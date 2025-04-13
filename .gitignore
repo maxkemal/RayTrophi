@@ -1,0 +1,28 @@
+
+# Build artifacts
+build/
+out/
+*.exe
+*.obj
+*.o
+*.dll
+*.lib
+*.so
+*.a
+
+# Cache and user settings
+*.log
+*.tmp
+*.cache
+*.sdf
+*.VC.db
+.vscode/
+.idea/
+
+# Binary assets
+*.png
+*.jpg
+*.hdr
+*.vdb
+*.sdl
+*.blend
