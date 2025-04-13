@@ -32,5 +32,7 @@
 
 ### License
 Raytrophi uses **Apache License 2.0** and integrates Intel Embree under compatible terms.
+![interior1](https://github.com/user-attachments/assets/25b3354b-de14-41eb-a874-6c0769761f78)
 
-> Developed with care and precision to be modular, extendable, and physically accurate.
+> Developed with care and preci![blender3-spash](https://github.com/user-attachments/assets/ac0b9d7d-43f4-4fc5-8147-14c0bc4481b7)
+sion to be modular, extendable, and physically accurate.
