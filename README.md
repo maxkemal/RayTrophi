@@ -2,42 +2,60 @@
 
 ## v0.02 (Mayıs 2025)
 
-**Türkçe (TR):**
+---
 
-Bu sürümde önemli yapısal güncellemeler ve yeni özellikler eklendi:
+## 🇹🇷 Türkçe (TR)
 
-- 🔥 **OptiX pipeline güncellendi**: Yeni raygen yapısı ve material scatter GPU tarafında iyileştirildi.
-- 🎞 **Animasyon desteği**: Kamera, ışık ve obje animasyonları Assimp üzerinden destekleniyor.
-- 🧠 **Principled BSDF güncellemeleri**: CPU ve GPU tarafında daha doğru fiziksel davranış.
-- 📷 **GPU kamera sistemi**: Kamera parametreleri GPU'ya aktarılarak dinamik kontrol sağlandı.
-- 🧹 **Kod modernizasyonu**: Eski metodlar güncellendi, gereksiz hesaplamalar kaldırıldı.
-- ✅ **CPU-Embree-OptiX senkronizasyonu**: Tüm yollar artık benzer materyal ve ışık sonuçları veriyor.
+**RayTrophi**, CPU ve GPU hızlandırmalı bir raytracing motorudur. Fiziksel olarak doğru ışık taşıma, PBR materyaller, animasyon desteği ve OptiX/Embree/CPU arasında esnek çalışma modlarına sahiptir.
 
-> Not: v0.01 ile uyumsuz değişiklikler içerir. Eski sürümü kullanmak isteyenler `v0.01` commitine dönebilir.
+### Bu sürümde:
 
-**Gelecek Planları (v0.03 ve sonrası):**
+- 🔥 **OptiX pipeline güncellendi**
+- 🎞 **Animasyon desteği (kamera, ışık, obje)**
+- 🧠 **Principled BSDF güncellemeleri**
+- 📷 **GPU kamera sistemi**
+- 🧹 **Kod modernizasyonu**
+- ✅ **CPU-Embree-OptiX senkronizasyonu**
+
+### Gelecek Planları (v0.03+)
 - Volumetrik materyal GPU tarafına taşınacak.
 - Multiple Importance Sampling (MIS) iyileştirilecek.
-- Bone animasyonları GPU'da desteklenecek.
+- Bone animasyonları GPU’da desteklenecek.
+
+### Kullanılan Üçüncü Parti Kütüphaneler:
+- **Assimp** → BSD / MIT
+- **Embree** → Apache 2.0
+- **OIDN** → Apache 2.0
+- **OptiX** → NVIDIA özel lisansı
+
+> Not: RayTrophi kendi kodu MIT lisansı ile lisanslanmıştır. Üçüncü parti kütüphaneler kendi lisansları altında kullanılmaktadır.
 
 ---
 
-**English (EN):**
+## 🇬🇧 English (EN)
 
-This version includes major structural updates and new features:
+**RayTrophi** is a ray tracing engine with CPU and GPU acceleration. It supports physically accurate light transport, PBR materials, animation support, and flexible modes switching between OptiX, Embree, and CPU.
 
-- 🔥 **OptiX pipeline updated**: New raygen structure and improved material scatter on the GPU side.
-- 🎞 **Animation support**: Camera, light, and object animations are now supported via Assimp.
-- 🧠 **Principled BSDF updates**: More accurate physical behavior on both CPU and GPU.
-- 📷 **GPU camera system**: Camera parameters can now be dynamically controlled on the GPU.
-- 🧹 **Code modernization**: Outdated methods were updated, and unnecessary calculations were removed.
-- ✅ **CPU-Embree-OptiX synchronization**: All paths now provide consistent material and lighting results.
+### This version includes:
 
-> Note: Contains breaking changes compared to v0.01. Users who wish to use the previous version can revert to the `v0.01` commit.
+- 🔥 **OptiX pipeline updates**
+- 🎞 **Animation support (camera, light, object)**
+- 🧠 **Principled BSDF improvements**
+- 📷 **GPU camera system**
+- 🧹 **Code modernization**
+- ✅ **CPU-Embree-OptiX synchronization**
 
-**Upcoming Plans (v0.03 and beyond):**
-- Volumetric material support will be moved to GPU.
-- Multiple Importance Sampling (MIS) improvements.
-- Bone animations will be supported on the GPU.
+### Future Plans (v0.03+)
+- Move volumetric materials to GPU.
+- Improve Multiple Importance Sampling (MIS).
+- Support bone animations on GPU.
+
+### Third Party Libraries Used:
+- **Assimp** → BSD / MIT
+- **Embree** → Apache 2.0
+- **OIDN** → Apache 2.0
+- **OptiX** → NVIDIA proprietary license
+
+> Note: RayTrophi core code is licensed under MIT. Third-party libraries retain their own licenses.
 
 ---
