@@ -30,6 +30,7 @@ extern "C" __global__ void __raygen__rg() {
     float3 mean = make_float3(0.0f, 0.0f, 0.0f);
     float3 m2 = make_float3(0.0f, 0.0f, 0.0f);
     int sample_count = 0;
+    const bool use_adaptive = optixLaunchParams.use_adaptive_sampling;
 
     // Adaptif parametreler
     const int min_samples = optixLaunchParams.min_samples; // Dışarıdan ayarlanabilir
@@ -76,46 +77,40 @@ extern "C" __global__ void __raygen__rg() {
         color_sum += sample;
 
         // Minimum örneklemeden sonra erken çıkış kontrolü
-        if (s >= min_samples - 1) {
+        if (use_adaptive && s >= min_samples - 1) {
             // Varyans hesaplama
             float3 var = m2 / (sample_count - 1);
             float luminance_var = 0.2126f * var.x + 0.7152f * var.y + 0.0722f * var.z;
             float luminance_mean = 0.2126f * mean.x + 0.7152f * mean.y + 0.0722f * mean.z;
 
-            // İyileştirilmiş nispi varyans (relative variance) hesaplaması
             float rel_variance = luminance_var / (fmaxf(luminance_mean * luminance_mean, 0.01f));
 
-            // Adaptif threshold - parlaklığa, pozisyona ve örnek sayısına göre ayarlanır
             float adaptive_threshold = base_variance_threshold;
 
-            // Karanlık bölgeler için threshold ayarlaması
             if (luminance_mean < 0.05f) {
                 adaptive_threshold *= (1.0f + (0.05f - luminance_mean) * 10.0f);
             }
             else if (luminance_mean > 0.9f) {
-                adaptive_threshold *= 0.5f; // Parlak alanlarda daha sıkı kriter
+                adaptive_threshold *= 0.5f;
             }
 
-            // Kenar bölgelerini tespit etme ve daha fazla örnekleme
             if (has_high_variance_neighbor) {
-                adaptive_threshold *= 0.7f; // Yüksek varyanslı komşuları olan pikseller için daha sıkı kriter
+                adaptive_threshold *= 0.7f;
             }
 
-            // Güven aralığı faktörü - düşük örnek sayısında daha yüksek threshold
             float confidence_factor = 1.0f / log2f(float(s) + 2.0f);
-            adaptive_threshold *= min(confidence_factor, 2.0f);
+            adaptive_threshold *= fminf(confidence_factor, 2.0f);
 
-            // Çok karanlık piksellerde sadece minimum örnek yeterli
             if (luminance_mean > 0.02f || has_high_variance_neighbor) {
                 if (rel_variance < adaptive_threshold) {
-                    break; // Yakınsama sağlandı, örneklemeyi durdur
+                    break;
                 }
             }
-            else if (s >= min_samples * 1.5) {
-                // Çok karanlık alanlarda min_samples*1.5 yeterlidir
+            else if (s >= int(min_samples * 1.5f)) {
                 break;
             }
         }
+
     }
 
     // Son renk değerini hesapla

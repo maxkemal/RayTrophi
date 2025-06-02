@@ -19,11 +19,14 @@
 #include "sbt_record.h"
 #include <ColorProcessingParams.h>
 #include <OpenImageDenoise/oidn.hpp>
+#include "sbt_record.h"
+#include <sbt_data.h>
+
 struct OptixGeometryData {
     std::vector<float3> vertices;
     std::vector<uint3> indices;
     std::vector<float3> normals;
-    std::vector<float3> tangents;   // ✅ EKLENDİ — buraya geçiyoruz
+    std::vector<float3> tangents;
     std::vector<float2> uvs;
     std::vector<GpuMaterial> materials;
     std::vector<int> material_indices;
@@ -55,6 +58,7 @@ struct OptixGeometryData {
 class OptixWrapper {
 public:
     OptixWrapper();
+    void partialCleanup();
     ~OptixWrapper();
 
     void initialize();
@@ -62,6 +66,7 @@ public:
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
     void validateMaterialIndices(const OptixGeometryData& data);
     void setupPipeline(const char* raygen_ptx);
+    void destroyTextureObjects();
     void buildFromData(const OptixGeometryData& data);
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
 
@@ -89,6 +94,8 @@ public:
 
     void setLightParams(const std::vector<std::shared_ptr<Light>>& lights);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
+    void resetBuffers(int width, int height);
+  
       ColorProcessor color_processor;
 
 
@@ -96,13 +103,22 @@ public:
 private:
     // OptiX context
     OptixDeviceContext context = nullptr;
+    // header dosyasında
+    std::vector<SbtRecord<HitGroupData>> hitgroup_records;
     CUstream stream = nullptr;
-      int image_width;
-    int image_height;
+      int Image_width;
+    int Image_height;
     // BVH ve bufferlar
     CUdeviceptr d_vertices = 0;
     CUdeviceptr d_indices = 0;
     CUdeviceptr d_bvh_output = 0;
+    CUdeviceptr d_normals=0;
+    CUdeviceptr d_uvs=0;
+    CUdeviceptr d_material_indices=0;
+    CUdeviceptr d_tangents=0;
+    CUdeviceptr d_temp_buffer=0, d_output_buffer=0, d_compacted_size=0;
+    CUdeviceptr d_params=0;
+    CUdeviceptr d_coords_x=0, d_coords_y=0;
     OptixTraversableHandle traversable_handle = 0;
     OptixModule module = nullptr;
     RayGenParams params;
@@ -112,7 +128,13 @@ private:
     OptixPipeline pipeline = nullptr;
     OptixShaderBindingTable sbt = {};
     GpuMaterial* d_materials = nullptr;
-
+    float* d_accumulation_buffer = nullptr;
+    float* d_variance_buffer = nullptr;
+    int* d_sample_count_buffer = nullptr;
+   
+    int prev_width = 0;
+    int prev_height = 0;
+    int frame_counter = 1;
 
     // (İleride pipeline ve SBT buraya gelir)
 };

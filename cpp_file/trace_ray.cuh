@@ -13,7 +13,7 @@ __device__ void trace_ray(const Ray& ray, OptixHitResult* result) {
         optixLaunchParams.handle,
         ray.origin,
         ray.direction,
-        0.001f, 1e16f, 0.0f,
+        0.01f, 1e16f, 0.0f,
         OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_DISABLE_ANYHIT,
         0, // ← ray_type = 0 (primary / bounce ray)

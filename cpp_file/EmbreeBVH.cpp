@@ -62,6 +62,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     rtcReleaseGeometry(geom);
 
     rtcCommitScene(scene);
+
 }
 
 

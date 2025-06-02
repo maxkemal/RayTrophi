@@ -2,25 +2,24 @@
 #define SPOTLIGHT_H
 
 #include "Light.h"
-#include "Vec3SIMD.h"
 #include "Vec3.h"
+
 class SpotLight : public Light {
 public:
-    SpotLight(const Vec3& pos, const Vec3& dir, const Vec3& intens, float ang, float rad);
-    Vec3 position;
-    float angle_degrees = 30.0f;
-    float angle_radians = angle_degrees * (M_PI / 180.0f);
-    float radius;
+    SpotLight(const Vec3& pos, const Vec3& dir, const Vec3& input_intensity, float angle_deg, float rad);
+
     Vec3 getDirection(const Vec3& point) const override;
-    float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const override;
     Vec3 getIntensity(const Vec3& point, const Vec3& light_sample_point) const override;
     Vec3 random_point() const override;
+    float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const override;
     LightType type() const override;
 
+    void setAngleDegrees(float deg) { angle_degrees = deg; }
+    float getAngleDegrees() const { return angle_degrees; }
+
 private:
-   
-   
-    
+    float angle_degrees;
+    float radius;
 };
 
 #endif // SPOTLIGHT_H

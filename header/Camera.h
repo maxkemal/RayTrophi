@@ -50,6 +50,10 @@ public:
 
     void update_camera_vectors();
 
+    void moveToTargetLocked(const Vec3& new_position);
+
+    void setLookDirection(const Vec3& direction_normalized);
+
     Vec3 random_in_unit_polygon(int sides) const;
 
     double calculate_bokeh_intensity(const Vec3& point) const;

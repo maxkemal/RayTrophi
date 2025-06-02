@@ -3,8 +3,18 @@
 #include "Vec3.h"
 #include "globals.h"
 
+enum class ToneMappingType {
+    AGX,
+    ACES,
+    Uncharted,
+    Filmic,
+    None
+};
+
+
 class ColorProcessor {
 public:
+    
     struct ColorProcessingParams {
         float global_exposure = exposure;
         float global_gamma = gamma;
@@ -14,7 +24,9 @@ public:
         float local_contrast = 0.02f;
         float saturation = 1.0;  // Yeni: Renk doygunluğu faktörü (1.0 = değişiklik yok)
         float color_temperature = 6500.0f; // Yeni: Kelvin cinsinden renk sıcaklığı
-
+        ToneMappingType tone_mapping_type = ToneMappingType::ACES;
+        bool enable_vignette = true;                // <<< yeni eklendi
+        float vignette_strength = 0.0f;             // <<< isteğe bağlı yoğunluk kontrolü
     };
     // Improved LogCTransform helper function
     float LogCTransform(float x) {
@@ -35,7 +47,7 @@ public:
         else
             return e * x + f;
     }
-
+    ColorProcessingParams params;
     // Improved AGX tonemapping with better color preservation
     Vec3 AGXToneMapping(const Vec3& color) {
         // Find maximum value to preserve color ratios
@@ -98,7 +110,7 @@ public:
         );
     }
 private:
-    ColorProcessingParams params;
+  
     std::vector<float> luminance_map;
     int width, height;
 
@@ -163,10 +175,10 @@ private:
     }
 
 public:
+    ColorProcessor() : width(0), height(0) {}
     ColorProcessor(int w, int h) : width(w), height(h) {
         luminance_map.resize(w * h, 0.0f);
     }
-
     float linearToSRGB(float linear) {
         return (linear <= 0.0031308f) ? 12.92f * linear : 1.055f * std::pow(linear, 1.0f /2.4f) - 0.055f;
     }
@@ -205,7 +217,7 @@ public:
         // AGX Filmic ton eşleme
         //  processed_color = AGXToneMapping(processed_color);
        // ACES filmic ton eşleştirme 
-        processed_color = ACESFilmicToneMapping(processed_color);
+       // processed_color = ACESFilmicToneMapping(processed_color);
        // UnchartedFilmic ton eşleştirme
        // processed_color = UnchartedFilmic(processed_color);
         // Filmic ton eşleştirme
@@ -215,7 +227,24 @@ public:
 
         // Renk doygunluğu ayarı
         processed_color = adjustSaturation(processed_color, params.saturation);
-       
+        switch (params.tone_mapping_type) {
+        case ToneMappingType::AGX:
+            processed_color = AGXToneMapping(processed_color);
+            break;
+        case ToneMappingType::ACES:
+            processed_color = ACESFilmicToneMapping(processed_color);
+            break;
+        case ToneMappingType::Uncharted:
+            processed_color = UnchartedFilmic(processed_color);
+            break;
+        case ToneMappingType::Filmic:
+            processed_color = FilmicTonemap(processed_color);
+            break;
+        case ToneMappingType::None:
+            // no tonemapping
+            break;
+        }
+
       
         ////// sRGB dönüşümü
         //processed_color = Vec3(

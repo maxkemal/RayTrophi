@@ -238,22 +238,53 @@ Vec3 Texture::get_color(double u, double v) const {
     return c0 * (1 - ty) + c1 * ty;
 }
 bool Texture::upload_to_gpu() {
-    if (uploaded) return true; // ✅ Zaten GPU'ya yüklenmişse tekrar yapma
-
+    if (uploaded) return true;
     if (!m_is_loaded || pixels.empty()) return false;
 
-    std::vector<float4> float_data(width * height);
-    for (int i = 0; i < width * height; ++i) {
-        float r = pixels[i].x;
-        float g = pixels[i].y;
-        float b = pixels[i].z;
-        float a = has_alpha ? alphas[i] : 1.0f;
-        float_data[i] = make_float4(r, g, b, a);
+    cudaError_t err;
+    cudaChannelFormatDesc channelDesc = {};
+    size_t pitch;
+    void* data_ptr = nullptr;
+    size_t pixel_size = 0;
+    std::vector<uint8_t> gray_data(width * height);
+    std::vector<uchar4> uchar_data(width * height);
+    if (is_gray_scale) {
+        // R8 formatında tanımla
+        channelDesc = cudaCreateChannelDesc<unsigned char>();
+
+        for (int i = 0; i < width * height; ++i) {
+            float v = pixels[i].x;  // R=G=B zaten
+            gray_data[i] = static_cast<uint8_t>(std::clamp(v * 255.0f, 0.0f, 255.0f));
+        }
+
+        pixel_size = sizeof(uint8_t);
+        data_ptr = gray_data.data();
     }
 
-    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
+    else {
+        // RGBA8: renkli texture
+       
+        for (int i = 0; i < width * height; ++i) {
+            float r = pixels[i].x;
+            float g = pixels[i].y;
+            float b = pixels[i].z;
+            float a = has_alpha ? alphas[i] : 1.0f;
 
-    cudaError_t err = cudaMallocArray(&cuda_array, &channelDesc, width, height);
+            uchar_data[i] = make_uchar4(
+                static_cast<uint8_t>(std::clamp(r * 255.0f, 0.0f, 255.0f)),
+                static_cast<uint8_t>(std::clamp(g * 255.0f, 0.0f, 255.0f)),
+                static_cast<uint8_t>(std::clamp(b * 255.0f, 0.0f, 255.0f)),
+                static_cast<uint8_t>(std::clamp(a * 255.0f, 0.0f, 255.0f))
+            );
+        }
+
+        channelDesc = cudaCreateChannelDesc<uchar4>();
+        pixel_size = sizeof(uchar4);
+        data_ptr = uchar_data.data();
+    }
+
+    // GPU belleğine ayır
+    err = cudaMallocArray(&cuda_array, &channelDesc, width, height);
     if (err != cudaSuccess) {
         std::cerr << "cudaMallocArray failed: " << cudaGetErrorString(err) << std::endl;
         return false;
@@ -261,9 +292,9 @@ bool Texture::upload_to_gpu() {
 
     err = cudaMemcpy2DToArray(
         cuda_array, 0, 0,
-        float_data.data(),
-        width * sizeof(float4),
-        width * sizeof(float4),
+        data_ptr,
+        width * pixel_size,
+        width * pixel_size,
         height,
         cudaMemcpyHostToDevice
     );
@@ -272,6 +303,7 @@ bool Texture::upload_to_gpu() {
         return false;
     }
 
+    //  Texture object oluştur
     cudaResourceDesc resDesc = {};
     resDesc.resType = cudaResourceTypeArray;
     resDesc.res.array.array = cuda_array;
@@ -280,7 +312,7 @@ bool Texture::upload_to_gpu() {
     texDesc.addressMode[0] = cudaAddressModeWrap;
     texDesc.addressMode[1] = cudaAddressModeWrap;
     texDesc.filterMode = cudaFilterModeLinear;
-    texDesc.readMode = cudaReadModeElementType;
+    texDesc.readMode = cudaReadModeNormalizedFloat; // 🎯 uchar → float dönüşüm
     texDesc.normalizedCoords = 1;
 
     err = cudaCreateTextureObject(&tex_obj, &resDesc, &texDesc, nullptr);
@@ -289,7 +321,7 @@ bool Texture::upload_to_gpu() {
         return false;
     }
 
-    uploaded = true; // ✅ Artık tekrar yüklenmeyecek
+    uploaded = true;
     return true;
 }
 void Texture::cleanup_gpu() {

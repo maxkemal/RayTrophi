@@ -55,17 +55,9 @@
 #include <OpenImageDenoise/oidn.hpp>
 #include "AnimatedObject.h"
 #include <ColorProcessingParams.h>
+#include <scene_data.h>
 
 
-struct SceneData {
-    HittableList world;
-    std::shared_ptr<Hittable> bvh;
-    std::vector<AnimationData> animationDataList;
-    std::vector<std::shared_ptr<AnimatedObject>> animatedObjects;
-    std::shared_ptr<Camera> camera;
-    std::vector<std::shared_ptr<Light>> lights;
-    Vec3 background_color;
-};
 enum class BVHType {
     CustomCPU,
     Embree,
@@ -105,11 +97,15 @@ public:
 
     void draw_progress_bar(SDL_Surface* surface, float progress);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
-    void render_image(SDL_Surface* surface, SDL_Window* window, const int total_samples_per_pixel, const int samples_per_pass);
+    void render_image(SDL_Surface* surface, SDL_Window* window,
+        const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene);
     Matrix4x4 calculateAnimationTransform(const AnimationData& animation, float currentTime);
    // void updateBVHForAnimatedObjects(ParallelBVHNode& bvh, const std::vector<std::shared_ptr<Hittable>>& animatedObjects);
-    void render_Animation(SDL_Surface* surface, SDL_Window* window, const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration);
-    SceneData create_scene(BVHType bvh_type, OptixWrapper* optix_gpu_ptr = nullptr);
+    void render_Animation(SDL_Surface* surface, SDL_Window* window, const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration,SceneData& scene);
+   // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
+
+    void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path);
+
    
     void initializeBuffers(int image_width, int image_height);
     static std::vector<Vec3> normalMapBuffer;
@@ -184,6 +180,8 @@ private:
   
     void apply_normal_map( HitRecord& rec);
     void render_chunk_adaptive(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const Hittable* bvh, const std::shared_ptr<Camera>& camera, const int total_samples_per_pixel);
+
+    void render_chunk_fixed_sampling(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const Hittable* bvh, const std::shared_ptr<Camera>& camera, const int total_samples_per_pixel);
   
     void render_chunk(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const   Hittable* bvh, const std::shared_ptr<Camera>& camera, const int samples_per_pass, const int current_sample);
   
@@ -195,6 +193,8 @@ private:
     int pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights, const Vec3& hit_position);
 
     Vec3 calculate_direct_lighting_single_light(const Hittable* bvh, const std::shared_ptr<Light>& light, const HitRecord& rec, const Vec3& normal, float ao_factor, const Ray& r_in);
+
+    Vec3 calculate_brdf_mis_single_light(const std::shared_ptr<Light>& light, const HitRecord& rec, const Ray& scattered, const Ray& ray_in);
   
     Vec3 apply_atmospheric_effects(const Vec3& intensity, float distance, bool is_global);
     Vec3 calculate_specular(const Vec3& intensity, const Vec3& normal, const Vec3& to_light, const Vec3& view_direction, float shininess);

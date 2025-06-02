@@ -2,28 +2,16 @@
 #include <cmath>
 #include <stdlib.h>
 #include "Matrix4x4.h"
-Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist, int blade_count) {
-    double theta = vfov * M_PI / 180;
-    double half_height = tan(theta / 2);
-    double half_width = aspect * half_height;
-    origin = lookfrom;
-    w = (lookfrom - lookat).normalize();
-    u = Vec3::cross(vup, w).normalize();
-    v = Vec3::cross(w, u);
-    lower_left_corner = origin - half_width * focus_dist * u - half_height * focus_dist * v - focus_dist * w;
-    horizontal = 2 * half_width * focus_dist * u;
-    vertical = 2 * half_height * focus_dist * v;
-    lens_radius = aperture / 2;
-
-    // Frustum culling için ek alanlar
-    near_dist = 0.1;  // Yakýn düzlem mesafesi, ihtiyaca göre ayarlayýn
-    far_dist = focus_dist * 2;  // Uzak düzlem mesafesi, ihtiyaca göre ayarlayýn
-    fov = vfov;
-    aspect_ratio = aspect;
-    updateFrustumPlanes();
-    this->aperture = aperture;
-    this->blade_count = blade_count; // Býçak sayýsýný sakla
+Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist, int blade_count)
+    : lookfrom(lookfrom), lookat(lookat), vup(vup), vfov(vfov),
+    aspect_ratio(aspect), aperture(aperture), focus_dist(focus_dist),
+    blade_count(blade_count), fov(vfov), origin(lookfrom)
+{
+    near_dist = 0.1;
+    far_dist = focus_dist * 2.0;
+    update_camera_vectors();
 }
+
 Camera::Camera() 
     : aperture(0.0), aspect(0.0), aspect_ratio(0.0), blade_count(0), far_dist(0.0), 
       focus_dist(0.0), fov(0.0), lens_radius(0.0), near_dist(0.0), vfov(0.0) {
@@ -41,26 +29,37 @@ int Camera::random_int(int min, int max) const {
 }
 void Camera::update_camera_vectors() {
     Vec3 view = lookat - lookfrom;
-    if (view.length_squared() < 1e-8) {
+    if (view.length_squared() < 1e-8)
         view = Vec3(0, 0, -1);
-    }
+
     w = (-view).normalize();
-
-    // Eðer vup sýfýrsa veya w ile paralelse düzelt!
-    if (vup.length_squared() < 1e-8 || std::abs(Vec3::dot(vup.normalize(), w)) > 0.999) {
-        vup = Vec3(0, 1, 0); // Zorunlu varsayýlan yukarý yönü
-    }
-
     u = Vec3::cross(vup, w).normalize();
     v = Vec3::cross(w, u).normalize();
 
     double theta = vfov * M_PI / 180.0;
     double half_height = tan(theta / 2.0);
-    double half_width = aspect * half_height;
+    double half_width = aspect_ratio * half_height;
 
     horizontal = 2.0 * half_width * focus_dist * u;
     vertical = 2.0 * half_height * focus_dist * v;
     lower_left_corner = lookfrom - horizontal * 0.5 - vertical * 0.5 - focus_dist * w;
+
+    origin = lookfrom;
+    fov = vfov;
+
+    updateFrustumPlanes();
+}
+void Camera::moveToTargetLocked(const Vec3& new_position) {
+    Vec3 view_dir = lookat - lookfrom;
+    lookfrom = new_position;
+    origin = new_position;
+    lookat = new_position + view_dir; // yön sabit kalýr
+    update_camera_vectors();
+}
+// Bu metodu da ekleyebilirsin
+void Camera::setLookDirection(const Vec3& direction_normalized) {
+    lookat = lookfrom + direction_normalized * focus_dist;
+    update_camera_vectors();
 }
 
 Vec3 Camera::random_in_unit_polygon(int sides) const {

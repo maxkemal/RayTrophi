@@ -7,8 +7,24 @@
 #include <cmath>
 #include <vector>
 #include "Vec3.h"
+#include <filesystem>
 
+struct RenderSettings {
+    int samples_per_pixel;
+    int samples_per_pass;
+    int max_bounces;
+    bool use_adaptive_sampling;
+    int min_samples;
+    int max_samples;
+    float variance_threshold;   
+    bool use_optix;
+    float animation_duration;
+    int animation_fps;
+    bool start_animation_render = false;
+};
 
+// Yalnýzca bildirim:
+extern RenderSettings render_settings;
 extern std::mutex mtx;
 extern std::atomic<int> completed_pixels;
 extern std::atomic<bool> rendering_complete;
@@ -18,7 +34,6 @@ extern const double aspect_ratio; // Sabit olarak double türünde tanýmlýyoruz
 extern const int image_width;
 extern const int image_height;
 extern const double EPSILON;
-extern  const int MAX_DEPTH;
 extern std::atomic<int> next_row;
 extern const double infinity;
 extern  std::string baseDirectory;

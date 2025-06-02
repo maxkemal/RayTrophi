@@ -30,6 +30,7 @@ void updatePixel(SDL_Surface* surface, int i, int j, const Vec3SIMD& color) {
     int b = static_cast<int>(255 * std::clamp(toSRGB(color.z()), 0.0f, 1.0f));
 
     *pixel = SDL_MapRGB(surface->format, r, g, b);
+  
 }
 
 std::vector<Vec3> normal_buffer(image_width* image_height);
@@ -276,26 +277,19 @@ void Renderer::update_variance_map_hybrid(SDL_Surface* surface) {
 static int point_light_pick_count = 0;
 static int directional_pick_count = 0;
 void Renderer::render_image(SDL_Surface* surface, SDL_Window* window,
-    const int total_samples_per_pixel, const int samples_per_pass) {
-
+    const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene) {
+    rendering_complete = false;
     unsigned int num_threads = std::thread::hardware_concurrency();
     std::vector<std::thread> threads;
-    auto start_time = std::chrono::steady_clock::now();
-
-    SceneData scene = create_scene(BVHType::Embree);  // ✅ Yeni sahne yapısı
-
-    auto create_scene_end_time = std::chrono::steady_clock::now();
-    auto create_scene_duration = std::chrono::duration<double, std::milli>(create_scene_end_time - start_time);
-    std::cout << "Create Scene Duration: " << create_scene_duration.count() / 1000 << " seconds" << std::endl;
-
+ 
     std::thread display_thread(&Renderer::update_display, this, window, surface);
 
     const int num_passes = (total_samples_per_pixel + samples_per_pass - 1) / samples_per_pass;
 
     for (int pass = 0; pass < num_passes; ++pass) {
-        std::cout << "Starting pass " << pass + 1 << " of " << num_passes << std::endl;
+       // std::cout << "Starting pass " << pass + 1 << " of " << num_passes << std::endl;
 
-        // 🔀 Shuffle full-resolution pixel list
+        //  Shuffle full-resolution pixel list
         std::vector<std::pair<int, int>> shuffled_pixel_list;
         for (int j = 0; j < image_height; ++j) {
             for (int i = 0; i < image_width; ++i) {
@@ -319,73 +313,52 @@ void Renderer::render_image(SDL_Surface* surface, SDL_Window* window,
                 samples_per_pass,
                 pass * samples_per_pass
             );
-
-          
-           
         }
        
         for (auto& thread : threads) {
+
             thread.join();
         }
 
         threads.clear();
 
         float progress = static_cast<float>(pass + 1) / num_passes;
-        std::cout << "\rRendering progress: " << std::fixed << std::setprecision(2) << progress << "%" << std::flush;
-
+        
         char title[100];
         snprintf(title, sizeof(title), "Rendering... %.1f%% Complete", progress * 100);
-        SDL_SetWindowTitle(window, title);
-
-        SDL_PumpEvents();
+        SDL_SetWindowTitle(window, title);       
+       
     }
 
     rendering_complete = true;
     display_thread.join();
     applyOIDNDenoising(surface, 0, true, 0.9);
-    SDL_UpdateWindowSurface(window);
-    SDL_PumpEvents();
-    std::cout << "\nRender completed." << std::endl;
+    SDL_UpdateWindowSurface(window);   
 
-    auto render_end_time = std::chrono::steady_clock::now();
-    auto render_duration = std::chrono::duration<double, std::milli>(render_end_time - create_scene_end_time);
-    auto total_duration = std::chrono::duration<double, std::milli>(render_end_time - start_time);
-    std::cout << "Point light seçilme sayısı: " << point_light_pick_count << std::endl;
-
-    std::cout << "Render Duration: " << render_duration.count() / 1000 << " seconds" << std::endl;
-    std::cout << "Total Duration: " << total_duration.count() / 1000 << " seconds" << std::endl;
-
-    if (SaveSurface(surface, "image/output.png")) {
-        std::cout << "Image saved successfully!" << std::endl;
-    }
-    else {
-        std::cerr << "Failed to save image." << std::endl;
-    }
 }
 
 void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
     const int total_samples_per_pixel, const int samples_per_pass,
-    float fps, float duration) {
+    float fps, float duration,SceneData& scene) {
 
     unsigned int num_threads = std::thread::hardware_concurrency();
     std::vector<std::thread> threads;
     auto start_time = std::chrono::steady_clock::now();
-
+    std::thread display_thread(&Renderer::update_display, this, window, surface);
     float frame_time = 1.0f / fps;
     int total_frames = static_cast<int>(duration * fps);
     std::filesystem::create_directory("render");
-    //  Yeni sahne kur
-    SceneData scene = create_scene(BVHType::Embree);
+   
     for (int frame = 0; frame < total_frames; ++frame) {
+      
+
 
         std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
         std::fill(sample_counts.begin(), sample_counts.end(), 0);
         SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 0, 0, 0));
         float current_time = frame * frame_time;
-       
-
-       
-      
+              
+		//  Zamanı güncelle
         std::cout << "\nFrame " << frame << " of " << total_frames
             << " at time " << current_time << "s" << std::endl;
 
@@ -422,6 +395,54 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             }
 
         }
+        if (!scene.boneData.boneNameToIndex.empty()) {
+            std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size());
+
+            for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
+                aiNode* node = scene.boneData.boneNameToNode[boneName];
+                if (!node) continue;
+
+                Matrix4x4 globalNodeTransform = convert(AssimpLoader::getGlobalTransform(node));
+
+                Matrix4x4 animTransform = Matrix4x4::identity();
+                for (const auto& anim : scene.animationDataList) {
+                    if (anim.positionKeys.count(boneName) > 0 ||
+                        anim.rotationKeys.count(boneName) > 0 ||
+                        anim.scalingKeys.count(boneName) > 0) {
+                        animTransform = anim.calculateAnimationTransform(anim, current_time, boneName);
+                        break;
+                    }
+                }
+
+                Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
+                const Matrix4x4& globalInverseTransform = scene.boneData.globalInverseTransform;               
+                finalBoneMatrices[boneIndex] = globalInverseTransform * globalNodeTransform * animTransform * offsetMatrix;
+
+            }
+
+            for (auto& obj : scene.world.objects) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                if (!tri || tri->vertexBoneWeights.empty()) continue;
+                if (tri->vertexBoneWeights.size() == 3 &&
+                    (!tri->vertexBoneWeights[0].empty() ||
+                        !tri->vertexBoneWeights[1].empty() ||
+                        !tri->vertexBoneWeights[2].empty())) {
+                    std::cout << "[DEBUG] ✅ Skin uygulanıyor: " << tri->getNodeName() << "\n";
+                    tri->apply_skinning(finalBoneMatrices);
+                }
+                else {
+                    std::cout << "[DEBUG] ❌ Skin atlandı: " << tri->getNodeName() << "\n";
+                }
+
+
+            }
+
+            if (use_embree) {
+                auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+                embree_ptr->clearAndRebuild(scene.world.objects);
+            }
+        }
+
         for (auto& light : scene.lights) {
             const aiNode* node = assimpLoader.getNodeByName(light->nodeName);
             if (!node) continue;
@@ -469,8 +490,6 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             }
         }
 
-
-
         //  Render per frame
         const int num_passes = (total_samples_per_pixel + samples_per_pass - 1) / samples_per_pass;
         for (int pass = 0; pass < num_passes; ++pass) {
@@ -498,23 +517,21 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
                     samples_per_pass,
                     pass * samples_per_pass
                 );
-
+              
             }
 
             for (auto& thread : threads) {
                 thread.join();
             }
-
+            threads.clear();
             char title[100];
             snprintf(title, sizeof(title), "Rendering Frame %d/%d - %.1f%% Complete",
                 frame + 1, total_frames, (static_cast<float>(pass + 1) / num_passes) * 100);
             SDL_SetWindowTitle(window, title);
-
-            applyOIDNDenoising(surface, 0, true, 0.85f);
+            applyOIDNDenoising(surface, 0, true, 0.9f);
             SDL_UpdateWindowSurface(window);
-            SDL_PumpEvents();
         }
-
+      
         //  Kaydet
         char filename[100];
         snprintf(filename, sizeof(filename), "render/output_frame_%03d.png", frame + 1);
@@ -527,28 +544,40 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             return;
         }
     }
-
+    
     rendering_complete = true;
+    display_thread.join();
+  
     SDL_SetWindowTitle(window, "Rendering Completed - All Frames Saved");
 }
-// Renderer.cpp
-SceneData Renderer::create_scene(BVHType bvh_type, OptixWrapper* optix_ptr) {
-    SceneData scene;
+//void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
+//    std::string default_path = "e:/data/home/bedroom.gltf";
+//    create_scene(scene, optix_gpu_ptr, default_path);
+//}
 
+void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path) {
+  
+    // Önce sahneyi sıfırla
     scene.world.clear();
     scene.lights.clear();
-    scene.background_color = Vec3(0.15, 0.25, 0.3) * 1.0;
     scene.animatedObjects.clear();
     scene.animationDataList.clear();
-
-    std::string model_path = "e:/data/home/bedroom.gltf";
+    scene.camera = nullptr;              // << önemli!
+    scene.bvh = nullptr;                // yeni BVH oluşturulacaksa önce sıfırlanmalı
+    scene.initialized = false;         // yeniden kurulacağı için
+    assimpLoader.clearTextureCache();
     std::filesystem::path path(model_path);
     baseDirectory = path.parent_path().string() + "/";
 
-    // 1. Triangles ve Animasyonları yükle
+    // ---- 1. Geometri ve animasyon yükle ----
     auto [triangles, loadedAnimations] = assimpLoader.loadModelToTriangles(model_path);
     scene.animationDataList = loadedAnimations;
-
+ if (triangles.empty()) {
+        std::cerr << "[HATA] Üçgen verisi yok, sahne yüklenemedi: " << model_path << std::endl;
+ }
+ else {
+	 std::cout << "Dosyadan " << triangles.size() << " üçgen yüklendi.\n";
+ }
     for (const auto& tri : triangles) {
         scene.world.add(tri);
 
@@ -558,52 +587,34 @@ SceneData Renderer::create_scene(BVHType bvh_type, OptixWrapper* optix_ptr) {
             scene.animatedObjects.push_back(animatedObj);
         }
     }
-
-    // 2. Kamera ve Işıklar
+	
+    // ---- 2. Kamera ve ışık verisi ----
     scene.lights = assimpLoader.getLights();
     scene.camera = assimpLoader.getDefaultCamera();
+    auto embree_bvh = std::make_shared<EmbreeBVH>();
+    embree_bvh->build(scene.world.objects);
+    scene.bvh = embree_bvh;
+    // ---- 3. GPU OptiX setup ----      
+        std::cout << "OptiX geometri oluşturuluyor (convertTrianglesToOptixData)...\n";
+        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
+        optix_gpu_ptr->validateMaterialIndices(optix_data);
+        optix_gpu_ptr->buildFromData(optix_data);
 
-    // 3. BVH Türüne Göre İşleme
-    if (bvh_type == BVHType::OptixGPU) {
-        if (optix_ptr) {
-            std::cout << " OptiX geometri oluşturuluyor (convertTrianglesToOptixData)...\n";
-
-            // Burada artık yeniden load etmiyoruz! Var olan triangles listesinden GPU datası oluşturuyoruz
-            OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
-			optix_ptr->validateMaterialIndices(optix_data);
-            optix_ptr->buildFromData(optix_data);
-
-            if (scene.camera) {
-                std::cout << " OptiX Kamerası ayarlanıyor...\n";
-                optix_ptr->setCameraParams(*scene.camera);
-            }
-
-            if (!scene.lights.empty()) {
-                std::cout << " OptiX çoklu ışıklar ayarlanıyor...\n";
-                optix_ptr->setLightParams(scene.lights); // artık tüm ışıkları gönderiyoruz
-            }
-
-            optix_ptr->setBackgroundColor(scene.background_color);
+        if (scene.camera) {
+            std::cout << "OptiX Kamerası ayarlanıyor...\n";
+            optix_gpu_ptr->setCameraParams(*scene.camera);
         }
-        else {
-            std::cerr << " OptiX pointer null geldi, sahne kurulamadı.\n";
-        }
-    }
-    else if (bvh_type == BVHType::Embree) {
-        auto embree_bvh = std::make_shared<EmbreeBVH>();
-        embree_bvh->build(scene.world.objects);
-        scene.bvh = embree_bvh;
-    }
-    else {
-        scene.bvh = std::make_shared<ParallelBVHNode>(
-            scene.world.objects, 0, scene.world.size(), 0.0, 1.0);
-    }
-	std::cout << " Sahne oluşturuldu.\n";
-	std::cout << "Toplam " << scene.world.size() << " nesne yüklendi.\n";
-    // triangles listesi world'e zaten eklendi, burayı boşaltmaya gerek yok.
-    // Eğer sadece GPU kullanıyorsan, animasyonları GPU'dan takip edeceksen, o zaman world.clear yapılabilir ama burada tutmak mantıklı.
 
-    return scene;
+        if (!scene.lights.empty()) {
+            std::cout << "OptiX çoklu ışıklar ayarlanıyor...\n";
+            optix_gpu_ptr->setLightParams(scene.lights);
+        }
+
+        optix_gpu_ptr->setBackgroundColor(scene.background_color);
+    // ---- 5. Bilgi ver ----
+    std::cout << "Sahne oluşturuldu.\n";
+   
+        scene.initialized = true;
 }
 std::uniform_int_distribution<> dis_width(0, image_width - 1);
 std::uniform_int_distribution<> dis_height(0, image_height - 1);
@@ -926,11 +937,17 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
     const std::shared_ptr<Camera>& camera,
     const int total_samples_per_pixel)
 {
-    const int lowpass_samples = 50;
-    const float variance_threshold = 0.00002f;
-    const int max_adaptive_samples = 100;
+    const int lowpass_samples = render_settings.min_samples;
+    const int max_adaptive_samples = render_settings.max_samples;
+    const float adaptive_threshold = render_settings.variance_threshold; // örnek: 0.05 (5%)
 
     int total_pixels = shuffled_pixel_list.size();
+
+    if (!render_settings.use_adaptive_sampling) {
+        render_chunk_fixed_sampling(surface, shuffled_pixel_list, next_pixel_index,
+            world, lights, background_color, bvh, camera, total_samples_per_pixel);
+        return;
+    }
 
     while (true) {
         int index = next_pixel_index.fetch_add(1);
@@ -940,16 +957,14 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
         int pixel_index = j * image_width + i;
 
         Vec3 mean(0.0f);
-        Vec3 M2(0.0f); // Variance hesaplama için
-
+        Vec3 M2(0.0f);
         Vec3 accumulated(0.0f);
 
-        // === Lowpass örnekleme (noise hesaplamak için) ===
+        // === İlk geçiş: lowpass örnekleme ===
         for (int s = 0; s < lowpass_samples; ++s) {
             Vec2 uv = stratified_halton(i, j, s, lowpass_samples);
             Ray r = camera->get_ray(uv.u, uv.v);
-            Vec3 c = ray_color(r, bvh, lights, background_color, MAX_DEPTH, s);
-
+            Vec3 c = ray_color(r, bvh, lights, background_color, render_settings.max_bounces, s);
             accumulated += c;
 
             Vec3 delta = c - mean;
@@ -958,15 +973,30 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
         }
 
         Vec3 variance = M2 / std::max(float(lowpass_samples - 1), 1e-5f);
-        float luminance = std::clamp(variance.luminance(), 0.0f, 1.0f);
 
-        // === Adaptive örnekleme ===
-        int adaptive_samples = std::clamp(int(luminance * max_adaptive_samples), 1, total_samples_per_pixel);
+        // === Hata Oranı Hesabı ===
+        float lum_mean = std::max(mean.luminance(), 1e-4f); // Bölme hatasına karşı
+        float lum_stddev = std::sqrt(variance.luminance());
+        float error_ratio = lum_stddev / lum_mean;
+
+        // === Log tabanlı varyansa dayalı ağırlık hesaplama ===
+        float luminance_weight = std::log1p(variance.luminance() * 10.0f); // daha hızlı artış
+        luminance_weight = std::clamp(luminance_weight, 0.0f, 1.0f);
+
+        int adaptive_samples = static_cast<int>(luminance_weight * max_adaptive_samples);
+
+        // Hata oranı yüksekse zorla daha fazla sample al
+        if (error_ratio > adaptive_threshold) {
+            adaptive_samples = max_adaptive_samples;
+        }
+
+        // Mutlak sınırlar içinde tut
+        adaptive_samples = std::clamp(adaptive_samples, 1, total_samples_per_pixel - lowpass_samples);
 
         for (int s = 0; s < adaptive_samples; ++s) {
             Vec2 uv = stratified_halton(i, j, s + lowpass_samples, adaptive_samples);
             Ray r = camera->get_ray(uv.u, uv.v);
-            Vec3 c = ray_color(r, bvh, lights, background_color, MAX_DEPTH, s + lowpass_samples);
+            Vec3 c = ray_color(r, bvh, lights, background_color, render_settings.max_bounces, s + lowpass_samples);
             accumulated += c;
         }
 
@@ -976,7 +1006,42 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
         sample_counts[pixel_index] = total_samples;
 
         Vec3 avg_color = accumulated / float(total_samples);
+        Vec3 final_color = color_processor.processColor(avg_color, i, j);
+        updatePixel(surface, i, j, final_color);
+    }
+}
+void Renderer::render_chunk_fixed_sampling(SDL_Surface* surface,
+    const std::vector<std::pair<int, int>>& shuffled_pixel_list,
+    std::atomic<int>& next_pixel_index,
+    const HittableList& world,
+    const std::vector<std::shared_ptr<Light>>& lights,
+    const Vec3& background_color,
+    const Hittable* bvh,
+    const std::shared_ptr<Camera>& camera,
+    const int total_samples_per_pixel)
+{
+    int total_pixels = shuffled_pixel_list.size();
 
+    while (true) {
+        int index = next_pixel_index.fetch_add(1);
+        if (index >= total_pixels) break;
+
+        const auto& [i, j] = shuffled_pixel_list[index];
+        int pixel_index = j * image_width + i;
+
+        Vec3 accumulated(0.0f);
+
+        for (int s = 0; s < total_samples_per_pixel; ++s) {
+            Vec2 uv = stratified_halton(i, j, s, total_samples_per_pixel);
+            Ray r = camera->get_ray(uv.u, uv.v);
+            Vec3 c = ray_color(r, bvh, lights, background_color, render_settings.max_bounces, s);
+            accumulated += c;
+        }
+
+        frame_buffer[pixel_index] = accumulated;
+        sample_counts[pixel_index] = total_samples_per_pixel;
+
+        Vec3 avg_color = accumulated / float(total_samples_per_pixel);
         Vec3 final_color = color_processor.processColor(avg_color, i, j);
         updatePixel(surface, i, j, final_color);
     }
@@ -993,7 +1058,7 @@ void Renderer::render_chunk(SDL_Surface* surface,
     const int total_samples_per_pixel,
     const int current_sample)  // Artık current_sample kullanılmıyor
 {
-    color_processor.preprocess(frame_buffer);
+   // color_processor.preprocess(frame_buffer);
 
     render_chunk_adaptive(surface, shuffled_pixel_list, next_pixel_index,
         world, lights, background_color, bvh, camera, total_samples_per_pixel);
@@ -1039,9 +1104,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
             float distance = std::max(1.0f, delta.length());
 
             // NOT: intensity_magnitude zaten mesafeye göre zayıflatılmış, tekrar bölmeye gerek yok.
-            float weight = lights[i]->intensity_magnitude;
-            weights[i] = weight;
-            total_weight += weight;
+           
         }
     }
 
@@ -1109,7 +1172,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     Vec3 L;
 
     float pdf_light = 1.0f;
-    float pdf_light_select = 1.0f; // Tek ışık seçildiği için 1
+    float pdf_light_select = 1.0f;
     float attenuation = 1.0f;
 
     // --- Light sampling ---
@@ -1119,7 +1182,6 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         to_light = L;
         light_distance = std::numeric_limits<float>::infinity();
         Li = directional->getIntensity(hit_point, light_sample);
-        attenuation = 1.0f;
     }
     else if (auto point = std::dynamic_pointer_cast<PointLight>(light)) {
         light_sample = point->random_point();
@@ -1127,14 +1189,13 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         light_distance = to_light.length();
         L = to_light / light_distance;
 
-        Li = point->getIntensity(hit_point, light_sample); // distance^2 düşüş burada
+        Li = point->getIntensity(hit_point, light_sample);
 
-        // GPU’daki gibi area bazlı pdf
         float area = 4.0f * M_PI * point->getRadius() * point->getRadius();
         pdf_light = (1.0f / area) * pdf_light_select;
     }
     else {
-        return direct_light; // Bilinmeyen ışık türü
+        return direct_light;
     }
 
     // --- Shadow ---
@@ -1145,34 +1206,30 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     float NdotL = std::fmax(Vec3::dot(N, L), 0.0f);
     if (NdotL < 1e-4f) return direct_light;
 
-    // --- BRDF ---
+    // --- BRDF Hesabı (Specular + Diffuse) ---
     Vec3 H = (L + V).normalize();
-    float NdotV = std::fmax(Vec3::dot(N, V), 0.0f);
-    float NdotH = std::fmax(Vec3::dot(N, H), 0.001f);
-    float VdotH = std::fmax(Vec3::dot(V, H), 0.001f);
+    float NdotV = std::fmax(Vec3::dot(N, V), 0.00001f);
+    float NdotH = std::fmax(Vec3::dot(N, H), 0.00001f);
+    float VdotH = std::fmax(Vec3::dot(V, H), 0.00001f);
 
     float alpha = roughness * roughness;
-    float alpha2 = alpha * alpha;
-    float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
-    float D = alpha2 / (M_PI * denom * denom);
+    PrincipledBSDF psdf;
+    // Specular bileşeni
+    float D = psdf.DistributionGGX(N, H, roughness);
+    float G = psdf.GeometrySmith(N, V, L, roughness);
+    Vec3 F = psdf.fresnelSchlickRoughness(VdotH, F0, roughness);
 
-    float k = (roughness + 1.0f) * (roughness + 1.0f) / 8.0f;
-    float G_V = NdotV / (NdotV * (1.0f - k) + k);
-    float G_L = NdotL / (NdotL * (1.0f - k) + k);
-    float G = G_V * G_L;
+    Vec3 specular = psdf.evalSpecular(N,V,L,F0,roughness);
 
-    Vec3 F = F0 + (Vec3(1.0f) - F0) * pow(1.0f - VdotH, 5.0f);
-    Vec3 specular = (D * G * F) / (4.0f * NdotV * NdotL + 1e-4f);
+    // Diffuse bileşeni
+    Vec3 kd = (1.0f - metallic) * (Vec3(1.0f) - F);
+    Vec3 diffuse = kd * albedo/M_PI;
 
-    // Artistic diffuse response
-    float lift = Vec3::lerpf(1.0f / M_PI, 1.0f, rec.material->artistic_albedo_response);
-    Vec3 diffuse = albedo * lift;
+    // Toplam BRDF
+    Vec3 brdf = diffuse + specular;
 
-    Vec3 brdf = ((1.0f - metallic) * diffuse) + specular;
-
-  
-    // --- Katkı ---
-    Vec3 direct = (brdf * Li * NdotL) ; // GPU ile aynı!
+    // Işık katkısı
+    Vec3 direct = brdf * Li * NdotL;
 
     return direct;
 }
@@ -1183,13 +1240,15 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     const Vec3& background_color, int depth, int sample_index) {
     Vec3 final_color(0, 0, 0);
     Vec3 throughput(1, 1, 1);
-    Ray current_ray = r;
+    Ray current_ray = r;    
 
-    for (int bounce = 0; bounce < MAX_DEPTH; ++bounce) {
+	// --- Ray tracing döngüsü ---
+    for (int bounce = 0; bounce < render_settings.max_bounces; ++bounce) {
         HitRecord rec;
 
-        if (!bvh->hit(current_ray, 0.0001f, std::numeric_limits<float>::infinity(), rec)) {
-            final_color += throughput * background_color;
+        if (!bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), rec)) {
+            float falloff = (bounce == 0) ? 1.0f : std::pow(0.3f, bounce); // Enerji kaybı
+            final_color += throughput * background_color*falloff;
             break;
         }
 
@@ -1207,16 +1266,15 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         throughput *= attenuation;
 
         // --- Russian Roulette ---
-        if (bounce > 0) {
+       
             float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
-            float continuation_prob = std::clamp(max_channel, 0.05f, 0.95f);
+            float continuation_prob = std::clamp(max_channel, 0.0f, 0.98f);
             if (random_double() > continuation_prob)
                 break;
-            throughput /= continuation_prob;
-        }
+            throughput /= continuation_prob;       
 
         // --- Emissive katkı ---
-        Vec3 emitted = rec.material->getEmission(rec.u, rec.v, rec.point);
+        Vec3 emitted = rec.material->getEmission(rec.u, rec.v, rec.point)*2;
         float transmission = rec.material->getTransmission(rec.uv);
         float opacity = rec.material->get_opacity(rec.uv);
 
@@ -1229,35 +1287,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             direct_light *= (1.0f - transmission);
         }
 
-        final_color += throughput * (emitted + direct_light * opacity);
-
-        // --- BRDF sampling katkısı (NEE) ---
-        HitRecord light_hit;
-        if (bvh->hit(scattered, 0.0001f, std::numeric_limits<float>::infinity(), light_hit)) {
-            for (const auto& light : lights) {
-                float pdf_light = light->pdf(rec.point, scattered.direction);
-                float pdf_light_clamped = std::min(pdf_light, 10.0f);
-                float pdf_brdf = rec.material->pdf(rec, -current_ray.direction, scattered.direction);
-                float pdf_brdf_clamped = std::clamp(pdf_brdf, 0.1f, 100.0f);
-                float w = power_heuristic(pdf_brdf_clamped, pdf_light_clamped);
-
-                Vec3 Li = Vec3(0.0f);
-                if (auto dir_light = std::dynamic_pointer_cast<DirectionalLight>(light)) {
-                    Vec3 L = -dir_light->direction.normalize();
-                    if (Vec3::dot(scattered.direction.normalize(), L) > 0.999f)
-                        Li = dir_light->getIntensity(rec.point, rec.point);
-                }
-                else if (auto point_light = std::dynamic_pointer_cast<PointLight>(light)) {
-                    Ray test_ray(rec.point, scattered.direction);
-                    if (intersects_sphere(test_ray, point_light->getPosition(), point_light->getRadius()))
-                        Li = point_light->getIntensity(rec.point, point_light->random_point());
-                }
-
-                Vec3 brdf_value = rec.material->pdf(rec, -current_ray.direction, scattered.direction);
-                Vec3 brdf_contribution = throughput * brdf_value * Li * w * opacity * (1.0f - transmission);
-                final_color += brdf_contribution;
-            }
-        }
+        final_color += throughput * (emitted + 5*direct_light * opacity);
 
         current_ray = scattered;
     }

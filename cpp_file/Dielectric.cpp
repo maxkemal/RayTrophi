@@ -125,7 +125,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     bool cannot_refract = sin_theta * refract_ratio > 1.0;
 
     // Olasılık hesaplamaları
-    double direct_trans_prob = 0.15; // %5 doğrudan geçiş
+    double direct_trans_prob = 0.05; // %5 doğrudan geçiş
     double reflect_prob = fresnel_reflect;
     double refract_prob = cannot_refract ? 0.0 : (1.0 - fresnel_reflect) * (1.0 - direct_trans_prob);
 

@@ -155,6 +155,12 @@ struct TextureInfo {
     aiTextureType type;
     std::string path;
 };
+struct BoneData {
+    std::unordered_map<std::string, unsigned int> boneNameToIndex;
+    std::unordered_map<std::string, aiNode*> boneNameToNode;
+    std::unordered_map<std::string, Matrix4x4> boneOffsetMatrices; // << DÜZELTİLDİ
+    Matrix4x4 globalInverseTransform;
+};
 
 static std::vector<std::shared_ptr<Camera>> cameras; // Kamera listesi
 // Matrix4x4.h dosyasının sonunda olabilir:
@@ -191,57 +197,7 @@ public:
         return transform;
     }
 
-    std::vector<std::shared_ptr<Triangle>> loadMeshByIndex(int meshIndex) {
-        std::vector<std::shared_ptr<Triangle>> triangles;
-
-        if (!scene || meshIndex >= scene->mNumMeshes) {
-            std::cerr << "Geçersiz mesh index: " << meshIndex << std::endl;
-            return triangles;
-        }
-
-        aiMesh* mesh = scene->mMeshes[meshIndex];
-        aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
-        auto convertedMaterial = processMaterial(material, scene);
-
-        // Global transform'i sıfır alıyoruz, çünkü instancing için zaten ayrı uygulanacak
-        aiMatrix4x4 identity;
-        std::string nodeName = "mesh_" + std::to_string(meshIndex);
-
-        AssimpLoader::processTriangles(mesh, identity, nodeName, convertedMaterial, triangles);
-
-        return triangles;
-    }
-
-    // AssimpLoader'a eklenecek yeni metod
-    std::vector<MeshInstance> loadModelToInstances(const std::string& filename) {
-        std::vector<MeshInstance> instances;
-
-        this->scene = importer.ReadFile(filename,
-            aiProcess_GenSmoothNormals |
-            aiProcess_GenNormals |
-            aiProcess_CalcTangentSpace
-        );
-
-        if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-            std::cerr << "Assimp error: " << importer.GetErrorString() << std::endl;
-            return instances;
-        }
-
-        std::function<void(aiNode*)> recurse = [&](aiNode* node) {
-            Matrix4x4 transform = convert(getGlobalTransform(node));
-
-            for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
-                int meshIndex = node->mMeshes[i];
-                instances.push_back({ meshIndex, transform, node->mName.C_Str() });
-            }
-
-            for (unsigned int i = 0; i < node->mNumChildren; ++i)
-                recurse(node->mChildren[i]);
-            };
-        recurse(scene->mRootNode);
-
-        return instances;
-    }
+  
     // Tek bir kamera almak için
     std::shared_ptr<Camera> getCamera(size_t index) const {
         if (index < cameras.size()) {
@@ -283,33 +239,11 @@ public:
             blade_count      // blade count
         );
     }
-    Matrix4x4 getBoneTransformAtTime(
-        const AnimationData& animData,
-        float time,
-        const std::string& boneName,
-        aiNode* boneNode)
-    {
-        // 1. Animasyon dönüşümü (animData'dan al)
-        Matrix4x4 animTransform = animData.calculateAnimationTransform(animData, time, boneName);
-
-        // 2. Node'un parent zincirinden gelen dönüşüm (static transformlar)
-        aiMatrix4x4 nodeTransform = boneNode ? boneNode->mTransformation : aiMatrix4x4();
-
-        aiNode* parent = boneNode ? boneNode->mParent : nullptr;
-        while (parent)
-        {
-            nodeTransform = parent->mTransformation * nodeTransform;
-            parent = parent->mParent;
-        }
-
-        Matrix4x4 globalTransform = convert(nodeTransform);
-        return animTransform * globalTransform;
-    }
 
     // Hem Triangle hem de AnimationData döndüren metod
     std::pair<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>>
         loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr) {
-
+        BoneData boneData;
         this->scene = importer.ReadFile(filename,
             //aiProcess_Triangulate |           // Önce üçgenlere böl
             aiProcess_GenSmoothNormals |      // Normalleri oluştur
@@ -327,7 +261,9 @@ public:
             std::cerr << "Assimp load error: " << importer.GetErrorString() << std::endl;
             return {};
         }
-
+        cameras.clear(); // ❗ Kameraları her model yüklemesinde sıfırla
+        lights.clear();  // Aynı mantık ışıklar için de geçerli
+      
         // Node ağacını tarayıp nodeMap'e doldur
         std::function<void(aiNode*)> recurse = [&](aiNode* node) {
             nodeMap[node->mName.C_Str()] = node;
@@ -345,8 +281,7 @@ public:
         std::unordered_map<std::string, unsigned int> boneNameToIndex;
         std::unordered_map<std::string, aiNode*> boneNameToNode;
 
-        processBones(scene, triangles, boneNameToIndex, boneNameToNode);
-
+        processBones(scene, triangles, boneData);
       
         std::vector<AnimationData> animationDataList;
         if (scene->mNumAnimations > 0) {
@@ -366,10 +301,7 @@ public:
                 for (unsigned int j = 0; j < animation->mNumChannels; ++j) {
                     const aiNodeAnim* channel = animation->mChannels[j];
                     std::string nodeName = channel->mNodeName.C_Str();
-                    std::cout << "Node: " << nodeName
-                        << ", Position Keys: " << channel->mNumPositionKeys
-                        << ", Rotation Keys: " << channel->mNumRotationKeys
-                        << ", Scaling Keys: " << channel->mNumScalingKeys << std::endl;
+                  
                     for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k) {
                         animData.positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
                     }
@@ -421,11 +353,17 @@ public:
 
     const aiScene* scene = nullptr;
     const aiScene* getScene() const { return scene; }
+
+    bool is_texture_bundle_valid(const OptixGeometryData::TextureBundle& tex) {
+        return tex.has_albedo_tex || tex.has_roughness_tex || tex.has_normal_tex ||
+            tex.has_metallic_tex || tex.has_transmission_tex ||
+            tex.has_opacity_tex || tex.has_emission_tex;
+    }
+
     OptixGeometryData convertTrianglesToOptixData(const std::vector<std::shared_ptr<Triangle>>& triangles) {
         OptixGeometryData data;
-        std::unordered_map<GpuMaterial, int> materialMap;
-        std::unordered_map<int, OptixGeometryData::TextureBundle> textureMap;  //  int-based map
-        std::vector<GpuMaterial> materialList;
+        std::unordered_map<GpuMaterialWithTextures, int> materialMap;
+        std::vector<GpuMaterial> gpuMaterials;
 
         for (const auto& tri : triangles) {
             uint3 tri_indices;
@@ -442,6 +380,7 @@ public:
                 data.vertices.push_back(make_float3(pos.x, pos.y, pos.z));
                 data.normals.push_back(make_float3(normal.x, normal.y, normal.z));
                 data.uvs.push_back(make_float2(uv.x, uv.y));
+
                 data.tangents.push_back(make_float3(tri->tangent0.x, tri->tangent0.y, tri->tangent0.z));
                 data.tangents.push_back(make_float3(tri->tangent1.x, tri->tangent1.y, tri->tangent1.z));
                 data.tangents.push_back(make_float3(tri->tangent2.x, tri->tangent2.y, tri->tangent2.z));
@@ -454,108 +393,140 @@ public:
 
             data.indices.push_back(tri_indices);
 
-            // GpuMaterial index eşleştirmesi
-            GpuMaterial gpuMat = tri->gpuMaterial;
-            int matIndex = -1;
+            // Benzersiz materyal + texture anahtarı
+            GpuMaterialWithTextures key;
+            key.material = *tri->mat_ptr->gpuMaterial;
+            key.albedoTexID = static_cast<size_t>(tri->textureBundle.albedo_tex);
+            key.normalTexID = static_cast<size_t>(tri->textureBundle.normal_tex);
+            key.roughnessTexID = static_cast<size_t>(tri->textureBundle.roughness_tex);
+            key.metallicTexID = static_cast<size_t>(tri->textureBundle.metallic_tex);
+            key.opacityTexID = static_cast<size_t>(tri->textureBundle.opacity_tex);
+            key.emissionTexID = static_cast<size_t>(tri->textureBundle.emission_tex);
 
-            auto it = materialMap.find(gpuMat);
+            int gpuIndex = -1;
+            auto it = materialMap.find(key);
             if (it != materialMap.end()) {
-                matIndex = it->second;
+                gpuIndex = it->second;
             }
             else {
-                matIndex = static_cast<int>(materialList.size());
-                materialMap[gpuMat] = matIndex;
-                materialList.push_back(gpuMat);
+                gpuIndex = static_cast<int>(gpuMaterials.size());
+                gpuMaterials.push_back(key.material);
+                data.textures.push_back(tri->textureBundle); // textures paralel sırada tutulur
+                materialMap[key] = gpuIndex;
+
+               /* std::cout << "[GpuMaterial] Yeni materyal eklendi: "
+                    << tri->mat_ptr->materialName << " -> Index " << gpuIndex << "\n";*/
             }
 
-            //  INT tabanlı kayıt → garantili çalışır
-            textureMap[matIndex] = tri->textureBundle;
-            data.material_indices.push_back(matIndex);
-
+            data.material_indices.push_back(gpuIndex);
         }
 
-        for (size_t i = 0; i < materialList.size(); ++i) {
-            if (textureMap.count((int)i)) {
-                data.textures.push_back(textureMap[(int)i]);
-              
-            }
-            else {
-                OptixGeometryData::TextureBundle dummy = {};
-                data.textures.push_back(dummy);
-              
-            }
-        }
-
-        data.materials = std::move(materialList);
+        data.materials = std::move(gpuMaterials);
         return data;
     }
 
 
-  
+    void clearTextureCache() {
+        for (auto& [name, tex] : textureCache) {
+            if (tex) tex->cleanup_gpu(); // GPU belleği temizle
+        }
+        textureCache.clear(); // CPU cache'i temizle
+    }
+   
 // TriangleData ve GpuMaterial kullanan tam OptixGeometryData çıkarımı
 private:
-    void processBones(const aiScene* scene,
+    void processBones(
+        const aiScene* scene,
         std::vector<std::shared_ptr<Triangle>>& triangles,
-        std::unordered_map<std::string, unsigned int>& boneNameToIndex,
-        std::unordered_map<std::string, aiNode*>& boneNameToNode)
-    {
-        for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex)
-        {
+        BoneData& boneData
+    ) {
+        std::cout << "[processBones] Başlıyor...\n";
+
+        // 0. Temizle
+        boneData.boneNameToIndex.clear();
+        boneData.boneNameToNode.clear();
+        boneData.boneOffsetMatrices.clear();
+
+        // 1. Global inverse transform (root node'dan)
+        boneData.globalInverseTransform = convert(scene->mRootNode->mTransformation).inverse();
+        std::cout << "[processBones] Global inverse transform alındı.\n";
+
+        // 2. Node map oluştur (bone isimlerini düğümle eşleştirmek için)
+        std::unordered_map<std::string, aiNode*> nodeMap;
+        std::function<void(aiNode*)> collectNodes = [&](aiNode* node) {
+            nodeMap[node->mName.C_Str()] = node;
+            for (unsigned int i = 0; i < node->mNumChildren; ++i)
+                collectNodes(node->mChildren[i]);
+            };
+        collectNodes(scene->mRootNode);
+        std::cout << "[processBones] Node map oluşturuldu. Toplam: " << nodeMap.size() << " düğüm.\n";
+
+        // 3. Meshleri dolaş
+        for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
             aiMesh* mesh = scene->mMeshes[meshIndex];
+            if (!mesh->HasBones()) continue;
 
-            if (mesh->HasBones())
-            {
-                std::cout << "Mesh " << meshIndex << " has bones: " << mesh->mNumBones << std::endl;
+            std::cout << "[Mesh " << meshIndex << "] Bone sayısı: " << mesh->mNumBones << std::endl;
 
-                for (unsigned int boneIndex = 0; boneIndex < mesh->mNumBones; ++boneIndex)
-                {
-                    aiBone* bone = mesh->mBones[boneIndex];
-                    std::string boneName = bone->mName.C_Str();
-                    aiMatrix4x4 offsetMatrix = bone->mOffsetMatrix;
+            for (unsigned int boneIndex = 0; boneIndex < mesh->mNumBones; ++boneIndex) {
+                aiBone* bone = mesh->mBones[boneIndex];
+                std::string boneName = bone->mName.C_Str();
 
-                    // ---  Bone index ve node eşleşmelerini kaydet ---
-                    boneNameToIndex[boneName] = boneIndex;
+                std::cout << "  [Bone] " << boneName << " | Vertex ağırlığı: " << bone->mNumWeights << "\n";
 
-                    // nodeMap zaten loadModelToTriangles içinde dolmuştu
-                    if (nodeMap.find(boneName) != nodeMap.end())
-                        boneNameToNode[boneName] = nodeMap[boneName];
-                    else
-                        boneNameToNode[boneName] = nullptr;  // Bulunamazsa NULL
+                // 3.1. Bone index
+                if (boneData.boneNameToIndex.count(boneName) == 0)
+                    boneData.boneNameToIndex[boneName] = static_cast<unsigned int>(boneData.boneNameToIndex.size());
 
-                    std::cout << "Bone: " << boneName
-                        << ", Affected Vertices: " << bone->mNumWeights << std::endl;
+                unsigned int globalBoneIndex = boneData.boneNameToIndex[boneName];
 
-                    for (unsigned int w = 0; w < bone->mNumWeights; ++w)
-                    {
-                        unsigned int vertexId = bone->mWeights[w].mVertexId;
-                        float weight = bone->mWeights[w].mWeight;
+                // 3.2. Node eşlemesi
+                boneData.boneNameToNode[boneName] = nodeMap.count(boneName) ? nodeMap[boneName] : nullptr;
 
-                        unsigned int triIndex = vertexId / 3;
-                        unsigned int vertInTri = vertexId % 3;
+                // 3.3. Offset matrix
+                boneData.boneOffsetMatrices[boneName] = convert(bone->mOffsetMatrix);
 
-                        if (triIndex >= triangles.size()) continue;
+                // 3.4. Ağırlıkları işle
+                for (unsigned int w = 0; w < bone->mNumWeights; ++w) {
+                    unsigned int vertexId = bone->mWeights[w].mVertexId;
+                    float weight = bone->mWeights[w].mWeight;
+                    bool found = false;
 
-                        auto& tri = triangles[triIndex];
+                    for (auto& tri : triangles) {
+                        const auto& indices = tri->getAssimpVertexIndices();
 
-                        // Eğer vertexBoneWeights yoksa, oluştur
-                        if (tri->vertexBoneWeights.size() != 3)
-                            tri->vertexBoneWeights = std::vector<std::vector<std::pair<int, float>>>(3);
+                        for (int vi = 0; vi < 3; ++vi) {
+                            if (indices[vi] == vertexId) {
+                                if (tri->vertexBoneWeights.size() != 3)
+                                    tri->vertexBoneWeights.resize(3);
+                                if (tri->originalVertexPositions.size() != 3)
+                                    tri->originalVertexPositions.resize(3);
 
-                        tri->vertexBoneWeights[vertInTri].push_back({ boneIndex, weight });
+                                tri->vertexBoneWeights[vi].emplace_back(globalBoneIndex, weight);
 
-                        if (tri->originalVertexPositions.size() != 3)
-                        {
-                            tri->originalVertexPositions = { tri->original_v0, tri->original_v1, tri->original_v2 };
+                                if (vi == 0) tri->originalVertexPositions[0] = tri->original_v0;
+                                if (vi == 1) tri->originalVertexPositions[1] = tri->original_v1;
+                                if (vi == 2) tri->originalVertexPositions[2] = tri->original_v2;
+
+                                std::cout << "    [Weight] Triangle bulundu | vertexId: " << vertexId
+                                    << ", weight: " << weight
+                                    << ", triangle node: " << tri->getNodeName() << "\n";
+
+                                found = true;
+                                break;
+                            }
                         }
+                        if (found) break;
+                    }
 
-                        std::cout << " -> Triangle " << triIndex
-                            << " Vertex " << vertInTri
-                            << " Bone " << boneIndex
-                            << " Weight " << weight << std::endl;
+                    if (!found) {
+                        std::cerr << "[WARNING] vertexId " << vertexId << " için triangle bulunamadı!\n";
                     }
                 }
             }
         }
+
+        std::cout << "[processBones] Tamamlandı. Toplam bone sayısı: " << boneData.boneNameToIndex.size() << std::endl;
     }
 
 
@@ -582,18 +553,21 @@ private:
             aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
             aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
 
-            // 🔧 HitGroupData tanımla
+            // HitGroupData oluştur
             HitGroupData hit_data = {};
 
-            //  Material ve GPU texture'ları yükle
+            // Material yükle ve textureları hit_data'ya yaz
             auto convertedMaterial = processMaterial(material, scene, &hit_data, geometry_data);
 
-            // 🎯 Mesh'i üçgenlere dönüştür
+            // Mevcut üçgen sayısını not al
+            size_t triangleStart = triangles.size();
+
+            // Mesh'teki üçgenleri ekle
             processTriangles(mesh, globalTransform, node->mName.C_Str(), convertedMaterial, triangles);
 
-            // 🧵 Son üçgene GPU texture bundle'ı aktar
-            if (!triangles.empty()) {
-                auto& tri = triangles.back();
+            // Yeni eklenen tüm üçgenlere textureBundle kopyala
+            for (size_t t = triangleStart; t < triangles.size(); ++t) {
+                auto& tri = triangles[t];
                 tri->textureBundle.albedo_tex = hit_data.albedo_tex;
                 tri->textureBundle.has_albedo_tex = hit_data.has_albedo_tex;
                 tri->textureBundle.roughness_tex = hit_data.roughness_tex;
@@ -606,12 +580,11 @@ private:
                 tri->textureBundle.has_transmission_tex = hit_data.has_transmission_tex;
                 tri->textureBundle.opacity_tex = hit_data.opacity_tex;
                 tri->textureBundle.has_opacity_tex = hit_data.has_opacity_tex;
-				tri->textureBundle.emission_tex = hit_data.emission_tex;
-				tri->textureBundle.has_emission_tex = hit_data.has_emission_tex;
-				
+                tri->textureBundle.emission_tex = hit_data.emission_tex;
+                tri->textureBundle.has_emission_tex = hit_data.has_emission_tex;
             }
 
-            // 🔗 geometry_data'ya textureBundle kaydet (OptiX için)
+            // OptiX için textureBundle yedekle
             if (geometry_data) {
                 OptixGeometryData::TextureBundle tex_bundle = {};
                 tex_bundle.albedo_tex = hit_data.albedo_tex;
@@ -627,17 +600,17 @@ private:
                 tex_bundle.opacity_tex = hit_data.opacity_tex;
                 tex_bundle.has_opacity_tex = hit_data.has_opacity_tex;
                 tex_bundle.emission_tex = hit_data.emission_tex;
-				tex_bundle.has_emission_tex = hit_data.has_emission_tex;
+                tex_bundle.has_emission_tex = hit_data.has_emission_tex;
                 geometry_data->textures.push_back(tex_bundle);
-              
             }
         }
 
-        // 🔁 Çocuk node'ları işle
+        // Çocuk node'ları işle
         for (unsigned int i = 0; i < node->mNumChildren; i++) {
             processNodeToTriangles(node->mChildren[i], scene, triangles, geometry_data);
         }
     }
+
     static void processTriangles(
         aiMesh* mesh,
         const aiMatrix4x4& transform,
@@ -650,7 +623,7 @@ private:
         normalTransform.Transpose();
 
         for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
-            aiFace face = mesh->mFaces[i];
+            const aiFace& face = mesh->mFaces[i];
             if (face.mNumIndices != 3) continue; // Sadece üçgen yüzleri işleyin
 
             std::vector<Vec3> vertices;
@@ -663,12 +636,12 @@ private:
             for (unsigned int j = 0; j < 3; j++) {
                 unsigned int index = face.mIndices[j];
 
-                // Vertex işleme
+                // Vertex
                 aiVector3D vertex = mesh->mVertices[index];
                 aiVector3D transformedVertex = transform * vertex;
                 vertices.emplace_back(transformedVertex.x, transformedVertex.y, transformedVertex.z);
 
-                // Normal işleme
+                // Normal
                 if (mesh->HasNormals()) {
                     aiVector3D normal = mesh->mNormals[index];
                     aiVector3D transformedNormal = normalTransform * normal;
@@ -676,34 +649,29 @@ private:
                     normals.emplace_back(transformedNormal.x, transformedNormal.y, transformedNormal.z);
                 }
 
-                // UV koordinatları işleme
+                // UV
                 if (mesh->HasTextureCoords(0)) {
                     aiVector3D texCoord = mesh->mTextureCoords[0][index];
-                    float u = texCoord.x;
-                    float v = texCoord.y;
-                    texCoords.emplace_back(u, v);
+                    texCoords.emplace_back(texCoord.x, texCoord.y);
                 }
                 else {
                     texCoords.emplace_back(0.0f, 0.0f);
                 }
 
-                // Tangent ve bitangent işleme
+                // Tangent / Bitangent
                 if (hasTangents) {
-                    aiVector3D tangent = mesh->mTangents[index];
-                    aiVector3D bitangent = mesh->mBitangents[index];
-
                     aiMatrix3x3 normalMatrix(transform);
                     normalMatrix.Inverse();
                     normalMatrix.Transpose();
 
-                    aiVector3D transformedTangent = normalMatrix * tangent;
-                    aiVector3D transformedBitangent = normalMatrix * bitangent;
+                    aiVector3D tangent = mesh->mTangents[index];
+                    aiVector3D bitangent = mesh->mBitangents[index];
+                    aiVector3D t = normalMatrix * tangent;
+                    aiVector3D b = normalMatrix * bitangent;
+                    t.Normalize(); b.Normalize();
 
-                    transformedTangent.Normalize();
-                    transformedBitangent.Normalize();
-
-                    tangents.emplace_back(transformedTangent.x, transformedTangent.y, transformedTangent.z);
-                    bitangents.emplace_back(transformedBitangent.x, transformedBitangent.y, transformedBitangent.z);
+                    tangents.emplace_back(t.x, t.y, t.z);
+                    bitangents.emplace_back(b.x, b.y, b.z);
                 }
             }
 
@@ -721,16 +689,18 @@ private:
                 material,
                 mesh->mMaterialIndex
             );
+
             triangle->mat_ptr = material;
-            triangle->gpuMaterial = *material->gpuMaterial; // struct kopyalanıyor
-
+            triangle->gpuMaterialPtr = material->gpuMaterial;
             triangle->setNodeName(nodeName);
-            triangles.push_back(triangle);
+            triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
+            triangle->setFaceIndex(static_cast<int>(triangles.size()));
 
+            triangles.push_back(triangle);
         }
     }
 
-     void processCameras(const aiScene* scene) {
+    void processCameras(const aiScene* scene) {
         try {
             if (!scene || !scene->HasCameras()) {
                 std::cout << "Sahne kameraları içermiyor..." << std::endl;
@@ -740,6 +710,7 @@ private:
             for (unsigned int i = 0; i < scene->mNumCameras; i++) {
                 aiCamera* aiCam = scene->mCameras[i];
                 if (!aiCam) continue;
+
                 cameraNodeNames.insert(aiCam->mName.C_Str());
                 aiNode* camNode = scene->mRootNode->FindNode(aiCam->mName.C_Str());
                 if (!camNode) {
@@ -747,128 +718,120 @@ private:
                     continue;
                 }
 
-                // **Global transform hesapla**
                 aiMatrix4x4 globalTransform = getGlobalTransform(camNode);
-
-                // **Dönüşüm matrisini parçala**
                 aiVector3D scaling, position;
                 aiQuaternion rotation;
                 globalTransform.Decompose(scaling, rotation, position);
 
-                // **Dönüşleri uygula**
                 Vec3 lookfrom(position.x, position.y, position.z);
                 Vec3 forward = rotateVector(Vec3(0, 0, -1), rotation);
                 Vec3 lookat = lookfrom + forward;
                 Vec3 vup = rotateVector(Vec3(0, 1, 0), rotation);
 
-                // **FOV dönüşümü**
-                double vfov = aiCam->mHorizontalFOV * 180.0 / M_PI;
-                double aspect = aiCam->mAspect;
-                vfov = 2.0 * atan(tan(vfov * 0.5 * M_PI / 180.0) / aspect) * 180.0 / M_PI;
+                // Aspect oranı sıfırsa fallback uygula
+                double aspect = (aiCam->mAspect > 0.01) ? aiCam->mAspect : 1.0;
+                double hfov_rad = aiCam->mHorizontalFOV;
+                double vfov_rad = 2.0 * atan(tan(hfov_rad / 2.0) / aspect);
+                double vfov = vfov_rad * 180.0 / M_PI;
 
+                // Kamera oluştur
                 auto camera = std::make_shared<Camera>(
                     lookfrom, lookat, vup, vfov, aspect, aperture, focusdistance, 5
                 );
-                camera->nodeName = std::string(aiCam->mName.C_Str());  // 🔥 Bu şart!
+                camera->nodeName = std::string(aiCam->mName.C_Str());
 
                 cameras.push_back(camera);
 
-                // **Debug Çıkışı**
-                std::cout << "Kamera " << i << " yüklendi:" << std::endl;
-                std::cout << "Konum: " << lookfrom.toString() << std::endl;
-                std::cout << "Hedef: " << lookat.toString() << std::endl;
-                std::cout << "Up vektörü: " << vup.toString() << std::endl;
-                std::cout << "FOV: " << vfov << "°" << std::endl;
+                // Loglama
+                std::cout << "[Camera Loaded] " << aiCam->mName.C_Str() << "\n";
+                std::cout << "  Position: " << lookfrom.toString() << "\n";
+                std::cout << "  LookAt  : " << lookat.toString() << "\n";
+                std::cout << "  Up      : " << vup.toString() << "\n";
+                std::cout << "  Aspect  : " << aspect << "\n";
+                std::cout << "  FOV     : " << vfov << " degrees\n\n";
             }
         }
         catch (const std::exception& e) {
             std::cerr << "Kamera işleme hatası: " << e.what() << std::endl;
         }
     }
-  
+
      void processLights(const aiScene* scene) {
-        try {
-            if (!scene || !scene->HasLights()) {
-                std::cout << "Sahnede ışık bulunmuyor, işlem devam ediyor..." << std::endl;
-                return;
-            }
+         try {
+             if (!scene || !scene->HasLights()) {
+                 std::cout << "Sahnede ışık bulunmuyor, işlem devam ediyor..." << std::endl;
+                 return;
+             }
 
-            for (unsigned int i = 0; i < scene->mNumLights; i++) {
-                aiLight* aiLgt = scene->mLights[i];
-                lightNodeNames.insert(std::string(aiLgt->mName.C_Str()));
+             for (unsigned int i = 0; i < scene->mNumLights; i++) {
+                 aiLight* aiLgt = scene->mLights[i];
+                 lightNodeNames.insert(std::string(aiLgt->mName.C_Str()));
 
-                // --- Global transform al ---
-                const aiNode* node = scene->mRootNode->FindNode(aiLgt->mName);
-                aiMatrix4x4 globalTransform = node ? getGlobalTransform(node) : aiMatrix4x4();
+                 // --- Global transform al ---
+                 const aiNode* node = scene->mRootNode->FindNode(aiLgt->mName);
+                 aiMatrix4x4 globalTransform = node ? getGlobalTransform(node) : aiMatrix4x4();
 
-                // --- Pozisyon ve yönü transform et ---
-                Vec3 position = transformPosition(globalTransform, aiLgt->mPosition);
-                Vec3 direction = transformDirection(globalTransform, aiLgt->mDirection);
+                 // --- Pozisyon ve yönü transform et ---
+                 Vec3 position = transformPosition(globalTransform, aiLgt->mPosition);
+                 Vec3 direction = transformDirection(globalTransform, aiLgt->mDirection);
 
-                // --- Renk ve yoğunluk ---
-                aiColor3D color = aiLgt->mColorDiffuse;
-                Vec3 intensity = Vec3(color.r, color.g, color.b);
+                 // --- Renk ve güç ayrımı ---
+                 aiColor3D col = aiLgt->mColorDiffuse;
+                 Vec3 raw_intensity(col.r, col.g, col.b);
+                 float power = raw_intensity.length(); // toplam ışık gücü
+                 Vec3 color = (power > 0.0f) ? raw_intensity / power : Vec3(1.0f);
+                 power /= 1000.0f; // isteğe bağlı ölçeklendirme
 
-                // --- Ortak pointer ---
-                std::shared_ptr<Light> light = nullptr;
-               
-                // --- Türüne göre ışık oluştur ---
-                if (aiLgt->mType == aiLightSource_DIRECTIONAL) {
-                    light = std::make_shared<DirectionalLight>(direction, intensity / 1000, 100.0);
-                    light->position = position;
-                   
-                }
-                else if (aiLgt->mType == aiLightSource_POINT) {
-                    light = std::make_shared<PointLight>(position, intensity / 1000, 0.1f);
-                    
-                }
-                else if (aiLgt->mType == aiLightSource_SPOT) {
-                    float angle_degrees = aiLgt->mAngleInnerCone * (180.0f / M_PI);
-                    float angle_radians = aiLgt->mAngleOuterCone;
-                    float radius = 10.0f;
+                 // --- Ortak pointer ---
+                 std::shared_ptr<Light> light = nullptr;
 
-                    light = std::make_shared<SpotLight>(position, direction, intensity, angle_degrees, radius);
-                  
-                }
-                else if (aiLgt->mType == aiLightSource_AREA) {
-                    Vec3 forward = transformDirection(globalTransform, aiLgt->mDirection).normalize();
-                    Vec3 up = transformDirection(globalTransform, aiLgt->mUp).normalize();
+                 // --- Türüne göre ışık oluştur ---
+                 if (aiLgt->mType == aiLightSource_DIRECTIONAL) {
+                     light = std::make_shared<DirectionalLight>(direction, color * power, 10.0);
+                     light->position = position;
+                 }
+                 else if (aiLgt->mType == aiLightSource_POINT) {
+                     light = std::make_shared<PointLight>(position, color * power, 0.1f);
+                 }
+                 else if (aiLgt->mType == aiLightSource_SPOT) {
+                     float angle_degrees = aiLgt->mAngleInnerCone * (180.0f / M_PI);
+                     float radius = 10.0f;
+                     light = std::make_shared<SpotLight>(position, direction, color * power, angle_degrees, radius);
+                 }
+                 else if (aiLgt->mType == aiLightSource_AREA) {
+                     Vec3 forward = transformDirection(globalTransform, aiLgt->mDirection).normalize();
+                     Vec3 up = transformDirection(globalTransform, aiLgt->mUp).normalize();
+                     Vec3 u = Vec3::cross(forward, up).normalize();
+                     Vec3 v = Vec3::cross(u, forward).normalize();
+                     double width = aiLgt->mSize.x;
+                     double height = aiLgt->mSize.y;
+                     light = std::make_shared<AreaLight>(position, u, v, width, height, color * power);
+                 }
 
-                    Vec3 u = Vec3::cross(forward, up).normalize();
-                    Vec3 v = Vec3::cross(u, forward).normalize();
+                 // --- Işık oluşturulduysa kaydet ---
+                 if (light) {
+                     light->nodeName = std::string(aiLgt->mName.C_Str());
+                     light->initialDirection = direction;
 
-                    double width = aiLgt->mSize.x;
-                    double height = aiLgt->mSize.y;
+                     lights.push_back(light);
 
-                    light = std::make_shared<AreaLight>(position, u, v, width, height, intensity);
-                   
-                }
+                     std::cout << "Işık eklendi: " << aiLgt->mName.C_Str()
+                         << " Tür: " << aiLgt->mType
+                         << " Pozisyon: (" << position.x << ", " << position.y << ", " << position.z << ")"
+                         << " Renk: " << color
+                         << " Güç: " << power << std::endl;
+                 }
+                 else {
+                     std::cerr << "Desteklenmeyen ışık türü: " << aiLgt->mType << std::endl;
+                 }
+             }
 
-                // --- Eğer ışık oluşturulduysa ayarları yap ---
-                if (light) {
-                    // Node adını ve başlangıç yönünü kaydet (animasyon eşleşmesi için)
-                    light->nodeName = std::string(aiLgt->mName.C_Str()); // ✅ DOĞRU!
-                    light->initialDirection = direction; // Yönlü ışıklar için önemli
+         }
+         catch (const std::exception& e) {
+             std::cerr << "Işık işleme sırasında hata oluştu: " << e.what() << std::endl;
+         }
+     }
 
-                    // Listeye ekle
-                    lights.push_back(light);
-
-                    // DEBUG
-                    std::cout << "Işık eklendi: " << aiLgt->mName.C_Str()
-                        << " Tür: " << aiLgt->mType
-                        << " Pozisyon: (" << position.x << ", " << position.y << ", " << position.z << ")"
-                        << " Şiddet: " << intensity << std::endl;
-                }
-                else {
-                    std::cerr << "Desteklenmeyen ışık türü: " << aiLgt->mType << std::endl;
-                }
-            }
-
-        }
-        catch (const std::exception& e) {
-            std::cerr << "Işık işleme sırasında hata oluştu: " << e.what() << std::endl;
-        }
-    }
 
 
 
@@ -957,9 +920,15 @@ private:
            aiMat->Get(AI_MATKEY_ANISOTROPY_FACTOR, anisotropyDir);
            material->setAnisotropic(anisotropy, Vec3(anisotropyDir.r, anisotropyDir.g, anisotropyDir.b));
        }
+       float ior = 1.0f;
+       if (!aiMat->Get(AI_MATKEY_REFRACTI, ior)) {
+           aiMat->Get("IOR", 0, 0, ior);  // GLTF için fallback
+       }
+       material->ior = ior;
+
        float transmission = 0.0f;
        if (AI_SUCCESS == aiGetMaterialFloat(aiMat, AI_MATKEY_TRANSMISSION_FACTOR, &transmission)) {
-           material->setTransmission(transmission,1.1);
+           material->setTransmission(transmission,1.5);
           
        }
 
@@ -1066,20 +1035,6 @@ private:
             
            }
 
-       /*if (materialNameStr.find("glass") != std::string::npos || materialNameStr.find("dielectric") != std::string::npos) {
-           Vec3 glassColor = Vec3(color.r,color.g,color.b);       
-           float scratch_density=10.0f;
-           auto dielectricMaterial = std::make_shared<Dielectric>(
-            1.2f, glassColor,2.0, 1.0,roughness, scratch_density);//cam ayarları kırılma indisi,renk,kaostik,cam rengi,bulanıklık, çizikler
-           // Transfer properties
-           dielectricMaterial->albedoProperty = material->albedoProperty;
-           dielectricMaterial->roughnessProperty = material->roughnessProperty;
-           dielectricMaterial->metallicProperty = material->metallicProperty;
-           dielectricMaterial->normalProperty = material->normalProperty;
-           dielectricMaterial->opacityProperty = material->opacityProperty;
-           return dielectricMaterial;
-       }*/
-
            if (materialNameStr.find("volume") != std::string::npos || materialNameStr.find("volumetric") != std::string::npos) {
                Vec3 albedo = Vec3(color.r, color.g, color.b); // Açık mavi hacim için uygun
                float density = 0.8f;               // Daha düşük yoğunluk genellikle görselde güzel durur
@@ -1099,15 +1054,49 @@ private:
            }
            auto gpu = std::make_shared<GpuMaterial>();
 
-           // Doğrudan renk verileriyle doldur
-           gpu->albedo = make_float3(color.r, color.g, color.b);
-           gpu->roughness = roughness;
-           gpu->metallic = metalicFactor;
-           gpu->emission = make_float3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
-           gpu->transmission = transmission;
-           gpu->ior = 1.5f;
-		   gpu->opacity = opacity;
+           // Texture varsa dummy, yoksa gerçek değer atıyoruz:
+           if (hit_data && hit_data->has_albedo_tex)
+               gpu->albedo = make_float3(1.0f, 1.0f, 1.0f);
+           else
+               gpu->albedo = make_float3(color.r, color.g, color.b);
 
+           if (hit_data && hit_data->has_roughness_tex)
+               gpu->roughness = 1.0f;
+           else
+               gpu->roughness = roughness;
+
+           if (hit_data && hit_data->has_metallic_tex)
+               gpu->metallic = 1.0f;
+           else
+               gpu->metallic = metalicFactor;
+
+           if (hit_data && hit_data->has_emission_tex)
+               gpu->emission = make_float3(1.0f, 1.0f, 1.0f);
+           else
+               gpu->emission = make_float3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
+
+           if (hit_data && hit_data->has_transmission_tex)
+               gpu->transmission = 1.0f;
+           else
+               gpu->transmission = transmission;
+
+           if (hit_data && hit_data->has_opacity_tex)
+               gpu->opacity = 1.0f;
+           else
+               gpu->opacity = opacity;
+
+           // Sabit IOR
+           gpu->ior = ior;
+		   gpu->clearcoat = clearcoatFactor;
+           // GPU materyali materyale ata
+           material->gpuMaterial = gpu;
+           static int matCount = 0;
+           matCount++;
+
+        /*   std::cout << "[Material #" << matCount << "] "
+               << material->materialName <<  std::endl;*/              
+
+           // TextureBundle'ı doldur ve pushla (varsa geometry_data)
            if (geometry_data && hit_data) {
                OptixGeometryData::TextureBundle tex_bundle = {};
 
@@ -1128,18 +1117,12 @@ private:
 
                tex_bundle.opacity_tex = hit_data->opacity_tex;
                tex_bundle.has_opacity_tex = hit_data->has_opacity_tex;
+
                tex_bundle.emission_tex = hit_data->emission_tex;
                tex_bundle.has_emission_tex = hit_data->has_emission_tex;
-               geometry_data->textures.push_back(tex_bundle); // 🚀
-           }
 
-           // GPU tarafına geçirilecek veriyi material içinde tut
-           if (materialNameStr.find("pastel") != std::string::npos ) {
-               material->artistic_albedo_response = 0.3f;
+               geometry_data->textures.push_back(tex_bundle);
            }
-
-           gpu->artistic_albedo_response = material->artistic_albedo_response;
-           material->gpuMaterial = gpu;
 
 
        return material;
@@ -1190,19 +1173,16 @@ private:
    static std::shared_ptr<Texture> loadTextureWithCache(const std::string& textureName, TextureType type = TextureType::Unknown) {
        auto it = textureCache.find(textureName);
        if (it != textureCache.end()) {
-           return it->second; // 📦 Zaten yüklü -> direkt dön
+           return it->second; //  Zaten yüklü -> direkt dön
        }
 
        // İlk kez yükleniyor
        auto texture = std::make_shared<Texture>(baseDirectory + textureName, type);
        textureCache[textureName] = texture;
 
-       texture->upload_to_gpu(); // 📦 İlk ve tek GPU yükleme
+       texture->upload_to_gpu(); // İlk ve tek GPU yükleme
 
        return texture;
    }
-
-
-
 
 };

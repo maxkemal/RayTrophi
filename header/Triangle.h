@@ -14,9 +14,12 @@
 
 class Triangle : public Hittable {
 public:
+    std::string materialName;
     // Animasyon için: her vertexin bone ağırlıkları
     std::vector<std::vector<std::pair<int, float>>> vertexBoneWeights;  // [vertex][(boneIndex, weight)]
-
+ 
+    void setFaceIndex(int idx) { faceIndex = idx; }
+    int getFaceIndex() const { return faceIndex; }
     // Animasyon için: her vertexin orijinal bind pose pozisyonu
     std::vector<Vec3> originalVertexPositions;
     // Orijinal (başlangıç) vertex pozisyonları
@@ -30,8 +33,8 @@ public:
     Vec3 bitangent0, bitangent1, bitangent2; // bitangents
     bool hasTangents;       // tangent basis var mı?
     std::shared_ptr<Material> mat_ptr;
-    GpuMaterial gpuMaterial;
-    OptixGeometryData::TextureBundle textureBundle; // ⬅️ Bunu ekle
+    std::shared_ptr<GpuMaterial> gpuMaterialPtr; // açık isim
+    OptixGeometryData::TextureBundle textureBundle;
     int smoothingGroup;
     Matrix4x4 transform;
     void setNodeName(const std::string& name) {
@@ -84,7 +87,7 @@ public:
     }
 
     std::shared_ptr<Texture> texture;
-    std::string materialName;
+  
     int smoothGroup;
     // Dönüştürülmüş haller
     Vec3 transformed_v0, transformed_v1, transformed_v2;
@@ -123,10 +126,20 @@ public:
     std::tuple<Vec2, Vec2, Vec2> getUVCoordinates() const;
     // Set normals
     void set_normals(const Vec3& normal0, const Vec3& normal1, const Vec3& normal2);
-  
+    void setAssimpVertexIndices(unsigned int i0, unsigned int i1, unsigned int i2) {
+        assimpVertexIndices = { i0, i1, i2 };
+    }
+
+    const std::array<unsigned int, 3>& getAssimpVertexIndices() const {
+        return assimpVertexIndices;
+    }
+
     virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override;
     virtual bool bounding_box(double time0, double time1, AABB& output_box) const override;
     void update_bounding_box();
+    Vec3 apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const;
+    void apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices);
+    Vec3 apply_bone_to_normal(const Vec3& originalNormal, const std::vector<std::pair<int, float>>& boneWeights, const std::vector<Matrix4x4>& finalBoneMatrices) const;
 private:
     Vec3 calculateBarycentricCoordinates(const Vec3& point) const;
 
@@ -139,7 +152,8 @@ private:
     Vec3 max_point;
     
     Vec2 uv0, uv1, uv2;
-  
+    int faceIndex = -1;
+    std::array<unsigned int, 3> assimpVertexIndices;
     void updateTransformedVertices() {
         transformed_v0 = finalTransform.transform_point(original_v0);
         transformed_v1 = finalTransform.transform_point(original_v1);

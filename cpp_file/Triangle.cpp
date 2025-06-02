@@ -63,6 +63,61 @@ float safeAcos(float x) {
     else if (x > 1.0) x = 1.0;
     return std::acos(x);
 }
+Vec3 Triangle::apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const {
+    Vec3 blended = Vec3(0);
+    for (const auto& [boneIdx, weight] : vertexBoneWeights[vi]) {
+        Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(originalVertexPositions[vi]);
+        blended += transformed * weight;
+    }
+    return blended;
+}
+void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
+    if (vertexBoneWeights.size() != 3 || originalVertexPositions.size() != 3) {
+        std::cerr << "[WARNING] Triangle skipping skinning — missing weight or position data.\n";
+        return;
+    }
+
+    for (int vi = 0; vi < 3; ++vi) {
+        if (vertexBoneWeights[vi].empty()) {
+            std::cerr << "[WARNING] vertex " << vi << " has no bone weights, skipping.\n";
+            continue;
+        }
+
+        Vec3 blended = Vec3(0);
+        for (auto& [boneIdx, weight] : vertexBoneWeights[vi]) {
+            if (boneIdx >= finalBoneMatrices.size()) {
+                std::cerr << "[ERROR] boneIdx " << boneIdx << " out of bounds!\n";
+                continue;
+            }
+            Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(originalVertexPositions[vi]);
+            blended += transformed * weight;
+        }
+
+        if (vi == 0) transformed_v0 = blended;
+        else if (vi == 1) transformed_v1 = blended;
+        else if (vi == 2) transformed_v2 = blended;
+    }
+
+    //  Þimdi gerçek vertexleri güncelle
+    v0 = transformed_v0;
+    v1 = transformed_v1;
+    v2 = transformed_v2;
+
+    update_bounding_box();
+}
+
+Vec3 Triangle::apply_bone_to_normal(const Vec3& originalNormal,
+    const std::vector<std::pair<int, float>>& boneWeights,
+    const std::vector<Matrix4x4>& finalBoneMatrices) const {
+    Vec3 blended = Vec3(0);
+    for (const auto& [boneIdx, weight] : boneWeights) {
+        Matrix4x4 normalMat = finalBoneMatrices[boneIdx].inverse().transpose();
+        Vec3 transformed = normalMat.transform_vector(originalNormal);
+        blended += transformed * weight;
+    }
+    return blended;
+}
+
 Vec3 Triangle::calculateBarycentricCoordinates(const Vec3& point) const {
     // Üçgen kenarlarý arasýndaki vektörler
     const Vec3 v0v1 = v1 - v0;

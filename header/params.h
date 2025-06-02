@@ -16,12 +16,13 @@ struct gpuCamera {
 };
 struct LightGPU {
     float3 position;
-    float3 direction; // directional light için
-    float3 intensity;
-	float radius; // yumusak gölgeler için
-    int type; // 0 = point, 1 = directional, 2 = area
-    float intensity_magnitude; // = length(intensity)
+    float3 direction;       // directional, spot, area için
+    float3 color;           // normalize edilmiş renk [0-1]
+    float intensity;        // toplam güç (lümen)
+    float radius;           // yumuşak gölge için
+    int type;               // 0 = point, 1 = directional, 2 = area, 3 = spot
 };
+
 struct RayGenParams {
     uchar4* framebuffer;
     int image_width;
@@ -45,7 +46,8 @@ struct RayGenParams {
     int min_samples;             // Minimum örnek sayısı
     float variance_threshold;    // Baz varyans eşik değeri
     int frame_number;            // Mevcut frame numarası
-
+	int max_depth; 		        // Maksimum derinlik
+	bool use_adaptive_sampling;   // Adaptif örnekleme kullanılıp kullanılmayacağı
     // Uzamsal tutarlılık ve temporal akümülasyon için
     float* variance_buffer;      // Piksellerin varyans değerlerini saklamak için
     float* accumulation_buffer;  // Temporal akümülasyon için önceki frame verisi

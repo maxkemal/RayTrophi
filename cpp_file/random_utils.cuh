@@ -61,3 +61,14 @@ __device__ float3 cosine_sample_hemisphere(curandState* rng, const float3& N) {
 
     return normalize(tangentX * sample.x + tangentY * sample.y + N * sample.z);
 }
+__device__ float2 random_in_unit_disk(curandState* rng) {
+    float2 p;
+    do {
+        p = make_float2(
+            random_float(rng) * 2.0f - 1.0f,
+            random_float(rng) * 2.0f - 1.0f
+        );
+    } while ((p.x * p.x + p.y * p.y) >= 1.0f);
+    return p;
+}
+

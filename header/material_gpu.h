@@ -1,47 +1,102 @@
-#pragma once
+﻿#pragma once
 #include <cuda_runtime.h>
-#include <functional> // hash i�in
+#include <functional> // hash için
 
-struct __align__(16) GpuMaterial {
+struct alignas(16) GpuMaterial {
     float3 albedo;
     float padding0;
-	float opacity;
+    float opacity;
     float roughness;
     float metallic;
+    float clearcoat;
     float2 padding1;
     float3 emission;
     float padding2;
     float transmission;
     float ior;
     float2 padding3;
-    float artistic_albedo_response ;
+    float artistic_albedo_response;
+    float subsurface=0.0f;                // 0.0 - 1.0 arası
+    float3 subsurface_color;         // genelde albedoya yakın ama daha yumuşak
 
 };
 
-
-// E�itlik kar��la�t�rmas�
-inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
-    return a.albedo.x == b.albedo.x && a.albedo.y == b.albedo.y && a.albedo.z == b.albedo.z &&
-        a.roughness == b.roughness &&
-        a.metallic == b.metallic &&
-        a.emission.x == b.emission.x && a.emission.y == b.emission.y && a.emission.z == b.emission.z &&
-        a.transmission == b.transmission &&
-        a.ior == b.ior;
+// Eşitlik operatörü - tüm önemli alanları karşılaştırır
+inline bool float3_esit(float3 a, float3 b, float epsilon = 1e-6f) {
+    return abs(a.x - b.x) < epsilon && abs(a.y - b.y) < epsilon && abs(a.z - b.z) < epsilon;
 }
 
-// Hash fonksiyonu (unordered_map i�in)
+inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
+    return float3_esit(a.albedo, b.albedo) &&
+        abs(a.roughness - b.roughness) < 1e-6f &&
+        abs(a.metallic - b.metallic) < 1e-6f &&
+        float3_esit(a.emission, b.emission) &&
+        abs(a.transmission - b.transmission) < 1e-6f &&
+        abs(a.ior - b.ior) < 1e-6f &&
+        abs(a.opacity - b.opacity) < 1e-6f &&
+        abs(a.artistic_albedo_response - b.artistic_albedo_response) < 1e-6f;
+}
+
+// Hash fonksiyonu (unordered_map için) - geliştirilmiş sürüm
 namespace std {
     template <>
     struct hash<GpuMaterial> {
         size_t operator()(const GpuMaterial& m) const {
-            size_t h1 = hash<float>{}(m.albedo.x) ^ hash<float>{}(m.albedo.y) ^ hash<float>{}(m.albedo.z);
-            size_t h2 = hash<float>{}(m.roughness);
-            size_t h3 = hash<float>{}(m.metallic);
-            size_t h4 = hash<float>{}(m.emission.x) ^ hash<float>{}(m.emission.y) ^ hash<float>{}(m.emission.z);
-            size_t h5 = hash<float>{}(m.transmission);
-            size_t h6 = hash<float>{}(m.ior);
+            // Daha ayırt edici hash için daha iyi bir başlangıç değeri kullanıyoruz
+            const size_t prime = 31;
+            size_t h = 17; // Rastgele bir asal sayı ile başla
 
-            return (((((h1 ^ (h2 << 1)) ^ (h3 << 2)) ^ (h4 << 3)) ^ (h5 << 4)) ^ (h6 << 5));
+            // Her alan için hash'i güncelle
+            auto combine = [&](auto val) {
+                h = h * prime + std::hash<decltype(val)>{}(val);
+                };
+
+            combine(m.albedo.x); combine(m.albedo.y); combine(m.albedo.z);
+            combine(m.roughness);
+            combine(m.metallic);
+            combine(m.emission.x); combine(m.emission.y); combine(m.emission.z);
+            combine(m.transmission);
+            combine(m.ior);
+            combine(m.opacity);
+            combine(m.artistic_albedo_response); // Bu alanı da dahil et
+
+            return h;
+        }
+    };
+}
+// CPU tarafı karşılaştırma yapısı
+struct GpuMaterialWithTextures {
+    GpuMaterial material;
+    size_t albedoTexID = 0;
+    size_t normalTexID = 0;
+    size_t roughnessTexID = 0;
+    size_t metallicTexID = 0;
+    size_t opacityTexID = 0;
+    size_t emissionTexID = 0;
+
+    bool operator==(const GpuMaterialWithTextures& other) const {
+        return material == other.material &&
+            albedoTexID == other.albedoTexID &&
+            normalTexID == other.normalTexID &&
+            roughnessTexID == other.roughnessTexID &&
+            metallicTexID == other.metallicTexID &&
+            opacityTexID == other.opacityTexID &&
+            emissionTexID == other.emissionTexID;
+    }
+};
+
+namespace std {
+    template <>
+    struct hash<GpuMaterialWithTextures> {
+        size_t operator()(const GpuMaterialWithTextures& x) const {
+            size_t h = std::hash<GpuMaterial>{}(x.material);
+            h ^= std::hash<size_t>{}(x.albedoTexID) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<size_t>{}(x.normalTexID);
+            h ^= std::hash<size_t>{}(x.roughnessTexID);
+            h ^= std::hash<size_t>{}(x.metallicTexID);
+            h ^= std::hash<size_t>{}(x.opacityTexID);
+            h ^= std::hash<size_t>{}(x.emissionTexID);
+            return h;
         }
     };
 }

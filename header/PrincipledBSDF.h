@@ -129,6 +129,14 @@ public:
     MaterialProperty transmissionProperty;
     Vec3 albedoValue;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const;
+    Vec3 computeFresnel(const Vec3& F0, float cosTheta) const;
+    Vec3 computeClearcoat(const Vec3& R, const Vec3& L, const Vec3& N) const;
+    float DistributionGGX(const Vec3& N, const Vec3& H, float roughness) const;
+    float GeometrySchlickGGX(float NdotV, float roughness) const;
+    float GeometrySmith(const Vec3& N, const Vec3& V, const Vec3& L, float roughness) const;
+    Vec3 fresnelSchlick(float cosTheta, const Vec3& F0) const;
+
+    Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
 private:
     float normalStrength = 1.0f;
     Vec3 subsurfaceRadius = 0.0f;
@@ -152,9 +160,7 @@ private:
     Vec2 applyPlanarWrapping(const Vec2& uv) const;
     Vec2 applyCubicWrapping(const Vec2& uv) const;
 
-    Vec3 fresnelSchlick(float cosTheta, const Vec3& F0) const;
-
-    Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
+  
 
     Vec3 evaluateBRDF(const Vec3& N, const Vec3& V, const Vec3& L, float roughness, float metallic, const Vec3& baseColor) const;
 
@@ -169,11 +175,7 @@ private:
 
     Vec3 computeScatterDirection(const Vec3& N, const Vec3& T, const Vec3& B, float roughness) const;
     void createCoordinateSystem(const Vec3& N, Vec3& T, Vec3& B) const; 
-    Vec3 computeFresnel(const Vec3& F0, float cosTheta) const;
-    Vec3 computeClearcoat(const Vec3& R, const Vec3& L, const Vec3& N) const;
-    float DistributionGGX(const Vec3& N, const Vec3& H, float roughness) const;
-    float GeometrySchlickGGX(float NdotV, float roughness) const;
-    float GeometrySmith(const Vec3& N, const Vec3& V, const Vec3& L, float roughness) const;
+    
 
   
     Vec2 applyTiling(double u, double v) const;

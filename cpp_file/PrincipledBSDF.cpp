@@ -163,16 +163,16 @@ bool PrincipledBSDF::scatter(
     // Albedo, roughness, metallic gibi değerleri al (texture olabilir)
     // Fetch BRDF properties (may be textured)
     Vec3 albedo = getPropertyValue(albedoProperty, uv);
-    albedo = Vec3::max(albedo, Vec3(0.05f)); // Tam siyahı engelle (Avoid total black)
+   // albedo = Vec3::max(albedo, Vec3(0.05f)); // Tam siyahı engelle (Avoid total black)
     float roughness = getPropertyValue(roughnessProperty, uv).y;
     float metallic = getPropertyValue(metallicProperty, uv).z;
     Vec3 emission = getPropertyValue(emissionProperty, uv);
     float transmissionValue = transmission;
     float opacity = get_opacity(uv);
-
+	float ior = getIOR();
     Vec3 N = rec.interpolated_normal.normalize(); // Geometri normali
     Vec3 V = -r_in.direction.normalize();         // Gelen ışığın yönü (view vector)
-
+    Vec3 L = scattered.direction;
     // 1. Opaklık kontrolü – ışığın geçip geçmeyeceğine karar ver
     // Opacity check – stochastic transparency
     if (opacity < 1.0f) {
@@ -185,7 +185,10 @@ bool PrincipledBSDF::scatter(
     // 2. Emissive malzeme varsa doğrudan ışık katkısı verir
     // If material emits light, return its emission
     if (emission.length_squared() > 0.0f) {
-        attenuation = emission;
+        if(emission.length()<1.0f)
+			attenuation = emission ;
+		else
+			attenuation = emission;       
         scattered = Ray(rec.point, Vec3(0)); // Genelde devam etmez
         return true;
     }
@@ -194,7 +197,7 @@ bool PrincipledBSDF::scatter(
     // Transmission check (e.g. glass-like material)
     if (random_double() < transmissionValue) {
         Dielectric dielectricMat(
-            1.1, albedo, 1.0, 1.0, roughness, 0
+            ior, albedo, 1.0, 1.0, roughness, 0
         ); // IOR vs. daha gelişmiş hale getirilebilir
         return dielectricMat.scatter(r_in, rec, attenuation, scattered);
     }
@@ -206,7 +209,7 @@ bool PrincipledBSDF::scatter(
     Vec3 cosine_dir = Vec3::random_cosine_direction(N);
 
     // Geçiş katsayısı daha net kontrol edilsin
-    float blend_factor = std::clamp(roughness * 0.5f, 0.0f, 1.0f);
+   
     Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness*0.1).normalize();
 
     // Fresnel term determines reflectance vs diffuse ratio
@@ -230,13 +233,14 @@ bool PrincipledBSDF::scatter(
     if (sampled_dir.near_zero()) {
         sampled_dir = N;
     }
-	Vec3 specular = F;   
+	Vec3 specular = evalSpecular(N,V,L,F0,roughness);   
     float lift = Vec3::lerpf(1.0f / M_PI, 1.0f, artistic_albedo_response);
-    Vec3  diffuse = albedo ;
+    Vec3 kd = (1.0f - metallic) * (Vec3(1.0f) - F);
+    Vec3  diffuse = kd * albedo/M_PI ;
 
     // 9. Işık katkısı `calculate_light_contribution` içinde yapılacak
     // Light contribution is handled separately in direct lighting
-    attenuation = (1 - metallic)*diffuse+ specular; // Sadece albedo değeri döndürülür (diffuse ağırlığı gibi)
+    attenuation = diffuse+specular;
     scattered = Ray(rec.point + N * 0.0001f, sampled_dir);
     return true;
 }
@@ -265,7 +269,7 @@ float PrincipledBSDF::GeometrySchlickGGX(float NdotV, float roughness) const {
 }
 
 float PrincipledBSDF::DistributionGGX(const Vec3& N, const Vec3& H, float roughness) const {
-    float alpha =(roughness * roughness);
+    float alpha = max(roughness * roughness, 0.01f);
     float alpha2 = alpha * alpha;
     float NdotH = fmax(Vec3::dot(N, H), 0.0001f);
     float NdotH2 = NdotH * NdotH;
@@ -276,7 +280,7 @@ float PrincipledBSDF::DistributionGGX(const Vec3& N, const Vec3& H, float roughn
 
 float PrincipledBSDF::GeometrySmith(const Vec3& N, const Vec3& V, const Vec3& L, float roughness) const {
 
-    float k = (roughness * roughness) /8.0f;
+    float k = max(roughness * roughness,0.01f) /8.0f;
     float NdotV = fmax(Vec3::dot(N, V), 0.0001f);
     float NdotL = fmax(Vec3::dot(N, L), 0.0001f);
 

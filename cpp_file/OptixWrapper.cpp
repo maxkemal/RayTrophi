@@ -1,11 +1,11 @@
 ﻿#include "OptixWrapper.h"
 #include <optix_stubs.h>
 #include <optix_function_table_definition.h>
-#include "sbt_record.h"
-#include <sbt_data.h>
 #include <chrono> // Süre ölçmek için
 #include <unordered_map> // Gereken başlık
 #include <algorithm>    // std::min ve std::max için
+#include <SpotLight.h>
+#include <filesystem>
 #undef min              // Eğer min bir yerde macro tanımlandıysa temizler
 #undef max
 
@@ -15,10 +15,107 @@
     } while(0)
 
 OptixWrapper::OptixWrapper()
-    : image_width(800), image_height(600), color_processor(800, 600) // 💥 işte burada!
+    : Image_width(image_width), Image_height(image_height), color_processor(image_width, image_height) //  işte burada!
 {
+    d_vertices = 0;
+    d_indices = 0;
+    d_bvh_output = 0;
+    d_accumulation_buffer = nullptr;
+    d_variance_buffer = nullptr;
+    d_sample_count_buffer = nullptr;
+    sbt.raygenRecord = 0;
+    sbt.missRecordBase = 0;
+    sbt.hitgroupRecordBase = 0;
+    traversable_handle = 0;
     initialize();
 }
+void OptixWrapper::partialCleanup() {
+    // Sadece buildFromData'da oluşturulan kaynakları temizle
+    // stream ve context gibi önemli yapılar korunur
+
+    if (d_vertices) {
+        cudaFree(reinterpret_cast<void*>(d_vertices));
+        d_vertices = 0;
+    }
+    if (d_indices) {
+        cudaFree(reinterpret_cast<void*>(d_indices));
+        d_indices = 0;
+    }
+    if (d_normals) {
+        cudaFree(reinterpret_cast<void*>(d_normals));
+        d_normals = 0;
+    }
+    if (d_uvs) {
+        cudaFree(reinterpret_cast<void*>(d_uvs));
+        d_uvs = 0;
+    }
+    if (d_tangents) {
+        cudaFree(reinterpret_cast<void*>(d_tangents));
+        d_tangents = 0;
+    }
+    if (d_material_indices) {
+        cudaFree(reinterpret_cast<void*>(d_material_indices));
+        d_material_indices = 0;
+    }
+    if (d_bvh_output) {
+        cudaFree(reinterpret_cast<void*>(d_bvh_output));
+        d_bvh_output = 0;
+    }
+    if (d_temp_buffer) {
+        cudaFree(reinterpret_cast<void*>(d_temp_buffer));
+        d_temp_buffer = 0;
+    }
+    if (d_output_buffer) {
+        cudaFree(reinterpret_cast<void*>(d_output_buffer));
+        d_output_buffer = 0;
+    }
+    if (d_compacted_size) {
+        cudaFree(reinterpret_cast<void*>(d_compacted_size));
+        d_compacted_size = 0;
+    }
+    if (d_params) {
+        cudaFree(reinterpret_cast<void*>(d_params));
+        d_params = 0;
+    }
+    if (d_coords_x) {
+        cudaFree(reinterpret_cast<void*>(d_coords_x));
+        d_coords_x = 0;
+    }
+    if (d_coords_y) {
+        cudaFree(reinterpret_cast<void*>(d_coords_y));
+        d_coords_y = 0;
+    }
+    if (d_materials) {
+        cudaFree(reinterpret_cast<void*>(d_materials));
+        d_materials = nullptr;
+    }
+    
+    if (d_accumulation_buffer) {
+        cudaFree(reinterpret_cast<void*>(d_accumulation_buffer));
+        d_accumulation_buffer = nullptr;
+    }
+    if (d_variance_buffer) {
+        cudaFree(reinterpret_cast<void*>(d_variance_buffer));
+        d_variance_buffer = nullptr;
+    }
+    if (d_sample_count_buffer) {
+        cudaFree(reinterpret_cast<void*>(d_sample_count_buffer));
+        d_sample_count_buffer = nullptr;
+    }
+
+    // SBT kaynakları
+    if (sbt.hitgroupRecordBase) {
+        cudaFree(reinterpret_cast<void*>(sbt.hitgroupRecordBase));
+        sbt.hitgroupRecordBase = 0;
+        sbt.hitgroupRecordCount = 0;
+    }
+
+    traversable_handle = 0;
+
+    // Senkronizasyon: zorunlu değil ama debug için güvenli
+    cudaDeviceSynchronize();
+}
+
 void OptixWrapper::cleanup() {
     if (d_vertices) {
         cudaFree(reinterpret_cast<void*>(d_vertices));
@@ -44,7 +141,9 @@ void OptixWrapper::cleanup() {
         optixDeviceContextDestroy(context);
         context = nullptr;
     }
-
+    if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
+    if (d_variance_buffer) cudaFree(d_variance_buffer);
+    if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
     traversable_handle = 0;
 }
 
@@ -56,6 +155,11 @@ float3 to_float3(const Vec3& v) {
 }
 
 void OptixWrapper::initialize() {
+    if (context != nullptr) {
+        std::cout << "[OptiX] Zaten başlatıldı, tekrar initialize edilmedi.\n";
+        return;
+    }
+
     cudaFree(0); // CUDA başlat
 
     OptixDeviceContextOptions options = {};
@@ -66,7 +170,10 @@ void OptixWrapper::initialize() {
     OPTIX_CHECK(optixDeviceContextCreate(0, &options, &context));
 
     cudaStreamCreate(&stream);
+
+    std::cout << "[OptiX] Başarıyla initialize edildi.\n";
 }
+
 inline float3 toFloat3(const Vec3& v) {
     return make_float3(v.x, v.y, v.z);
 }
@@ -293,6 +400,22 @@ void OptixWrapper::setupPipeline(const char* raygen_ptx) {
     sbt.hitgroupRecordStrideInBytes = sizeof(SbtRecord);
     sbt.hitgroupRecordCount = 1;
 }
+void OptixWrapper::destroyTextureObjects() {
+    for (const auto& record : hitgroup_records) {
+        const HitGroupData& data = record.data;
+
+        if (data.albedo_tex) cudaDestroyTextureObject(data.albedo_tex);
+        if (data.roughness_tex) cudaDestroyTextureObject(data.roughness_tex);
+        if (data.normal_tex) cudaDestroyTextureObject(data.normal_tex);
+        if (data.metallic_tex) cudaDestroyTextureObject(data.metallic_tex);
+        if (data.transmission_tex) cudaDestroyTextureObject(data.transmission_tex);
+        if (data.opacity_tex) cudaDestroyTextureObject(data.opacity_tex);
+        if (data.emission_tex) cudaDestroyTextureObject(data.emission_tex);
+    }
+
+    hitgroup_records.clear(); // artık geçmiş yok
+}
+
 void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     std::cout << " OptiX buildFromData başlıyor...\n";
 
@@ -300,6 +423,8 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         std::cerr << " Geometri verisi boş!\n";
         return;
     }
+    destroyTextureObjects();      
+    partialCleanup();            // << Ardından tüm CUDA buffer'larını temizle  
 
     // 1. Tüm geometri verilerini GPU'ya gönder
     size_t v_size = data.vertices.size() * sizeof(float3);
@@ -310,14 +435,14 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     cudaMalloc(reinterpret_cast<void**>(&d_indices), i_size);
     cudaMemcpy(reinterpret_cast<void*>(d_indices), data.indices.data(), i_size, cudaMemcpyHostToDevice);
 
-    CUdeviceptr d_normals = 0;
+    d_normals = 0;
     if (!data.normals.empty()) {
         size_t n_size = data.normals.size() * sizeof(float3);
         cudaMalloc(reinterpret_cast<void**>(&d_normals), n_size);
         cudaMemcpy(reinterpret_cast<void*>(d_normals), data.normals.data(), n_size, cudaMemcpyHostToDevice);
     }
 
-    CUdeviceptr d_uvs = 0;
+    d_uvs = 0;
     if (!data.uvs.empty()) {
         size_t uv_size = data.uvs.size() * sizeof(float2);
         cudaMalloc(reinterpret_cast<void**>(&d_uvs), uv_size);
@@ -336,13 +461,13 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         material_indices_ptr = data.material_indices.data();
     }
 
-    CUdeviceptr d_material_indices;
+   
     size_t mi_size = data.indices.size() * sizeof(int);
     cudaMalloc(reinterpret_cast<void**>(&d_material_indices), mi_size);
     cudaMemcpy(reinterpret_cast<void*>(d_material_indices), material_indices_ptr, mi_size, cudaMemcpyHostToDevice);
 
     // Tangent verilerini GPU'ya gönder
-    CUdeviceptr d_tangents = 0;
+     d_tangents = 0;
     if (!data.tangents.empty()) {
         size_t tangent_size = data.tangents.size() * sizeof(float3);
         cudaMalloc(reinterpret_cast<void**>(&d_tangents), tangent_size);
@@ -358,8 +483,8 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
 
     // 2. Her materyal için bir SBT kaydı oluştur
     int ray_type_count = 1; // primary, shadow
-    std::vector<SbtRecord<HitGroupData>> hitgroup_records;
-
+   
+   
     for (int ray_type = 0; ray_type < ray_type_count; ++ray_type) {
         for (size_t mat_index = 0; mat_index < data.materials.size(); ++mat_index) {
             SbtRecord<HitGroupData> rec = {};
@@ -381,8 +506,17 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
                 rec.data.has_metallic_tex = tex.has_metallic_tex;
                 rec.data.has_transmission_tex = tex.has_transmission_tex;
                 rec.data.has_opacity_tex = tex.has_opacity_tex;
+                //  DEBUG: Texture geçişi doğru mu?
+              /*  std::cout << "[SBT-TEX] Mat #" << mat_index
+                    << " | Albedo? " << tex.has_albedo_tex
+                    << " | Normal? " << tex.has_normal_tex
+                    << " | Roughness? " << tex.has_roughness_tex
+                    << " | TexPtr: " << tex.albedo_tex
+                    << "\n";*/
             }
-
+            else {
+                std::cerr << "[SBT-WARN] Mat #" << mat_index << " için texture bulunamadı!\n";
+            }
             rec.data.material_id = static_cast<int>(mat_index);
             rec.data.vertices = reinterpret_cast<float3*>(d_vertices);
             rec.data.indices = reinterpret_cast<uint3*>(d_indices);
@@ -435,7 +569,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     OptixAccelBufferSizes buffer_sizes;
     OPTIX_CHECK(optixAccelComputeMemoryUsage(context, &accel_options, &build_input, 1, &buffer_sizes));
 
-    CUdeviceptr d_temp_buffer, d_output_buffer, d_compacted_size;
+   
     cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer), buffer_sizes.tempSizeInBytes);
     cudaMalloc(reinterpret_cast<void**>(&d_output_buffer), buffer_sizes.outputSizeInBytes);
     cudaMalloc(reinterpret_cast<void**>(&d_compacted_size), sizeof(uint64_t));
@@ -466,6 +600,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         d_output_buffer = d_compacted_buffer;
     }
 
+
     // Temizlik
     cudaFree(reinterpret_cast<void*>(d_temp_buffer));
     cudaFree(reinterpret_cast<void*>(d_compacted_size));
@@ -475,6 +610,8 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     std::cout << " OptiX buildFromData başarıyla tamamlandı! "
         << data.materials.size() << " materyal için SBT kaydı oluşturuldu.\n";
 }
+
+
 void OptixWrapper::launch_random_pixel_mode(
     SDL_Surface* surface, SDL_Window* window, int width, int height,
     std::vector<uchar4>& framebuffer
@@ -487,11 +624,13 @@ void OptixWrapper::launch_random_pixel_mode(
 
     int max_threads_per_block = props.maxThreadsPerBlock;
     int num_sms = props.multiProcessorCount;
-    int optimal_pixels = num_sms * max_threads_per_block * 5;
-    int pixels_per_launch = std::min(optimal_pixels, width * height);
 
-    const int samples_per_pixel = 100;
-    params.samples_per_pixel = samples_per_pixel;
+    // OptiX 9 için optimize edilmiş çarpan değeri - GPU mimarisine göre ince ayar yapılabilir
+    // RTX serisi kartlar için 16-24 arası değerler genellikle iyi sonuç verir
+   
+    int total_batches = 100;
+    int pixels_per_launch = (width * height + total_batches - 1) / total_batches;
+
 
     // ------------------ FRAMEBUFFER SETUP -----------------------
     uchar4* d_framebuffer = nullptr;
@@ -500,7 +639,7 @@ void OptixWrapper::launch_random_pixel_mode(
     params.image_width = width;
     params.image_height = height;
     params.handle = traversable_handle;
-    params.background_color = make_float3(0.15f , 0.25f , 0.3f );
+
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
 
     // Atmosfer
@@ -512,32 +651,30 @@ void OptixWrapper::launch_random_pixel_mode(
     params.atmosphere.active = false; // kapalı
 
     // ------------------ ADAPTIVE PARAMETRELER ------------------
+    params.samples_per_pixel = render_settings.samples_per_pixel;
+    params.min_samples = render_settings.min_samples;
+    params.variance_threshold = render_settings.variance_threshold;
+    params.max_depth = render_settings.max_bounces;
+    params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
 
-    params.min_samples = 50;                 // minimum örnek
-    params.variance_threshold = 0.002f;     // temel varyans
     // Frame sayısını arttır
-    static int frame_counter = 1;
     params.frame_number = frame_counter;
     frame_counter++;
 
-    // Temporal blend: yeni frame %95, eski %5 katkı
+    // Temporal blend: yeni frame %98, eski %2 katkı (daha hızlı converge için)
     params.temporal_blend = 0.95f;
 
     // ------------------ VARYANS & AKÜMÜLASYON BUFFERLARI ------------------
-    static float* d_variance_buffer = nullptr;
-    static float* d_accumulation_buffer = nullptr;
-    static int* d_sample_count_buffer = nullptr;
-
-    // Sadece ilk defa veya boyut değişince allocate edilir
-    static int prev_width = 0, prev_height = 0;
+    // Buffer reallocation sadece gerektiğinde yapılıyor
     if (width != prev_width || height != prev_height) {
         if (d_variance_buffer) cudaFree(d_variance_buffer);
         if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
         if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
 
-        cudaMalloc(&d_variance_buffer, sizeof(float) * width * height);
-        cudaMalloc(&d_accumulation_buffer, sizeof(float) * width * height * 3); // RGB
-        cudaMalloc(&d_sample_count_buffer, sizeof(int) * width * height);
+        // Pinned memory kullanımı için
+        cudaMallocHost(&d_variance_buffer, sizeof(float) * width * height);
+        cudaMallocHost(&d_accumulation_buffer, sizeof(float) * width * height * 3); // RGB
+        cudaMallocHost(&d_sample_count_buffer, sizeof(int) * width * height);
 
         cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
         cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
@@ -552,26 +689,34 @@ void OptixWrapper::launch_random_pixel_mode(
     params.sample_count_buffer = d_sample_count_buffer;
 
     // ------------------ PARAMS DEVICE KOPYALAMA ------------------
-    CUdeviceptr d_params;
+    
     cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
 
     // ------------------ PİKSEL KOORDİNATLARI ------------------
     std::vector<std::pair<int, int>> all_coords;
+    all_coords.reserve(width * height); // Önceden bellek ayırma - performans artışı
+
     for (int j = 0; j < height; ++j)
         for (int i = 0; i < width; ++i)
             all_coords.emplace_back(i, j);
 
-    std::shuffle(all_coords.begin(), all_coords.end(), std::mt19937{ std::random_device{}() });
+    // Daha hızlı rastgele karıştırma için sabit tohum
+    static std::mt19937 rng(12345);
+    std::shuffle(all_coords.begin(), all_coords.end(), rng);
 
     std::vector<int> coords_x(pixels_per_launch);
     std::vector<int> coords_y(pixels_per_launch);
 
-    CUdeviceptr d_coords_x, d_coords_y;
+   
     cudaMalloc(reinterpret_cast<void**>(&d_coords_x), pixels_per_launch * sizeof(int));
     cudaMalloc(reinterpret_cast<void**>(&d_coords_y), pixels_per_launch * sizeof(int));
 
     size_t total_pixels = all_coords.size();
     size_t rendered_pixels = 0;
+
+    // Asenkron işlemler için CUDA akışları
+    cudaStream_t render_stream;
+    cudaStreamCreate(&render_stream);
 
     for (size_t offset = 0; offset < total_pixels; offset += pixels_per_launch) {
         size_t count = std::min<size_t>(pixels_per_launch, total_pixels - offset);
@@ -582,83 +727,85 @@ void OptixWrapper::launch_random_pixel_mode(
             coords_y[k] = all_coords[index].second;
         }
 
-        cudaMemcpy(reinterpret_cast<void*>(d_coords_x), coords_x.data(), count * sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(reinterpret_cast<void*>(d_coords_y), coords_y.data(), count * sizeof(int), cudaMemcpyHostToDevice);
+        // Asenkron veri transferi
+        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_x), coords_x.data(), count * sizeof(int),
+            cudaMemcpyHostToDevice, render_stream);
+        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_y), coords_y.data(), count * sizeof(int),
+            cudaMemcpyHostToDevice, render_stream);
 
         params.launch_coords_x = reinterpret_cast<int*>(d_coords_x);
         params.launch_coords_y = reinterpret_cast<int*>(d_coords_y);
         params.batch_pixel_count = static_cast<int>(count);
 
-        cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice);
+        cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams),
+            cudaMemcpyHostToDevice, render_stream);
 
         OPTIX_CHECK(optixLaunch(
-            pipeline, stream,
+            pipeline, render_stream,
             d_params, sizeof(RayGenParams),
             &sbt,
             static_cast<unsigned int>(count), 1, 1
         ));
 
-        cudaStreamSynchronize(stream);
+        // Güncelleme aralığını ayarlama - her %10'da bir ekranı güncelle
+        bool should_update = (rendered_pixels % (total_pixels / 10) == 0) ||
+            (offset + count >= total_pixels);
 
-        cudaMemcpy(framebuffer.data(), d_framebuffer, width * height * sizeof(uchar4), cudaMemcpyDeviceToHost);
+        if (should_update) {
+            // Render işlemi tamamlanmadan önce stream'in tamamlanmasını bekle
+            cudaStreamSynchronize(render_stream);
 
-        // ------------------ SDL GÜNCELLEME ------------------
-        Uint32* pixel;
-        int i, j;
-        Vec3 final_color;
-        for (j = 0; j < height; ++j) {
-            for (i = 0; i < width; ++i) {
-                const uchar4& c = framebuffer[j * width + i];
+            // Framebuffer'ı güncelle
+            cudaMemcpyAsync(framebuffer.data(), d_framebuffer, width * height * sizeof(uchar4),
+                cudaMemcpyDeviceToHost, render_stream);
 
-                Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
-                final_color = color_processor.processColor(raw_color, i, j);
+            // ------------------ SDL GÜNCELLEME ------------------
+            cudaStreamSynchronize(render_stream); // Framebuffer transferinin bitmesini bekle
 
-                int r = static_cast<int>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
-                int g = static_cast<int>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
-                int b = static_cast<int>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
+            Uint32* pixel;
+            for (int j = 0; j < height; ++j) {
+                for (int i = 0; i < width; ++i) {
+                    const uchar4& c = framebuffer[j * width + i];
 
-                pixel = (Uint32*)surface->pixels + (height - 1 - j) * surface->w + i;
-                *pixel = SDL_MapRGB(surface->format, r, g, b);
+                    Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
+                    Vec3 final_color = color_processor.processColor(raw_color, i, j);
+                    int r = static_cast<int>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
+                    int g = static_cast<int>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
+                    int b = static_cast<int>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
+
+                    pixel = (Uint32*)surface->pixels + (height - 1 - j) * surface->w + i;
+                    *pixel = SDL_MapRGB(surface->format, r, g, b);
+                   
+                }
             }
+            SDL_UpdateWindowSurface(window);
+           
         }
 
         rendered_pixels += count;
-
-        float percent = 100.0f * rendered_pixels / total_pixels;
-        double elapsed = duration_cast<seconds>(
-            high_resolution_clock::now() - start_time
-        ).count();
-
-        printf("  Progress: %.2f%%  |  Pixels: %zu/%zu  |  Time Elapsed: %.0f s\r",
-            percent, rendered_pixels, total_pixels, elapsed);
-        fflush(stdout);
-
-        SDL_UpdateWindowSurface(window);
-        SDL_PumpEvents();
     }
 
-    // ------------------ OIDN DENOISE ------------------
-    applyOIDNDenoising(surface, 0, true, 0.9f);
-    SDL_UpdateWindowSurface(window);
-
-    printf("\n Render tamamlandı. Toplam süre: %lld s\n",
-        duration_cast<seconds>(high_resolution_clock::now() - start_time).count());
-
-    if (SaveSurface(surface, "image/output_Optix.png")) {
-        std::cout << "Image saved successfully!" << std::endl;
-    }
-    else {
-        std::cerr << "Failed to save image." << std::endl;
-    }
+    // Son işlemler için stream'in tamamlanmasını bekle
+    cudaStreamSynchronize(render_stream);
 
     // ------------------ TEMİZLİK ------------------
     cudaFree(reinterpret_cast<void*>(d_framebuffer));
     cudaFree(reinterpret_cast<void*>(d_params));
     cudaFree(reinterpret_cast<void*>(d_coords_x));
     cudaFree(reinterpret_cast<void*>(d_coords_y));
-    // Not: variance, accumulation ve sample_count bufferları sabit tutuluyor (bir sonraki frame için reuse!)
-}
+    cudaStreamDestroy(render_stream);
 
+    // Not: variance, accumulation ve sample_count bufferları sabit tutuluyor (bir sonraki frame için reuse!)
+
+    // ------------------ OIDN DENOISE ------------------
+    applyOIDNDenoising(surface, 0, true, 0.9f);
+    SDL_UpdateWindowSurface(window);
+
+    // Toplam süreyi ölç
+    //auto end_time = high_resolution_clock::now();
+    //auto duration = duration_cast<milliseconds>(end_time - start_time).count();
+    //std::cout << "Render süresi: " << duration << " ms" << std::endl;
+}
 
 void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.origin = toFloat3(cpuCamera.origin);
@@ -688,60 +835,80 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
 
     for (const auto& light : lights) {
         LightGPU l = {};
+        const Vec3& color = light->color;
+        float intensity = light->intensity*10;
 
         if (auto pointLight = std::dynamic_pointer_cast<PointLight>(light)) {
             const Vec3& pos = pointLight->position;
-            const Vec3& inten = pointLight->intensity;
             l.position = make_float3(pos.x, pos.y, pos.z);
-            l.intensity = make_float3(inten.x, inten.y, inten.z);
-			l.radius = 0.1f;
+            l.color = make_float3(color.x, color.y, color.z);
+            l.intensity = intensity;
+            l.radius = pointLight->getRadius();
             l.type = 0;
-            l.intensity_magnitude = length(l.intensity);
-
         }
         else if (auto dirLight = std::dynamic_pointer_cast<DirectionalLight>(light)) {
-            const Vec3 dir = (-dirLight->direction.normalize());
-            const Vec3& inten = dirLight->intensity;
+            Vec3 dir = -dirLight->direction.normalize();
             l.direction = make_float3(dir.x, dir.y, dir.z);
-            l.intensity = make_float3(inten.x, inten.y, inten.z);
-            l.radius = 0.05f;
+            l.color = make_float3(color.x, color.y, color.z);
+            l.intensity = intensity;
+            l.radius = dirLight->getDiskRadius(); // disk ışık yarıçapı
             l.type = 1;
-            l.intensity_magnitude = length(l.intensity);
         }
         else if (auto areaLight = std::dynamic_pointer_cast<AreaLight>(light)) {
             const Vec3& pos = areaLight->position;
-           /* const Vec3 inten = areaLight->getIntensity();
             l.position = make_float3(pos.x, pos.y, pos.z);
-            l.intensity = make_float3(inten.x, inten.y, inten.z);
-            l.type = 2;*/
-            l.intensity_magnitude = length(l.intensity);
+            Vec3 dir = areaLight->direction.normalize();
+            l.direction = make_float3(dir.x, dir.y, dir.z);
+            l.color = make_float3(color.x, color.y, color.z);
+            l.intensity = intensity;
+            l.radius = 0.0f; // gerekirse hesaplanır
+            l.type = 2;
         }
+        else if (auto spotLight = std::dynamic_pointer_cast<SpotLight>(light)) {
+            const Vec3& pos = spotLight->position;
+            Vec3 dir = spotLight->direction.normalize();
+            l.position = make_float3(pos.x, pos.y, pos.z);
+            l.direction = make_float3(dir.x, dir.y, dir.z);
+            l.color = make_float3(color.x, color.y, color.z);
+            l.intensity = intensity;
+            l.radius = 0.0f;
+            l.type = 3;
+        }
+
         gpuLights.push_back(l);
     }
 
     // GPU'ya kopyala
     CUdeviceptr d_lights;
-    cudaMalloc(reinterpret_cast<void**>(&d_lights), gpuLights.size() * sizeof(LightGPU));
-    cudaMemcpy(reinterpret_cast<void*>(d_lights), gpuLights.data(), gpuLights.size() * sizeof(LightGPU), cudaMemcpyHostToDevice);
+    size_t byteSize = gpuLights.size() * sizeof(LightGPU);
+    cudaMalloc(reinterpret_cast<void**>(&d_lights), byteSize);
+    cudaMemcpy(reinterpret_cast<void*>(d_lights), gpuLights.data(), byteSize, cudaMemcpyHostToDevice);
 
     params.lights = reinterpret_cast<LightGPU*>(d_lights);
     params.light_count = static_cast<int>(gpuLights.size());
 }
-bool OptixWrapper::SaveSurface(SDL_Surface* surface, const char* file_path) {
-    SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
-    /* int imgFlags = IMG_INIT_PNG;
-     if (!(IMG_Init(imgFlags) & imgFlags)) {
-         SDL_Log("SDL_image could not initialize! SDL_image Error: %s\n", IMG_GetError());
-         SDL_Quit();
-         return 1;
-     }*/
 
-    if (surface_to_save == NULL) {
+bool OptixWrapper::SaveSurface(SDL_Surface* surface, const char* filename) {
+    // 🔒 Sabit ve değişmeyen klasör yolu
+    std::filesystem::path output_dir = "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/image";
+
+    if (!std::filesystem::exists(output_dir)) {
+        std::error_code ec;
+        if (!std::filesystem::create_directories(output_dir, ec)) {
+            SDL_Log("Klasör oluşturulamadı: %s", ec.message().c_str());
+            return false;
+        }
+    }
+
+    std::filesystem::path full_path = output_dir / filename;
+
+    SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
+    if (!surface_to_save) {
         SDL_Log("Couldn't convert surface: %s", SDL_GetError());
         return false;
     }
 
-    int result = IMG_SavePNG(surface_to_save, file_path);
+    int result = IMG_SavePNG(surface_to_save, full_path.string().c_str());
     SDL_FreeSurface(surface_to_save);
 
     if (result != 0) {
@@ -749,5 +916,27 @@ bool OptixWrapper::SaveSurface(SDL_Surface* surface, const char* file_path) {
         return false;
     }
 
+    SDL_Log("Image saved to: %s", full_path.string().c_str());
     return true;
 }
+
+void OptixWrapper::resetBuffers(int width, int height) {
+    if (prev_width != width || prev_height != height) {
+        if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
+        if (d_variance_buffer) cudaFree(d_variance_buffer);
+        if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
+
+        cudaMalloc(&d_accumulation_buffer, sizeof(float) * width * height * 3);
+        cudaMalloc(&d_variance_buffer, sizeof(float) * width * height);
+        cudaMalloc(&d_sample_count_buffer, sizeof(int) * width * height);
+
+        prev_width = width;
+        prev_height = height;
+    }
+
+    cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
+    cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
+    cudaMemset(d_sample_count_buffer, 0, sizeof(int) * width * height);
+    frame_counter =1 ;
+}
+

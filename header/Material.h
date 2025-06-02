@@ -71,7 +71,7 @@ public:
         float cos_theta = std::max(Vec3::dot(rec.normal, outgoing), 0.0);
         return cos_theta / M_PI;
     }
-    // Material.h içine, public kýsmýna:
+  
     std::string materialName;
     std::shared_ptr<GpuMaterial> gpuMaterial;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const {
@@ -179,11 +179,12 @@ public:
     virtual float get_scattering_factor() const = 0;
     Vec3 albedo;
     float artistic_albedo_response = 0.50f; // default fiziksel
+    float ior = 1.5f; // Yeni: Varsayýlan kýrýlma indeksi
 protected:
    
     float normalStrength;
     float roughness = 0.0f;
-    float ior = 1.05f; // Yeni: Varsayýlan kýrýlma indeksi
+   
     Vec3 f0 = Vec3(0.04f); // Yeni: Varsayýlan Fresnel yansýma katsayýsý
     std::shared_ptr<Texture> texture;
     Vec3 emissionColor = 0;

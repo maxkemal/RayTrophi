@@ -3,7 +3,7 @@
 
 // Varsayýlan yapýcý
 // Birim matris oluþturma
- 
+
 Matrix4x4::Matrix4x4(Vec3 tangent, Vec3 bitangent, Vec3 normal) {
     // Ýlk üç satýr ve sütunu TBN matrisine göre ayarla
     m[0][0] = tangent.x;

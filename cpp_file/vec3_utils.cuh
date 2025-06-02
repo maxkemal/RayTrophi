@@ -111,6 +111,12 @@ __device__ inline float3 clamp(const float3& v, float minVal, float maxVal) {
         fminf(fmaxf(v.z, minVal), maxVal)
     );
 }
+__device__ __host__ inline float2 clamp(const float2& v, float minVal, float maxVal) {
+    return make_float2(
+        fminf(fmaxf(v.x, minVal), maxVal),
+        fminf(fmaxf(v.y, minVal), maxVal)
+    );
+}
 __device__ inline float lerp(float a, float b, float t) {
     return a * (1.0f - t) + b * t;
 }
