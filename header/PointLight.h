@@ -8,6 +8,7 @@
 
 class PointLight : public Light {
 public:
+    float radius;
     PointLight()
         : radius(0.0f),
         volumetricDensity(0.0f),
@@ -86,8 +87,7 @@ public:
     void setScatteringCoef(float coef) { scatteringCoef = coef; }
     void setVolumetricSamples(int samples) { volumetricSamples = samples; }
 
-private:
-    float radius;
+private:   
     float volumetricDensity;
     float scatteringCoef;
     int volumetricSamples;

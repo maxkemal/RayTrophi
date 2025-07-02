@@ -61,8 +61,11 @@ public:
     void partialCleanup();
     ~OptixWrapper();
 
+    void resizeBuffers(int w, int h);
+
     void initialize();
     bool isCudaAvailable();
+    void setupOIDN(int width, int height);
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
     void validateMaterialIndices(const OptixGeometryData& data);
     void setupPipeline(const char* raygen_ptx);
@@ -101,6 +104,14 @@ public:
 
 
 private:
+    oidn::DeviceRef oidnDevice;
+    oidn::FilterRef oidnFilter;
+    oidn::BufferRef oidnInputBuffer;
+    oidn::BufferRef oidnOutputBuffer;
+    bool oidnInitialized = false;
+    int oidnLastWidth = 0;
+    int oidnLastHeight = 0;
+
     // OptiX context
     OptixDeviceContext context = nullptr;
     // header dosyasında

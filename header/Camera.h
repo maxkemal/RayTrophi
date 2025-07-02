@@ -27,24 +27,24 @@ public:
     Vec3 initialLookDirection;
     std::string nodeName;
     int blade_count;
-    double aperture;
-    double focus_dist;
+    float aperture;
+    float focus_dist;
     Vec3 origin;
     Vec3 u, v, w;
     Vec3 lookfrom;
     Vec3 lookat;
     Vec3 vup;
-    double aspect;
-    double near_dist;
-    double far_dist;
-    double fov;
-    double aspect_ratio;
-    double vfov;
+    float aspect;
+    float near_dist;
+    float far_dist;
+    float fov;
+    float aspect_ratio;
+    float vfov;
    // Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist);
 
-    Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist, int blade_count);
+    Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
     Camera();
-    Ray get_ray(double s, double t) const;
+    Ray get_ray(float s, float t) const;
 
     int random_int(int min, int max) const;
 
@@ -56,18 +56,18 @@ public:
 
     Vec3 random_in_unit_polygon(int sides) const;
 
-    double calculate_bokeh_intensity(const Vec3& point) const;
+    float calculate_bokeh_intensity(const Vec3& point) const;
 
-    Vec3 create_bokeh_shape(const Vec3& color, double intensity) const;
+    Vec3 create_bokeh_shape(const Vec3& color, float intensity) const;
 
-    bool isPointInFrustum(const Vec3& point, double size) const;
+    bool isPointInFrustum(const Vec3& point, float size) const;
      Matrix4x4 getRotationMatrix() const ;
     bool isAABBInFrustum(const AABB& aabb) const;
     std::vector<AABB> performFrustumCulling(const std::vector<AABB>& objects) const;
     Vec3 lower_left_corner;
     Vec3 horizontal;
     Vec3 vertical;
-    double lens_radius;
+    float lens_radius;
 private:
     void updateFrustumPlanes();
 

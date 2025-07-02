@@ -21,7 +21,7 @@ extern "C" __global__ void __raygen__rg() {
     int j = optixLaunchParams.launch_coords_y[index];
     int pixel_index = j * optixLaunchParams.image_width + i;
 
-    // Daha iyi seed stratejisi - piksel koordinatları, frame ve global seed karıştırılır
+    // Geliştirilmiş seed stratejisi
     unsigned int seed = optixLaunchParams.frame_number * 719393 + pixel_index * 13731 + 1337;
     curandState rng;
     curand_init(seed, 0, 0, &rng);
@@ -33,90 +33,93 @@ extern "C" __global__ void __raygen__rg() {
     const bool use_adaptive = optixLaunchParams.use_adaptive_sampling;
 
     // Adaptif parametreler
-    const int min_samples = optixLaunchParams.min_samples; // Dışarıdan ayarlanabilir
-    const int max_samples = optixLaunchParams.samples_per_pixel;
-    const float base_variance_threshold = optixLaunchParams.variance_threshold; // Dışarıdan ayarlanabilir
+    const int min_samples = optixLaunchParams.min_samples;
+    const int max_samples = optixLaunchParams.max_samples;
+    const float base_variance_threshold = optixLaunchParams.variance_threshold;
 
-    // Komşu piksellerin durumunu kontrol et - uzamsal tutarlılık için
+    // Komşu varyans analizi (5x5 çevre)
     bool has_high_variance_neighbor = false;
-    if (optixLaunchParams.frame_number > 1 && i > 0 && i < optixLaunchParams.image_width - 1 &&
-        j > 0 && j < optixLaunchParams.image_height - 1) {
-        // 3x3 komşuluk kontrolü - çok fazla hesaplama yapmamak için sadece bazı pikselleri kontrol ediyoruz
-        float neighbor_variance[4];
-        neighbor_variance[0] = optixLaunchParams.variance_buffer[(j - 1) * optixLaunchParams.image_width + i];
-        neighbor_variance[1] = optixLaunchParams.variance_buffer[(j + 1) * optixLaunchParams.image_width + i];
-        neighbor_variance[2] = optixLaunchParams.variance_buffer[j * optixLaunchParams.image_width + (i - 1)];
-        neighbor_variance[3] = optixLaunchParams.variance_buffer[j * optixLaunchParams.image_width + (i + 1)];
+    float neighbor_variance_sum = 0.0f;
+    int neighbor_count = 0;
 
-        for (int n = 0; n < 4; n++) {
-            if (neighbor_variance[n] > base_variance_threshold * 2.0f) {
-                has_high_variance_neighbor = true;
-                break;
+    if (optixLaunchParams.frame_number > 1 && i >= 2 && i < optixLaunchParams.image_width - 2 &&
+        j >= 2 && j < optixLaunchParams.image_height - 2) {
+
+        for (int dj = -1; dj <= 1; dj++) {
+            for (int di = -1; di <= 1; di++) {
+                if (di == 0 && dj == 0) continue;
+                float nv = optixLaunchParams.variance_buffer[(j + dj) * optixLaunchParams.image_width + (i + di)];
+                float weight = 1.0f - (abs(di) + abs(dj)) * 0.25f; // Merkezi komşulara daha çok güven
+                neighbor_variance_sum += nv * weight;
+                neighbor_count++;
+                if (nv > base_variance_threshold * 1.5f) {
+                    has_high_variance_neighbor = true;
+                }
             }
         }
     }
 
-    // Ana örnekleme döngüsü
+    // Dinamik min_samples ayarı
+    int dynamic_min_samples = min_samples;
+    if (has_high_variance_neighbor) {
+        dynamic_min_samples = min(min_samples * 2, max_samples);
+    }
+
+    // Ana örnekleme döngüsü (Blue Noise benzeri dağılım)
     for (int s = 0; s < max_samples; ++s) {
-        // Stratified sampling - piksel içinde daha düzgün dağılmış örnekler
-        float u = (i + (s + random_float(&rng)) / max_samples) / float(optixLaunchParams.image_width);
-        float v = (j + (s + random_float(&rng)) / max_samples) / float(optixLaunchParams.image_height);
+        // Geliştirilmiş örnekleme
+        float u = (i + (curand_uniform(&rng) + s) / max_samples) / float(optixLaunchParams.image_width);
+        float v = (j + (curand_uniform(&rng) + s) / max_samples) / float(optixLaunchParams.image_height);
 
-        // Lens apertüründe stratified sampling
         Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-
-        // Importance sampling kullanarak renk örneklemesi
         float3 sample = ray_color(ray, &rng);
         sample_count++;
 
-        // Welford online mean ve variance güncelleme
-        float3 delta = sample - mean;
-        mean += delta / sample_count;
+        // Welford algoritması (vectorized)
+        float3 delta1 = sample - mean;
+        mean += delta1 / sample_count;
         float3 delta2 = sample - mean;
-        m2 += delta * delta2;
+        m2 += delta1 * delta2;
         color_sum += sample;
 
-        // Minimum örneklemeden sonra erken çıkış kontrolü
-        if (use_adaptive && s >= min_samples - 1) {
-            // Varyans hesaplama
-            float3 var = m2 / (sample_count - 1);
-            float luminance_var = 0.2126f * var.x + 0.7152f * var.y + 0.0722f * var.z;
+        // Adaptif erken çıkış
+        if (use_adaptive && s >= dynamic_min_samples - 1) {
+            float3 var = m2 / max(sample_count - 1, 1);
+
+            // Renk kanallarına göre maksimum varyans
+            float max_channel_variance = fmaxf(var.x, fmaxf(var.y, var.z));
             float luminance_mean = 0.2126f * mean.x + 0.7152f * mean.y + 0.0722f * mean.z;
 
-            float rel_variance = luminance_var / (fmaxf(luminance_mean * luminance_mean, 0.01f));
-
+            // Dinamik eşik hesaplama
             float adaptive_threshold = base_variance_threshold;
 
-            if (luminance_mean < 0.05f) {
-                adaptive_threshold *= (1.0f + (0.05f - luminance_mean) * 10.0f);
+            // Parlaklığa göre ayar
+            if (luminance_mean < 0.1f) {
+                adaptive_threshold *= 2.0f; // Karanlık bölgeler
             }
             else if (luminance_mean > 0.9f) {
-                adaptive_threshold *= 0.5f;
+                adaptive_threshold *= 0.5f; // Parlak bölgeler
             }
 
-            if (has_high_variance_neighbor) {
-                adaptive_threshold *= 0.7f;
+            // Komşu varyans etkisi
+            if (neighbor_count > 0) {
+                float avg_neighbor_variance = neighbor_variance_sum / neighbor_count;
+                adaptive_threshold *= fmaxf(0.5f, 1.0f - avg_neighbor_variance * 0.5f);
             }
 
-            float confidence_factor = 1.0f / log2f(float(s) + 2.0f);
-            adaptive_threshold *= fminf(confidence_factor, 2.0f);
-
-            if (luminance_mean > 0.02f || has_high_variance_neighbor) {
-                if (rel_variance < adaptive_threshold) {
-                    break;
-                }
-            }
-            else if (s >= int(min_samples * 1.5f)) {
+            // Örnekleme ilerledikçe eşiği sıkılaştır
+            float sample_progress = float(s - dynamic_min_samples) / float(max_samples - dynamic_min_samples);
+            adaptive_threshold *= powf(1.0f - sample_progress, 1.0f);
+            // Erken çıkış kontrolü
+            if (max_channel_variance < adaptive_threshold) {
                 break;
             }
         }
-
     }
 
-    // Son renk değerini hesapla
+    // Temporal blending (varyans temelli)
     float3 final_color = color_sum / sample_count;
 
-    // Temporal accumulation için önceki frame ile blend etme (opsiyonel)
     if (optixLaunchParams.frame_number > 1 && optixLaunchParams.temporal_blend > 0.0f) {
         float3 prev_color = make_float3(
             optixLaunchParams.accumulation_buffer[pixel_index * 3],
@@ -125,23 +128,20 @@ extern "C" __global__ void __raygen__rg() {
         );
 
         float blend_factor = optixLaunchParams.temporal_blend;
-        final_color = lerp(final_color, prev_color, blend_factor);
-    }
+        float3 var = m2 / max(sample_count - 1, 1);
+        float luminance_var = 0.2126f * var.x + 0.7152f * var.y + 0.0722f * var.z;
 
-    // Sonuçları kaydet
+        // Gürültülü piksellerde daha az temporal blending
+        if (luminance_var > base_variance_threshold) {
+            blend_factor *= 0.5f;
+        }
+
+        final_color = lerp(prev_color, final_color, blend_factor);  // Daha doğal temporal blend
+       
+    }	
+    // Sonuçları yaz
     optixLaunchParams.framebuffer[pixel_index] = make_color(final_color);
 
-    // Varyans değerini bir sonraki frame için kaydet
-    if (optixLaunchParams.variance_buffer) {
-        float3 var = m2 / (sample_count - 1);
-        float luminance_var = 0.2126f * var.x + 0.7152f * var.y + 0.0722f * var.z;
-        optixLaunchParams.variance_buffer[pixel_index] = luminance_var;
-    }
-
-    // İstatistik için örnek sayısını kaydet
-    if (optixLaunchParams.sample_count_buffer) {
-        optixLaunchParams.sample_count_buffer[pixel_index] = sample_count;
-    }
 }
 extern "C" __global__ void __miss__ms() {
     unsigned int p0 = optixGetPayload_0();

@@ -18,7 +18,9 @@ __device__ inline float3 operator-(const float3& a, const float3& b) {
 __device__ inline float3 operator-(const float3& v) {
     return make_float3(-v.x, -v.y, -v.z);
 }
-
+__device__ inline float3 exp_componentwise(float3 v) {
+    return make_float3(expf(v.x), expf(v.y), expf(v.z));
+}
 __device__ inline float3 operator*(const float3& a, const float3& b) {
     return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
@@ -139,9 +141,9 @@ __device__ inline float3 abs(const float3& a) {
 __device__ inline uchar4 make_color(const float3& c) {
 
     float3 gamma_corrected = make_float3(
-        powf(fminf(c.x, 1.0f), 1.0f / 2.4f),
-        powf(fminf(c.y, 1.0f), 1.0f / 2.4f),
-        powf(fminf(c.z, 1.0f), 1.0f / 2.4f)
+        powf(fminf(c.x, 1.0f), 1.0f / 1.4f),
+        powf(fminf(c.y, 1.0f), 1.0f / 1.4f),
+        powf(fminf(c.z, 1.0f), 1.0f / 1.4f)
     );
 
     return make_uchar4(

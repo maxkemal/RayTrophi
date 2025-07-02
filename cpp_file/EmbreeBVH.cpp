@@ -163,11 +163,8 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
                 return false; // Işık geçti, zayıf gölge
         }
 
-
-        if (opacity < 1.0)
+        if (Vec3::random_double() > opacity)
             return false; // ışık geçti
-      
-       
         return true; // gölgede
     }
 

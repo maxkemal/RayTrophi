@@ -10,22 +10,19 @@ struct UIContext {
     OptixWrapper* optix_gpu_ptr;
     ColorProcessor& color_processor;
     RenderSettings& render_settings;
-    SDL_Surface* surface;
-    SDL_Surface* original_surface;
-    SDL_Window* window;
-    int& sample_count;
-    int& sample_per_pass;
-    float& animation_duration;
-    float& animation_fps;
-    bool& start_render;
+   
+
+    int& sample_count;                // dynamic counter (not in settings)
+    bool& start_render;              // trigger flag
     std::string& active_model_path;
+
     bool& apply_tonemap;
     bool& reset_tonemap;
 
-    // Yeni eklenen alanlar:
     bool& mouse_control_enabled;
     float& mouse_sensitivity;
 };
+
 
 
 

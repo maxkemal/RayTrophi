@@ -37,55 +37,7 @@ public:
     OptixGeometryData::TextureBundle textureBundle;
     int smoothingGroup;
     Matrix4x4 transform;
-    void setNodeName(const std::string& name) {
-        nodeName = name;
-    }
-    std::shared_ptr<Material> getMaterial() const {
-        return mat_ptr;
-    }
-    void setMaterial(const std::shared_ptr<Material>& mat) {
-        mat_ptr = mat;
-    }
-
-    const std::string& getNodeName() const {
-        return nodeName;
-    }
-
-    void setBaseTransform(const Matrix4x4& transform) {
-        baseTransform = transform;
-        updateTransformedVertices();
-    }
-
-    void initialize_transforms() {
-        // Orijinal vertexleri sakla
-        original_v0 = v0;
-        original_v1 = v1;
-        original_v2 = v2;
-
-        original_n0 = n0;
-        original_n1 = n1;
-        original_n2 = n2;
-
-        // Başlangıçta transformed değerler orijinal değerlerle aynı
-        transformed_v0 = v0;
-        transformed_v1 = v1;
-        transformed_v2 = v2;
-
-        transformed_n0 = n0;
-        transformed_n1 = n1;
-        transformed_n2 = n2;
-
-         // processTriangles'da vertexler ve normallar zaten transform edilmiş olarak geliyor
-        baseTransform = Matrix4x4::identity();
-        currentTransform = Matrix4x4::identity();
-        finalTransform = Matrix4x4::identity();
-    }
-    void updateAnimationTransform(const Matrix4x4& animTransform) {
-        currentTransform = animTransform;
-        finalTransform = currentTransform;  // Base transform zaten identity olduğu için
-        updateTransformedVertices();
-    }
-
+	// Texture nesnesi
     std::shared_ptr<Texture> texture;
   
     int smoothGroup;
@@ -93,29 +45,9 @@ public:
     Vec3 transformed_v0, transformed_v1, transformed_v2;
     Vec3 transformed_n0, transformed_n1, transformed_n2;
     // Default constructor
-    Triangle();
-    Triangle(const Vec3& a, const Vec3& b, const Vec3& c, std::shared_ptr<Material> m);
+    Triangle();  
+    Triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& na, const Vec3& nb, const Vec3& nc, const Vec2& ta, const Vec2& tb, const Vec2& tc, const Vec3& tana, const Vec3& tanb, const Vec3& tanc, const Vec3& ba, const Vec3& bb, const Vec3& bc, bool hasTangentBasis, std::shared_ptr<Material> m, int sg);
 
-    Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
-        const Vec3& na, const Vec3& nb, const Vec3& nc,
-        const Vec2& ta, const Vec2& tb, const Vec2& tc,
-        const Vec3& tana, const Vec3& tanb, const Vec3& tanc,
-        const Vec3& ba, const Vec3& bb, const Vec3& bc,
-        bool hasTangentBasis,
-        std::shared_ptr<Material> m,
-        int sg)
-        : v0(a), v1(b), v2(c),
-        n0(na), n1(nb), n2(nc),
-        t0(ta), t1(tb), t2(tc),
-        tangent0(tana), tangent1(tanb), tangent2(tanc),
-        bitangent0(ba), bitangent1(bb), bitangent2(bc),
-        hasTangents(hasTangentBasis),
-        mat_ptr(m),
-        smoothingGroup(sg) {
-        update_bounding_box();
-        initialize_transforms();  // Transform işlemlerini başlat
-        // Diğer gerekli başlatmalar...
-    }
   
     bool has_tangent_basis() const;
     void setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv2);
@@ -133,8 +65,23 @@ public:
     const std::array<unsigned int, 3>& getAssimpVertexIndices() const {
         return assimpVertexIndices;
     }
+    std::shared_ptr<Material> getMaterial() const {
+        return mat_ptr;
+    }
+    void setMaterial(const std::shared_ptr<Material>& mat) {
+        mat_ptr = mat;
+    }
+
+    const std::string& getNodeName() const {
+        return nodeName;
+    }
 
     virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override;
+    void updateTransformedVertices();
+    void setNodeName(const std::string& name);
+    void setBaseTransform(const Matrix4x4& transform);
+    void initialize_transforms();
+    void updateAnimationTransform(const Matrix4x4& animTransform);
     virtual bool bounding_box(double time0, double time1, AABB& output_box) const override;
     void update_bounding_box();
     Vec3 apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const;
@@ -154,24 +101,7 @@ private:
     Vec2 uv0, uv1, uv2;
     int faceIndex = -1;
     std::array<unsigned int, 3> assimpVertexIndices;
-    void updateTransformedVertices() {
-        transformed_v0 = finalTransform.transform_point(original_v0);
-        transformed_v1 = finalTransform.transform_point(original_v1);
-        transformed_v2 = finalTransform.transform_point(original_v2);
-
-        // Normalları güncelle
-        Matrix4x4 normalTransform = finalTransform.inverse().transpose();
-        transformed_n0 = normalTransform.transform_vector(original_n0).normalize();
-        transformed_n1 = normalTransform.transform_vector(original_n1).normalize();
-        transformed_n2 = normalTransform.transform_vector(original_n2).normalize();
-
-        //  Embree ve raytracer için ana vertex'leri güncelle
-        v0 = transformed_v0;
-        v1 = transformed_v1;
-        v2 = transformed_v2;
-
-        update_bounding_box();
-    }
+   
 
    
 };

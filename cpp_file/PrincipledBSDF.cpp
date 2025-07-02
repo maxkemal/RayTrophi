@@ -175,21 +175,17 @@ bool PrincipledBSDF::scatter(
     Vec3 L = scattered.direction;
     // 1. Opaklık kontrolü – ışığın geçip geçmeyeceğine karar ver
     // Opacity check – stochastic transparency
-    if (opacity < 1.0f) {
-        
-            attenuation = Vec3(1.0f - opacity); // Geçen ışığın oranı
-            scattered = Ray(rec.point + r_in.direction * 0.001f, r_in.direction);
-            return true;
-       
-    }
+	if (opacity < 0.2f) {
+		// Işık geçiyor, bu yüzden ışık kaynağına geri döndür
+        scattered = Ray(rec.point + r_in.direction * 0.001f, r_in.direction);
+		attenuation = Vec3(1.0f); // Tam geçiş
+		return true; // Işık geçiyor
+	}
     // 2. Emissive malzeme varsa doğrudan ışık katkısı verir
     // If material emits light, return its emission
     if (emission.length_squared() > 0.0f) {
-        if(emission.length()<1.0f)
-			attenuation = emission ;
-		else
-			attenuation = emission;       
-        scattered = Ray(rec.point, Vec3(0)); // Genelde devam etmez
+       
+		attenuation = albedo+emission; 
         return true;
     }
 
@@ -210,37 +206,34 @@ bool PrincipledBSDF::scatter(
 
     // Geçiş katsayısı daha net kontrol edilsin
    
-    Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness*0.1).normalize();
-
+    Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness).normalize();
+    //Vec3 diffuse_dir = cosine_dir.normalize();
     // Fresnel term determines reflectance vs diffuse ratio
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
-    float cosTheta = std::max(Vec3::dot(V, H), 1e-4);
+    float cosTheta = std::max(Vec3::dot(V, L), 1e-4);
     Vec3 F = fresnelSchlickRoughness(cosTheta, F0, roughness);
-
+    Vec3 F_avg = F0 + (Vec3(1.0f) - F0) /21.0f;
+    Vec3 k_d =  (1.0f - metallic);
     // 7. Stokastik seçim: F.x oranında speküler, geri kalanı difüz
     // Stochastic selection based on Fresnel reflectance
     Vec3 sampled_dir;
     float randVal = random_double();
+    Vec3 specular = evalSpecular(N, V, sampled_dir, F0, roughness);
+    // Attenuation ayır
     if (randVal < F.x) {
         sampled_dir = metal_dir;
+       
     }
     else {
         sampled_dir = diffuse_dir;
+       
     }
-
     // 8. Near-zero kontrolü
     // Check for near-zero direction to avoid NaNs
     if (sampled_dir.near_zero()) {
         sampled_dir = N;
-    }
-	Vec3 specular = evalSpecular(N,V,L,F0,roughness);   
-    float lift = Vec3::lerpf(1.0f / M_PI, 1.0f, artistic_albedo_response);
-    Vec3 kd = (1.0f - metallic) * (Vec3(1.0f) - F);
-    Vec3  diffuse = kd * albedo/M_PI ;
-
-    // 9. Işık katkısı `calculate_light_contribution` içinde yapılacak
-    // Light contribution is handled separately in direct lighting
-    attenuation = diffuse+specular;
+    }	
+    attenuation = (k_d * albedo)+specular;
     scattered = Ray(rec.point + N * 0.0001f, sampled_dir);
     return true;
 }
@@ -250,8 +243,8 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
     float cos_theta = std::max(Vec3::dot(rec.normal, outgoing), 0.0);
 
     // GGX sample: assume isotropic
-    float alpha = std::max(0.001f, roughness * roughness);
-    float NdotH = std::max(Vec3::dot(rec.normal, (outgoing + incoming)), 0.001);
+    float alpha =max(roughness * roughness,0.01f);
+    float NdotH = max(Vec3::dot(rec.normal, (outgoing + incoming)), 0.001);
     float D = (alpha * alpha) / (M_PI * powf((NdotH * NdotH * (alpha * alpha - 1.0f) + 1.0f), 2));
 
     float pdf_specular = D * NdotH / (4.0f * std::max(Vec3::dot(outgoing, (incoming + outgoing)), 0.001));
@@ -263,13 +256,13 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
 
 float PrincipledBSDF::GeometrySchlickGGX(float NdotV, float roughness) const {
     float r = (roughness * roughness);
-    float k = (r * r) / 8.0f; // Changed from /2.0 to /8.0 for better approximation
+    float k = (r * r) /2.0f; // Changed from /2.0 to /8.0 for better approximation
 
     return NdotV / (NdotV * (1.0f - k) + k);
 }
 
 float PrincipledBSDF::DistributionGGX(const Vec3& N, const Vec3& H, float roughness) const {
-    float alpha = max(roughness * roughness, 0.01f);
+    float alpha = max(roughness * roughness, 0.001f);
     float alpha2 = alpha * alpha;
     float NdotH = fmax(Vec3::dot(N, H), 0.0001f);
     float NdotH2 = NdotH * NdotH;
@@ -280,7 +273,7 @@ float PrincipledBSDF::DistributionGGX(const Vec3& N, const Vec3& H, float roughn
 
 float PrincipledBSDF::GeometrySmith(const Vec3& N, const Vec3& V, const Vec3& L, float roughness) const {
 
-    float k = max(roughness * roughness,0.01f) /8.0f;
+    float k = max(roughness * roughness,0.001f) /2.0f;
     float NdotV = fmax(Vec3::dot(N, V), 0.0001f);
     float NdotL = fmax(Vec3::dot(N, L), 0.0001f);
 

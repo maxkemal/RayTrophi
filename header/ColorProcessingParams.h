@@ -109,6 +109,14 @@ public:
             std::clamp(gradedColor.z, 0.0f, 1.0f)
         );
     }
+    void resize(int w, int h) {
+        width = w;
+        height = h;
+		// Resize luminance map to match new dimensions
+		luminance_map.resize(w * h, 0.0f);
+
+    }
+
 private:
   
     std::vector<float> luminance_map;
@@ -247,11 +255,11 @@ public:
 
       
         ////// sRGB dönüşümü
-        //processed_color = Vec3(
-        //    linearToSRGB(processed_color.x),
-        //    linearToSRGB(processed_color.y),
-        //    linearToSRGB(processed_color.z)
-        //);
+        processed_color = Vec3(
+            linearToSRGB(processed_color.x),
+            linearToSRGB(processed_color.y),
+            linearToSRGB(processed_color.z)
+        );
 
         // Gamma düzeltmesi
         float gamma_adjust = 1.0f / params.global_gamma;

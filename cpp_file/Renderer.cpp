@@ -140,8 +140,36 @@ Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int
     initialize_sobol_cache();
     frame_buffer.resize(image_width * image_height);
 	sample_counts.resize(image_width * image_height, 0);
+	max_halton_index = MAX_SAMPLES_HALTON - 1; // Halton dizisi için maksimum indeks
+	
+	// Adaptive sampling için bufferlar
+	variance_buffer.resize(image_width * image_height, 0.0f);
+	
+	rendering_complete = false;
+	// Normal map buffer'ı başlat
+	normal_buffer.resize(image_width * image_height, Vec3(0.0f));
 	variance_map.resize(image_width * image_height, 0.0f);
+   
+
 }
+void Renderer::resetResolution(int w, int h) {
+    image_width = w;
+    image_height = h;
+    aspect_ratio = static_cast<double>(image_width) / image_height;
+
+    const size_t pixel_count = w * h;
+
+    // Buffers resize
+    frame_buffer.resize(pixel_count);
+    variance_buffer.resize(pixel_count, 0.0f);  // reset variance
+    sample_counts.resize(pixel_count, 0);       // reset counts
+    variance_map.resize(pixel_count, 0.0f);     // optional if used in display
+
+    // Optional: zero the actual frame buffer content
+    std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
+
+}
+
 
 Renderer::~Renderer()
 {
@@ -331,15 +359,14 @@ void Renderer::render_image(SDL_Surface* surface, SDL_Window* window,
     }
 
     rendering_complete = true;
-    display_thread.join();
-    applyOIDNDenoising(surface, 0, true, 0.9);
-    SDL_UpdateWindowSurface(window);   
+    display_thread.join();   
+    //SDL_UpdateWindowSurface(window);   
 
 }
 
 void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
     const int total_samples_per_pixel, const int samples_per_pass,
-    float fps, float duration,SceneData& scene) {
+    float fps, float duration, SceneData& scene) {
 
     unsigned int num_threads = std::thread::hardware_concurrency();
     std::vector<std::thread> threads;
@@ -347,150 +374,162 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
     std::thread display_thread(&Renderer::update_display, this, window, surface);
     float frame_time = 1.0f / fps;
     int total_frames = static_cast<int>(duration * fps);
-    std::filesystem::create_directory("render");
-   
-    for (int frame = 0; frame < total_frames; ++frame) {
-      
+    std::filesystem::create_directory("render"); // "render" klasörünü oluştur
 
+    for (int frame = 0; frame < total_frames; ++frame) {
 
         std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
         std::fill(sample_counts.begin(), sample_counts.end(), 0);
         SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 0, 0, 0));
         float current_time = frame * frame_time;
-              
-		//  Zamanı güncelle
+
         std::cout << "\nFrame " << frame << " of " << total_frames
             << " at time " << current_time << "s" << std::endl;
 
-        //  Animasyon matrislerini uygula
-        if (!scene.animationDataList.empty()) {
-            for (const auto& triangle : scene.world.objects) {
-                auto trianglePtr = std::dynamic_pointer_cast<Triangle>(triangle);
-                if (!trianglePtr) continue;
+        // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
+        // Tüm düğümlerin (kemikler dahil) anlık animasyonlu global dönüşümlerini tutacak harita
+        std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
 
-                std::string nodeName = trianglePtr->getNodeName();
-                const aiNode* node = assimpLoader.getNodeByName(nodeName);
-                if (!node) continue;
+        // Animasyon verileri ve sahne kök düğümü mevcutsa işle
+        if (assimpLoader.getScene() && assimpLoader.getScene()->mRootNode && !scene.animationDataList.empty()) {
+            Matrix4x4 identityParentTransform = Matrix4x4::identity(); // Kök düğümün parent transformu identity'dir
 
-                for (const auto& animation : scene.animationDataList) {
-                    if (animation.positionKeys.count(nodeName) == 0 &&
-                        animation.rotationKeys.count(nodeName) == 0 &&
-                        animation.scalingKeys.count(nodeName) == 0)
-                        continue;
-
-                    Matrix4x4 animTransform = animation.calculateAnimationTransform(animation, current_time, nodeName);
-                    Matrix4x4 baseTransform = convert(AssimpLoader::getGlobalTransform(node));
-                    Matrix4x4 finalTransform = baseTransform * animTransform;
-
-                    trianglePtr->updateAnimationTransform(finalTransform);
-                }
-            }
-            if (use_embree) {
-                auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
-                embree_ptr->clearAndRebuild(scene.world.objects);  //  garantili temiz başlangıç
+            // Animasyon verilerini düğüm ismine göre hızlı erişim için bir harita oluştur
+            std::map<std::string, const AnimationData*> animationLookupMap;
+            for (const auto& anim : scene.animationDataList) {
+                // Her animasyon kanalını node ismine eşle
+                for (const auto& pair : anim.positionKeys) animationLookupMap[pair.first] = &anim;
+                for (const auto& pair : anim.rotationKeys) animationLookupMap[pair.first] = &anim;
+                for (const auto& pair : anim.scalingKeys) animationLookupMap[pair.first] = &anim;
             }
 
-            else {
-                //scene.bvh->updateTree(scene.world.objects, current_time, current_time + frame_time);
-            }
-
+            // Rekürsif fonksiyonu çağırarak tüm düğümlerin animasyonlu global transformlarını doldur
+            assimpLoader.calculateAnimatedNodeTransformsRecursive( // AssimpLoader:: static metodunu çağır
+                assimpLoader.getScene()->mRootNode, // Sahnenin kök düğümünü AssimpLoader'dan al
+                identityParentTransform,
+                animationLookupMap,
+                current_time,
+                animatedGlobalNodeTransforms
+            );
         }
-        if (!scene.boneData.boneNameToIndex.empty()) {
-            std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size());
 
-            for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
-                aiNode* node = scene.boneData.boneNameToNode[boneName];
-                if (!node) continue;
+        // --- 2. Adım: Üçgenleri Animasyon Türüne Göre Güncelle ---
+        for (auto& obj : scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (!tri) continue;
 
-                Matrix4x4 globalNodeTransform = convert(AssimpLoader::getGlobalTransform(node));
+            std::string nodeName = tri->getNodeName();
 
-                Matrix4x4 animTransform = Matrix4x4::identity();
-                for (const auto& anim : scene.animationDataList) {
-                    if (anim.positionKeys.count(boneName) > 0 ||
-                        anim.rotationKeys.count(boneName) > 0 ||
-                        anim.scalingKeys.count(boneName) > 0) {
-                        animTransform = anim.calculateAnimationTransform(anim, current_time, boneName);
-                        break;
-                    }
-                }
-
-                Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
-                const Matrix4x4& globalInverseTransform = scene.boneData.globalInverseTransform;               
-                finalBoneMatrices[boneIndex] = globalInverseTransform * globalNodeTransform * animTransform * offsetMatrix;
-
+         
+            if (!tri->vertexBoneWeights.empty() &&
+                tri->vertexBoneWeights[0].empty() && tri->vertexBoneWeights[1].empty() && tri->vertexBoneWeights[2].empty()) {
+              
             }
 
-            for (auto& obj : scene.world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (!tri || tri->vertexBoneWeights.empty()) continue;
-                if (tri->vertexBoneWeights.size() == 3 &&
-                    (!tri->vertexBoneWeights[0].empty() ||
-                        !tri->vertexBoneWeights[1].empty() ||
-                        !tri->vertexBoneWeights[2].empty())) {
-                    std::cout << "[DEBUG] ✅ Skin uygulanıyor: " << tri->getNodeName() << "\n";
-                    tri->apply_skinning(finalBoneMatrices);
+            bool isSkinnedMesh = false;
+            if (tri->vertexBoneWeights.size() == 3) {
+                if (!tri->vertexBoneWeights[0].empty() ||
+                    !tri->vertexBoneWeights[1].empty() ||
+                    !tri->vertexBoneWeights[2].empty()) {
+                    isSkinnedMesh = true;
+                }
+            }
+
+
+            if (isSkinnedMesh) {
+                // Bu bir skinned üçgen. Skinning uygula.
+               // std::cout << "DEBUG: scene.boneData.boneNameToIndex.size() = " << scene.boneData.boneNameToIndex.size() << std::endl;
+                std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size());
+               // std::cout << "DEBUG: finalBoneMatrices size after creation = " << finalBoneMatrices.size() << std::endl;
+
+                for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
+                    // Kemik düğümünün animasyonlu global transformunu al
+                    if (animatedGlobalNodeTransforms.count(boneName) == 0) {
+                      //  std::cerr << "[ERROR] Bone " << boneName << " için animasyonlu global transform bulunamadı! Bind pose kullanılıyor.\n";
+                        // Bulunamadıysa bind pose transformunu kullan (hata durumu veya animasyonsuz kemikler için)
+                        const aiNode* node = assimpLoader.getNodeByName(boneName); // Statik düğümü al
+                        Matrix4x4 staticGlobalNodeTransform = node ? convert(assimpLoader.getGlobalTransform(node)) : Matrix4x4::identity();
+                        finalBoneMatrices[boneIndex] = scene.boneData.globalInverseTransform * staticGlobalNodeTransform * scene.boneData.boneOffsetMatrices[boneName];
+                        continue;
+                    }
+
+                    Matrix4x4 animatedBoneGlobalTransform = animatedGlobalNodeTransforms[boneName];
+                    Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
+                    const Matrix4x4& globalInverseTransform = scene.boneData.globalInverseTransform;
+
+                    // Doğru final kemik matrisi formülü:
+                    finalBoneMatrices[boneIndex] = globalInverseTransform * animatedBoneGlobalTransform * offsetMatrix;
+                }
+
+               // std::cout << "[DEBUG] Skin uygulanıyor: " << tri->getNodeName() << "\n";
+                tri->apply_skinning(finalBoneMatrices);
+
+            }
+            else {
+                // Bu bir katı (rigid) üçgen. Node dönüşümünü uygula.
+                if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
+                    // Rigid nesneler için animasyonlu global transformu doğrudan kullan
+                    tri->updateAnimationTransform(animatedGlobalNodeTransforms[nodeName]);
+                  //  std::cout << "[DEBUG]  Rigid transform uygulanıyor: " << tri->getNodeName() << "\n";
                 }
                 else {
-                    std::cout << "[DEBUG] ❌ Skin atlandı: " << tri->getNodeName() << "\n";
+                    // Eğer bu node için animasyon verisi yoksa, herhangi bir dönüşüm uygulamadan geç.
+                    // Veya başlangıçtaki pozisyonunda kalmasını istiyorsanız `tri->updateAnimationTransform(Matrix4x4::identity());`
+                    // gibi bir şey yapabilirsiniz, ama original_vX zaten yüklenmiş olmalı.
+                   // std::cout << "[DEBUG]  Rigid transform atlandı (animasyon verisi veya node bulunamadı): " << tri->getNodeName() << "\n";
                 }
-
-
-            }
-
-            if (use_embree) {
-                auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
-                embree_ptr->clearAndRebuild(scene.world.objects);
             }
         }
 
+        // --- 3. Adım: Işık ve Kamera Animasyonlarını Güncelle ---
+        // Bu kısımlar mevcut kodunuzdaki mantıkla devam edebilir, çünkü animatedGlobalNodeTransforms artık kullanılabilir.
         for (auto& light : scene.lights) {
             const aiNode* node = assimpLoader.getNodeByName(light->nodeName);
-            if (!node) continue;
+            if (!node || animatedGlobalNodeTransforms.count(light->nodeName) == 0) continue;
 
-            for (const auto& animation : scene.animationDataList) {
-                if (animation.positionKeys.count(light->nodeName) > 0 ||
-                    animation.rotationKeys.count(light->nodeName) > 0) {
+            Matrix4x4 finalTransform = animatedGlobalNodeTransforms[light->nodeName];
 
-                    Matrix4x4 baseTransform = convert(AssimpLoader::getGlobalTransform(node));
-                    Matrix4x4 animTransform = animation.calculateAnimationTransform(animation, current_time, light->nodeName);
-                    Matrix4x4 finalTransform = baseTransform * animTransform;
+            // Pozisyon
+            Vec3 pos = finalTransform.transform_point(Vec3(0, 0, 0));
+            light->position = pos;
 
-                    // Pozisyon
-                    Vec3 pos = finalTransform.transform_point(Vec3(0, 0, 0));
-                    light->position = pos;
-
-                    // Yön (Directional ve Spot için)
-                    if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
-                        Vec3 forward = finalTransform.transform_vector(Vec3(0, 0, -1)).normalize();
-                        light->direction = forward;
-                    }
-                }
+            // Yön (Directional ve Spot için)
+            if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
+                Vec3 forward = finalTransform.transform_vector(Vec3(0, 0, -1)).normalize();
+                light->direction = forward;
             }
         }
 
         if (scene.camera) {
-            for (const auto& animation : scene.animationDataList) {
-                if (animation.positionKeys.count(scene.camera->nodeName) > 0 ||
-                    animation.rotationKeys.count(scene.camera->nodeName) > 0) {
+            if (animatedGlobalNodeTransforms.count(scene.camera->nodeName) > 0) {
+                Matrix4x4 animTransform = animatedGlobalNodeTransforms[scene.camera->nodeName];
 
-                    // YALNIZCA animasyon transformunu hesapla
-                    Matrix4x4 animTransform = animation.calculateAnimationTransform(animation, current_time, scene.camera->nodeName);
-
-                    // Pozisyon ve yön
-                    Vec3 pos = animTransform.transform_point(Vec3(0, 0, 0));
-                    Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
-                    Vec3 look = pos + forward;
-                    scene.camera->lookfrom = pos;
-                    scene.camera->lookat = look;
-                    if (scene.camera->vup.length_squared() < 1e-8) {
-                        scene.camera->vup = Vec3(0, 1, 0);
-                    }
-                  
+                // Pozisyon ve yön
+                Vec3 pos = animTransform.transform_point(Vec3(0, 0, 0));
+                Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
+                Vec3 look = pos + forward;
+                scene.camera->lookfrom = pos;
+                scene.camera->lookat = look;
+                if (scene.camera->vup.length_squared() < 1e-8) { // Up vektörü sıfır olmasın
+                    scene.camera->vup = Vec3(0, 1, 0); // Varsayılan up vektörü
                 }
+                // Kameranın diğer vektörlerini de güncelleyin (right, up vb.)
+                scene.camera->update_camera_vectors();
             }
         }
 
-        //  Render per frame
+        // --- 4. Adım: BVH'yi Güncelle ---
+        // Tüm sahne nesneleri (üçgenler) güncellendikten sonra BVH'yi yeniden inşa et
+        if (use_embree) {
+            auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+            if (embree_ptr) { // Nullptr kontrolü
+                embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+            }
+        }
+        // else { /* OptiX için BVH güncellemesi, eğer kullanılıyorsa */ }
+
+
+        // --- 5. Adım: Sahneyi Render Et ---
         const int num_passes = (total_samples_per_pixel + samples_per_pass - 1) / samples_per_pass;
         for (int pass = 0; pass < num_passes; ++pass) {
             next_row.store(0);
@@ -517,7 +556,6 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
                     samples_per_pass,
                     pass * samples_per_pass
                 );
-              
             }
 
             for (auto& thread : threads) {
@@ -527,15 +565,14 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             char title[100];
             snprintf(title, sizeof(title), "Rendering Frame %d/%d - %.1f%% Complete",
                 frame + 1, total_frames, (static_cast<float>(pass + 1) / num_passes) * 100);
-            SDL_SetWindowTitle(window, title);
-            applyOIDNDenoising(surface, 0, true, 0.9f);
+            SDL_SetWindowTitle(window, title);           
             SDL_UpdateWindowSurface(window);
         }
-      
-        //  Kaydet
+
+        // --- 6. Adım: Kareyi Kaydet ---
         char filename[100];
         snprintf(filename, sizeof(filename), "render/output_frame_%03d.png", frame + 1);
-        if (SaveSurface(surface, filename)) {
+        if (SaveSurface(surface, filename)) { // SaveSurface fonksiyonunuzun mevcut olduğunu varsayar
             std::cout << "Frame " << (frame + 1) << "/" << total_frames
                 << " saved successfully as " << filename << std::endl;
         }
@@ -544,10 +581,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             return;
         }
     }
-    
+
     rendering_complete = true;
     display_thread.join();
-  
+
     SDL_SetWindowTitle(window, "Rendering Completed - All Frames Saved");
 }
 //void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
@@ -570,15 +607,19 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     baseDirectory = path.parent_path().string() + "/";
 
     // ---- 1. Geometri ve animasyon yükle ----
-    auto [triangles, loadedAnimations] = assimpLoader.loadModelToTriangles(model_path);
-    scene.animationDataList = loadedAnimations;
- if (triangles.empty()) {
+    auto [loaded_triangles, loaded_animations, loaded_bone_data] = assimpLoader.loadModelToTriangles(model_path);
+    scene.animationDataList = loaded_animations;
+    scene.animationDataList = loaded_animations;
+    scene.boneData = loaded_bone_data; // BURADA BONE DATA'YI ATAYIN!
+ if (loaded_triangles.empty()) {
         std::cerr << "[HATA] Üçgen verisi yok, sahne yüklenemedi: " << model_path << std::endl;
+		std::cerr << "Lütfen geçerli bir model dosyası sağlayın." << std::endl; 
+		
  }
  else {
-	 std::cout << "Dosyadan " << triangles.size() << " üçgen yüklendi.\n";
+	 std::cout << "Dosyadan " << loaded_triangles.size() << " üçgen yüklendi.\n";
  }
-    for (const auto& tri : triangles) {
+    for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
 
         auto hittable = std::dynamic_pointer_cast<Hittable>(tri);
@@ -596,7 +637,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     scene.bvh = embree_bvh;
     // ---- 3. GPU OptiX setup ----      
         std::cout << "OptiX geometri oluşturuluyor (convertTrianglesToOptixData)...\n";
-        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
+        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(loaded_triangles);
         optix_gpu_ptr->validateMaterialIndices(optix_data);
         optix_gpu_ptr->buildFromData(optix_data);
 
@@ -613,7 +654,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         optix_gpu_ptr->setBackgroundColor(scene.background_color);
     // ---- 5. Bilgi ver ----
     std::cout << "Sahne oluşturuldu.\n";
-   
+    
         scene.initialized = true;
 }
 std::uniform_int_distribution<> dis_width(0, image_width - 1);
@@ -860,23 +901,24 @@ float Renderer::halton(int index, int base) {
 }
 
 Vec2 Renderer::stratified_halton(int x, int y, int sample_index, int samples_per_pixel) {
+    // Daha iyi dağılım için permütasyon ekliyoruz
+    const uint32_t pixel_hash = (x * 73856093) ^ (y * 19349663); // Basit bir hash fonksiyonu
+    const uint32_t sample_hash = sample_index * 83492791;
 
-    int index = (y * image_width + x) * samples_per_pixel + sample_index;
-    if (MAX_SAMPLES_HALTON > 0) {
-        index = index % MAX_SAMPLES_HALTON;
-    }
-    else {
-        index = 0;  // Eğer 0 olursa, varsayılan bir değer kullan.
-    }
+    // Halton dizisinde farklı offsetler kullanıyoruz
+    const int base_index = (pixel_hash + sample_hash) % MAX_SAMPLES_HALTON;
 
+    // Farklı asal sayı tabanları kullanarak daha iyi dağılım
+    const float u = halton_cache[base_index];                     // Taban 2
+    const float v = halton_cache[(base_index + MAX_SAMPLES_HALTON / 2) % MAX_SAMPLES_HALTON]; // Taban 3
 
-    // Tek boyutlu cache'den 2D array gibi erişim
-    float u = halton_cache[index];                    // Birinci boyut
-    float v = halton_cache[index + MAX_SAMPLES_HALTON]; // İkinci boyut
+    // Stratifikasyon eklemek için jitter
+    const float jitter_u = (rand() / (float)RAND_MAX) * 0.8f / samples_per_pixel;
+    const float jitter_v = (rand() / (float)RAND_MAX) * 0.8f / samples_per_pixel;
 
     return Vec2(
-        (x + u) / image_width,
-        (y + v) / image_height
+        (x + u + jitter_u) / image_width,
+        (y + v + jitter_v) / image_height
     );
 }
 inline float luminance(const Vec3& c) {
@@ -937,79 +979,106 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
     const std::shared_ptr<Camera>& camera,
     const int total_samples_per_pixel)
 {
-    const int lowpass_samples = render_settings.min_samples;
-    const int max_adaptive_samples = render_settings.max_samples;
-    const float adaptive_threshold = render_settings.variance_threshold; // örnek: 0.05 (5%)
-
-    int total_pixels = shuffled_pixel_list.size();
-
     if (!render_settings.use_adaptive_sampling) {
         render_chunk_fixed_sampling(surface, shuffled_pixel_list, next_pixel_index,
-            world, lights, background_color, bvh, camera, total_samples_per_pixel);
+            world, lights, background_color, bvh, camera, render_settings.samples_per_pixel);
         return;
     }
 
+    const int min_samples = std::max(4, render_settings.min_samples);
+    const int max_samples = render_settings.max_samples;
+    const float base_variance_threshold = render_settings.variance_threshold;
+    const int total_pixels = shuffled_pixel_list.size();
+
     while (true) {
-        int index = next_pixel_index.fetch_add(1);
+        const int index = next_pixel_index.fetch_add(1, std::memory_order_relaxed);
         if (index >= total_pixels) break;
 
         const auto& [i, j] = shuffled_pixel_list[index];
-        int pixel_index = j * image_width + i;
+        const int pixel_index = j * image_width + i;
 
+        Vec3 accumulated_color(0.0f);
         Vec3 mean(0.0f);
-        Vec3 M2(0.0f);
-        Vec3 accumulated(0.0f);
+        Vec3 variance(0.0f);
 
-        // === İlk geçiş: lowpass örnekleme ===
-        for (int s = 0; s < lowpass_samples; ++s) {
-            Vec2 uv = stratified_halton(i, j, s, lowpass_samples);
+        int dynamic_min_samples = min_samples;
+
+        // Komşu varyans kontrolü
+        bool has_high_variance_neighbor = false;
+        float neighbor_variance_sum = 0.0f;
+        int neighbor_count = 0;
+
+        if (i >= 2 && i < image_width - 2 && j >= 2 && j < image_height - 2) {
+            for (int dj = -2; dj <= 2; ++dj) {
+                for (int di = -2; di <= 2; ++di) {
+                    if (di == 0 && dj == 0) continue;
+                    int ni = i + di;
+                    int nj = j + dj;
+                    float neighbor_var = variance_buffer[nj * image_width + ni];
+                    neighbor_variance_sum += neighbor_var;
+                    neighbor_count++;
+                    if (neighbor_var > base_variance_threshold * 1.5f) {
+                        has_high_variance_neighbor = true;
+                    }
+                }
+            }
+
+            if (has_high_variance_neighbor) {
+                dynamic_min_samples = std::min(min_samples * 2, max_samples);
+            }
+        }
+
+        int sample_count = 0;
+        bool converged = false;
+
+        for (int s = 0; s < max_samples && !converged; ++s) {
+            Vec2 uv = stratified_halton(i, j, s, max_samples);
             Ray r = camera->get_ray(uv.u, uv.v);
-            Vec3 c = ray_color(r, bvh, lights, background_color, render_settings.max_bounces, s);
-            accumulated += c;
+            Vec3 sample_color = ray_color(r, bvh, lights, background_color,
+                render_settings.max_bounces, s);
 
-            Vec3 delta = c - mean;
+            const Vec3 delta = sample_color - mean;
             mean += delta / float(s + 1);
-            M2 += delta * (c - mean);
+            variance += delta * (sample_color - mean);
+            accumulated_color += sample_color;
+            sample_count++;
+
+            // Yakınsama kontrolü her 4 örnekte bir
+            if (s >= dynamic_min_samples && (s & 0x3) == 0) {
+                Vec3 var = variance / std::max(float(sample_count - 1), 1e-5f);
+                float luminance_mean = mean.luminance();
+                float luminance_var = var.luminance();
+                float adaptive_threshold = base_variance_threshold;
+
+                if (luminance_mean < 0.1f)
+                    adaptive_threshold *= 2.0f;
+                else if (luminance_mean > 0.9f)
+                    adaptive_threshold *= 0.5f;
+
+                if (neighbor_count > 0) {
+                    float avg_neighbor_var = neighbor_variance_sum / neighbor_count;
+                    adaptive_threshold *= std::max(0.5f, 1.0f - avg_neighbor_var * 0.5f);
+                }
+
+                float progress = float(s - dynamic_min_samples) / std::max(1.0f, float(max_samples - dynamic_min_samples));
+                adaptive_threshold *= (1.0f - progress * 0.5f);
+
+                if (luminance_var < adaptive_threshold) {
+                    converged = true;
+                }
+            }
         }
 
-        Vec3 variance = M2 / std::max(float(lowpass_samples - 1), 1e-5f);
+        const Vec3 final_color = accumulated_color / float(sample_count);
+        frame_buffer[pixel_index] = accumulated_color;
+        sample_counts[pixel_index] = sample_count;
+        variance_buffer[pixel_index] = variance.luminance() / std::max(float(sample_count - 1), 1e-5f);
 
-        // === Hata Oranı Hesabı ===
-        float lum_mean = std::max(mean.luminance(), 1e-4f); // Bölme hatasına karşı
-        float lum_stddev = std::sqrt(variance.luminance());
-        float error_ratio = lum_stddev / lum_mean;
-
-        // === Log tabanlı varyansa dayalı ağırlık hesaplama ===
-        float luminance_weight = std::log1p(variance.luminance() * 10.0f); // daha hızlı artış
-        luminance_weight = std::clamp(luminance_weight, 0.0f, 1.0f);
-
-        int adaptive_samples = static_cast<int>(luminance_weight * max_adaptive_samples);
-
-        // Hata oranı yüksekse zorla daha fazla sample al
-        if (error_ratio > adaptive_threshold) {
-            adaptive_samples = max_adaptive_samples;
-        }
-
-        // Mutlak sınırlar içinde tut
-        adaptive_samples = std::clamp(adaptive_samples, 1, total_samples_per_pixel - lowpass_samples);
-
-        for (int s = 0; s < adaptive_samples; ++s) {
-            Vec2 uv = stratified_halton(i, j, s + lowpass_samples, adaptive_samples);
-            Ray r = camera->get_ray(uv.u, uv.v);
-            Vec3 c = ray_color(r, bvh, lights, background_color, render_settings.max_bounces, s + lowpass_samples);
-            accumulated += c;
-        }
-
-        int total_samples = lowpass_samples + adaptive_samples;
-
-        frame_buffer[pixel_index] = accumulated;
-        sample_counts[pixel_index] = total_samples;
-
-        Vec3 avg_color = accumulated / float(total_samples);
-        Vec3 final_color = color_processor.processColor(avg_color, i, j);
-        updatePixel(surface, i, j, final_color);
+        Vec3 display_color = color_processor.processColor(final_color, i, j);
+        updatePixel(surface, i, j, display_color);
     }
 }
+
 void Renderer::render_chunk_fixed_sampling(SDL_Surface* surface,
     const std::vector<std::pair<int, int>>& shuffled_pixel_list,
     std::atomic<int>& next_pixel_index,
@@ -1020,29 +1089,41 @@ void Renderer::render_chunk_fixed_sampling(SDL_Surface* surface,
     const std::shared_ptr<Camera>& camera,
     const int total_samples_per_pixel)
 {
-    int total_pixels = shuffled_pixel_list.size();
+    const int total_pixels = shuffled_pixel_list.size();
+    const int samples_per_pixel = total_samples_per_pixel;
 
     while (true) {
-        int index = next_pixel_index.fetch_add(1);
+        const int index = next_pixel_index.fetch_add(1, std::memory_order_relaxed);
         if (index >= total_pixels) break;
 
         const auto& [i, j] = shuffled_pixel_list[index];
-        int pixel_index = j * image_width + i;
+        const int pixel_index = j * image_width + i;
 
         Vec3 accumulated(0.0f);
 
-        for (int s = 0; s < total_samples_per_pixel; ++s) {
-            Vec2 uv = stratified_halton(i, j, s, total_samples_per_pixel);
-            Ray r = camera->get_ray(uv.u, uv.v);
-            Vec3 c = ray_color(r, bvh, lights, background_color, render_settings.max_bounces, s);
-            accumulated += c;
+        // Unrolled loop for better performance
+        for (int s = 0; s < samples_per_pixel; s += 4) {
+            // Process 4 samples at a time (adjust based on your architecture)
+            Vec3 batch_color(0.0f);
+            const int remaining = std::min(4, samples_per_pixel - s);
+
+            for (int b = 0; b < remaining; ++b) {
+                const Vec2 uv = stratified_halton(i, j, s + b, samples_per_pixel);
+                const Ray r = camera->get_ray(uv.u, uv.v);
+                batch_color += ray_color(r, bvh, lights, background_color,
+                    render_settings.max_bounces, s + b);
+            }
+
+            accumulated += batch_color;
         }
 
+        // Update buffers
         frame_buffer[pixel_index] = accumulated;
-        sample_counts[pixel_index] = total_samples_per_pixel;
+        sample_counts[pixel_index] = samples_per_pixel;
 
-        Vec3 avg_color = accumulated / float(total_samples_per_pixel);
-        Vec3 final_color = color_processor.processColor(avg_color, i, j);
+        // Process and display final color
+        const Vec3 avg_color = accumulated / float(samples_per_pixel);
+        const Vec3 final_color = color_processor.processColor(avg_color, i, j);
         updatePixel(surface, i, j, final_color);
     }
 }
@@ -1056,7 +1137,7 @@ void Renderer::render_chunk(SDL_Surface* surface,
     const Hittable* bvh,
     const std::shared_ptr<Camera>& camera,
     const int total_samples_per_pixel,
-    const int current_sample)  // Artık current_sample kullanılmıyor
+    const int current_sample)  
 {
    // color_processor.preprocess(frame_buffer);
 
@@ -1077,16 +1158,18 @@ inline float power_heuristic(float pdf_a, float pdf_b) {
     float b2 = pdf_b * pdf_b;
     return a2 / (a2 + b2 + 1e-4f);
 }
+float Renderer::luminance(const Vec3& color) {
+    return 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
+}
+
 // --- Akıllı ışık seçimi ---
 int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights, const Vec3& hit_position) {
-
     int light_count = (int)lights.size();
     if (light_count == 0) return -1;
 
-    // --- 1. Öncelik: Eğer Directional light varsa %50 ihtimalle seç ---
+    // --- 1. Directional light varsa %33 ihtimalle seç ---
     for (int i = 0; i < light_count; i++) {
         if (lights[i]->type() == LightType::Directional) {
-
             if (random_double() < 0.33) {
                 directional_pick_count++;
                 return i;
@@ -1103,48 +1186,42 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
             Vec3 delta = lights[i]->position - hit_position;
             float distance = std::max(1.0f, delta.length());
 
-            // NOT: intensity_magnitude zaten mesafeye göre zayıflatılmış, tekrar bölmeye gerek yok.
-           
+            // Enerjiye göre ağırlık: yakın ve güçlü ışık öncelikli
+            float falloff = 1.0f / (distance * distance);
+            float intensity = luminance(lights[i]->intensity);
+            weights[i] = falloff * intensity;
+
+            total_weight += weights[i];
         }
     }
 
-    // Eğer hiç ağırlık yoksa rastgele seç (fallback)
+    // --- Eğer ağırlık yoksa fallback rastgele seçim ---
     if (total_weight < 1e-6f) {
         int random_light = std::clamp(int(random_double() * light_count), 0, light_count - 1);
-
-        // Hangi tür seçildiğini kontrol edelim:
-        if (lights[random_light]->type() == LightType::Point)
-            point_light_pick_count++;
-        else if (lights[random_light]->type() == LightType::Directional)
-            directional_pick_count++;
-
+        if (lights[random_light]->type() == LightType::Point) point_light_pick_count++;
+        else if (lights[random_light]->type() == LightType::Directional) directional_pick_count++;
         return random_light;
     }
 
-    // Ağırlıklı seçim
+    // --- Weighted seçim ---
     float r = random_double() * total_weight;
     float accum = 0.0f;
     for (int i = 0; i < light_count; i++) {
         accum += weights[i];
         if (r <= accum) {
-            // Hangi tür olduğunu kontrol et ve sayacı artır:
-            if (lights[i]->type() == LightType::Point)
-                point_light_pick_count++;
-            else if (lights[i]->type() == LightType::Directional)
-                directional_pick_count++;
-
+            if (lights[i]->type() == LightType::Point) point_light_pick_count++;
+            else if (lights[i]->type() == LightType::Directional) directional_pick_count++;
             return i;
         }
     }
 
-    // Güvenlik için fallback (normalde buraya düşmemesi lazım)
+    // --- Güvenlik fallback ---
     int fallback = std::clamp(int(random_double() * light_count), 0, light_count - 1);
-    if (lights[fallback]->type() == LightType::Point)
-        point_light_pick_count++;
-    else if (lights[fallback]->type() == LightType::Directional)
-        directional_pick_count++;
+    if (lights[fallback]->type() == LightType::Point) point_light_pick_count++;
+    else if (lights[fallback]->type() == LightType::Directional) directional_pick_count++;
     return fallback;
 }
+
 Vec3 Renderer::calculate_direct_lighting_single_light(
     const Hittable* bvh,
     const std::shared_ptr<Light>& light,
@@ -1178,7 +1255,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     // --- Light sampling ---
     if (auto directional = std::dynamic_pointer_cast<DirectionalLight>(light)) {
         L = -directional->random_point();
-        light_sample = hit_point + L * 10000.0f;
+        light_sample = hit_point + L * 1e8f;
         to_light = L;
         light_distance = std::numeric_limits<float>::infinity();
         Li = directional->getIntensity(hit_point, light_sample);
@@ -1200,11 +1277,11 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     // --- Shadow ---
     Ray shadow_ray(hit_point + N * 0.0001f, L);
-    if (bvh->occluded(shadow_ray, 0.0001f, light_distance))
+    if (bvh->occluded(shadow_ray, 0.001f, light_distance))
         return direct_light;
 
-    float NdotL = std::fmax(Vec3::dot(N, L), 0.0f);
-    if (NdotL < 1e-4f) return direct_light;
+    float NdotL = std::fmax(Vec3::dot(N, L), 0.00001f);
+   
 
     // --- BRDF Hesabı (Specular + Diffuse) ---
     Vec3 H = (L + V).normalize();
@@ -1212,7 +1289,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     float NdotH = std::fmax(Vec3::dot(N, H), 0.00001f);
     float VdotH = std::fmax(Vec3::dot(V, H), 0.00001f);
 
-    float alpha = roughness * roughness;
+    float alpha = max(roughness * roughness,0.01f);
     PrincipledBSDF psdf;
     // Specular bileşeni
     float D = psdf.DistributionGGX(N, H, roughness);
@@ -1222,8 +1299,9 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     Vec3 specular = psdf.evalSpecular(N,V,L,F0,roughness);
 
     // Diffuse bileşeni
-    Vec3 kd = (1.0f - metallic) * (Vec3(1.0f) - F);
-    Vec3 diffuse = kd * albedo/M_PI;
+    Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
+    Vec3 k_d =  (1.0f - metallic);
+    Vec3 diffuse = k_d * albedo/M_PI;
 
     // Toplam BRDF
     Vec3 brdf = diffuse + specular;
@@ -1247,8 +1325,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         HitRecord rec;
 
         if (!bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), rec)) {
-            float falloff = (bounce == 0) ? 1.0f : std::pow(0.3f, bounce); // Enerji kaybı
-            final_color += throughput * background_color*falloff;
+            float falloff = (bounce == 0) ? 1.0f : std::pow(0.5f, bounce); // Enerji kaybı
+            final_color += throughput * background_color* falloff;
             break;
         }
 
@@ -1269,12 +1347,13 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
        
             float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
             float continuation_prob = std::clamp(max_channel, 0.0f, 0.98f);
-            if (random_double() > continuation_prob)
-                break;
-            throughput /= continuation_prob;       
-
+            if (bounce > 2) { // İlk birkaç atışta devam et, sonra RR uygula
+                if (random_double() > continuation_prob)
+                    break;
+                throughput /= continuation_prob;
+            }
         // --- Emissive katkı ---
-        Vec3 emitted = rec.material->getEmission(rec.u, rec.v, rec.point)*2;
+        Vec3 emitted = rec.material->getEmission(rec.u, rec.v, rec.point);
         float transmission = rec.material->getTransmission(rec.uv);
         float opacity = rec.material->get_opacity(rec.uv);
 
@@ -1287,7 +1366,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             direct_light *= (1.0f - transmission);
         }
 
-        final_color += throughput * (emitted + 5*direct_light * opacity);
+        final_color += throughput * (emitted + direct_light)* opacity;
 
         current_ray = scattered;
     }

@@ -109,7 +109,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     Vec3 outward_normal = rec.interpolated_normal;
 	outward_normal = outward_normal.normalize();
     // Malzeme parametreleri
-    float adjusted_thickness = 0.001f;  // Daha küçük bir kalınlık değeri
+    float adjusted_thickness = 0.01f;  // Daha küçük bir kalınlık değeri
 
     // Açı hesaplamaları
     double cos_theta = fmin(Vec3::dot(-unit_direction, outward_normal), 1.0);
@@ -153,10 +153,8 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
 
         // Beer-Lambert yasasına göre zayıflama
         double distance = (rec.point - r_in.origin).length();  // Başlangıç noktası ile etkileşim noktası arasındaki mesafe
-       attenuation *= calculate_attenuation(distance);
-        //trans_color = trans_color*color; // Renkle son katmanı çarp
-        attenuation += calculate_refracted_attenuation(color,adjusted_thickness,fresnel_factor,ir);
-        
+       attenuation *= calculate_attenuation(distance);       
+        attenuation += calculate_refracted_attenuation(color,adjusted_thickness,fresnel_factor,ir);        
         // Kostikler için kontrollü ekleme
         Vec3 caustic = calculate_caustic(unit_direction, outward_normal, direction);  
         attenuation += caustic ;

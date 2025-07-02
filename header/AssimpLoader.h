@@ -162,7 +162,7 @@ struct BoneData {
     Matrix4x4 globalInverseTransform;
 };
 
-static std::vector<std::shared_ptr<Camera>> cameras; // Kamera listesi
+
 // Matrix4x4.h dosyasının sonunda olabilir:
 inline Matrix4x4 convert(const aiMatrix4x4& m) {
     return Matrix4x4(
@@ -176,6 +176,10 @@ class AssimpLoader {
 public:
     std::set<std::string> lightNodeNames;
     std::set<std::string> cameraNodeNames;
+    std::vector<std::shared_ptr<Light>> lights;
+    std::unordered_map<std::string, std::shared_ptr<Texture>> textureCache;
+    std::vector<TextureInfo> textureInfos;
+    std::vector<std::shared_ptr<Camera>> cameras; // Kamera listesi
 
     Assimp::Importer importer;
     const aiNode* getNodeByName(const std::string& name) const {
@@ -241,7 +245,7 @@ public:
     }
 
     // Hem Triangle hem de AnimationData döndüren metod
-    std::pair<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>>
+    std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>, BoneData>
         loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr) {
         BoneData boneData;
         this->scene = importer.ReadFile(filename,
@@ -318,7 +322,7 @@ public:
         else {
             std::cout << "No animations found in the file: " << filename << std::endl;
         }
-        return { triangles, animationDataList };
+        return { triangles, animationDataList, boneData };
     }
 
     std::vector<std::shared_ptr<Light>> getLights() const {
@@ -339,7 +343,7 @@ public:
         );
     }
 
-    static aiMatrix4x4 getGlobalTransform(const aiNode* node) {
+     aiMatrix4x4 getGlobalTransform(const aiNode* node) {
         aiMatrix4x4 transform = node ? node->mTransformation : aiMatrix4x4();
         const aiNode* parent = node ? node->mParent : nullptr;
 
@@ -432,7 +436,38 @@ public:
         }
         textureCache.clear(); // CPU cache'i temizle
     }
-   
+    // AssimpLoader sınıfı içinde veya uygun bir namespace'de
+     void calculateAnimatedNodeTransformsRecursive(
+        aiNode* node,
+        const Matrix4x4& parentAnimatedGlobalTransform,
+        const std::map<std::string, const AnimationData*>& animationMap,
+        float currentTime,
+        std::unordered_map<std::string, Matrix4x4>& animatedGlobalTransformsStore
+    ) {
+        std::string nodeName = node->mName.C_Str();
+        Matrix4x4 nodeLocalTransform = convert(node->mTransformation); // Varsayılan olarak bind pose lokal transform
+
+        // Eğer bu düğüm için animasyon verisi varsa, animasyonlu lokal transformu hesapla
+        if (animationMap.count(nodeName) > 0) {
+            const AnimationData* anim = animationMap.at(nodeName);
+            // AnimationData::calculateAnimationTransform zaten lokal animasyon transformunu döndürmeli
+            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, nodeName);
+        }
+
+        Matrix4x4 currentAnimatedGlobalTransform = parentAnimatedGlobalTransform * nodeLocalTransform;
+        animatedGlobalTransformsStore[nodeName] = currentAnimatedGlobalTransform;
+
+        // Çocuk düğümler için rekürsif olarak devam et
+        for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+            calculateAnimatedNodeTransformsRecursive(
+                node->mChildren[i],
+                currentAnimatedGlobalTransform,
+                animationMap,
+                currentTime,
+                animatedGlobalTransformsStore
+            );
+        }
+    }
 // TriangleData ve GpuMaterial kullanan tam OptixGeometryData çıkarımı
 private:
     void processBones(
@@ -472,8 +507,6 @@ private:
                 aiBone* bone = mesh->mBones[boneIndex];
                 std::string boneName = bone->mName.C_Str();
 
-                std::cout << "  [Bone] " << boneName << " | Vertex ağırlığı: " << bone->mNumWeights << "\n";
-
                 // 3.1. Bone index
                 if (boneData.boneNameToIndex.count(boneName) == 0)
                     boneData.boneNameToIndex[boneName] = static_cast<unsigned int>(boneData.boneNameToIndex.size());
@@ -508,10 +541,6 @@ private:
                                 if (vi == 1) tri->originalVertexPositions[1] = tri->original_v1;
                                 if (vi == 2) tri->originalVertexPositions[2] = tri->original_v2;
 
-                                std::cout << "    [Weight] Triangle bulundu | vertexId: " << vertexId
-                                    << ", weight: " << weight
-                                    << ", triangle node: " << tri->getNodeName() << "\n";
-
                                 found = true;
                                 break;
                             }
@@ -520,7 +549,7 @@ private:
                     }
 
                     if (!found) {
-                        std::cerr << "[WARNING] vertexId " << vertexId << " için triangle bulunamadı!\n";
+                       // std::cerr << "[WARNING] vertexId " << vertexId << " için triangle bulunamadı!\n";
                     }
                 }
             }
@@ -531,22 +560,19 @@ private:
 
 
     std::unordered_map<std::string, aiNode*> nodeMap;
-   static Vec3 transformPosition(const aiMatrix4x4& matrix, const aiVector3D& position) {
+    Vec3 transformPosition(const aiMatrix4x4& matrix, const aiVector3D& position) {
        aiVector3D transformed = matrix * position;
        return Vec3(transformed.x, transformed.y, transformed.z);
    }
 
-   static Vec3 transformDirection(const aiMatrix4x4& matrix, const aiVector3D& direction) {
+    Vec3 transformDirection(const aiMatrix4x4& matrix, const aiVector3D& direction) {
        aiMatrix3x3 rotation(matrix);
        aiVector3D transformed = rotation * direction;
        return Vec3(transformed.x, transformed.y, transformed.z);
    }
 
-    static std::vector<TextureInfo> textureInfos;
-    static std::vector<std::shared_ptr<Light>> lights;
-    static std::unordered_map<std::string, std::shared_ptr<Texture>> textureCache;
    // std::vector<std::shared_ptr<Camera>> cameras;
-    static void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, OptixGeometryData* geometry_data = nullptr) {
+     void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, OptixGeometryData* geometry_data = nullptr) {
         aiMatrix4x4 globalTransform = getGlobalTransform(node);
 
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
@@ -611,7 +637,7 @@ private:
         }
     }
 
-    static void processTriangles(
+     void processTriangles(
         aiMesh* mesh,
         const aiMatrix4x4& transform,
         const std::string& nodeName,
@@ -787,7 +813,7 @@ private:
 
                  // --- Türüne göre ışık oluştur ---
                  if (aiLgt->mType == aiLightSource_DIRECTIONAL) {
-                     light = std::make_shared<DirectionalLight>(direction, color * power, 10.0);
+                     light = std::make_shared<DirectionalLight>(direction, color * power, 10.0f);
                      light->position = position;
                  }
                  else if (aiLgt->mType == aiLightSource_POINT) {
@@ -835,7 +861,7 @@ private:
 
 
 
-    static std::shared_ptr<Material> processMaterial(
+     std::shared_ptr<Material> processMaterial(
         aiMaterial* aiMat,
         const aiScene* scene,
         HitGroupData* hit_data = nullptr,
@@ -920,20 +946,20 @@ private:
            aiMat->Get(AI_MATKEY_ANISOTROPY_FACTOR, anisotropyDir);
            material->setAnisotropic(anisotropy, Vec3(anisotropyDir.r, anisotropyDir.g, anisotropyDir.b));
        }
-       float ior = 1.0f;
+       float ior = 1.5f;
        if (!aiMat->Get(AI_MATKEY_REFRACTI, ior)) {
            aiMat->Get("IOR", 0, 0, ior);  // GLTF için fallback
        }
        material->ior = ior;
-
+	  // std::cout << "Material IOR: " << ior << std::endl;
        float transmission = 0.0f;
        if (AI_SUCCESS == aiGetMaterialFloat(aiMat, AI_MATKEY_TRANSMISSION_FACTOR, &transmission)) {
-           material->setTransmission(transmission,1.5);
+           material->setTransmission(transmission, ior);
           
        }
 
        else {
-		   material->setTransmission(0.0f, 1.5);
+		   material->setTransmission(0.0f, ior);
        }
        aiString texPath;
        if (aiGetMaterialTexture(aiMat, AI_MATKEY_TRANSMISSION_TEXTURE, &texPath) == AI_SUCCESS) {
@@ -1081,7 +1107,7 @@ private:
                gpu->transmission = transmission;
 
            if (hit_data && hit_data->has_opacity_tex)
-               gpu->opacity = 1.0f;
+               gpu->opacity = 0.0f;
            else
                gpu->opacity = opacity;
 
@@ -1127,7 +1153,7 @@ private:
 
        return material;
    }
-   static std::shared_ptr<Texture> loadTexture(const std::string& filepath, TextureType type = TextureType::Unknown, const std::string& opacityMapPath = "") {
+    std::shared_ptr<Texture> loadTexture(const std::string& filepath, TextureType type = TextureType::Unknown, const std::string& opacityMapPath = "") {
        std::string fullPath = baseDirectory + filepath;
        auto texture = std::make_shared<Texture>(fullPath, type); // 👈 yeni parametre
 
@@ -1139,7 +1165,7 @@ private:
        return texture;
    }
 
-   static std::string sanitizeTextureName(const aiString& str) {
+    std::string sanitizeTextureName(const aiString& str) {
        std::string textureName = str.C_Str();
        size_t pos = 0;
        while ((pos = textureName.find("%20", pos)) != std::string::npos) {
@@ -1148,7 +1174,7 @@ private:
        }
        return textureName;
    }
-   static  void processMaterialTexture(aiMaterial* aiMat, aiTextureType type, MaterialProperty& property) {
+     void processMaterialTexture(aiMaterial* aiMat, aiTextureType type, MaterialProperty& property) {
        aiString str;
        if (aiMat->GetTextureCount(type) > 0) {
            aiMat->GetTexture(type, 0, &str);
@@ -1156,7 +1182,7 @@ private:
            property.texture = loadTexture(textureName.c_str());
        }
    }
-   static TextureType convertToTextureType(aiTextureType type) {
+    TextureType convertToTextureType(aiTextureType type) {
        switch (type) {
        case aiTextureType_DIFFUSE: return TextureType::Albedo;
        case aiTextureType_SPECULAR: return TextureType::Unknown; // genelde linear
@@ -1170,7 +1196,7 @@ private:
        }
    }
 
-   static std::shared_ptr<Texture> loadTextureWithCache(const std::string& textureName, TextureType type = TextureType::Unknown) {
+    std::shared_ptr<Texture> loadTextureWithCache(const std::string& textureName, TextureType type = TextureType::Unknown) {
        auto it = textureCache.find(textureName);
        if (it != textureCache.end()) {
            return it->second; //  Zaten yüklü -> direkt dön

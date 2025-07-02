@@ -312,7 +312,7 @@ bool Texture::upload_to_gpu() {
     texDesc.addressMode[0] = cudaAddressModeWrap;
     texDesc.addressMode[1] = cudaAddressModeWrap;
     texDesc.filterMode = cudaFilterModeLinear;
-    texDesc.readMode = cudaReadModeNormalizedFloat; // 🎯 uchar → float dönüşüm
+    texDesc.readMode = cudaReadModeNormalizedFloat; //  uchar → float dönüşüm
     texDesc.normalizedCoords = 1;
 
     err = cudaCreateTextureObject(&tex_obj, &resDesc, &texDesc, nullptr);

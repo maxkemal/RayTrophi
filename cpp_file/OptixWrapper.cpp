@@ -154,9 +154,10 @@ float3 to_float3(const Vec3& v) {
     return make_float3(v.x, v.y, v.z);
 }
 
+
 void OptixWrapper::initialize() {
     if (context != nullptr) {
-        std::cout << "[OptiX] Zaten başlatıldı, tekrar initialize edilmedi.\n";
+      
         return;
     }
 
@@ -204,72 +205,182 @@ bool OptixWrapper::isCudaAvailable() {
         return false; // CUDA desteklenmiyor
     }
 }
-void OptixWrapper::applyOIDNDenoising(SDL_Surface* surface, int numThreads = 0, bool denoise = true, float blend = 0.8f) {
-    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+void OptixWrapper::setupOIDN(int width, int height)
+{
+    if (oidnInitialized) return;
+
+    oidnDevice = oidn::newDevice(oidn::DeviceType::CUDA); // veya CPU fallback
+    oidnDevice.commit();
+
+    size_t size = width * height * 3 * sizeof(float);
+    oidnInputBuffer = oidnDevice.newBuffer(size);
+    oidnOutputBuffer = oidnDevice.newBuffer(size);
+
+    oidnFilter = oidnDevice.newFilter("RT");
+    oidnFilter.setImage("color", oidnInputBuffer, oidn::Format::Float3, width, height);
+    oidnFilter.setImage("output", oidnOutputBuffer, oidn::Format::Float3, width, height);
+    oidnFilter.set("hdr", false);
+    oidnFilter.set("srgb", true);
+    oidnFilter.commit();
+
+    oidnInitialized = true;
+}
+
+void OptixWrapper::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
+    // 1. Parametre Doğrulaması
+    if (!surface) {
+        std::cerr << "[OIDN] Hata: SDL_Surface pointer null." << std::endl;
+        return;
+    }
+    if (surface->w <= 0 || surface->h <= 0) {
+        std::cerr << "[OIDN] Hata: Geçersiz yüzey boyutları (genişlik veya yükseklik sıfır/negatif)." << std::endl;
+        return;
+    }
+
     int width = surface->w;
     int height = surface->h;
+    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
 
-    // Renk verisini normalize ederek buffer'a aktar
-    std::vector<float> colorBuffer(width * height * 3);
-    for (int i = 0; i < width * height; ++i) {
+    const size_t pixelCount = width * height;
+    const size_t byteSize = pixelCount * 3 * sizeof(float); // RGB, float32
+
+    // SDL Surface -> RGB float32 buffer
+    std::vector<float> inputFloatBuffer(pixelCount * 3);
+    for (int i = 0; i < pixelCount; ++i) {
         Uint8 r, g, b;
         SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
-        colorBuffer[i * 3] = static_cast<float>(r) / 255.0f;
-        colorBuffer[i * 3 + 1] = static_cast<float>(g) / 255.0f;
-        colorBuffer[i * 3 + 2] = static_cast<float>(b) / 255.0f;
+        inputFloatBuffer[i * 3 + 0] = static_cast<float>(r) / 255.0f;
+        inputFloatBuffer[i * 3 + 1] = static_cast<float>(g) / 255.0f;
+        inputFloatBuffer[i * 3 + 2] = static_cast<float>(b) / 255.0f;
     }
 
-    // CUDA veya CPU cihazını seç
-    oidn::DeviceRef device;
-    if (isCudaAvailable()) {
-        device = oidn::newDevice(oidn::DeviceType::CUDA);
+    // --- OIDN Başlatma (sadece bir kere veya boyut değiştiğinde) ---
+    // Eğer boyutlar değiştiyse veya henüz başlatılmadıysa, OIDN kaynaklarını yeniden oluştur.
+    // Bu, boyut değişimlerinde doğru tampon ve filtre boyutlandırmasını sağlar.
+    if (!oidnInitialized || oidnLastWidth != width || oidnLastHeight != height) {
+        // Önceki kaynakları temizle (eğer varsa)
+        if (oidnInitialized) {
+            oidnFilter = nullptr; // OIDN filtresini serbest bırakır
+            oidnInputBuffer = nullptr; // OIDN tamponunu serbest bırakır
+            oidnOutputBuffer = nullptr; // OIDN tamponunu serbest bırakır
+            // Cihazın da serbest bırakılması gerekebilir ancak genellikle uygulamanın sonunda yapılır
+            // oidnDevice = nullptr; // Cihazı da serbest bırakır (dikkatli kullanılmalı)
+        }
+
+        try {
+            oidnDevice = isCudaAvailable() ? oidn::newDevice(oidn::DeviceType::CUDA) : oidn::newDevice(oidn::DeviceType::CPU);
+            if (numThreads > 0) oidnDevice.set("numThreads", numThreads);
+            oidnDevice.commit(); // Cihaz ayarlarını uygula
+
+            // Cihaz hata kontrolü
+            const char* deviceErrorMessage;
+            if (oidnDevice.getError(deviceErrorMessage) != oidn::Error::None) {
+                std::cerr << "[OIDN] Cihaz Başlatma Hatası: " << deviceErrorMessage << std::endl;
+                oidnInitialized = false; // Hata durumunda başlatılmadı olarak işaretle
+                return;
+            }
+
+            oidnInputBuffer = oidnDevice.newBuffer(byteSize);
+            oidnOutputBuffer = oidnDevice.newBuffer(byteSize);
+
+            oidnFilter = oidnDevice.newFilter("RT"); // Ray Tracing filtresi
+            oidnFilter.setImage("color", oidnInputBuffer, oidn::Format::Float3, width, height);
+            oidnFilter.setImage("output", oidnOutputBuffer, oidn::Format::Float3, width, height);
+
+            // HDR ve sRGB ayarları: Giriş verisinin renk uzayına göre ayarlanmalı.
+            // SDL_Surface genellikle sRGB'dir. Eğer kaynak HDR ise 'hdr' true yapılmalı.
+            oidnFilter.set("hdr", false);
+            oidnFilter.set("srgb", true); // SDL_Surface için genellikle doğru
+
+            oidnFilter.commit(); // Filtre ayarlarını uygula
+
+            // Filtre başlatma sonrası hata kontrolü (Yine cihaz üzerinden)
+            // Filtrenin commit edilmesi de cihazda hata yaratabilir.
+            const char* filterErrorMessage;
+            if (oidnDevice.getError(filterErrorMessage) != oidn::Error::None) { // << Burada oidnDevice kullanılıyor
+                std::cerr << "[OIDN] Filtre Ayarlama Hatası: " << filterErrorMessage << std::endl;
+                oidnInitialized = false;
+                return;
+            }
+
+            oidnLastWidth = width;
+            oidnLastHeight = height;
+            oidnInitialized = true; // Başarıyla başlatıldı
+            std::cout << "[OIDN] OIDN kaynakları yeniden başlatıldı/oluşturuldu. (Boyut: " << width << "x" << height << ")" << std::endl;
+
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[OIDN] İstisna: OIDN kaynaklarını başlatırken hata oluştu: " << e.what() << std::endl;
+            oidnInitialized = false; // Hata durumunda başlatılmadı olarak işaretle
+            return;
+        }
     }
-    else {
-        device = oidn::newDevice(oidn::DeviceType::CPU);
+
+    // Eğer OIDN başlatılamadıysa, denoise yapma
+    if (!oidnInitialized) {
+        std::cerr << "[OIDN] OIDN başlatılamadığı için denoise işlemi atlandı." << std::endl;
+        return;
     }
-    device.set("numThreads", numThreads);
-    device.commit();
 
-    // OIDN buffer'larını oluştur
-    oidn::BufferRef colorOIDNBuffer = device.newBuffer(colorBuffer.size() * sizeof(float));
-    // oidn::BufferRef normalOIDNBuffer = device.newBuffer(normalData.size() * sizeof(float)); // Normal buffer
-    oidn::BufferRef outputOIDNBuffer = device.newBuffer(colorBuffer.size() * sizeof(float));
+    // --- Denoise işlemi ---
+    // Giriş tamponuna veriyi kopyala
+    std::memcpy(oidnInputBuffer.getData(), inputFloatBuffer.data(), byteSize);
 
-    std::memcpy(colorOIDNBuffer.getData(), colorBuffer.data(), colorBuffer.size() * sizeof(float));
-    // std::memcpy(normalOIDNBuffer.getData(), normalData.data(), normalData.size() * sizeof(float));
+    // Denoise ayarını yap ve commit et (Her çağrıda değişebilir)
+    oidnFilter.set("denoise", denoise);
+    oidnFilter.commit(); // Bu ayarı uygulamak için commit etmeliyiz
 
-     // Filtreyi yapılandır ve çalıştır
-    oidn::FilterRef filter = device.newFilter("RT");
-    filter.setImage("color", colorOIDNBuffer, oidn::Format::Float3, width, height);
-    // filter.setImage("normal", normalOIDNBuffer, oidn::Format::Float3, width, height); // Normal verisini burada ekliyoruz
-    filter.setImage("output", outputOIDNBuffer, oidn::Format::Float3, width, height);
+    // Denoise işlemini yürüt
+    try {
+        // auto start = std::chrono::high_resolution_clock::now();
+        oidnFilter.execute();
+        // auto end = std::chrono::high_resolution_clock::now();
+        // std::chrono::duration<double, std::milli> elapsed = end - start;
+        // std::cout << "[OIDN] Denoising took " << elapsed.count() << " ms.\n";
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[OIDN] İstisna: Denoise işlemi sırasında hata oluştu: " << e.what() << std::endl;
+        return;
+    }
 
-    filter.set("hdr", false); // Normal map verisi için HDR (lineer veri)
-    filter.set("srgb", true); // Gamma düzeltmesi uygulama
-    filter.set("denoise", denoise);
-    filter.commit();
 
-    auto start = std::chrono::high_resolution_clock::now();
-    filter.execute();
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-
-    // Hataları kontrol et
+    // OIDN işleminden sonra hata kontrolü
     const char* errorMessage;
-    if (device.getError(errorMessage) != oidn::Error::None)
-        std::cerr << "OIDN error: " << errorMessage << std::endl;
+    if (oidnDevice.getError(errorMessage) != oidn::Error::None) {
+        std::cerr << "[OIDN] Çalışma Zamanı Hatası: " << errorMessage << std::endl;
+        // Hata durumunda işleme devam etmek yerine çıkmak daha güvenli olabilir
+        return;
+    }
 
-    // Denoised veriyi al ve karıştır
-    std::memcpy(colorBuffer.data(), outputOIDNBuffer.getData(), colorBuffer.size() * sizeof(float));
-    for (int i = 0; i < width * height; ++i) {
-        Uint8 r_orig, g_orig, b_orig;
-        SDL_GetRGB(pixels[i], surface->format, &r_orig, &g_orig, &b_orig);
+    // --- Sonuçları al ve blend et ---
+    std::vector<float> outputFloatBuffer(pixelCount * 3);
+    std::memcpy(outputFloatBuffer.data(), oidnOutputBuffer.getData(), byteSize);
 
-        Uint8 r = static_cast<Uint8>((colorBuffer[i * 3] * blend + r_orig / 255.0f * (1 - blend)) * 255);
-        Uint8 g = static_cast<Uint8>((colorBuffer[i * 3 + 1] * blend + g_orig / 255.0f * (1 - blend)) * 255);
-        Uint8 b = static_cast<Uint8>((colorBuffer[i * 3 + 2] * blend + b_orig / 255.0f * (1 - blend)) * 255);
+    // Blend değerini [0, 1] aralığına kısıtla
+    float clampedBlend = std::clamp(blend, 0.0f, 1.0f);
 
-        pixels[i] = SDL_MapRGB(surface->format, r, g, b);
+    for (int i = 0; i < pixelCount; ++i) {
+        Uint8 r0, g0, b0;
+        SDL_GetRGB(pixels[i], surface->format, &r0, &g0, &b0);
+
+        // Orijinal ve denoise edilmiş pikselleri harmanla
+        float r_denoised = outputFloatBuffer[i * 3 + 0];
+        float g_denoised = outputFloatBuffer[i * 3 + 1];
+        float b_denoised = outputFloatBuffer[i * 3 + 2];
+
+        float r_original = static_cast<float>(r0) / 255.0f;
+        float g_original = static_cast<float>(g0) / 255.0f;
+        float b_original = static_cast<float>(b0) / 255.0f;
+
+        float r = r_denoised * clampedBlend + r_original * (1.0f - clampedBlend);
+        float g = g_denoised * clampedBlend + g_original * (1.0f - clampedBlend);
+        float b = b_denoised * clampedBlend + b_original * (1.0f - clampedBlend);
+
+        // Renk değerlerini 0-255 aralığına kısıtla ve Uint8'e dönüştür
+        pixels[i] = SDL_MapRGB(surface->format,
+            static_cast<Uint8>(std::clamp(r * 255.0f, 0.0f, 255.0f)),
+            static_cast<Uint8>(std::clamp(g * 255.0f, 0.0f, 255.0f)),
+            static_cast<Uint8>(std::clamp(b * 255.0f, 0.0f, 255.0f)));
     }
 }
 void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
@@ -625,13 +736,13 @@ void OptixWrapper::launch_random_pixel_mode(
     int max_threads_per_block = props.maxThreadsPerBlock;
     int num_sms = props.multiProcessorCount;
 
-    // OptiX 9 için optimize edilmiş çarpan değeri - GPU mimarisine göre ince ayar yapılabilir
-    // RTX serisi kartlar için 16-24 arası değerler genellikle iyi sonuç verir
-   
-    int total_batches = 100;
-    int pixels_per_launch = (width * height + total_batches - 1) / total_batches;
+    int image_pixels = width * height;
+    int pixels_per_batch = std::clamp(image_pixels, 256 * 256, 1024 * 1024); // min: 16K, max: 1M
+    int total_batches = std::max(1, image_pixels / pixels_per_batch);
+    int pixels_per_launch = (image_pixels + total_batches - 1) / total_batches;
 
-
+    // Render sırasında kaç defa ekran güncellensin (1–20 arası ideal)
+    int update_frequency = 10; 
     // ------------------ FRAMEBUFFER SETUP -----------------------
     uchar4* d_framebuffer = nullptr;
     cudaMalloc(&d_framebuffer, width * height * sizeof(uchar4));
@@ -643,16 +754,17 @@ void OptixWrapper::launch_random_pixel_mode(
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
 
     // Atmosfer
-    params.atmosphere.sigma_s = 0.2f;
-    params.atmosphere.sigma_a = 0.1f;
-    params.atmosphere.g = 0.1f;
-    params.atmosphere.base_density = 1.0f;
+    params.atmosphere.sigma_s = 0.01f;
+    params.atmosphere.sigma_a = 0.01f;
+    params.atmosphere.g = 0.0f;
+    params.atmosphere.base_density = 0.001f;
     params.atmosphere.temperature = 300.0f;
     params.atmosphere.active = false; // kapalı
 
     // ------------------ ADAPTIVE PARAMETRELER ------------------
     params.samples_per_pixel = render_settings.samples_per_pixel;
     params.min_samples = render_settings.min_samples;
+	params.max_samples = render_settings.max_samples;
     params.variance_threshold = render_settings.variance_threshold;
     params.max_depth = render_settings.max_bounces;
     params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
@@ -672,10 +784,10 @@ void OptixWrapper::launch_random_pixel_mode(
         if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
 
         // Pinned memory kullanımı için
-        cudaMallocHost(&d_variance_buffer, sizeof(float) * width * height);
-        cudaMallocHost(&d_accumulation_buffer, sizeof(float) * width * height * 3); // RGB
-        cudaMallocHost(&d_sample_count_buffer, sizeof(int) * width * height);
-
+        cudaMalloc(&d_variance_buffer, sizeof(float) * width * height);
+        cudaMalloc(&d_accumulation_buffer, sizeof(float) * width * height * 3); // RGB
+        cudaMalloc(&d_sample_count_buffer, sizeof(int) * width * height);
+       
         cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
         cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
         cudaMemset(d_sample_count_buffer, 0, sizeof(int) * width * height);
@@ -746,11 +858,14 @@ void OptixWrapper::launch_random_pixel_mode(
             &sbt,
             static_cast<unsigned int>(count), 1, 1
         ));
+       
 
         // Güncelleme aralığını ayarlama - her %10'da bir ekranı güncelle
-        bool should_update = (rendered_pixels % (total_pixels / 10) == 0) ||
-            (offset + count >= total_pixels);
-
+        bool should_update = (
+            (rendered_pixels % (total_pixels / update_frequency) == 0) ||
+            (offset + count >= total_pixels)
+            );
+      
         if (should_update) {
             // Render işlemi tamamlanmadan önce stream'in tamamlanmasını bekle
             cudaStreamSynchronize(render_stream);
@@ -761,7 +876,7 @@ void OptixWrapper::launch_random_pixel_mode(
 
             // ------------------ SDL GÜNCELLEME ------------------
             cudaStreamSynchronize(render_stream); // Framebuffer transferinin bitmesini bekle
-
+           
             Uint32* pixel;
             for (int j = 0; j < height; ++j) {
                 for (int i = 0; i < width; ++i) {
@@ -773,13 +888,16 @@ void OptixWrapper::launch_random_pixel_mode(
                     int g = static_cast<int>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
                     int b = static_cast<int>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
 
-                    pixel = (Uint32*)surface->pixels + (height - 1 - j) * surface->w + i;
+                    int row_stride = surface->pitch / 4;
+                    pixel = (Uint32*)surface->pixels + (height - 1 - j) * row_stride + i;
+
                     *pixel = SDL_MapRGB(surface->format, r, g, b);
                    
                 }
-            }
-            SDL_UpdateWindowSurface(window);
-           
+               
+            }           
+			// SDL yüzeyini güncelle 
+            //SDL_UpdateWindowSurface(window);
         }
 
         rendered_pixels += count;
@@ -797,9 +915,8 @@ void OptixWrapper::launch_random_pixel_mode(
 
     // Not: variance, accumulation ve sample_count bufferları sabit tutuluyor (bir sonraki frame için reuse!)
 
-    // ------------------ OIDN DENOISE ------------------
-    applyOIDNDenoising(surface, 0, true, 0.9f);
-    SDL_UpdateWindowSurface(window);
+   
+   // SDL_UpdateWindowSurface(window);
 
     // Toplam süreyi ölç
     //auto end_time = high_resolution_clock::now();
@@ -820,6 +937,7 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
 
     params.camera.lens_radius = static_cast<float>(cpuCamera.lens_radius);
     params.camera.focus_dist = static_cast<float>(cpuCamera.focus_dist);
+	params.camera.aperture = static_cast<float>(cpuCamera.aperture);
     params.camera.blade_count = cpuCamera.blade_count;
 }
 __host__ __device__ inline float length(const float3& v) {

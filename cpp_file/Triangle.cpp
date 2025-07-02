@@ -5,15 +5,28 @@
 #include <Dielectric.h>
 
 
-Triangle::Triangle()
-    : smoothGroup(0) {
-}
-
-Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c, std::shared_ptr<Material> m)
-    : v0(a), v1(b), v2(c), mat_ptr(m), smoothGroup(0) {
+Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
+    const Vec3& na, const Vec3& nb, const Vec3& nc,
+    const Vec2& ta, const Vec2& tb, const Vec2& tc,
+    const Vec3& tana, const Vec3& tanb, const Vec3& tanc,
+    const Vec3& ba, const Vec3& bb, const Vec3& bc,
+    bool hasTangentBasis,
+    std::shared_ptr<Material> m,
+    int sg)
+    : v0(a), v1(b), v2(c),
+    n0(na), n1(nb), n2(nc),
+    t0(ta), t1(tb), t2(tc),
+    tangent0(tana), tangent1(tanb), tangent2(tanc),
+    bitangent0(ba), bitangent1(bb), bitangent2(bc),
+    hasTangents(hasTangentBasis),
+    mat_ptr(m),
+    smoothingGroup(sg) {
+    update_bounding_box();
     initialize_transforms();  // Transform iþlemlerini baþlat
-}
+    updateTransformedVertices(); // initialize_transforms sonrasý, çünkü transformed_vX hesaplamazsan AABB yanlýþ olur
 
+    // Diðer gerekli baþlatmalar...
+}
 
 void Triangle::setUVCoordinates(const Vec2& t0, const Vec2& t1, const Vec2& t2) {
     this->t0 = t0;
@@ -72,36 +85,62 @@ Vec3 Triangle::apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalB
     return blended;
 }
 void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
-    if (vertexBoneWeights.size() != 3 || originalVertexPositions.size() != 3) {
-        std::cerr << "[WARNING] Triangle skipping skinning — missing weight or position data.\n";
+    // Eksik veri durumunda erken çýkýþ ve orijinal pozisyon/normal atamasý
+    if (vertexBoneWeights.size() != 3 || originalVertexPositions.size() != 3 ||
+        original_n0.length_squared() < 1e-6 || original_n1.length_squared() < 1e-6 || original_n2.length_squared() < 1e-6) {
+       // std::cerr << "[WARNING] Triangle skipping skinning — missing weight, position or normal data for " << getNodeName()
+       //     << " (VBW size: " << vertexBoneWeights.size() << ", OVP size: " << originalVertexPositions.size()
+        //    << ", Original Normals Valid: " << (original_n0.length_squared() >= 1e-6 && original_n1.length_squared() >= 1e-6 && original_n2.length_squared() >= 1e-6) << ").\n";
+        // Eðer veri eksikse, transformed deðerleri orijinal deðerlere eþitle
+        transformed_v0 = original_v0; transformed_v1 = original_v1; transformed_v2 = original_v2;
+        transformed_n0 = original_n0; transformed_n1 = original_n1; transformed_n2 = original_n2;
+        // Ana vertex ve normal üyelerini de güncelle (hit metodu için)
+        v0 = original_v0; v1 = original_v1; v2 = original_v2;
+        n0 = original_n0; n1 = original_n1; n2 = original_n2;
+        update_bounding_box();
         return;
     }
 
-    for (int vi = 0; vi < 3; ++vi) {
+    // Pozisyonlara skinning uygulama
+    for (int vi = 0; vi < 3; ++vi) { // Her bir vertex için
         if (vertexBoneWeights[vi].empty()) {
-            std::cerr << "[WARNING] vertex " << vi << " has no bone weights, skipping.\n";
-            continue;
+           // std::cerr << "[WARNING] vertex " << vi << " has no bone weights for " << getNodeName() << ", keeping original position.\n";
+            // Aðýrlýðý olmayan vertex, orijinal (bind pose) pozisyonunu korumalýdýr.
+            if (vi == 0) transformed_v0 = original_v0;
+            else if (vi == 1) transformed_v1 = original_v1;
+            else if (vi == 2) transformed_v2 = original_v2;
         }
-
-        Vec3 blended = Vec3(0);
-        for (auto& [boneIdx, weight] : vertexBoneWeights[vi]) {
-            if (boneIdx >= finalBoneMatrices.size()) {
-                std::cerr << "[ERROR] boneIdx " << boneIdx << " out of bounds!\n";
-                continue;
+        else {
+            Vec3 blendedPosition = Vec3(0);
+            for (auto& [boneIdx, weight] : vertexBoneWeights[vi]) {
+                if (boneIdx >= finalBoneMatrices.size()) {
+                   // std::cerr << "[ERROR] POS: boneIdx " << boneIdx << " out of bounds! finalBoneMatrices.size(): " << finalBoneMatrices.size()
+                     //   << " for vertex " << vi << " in triangle " << getNodeName() << " (Node: " << nodeName << ")\n";
+                    continue; // Hata durumunda bu kemiði atla
+                }
+                Vec3 transformedVertex = finalBoneMatrices[boneIdx].transform_point(originalVertexPositions[vi]);
+                blendedPosition += transformedVertex * weight;
             }
-            Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(originalVertexPositions[vi]);
-            blended += transformed * weight;
+            if (vi == 0) transformed_v0 = blendedPosition;
+            else if (vi == 1) transformed_v1 = blendedPosition;
+            else if (vi == 2) transformed_v2 = blendedPosition;
         }
-
-        if (vi == 0) transformed_v0 = blended;
-        else if (vi == 1) transformed_v1 = blended;
-        else if (vi == 2) transformed_v2 = blended;
     }
 
-    //  Þimdi gerçek vertexleri güncelle
+    // Normallere skinning uygulama
+    // apply_bone_to_normal metodunu burada çaðýrýyoruz
+    transformed_n0 = apply_bone_to_normal(original_n0, vertexBoneWeights[0], finalBoneMatrices);
+    transformed_n1 = apply_bone_to_normal(original_n1, vertexBoneWeights[1], finalBoneMatrices);
+    transformed_n2 = apply_bone_to_normal(original_n2, vertexBoneWeights[2], finalBoneMatrices);
+
+    // Hit metodu tarafýndan kullanýlan ana vertex ve normal üyelerini güncelle
     v0 = transformed_v0;
     v1 = transformed_v1;
     v2 = transformed_v2;
+
+    n0 = transformed_n0.normalize(); // Normallerin normalize edildiðinden emin olun
+    n1 = transformed_n1.normalize();
+    n2 = transformed_n2.normalize();
 
     update_bounding_box();
 }
@@ -228,7 +267,63 @@ bool Triangle::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) con
    
     return true;
 }
+void Triangle::updateTransformedVertices() {
+    transformed_v0 = finalTransform.transform_point(original_v0);
+    transformed_v1 = finalTransform.transform_point(original_v1);
+    transformed_v2 = finalTransform.transform_point(original_v2);
 
+    // Normallarý güncelle
+    Matrix4x4 normalTransform = finalTransform.inverse().transpose();
+    transformed_n0 = normalTransform.transform_vector(original_n0).normalize();
+    transformed_n1 = normalTransform.transform_vector(original_n1).normalize();
+    transformed_n2 = normalTransform.transform_vector(original_n2).normalize();
+
+    //  Embree ve raytracer için ana vertex'leri güncelle
+    v0 = transformed_v0;
+    v1 = transformed_v1;
+    v2 = transformed_v2;
+
+    update_bounding_box();
+}
+void Triangle::setNodeName(const std::string& name) {
+    nodeName = name;
+}
+
+void Triangle::setBaseTransform(const Matrix4x4& transform) {
+    baseTransform = transform;
+    updateTransformedVertices();
+}
+
+void Triangle::initialize_transforms() {
+    // Orijinal vertexleri sakla
+    original_v0 = v0;
+    original_v1 = v1;
+    original_v2 = v2;
+
+    original_n0 = n0;
+    original_n1 = n1;
+    original_n2 = n2;
+
+    // Baþlangýçta transformed deðerler orijinal deðerlerle ayný
+    transformed_v0 = v0;
+    transformed_v1 = v1;
+    transformed_v2 = v2;
+
+    transformed_n0 = n0;
+    transformed_n1 = n1;
+    transformed_n2 = n2;
+
+    // processTriangles'da vertexler ve normallar zaten transform edilmiþ olarak geliyor
+    baseTransform = Matrix4x4::identity();
+    currentTransform = Matrix4x4::identity();
+    finalTransform = Matrix4x4::identity();
+}
+
+void Triangle::updateAnimationTransform(const Matrix4x4& animTransform) {
+    currentTransform = animTransform;
+    finalTransform = currentTransform;  // Base transform zaten identity olduðu için
+    updateTransformedVertices();
+}
 bool Triangle::bounding_box(double time0, double time1, AABB& output_box) const {
     Vec3 small(
         std::min({ transformed_v0.x, transformed_v1.x, transformed_v2.x }),

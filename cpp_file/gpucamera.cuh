@@ -26,6 +26,7 @@ __device__ float2 random_in_unit_polygon(int sides, curandState* rng) {
 
 __device__ Ray get_ray_from_camera(const gpuCamera& cam, float s, float t, curandState* rng) {
     // Eğer aperture yoksa (f:0 gibi), direkt düz ray atalım.
+
     if (cam.lens_radius <= 0.0f) {
         float3 dir = cam.lower_left_corner + s * cam.horizontal + t * cam.vertical - cam.origin;
         return Ray(cam.origin, normalize(dir));

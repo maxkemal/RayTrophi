@@ -9,8 +9,8 @@
 
 
 __device__ float G_SchlickGGX(float NdotV, float roughness) {
-    float r = roughness + 1.0f;
-    float k = (r * r) / 8.0f;
+    //float r = roughness+1.0f;
+    float k = max(roughness * roughness, 0.01f) /2.0f;
     return NdotV / (NdotV * (1.0f - k) + k);
 }
 
@@ -24,7 +24,7 @@ __device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3
     float VdotH = max(dot(wo, H), 0.0001f);
 
     float roughness = mat.roughness;
-    float alpha = max(roughness * roughness, 0.001f);
+    float alpha = max(roughness * roughness, 0.01f);
     float alpha2 = alpha * alpha;
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
     float D = alpha2 / (M_PIf * denom * denom);
@@ -50,14 +50,14 @@ __device__ float3 evaluate_brdf(
     float2 uv = payload.uv;
     uv = clamp(uv, 0.0f, 1.0f);
 
-    float NdotL = max(dot(N, wi), 0.0f);
-    float NdotV = max(dot(N, wo), 0.0f);
+    float NdotL = max(dot(N, wi), 0.0001f);
+    float NdotV = max(dot(N, wo), 0.0001f);
     if (NdotL == 0 || NdotV == 0) return make_float3(0.0f, 0.0f, 0.0f);
 
     float3 H = normalize(wi + wo);
     float NdotH = max(dot(N, H), 0.0001f);
     float VdotH = max(dot(wo, H), 0.0001f);
-   
+	if (NdotH == 0 || VdotH == 0) return make_float3(0.0f, 0.0f, 0.0f);
     float3 albedo = material.albedo;
     if (payload.has_albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
@@ -65,7 +65,9 @@ __device__ float3 evaluate_brdf(
             make_float3(tex.x, tex.x, tex.x) :
             make_float3(tex.x, tex.y, tex.z);
     }
-
+	albedo = clamp(albedo, 0.01f, 1.0f); // Albedo değerini 0-1 aralığına sıkıştır
+    float sheen_strength=0.2f  ;   // 0.0–1.0 arasında
+    float3 sheen_color=albedo;     // kumaş parıltı rengi (genellikle albedoya benzer)
 
     float roughness = material.roughness;
     if (payload.has_roughness_tex) {
@@ -77,6 +79,14 @@ __device__ float3 evaluate_brdf(
     if (payload.has_metallic_tex) {
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
        
+    }
+    // ----- SHEEN KATKISI -----
+    float3 sheen = make_float3(0.0f, 0.0f, 0.0f);
+    if (!material.metallic && sheen_strength > 0.001f) // metalde sheen olmaz
+    {
+        float NdotV = max(dot(N, wo), 0.0f);
+        float sheen_term = powf(1.0f - NdotV, 5.0f); // Schlick grazing angle falloff
+        sheen = sheen_color * sheen_term * sheen_strength;
     }
 
     float alpha = max(roughness * roughness, 0.001f);
@@ -94,7 +104,16 @@ __device__ float3 evaluate_brdf(
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
     float3 diffuse = k_d * albedo/M_PIf;
+    float3 emission = material.emission;
+    if (payload.has_emission_tex) {
+        float4 tex = tex2D<float4>(payload.emission_tex, uv.x, uv.y);
+        emission = make_float3(tex.x, tex.y, tex.z);
 
+    }
+    if (length(emission) > 0.01f) {
+		return emission; // Emissive materyaller için direkt ışın gönder
+      
+    }
     if (material.transmission >= 0.01f)
     {
         curandState rng;
@@ -105,7 +124,7 @@ __device__ float3 evaluate_brdf(
         return spec;
     }
 
-    return (diffuse + spec);
+    return (diffuse + spec+ sheen);
 }
 __device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float roughness)
 {
@@ -114,7 +133,7 @@ __device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float rou
 }
 
 __device__ float3 importance_sample_ggx(float u1, float u2, float roughness, const float3& N) {
-    float alpha = max(roughness * roughness, 0.001f);
+    float alpha = (roughness * roughness);
     float phi = 2.0f * M_PIf * u1;
     float cosTheta = sqrtf((1.0f - u2) / (1.0f + (alpha * alpha - 1.0f) * u2));
     float sinTheta = sqrtf(max(1.0f - cosTheta * cosTheta, 0.0f));
@@ -281,9 +300,10 @@ __device__ bool scatter_material(
    
     uv = clamp(uv, 0.0f, 1.0f);
     const float3 V = -normalize(ray_in.direction);
-
-    // BURADA DİKKAT:
-    // DOĞRUDAN material albedo, roughness, metallic vs. kullanacağız
+	if (length(N) < 0.001f) {
+		N = make_float3(0.0f, 0.0f, 1.0f); // Normal sıfırsa Z eksenine yönlendir
+	}
+   
     float3 albedo = material.albedo;
     if (payload.has_albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
@@ -292,19 +312,18 @@ __device__ bool scatter_material(
             make_float3(tex.x, tex.y, tex.z);
     }
 
-
-   /* float opacity = material.opacity;
+    albedo = clamp(albedo, 0.01f, 1.0f); // Albedo değerini 0-1 aralığına sıkıştır
+    float opacity = material.opacity;
     opacity *= get_alpha_gpu(payload, uv);
 
-    if (opacity < 1.0f) {
+    if (opacity < 0.5f) {
        
             *attenuation = make_float3(1.0f, 1.0f, 1.0f);
             *scattered = Ray(payload.position + 1e-5f * ray_in.direction, ray_in.direction);
-            *pdf = 1.0f;
-           
+            *is_specular = false;
             return true;
        
-    }*/
+    }
 
     float roughness = material.roughness;
     if (payload.has_roughness_tex)
@@ -323,8 +342,16 @@ __device__ bool scatter_material(
     if (payload.has_emission_tex) {
         float4 tex = tex2D<float4>(payload.emission_tex, uv.x, uv.y);
         emission = make_float3(tex.x, tex.y, tex.z);
+       
     }
-    // ✨ Fresnel-Schlick + GGX ile metalik / difüz karışımı
+	if (length(emission) > 0.001f) {
+		*attenuation = emission;		
+		*pdf = 1.0f;
+        *is_specular = false; 
+
+		return true; // Emissive materyaller için direkt ışın gönder
+	}
+    //  Fresnel-Schlick + GGX ile metalik / difüz karışımı
     float3 H = importance_sample_ggx(random_float(rng), random_float(rng), roughness, N);
     float3 L = normalize(reflect(-V, H));
     // if (dot(L, N) <= 0.0f) return false;
@@ -333,6 +360,7 @@ __device__ bool scatter_material(
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);   
 
     if (transmission > 0.0f && random_float(rng) < transmission) {
+        *is_specular = true;  // çünkü cam / su gibi yüzeyler delta dağılım
         return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation); // transmission_scatter da material alacak
     }
     float3 ssscolor=make_float3(1,0.5,0.5) ;
@@ -371,6 +399,7 @@ __device__ bool scatter_material(
     *pdf = pdf_brdf(material, wo, wi, payload.normal);   
     *scattered = Ray(payload.position + L * 0.001f, L);
     *attenuation = (diffuse + specular + emission);
-   
+    *is_specular = (roughness < 0.05f && metallic > 0.5f);  // ayna gibi yüzeyler
+
     return true;
 }

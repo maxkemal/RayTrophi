@@ -5,6 +5,12 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <string>
+static void HelpMarker(const char* desc)
+{
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", desc);
+}
 
 std::string openFileDialog(const char* filter = "Tüm Dosyalar\0*.*\0") {
     char filename[MAX_PATH] = "";
@@ -23,149 +29,8 @@ std::string openFileDialog(const char* filter = "Tüm Dosyalar\0*.*\0") {
     }
     return ""; // iptal edildi
 }
-std::string saveFileDialog(const char* filter = "PNG Dosyası\0*.png\0") {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
 
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL; // SDL window handle verilebilir
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT; // 👈 önemli: üzerine yaz uyarısı verir
-    ofn.lpstrTitle = "Render Görüntüsünü Kaydet";
-
-    if (GetSaveFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-    return ""; // iptal edildi
-}
-
-
-bool SaveSurface(SDL_Surface* surface, const char* file_path) {
-    SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
-    /* int imgFlags = IMG_INIT_PNG;
-     if (!(IMG_Init(imgFlags) & imgFlags)) {
-         SDL_Log("SDL_image could not initialize! SDL_image Error: %s\n", IMG_GetError());
-         SDL_Quit();
-         return 1;
-     }*/
-
-    if (surface_to_save == NULL) {
-        SDL_Log("Couldn't convert surface: %s", SDL_GetError());
-        return false;
-    }
-
-    int result = IMG_SavePNG(surface_to_save, file_path);
-    SDL_FreeSurface(surface_to_save);
-
-    if (result != 0) {
-        SDL_Log("Failed to save image: %s", IMG_GetError());
-        return false;
-    }
-
-    return true;
-}
 static std::string active_model_path = "Henüz dosya seçilmedi.";
-void SceneUI::drawHistogramPanel(UIContext& ctx) {
-    ImGuiIO& io = ImGui::GetIO();
-    float screen_y = io.DisplaySize.y;
-
-    static std::vector<float> r_data(256, 0.0f);
-    static std::vector<float> g_data(256, 0.0f);
-    static std::vector<float> b_data(256, 0.0f);
-    static std::vector<float> luma_data(256, 0.0f);
-
-    std::fill(r_data.begin(), r_data.end(), 0.0f);
-    std::fill(g_data.begin(), g_data.end(), 0.0f);
-    std::fill(b_data.begin(), b_data.end(), 0.0f);
-    std::fill(luma_data.begin(), luma_data.end(), 0.0f);
-
-    int total_pixels = 0;
-
-    if (ctx.surface) {
-        SDL_LockSurface(ctx.surface);
-        uint8_t* pixels = static_cast<uint8_t*>(ctx.surface->pixels);
-        int pitch = ctx.surface->pitch;
-
-        for (int y = 0; y < ctx.surface->h; ++y) {
-            for (int x = 0; x < ctx.surface->w; ++x) {
-                uint8_t* pixel = pixels + y * pitch + x * 4;
-                uint8_t r = pixel[2];
-                uint8_t g = pixel[1];
-                uint8_t b = pixel[0];
-
-                r_data[r]++;
-                g_data[g]++;
-                b_data[b]++;
-
-                float luma = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-                int l_idx = std::fmin(255, static_cast<int>(luma));
-                luma_data[l_idx]++;
-
-                total_pixels++;
-            }
-        }
-
-        SDL_UnlockSurface(ctx.surface);
-    }
-
-    if (total_pixels > 0) {
-        for (int i = 0; i < 256; ++i) {
-            r_data[i] /= total_pixels;
-            g_data[i] /= total_pixels;
-            b_data[i] /= total_pixels;
-            luma_data[i] /= total_pixels;
-        }
-    }
-
-    ImGui::SetNextWindowSize(ImVec2(500, 240), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(1000, screen_y - 540), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Histogram");
-
-    ImGui::Text("Hover to inspect. RGB + Luminance");
-
-    ImVec2 canvas_size(460, 140);
-    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    draw_list->AddRect(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), IM_COL32(100, 100, 100, 255));
-
-    float bin_width = canvas_size.x / 256.0f;
-
-    for (int i = 0; i < 256; ++i) {
-        float x = canvas_pos.x + i * bin_width;
-        float base_y = canvas_pos.y + canvas_size.y;
-
-        float rh = r_data[i] * canvas_size.y;
-        float gh = g_data[i] * canvas_size.y;
-        float bh = b_data[i] * canvas_size.y;
-        float lh = luma_data[i] * canvas_size.y;
-
-        draw_list->AddLine(ImVec2(x, base_y), ImVec2(x, base_y - rh), IM_COL32(255, 0, 0, 180));
-        draw_list->AddLine(ImVec2(x, base_y), ImVec2(x, base_y - gh), IM_COL32(0, 255, 0, 180));
-        draw_list->AddLine(ImVec2(x, base_y), ImVec2(x, base_y - bh), IM_COL32(0, 120, 255, 180));
-        draw_list->AddLine(ImVec2(x, base_y), ImVec2(x, base_y - lh), IM_COL32(220, 220, 220, 80));
-    }
-
-    ImGui::InvisibleButton("histogram_hover", canvas_size);
-    if (ImGui::IsItemHovered()) {
-        ImVec2 mouse = ImGui::GetMousePos();
-        int hover_index = static_cast<int>((mouse.x - canvas_pos.x) / bin_width);
-        hover_index = std::clamp(hover_index, 0, 255);
-
-        ImGui::BeginTooltip();
-        ImGui::Text("Bin: %d", hover_index);
-        ImGui::Text("R: %.4f", r_data[hover_index]);
-        ImGui::Text("G: %.4f", g_data[hover_index]);
-        ImGui::Text("B: %.4f", b_data[hover_index]);
-        ImGui::Text("Luminance: %.4f", luma_data[hover_index]);
-        ImGui::EndTooltip();
-    }
-
-    ImGui::Dummy(canvas_size);
-    ImGui::End();
-}
 
 void SceneUI::drawLogConsole() {
     static ImGuiTextBuffer log_buffer;
@@ -250,7 +115,6 @@ void SceneUI::draw(UIContext& ctx) {
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 6));
-
     ImGui::SetNextWindowSize(ImVec2(340, 260), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(20, screen_y - 300), ImGuiCond_FirstUseEver);
 
@@ -287,7 +151,7 @@ void SceneUI::draw(UIContext& ctx) {
         ImGui::Text("Mouse Control");
         ImGui::Checkbox("Enable Mouse Look", &ctx.mouse_control_enabled);
         if (ctx.mouse_control_enabled)
-            ImGui::SliderFloat("Sensitivity", &ctx.mouse_sensitivity, 0.001f, 0.2f, "%.3f");
+            ImGui::SliderFloat("Sensitivity", &ctx.mouse_sensitivity, 0.01f, 0.5f, "%.3f");
 
         // Apply position changes
         if (pos_changed) {
@@ -336,19 +200,51 @@ void SceneUI::draw(UIContext& ctx) {
     ImGui::SetNextWindowSize(ImVec2(360, 360), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(1040, screen_y - 280), ImGuiCond_FirstUseEver);
     ImGui::Begin("Render Settings", nullptr);
+    static int new_width = image_width;
+	float new_aspect_ratio = aspect_ratio;
+    static int new_height = image_height;
+    static int aspect_w = 16;
+    static int aspect_h = 9;
+
+    ImGui::Text("Render Resolution");
+    ImGui::InputInt("Width", &new_width);
+    ImGui::InputInt("Height", &new_height);
+    ImGui::InputInt("Aspect W", &aspect_w);
+    ImGui::SameLine();
+    ImGui::InputInt("Aspect H", &aspect_h);
+
+    if (ImGui::Button("Apply")) {
+        if (aspect_h != 0) {
+            pending_aspect_ratio = static_cast<float>(aspect_w) / static_cast<float>(aspect_h);
+        }
+        else {
+            pending_aspect_ratio = 1.0f; // Güvenli varsayılan
+        }
+        pending_width = new_width;
+        pending_height = new_height;
+		aspect_ratio = pending_aspect_ratio;
+        pending_resolution_change = true;
+    }
 
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "Model & Scene");
 
     if (ImGui::Button("Load Model", ImVec2(150, 0))) {
 #ifdef _WIN32
-        std::string file = openFileDialog("3D Files\0*.gltf\0");
+        std::string file = openFileDialog(
+            "3D Files\0*.gltf;*.glb;*.fbx;*.obj;*.dae;*.3ds;*.blend;*.ply;*.stl\0"
+            "GLTF Files (*.gltf, *.glb)\0*.gltf;*.glb\0"
+            "FBX Files (*.fbx)\0*.fbx\0"
+            "OBJ Files (*.obj)\0*.obj\0"
+            "All Files (*.*)\0*.*\0"
+        );
+
         if (!file.empty()) {
             active_model_path = file;
           
             ctx.scene.clear();
             ctx.renderer.create_scene(ctx.scene, ctx.optix_gpu_ptr, file);            
                 ctx.scene.camera->update_camera_vectors(); 
-                render_settings.start_animation_render = false;
+                ctx.render_settings.start_animation_render = false;
 				ctx.start_render = false;				
         }
 
@@ -356,57 +252,83 @@ void SceneUI::draw(UIContext& ctx) {
     }
     ImGui::SameLine();
     ImGui::TextWrapped("Model: %s", active_model_path.c_str());
-
     ImGui::Separator();
-
+    ImGui::PushItemWidth(180);
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "Render Engine");
-    ImGui::Checkbox("Use OptiX", &render_settings.use_optix);
 
-    ImGui::SliderInt("Samples Per Pixel", &render_settings.samples_per_pixel, 4, 4096);
-    ImGui::SliderInt("Samples Per Pass", &render_settings.samples_per_pass, 4, 4096);
-    ImGui::SliderInt("Max Bounces", &render_settings.max_bounces, 1, 64);
-    
+    ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
+    ImGui::SameLine(); HelpMarker("Enables GPU acceleration via NVIDIA OptiX. Requires RTX-compatible GPU.");
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Use Denoiser", &ctx.render_settings.use_denoiser);
+    ImGui::SameLine(); HelpMarker("Applies denoising to reduce noise after rendering. Based on OIDN.");
+
+    if (render_settings.use_denoiser) {
+        ImGui::SliderFloat("Denoiser Blend", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f, "%.2f");
+        ImGui::SameLine(); HelpMarker("Blends the denoised result with the original. 1 = fully denoised, 0 = original image.");
+    }
+
     ImGui::Separator();
     ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1), "Adaptive Sampling");
 
-    ImGui::Checkbox("Use Adaptive", &render_settings.use_adaptive_sampling);
-    if (render_settings.use_adaptive_sampling) {
-        ImGui::SliderInt("Min Samples", &render_settings.min_samples, 4, 1024);
-        ImGui::SliderInt("Max Samples", &render_settings.max_samples, 4, 2048);
-        ImGui::SliderFloat("Variance Threshold", &render_settings.variance_threshold, 0.00001f, 0.01f, "%.5f");
-    }
+    // Min Samples
+    ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples, 1.0f, 1, 1024);
+    ImGui::SameLine(); HelpMarker("Minimum number of samples per pixel before noise variance is evaluated.");
 
-   
+    // Max Samples
+    ImGui::DragInt("Max Samples", &ctx.render_settings.max_samples, 1.0f, 1, 2048);
+    ImGui::SameLine(); HelpMarker("Maximum number of samples per pixel. Higher values allow cleaner results but take longer.");
+
+    // Variance Threshold
+    ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.00001f, 0.01f, "%.5f");
+    ImGui::SameLine(); HelpMarker("Pixels with variance below this threshold will stop sampling early. Lower = cleaner but slower.");
+	// Max Bounces
+    ImGui::Separator();
+    ImGui::DragInt("Max Bounce", &ctx.render_settings.max_bounces, 1.0f, 1, 64);
+    ImGui::SameLine(); HelpMarker("Maximum number of ray bounces. Higher values improve indirect lighting, reflections, and refractions but increase render time.");
 
     ImGui::Separator();
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "Environment");
     ImGui::ColorEdit3("Background Color", &ctx.scene.background_color.x);
 
     ImGui::Separator();
-
     if (ImGui::Button("Start Render", ImVec2(150, 0))) ctx.start_render = true;
     ImGui::SameLine();
     if (ImGui::Button("Stop", ImVec2(150, 0))) ctx.start_render = false;
+   
+    ImGui::Separator();
+    // Show current render time text
+    ImGui::Text("Last Render Time: %.2f sec", last_render_time_ms);
+    // Clamp to [0, 1] range for progress bar
+    float normalized = std::fmin(last_render_time_ms / 1000.0f, 1.0f);  // 1 saniyeyi 100%
+    // Label inside progress bar
+    char label[64];
+    snprintf(label, sizeof(label), "%.2f sec", last_render_time_ms);
+    // Bar visualization
+    ImGui::ProgressBar(normalized, ImVec2(-1, 25), label);
+
     ImGui::Separator();
     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1), "Animation");
 
-    ImGui::SliderFloat("Duration (sec)", &render_settings.animation_duration, 1.0f, 60.0f);
-    ImGui::SliderInt("FPS", &render_settings.animation_fps, 1, 60);
+    ImGui::SliderFloat("Duration (sec)", &ctx.render_settings.animation_duration, 1.0f, 60.0f);
+    ImGui::SameLine(); HelpMarker("Length of the animation in seconds.");
+
+    ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);
+    ImGui::SameLine(); HelpMarker("Frames per second for animation rendering.");
+
     ImGui::Separator();
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "Animation Rendering");
 
     if (ImGui::Button("Start CPU Animation Render", ImVec2(310, 0))) {
-        render_settings.start_animation_render = true;
+        ctx.render_settings.start_animation_render = true;
+		ctx.start_render = true;  // Start render immediately
     }
     ImGui::Spacing();
     if (ImGui::Button("Save Image As...", ImVec2(310, 0))) {
-        std::string path = saveFileDialog("PNG Files\0*.png\0");
-        if (!path.empty()) {
-            SaveSurface(ctx.surface, path.c_str());
-            SDL_Log("Image saved to: %s", path.c_str());
-        }
+        ctx.render_settings.save_image_requested = true;
     }
 
+    ImGui::PopItemWidth();
     ImGui::End();
 
     ImGui::PopStyleVar(2);

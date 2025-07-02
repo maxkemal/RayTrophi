@@ -6,6 +6,34 @@
 #include "scatter_volume_step.h"
 
 extern AtmosphereProperties g_atmosphere;
+__device__ void compute_atmosphere(
+    const Ray& ray, float t_max, const AtmosphereProperties& params,
+    float3* out_transmittance, float3* out_inscattered)
+{
+    // Ray marching (basit)
+    const int steps = 32;
+    float3 transmittance = make_float3(1.0f, 1.0f, 1.0f);
+    float3 inscattered = make_float3(0.0f, 0.0f, 0.0f);
+    float dt = t_max / steps;
+
+    for (int i = 0; i < steps; ++i) {
+        float t = dt * (i + 0.5f);
+        float3 pos = ray.origin + t * ray.direction;
+
+        float density = params.base_density * exp(-pos.y * 0.001f); // basit height decay
+        float3 scatter = make_float3(params.sigma_s * density, params.sigma_s * density, params.sigma_s * density);
+        float3 absorb = make_float3(params.sigma_a * density, params.sigma_a * density, params.sigma_a * density);
+
+        float3 step_transmittance = exp_componentwise(-dt * absorb);
+        transmittance *= step_transmittance;
+
+        float3 incident = make_float3(1.0f, 1.0f, 1.0f); // Güneş ışığı vs.
+        inscattered += transmittance * scatter * incident * dt;
+    }
+
+    *out_transmittance = transmittance;
+    *out_inscattered = inscattered;
+}
 
 __device__ float power_heuristic(float pdf_a, float pdf_b) {
     float a2 = pdf_a * pdf_a;
@@ -15,11 +43,15 @@ __device__ float power_heuristic(float pdf_a, float pdf_b) {
 __device__ float balance_heuristic(float pdf_a, float pdf_b) {
     return pdf_a / (pdf_a + pdf_b + 1e-4f);
 }
+__device__ float luminance(const float3& c) {
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
 __device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
     int light_count = optixLaunchParams.light_count;
     if (light_count == 0) return -1;
 
-    // --- Öncelik: Directional light ---
+    // --- Öncelik: Directional light --- (örnekleme olasılığı %33)
     for (int i = 0; i < light_count; i++) {
         if (optixLaunchParams.lights[i].type == 1) {
             if (random_float(rng) < 0.33f)
@@ -28,23 +60,32 @@ __device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
     }
 
     // --- Point light seçim ---
-    float weights[32];
+    float weights[128];  // max light sayısı 32 varsayımı
     float total_weight = 0.0f;
+
     for (int i = 0; i < light_count; i++) {
         const LightGPU& light = optixLaunchParams.lights[i];
         if (light.type == 0) {
             float dist = length(light.position - hit_position);
-            dist = fmaxf(dist, 1.0f);
-           
+            dist = fmaxf(dist, 1.0f); // minimum 1.0f uzaklık
+
+            // Enerji katkısını hesaba kat (daha yakın, daha enerjik olanlara öncelik)
+            float falloff = 1.0f / (dist * dist); // inverse square
+            float intensity = luminance(light.color * light.intensity);
+            weights[i] = falloff * intensity;
+
+            total_weight += weights[i];
         }
         else {
             weights[i] = 0.0f;
         }
     }
 
+    // --- Eğer total_weight çok düşükse fallback ---
     if (total_weight < 1e-6f)
         return clamp(int(random_float(rng) * light_count), 0, light_count - 1);
 
+    // --- Weighted seçim ---
     float r = random_float(rng) * total_weight;
     float accum = 0.0f;
     for (int i = 0; i < light_count; i++) {
@@ -53,8 +94,10 @@ __device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
             return i;
     }
 
+    // --- Güvenli fallback ---
     return clamp(int(random_float(rng) * light_count), 0, light_count - 1);
 }
+
 __device__ float3 sample_directional_light(const LightGPU& light, const float3& hit_pos, curandState* rng, float3& wi_out) {
     float3 L = normalize(light.direction);
     float3 tangent = normalize(cross(L, make_float3(0.0f, 1.0f, 0.0f)));
@@ -64,7 +107,7 @@ __device__ float3 sample_directional_light(const LightGPU& light, const float3& 
     float2 disk_sample = random_in_unit_disk(rng);
     float3 offset = (tangent * disk_sample.x + bitangent * disk_sample.y) * light.radius;
 
-    float3 light_pos = hit_pos + L * 1000.0f + offset;
+    float3 light_pos = hit_pos + L * 1000 + offset;
     wi_out = normalize(light_pos - hit_pos);
     return wi_out;
 }
@@ -99,7 +142,7 @@ __device__ float3 calculate_light_contribution(
         return make_float3(0.0f, 0.0f, 0.0f);
     }
 
-    float NdotL = dot(payload.normal, wi);
+    float NdotL = max(dot(payload.normal, wi),0.0001);
     //if (NdotL <= 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
 
     float3 origin = payload.position + payload.normal * shadow_bias;
@@ -110,7 +153,7 @@ __device__ float3 calculate_light_contribution(
 
     float3 f = evaluate_brdf(material, payload, wo, wi);
     float pdf_brdf_val = pdf_brdf(material, wo, wi, payload.normal);
-    float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.1f, 5000.0f);
+    float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.001f, 5000.0f);
 
     float pdf_light = 1.0f;
     if (light.type == 0) {
@@ -186,7 +229,7 @@ __device__ float3 calculate_direct_lighting(
     // ==== BRDF & PDF ====
     float3 f = evaluate_brdf(mat, payload, wo, wi);
     float pdf_brdf_val = pdf_brdf(mat, wo, wi, payload.normal);
-    float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.1f, 5000.0f);
+    float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.01f, 5000.0f);
 
     // ==== Light PDF ====
     float pdf_light = 1.0f;
@@ -247,7 +290,7 @@ __device__ float3 calculate_brdf_mis(
             float3 f = evaluate_brdf(mat, payload, wo, wi);
             float NdotL = fmaxf(dot(payload.normal, wi), 0.0f);
             float3 Li = light.color * light.intensity ;
-
+          
             result += (f * Li * NdotL) * mis_weight * light_count; // Light_count çarpılıyor, çünkü sadece bir ışık örneklendi.
         }
     }
@@ -264,7 +307,7 @@ __device__ float3 calculate_brdf_mis(
             float3 f = evaluate_brdf(mat, payload, wo, wi);
             float NdotL = fmaxf(dot(payload.normal, wi), 0.0f);
             float3 Li = light.color * light.intensity / (dist * dist);
-
+			
             result += (f * Li * NdotL) * mis_weight * light_count; // Sadece seçilen ışık örneklendiği için çarpım.
         }
     }
@@ -275,7 +318,7 @@ __device__ float3 calculate_brdf_mis(
 __device__ float3 ray_color(Ray ray, curandState* rng) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
-    bool specular_bounce = false;
+    //bool specular_bounce = false;
     const int max_depth = optixLaunchParams.max_depth;
     int light_count = optixLaunchParams.light_count;
     int light_index = (light_count > 0) ? pick_smart_light(ray.origin, rng) : -1;
@@ -286,9 +329,17 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         trace_ray(ray, &payload);
 
         if (!payload.hit) {
-            float falloff = (bounce == 0) ? 1.0f : __powf(0.1f, bounce); // Her bounce'ta azalır
-            color += throughput * optixLaunchParams.background_color * falloff;
+			// --- Eğer ışık yoksa arka plan rengi ve atmosfer katkısı ekle ---
+            float3 transmittance = make_float3(1.0f, 1.0f, 1.0f);
+            float3 inscattered = make_float3(0.0f, 0.0f, 0.0f);
+            if (optixLaunchParams.atmosphere.active) {
+                float t_far = 1000.0f; // max distance (gerekirse dinamik al)
+                compute_atmosphere(ray, t_far, optixLaunchParams.atmosphere, &transmittance, &inscattered);
+            }
+            float falloff = (bounce == 0) ? 1.0f : __powf(0.5f, bounce);
+            color += throughput * (optixLaunchParams.background_color * falloff * transmittance + inscattered) ;
             break;
+           
         }
 
         float3 wo = -normalize(ray.direction);
@@ -302,15 +353,17 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         // --- Scatter başarısızsa çık ---
         if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular))
             break;
+        float opacity = mat.opacity;
         throughput *= attenuation;
         // --- Russian roulette ---
        
             float p = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
             p = clamp(p, 0.0f, 0.98f);
-            if (random_float(rng) > p)
-                break;
-            throughput /= p;
-       
+            if (bounce > 2) {
+                if (random_float(rng) > p)
+                    break;
+                throughput /= p;
+            }
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
         if (light_count == 0) {
             color += throughput * payload.emission;
@@ -323,10 +376,11 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
        
         // --- Direkt katkı ---
         float3 direct = make_float3(0.0f, 0.0f, 0.0f);
-        if (light_index >= 0) {
+        if (!is_specular && light_index >= 0) {
             direct = calculate_light_contribution(
                 optixLaunchParams.lights[light_index], mat, payload, wo, rng
             );
+			 // Direkt katkıyı throughput ile çarp
         }
 
         // --- BRDF yönünde MIS katkı ---
@@ -361,12 +415,16 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                 }
             }
         }
-       
+		
+        direct *= opacity; 
+		brdf_mis *= opacity; // BRDF MIS katkısını da opacity ile çarp
+
         // --- Toplam katkı ---
-        color += throughput * (payload.emission*0.5 + direct + brdf_mis);
+        color += throughput * (payload.emission + direct+ brdf_mis);
        
         ray = scattered;
-        specular_bounce = is_specular;
+		
+
     }
 
     return color;

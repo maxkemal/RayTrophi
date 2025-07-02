@@ -2,7 +2,7 @@
 #include <cmath>
 #include <stdlib.h>
 #include "Matrix4x4.h"
-Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist, int blade_count)
+Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count)
     : lookfrom(lookfrom), lookat(lookat), vup(vup), vfov(vfov),
     aspect_ratio(aspect), aperture(aperture), focus_dist(focus_dist),
     blade_count(blade_count), fov(vfov), origin(lookfrom)
@@ -16,7 +16,7 @@ Camera::Camera()
     : aperture(0.0), aspect(0.0), aspect_ratio(0.0), blade_count(0), far_dist(0.0), 
       focus_dist(0.0), fov(0.0), lens_radius(0.0), near_dist(0.0), vfov(0.0) {
 }
-Ray Camera::get_ray(double s, double t) const {
+Ray Camera::get_ray(float s, float t) const {
     Vec3 rd = lens_radius * random_in_unit_polygon(blade_count);
     Vec3 offset = u * rd.x + v * rd.y;
     return Ray(origin + offset, lower_left_corner + s * horizontal + t * vertical - origin - offset);
@@ -36,9 +36,9 @@ void Camera::update_camera_vectors() {
     u = Vec3::cross(vup, w).normalize();
     v = Vec3::cross(w, u).normalize();
 
-    double theta = vfov * M_PI / 180.0;
-    double half_height = tan(theta / 2.0);
-    double half_width = aspect_ratio * half_height;
+    float theta = vfov * M_PI / 180.0;
+    float half_height = tan(theta / 2.0);
+    float half_width = aspect_ratio * half_height;
 
     horizontal = 2.0 * half_width * focus_dist * u;
     vertical = 2.0 * half_height * focus_dist * v;
@@ -89,7 +89,7 @@ Vec3 Camera::random_in_unit_polygon(int sides) const {
     return Vec3SIMD(px, py, 0);
 }
 // Yeni fonksiyon: Bokeh þiddetini hesapla
-double Camera::calculate_bokeh_intensity(const Vec3& point) const {
+float Camera::calculate_bokeh_intensity(const Vec3& point) const {
     double distance = (point - origin).length();
     double focal_plane_distance = focus_dist;
 
@@ -101,13 +101,13 @@ double Camera::calculate_bokeh_intensity(const Vec3& point) const {
     return std::min(1.0, blur_factor * scaled_aperture);
 }
 // Iþýk kaynaklarý için özel bokeh þekli oluþtur
-Vec3 Camera::create_bokeh_shape(const Vec3& color, double intensity) const {
+Vec3 Camera::create_bokeh_shape(const Vec3& color, float intensity) const {
     Vec3 bokeh_color = color * intensity;
     Vec3 shape = random_in_unit_polygon(blade_count);
     return bokeh_color * (shape * 0.5 + Vec3(0.5, 0.5, 0.5));
 }
 
-bool Camera::isPointInFrustum(const Vec3& point, double size) const {
+bool Camera::isPointInFrustum(const Vec3& point, float size) const {
     for (const auto& plane : frustum_planes) {
         if (plane.distanceToPoint(point) < -size) {
             return false;  // Point is outside the frustum

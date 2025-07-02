@@ -12,7 +12,7 @@ struct gpuCamera {
     float lens_radius;
     float focus_dist;
     int blade_count;
-
+	float aperture;  // lens aperture
 };
 struct LightGPU {
     float3 position;
@@ -44,6 +44,7 @@ struct RayGenParams {
     AtmosphereProperties atmosphere;
     // Yeni parametreler
     int min_samples;             // Minimum örnek sayısı
+	int max_samples;             // Maksimum örnek sayısı
     float variance_threshold;    // Baz varyans eşik değeri
     int frame_number;            // Mevcut frame numarası
 	int max_depth; 		        // Maksimum derinlik

@@ -32,7 +32,7 @@ public:
     virtual Vec3 getIntensity(const Vec3& point, const Vec3& light_sample_point) const {
         return color * intensity; // varsayýlan davranýþ: sabit ýþýk
     }
-
+    void setRadius(float rad) { radius = rad; }
     virtual Vec3 random_point() const = 0;
     virtual LightType type() const = 0;
 

@@ -72,6 +72,7 @@ public:
     static void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
 
     Renderer(int image_width, int image_height, int max_depth, int samples_per_pixel);
+    void resetResolution(int w, int h);
     ~Renderer();
    
     void precompute_halton(int max_halton_index);
@@ -111,6 +112,7 @@ public:
     static std::vector<Vec3> normalMapBuffer;
    
 private:
+    std::vector<float> variance_buffer;
     static constexpr size_t CACHE_SIZE = 8;
     static constexpr size_t DIMENSION_COUNT = 2;
     AssimpLoader assimpLoader;
@@ -159,7 +161,6 @@ private:
     float max(float a, float b) const { return a > b ? a : b; }
     // Adaptive sampling için ekstra bufferlar
     std::vector<Vec3> variance_map;
-    std::vector<int> sample_budget_map; // Şimdilik opsiyonel
 
     AtmosphericEffects atmosphericEffects;
     SDL_Renderer* sdlRenderer; // SDL_Renderer pointer'ı ekleyin
@@ -189,6 +190,8 @@ private:
     float radical_inverse(unsigned int bits);
     Vec3 calculate_volumetric_lighting(const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const HitRecord& rec, const Ray& ray);
    
+
+    float luminance(const Vec3& color);
 
     int pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights, const Vec3& hit_position);
 
