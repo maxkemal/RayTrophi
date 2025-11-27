@@ -594,14 +594,15 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         std::cout << "[Embree] BVH rebuilt successfully.\n";
     }
     else {
-        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0);
+        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0,0);
         std::cout << "[In-house BVH] BVH rebuilt successfully.\n";
     }
 }
 
 
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path) {
-  
+    std::cout << "[INFO] Test log\n" << std::flush;
+
     // Önce sahneyi sıfırla
     scene.world.clear();
     scene.lights.clear();
@@ -648,7 +649,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         std::cout << "[Embree] BVH structure built successfully." << std::endl;
     }
     else {
-        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0);
+        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0f, 1.0f);
         std::cout << "[In-house BVH] BVH structure built successfully." << std::endl;
     }
 

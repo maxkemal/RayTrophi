@@ -24,9 +24,6 @@ struct UIContext {
 	
 };
 
-
-
-
 class SceneUI {
 public:
 

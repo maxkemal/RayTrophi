@@ -12,17 +12,17 @@ Vec3 Box::max() const {
     return center + Vec3(size / 2, size / 2, size / 2);
 }
 
-bool Box::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
+bool Box::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     Vec3 min_point = min();
     Vec3 max_point = max();
 
-    double tmin = (min_point.x - r.origin.x) / r.direction.x;
-    double tmax = (max_point.x - r.origin.x) / r.direction.x;
+    float tmin = (min_point.x - r.origin.x) / r.direction.x;
+    float tmax = (max_point.x - r.origin.x) / r.direction.x;
 
     if (tmin > tmax) std::swap(tmin, tmax);
 
-    double tymin = (min_point.y - r.origin.y) / r.direction.y;
-    double tymax = (max_point.y - r.origin.y) / r.direction.y;
+    float tymin = (min_point.y - r.origin.y) / r.direction.y;
+    float tymax = (max_point.y - r.origin.y) / r.direction.y;
 
     if (tymin > tymax) std::swap(tymin, tymax);
 
@@ -35,8 +35,8 @@ bool Box::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
     if (tymax < tmax)
         tmax = tymax;
 
-    double tzmin = (min_point.z - r.origin.z) / r.direction.z;
-    double tzmax = (max_point.z - r.origin.z) / r.direction.z;
+    float tzmin = (min_point.z - r.origin.z) / r.direction.z;
+    float tzmax = (max_point.z - r.origin.z) / r.direction.z;
 
     if (tzmin > tzmax) std::swap(tzmin, tzmax);
 
@@ -54,7 +54,7 @@ bool Box::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
         rec.point = r.at(rec.t);
         Vec3 outward_normal = Vec3(0, 0, 0);
         Vec3 relative_pos = rec.point - center;
-        double epsilon = 0.0001;
+        float epsilon = 0.0001f;
 
         if (std::abs(relative_pos.x) > size / 2 - epsilon)
             outward_normal.x = relative_pos.x > 0 ? 1 : -1;
@@ -71,7 +71,7 @@ bool Box::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
     return false;
 }
 
-bool Box::bounding_box(double time0, double time1, AABB& output_box) const {
+bool Box::bounding_box(float time0, float time1, AABB& output_box) const {
     output_box = AABB(min(), max());
     return true;
 }

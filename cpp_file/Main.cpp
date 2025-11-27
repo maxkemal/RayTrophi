@@ -103,6 +103,7 @@ Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float
     float falloff = std::clamp(1.0f - strength * dist, 0.0f, 1.0f);
     return color * falloff;
 }
+
 SceneUI ui;
 SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
@@ -257,7 +258,7 @@ bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
 
 int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "Turkish");
-	
+  
 		std::cout << "RayTrophi Render Engine Launched" << std::endl;
         detectOptixHardware();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
@@ -427,12 +428,13 @@ int main(int argc, char* argv[]) {
             }
         
         }
-
+       
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
-       
+
         ui.draw(ui_ctx);
+
         auto now = std::chrono::steady_clock::now();
         auto delta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_camera_move_time).count();
         camera_moved_recently = (delta_ms < 50);

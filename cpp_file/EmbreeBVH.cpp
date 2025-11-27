@@ -207,7 +207,7 @@ void EmbreeBVH::buildFromTriangleData(const std::vector<TriangleData>& triangles
     rtcCommitScene(scene);
 }
 
-bool EmbreeBVH::hit(const Ray& ray, double t_min, double t_max, HitRecord& rec) const {
+bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec) const {
     RTCRayHit rayhit = {};
     rayhit.ray.org_x = ray.origin.x;
     rayhit.ray.org_y = ray.origin.y;

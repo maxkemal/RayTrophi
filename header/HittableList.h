@@ -23,8 +23,8 @@ public:
     std::shared_ptr<Hittable> getHittable(size_t index) const {
         return hittables[index]; // hittables bir vektör veya benzeri bir veri yapýsý olmalý
     }
-    virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override;
-    virtual bool bounding_box(double time0, double time1, AABB& output_box) const override;
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
+    virtual bool bounding_box(float time0, float time1, AABB& output_box) const override;
 
     void build_bvh();
 private:

@@ -75,13 +75,13 @@ public:
         return nodeName;
     }
 
-    virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override;
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
     void updateTransformedVertices();
     void setNodeName(const std::string& name);
     void setBaseTransform(const Matrix4x4& transform);
     void initialize_transforms();
     void updateAnimationTransform(const Matrix4x4& animTransform);
-    virtual bool bounding_box(double time0, double time1, AABB& output_box) const override;
+    virtual bool bounding_box(float time0, float time1, AABB& output_box) const override;
     void update_bounding_box();
     Vec3 apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const;
     void apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices);

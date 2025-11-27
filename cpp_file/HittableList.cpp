@@ -22,7 +22,7 @@ size_t HittableList::size() const {
     return objects.size();
 }
 
-bool HittableList::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
+bool HittableList::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     if (bvh_root) {
         return bvh_root->hit(r, t_min, t_max, rec);
     }
@@ -43,7 +43,7 @@ bool HittableList::hit(const Ray& r, double t_min, double t_max, HitRecord& rec)
     }
 }
 
-bool HittableList::bounding_box(double time0, double time1, AABB& output_box) const {
+bool HittableList::bounding_box(float time0, float time1, AABB& output_box) const {
     if (objects.empty()) return false;
 
     AABB temp_box;

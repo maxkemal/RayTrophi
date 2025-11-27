@@ -27,10 +27,10 @@ public:
     void updateGeometryFromTrianglesFromSource(const std::vector<std::shared_ptr<Hittable>>& objects);
     bool occluded(const Ray& ray, float t_min, float t_max) const;
     void buildFromTriangleData(const std::vector<TriangleData>& triangles);
-    bool hit(const Ray& ray, double t_min, double t_max, HitRecord& rec) const override;
+    bool hit(const Ray& ray, float t_min, float t_max, HitRecord& rec) const override;
     void clearAndRebuild(const std::vector<std::shared_ptr<Hittable>>& objects);
     OptixGeometryData exportToOptixData() const;
-    bool bounding_box(double time0, double time1, AABB& output_box) const override {
+    bool bounding_box(float time0, float time1, AABB& output_box) const override {
         // Embree kendi bounding box’ýný tuttuðu için dummy bir kutu döndürebilirsin.
         // Ya da sahnedeki tüm üçgenlerden büyük bir box hesaplayabilirsin.
         if (triangle_data.empty()) return false;

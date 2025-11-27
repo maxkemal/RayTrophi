@@ -5,6 +5,10 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <string>
+
+
+
+
 static void HelpMarker(const char* desc) {
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
@@ -43,29 +47,13 @@ std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0") {
 static std::string active_model_path = "No file selected yet.";
 
 void SceneUI::drawLogConsole() {
-    static ImGuiTextBuffer log_buffer;
-    static bool scroll_to_bottom = true;
-
-    ImGui::SetNextWindowSize(ImVec2(500, 200), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(20, 40), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Console Log");
-
-    if (ImGui::Button("Clear")) log_buffer.clear();
-    ImGui::SameLine();
-    if (ImGui::Button("Add Log")) {
-        log_buffer.appendf("New render pass started...\n");
-        scroll_to_bottom = true;
-    }
-
-    ImGui::Separator();
-    ImGui::BeginChild("LogScrollRegion", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
-    ImGui::TextUnformatted(log_buffer.begin());
-    if (scroll_to_bottom)
+    if (ImGui::Begin("Console Output")) {
+        ImGui::BeginChild("console", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+       // ImGui::TextUnformatted(g_capturedConsole.c_str());
         ImGui::SetScrollHereY(1.0f);
-    scroll_to_bottom = false;
-    ImGui::EndChild();
-
-    ImGui::End();
+        ImGui::EndChild();
+    }
+    ImGui::End();   
 }
 
 void SceneUI::drawToneMapPanel(UIContext& ctx) {
@@ -200,6 +188,7 @@ void SceneUI::draw(UIContext& ctx) {
 
     ImGui::End();
 
+
     ImGui::SetNextWindowSize(ImVec2(340, 260), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(340, screen_y - 280), ImGuiCond_FirstUseEver);
     ImGui::Begin("Lights", nullptr);
@@ -246,7 +235,7 @@ void SceneUI::draw(UIContext& ctx) {
 
 	// TON MAP PANEL
     drawToneMapPanel(ctx);
-	
+
     // === RENDER SETTINGS PANEL ===
     ImGui::SetNextWindowSize(ImVec2(360, 360), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(1040, screen_y - 280), ImGuiCond_FirstUseEver);
@@ -308,23 +297,39 @@ void SceneUI::draw(UIContext& ctx) {
 
     // --- GPU Section ---
     ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1), "GPU (OptiX)");
-    if (!g_hasOptix) ctx.render_settings.use_optix = false;
-    ImGui::BeginDisabled(!g_hasOptix);
-    ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
-    ImGui::SameLine();
-    HelpMarker("Enables GPU acceleration via NVIDIA OptiX. Requires an RTX-class GPU.");
-    ImGui::EndDisabled();
+
+    if (!g_hasOptix) {
+        ImGui::BeginDisabled();
+        ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "(No RTX GPU detected)");
+        ImGui::EndDisabled();
+    }
+    else {
+        ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
+        ImGui::SameLine();
+        HelpMarker("Enables GPU acceleration via NVIDIA OptiX. Requires an RTX-class GPU.");
+    }
+
 
     // --- CPU Section ---
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "CPU (BVH)");
     const char* bvh_options[] = { "Embree", "In-house" };
     static int current_bvh = ctx.render_settings.UI_use_embree ? 0 : 1;
+
     if (ImGui::Combo("BVH Type", &current_bvh, bvh_options, IM_ARRAYSIZE(bvh_options))) {
         ctx.render_settings.UI_use_embree = (current_bvh == 0);
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     }
+
+    // Uyarı metni
+    if (!ctx.render_settings.UI_use_embree) { // In-house seçildiyse
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "(Experimental)");
+    }
+
     ImGui::SameLine();
-    HelpMarker("Select which BVH structure to use for acceleration. Embree = highly optimized, In-house = custom implementation.");
+    HelpMarker("Select which BVH structure to use for acceleration. Embree = highly optimized, In-house = custom implementation.(Experimental)");
 
     // --- Denoiser Section ---
     ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.6f, 1), "Denoiser");

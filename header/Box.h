@@ -17,8 +17,8 @@ public:
     Vec3 min() const;
     Vec3 max() const;
 
-    virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override;
-    virtual bool bounding_box(double time0, double time1, AABB& output_box) const override;
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
+    virtual bool bounding_box(float time0, float time1, AABB& output_box) const override;
 };
 
 #endif // BOX_H

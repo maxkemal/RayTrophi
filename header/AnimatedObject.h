@@ -39,7 +39,7 @@ public:
         m_meshTransforms.resize(meshes.size(), Matrix4x4()); // Varsayýlan constructor zaten identity matrix oluþturuyor
     }
 
-    virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const override {
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override {
         bool hit_anything = false;
         double closest_so_far = t_max;
 
@@ -57,7 +57,7 @@ public:
         return hit_anything;
     }
 
-    virtual bool bounding_box(double time0, double time1, AABB& output_box) const override {
+    virtual bool bounding_box(float time0, float time1, AABB& output_box) const override {
         if (m_meshes.empty()) return false;
 
         AABB temp_box;

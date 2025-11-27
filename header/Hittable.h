@@ -43,9 +43,9 @@ struct HitRecord {
 
 class Hittable {
 public:
-    virtual bool hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const = 0;
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const = 0;
  
-    virtual bool bounding_box(double time0, double time1, AABB& output_box) const = 0;
+    virtual bool bounding_box(float time0, float time1, AABB& output_box) const = 0;
     virtual ~Hittable() = default;
     virtual void collect_neighbor_normals(const AABB& query_box, Vec3& neighbor_normal,
         int& neighbor_count, const std::shared_ptr<Material>& current_material) const {

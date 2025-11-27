@@ -4,7 +4,7 @@ Sphere::Sphere() {}
 Sphere::Sphere(Vec3 cen, double r, std::shared_ptr<Material> m)
     : center(cen), radius(r), material(m) {}
 
-bool Sphere::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
+bool Sphere::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     Vec3 oc = r.origin - center;
     auto a = Vec3::dot(r.direction, r.direction);
     auto b = Vec3::dot(oc, r.direction);
@@ -35,7 +35,7 @@ bool Sphere::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const
     return false;
 }
 
-bool Sphere::bounding_box(double time0, double time1, AABB& output_box) const {
+bool Sphere::bounding_box(float time0, float time1, AABB& output_box) const {
     output_box = AABB(center - Vec3(radius, radius, radius),
         center + Vec3(radius, radius, radius));
     return true;

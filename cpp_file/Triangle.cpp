@@ -179,7 +179,7 @@ float smoothstep(float edge0, float edge1, float x) {
     x = std::clamp((x - edge0) / (edge1 - edge0), 0.01f, 1.0f);
     return x * x * (3.0f - 2.0f * x);
 }
-bool Triangle::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
+bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     // Vertexleri dönüþtürme
     const Vec3 edge1 = transformed_v1 - transformed_v0;
     const Vec3 edge2 = transformed_v2 - transformed_v0;
@@ -288,7 +288,7 @@ void Triangle::updateAnimationTransform(const Matrix4x4& animTransform) {
     finalTransform = currentTransform;  // Base transform zaten identity olduðu için
     updateTransformedVertices();
 }
-bool Triangle::bounding_box(double time0, double time1, AABB& output_box) const {
+bool Triangle::bounding_box(float time0, float time1, AABB& output_box) const {
     Vec3 small(
         std::min({ transformed_v0.x, transformed_v1.x, transformed_v2.x }),
         std::min({ transformed_v0.y, transformed_v1.y, transformed_v2.y }),

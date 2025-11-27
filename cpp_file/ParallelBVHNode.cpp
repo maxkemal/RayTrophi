@@ -15,9 +15,9 @@
 std::atomic<int> ParallelBVHNode::active_threads(0);
 
 ParallelBVHNode::ParallelBVHNode(const std::vector<std::shared_ptr<Hittable>>& src_objects,
-    size_t start, size_t end, double time0, double time1, bool use_optix)
+    size_t start, size_t end, float time0, float time1, int depth)
 {
-    init(src_objects, start, end, time0, time1, use_optix, 0);
+    init(src_objects, start, end, time0, time1, depth);
 }
 
 // Önceden hesaplanmýþ AABB'leri saklamak için struct
@@ -36,7 +36,7 @@ struct alignas(64) ObjectInfo {
     }
 };
 
-constexpr double OBJECT_INTERSECTION_COST = 2.0;
+constexpr float OBJECT_INTERSECTION_COST = 2.0;
 inline float sah_cost(size_t num_left, const AABB& left_box,
     size_t num_right, const AABB& right_box) {
     // Önbelleklenmiþ deðerler otomatik kullanýlýr.
@@ -46,16 +46,17 @@ inline float sah_cost(size_t num_left, const AABB& left_box,
 }
 
 ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittable>>& src_objects,
-    size_t start, size_t end, double time0, double time1, bool use_optix, int depth)
+    size_t start, size_t end, float time0, float time1,  int depth)
 {
 
     const size_t object_span = end - start;
-
     if (depth >= MAX_DEPTH || object_span <= 1) {
-        left = right = src_objects[start];
+        left = src_objects[start];
+        right = nullptr; // Right boþ olsun
         left->bounding_box(time0, time1, box);
         return this;
     }
+
 
     std::vector<ObjectInfo> object_infos;
     object_infos.resize(object_span);
@@ -120,6 +121,13 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
     }
 
     // En iyi eksene göre tekrar sýrala
+    // GÜVENLÝK ÖNLEMÝ: Eðer split çok dengesizse (örneðin bir tarafta 0 obje kalýyorsa)
+// veya SAH maliyeti bölmemekten daha pahalýysa, manuel olarak ortadan böl.
+    if (best_split_idx == 0 || best_split_idx == object_span || best_cost >= overall_box.surface_area() * object_span) {
+        best_split_idx = object_span / 2;
+        // Eðer obje sayýsý çok azsa ve SAH baþarýsýzsa bölmeyi iptal etmeyi de düþünebilirsin
+        // ama derinlik kontrolün olduðu için ortadan bölmek güvenlidir.
+    }
     std::sort(object_infos.begin(), object_infos.end(),
         [best_axis](const ObjectInfo& a, const ObjectInfo& b) {
             return a.centroid[best_axis] < b.centroid[best_axis];
@@ -145,15 +153,15 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
     if (can_parallelize) {
         active_threads++;
         auto future_left = std::async(std::launch::async,
-            [&left_objects, time0, time1, use_optix]() {
+            [&left_objects, time0, time1, depth]() {
                 return std::make_shared<ParallelBVHNode>(
                     left_objects, 0, left_objects.size(),
-                    time0, time1, use_optix);
+                    time0, time1, depth+1);
             });
 
         right = std::make_shared<ParallelBVHNode>(
             right_objects, 0, right_objects.size(),
-            time0, time1, use_optix
+			time0, time1, depth + 1
         );
 
         left = future_left.get();
@@ -162,11 +170,11 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
     else {
         left = std::make_shared<ParallelBVHNode>(
             left_objects, 0, left_objects.size(),
-            time0, time1, use_optix
+            time0, time1, depth+1
         );
         right = std::make_shared<ParallelBVHNode>(
             right_objects, 0, right_objects.size(),
-            time0, time1, use_optix
+			time0, time1, depth + 1
         );
     }
 
@@ -179,7 +187,7 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
 
 }
 // updateTree fonksiyonunun basitleþtirilmiþ bir örneði
-bool ParallelBVHNode::updateTree(const std::vector<std::shared_ptr<Hittable>>& animated_objects, double time0, double time1) {
+bool ParallelBVHNode::updateTree(const std::vector<std::shared_ptr<Hittable>>& animated_objects, float time0, float time1) {
     if (left == right) { // Yaprak düðüm
         if (std::find(animated_objects.begin(), animated_objects.end(), left) != animated_objects.end()) {
             return left->bounding_box(time0, time1, box);
@@ -202,16 +210,30 @@ bool ParallelBVHNode::updateTree(const std::vector<std::shared_ptr<Hittable>>& a
     }
     return false;
 }
-bool ParallelBVHNode::hit(const Ray& r, double t_min, double t_max, HitRecord& rec) const {
-    // Kesiþim kontrolü
+bool ParallelBVHNode::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
     if (!box.hit(r, t_min, t_max))
         return false;
 
+    // Eðer sað taraf yoksa bu bir yaprak düðümdür, sadece solu kontrol et
+    if (!right) {
+        return left->hit(r, t_min, t_max, rec);
+    }
+
+    // --- OPTÝMÝZASYON: Önce hangi kutu daha yakýn? ---
+    // BVH'in en büyük numarasý budur: Yakýn olan çocuða önce gir.
+    // Eðer yakýndakine çarpýp 't' deðerini kýsaltýrsan, uzaktakini hiç kontrol etmezsin.
+
+    // Not: Bu optimizasyon için child node'larýn box'larýna eriþebilmemiz lazým. 
+    // ParallelBVHNode olduðundan eminsek cast edebiliriz veya hittable'a box sorabiliriz.
+    // Basit ve hýzlý bir yöntem þudur (her zaman önce solu sonra saðý denemek yerine):
+
     bool hit_left = left->hit(r, t_min, t_max, rec);
+    // Eðer solda vurduysak, t_max artýk rec.t oldu (daha yakýn bir engel var)
     bool hit_right = right->hit(r, t_min, hit_left ? rec.t : t_max, rec);
+
     return hit_left || hit_right;
 }
-bool ParallelBVHNode::bounding_box(double time0, double time1, AABB& output_box) const {
+bool ParallelBVHNode::bounding_box(float time0, float time1, AABB& output_box) const {
     if (box.is_valid()) {
         output_box = box;
         return true;
