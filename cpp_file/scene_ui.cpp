@@ -5,32 +5,42 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <string>
-static void HelpMarker(const char* desc)
-{
+static void HelpMarker(const char* desc) {
+    ImGui::SameLine();
     ImGui::TextDisabled("(?)");
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("%s", desc);
+    if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(450.0f);
+        ImGui::TextUnformatted(desc);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
 }
 
-std::string openFileDialog(const char* filter = "Tüm Dosyalar\0*.*\0") {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
+
+std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0") {
+    wchar_t filename[MAX_PATH] = L"";
+    OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL; // SDL kullanıyorsan pencere handle'ı da olabilir
+    ofn.hwndOwner = nullptr;
     ofn.lpstrFilter = filter;
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-    ofn.lpstrTitle = "Bir dosya seçin";
-
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
+    ofn.lpstrTitle = L"Select a file";
+    ofn.hwndOwner = GetActiveWindow();
+    if (GetOpenFileNameW(&ofn)) {
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
+        std::string utf8_path(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, filename, -1, utf8_path.data(), size_needed, nullptr, nullptr);
+        utf8_path.resize(size_needed - 1); // null terminatörü çıkar
+        return utf8_path;
     }
-    return ""; // iptal edildi
+    return "";
 }
 
-static std::string active_model_path = "Henüz dosya seçilmedi.";
+
+static std::string active_model_path = "No file selected yet.";
 
 void SceneUI::drawLogConsole() {
     static ImGuiTextBuffer log_buffer;
@@ -107,8 +117,6 @@ void SceneUI::drawToneMapPanel(UIContext& ctx) {
     ImGui::End();
 }
 
-
-
 void SceneUI::draw(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
     float screen_y = io.DisplaySize.y;
@@ -147,12 +155,31 @@ void SceneUI::draw(UIContext& ctx) {
             ctx.scene.camera->fov = fov;
             ctx.scene.camera->update_camera_vectors();
         }
+        HelpMarker("Field of View in degrees.\nWider FOV captures more of the scene but increases distortion.");
+
+        ImGui::Text("Depth of Field");
+
+        float& aperture = ctx.scene.camera->aperture;
+        float& focus_dist = ctx.scene.camera->focus_dist;
+
+        bool aperture_changed = ImGui::SliderFloat("Aperture", &aperture, 0.0f, 5.0f, "%.2f");
+        HelpMarker("Controls the size of the lens opening.\nHigher values produce stronger bokeh (background blur).");
+        bool focus_changed = ImGui::DragFloat("Focus Distance", &focus_dist, 0.05f, 0.01f, 100.0f);
+        HelpMarker("Sets the distance from the camera where objects appear sharp.\nObjects in front or behind will blur based on aperture.");
+        if (aperture_changed || focus_changed) {
+            ctx.scene.camera->lens_radius = aperture * 0.5f;
+            ctx.scene.camera->update_camera_vectors();
+        }
+        ImGui::Text("Bokeh Settings");
+        ImGui::SliderInt("Blade Count", &ctx.scene.camera->blade_count, 3, 12);
+        HelpMarker("Number of aperture blades.\nAffects the shape of the bokeh highlights (e.g. triangle, pentagon).");
         ImGui::Separator();
         ImGui::Text("Mouse Control");
         ImGui::Checkbox("Enable Mouse Look", &ctx.mouse_control_enabled);
+        HelpMarker("Enables first-person camera control with mouse movement.");
         if (ctx.mouse_control_enabled)
             ImGui::SliderFloat("Sensitivity", &ctx.mouse_sensitivity, 0.01f, 0.5f, "%.3f");
-
+        HelpMarker("Controls how fast the camera rotates with mouse movement.");
         // Apply position changes
         if (pos_changed) {
             if (targetLock)
@@ -173,26 +200,50 @@ void SceneUI::draw(UIContext& ctx) {
 
     ImGui::End();
 
-    // === LIGHTS PANEL ===
     ImGui::SetNextWindowSize(ImVec2(340, 260), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(340, screen_y - 280), ImGuiCond_FirstUseEver);
     ImGui::Begin("Lights", nullptr);
     ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1), "Scene Lights");
+
     for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
         auto light = ctx.scene.lights[i];
         if (!light) continue;
 
         std::string label = "Light #" + std::to_string(i);
         if (ImGui::TreeNode(label.c_str())) {
+            const char* lightTypeNames[] = { "Point", "Directional", "Spot", "Area" };
+            int index = static_cast<int>(light->type());
+            if (index >= 0 && index < 4)
+                ImGui::Text("Type: %s", lightTypeNames[index]);
+            else
+                ImGui::Text("Type: Unknown (%d)", index);
+
+            HelpMarker("Type of the light source.\nAffects how the light interacts with geometry.");
+
             ImGui::DragFloat3("Position", &light->position.x, 0.1f);
-            ImGui::DragFloat3("Direction", &light->direction.x, 0.1f);
+            HelpMarker("Position of the light in world space.");
+
+            if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
+                ImGui::DragFloat3("Direction", &light->direction.x, 0.1f);
+                HelpMarker("Direction the light is pointing.");
+            }
+
             ImGui::ColorEdit3("Color", &light->color.x);
+            HelpMarker("Base color of the emitted light.");
+
             ImGui::DragFloat("Intensity", &light->intensity, 0.1f, 0.0f, 1000.0f);
-            ImGui::DragFloat("Radius", &light->radius, 0.01f, 0.0f, 10.0f);
+            HelpMarker("Brightness of the light.");
+
+            if (light->type() == LightType::Point || light->type() == LightType::Area|| light->type() == LightType::Directional) {
+                ImGui::DragFloat("Radius", &light->radius, 0.01f, 0.01f, 100.0f);
+                HelpMarker("Physical size of the light.");
+            }
+
             ImGui::TreePop();
         }
     }
     ImGui::End();
+
 	// TON MAP PANEL
     drawToneMapPanel(ctx);
 	
@@ -230,17 +281,14 @@ void SceneUI::draw(UIContext& ctx) {
 
     if (ImGui::Button("Load Model", ImVec2(150, 0))) {
 #ifdef _WIN32
-        std::string file = openFileDialog(
-            "3D Files\0*.gltf;*.glb;*.fbx;*.obj;*.dae;*.3ds;*.blend;*.ply;*.stl\0"
-            "GLTF Files (*.gltf, *.glb)\0*.gltf;*.glb\0"
-            "FBX Files (*.fbx)\0*.fbx\0"
-            "OBJ Files (*.obj)\0*.obj\0"
-            "All Files (*.*)\0*.*\0"
+        std::string file = openFileDialogW(
+            L"3D Files\0*.gltf;*.glb;*.fbx;*.obj;*.dae;*.3ds;*.blend;*.ply;*.stl\0All Files\0*.*\0"
         );
+
 
         if (!file.empty()) {
             active_model_path = file;
-          
+			use_embree = ctx.render_settings.UI_use_embree;
             ctx.scene.clear();
             ctx.renderer.create_scene(ctx.scene, ctx.optix_gpu_ptr, file);            
                 ctx.scene.camera->update_camera_vectors(); 
@@ -254,21 +302,43 @@ void SceneUI::draw(UIContext& ctx) {
     ImGui::TextWrapped("Model: %s", active_model_path.c_str());
     ImGui::Separator();
     ImGui::PushItemWidth(180);
+    ImGui::Separator();
+    ImGui::PushItemWidth(180);
     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "Render Engine");
 
+    // --- GPU Section ---
+    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1), "GPU (OptiX)");
+    if (!g_hasOptix) ctx.render_settings.use_optix = false;
+    ImGui::BeginDisabled(!g_hasOptix);
     ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
-    ImGui::SameLine(); HelpMarker("Enables GPU acceleration via NVIDIA OptiX. Requires RTX-compatible GPU.");
-
     ImGui::SameLine();
-    ImGui::Checkbox("Use Denoiser", &ctx.render_settings.use_denoiser);
-    ImGui::SameLine(); HelpMarker("Applies denoising to reduce noise after rendering. Based on OIDN.");
+    HelpMarker("Enables GPU acceleration via NVIDIA OptiX. Requires an RTX-class GPU.");
+    ImGui::EndDisabled();
 
-    if (render_settings.use_denoiser) {
+    // --- CPU Section ---
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "CPU (BVH)");
+    const char* bvh_options[] = { "Embree", "In-house" };
+    static int current_bvh = ctx.render_settings.UI_use_embree ? 0 : 1;
+    if (ImGui::Combo("BVH Type", &current_bvh, bvh_options, IM_ARRAYSIZE(bvh_options))) {
+        ctx.render_settings.UI_use_embree = (current_bvh == 0);
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    }
+    ImGui::SameLine();
+    HelpMarker("Select which BVH structure to use for acceleration. Embree = highly optimized, In-house = custom implementation.");
+
+    // --- Denoiser Section ---
+    ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.6f, 1), "Denoiser");
+    ImGui::Checkbox("Use Denoiser", &ctx.render_settings.use_denoiser);
+    ImGui::SameLine();
+    HelpMarker("Applies denoising to reduce noise after rendering. Based on OIDN.");
+    if (ctx.render_settings.use_denoiser) {
         ImGui::SliderFloat("Denoiser Blend", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f, "%.2f");
-        ImGui::SameLine(); HelpMarker("Blends the denoised result with the original. 1 = fully denoised, 0 = original image.");
+        ImGui::SameLine();
+        HelpMarker("Blends the denoised result with the original. 1 = fully denoised, 0 = original image.");
     }
 
     ImGui::Separator();
+
     ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1), "Adaptive Sampling");
 
     // Min Samples
@@ -280,11 +350,11 @@ void SceneUI::draw(UIContext& ctx) {
     ImGui::SameLine(); HelpMarker("Maximum number of samples per pixel. Higher values allow cleaner results but take longer.");
 
     // Variance Threshold
-    ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.00001f, 0.01f, "%.5f");
+    ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.001f, 1.0f, "%.5f");
     ImGui::SameLine(); HelpMarker("Pixels with variance below this threshold will stop sampling early. Lower = cleaner but slower.");
 	// Max Bounces
     ImGui::Separator();
-    ImGui::DragInt("Max Bounce", &ctx.render_settings.max_bounces, 1.0f, 1, 64);
+    ImGui::DragInt("Max Bounce", &ctx.render_settings.max_bounces, 1.0f, 1, 32);
     ImGui::SameLine(); HelpMarker("Maximum number of ray bounces. Higher values improve indirect lighting, reflections, and refractions but increase render time.");
 
     ImGui::Separator();
@@ -298,19 +368,19 @@ void SceneUI::draw(UIContext& ctx) {
    
     ImGui::Separator();
     // Show current render time text
-    ImGui::Text("Last Render Time: %.2f sec", last_render_time_ms);
+    ImGui::Text("Last Render Time: %.4f sec", last_render_time_ms);
     // Clamp to [0, 1] range for progress bar
     float normalized = std::fmin(last_render_time_ms / 1000.0f, 1.0f);  // 1 saniyeyi 100%
     // Label inside progress bar
     char label[64];
-    snprintf(label, sizeof(label), "%.2f sec", last_render_time_ms);
+    snprintf(label, sizeof(label), "%.4f sec", last_render_time_ms);
     // Bar visualization
     ImGui::ProgressBar(normalized, ImVec2(-1, 25), label);
 
     ImGui::Separator();
     ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1), "Animation");
 
-    ImGui::SliderFloat("Duration (sec)", &ctx.render_settings.animation_duration, 1.0f, 60.0f);
+    ImGui::SliderFloat("Duration (sec)", &ctx.render_settings.animation_duration, 0.1f, 60.0f);
     ImGui::SameLine(); HelpMarker("Length of the animation in seconds.");
 
     ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);

@@ -7,7 +7,7 @@ bool EmissiveMaterial::scatter(const Ray& r_in, const HitRecord& rec, Vec3& atte
     return false; // Emissive materials do not scatter light
 }
 
-Vec3 EmissiveMaterial::getEmission(double u, double v, const Vec3& p) const {
+Vec3 EmissiveMaterial::getEmission(const Vec2& uv, const Vec3& p) const {
     return emission;
 }
 float EmissiveMaterial::get_opacity(const Vec2& uv) const {

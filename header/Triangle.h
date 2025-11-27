@@ -29,8 +29,8 @@ public:
     Vec3 v0, v1, v2;        // vertices
     Vec3 n0, n1, n2;        // normals
     Vec2 t0,t1, t2;     // texture coordinates
-    Vec3 tangent0, tangent1, tangent2;     // tangents
-    Vec3 bitangent0, bitangent1, bitangent2; // bitangents
+   // Vec3 tangent0, tangent1, tangent2;     // tangents
+   // Vec3 bitangent0, bitangent1, bitangent2; // bitangents
     bool hasTangents;       // tangent basis var mı?
     std::shared_ptr<Material> mat_ptr;
     std::shared_ptr<GpuMaterial> gpuMaterialPtr; // açık isim
@@ -38,20 +38,19 @@ public:
     int smoothingGroup;
     Matrix4x4 transform;
 	// Texture nesnesi
-    std::shared_ptr<Texture> texture;
-  
+    std::shared_ptr<Texture> texture;  
     int smoothGroup;
     // Dönüştürülmüş haller
     Vec3 transformed_v0, transformed_v1, transformed_v2;
     Vec3 transformed_n0, transformed_n1, transformed_n2;
     // Default constructor
     Triangle();  
-    Triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& na, const Vec3& nb, const Vec3& nc, const Vec2& ta, const Vec2& tb, const Vec2& tc, const Vec3& tana, const Vec3& tanb, const Vec3& tanc, const Vec3& ba, const Vec3& bb, const Vec3& bc, bool hasTangentBasis, std::shared_ptr<Material> m, int sg);
+    Triangle(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& na, const Vec3& nb, const Vec3& nc, const Vec2& ta, const Vec2& tb, const Vec2& tc, std::shared_ptr<Material> m, int sg);
 
   
     bool has_tangent_basis() const;
     void setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv2);
-    void setMaterial(std::shared_ptr<Material> m) { mat_ptr = m; }
+   
     void set_transform(const Matrix4x4& t);
     static void updateTriangleTransform(Triangle& triangle, const Matrix4x4& transform);
     void render(SDL_Renderer* renderer, SDL_Texture* texture);
@@ -101,9 +100,6 @@ private:
     Vec2 uv0, uv1, uv2;
     int faceIndex = -1;
     std::array<unsigned int, 3> assimpVertexIndices;
-   
-
-   
 };
 
 #endif // TRIANGLE_H

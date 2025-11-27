@@ -1,13 +1,14 @@
 ﻿#include "DirectionalLight.h"
 #include <cmath>
 
-DirectionalLight::DirectionalLight(const Vec3& dir, const Vec3& input_intens, double radius)
-    : disk_radius(radius) {
+DirectionalLight::DirectionalLight(const Vec3& dir, const Vec3& input_intens, float rad)
+      {
     direction = dir.normalize();
 
     float power = input_intens.length();
     color = (power > 0.0f) ? input_intens / power : Vec3(1.0f);
     intensity = power;
+	radius = rad;
 }
 
 int DirectionalLight::getSampleCount() const {
@@ -26,7 +27,7 @@ Vec3 DirectionalLight::random_point() const {
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> dis_angle(0, 2 * M_PI);
-    std::uniform_real_distribution<> dis_radius(0, disk_radius);
+    std::uniform_real_distribution<> dis_radius(0, radius);
 
     double angle = dis_angle(gen);
     double r = dis_radius(gen);
@@ -44,7 +45,7 @@ LightType DirectionalLight::type() const {
 
 float DirectionalLight::pdf(const Vec3& /*hit_point*/, const Vec3& incoming_direction) const {
     float cos_angle = Vec3::dot(-direction.normalize(), incoming_direction);
-    float apparent_angle = atan2(disk_radius, 1000.0);
+    float apparent_angle = atan2(radius, 1000.0);
     float cos_epsilon = cos(apparent_angle);
 
     if (cos_angle > cos_epsilon) {

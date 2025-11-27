@@ -7,8 +7,9 @@ Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, f
     aspect_ratio(aspect), aperture(aperture), focus_dist(focus_dist),
     blade_count(blade_count), fov(vfov), origin(lookfrom)
 {
-    near_dist = 0.1;
-    far_dist = focus_dist * 2.0;
+    lens_radius = aperture * 0.5f;
+	near_dist = 0.1; // Yakýn mesafe, genellikle 0.1 olarak ayarlanýr
+	far_dist = focus_dist * 2.0; // Uzak mesafe, odak uzaklýðýnýn iki katý olarak ayarlanýr
     update_camera_vectors();
 }
 
@@ -63,42 +64,42 @@ void Camera::setLookDirection(const Vec3& direction_normalized) {
 }
 
 Vec3 Camera::random_in_unit_polygon(int sides) const {
-    double step = 2 * M_PI / sides;
+    float step = 2 * M_PI / sides;
 
     // Rastgele bir kenar seç
     int edge_index = random_int(0, sides - 1);
-    double edge_angle = edge_index * step;
+    float edge_angle = edge_index * step;
 
     // Kenar boyunca rastgele bir nokta seç
-    double t = random_double();
-    double x1 = cos(edge_angle);
-    double y1 = sin(edge_angle);
+    float t = Vec3::random_double();
+    float x1 = cos(edge_angle);
+    float y1 = sin(edge_angle);
 
-    double x2 = cos(edge_angle + step);
-    double y2 = sin(edge_angle + step);
+    float x2 = cos(edge_angle + step);
+    float y2 = sin(edge_angle + step);
 
     // Rastgele nokta, kenar boyunca interpolasyon
-    double px = x1 * (1 - t) + x2 * t;
-    double py = y1 * (1 - t) + y2 * t;
+    float px = x1 * (1 - t) + x2 * t;
+    float py = y1 * (1 - t) + y2 * t;
 
     // Ýçeri rastgele bir kaydýrma yaparak tam dolu hale getir
-    double shrink_factor = sqrt(random_double()); // Ýç içe eþit doluluk için
+    float shrink_factor = sqrt(Vec3::random_double()); // Ýç içe eþit doluluk için
     px *= shrink_factor;
     py *= shrink_factor;
 
-    return Vec3SIMD(px, py, 0);
+    return Vec3(px, py, 0);
 }
 // Yeni fonksiyon: Bokeh þiddetini hesapla
 float Camera::calculate_bokeh_intensity(const Vec3& point) const {
-    double distance = (point - origin).length();
-    double focal_plane_distance = focus_dist;
+    float distance = (point - origin).length();
+    float focal_plane_distance = focus_dist;
 
     // Blur faktörünü daha yumuþak bir þekilde hesapla
-    double blur_factor = std::abs(distance - focal_plane_distance) / focal_plane_distance;
+    float blur_factor = std::abs(distance - focal_plane_distance) / focal_plane_distance;
 
     // Blur faktörünü daha kontrollü hale getir
-    double scaled_aperture = aperture * 10.0; // aperture etkisini ölçekle
-    return std::min(1.0, blur_factor * scaled_aperture);
+    float scaled_aperture = aperture * 10.0f; // aperture etkisini ölçekle
+    return std::min(1.0f, blur_factor * scaled_aperture);
 }
 // Iþýk kaynaklarý için özel bokeh þekli oluþtur
 Vec3 Camera::create_bokeh_shape(const Vec3& color, float intensity) const {

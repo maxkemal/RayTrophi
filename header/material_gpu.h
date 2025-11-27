@@ -5,7 +5,7 @@
 #include <type_traits> // std::remove_reference_t için  
 
 // float değerlerini karşılaştırmak için global bir epsilon  
-constexpr float FLOAT_COMPARE_EPSILON = 1e-6f;  
+constexpr float FLOAT_COMPARE_EPSILON = 1e-4f;  
 
 struct alignas(16) GpuMaterial {  
    float3 albedo;  

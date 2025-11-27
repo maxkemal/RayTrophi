@@ -37,6 +37,23 @@ __device__ float3 float3_min(const float3& a, const float3& b) {
         fminf(a.y, b.y),
         fminf(a.z, b.z));
 }
+__device__ float get_alpha_gpu(const OptixHitResult& payload, const float2& uv)
+{
+    // Öncelikle opacity texture varsa kullan
+    if (payload.opacity_tex) {
+        float4 tex = tex2D<float4>(payload.opacity_tex, uv.x, uv.y);
+        return tex.w > 0.0f ? tex.w : (tex.x + tex.y + tex.z) / 3.0f;
+    }
+
+    // Opacity yoksa albedo'yu kontrol et
+    if (payload.albedo_tex) {
+        float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
+        return tex.w > 0.0f ? tex.w : (tex.x + tex.y + tex.z) / 3.0f;
+    }
+
+    // Ne opacity ne de albedo varsa → tamamen opak
+    return 1.0f;
+}
 
 
 __device__ float3 evaluate_brdf(
@@ -74,7 +91,15 @@ __device__ float3 evaluate_brdf(
         roughness = tex2D<float4>(payload.roughness_tex, uv.x, uv.y).y;
        
     }
-    
+   /* float opacity = material.opacity;
+    opacity *= get_alpha_gpu(payload, uv);
+
+    if (opacity < 1.0f) {
+
+       
+        return make_float3(0.0f, 0.0f, 0.0f);;
+
+    }*/
     float metallic = material.metallic;
     if (payload.has_metallic_tex) {
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
@@ -104,16 +129,8 @@ __device__ float3 evaluate_brdf(
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
     float3 diffuse = k_d * albedo/M_PIf;
-    float3 emission = material.emission;
-    if (payload.has_emission_tex) {
-        float4 tex = tex2D<float4>(payload.emission_tex, uv.x, uv.y);
-        emission = make_float3(tex.x, tex.y, tex.z);
-
-    }
-    if (length(emission) > 0.01f) {
-		return emission; // Emissive materyaller için direkt ışın gönder
-      
-    }
+  
+   
     if (material.transmission >= 0.01f)
     {
         curandState rng;
@@ -266,23 +283,6 @@ __device__ bool transmission_scatter(
     *scattered = Ray(payload.position + outward_normal * 0.00001f, normalize(direction));
     return true;
 }
-__device__ float get_alpha_gpu(const OptixHitResult& payload, const float2& uv)
-{
-    // Öncelikle opacity texture varsa kullan
-    if (payload.opacity_tex) {
-        float4 tex = tex2D<float4>(payload.opacity_tex, uv.x, uv.y);
-        return tex.w > 0.0f ? tex.w : (tex.x + tex.y + tex.z) / 3.0f;
-    }
-
-    // Opacity yoksa albedo'yu kontrol et
-    if (payload.albedo_tex) {
-        float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
-        return tex.w > 0.0f ? tex.w : (tex.x + tex.y + tex.z) / 3.0f;
-    }
-
-    // Ne opacity ne de albedo varsa → tamamen opak
-    return 1.0f;
-}
 
 __device__ bool scatter_material(
     const GpuMaterial& material,         // dışarıdan gelen materyal
@@ -316,7 +316,7 @@ __device__ bool scatter_material(
     float opacity = material.opacity;
     opacity *= get_alpha_gpu(payload, uv);
 
-    if (opacity < 0.5f) {
+    if (opacity < 1.0f) {
        
             *attenuation = make_float3(1.0f, 1.0f, 1.0f);
             *scattered = Ray(payload.position + 1e-5f * ray_in.direction, ray_in.direction);
@@ -344,7 +344,7 @@ __device__ bool scatter_material(
         emission = make_float3(tex.x, tex.y, tex.z);
        
     }
-	if (length(emission) > 0.001f) {
+	if (length(emission) > 0.0f) {
 		*attenuation = emission;		
 		*pdf = 1.0f;
         *is_specular = false; 
@@ -398,7 +398,7 @@ __device__ bool scatter_material(
     float3 specular = F;
     *pdf = pdf_brdf(material, wo, wi, payload.normal);   
     *scattered = Ray(payload.position + L * 0.001f, L);
-    *attenuation = (diffuse + specular + emission);
+    *attenuation = (diffuse + specular );
     *is_specular = (roughness < 0.05f && metallic > 0.5f);  // ayna gibi yüzeyler
 
     return true;

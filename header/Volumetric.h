@@ -14,7 +14,7 @@ public:
 
     virtual float get_opacity(const Vec2& uv) const override;
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
-    virtual Vec3 getEmission(double u, double v, const Vec3& p) const override;
+    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const override;
 
     double calculate_density(const Vec3& point) const;
     Vec3 calculate_random_color_shift(double distance_to_center) const;

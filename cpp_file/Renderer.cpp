@@ -45,6 +45,8 @@ bool Renderer::isCudaAvailable() {
     }
 }
 void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads = 0, bool denoise = true, float blend = 0.8f) {
+    if (!surface) return;
+
     Uint32* pixels = static_cast<Uint32*>(surface->pixels);
     int width = surface->w;
     int height = surface->h;
@@ -54,70 +56,54 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads = 0, bool
     for (int i = 0; i < width * height; ++i) {
         Uint8 r, g, b;
         SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
-        colorBuffer[i * 3] = static_cast<float>(r) / 255.0f;
-        colorBuffer[i * 3 + 1] = static_cast<float>(g) / 255.0f;
-        colorBuffer[i * 3 + 2] = static_cast<float>(b) / 255.0f;
+        colorBuffer[i * 3] = r / 255.0f;
+        colorBuffer[i * 3 + 1] = g / 255.0f;
+        colorBuffer[i * 3 + 2] = b / 255.0f;
     }
 
-    std::vector<float> normalData(width * height * 3);
-
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            size_t pixel_index = y * width + x;
-            size_t color_index = pixel_index * 3;
-            // Eğer normal_buffer eksik veya küçükse sınır kontrolü yap
-            if (pixel_index < normal_buffer.size()) {
-                const Vec3& normal = normal_buffer[pixel_index];
-                normalData[color_index] = normal.x;
-                normalData[color_index + 1] = normal.y;
-                normalData[color_index + 2] = normal.z;
-            }
-
-        }
-    }
-
-
-    // CUDA veya CPU cihazını seç
+    // Device seçimi
     oidn::DeviceRef device;
-    if (isCudaAvailable()) {
-        device = oidn::newDevice(oidn::DeviceType::CUDA);
+    try {
+        if (g_hasOptix) {
+            device = oidn::newDevice(oidn::DeviceType::CUDA);
+        }
+        else {
+            device = oidn::newDevice(oidn::DeviceType::CPU);
+        }
+        device.set("numThreads", numThreads);
+        device.commit();
     }
-    else {
-        device = oidn::newDevice(oidn::DeviceType::CPU);
+    catch (const std::exception& e) {
+        std::cerr << "Failed to create OIDN device: " << e.what() << std::endl;
+        return;
     }
-    device.set("numThreads", numThreads);
-    device.commit();
 
-    // OIDN buffer'larını oluştur
+    // Buffer oluşturma
     oidn::BufferRef colorOIDNBuffer = device.newBuffer(colorBuffer.size() * sizeof(float));
-    // oidn::BufferRef normalOIDNBuffer = device.newBuffer(normalData.size() * sizeof(float)); // Normal buffer
     oidn::BufferRef outputOIDNBuffer = device.newBuffer(colorBuffer.size() * sizeof(float));
-
     std::memcpy(colorOIDNBuffer.getData(), colorBuffer.data(), colorBuffer.size() * sizeof(float));
-    // std::memcpy(normalOIDNBuffer.getData(), normalData.data(), normalData.size() * sizeof(float));
 
-     // Filtreyi yapılandır ve çalıştır
+    // Filtreyi ayarla
     oidn::FilterRef filter = device.newFilter("RT");
     filter.setImage("color", colorOIDNBuffer, oidn::Format::Float3, width, height);
-    // filter.setImage("normal", normalOIDNBuffer, oidn::Format::Float3, width, height); // Normal verisini burada ekliyoruz
     filter.setImage("output", outputOIDNBuffer, oidn::Format::Float3, width, height);
-
-    filter.set("hdr", false); // Normal map verisi için HDR (lineer veri)
-    filter.set("srgb", true); // Gamma düzeltmesi uygulama
+    filter.set("hdr", false);
+    filter.set("srgb", true);
     filter.set("denoise", denoise);
     filter.commit();
 
-    auto start = std::chrono::high_resolution_clock::now();
-    filter.execute();
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
+    try {
+        filter.execute();
+        const char* errorMessage;
+        if (device.getError(errorMessage) != oidn::Error::None)
+            std::cerr << "OIDN error: " << errorMessage << std::endl;
+    }
+    catch (const std::exception& e) {
+        std::cerr << "OIDN execution failed: " << e.what() << std::endl;
+        return;
+    }
 
-    // Hataları kontrol et
-    const char* errorMessage;
-    if (device.getError(errorMessage) != oidn::Error::None)
-        std::cerr << "OIDN error: " << errorMessage << std::endl;
-
-    // Denoised veriyi al ve karıştır
+    // Sonucu karıştır ve geri yaz
     std::memcpy(colorBuffer.data(), outputOIDNBuffer.getData(), colorBuffer.size() * sizeof(float));
     for (int i = 0; i < width * height; ++i) {
         Uint8 r_orig, g_orig, b_orig;
@@ -439,26 +425,29 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             if (isSkinnedMesh) {
                 // Bu bir skinned üçgen. Skinning uygula.
                // std::cout << "DEBUG: scene.boneData.boneNameToIndex.size() = " << scene.boneData.boneNameToIndex.size() << std::endl;
-                std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size());
+                std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
                // std::cout << "DEBUG: finalBoneMatrices size after creation = " << finalBoneMatrices.size() << std::endl;
 
                 for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
-                    // Kemik düğümünün animasyonlu global transformunu al
                     if (animatedGlobalNodeTransforms.count(boneName) == 0) {
-                      //  std::cerr << "[ERROR] Bone " << boneName << " için animasyonlu global transform bulunamadı! Bind pose kullanılıyor.\n";
-                        // Bulunamadıysa bind pose transformunu kullan (hata durumu veya animasyonsuz kemikler için)
-                        const aiNode* node = assimpLoader.getNodeByName(boneName); // Statik düğümü al
-                        Matrix4x4 staticGlobalNodeTransform = node ? convert(assimpLoader.getGlobalTransform(node)) : Matrix4x4::identity();
-                        finalBoneMatrices[boneIndex] = scene.boneData.globalInverseTransform * staticGlobalNodeTransform * scene.boneData.boneOffsetMatrices[boneName];
+                        std::cerr << "Warning: Missing animation data for bone: " << boneName << "\n";
                         continue;
                     }
 
-                    Matrix4x4 animatedBoneGlobalTransform = animatedGlobalNodeTransforms[boneName];
+                    // Global dönüşüm matrisini al
+                    Matrix4x4 globalTransform = animatedGlobalNodeTransforms[boneName];
+                    
+                    // Offset matrisini al
+                    if (scene.boneData.boneOffsetMatrices.count(boneName) == 0) {
+                        std::cerr << "Warning: Missing offset matrix for bone: " << boneName << "\n";
+                        continue;
+                    }
                     Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
-                    const Matrix4x4& globalInverseTransform = scene.boneData.globalInverseTransform;
 
-                    // Doğru final kemik matrisi formülü:
-                    finalBoneMatrices[boneIndex] = globalInverseTransform * animatedBoneGlobalTransform * offsetMatrix;
+                    // Final matrisi hesapla
+                    finalBoneMatrices[boneIndex] = scene.boneData.globalInverseTransform * 
+                                                  globalTransform * 
+                                                  offsetMatrix;
                 }
 
                // std::cout << "[DEBUG] Skin uygulanıyor: " << tri->getNodeName() << "\n";
@@ -482,7 +471,6 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
         }
 
         // --- 3. Adım: Işık ve Kamera Animasyonlarını Güncelle ---
-        // Bu kısımlar mevcut kodunuzdaki mantıkla devam edebilir, çünkü animatedGlobalNodeTransforms artık kullanılabilir.
         for (auto& light : scene.lights) {
             const aiNode* node = assimpLoader.getNodeByName(light->nodeName);
             if (!node || animatedGlobalNodeTransforms.count(light->nodeName) == 0) continue;
@@ -591,6 +579,26 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
 //    std::string default_path = "e:/data/home/bedroom.gltf";
 //    create_scene(scene, optix_gpu_ptr, default_path);
 //}
+void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
+    if (!scene.initialized || scene.world.objects.empty()) {
+        std::cerr << "[BVH REBUILD] Scene not loaded yet, rebuild skipped.\n";
+        return;
+    }
+
+    scene.bvh = nullptr; // eskiyi temizle
+
+    if (use_embree) {
+        auto embree_bvh = std::make_shared<EmbreeBVH>();
+        embree_bvh->build(scene.world.objects);
+        scene.bvh = embree_bvh;
+        std::cout << "[Embree] BVH rebuilt successfully.\n";
+    }
+    else {
+        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0);
+        std::cout << "[In-house BVH] BVH rebuilt successfully.\n";
+    }
+}
+
 
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path) {
   
@@ -612,12 +620,12 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     scene.animationDataList = loaded_animations;
     scene.boneData = loaded_bone_data; // BURADA BONE DATA'YI ATAYIN!
  if (loaded_triangles.empty()) {
-        std::cerr << "[HATA] Üçgen verisi yok, sahne yüklenemedi: " << model_path << std::endl;
-		std::cerr << "Lütfen geçerli bir model dosyası sağlayın." << std::endl; 
+        std::cerr << "[ERROR] No triangle data, scene loading failed: " << model_path << std::endl;
+		std::cerr << "Please provide a valid model file." << std::endl; 
 		
  }
  else {
-	 std::cout << "Dosyadan " << loaded_triangles.size() << " üçgen yüklendi.\n";
+	 std::cout << "Loaded triangles from file " << loaded_triangles.size() << ".\n";
  }
     for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
@@ -632,28 +640,53 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     // ---- 2. Kamera ve ışık verisi ----
     scene.lights = assimpLoader.getLights();
     scene.camera = assimpLoader.getDefaultCamera();
-    auto embree_bvh = std::make_shared<EmbreeBVH>();
-    embree_bvh->build(scene.world.objects);
-    scene.bvh = embree_bvh;
-    // ---- 3. GPU OptiX setup ----      
-        std::cout << "OptiX geometri oluşturuluyor (convertTrianglesToOptixData)...\n";
-        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(loaded_triangles);
-        optix_gpu_ptr->validateMaterialIndices(optix_data);
-        optix_gpu_ptr->buildFromData(optix_data);
+    // ⚡️ Selectable BVH (Embree or in-house BVH)
+    if (use_embree) {
+        auto embree_bvh = std::make_shared<EmbreeBVH>();
+        embree_bvh->build(scene.world.objects);  // Provide triangles
+        scene.bvh = embree_bvh;
+        std::cout << "[Embree] BVH structure built successfully." << std::endl;
+    }
+    else {
+        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0);
+        std::cout << "[In-house BVH] BVH structure built successfully." << std::endl;
+    }
 
-        if (scene.camera) {
-            std::cout << "OptiX Kamerası ayarlanıyor...\n";
-            optix_gpu_ptr->setCameraParams(*scene.camera);
+    // ---- 3. GPU OptiX setup ----
+    if (g_hasOptix && optix_gpu_ptr)
+    {
+        try
+        {
+            std::cout << "Creating OptiX geometry (convert Triangles To Optix Data)...\n";
+
+            OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(loaded_triangles);
+            optix_gpu_ptr->validateMaterialIndices(optix_data);
+            optix_gpu_ptr->buildFromData(optix_data);
+
+            if (scene.camera) {
+                std::cout << "Setting up the OptiX Camera...\n";
+                optix_gpu_ptr->setCameraParams(*scene.camera);
+            }
+
+            if (!scene.lights.empty()) {
+                std::cout << "OptiX multi-lights adjustment...\n";
+                optix_gpu_ptr->setLightParams(scene.lights);
+            }
+
+            optix_gpu_ptr->setBackgroundColor(scene.background_color);
         }
-
-        if (!scene.lights.empty()) {
-            std::cout << "OptiX çoklu ışıklar ayarlanıyor...\n";
-            optix_gpu_ptr->setLightParams(scene.lights);
+        catch (std::exception& e)
+        {
+            std::cerr << "[OptiX ERROR] Falling back to CPU only: " << e.what() << "\n";
+            g_hasOptix = false; // GPU çökmüşse tamamen devre dışı bırakmak iyi
         }
-
-        optix_gpu_ptr->setBackgroundColor(scene.background_color);
+    }
+    else
+    {
+        std::cout << "OptiX disabled. CPU-only path is active.\n";
+    }
     // ---- 5. Bilgi ver ----
-    std::cout << "Sahne oluşturuldu.\n";
+    std::cout << "The scene is created.\n";
     
         scene.initialized = true;
 }
@@ -690,7 +723,7 @@ void Renderer::update_display(SDL_Window* window, SDL_Surface* surface) {
     while (!rendering_complete) {
 
         SDL_UpdateWindowSurface(window);
-        float progress = static_cast<float>(completed_pixels) / (image_width * image_height) * 100.0f;
+       // float progress = static_cast<float>(completed_pixels) / (image_width * image_height) * 100.0f;
 
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -700,7 +733,7 @@ void Renderer::update_display(SDL_Window* window, SDL_Surface* surface) {
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 100ms aralıklarla güncelle
+        //std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // 100ms aralıklarla güncelle
     }
 
 }
@@ -782,10 +815,10 @@ float Renderer::sobol(int index, int dimension) {
 
     // Lookup table kullanarak hızlı bit sayımı
     static const unsigned char BitsSetTable256[256] = {
-        #define B2(n) n,     n+1,     n+1,     n+2
-        #define B4(n) B2(n), B2(n+1), B2(n+1), B2(n+2)
-        #define B6(n) B4(n), B4(n+1), B4(n+1), B4(n+2)
-        B6(0), B6(1), B6(1), B6(2)
+        #define B2(n) n,     n+1,     n+2,     n+3
+        #define B4(n) B2(n), B2(n+1), B2(n+2), B2(n+3)
+        #define B6(n) B4(n), B4(n+1), B4(n+2), B4(n+3)
+        B6(0), B6(1), B6(2), B6(3)
     };
 
     unsigned int result = 0;
@@ -1170,7 +1203,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
     // --- 1. Directional light varsa %33 ihtimalle seç ---
     for (int i = 0; i < light_count; i++) {
         if (lights[i]->type() == LightType::Directional) {
-            if (random_double() < 0.33) {
+            if (Vec3::random_double() < 0.33) {
                 directional_pick_count++;
                 return i;
             }
@@ -1197,14 +1230,14 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
 
     // --- Eğer ağırlık yoksa fallback rastgele seçim ---
     if (total_weight < 1e-6f) {
-        int random_light = std::clamp(int(random_double() * light_count), 0, light_count - 1);
+        int random_light = std::clamp(int(Vec3::random_double() * light_count), 0, light_count - 1);
         if (lights[random_light]->type() == LightType::Point) point_light_pick_count++;
         else if (lights[random_light]->type() == LightType::Directional) directional_pick_count++;
         return random_light;
     }
 
     // --- Weighted seçim ---
-    float r = random_double() * total_weight;
+    float r = Vec3::random_double() * total_weight;
     float accum = 0.0f;
     for (int i = 0; i < light_count; i++) {
         accum += weights[i];
@@ -1216,7 +1249,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
     }
 
     // --- Güvenlik fallback ---
-    int fallback = std::clamp(int(random_double() * light_count), 0, light_count - 1);
+    int fallback = std::clamp(int(Vec3::random_double() * light_count), 0, light_count - 1);
     if (lights[fallback]->type() == LightType::Point) point_light_pick_count++;
     else if (lights[fallback]->type() == LightType::Directional) directional_pick_count++;
     return fallback;
@@ -1277,7 +1310,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     // --- Shadow ---
     Ray shadow_ray(hit_point + N * 0.0001f, L);
-    if (bvh->occluded(shadow_ray, 0.001f, light_distance))
+    if (bvh->occluded(shadow_ray, 0.0001f, light_distance))
         return direct_light;
 
     float NdotL = std::fmax(Vec3::dot(N, L), 0.00001f);
@@ -1333,7 +1366,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         int light_index = -1;
         if (!lights.empty())
             light_index = pick_smart_light(lights, rec.point);
-
+		// --- Normal harita uygulaması ---
+		// apply_interpolated_normal(rec);
+         // HitRecord nesnesinin normal harita bilgilerini kullanarak 'interpolated_normal' üyesini günceller.
+        // 'rec' parametresi hem girdi hem de çıktı olarak kullanılır.
         apply_normal_map(rec);
 
         Vec3 attenuation;
@@ -1348,12 +1384,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
             float continuation_prob = std::clamp(max_channel, 0.0f, 0.98f);
             if (bounce > 2) { // İlk birkaç atışta devam et, sonra RR uygula
-                if (random_double() > continuation_prob)
+                if (Vec3::random_double() > continuation_prob)
                     break;
                 throughput /= continuation_prob;
             }
         // --- Emissive katkı ---
-        Vec3 emitted = rec.material->getEmission(rec.u, rec.v, rec.point);
+        Vec3 emitted = rec.material->getEmission(rec.uv, rec.point);
         float transmission = rec.material->getTransmission(rec.uv);
         float opacity = rec.material->get_opacity(rec.uv);
 
@@ -1366,7 +1402,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             direct_light *= (1.0f - transmission);
         }
 
-        final_color += throughput * (emitted + direct_light)* opacity;
+        final_color += throughput * (emitted + 10*direct_light)* opacity;
 
         current_ray = scattered;
     }
@@ -1391,7 +1427,7 @@ float Renderer::compute_ambient_occlusion(HitRecord& rec, const ParallelBVHNode*
 
     // Adaptive sampling based on surface complexity
     Vec3 normal = rec.normal;
-    float complexity = 1.0f - std::abs(normal.dot(Vec3(0, 1, 0)));
+    float complexity = 1.0f - std::abs(Vec3::dot(normal,(Vec3(0, 1, 0))));
     int numSamples = baseSamples + static_cast<int>(complexity * maxAdditionalSamples);
 
     float occlusion = 0.0f;

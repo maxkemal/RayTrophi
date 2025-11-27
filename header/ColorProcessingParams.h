@@ -188,7 +188,7 @@ public:
         luminance_map.resize(w * h, 0.0f);
     }
     float linearToSRGB(float linear) {
-        return (linear <= 0.0031308f) ? 12.92f * linear : 1.055f * std::pow(linear, 1.0f /2.4f) - 0.055f;
+        return (linear <= 0.0031308f) ? 12.92f * linear : 1.055f * std::pow(linear, 1.0f /1.2f) - 0.055f;
     }
  
 
@@ -252,14 +252,6 @@ public:
             // no tonemapping
             break;
         }
-
-      
-        ////// sRGB dönüşümü
-        processed_color = Vec3(
-            linearToSRGB(processed_color.x),
-            linearToSRGB(processed_color.y),
-            linearToSRGB(processed_color.z)
-        );
 
         // Gamma düzeltmesi
         float gamma_adjust = 1.0f / params.global_gamma;

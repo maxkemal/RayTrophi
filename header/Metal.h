@@ -26,7 +26,7 @@ public:
       
 
     MaterialType type() const override;
-    virtual Vec3 getEmission(double u, double v, const Vec3& p) const override;
+    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const override;
    
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
     virtual double getIndexOfRefraction() const override;

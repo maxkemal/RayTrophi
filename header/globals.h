@@ -27,7 +27,7 @@ struct RenderSettings {
 
     // Backend
     bool use_optix;
-
+    bool UI_use_embree;
     // Animation
     float animation_duration;
     int animation_fps;
@@ -38,9 +38,7 @@ struct RenderSettings {
 
 // Yalnýzca bildirim:
 extern RenderSettings render_settings;
-extern std::mutex mtx;
 extern std::atomic<int> completed_pixels;
-extern std::atomic<bool> rendering_complete;
 extern const double min_distance;
 extern const double max_distance;
 extern  float aspect_ratio; // Sabit olarak double türünde tanýmlýyoruz
@@ -65,10 +63,11 @@ extern bool globalreflectance ;
 extern bool is_normal_map;
 extern  int hitcount;
 extern bool use_embree;
+extern bool g_hasOptix ;
 extern float last_render_time_ms;
 extern bool pending_resolution_change;
 extern int pending_width;
 extern int pending_height;
 extern float pending_aspect_ratio;
-
+extern float light_radius;
 #endif // GLOBALS_H

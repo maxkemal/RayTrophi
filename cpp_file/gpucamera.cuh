@@ -1,23 +1,28 @@
 ﻿#pragma once
 #include "ray.h"
 #include "params.h"
+
 __device__ float2 random_in_unit_polygon(int sides, curandState* rng) {
     float step = 2.0f * M_PIf / float(sides);
 
+    // Rastgele bir kenar seç (köşe indeksi)
     int edge_index = curand(rng) % sides;
-    float edge_angle = step * edge_index;
+    float angle1 = step * edge_index;
+    float angle2 = angle1 + step;
 
+    // Bu kenar boyunca interpolasyon için rastgele t
     float t = curand_uniform(rng);
-    float x1 = cosf(edge_angle);
-    float y1 = sinf(edge_angle);
 
-    float x2 = cosf(edge_angle + step);
-    float y2 = sinf(edge_angle + step);
+    float x1 = cosf(angle1);
+    float y1 = sinf(angle1);
+    float x2 = cosf(angle2);
+    float y2 = sinf(angle2);
 
     float px = x1 * (1.0f - t) + x2 * t;
     float py = y1 * (1.0f - t) + y2 * t;
 
-    float shrink = sqrtf(curand_uniform(rng)); // merkezden dolu dağılım
+    // Daire içine eşit doluluk için shrink faktörü (radyal içe çekme)
+    float shrink = sqrtf(curand_uniform(rng)); // 0-1 arası, merkeze eşit doluluk
     px *= shrink;
     py *= shrink;
 

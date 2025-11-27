@@ -84,8 +84,8 @@ Vec2 SmartUVProjection::calculateUVForVertex(const Vec3& vertex, const Vec3& min
     const Vec3& boxSize, double maxDimension) {
     Vec3 localPos = vertex - minBound;
     Vec2 uv;
-    uv.x = localPos.dot(tangent) / maxDimension;
-    uv.y = localPos.dot(bitangent) / maxDimension;
+    uv.x = Vec3::dot(localPos,tangent) / maxDimension;
+    uv.y = Vec3::dot(localPos, bitangent) / maxDimension;
 
     // Normalize UV coordinates to [0, 1] range
     uv.x = std::clamp(uv.x, 0.0, 1.0);

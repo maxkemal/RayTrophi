@@ -15,7 +15,7 @@ float Dielectric::get_opacity(const Vec2& uv) const {
     return 1.0f;  // Dielectric materyal tamamen opak, bu yüzden 1.0 döndür
 }
 
-Vec3 Dielectric::getEmission(double u, double v, const Vec3& p) const {
+Vec3 Dielectric::getEmission(const Vec2& uv, const Vec3& p) const {
     return Vec3(0.0, 0.0, 0.0);
 }
 Vec3 Dielectric::calculate_reflected_attenuation(const Vec3& base_color, const Vec3& fresnel_factor) const {
@@ -138,7 +138,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     
     // Işık yönü hesaplaması
     Vec3 direction;
-    double random_val = random_double();
+    double random_val = Vec3::random_double();
 
     if (random_val < reflect_prob) {
         // Yansıma
@@ -180,7 +180,7 @@ double Dielectric::getIndexOfRefraction() const {
 }
 
 Vec3 Dielectric::fresnel(const Vec3& incident, const Vec3& normal, const std::array<double, 3>& ior) const {
-    float cos_i = std::clamp(Vec3::dot(-incident, normal), -1.0, 1.0);
+    float cos_i = std::clamp(Vec3::dot(-incident, normal), -1.0f, 1.0f);
 
     // Havadan cama mı, camdan havaya mı?
     float eta_i = 1.0f, eta_t = ior[1];
@@ -205,7 +205,7 @@ Vec3 Dielectric::fresnel(const Vec3& incident, const Vec3& normal, const std::ar
 
 Vec3 Dielectric::calculate_caustic(const Vec3& incident, const Vec3& normal, const Vec3& refracted) const {
     float dot_product = Vec3::dot(incident, normal);
-    float refraction_angle = std::acos(std::clamp(Vec3::dot(refracted, -normal), -1.0, 1.0));
+    float refraction_angle = std::acos(std::clamp(Vec3::dot(refracted, -normal), -1.0f, 1.0f));
     float caustic_factor = pow(std::max(refraction_angle, 0.0f), 3.0) * caustic_intensity;
     return color * caustic_factor * (1.0 - dot_product * dot_product);
 }

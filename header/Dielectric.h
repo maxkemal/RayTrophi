@@ -16,7 +16,7 @@ public:
         double roughness = 0.0,
         double scratch_density = 0.0);
    
-    virtual Vec3 getEmission(double u, double v, const Vec3& p) const override;
+    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const;
 
     Vec3 calculate_reflected_attenuation(const Vec3& base_color, const Vec3& fresnel_factor) const;
 

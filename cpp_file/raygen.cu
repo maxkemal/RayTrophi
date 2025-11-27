@@ -14,6 +14,66 @@
 #include "random_utils.cuh" // random_float() fonksiyonu burada
 #include "trace_ray.cuh"   // trace_ray() fonksiyonu burada
 
+/* launch_tile_based_progressive örneği için eski kod
+* 
+extern "C" __global__ void __raygen__rg() {
+    // Tile-based launch için doğru koordinat hesaplama
+    const uint3 launch_idx = optixGetLaunchIndex();
+    const uint3 launch_dim = optixGetLaunchDimensions();
+
+    // Tile içindeki lokal koordinatlar -> Global koordinatlar
+    int i = optixLaunchParams.tile_x + launch_idx.x;
+    int j = optixLaunchParams.tile_y + launch_idx.y;
+
+    // Bounds check
+    if (i >= optixLaunchParams.image_width || j >= optixLaunchParams.image_height)
+        return;
+
+    int pixel_index = j * optixLaunchParams.image_width + i;
+
+    // Seed hesaplama
+    unsigned int seed = optixLaunchParams.frame_number * 719393 +
+        pixel_index * 13731 +
+        optixLaunchParams.current_pass * 5381 + 1337;
+    curandState rng;
+    curand_init(seed, 0, 0, &rng);
+
+    const int samples_this_pass = optixLaunchParams.samples_per_pixel;
+    float3 color_sum = make_float3(0.0f, 0.0f, 0.0f);
+
+    // Örnekleme döngüsü
+    for (int s = 0; s < samples_this_pass; ++s) {
+        float u = (i + curand_uniform(&rng)) / float(optixLaunchParams.image_width);
+        float v = (j + curand_uniform(&rng)) / float(optixLaunchParams.image_height);
+
+        Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
+        float3 sample = ray_color(ray, &rng);
+        color_sum += sample;
+    }
+
+    float3 new_color = color_sum / samples_this_pass;
+
+    // Accumulation (progressive refinement)
+    if (optixLaunchParams.current_pass > 0) {
+        float4 prev = optixLaunchParams.accumulation_buffer[pixel_index];
+        float3 prev_color = make_float3(prev.x, prev.y, prev.z);
+        float prev_weight = prev.w;  // Toplam sample sayısı
+
+        float new_weight = prev_weight + samples_this_pass;
+        float3 blended = (prev_color * prev_weight + new_color * samples_this_pass) / new_weight;
+
+        optixLaunchParams.accumulation_buffer[pixel_index] = make_float4(blended.x, blended.y, blended.z, new_weight);
+        new_color = blended;
+    }
+    else {
+        optixLaunchParams.accumulation_buffer[pixel_index] = make_float4(new_color.x, new_color.y, new_color.z, samples_this_pass);
+    }
+
+    // Framebuffer'a yaz
+    optixLaunchParams.framebuffer[pixel_index] = make_color(new_color);
+}
+*/
+
 // RAYGEN
 extern "C" __global__ void __raygen__rg() {
     int index = optixGetLaunchIndex().x;
@@ -240,7 +300,7 @@ extern "C" __global__ void __closesthit__ch() {
             float2 deltaUV1 = uv1 - uv0;
             float2 deltaUV2 = uv2 - uv0;
 
-            float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y + 1e-8f);
+            float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y + 1e-6f);
 
             final_tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
             final_tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);

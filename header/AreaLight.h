@@ -47,7 +47,7 @@ public:
         wi = wi.normalize();
 
         Vec3 light_normal = direction.normalize();
-        float cos_theta = std::max(0.0001, Vec3::dot(-wi, light_normal));
+        float cos_theta = std::fmax(0.0001, Vec3::dot(-wi, light_normal));
         return dist2 / (area * cos_theta);
     }
 

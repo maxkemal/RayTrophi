@@ -120,7 +120,7 @@ bool PrincipledBSDF::isEmissive() const {
     return emissionProperty.intensity > 0.0f;
 }
 bool refract(const Vec3& uv, const Vec3& n, float etai_over_etat, Vec3& refracted) {
-    double cos_theta = std::clamp(-Vec3::dot(uv, n), -1.0, 1.0);
+    double cos_theta = std::clamp(-Vec3::dot(uv, n), -1.0f, 1.0f);
     Vec3 r_out_perp = etai_over_etat * (uv + cos_theta * n);
     float k = 1.0f - r_out_perp.length_squared();
 
@@ -150,6 +150,7 @@ Vec3 applyDisneyMultiScattering(const Vec3& specular, const Vec3& F0,
     return Vec3::min(specular * compensation / E, specular * 2.0);
 }
 
+
 bool PrincipledBSDF::scatter(
     const Ray& r_in,
     const HitRecord& rec,
@@ -175,7 +176,7 @@ bool PrincipledBSDF::scatter(
     Vec3 L = scattered.direction;
     // 1. Opaklık kontrolü – ışığın geçip geçmeyeceğine karar ver
     // Opacity check – stochastic transparency
-	if (opacity < 0.2f) {
+	if (opacity < 1.0f) {
 		// Işık geçiyor, bu yüzden ışık kaynağına geri döndür
         scattered = Ray(rec.point + r_in.direction * 0.001f, r_in.direction);
 		attenuation = Vec3(1.0f); // Tam geçiş
@@ -185,13 +186,13 @@ bool PrincipledBSDF::scatter(
     // If material emits light, return its emission
     if (emission.length_squared() > 0.0f) {
        
-		attenuation = albedo+emission; 
+		attenuation = emission; 
         return true;
     }
 
     // 3. Transmission varsa cam/şeffaf gibi davran
     // Transmission check (e.g. glass-like material)
-    if (random_double() < transmissionValue) {
+    if (Vec3::random_double() < transmissionValue) {
         Dielectric dielectricMat(
             ior, albedo, 1.0, 1.0, roughness, 0
         ); // IOR vs. daha gelişmiş hale getirilebilir
@@ -200,7 +201,7 @@ bool PrincipledBSDF::scatter(
 
     // 4. Mikrofacet yönü için Half-Vector oluştur
     // Sample a GGX-based half-vector for microfacet reflection
-    Vec3 H = importanceSampleGGX(random_double(), random_double(), roughness, N);
+    Vec3 H = importanceSampleGGX(Vec3::random_double(), Vec3::random_double(), roughness, N);
     Vec3 metal_dir = Vec3::reflect(-V, H).normalize();
     Vec3 cosine_dir = Vec3::random_cosine_direction(N);
 
@@ -210,22 +211,24 @@ bool PrincipledBSDF::scatter(
     //Vec3 diffuse_dir = cosine_dir.normalize();
     // Fresnel term determines reflectance vs diffuse ratio
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
-    float cosTheta = std::max(Vec3::dot(V, L), 1e-4);
+    float cosTheta = std::fmax(Vec3::dot(V, L), 1e-4);
     Vec3 F = fresnelSchlickRoughness(cosTheta, F0, roughness);
     Vec3 F_avg = F0 + (Vec3(1.0f) - F0) /21.0f;
     Vec3 k_d =  (1.0f - metallic);
     // 7. Stokastik seçim: F.x oranında speküler, geri kalanı difüz
     // Stochastic selection based on Fresnel reflectance
     Vec3 sampled_dir;
-    float randVal = random_double();
+    float randVal = Vec3::random_double();
     Vec3 specular = evalSpecular(N, V, sampled_dir, F0, roughness);
     // Attenuation ayır
     if (randVal < F.x) {
+    // 
+    // yeni yön şimdilik metal_dr yönü alınsın
         sampled_dir = metal_dir;
        
-    }
+     }
     else {
-        sampled_dir = diffuse_dir;
+       sampled_dir = diffuse_dir;
        
     }
     // 8. Near-zero kontrolü
@@ -240,14 +243,14 @@ bool PrincipledBSDF::scatter(
 float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const  {
     float metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
     float roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
-    float cos_theta = std::max(Vec3::dot(rec.normal, outgoing), 0.0);
+    float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0);
 
     // GGX sample: assume isotropic
     float alpha =max(roughness * roughness,0.01f);
     float NdotH = max(Vec3::dot(rec.normal, (outgoing + incoming)), 0.001);
     float D = (alpha * alpha) / (M_PI * powf((NdotH * NdotH * (alpha * alpha - 1.0f) + 1.0f), 2));
 
-    float pdf_specular = D * NdotH / (4.0f * std::max(Vec3::dot(outgoing, (incoming + outgoing)), 0.001));
+    float pdf_specular = D * NdotH / (4.0f * std::fmax(Vec3::dot(outgoing, (incoming + outgoing)), 0.001));
     float pdf_diffuse = cos_theta / M_PI;
 
     float fresnel_weight = metallic; // çok basit: sadece metal oranı
@@ -337,8 +340,8 @@ void PrincipledBSDF::precomputeLUT() {
     lutInitialized = true;
 }
 Vec3 PrincipledBSDF::computeAnisotropicDirection(const Vec3& N, const Vec3& T, const Vec3& B, float roughness, float anisotropy) const {
-    float r1 = random_double();
-    float r2 = random_double();
+    float r1 = Vec3::random_double();
+    float r2 = Vec3::random_double();
 
     float phi = 2 * M_PI * r1;
     float cosTheta = std::sqrt((1 - r2) / (1 + (anisotropy * anisotropy - 1) * r2));
@@ -373,9 +376,9 @@ Vec3 PrincipledBSDF::computeClearcoat(const Vec3& V, const Vec3& L, const Vec3& 
     Vec3 H = (V + L).normalize();  // H vektörü yansıyan ışık değil, göz ve ışık yönü olmalı
     float clearcoatNDF = DistributionGGX(N, H, clearcoatRough);
     float clearcoatG = GeometrySmith(N, V, L, clearcoatRough);
-    Vec3 clearcoatF = fresnelSchlick(std::max(Vec3::dot(H, V), 0.0), clearcoatColor);
+    Vec3 clearcoatF = fresnelSchlick(std::fmax(Vec3::dot(H, V), 0.0), clearcoatColor);
 
-    float clearcoatDenom = 4.0f * std::max(Vec3::dot(N, V), 0.0) * max(Vec3::dot(N, L), 0.0f) + 0.0001f;
+    float clearcoatDenom = 4.0f * std::fmax(Vec3::dot(N, V), 0.0) * max(Vec3::dot(N, L), 0.0f) + 0.0001f;
 
     return (clearcoatNDF * clearcoatG * clearcoatF) / clearcoatDenom;
 }
@@ -388,9 +391,9 @@ Vec3 PrincipledBSDF::computeSubsurfaceScattering(const Vec3& N, const Vec3& V, c
     for (int i = 0; i < numSamples; i++) {
         // Işığın içte ne kadar ilerlediğini rastgele belirle
         Vec3 randomOffset = Vec3(
-            random_double() * subsurfaceRadius.x,
-            random_double() * subsurfaceRadius.y,
-            random_double() * subsurfaceRadius.z
+            Vec3::random_double() * subsurfaceRadius.x,
+            Vec3::random_double() * subsurfaceRadius.y,
+            Vec3::random_double() * subsurfaceRadius.z
         );
 
         // Yeni bir yön belirle (Henyey-Greenstein kullanabiliriz)
@@ -408,8 +411,8 @@ Vec3 PrincipledBSDF::computeSubsurfaceScattering(const Vec3& N, const Vec3& V, c
 
 
 Vec3 PrincipledBSDF::sample_henyey_greenstein(const Vec3& wi, double g) const {
-    double rand1 = random_double();
-    double rand2 = random_double();
+    double rand1 = Vec3::random_double();
+    double rand2 = Vec3::random_double();
 
     // HG (Henyey-Greenstein) phase function için cos(theta) hesapla
     double cos_theta;

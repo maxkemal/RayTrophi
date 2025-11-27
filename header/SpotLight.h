@@ -19,7 +19,7 @@ public:
 
 private:
     float angle_degrees;
-    float radius;
+   
 };
 
 #endif // SPOTLIGHT_H

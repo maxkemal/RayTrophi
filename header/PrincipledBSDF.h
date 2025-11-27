@@ -113,7 +113,7 @@ public:
         // Example formula incorporating reflectivity and roughness
         return 0.01f;
     }
-    Vec3 getEmission(double u, double v, const Vec3& p) const {
+    Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
         return  emissionProperty* emissionProperty.intensity; // Hacimde yoğunlukla değişen ışık emisyonu
 
     }

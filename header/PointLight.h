@@ -8,20 +8,20 @@
 
 class PointLight : public Light {
 public:
-    float radius;
+   
     PointLight()
-        : radius(0.0f),
-        volumetricDensity(0.0f),
+        :volumetricDensity(0.0f),
         scatteringCoef(0.5f),
         volumetricSamples(50) {
         position = Vec3(0.0f);
         color = Vec3(1.0f);
         intensity = 1.0f;
+		radius = 0.1f; // Varsayýlan yarýçap
     }
 
     PointLight(const Vec3& pos, const Vec3& input_intens, float rad,
         float volDensity = 0.0f, float scatter = 0.5f, int samples = 50)
-        : radius(rad),
+        :
         volumetricDensity(volDensity),
         scatteringCoef(scatter),
         volumetricSamples(samples) {
@@ -29,6 +29,7 @@ public:
         float power = input_intens.length();
         color = (power > 0.0f) ? input_intens / power : Vec3(1.0f);
         intensity = power;
+		radius = rad;
     }
 
     Vec3 getDirection(const Vec3& point) const override {
@@ -92,6 +93,7 @@ private:
     float scatteringCoef;
     int volumetricSamples;
     mutable Vec3 last_sampled_point;
+  
 };
 
 #endif // POINTLIGHT_H

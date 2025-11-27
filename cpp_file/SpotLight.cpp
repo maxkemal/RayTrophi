@@ -2,10 +2,10 @@
 #include <cmath>
 
 SpotLight::SpotLight(const Vec3& pos, const Vec3& dir, const Vec3& input_intensity, float ang, float rad)
-    : angle_degrees(ang), radius(rad) {
+    : angle_degrees(ang){
     position = pos;
     direction = dir.normalize();
-
+	radius = rad;
     float power = input_intensity.length();
     color = (power > 0.0f) ? input_intensity / power : Vec3(1.0f);
     intensity = power;

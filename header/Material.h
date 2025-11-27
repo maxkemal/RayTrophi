@@ -37,7 +37,7 @@ struct MaterialProperty {
     // Texture varsa UV'den örnek al, yoksa sabit deðeri döndür
     Vec3 evaluate(const Vec2& uv) const {
         if (texture) {
-            return texture->getColor(uv) * intensity;  // Texture örneðini yoðunlukla çarp
+            return texture->get_color(uv.u,uv.v) ;  // Texture örneðini yoðunlukla çarp
         }
         return color * intensity;
     }
@@ -68,7 +68,7 @@ class Material {
 public:
     virtual float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const {
         // Default: Cosine-weighted hemisphere
-        float cos_theta = std::max(Vec3::dot(rec.normal, outgoing), 0.0);
+        float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0);
         return cos_theta / M_PI;
     }
   
@@ -127,7 +127,7 @@ public:
     MaterialProperty materyalproperty;  
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const = 0;
     virtual float get_metallic() const { return metallic.getValue(); }
-    virtual Vec3 getEmission(double u, double v, const Vec3& p) const {
+    virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
         return emissionColor* materyalproperty.intensity;
     }
     virtual bool isEmissive() const { return false; }

@@ -105,6 +105,10 @@ public:
     void render_Animation(SDL_Surface* surface, SDL_Window* window, const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration,SceneData& scene);
    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
+    void create_scenefromMesh(const std::string& filename);
+
+    void rebuildBVH(SceneData& scene, bool use_embree);
+
     void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path);
 
    

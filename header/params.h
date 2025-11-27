@@ -54,7 +54,11 @@ struct RayGenParams {
     float* accumulation_buffer;  // Temporal akümülasyon için önceki frame verisi
     int* sample_count_buffer;    // Her piksel için kullanılan örnek sayısını saklamak için
     float temporal_blend;        // Temporal akümülasyon karışım faktörü (0 = sadece yeni, 1 = sadece eski)
-    
+    int tile_x, tile_y;
+    int tile_width, tile_height;
+    int current_pass;
+    //float4* accumulation_buffer launch_tile_based_progressive için gerektiğinde;
+   
 };
 #define SHADOW_RAY_TYPE 1
 #define RAY_TYPE_COUNT 2

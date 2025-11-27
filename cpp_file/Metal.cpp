@@ -18,7 +18,7 @@ MaterialType Metal::type() const {
 float Metal::get_opacity(const Vec2& uv) const {
     return 1.0f;  // Dielectric materyal tamamen opak, bu yüzden 1.0 döndür
 }
-Vec3 Metal::getEmission(double u, double v, const Vec3& p) const {
+Vec3 Metal::getEmission(const Vec2& uv, const Vec3& p) const {
     return Vec3(0, 0, 0);
 }
 double Metal::getIndexOfRefraction() const {
@@ -260,8 +260,8 @@ void Metal::setAnisotropic(float anisotropic, const Vec3SIMD& anisotropicDirecti
 }
 
 Vec3SIMD Metal::computeAnisotropicDirection(const Vec3SIMD& N, const Vec3SIMD& T, const Vec3SIMD& B, float roughness, float anisotropy) const {
-    float phi = 2 * M_PI * random_double();
-    float cosTheta = std::pow(1 - random_double(), 1 / (roughness * anisotropy + 1));
+    float phi = 2 * M_PI * Vec3::random_double();
+    float cosTheta = std::pow(1 - Vec3::random_double(), 1 / (roughness * anisotropy + 1));
     float sinTheta = std::sqrt(1 - cosTheta * cosTheta);
 
     Vec3SIMD anisotropicDirection = sinTheta * std::cos(phi) * T + sinTheta * std::sin(phi) * B + cosTheta * N;

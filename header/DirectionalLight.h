@@ -7,7 +7,7 @@
 
 class DirectionalLight : public Light {
 public:
-    DirectionalLight(const Vec3& dir, const Vec3& input_intens, double radius);
+    DirectionalLight(const Vec3& dir, const Vec3& input_intens, float rad);
 
     int getSampleCount() const override;
     Vec3 getDirection(const Vec3& point) const override;
@@ -17,11 +17,11 @@ public:
     float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const override;
 
     void setDirection(const Vec3& dir);
-    void setDiskRadius(float r) { disk_radius = r; }
-    float getDiskRadius() const { return disk_radius; }
+    void setDiskRadius(float r) { radius = r; }
+    float getDiskRadius() const { return radius; }
 
 private:
-    double disk_radius = 0.01;
+    
     mutable Vec3 last_sampled_point;
 };
 

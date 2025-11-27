@@ -13,35 +13,8 @@
 #include <windows.h>
 #include <commdlg.h>
 
-std::string saveFileDialog(const char* filter = "PNG File\0*.png\0") {
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn;
-    ZeroMemory(&ofn, sizeof(ofn));
-
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL; // SDL window handle verilebilir
-    ofn.lpstrFilter = filter;
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT; //  önemli: üzerine yaz uyarısı verir
-    ofn.lpstrTitle = "Save Render Image";
-
-    if (GetSaveFileNameA(&ofn)) {
-        return std::string(filename);
-    }
-    return ""; // iptal edildi
-}
-
-
 bool SaveSurface(SDL_Surface* surface, const char* file_path) {
     SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
-    /* int imgFlags = IMG_INIT_PNG;
-     if (!(IMG_Init(imgFlags) & imgFlags)) {
-         SDL_Log("SDL_image could not initialize! SDL_image Error: %s\n", IMG_GetError());
-         SDL_Quit();
-         return 1;
-     }*/
-
     if (surface_to_save == NULL) {
         SDL_Log("Couldn't convert surface: %s", SDL_GetError());
         return false;
@@ -57,6 +30,40 @@ bool SaveSurface(SDL_Surface* surface, const char* file_path) {
 
     return true;
 }
+
+
+std::string saveFileDialogW(const wchar_t* filter = L"PNG Files\0*.png\0") {
+    wchar_t filename[MAX_PATH] = L"";
+    OPENFILENAMEW ofn = { 0 };
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = filename;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_OVERWRITEPROMPT;
+    ofn.lpstrTitle = L"Save Image";
+    ofn.hwndOwner = GetActiveWindow();
+
+    if (GetSaveFileNameW(&ofn)) {
+        // UTF-16 → UTF-8 dönüşümü
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
+        std::string utf8_path(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, filename, -1, utf8_path.data(), size_needed, nullptr, nullptr);
+
+        // Boş terminatörü kaldır
+        if (!utf8_path.empty() && utf8_path.back() == '\0')
+            utf8_path.pop_back();
+
+        // Eğer kullanıcı uzantıyı yazmadıysa otomatik ekle
+        std::string lower = utf8_path;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        if (lower.find(".png") == std::string::npos)
+            utf8_path += ".png";
+
+        return utf8_path;
+    }
+    return "";
+}
+
 
 constexpr float to_radians(float degrees) { return degrees * 3.1415926535f / 180.0f; }
 int sample_per_pass = 1;
@@ -74,6 +81,7 @@ bool camera_moved_recently = false;
 auto last_camera_move_time = std::chrono::steady_clock::now();
 float denoiser_blend_factor = 0.9f;
 bool use_optix = true;
+bool UI_use_embree = true;
 int sample_count = 1;
 float yaw = -90.0f;
 float pitch = 0.0f;
@@ -81,6 +89,13 @@ bool dragging = false;
 int last_mouse_x = 0;
 int last_mouse_y = 0;
 float move_speed = 0.5f;
+HitRecord hit_record;
+Ray ray;
+int mx = 0;
+int my = 0;
+float u;
+float v;
+bool rayhit = false;
 Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float strength = 1.0f) {
     float u = (x / (float)width - 0.5f) * 2.0f;
     float v = (y / (float)height - 0.5f) * 2.0f;
@@ -98,6 +113,7 @@ SDL_Window* window = SDL_CreateWindow("RayTrophi", SDL_WINDOWPOS_CENTERED, SDL_W
     image_width, image_height, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 SDL_Surface* surface = SDL_GetWindowSurface(window);
+
 SDL_Texture* raytrace_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
     SDL_TEXTUREACCESS_STREAMING, image_width, image_height);
 SDL_Surface* original_surface = SDL_ConvertSurface(surface, surface->format, 0);
@@ -139,40 +155,129 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
         }
     }
 }
-void reset_render_resolution(int w, int h) {
-    // 1. SDL Surfaceleri sıfırla
+void reset_render_resolution(int w, int h)
+{
+    // 1. SDL surface ve texture'ları sıfırla
     if (raytrace_texture) SDL_DestroyTexture(raytrace_texture);
     if (surface) SDL_FreeSurface(surface);
     if (original_surface) SDL_FreeSurface(original_surface);
-   
+
     surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
     original_surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
     raytrace_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
-    SDL_TEXTUREACCESS_STREAMING, w, h);   
-	if (!surface || !original_surface || !raytrace_texture) {
-		std::cerr << "Failed to create SDL surfaces or texture!" << std::endl;
-		return;
-	}
-	
-    // 2. CPU Renderer’e yeni boyutu bildir
+        SDL_TEXTUREACCESS_STREAMING, w, h);
+
+    if (!surface || !original_surface || !raytrace_texture) {
+        std::cerr << "Failed to create SDL surfaces or texture!" << std::endl;
+        return;
+    }
+
+    // 2. CPU renderer'ı güncelle
     ray_renderer.resetResolution(w, h);
 
-    // 3. OptiX GPU buffer’larını yeniden başlat
-    optix_gpu.resetBuffers(w, h);
-   
-    // 4. Tonemapping ve post-process ayarlarını yeniden yapılandır (gerekirse)
+    // 3. OptiX GPU bufferlarını yalnızca GPU aktifse resetle
+    if (use_optix && g_hasOptix)
+    {
+        optix_gpu.resetBuffers(w, h);
+    }
+
+    // 4. Color processor (CPU-side tone mapping)
     color_processor.resize(w, h);
 
     std::cout << "Render resolution updated: " << w << "x" << h << std::endl;
 }
+
+static bool isRTX(int major, int minor)
+{
+    // RTX donanımı SM 7.5 ile başladı.
+    if (major > 7) return true;            // SM 8.x, 9.x, 10.x → yeni RTX mimarileri
+    if (major == 7 && minor >= 5) return true; // SM 7.5 → Turing
+    return false;
+}
+
+void detectOptixHardware()
+{
+    int deviceCount = 0;
+    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+
+    // NVIDIA kart yok / CUDA yok / sürücü yok → OptiX yok.
+    if (err != cudaSuccess || deviceCount == 0) {
+        g_hasOptix = false;
+		std::cout << "No CUDA-capable devices found. OptiX will be disabled." << std::endl;
+        return;
+    }
+
+    bool foundRTX = false;
+
+    for (int i = 0; i < deviceCount; ++i)
+    {
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, i);
+
+        int major = prop.major;
+        int minor = prop.minor;
+
+        if (isRTX(major, minor)) {
+            foundRTX = true;
+			std::cout << "Found RTX-capable device: " << prop.name << " (SM " << major << "." << minor << ")" << std::endl;
+            break;
+        }
+    }
+
+    g_hasOptix = foundRTX;
+}
+// Tek merkezden kontrol edilen OptiX init
+bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
+    if (!g_hasOptix) return false; // Donanım yoksa direkt false döner
+
+    try {
+        optix_gpu.initialize();
+
+        // PTX dosyası her zaman yüklenmeye çalışılır
+        std::filesystem::path ptx_path = L"raygen.ptx";
+        std::ifstream file(ptx_path, std::ios::binary);
+        if (!file.is_open()) {
+            std::wcerr << L"Failed to open PTX file: " << ptx_path << std::endl;
+            g_hasOptix = false;
+            return false;
+        }
+
+        std::string ptx((std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>());
+        optix_gpu.setupPipeline(ptx.c_str());
+    }
+    catch (const std::exception& e) {
+        std::cerr << "OptiX initialization failed: " << e.what() << std::endl;
+        g_hasOptix = false;
+        return false;
+    }
+
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "Turkish");
-   
+	
+		std::cout << "RayTrophi Render Engine Launched" << std::endl;
+        detectOptixHardware();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << std::endl;
         return 1;
     }
-   
+    // SDL başlatıldıktan hemen sonra, render döngüsünden önce ekle
+    SDL_Surface* splash = IMG_Load("RayTrophi_image.png");
+    if (splash) {
+        SDL_BlitScaled(splash, nullptr, surface, nullptr); // splash'ı surface'a bas
+        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch); // texture güncelle
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+        SDL_RenderPresent(renderer);
+        SDL_FreeSurface(splash); // işimiz bitti
+    }
+    else {
+        SDL_Log("Splash görseli yüklenemedi: %s", IMG_GetError());
+    }
+
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -182,18 +287,13 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDLRenderer2_Init(renderer);
     ImGui::StyleColorsDark();
    
-    if (use_optix) {
-        optix_gpu.initialize();
-        std::ifstream file("E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.ptx");
-        if (file.is_open()) {
-            std::string ptx((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-            optix_gpu.setupPipeline(ptx.c_str());
-        }
-        else {
-            std::cerr << "Failed to open PTX file!" << std::endl;
-            use_optix = false;
-        }
+    if (initializeOptixIfAvailable(optix_gpu)) {
+        std::cout << "OptiX is ready!" << std::endl;
     }
+    else {
+        std::cout << "Falling back to CPU rendering." << std::endl;
+    }
+
 
     SDL_Event e;
     while (!quit) {
@@ -213,6 +313,17 @@ int main(int argc, char* argv[]) {
                 dragging = true;
                 last_mouse_x = e.button.x;
                 last_mouse_y = e.button.y;
+            }
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    rayhit = true;
+                    mx = e.button.x;
+                    my = e.button.y;
+                    my = image_height - my;
+                    u = (mx + 0.5f) / image_width;
+                    v = (my + 0.5f) / image_height;
+
+                }
             }
             if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_MIDDLE) {
                 dragging = false;
@@ -325,18 +436,30 @@ int main(int argc, char* argv[]) {
         auto now = std::chrono::steady_clock::now();
         auto delta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_camera_move_time).count();
         camera_moved_recently = (delta_ms < 50);
+        if (rayhit && scene.initialized) {
+            rayhit = false;
+            start_render = true;
+            ray = scene.camera->get_ray(u, v);
+            if (scene.bvh->hit(ray, 0.00001f, 1e10f, hit_record)) {						
+                scene.camera->focus_dist = hit_record.t;
+               
+            }
+
+            else {
+                std::cout << "No hit detected." << std::endl;
+            }           
+        }
         if (start_render && scene.initialized) {
             start_render = false;
             auto start_time = std::chrono::high_resolution_clock::now();  // Zaman başlat
            
-            if (ui_ctx.render_settings.use_optix) {
+            if (ui_ctx.render_settings.use_optix&& g_hasOptix) {
                 //std::cout << "Starting Optix Render... " << std::endl;
                 if (scene.camera) {
                     optix_gpu.setCameraParams(*scene.camera);
                     Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                     yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
                     pitch = asinf(dir.y) * 180.0f / 3.14159265f;
-				
                 }
                 if (!scene.lights.empty())
                     optix_gpu.setLightParams(scene.lights);
@@ -345,11 +468,15 @@ int main(int argc, char* argv[]) {
                 std::vector<uchar4> framebuffer(image_width * image_height);
                 optix_gpu.resetBuffers(image_width, image_height);
 
-                optix_gpu.launch_random_pixel_mode(surface, window, image_width, image_height, framebuffer);
-				if (ui_ctx.render_settings.use_denoiser) {
-					//std::cout << "Applying OIDN Denoising..." << std::endl;
-                    ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
-				}
+                // Bu fonksiyon artık kendi içinde progressive update yapacak
+                optix_gpu.launch_random_pixel_mode_progressive(surface, window, image_width, image_height, framebuffer, raytrace_texture);
+
+                if (ui_ctx.render_settings.use_denoiser) {
+                    //std::cout << "Applying OIDN Denoising..." << std::endl;
+                    optix_gpu.applyOIDNDenoising(surface, true, ui_ctx.render_settings.denoiser_blend_factor);
+                    // Denoising sonrası da texture'ı güncelle
+                    
+                }
                 SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
                 SDL_FreeSurface(original_surface);
                 original_surface = SDL_ConvertSurface(surface, surface->format, 0);
@@ -363,7 +490,7 @@ int main(int argc, char* argv[]) {
                 ray_renderer.render_image(surface, window, sample_count, sample_per_pass, scene);
                 if (ui_ctx.render_settings.use_denoiser) {
                    // std::cout << "Applying OIDN Denoising..." << std::endl;
-                    ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                    optix_gpu.applyOIDNDenoising(surface, true, ui_ctx.render_settings.denoiser_blend_factor);
                 }
                 SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
                 SDL_FreeSurface(original_surface);
@@ -378,7 +505,7 @@ int main(int argc, char* argv[]) {
 				ray_renderer.render_Animation(surface, window, sample_count, sample_per_pass, ui_ctx.render_settings.animation_fps, ui_ctx.render_settings.animation_duration, scene);
                 if (render_settings.use_denoiser) {
                   //  std::cout << "Applying OIDN Denoising..." << std::endl;
-                    ray_renderer.applyOIDNDenoising(surface, 0, true, denoiser_blend_factor);
+                    optix_gpu.applyOIDNDenoising(surface, true, denoiser_blend_factor);
                 }
                 SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
                 SDL_FreeSurface(original_surface);
@@ -399,7 +526,8 @@ int main(int argc, char* argv[]) {
                 SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
                 reset_tonemap = false;
             }
-
+			
+           
             if (apply_tonemap) {
                 applyToneMappingToSurface(surface, original_surface, color_processor);
                 SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
@@ -408,12 +536,18 @@ int main(int argc, char* argv[]) {
         }
         if (ui_ctx.render_settings.save_image_requested && original_surface) {
             ui_ctx.render_settings.save_image_requested = false;
-            std::string path = saveFileDialog("PNG Files\0*.png\0");
+
+            std::string path = saveFileDialogW(L"PNG Dosyaları\0*.png\0Tüm Dosyalar\0*.*\0");
             if (!path.empty()) {
-                SaveSurface(surface, path.c_str());
-                SDL_Log("Image saved to: %s", path.c_str());
+                if (SaveSurface(surface, path.c_str())) {
+                    SDL_Log("Image saved to: %s", path.c_str());
+                }
+                else {
+                    SDL_Log("Image save failed!");
+                }
             }
         }
+
 
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -421,7 +555,7 @@ int main(int argc, char* argv[]) {
         SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
-        std::this_thread::sleep_for(std::chrono::milliseconds(16));  // C++17 alternatifi
+        std::this_thread::sleep_for(std::chrono::milliseconds(32));  // C++17 alternatifi
 
        //SDL_Delay(32);
     }

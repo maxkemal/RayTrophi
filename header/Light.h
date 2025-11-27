@@ -3,11 +3,11 @@
 
 #include "Vec3.h"
 
-enum class LightType {
-    Point,
-    Directional,
-    Spot,
-    Area
+enum class LightType : int {
+    Point = 0,
+    Directional = 1,
+    Spot = 2,
+    Area = 3
 };
 
 class Light {
@@ -19,11 +19,11 @@ public:
 
     Vec3 color = Vec3(1.0f);    // normalize edilmiþ renk (0–1 arasý)
     float intensity = 1.0f;     // toplam enerji (lümen ya da key-value olarak)
-
+    float radius = 0.0f;
     // Alan ýþýðý için
     Vec3 u, v;
     double width = 1.0, height = 1.0;
-    float radius = 0.0f;
+  
 
     virtual float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const = 0;
     virtual Vec3 getDirection(const Vec3& point) const = 0;
@@ -33,6 +33,7 @@ public:
         return color * intensity; // varsayýlan davranýþ: sabit ýþýk
     }
     void setRadius(float rad) { radius = rad; }
+    float getRadius() const { return radius; }
     virtual Vec3 random_point() const = 0;
     virtual LightType type() const = 0;
 

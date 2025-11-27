@@ -27,7 +27,7 @@ OptixWrapper::OptixWrapper()
     sbt.missRecordBase = 0;
     sbt.hitgroupRecordBase = 0;
     traversable_handle = 0;
-    initialize();
+   // initialize();
 }
 void OptixWrapper::partialCleanup() {
     // Sadece buildFromData'da oluşturulan kaynakları temizle
@@ -172,7 +172,7 @@ void OptixWrapper::initialize() {
 
     cudaStreamCreate(&stream);
 
-    std::cout << "[OptiX] Başarıyla initialize edildi.\n";
+    //std::cout << "OptiX Successfully initialized.\n";
 }
 
 inline float3 toFloat3(const Vec3& v) {
@@ -207,14 +207,24 @@ bool OptixWrapper::isCudaAvailable() {
 }
 void OptixWrapper::setupOIDN(int width, int height)
 {
-    if (oidnInitialized) return;
+    if (oidnInitialized && oidnLastWidth == width && oidnLastHeight == height)
+        return; // Çözünürlük aynı -> Hiçbir şey yapma, en hızlı yol
 
-    oidnDevice = oidn::newDevice(oidn::DeviceType::CUDA); // veya CPU fallback
-    oidnDevice.commit();
+    // Aşağısı sadece çözünürlük değişirse (ya da ilk kurulumda) çalışır:
+    oidnInputBuffer = nullptr;
+    oidnOutputBuffer = nullptr;
+    oidnFilter = nullptr;
 
-    size_t size = width * height * 3 * sizeof(float);
-    oidnInputBuffer = oidnDevice.newBuffer(size);
-    oidnOutputBuffer = oidnDevice.newBuffer(size);
+    if (!oidnDevice) {
+        oidnDevice = g_hasOptix ? oidn::newDevice(oidn::DeviceType::CUDA)
+            : oidn::newDevice(oidn::DeviceType::CPU);
+        oidnDevice.commit();
+    }
+
+    const size_t byteSize = width * height * 3 * sizeof(float);
+
+    oidnInputBuffer = oidnDevice.newBuffer(byteSize);
+    oidnOutputBuffer = oidnDevice.newBuffer(byteSize);
 
     oidnFilter = oidnDevice.newFilter("RT");
     oidnFilter.setImage("color", oidnInputBuffer, oidn::Format::Float3, width, height);
@@ -223,181 +233,87 @@ void OptixWrapper::setupOIDN(int width, int height)
     oidnFilter.set("srgb", true);
     oidnFilter.commit();
 
+    oidnLastWidth = width;
+    oidnLastHeight = height;
     oidnInitialized = true;
 }
 
-void OptixWrapper::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
-    // 1. Parametre Doğrulaması
-    if (!surface) {
-        std::cerr << "[OIDN] Hata: SDL_Surface pointer null." << std::endl;
-        return;
-    }
-    if (surface->w <= 0 || surface->h <= 0) {
-        std::cerr << "[OIDN] Hata: Geçersiz yüzey boyutları (genişlik veya yükseklik sıfır/negatif)." << std::endl;
-        return;
-    }
-
+void OptixWrapper::applyOIDNDenoising(SDL_Surface* surface, bool denoise, float blend)
+{
     int width = surface->w;
     int height = surface->h;
-    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+
+    setupOIDN(width, height);  // Çok hızlı - çözünürlük değişmediyse boş
+
+    if (!oidnInitialized)
+        return;
 
     const size_t pixelCount = width * height;
-    const size_t byteSize = pixelCount * 3 * sizeof(float); // RGB, float32
+    const size_t byteSize = pixelCount * 3 * sizeof(float);
 
-    // SDL Surface -> RGB float32 buffer
-    std::vector<float> inputFloatBuffer(pixelCount * 3);
-    for (int i = 0; i < pixelCount; ++i) {
+    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+
+    // Paylaşılan statik vektör (her kare yeniden allocate etmez)
+    static std::vector<float> input;
+    static std::vector<float> output;
+
+    input.resize(pixelCount * 3);
+    output.resize(pixelCount * 3);
+
+    for (int i = 0; i < pixelCount; i++) {
         Uint8 r, g, b;
         SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
-        inputFloatBuffer[i * 3 + 0] = static_cast<float>(r) / 255.0f;
-        inputFloatBuffer[i * 3 + 1] = static_cast<float>(g) / 255.0f;
-        inputFloatBuffer[i * 3 + 2] = static_cast<float>(b) / 255.0f;
+        input[i * 3 + 0] = r / 255.0f;
+        input[i * 3 + 1] = g / 255.0f;
+        input[i * 3 + 2] = b / 255.0f;
     }
 
-    // --- OIDN Başlatma (sadece bir kere veya boyut değiştiğinde) ---
-    // Eğer boyutlar değiştiyse veya henüz başlatılmadıysa, OIDN kaynaklarını yeniden oluştur.
-    // Bu, boyut değişimlerinde doğru tampon ve filtre boyutlandırmasını sağlar.
-    if (!oidnInitialized || oidnLastWidth != width || oidnLastHeight != height) {
-        // Önceki kaynakları temizle (eğer varsa)
-        if (oidnInitialized) {
-            oidnFilter = nullptr; // OIDN filtresini serbest bırakır
-            oidnInputBuffer = nullptr; // OIDN tamponunu serbest bırakır
-            oidnOutputBuffer = nullptr; // OIDN tamponunu serbest bırakır
-            // Cihazın da serbest bırakılması gerekebilir ancak genellikle uygulamanın sonunda yapılır
-            // oidnDevice = nullptr; // Cihazı da serbest bırakır (dikkatli kullanılmalı)
-        }
+    std::memcpy(oidnInputBuffer.getData(), input.data(), byteSize);
 
-        try {
-            oidnDevice = isCudaAvailable() ? oidn::newDevice(oidn::DeviceType::CUDA) : oidn::newDevice(oidn::DeviceType::CPU);
-            if (numThreads > 0) oidnDevice.set("numThreads", numThreads);
-            oidnDevice.commit(); // Cihaz ayarlarını uygula
-
-            // Cihaz hata kontrolü
-            const char* deviceErrorMessage;
-            if (oidnDevice.getError(deviceErrorMessage) != oidn::Error::None) {
-                std::cerr << "[OIDN] Cihaz Başlatma Hatası: " << deviceErrorMessage << std::endl;
-                oidnInitialized = false; // Hata durumunda başlatılmadı olarak işaretle
-                return;
-            }
-
-            oidnInputBuffer = oidnDevice.newBuffer(byteSize);
-            oidnOutputBuffer = oidnDevice.newBuffer(byteSize);
-
-            oidnFilter = oidnDevice.newFilter("RT"); // Ray Tracing filtresi
-            oidnFilter.setImage("color", oidnInputBuffer, oidn::Format::Float3, width, height);
-            oidnFilter.setImage("output", oidnOutputBuffer, oidn::Format::Float3, width, height);
-
-            // HDR ve sRGB ayarları: Giriş verisinin renk uzayına göre ayarlanmalı.
-            // SDL_Surface genellikle sRGB'dir. Eğer kaynak HDR ise 'hdr' true yapılmalı.
-            oidnFilter.set("hdr", false);
-            oidnFilter.set("srgb", true); // SDL_Surface için genellikle doğru
-
-            oidnFilter.commit(); // Filtre ayarlarını uygula
-
-            // Filtre başlatma sonrası hata kontrolü (Yine cihaz üzerinden)
-            // Filtrenin commit edilmesi de cihazda hata yaratabilir.
-            const char* filterErrorMessage;
-            if (oidnDevice.getError(filterErrorMessage) != oidn::Error::None) { // << Burada oidnDevice kullanılıyor
-                std::cerr << "[OIDN] Filtre Ayarlama Hatası: " << filterErrorMessage << std::endl;
-                oidnInitialized = false;
-                return;
-            }
-
-            oidnLastWidth = width;
-            oidnLastHeight = height;
-            oidnInitialized = true; // Başarıyla başlatıldı
-            std::cout << "[OIDN] OIDN kaynakları yeniden başlatıldı/oluşturuldu. (Boyut: " << width << "x" << height << ")" << std::endl;
-
-        }
-        catch (const std::exception& e) {
-            std::cerr << "[OIDN] İstisna: OIDN kaynaklarını başlatırken hata oluştu: " << e.what() << std::endl;
-            oidnInitialized = false; // Hata durumunda başlatılmadı olarak işaretle
-            return;
-        }
-    }
-
-    // Eğer OIDN başlatılamadıysa, denoise yapma
-    if (!oidnInitialized) {
-        std::cerr << "[OIDN] OIDN başlatılamadığı için denoise işlemi atlandı." << std::endl;
-        return;
-    }
-
-    // --- Denoise işlemi ---
-    // Giriş tamponuna veriyi kopyala
-    std::memcpy(oidnInputBuffer.getData(), inputFloatBuffer.data(), byteSize);
-
-    // Denoise ayarını yap ve commit et (Her çağrıda değişebilir)
     oidnFilter.set("denoise", denoise);
-    oidnFilter.commit(); // Bu ayarı uygulamak için commit etmeliyiz
+    oidnFilter.commit();
 
-    // Denoise işlemini yürüt
-    try {
-        // auto start = std::chrono::high_resolution_clock::now();
-        oidnFilter.execute();
-        // auto end = std::chrono::high_resolution_clock::now();
-        // std::chrono::duration<double, std::milli> elapsed = end - start;
-        // std::cout << "[OIDN] Denoising took " << elapsed.count() << " ms.\n";
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[OIDN] İstisna: Denoise işlemi sırasında hata oluştu: " << e.what() << std::endl;
-        return;
-    }
+    oidnFilter.execute();
 
+    std::memcpy(output.data(), oidnOutputBuffer.getData(), byteSize);
 
-    // OIDN işleminden sonra hata kontrolü
-    const char* errorMessage;
-    if (oidnDevice.getError(errorMessage) != oidn::Error::None) {
-        std::cerr << "[OIDN] Çalışma Zamanı Hatası: " << errorMessage << std::endl;
-        // Hata durumunda işleme devam etmek yerine çıkmak daha güvenli olabilir
-        return;
-    }
-
-    // --- Sonuçları al ve blend et ---
-    std::vector<float> outputFloatBuffer(pixelCount * 3);
-    std::memcpy(outputFloatBuffer.data(), oidnOutputBuffer.getData(), byteSize);
-
-    // Blend değerini [0, 1] aralığına kısıtla
-    float clampedBlend = std::clamp(blend, 0.0f, 1.0f);
+    float clamped = std::clamp(blend, 0.0f, 1.0f);
 
     for (int i = 0; i < pixelCount; ++i) {
         Uint8 r0, g0, b0;
         SDL_GetRGB(pixels[i], surface->format, &r0, &g0, &b0);
 
-        // Orijinal ve denoise edilmiş pikselleri harmanla
-        float r_denoised = outputFloatBuffer[i * 3 + 0];
-        float g_denoised = outputFloatBuffer[i * 3 + 1];
-        float b_denoised = outputFloatBuffer[i * 3 + 2];
+        float rr = output[i * 3];
+        float gg = output[i * 3 + 1];
+        float bb = output[i * 3 + 2];
 
-        float r_original = static_cast<float>(r0) / 255.0f;
-        float g_original = static_cast<float>(g0) / 255.0f;
-        float b_original = static_cast<float>(b0) / 255.0f;
+        float r = rr * clamped + (r0 / 255.0f) * (1.0f - clamped);
+        float g = gg * clamped + (g0 / 255.0f) * (1.0f - clamped);
+        float b = bb * clamped + (b0 / 255.0f) * (1.0f - clamped);
 
-        float r = r_denoised * clampedBlend + r_original * (1.0f - clampedBlend);
-        float g = g_denoised * clampedBlend + g_original * (1.0f - clampedBlend);
-        float b = b_denoised * clampedBlend + b_original * (1.0f - clampedBlend);
-
-        // Renk değerlerini 0-255 aralığına kısıtla ve Uint8'e dönüştür
         pixels[i] = SDL_MapRGB(surface->format,
-            static_cast<Uint8>(std::clamp(r * 255.0f, 0.0f, 255.0f)),
-            static_cast<Uint8>(std::clamp(g * 255.0f, 0.0f, 255.0f)),
-            static_cast<Uint8>(std::clamp(b * 255.0f, 0.0f, 255.0f)));
+            (Uint8)(std::clamp(r * 255.0f, 0.0f, 255.0f)),
+            (Uint8)(std::clamp(g * 255.0f, 0.0f, 255.0f)),
+            (Uint8)(std::clamp(b * 255.0f, 0.0f, 255.0f))
+        );
     }
 }
+
 void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
     if (data.materials.empty()) {
-        std::cerr << " HATA: Hiç materyal yok!\n";
+        std::cerr << " ERROR: No material available!\n";
         return;
     }
 
     if (data.indices.empty()) {
-        std::cerr << " HATA: Hiç üçgen yok!\n";
+        std::cerr << " ERROR: There are no triangles!\n";
         return;
     }
 
     const auto& material_indices = data.material_indices;
 
     if (material_indices.empty()) {
-        std::cout << " Bilgi: Material indices boş, hepsi default 0 sayılacak.\n";
+        std::cout << " Information: Material indices are empty, all will be considered as 0 by default.\n";
         return;
     }
 
@@ -405,11 +321,11 @@ void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
         int mat_idx = material_indices[tri_idx];
 
         if (mat_idx < 0 || mat_idx >= data.materials.size()) {
-            std::cerr << " UYARI: Triangle [" << tri_idx << "] için geçersiz material index: " << mat_idx << "\n";
+            std::cerr << " WARNING: Invalid material index for triangle [" << tri_idx << "]: " << mat_idx << "\n";
         }
     }
 
-    std::cout << " Material indices doğrulandı! (" << material_indices.size() << " üçgen kontrol edildi)\n";
+    std::cout << " Material indices verified! (" << material_indices.size() << " triangle checked)\n";
 }
 
 void OptixWrapper::setupPipeline(const char* raygen_ptx) {
@@ -528,10 +444,10 @@ void OptixWrapper::destroyTextureObjects() {
 }
 
 void OptixWrapper::buildFromData(const OptixGeometryData& data) {
-    std::cout << " OptiX buildFromData başlıyor...\n";
+    std::cout << " OptiX buildFromData is starting...\n";
 
     if (data.vertices.empty() || data.indices.empty()) {
-        std::cerr << " Geometri verisi boş!\n";
+        std::cerr << " Geometry data is empty!\n";
         return;
     }
     destroyTextureObjects();      
@@ -566,7 +482,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     if (data.material_indices.empty() || data.material_indices.size() != data.indices.size()) {
         default_material_indices.resize(data.indices.size(), 0);
         material_indices_ptr = default_material_indices.data();
-        std::cout << "Uyarı: Materyal indeksleri yeniden oluşturuldu.\n";
+        std::cout << "Warning: Material indexes have been rebuilt.\n";
     }
     else {
         material_indices_ptr = data.material_indices.data();
@@ -626,7 +542,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
                     << "\n";*/
             }
             else {
-                std::cerr << "[SBT-WARN] Mat #" << mat_index << " için texture bulunamadı!\n";
+                std::cerr << "[SBT-WARN] Mat #" << mat_index << " No texture found for!\n";
             }
             rec.data.material_id = static_cast<int>(mat_index);
             rec.data.vertices = reinterpret_cast<float3*>(d_vertices);
@@ -718,193 +634,414 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     d_bvh_output = d_output_buffer;
 
     cudaStreamSynchronize(stream);
-    std::cout << " OptiX buildFromData başarıyla tamamlandı! "
-        << data.materials.size() << " materyal için SBT kaydı oluşturuldu.\n";
+    std::cout << "OptiX buildFromData completed successfully! "
+        << data.materials.size() << " SBT record created for material.\n";
 }
-
-
-void OptixWrapper::launch_random_pixel_mode(
+/*
+void OptixWrapper::launch_tile_based_progressive(
     SDL_Surface* surface, SDL_Window* window, int width, int height,
-    std::vector<uchar4>& framebuffer
+    std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture
 ) {
-    using namespace std::chrono;
-    auto start_time = high_resolution_clock::now();
-
-    cudaDeviceProp props;
     cudaGetDeviceProperties(&props, 0);
 
-    int max_threads_per_block = props.maxThreadsPerBlock;
-    int num_sms = props.multiProcessorCount;
+    constexpr int TILE_SIZE = 256;
+    constexpr int MAX_PASSES = 4;
 
-    int image_pixels = width * height;
-    int pixels_per_batch = std::clamp(image_pixels, 256 * 256, 1024 * 1024); // min: 16K, max: 1M
-    int total_batches = std::max(1, image_pixels / pixels_per_batch);
-    int pixels_per_launch = (image_pixels + total_batches - 1) / total_batches;
-
-    // Render sırasında kaç defa ekran güncellensin (1–20 arası ideal)
-    int update_frequency = 10; 
-    // ------------------ FRAMEBUFFER SETUP -----------------------
+    // Buffers
     uchar4* d_framebuffer = nullptr;
+    float4* d_accumulation = nullptr;
+
     cudaMalloc(&d_framebuffer, width * height * sizeof(uchar4));
-    params.framebuffer = d_framebuffer;
+    cudaMemset(d_framebuffer, 0, width * height * sizeof(uchar4));
+
+    cudaMalloc(&d_accumulation, width * height * sizeof(float4));
+    cudaMemset(d_accumulation, 0, width * height * sizeof(float4));
+
+    // Streams
+    cudaStream_t render_stream, copy_stream;
+    cudaStreamCreate(&render_stream);
+    cudaStreamCreate(&copy_stream);
+
+    // Host buffers
+    std::vector<uchar4> tile_buffer(TILE_SIZE * TILE_SIZE);
+    framebuffer.resize(width * height, make_uchar4(0, 0, 0, 255));
+
+    Uint32* pixels = (Uint32*)surface->pixels;
+    int row_stride = surface->pitch / 4;
+
+    // Tile generation
+    std::vector<Tile> tiles;
+    for (int y = 0; y < height; y += TILE_SIZE) {
+        for (int x = 0; x < width; x += TILE_SIZE) {
+            Tile tile;
+            tile.x = x;
+            tile.y = y;
+            tile.width = std::min(TILE_SIZE, width - x);
+            tile.height = std::min(TILE_SIZE, height - y);
+            tile.samples = 0;
+            tile.variance = 1.0f;
+            tile.completed = false;
+            tiles.push_back(tile);
+        }
+    }
+
+    static std::mt19937 rng(12345);
+    std::shuffle(tiles.begin(), tiles.end(), rng);
+
+    std::cout << "Tiles: " << tiles.size() << " (" << TILE_SIZE << "x" << TILE_SIZE << ")\n";
+
+    // Params setup (sabit değerler)
     params.image_width = width;
     params.image_height = height;
     params.handle = traversable_handle;
-
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
+    params.max_depth = render_settings.max_bounces;
+    params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
+    params.variance_threshold = render_settings.variance_threshold;
+    params.framebuffer = d_framebuffer;
+    params.accumulation_buffer = d_accumulation;
 
-    // Atmosfer
+    // Atmosphere
     params.atmosphere.sigma_s = 0.01f;
     params.atmosphere.sigma_a = 0.01f;
     params.atmosphere.g = 0.0f;
     params.atmosphere.base_density = 0.001f;
     params.atmosphere.temperature = 300.0f;
-    params.atmosphere.active = false; // kapalı
+    params.atmosphere.active = false;
 
-    // ------------------ ADAPTIVE PARAMETRELER ------------------
+    RayGenParams* d_params = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    int frame_counter = 0;
+
+    // Multi-pass progressive loop
+    for (int pass = 0; pass < MAX_PASSES; pass++) {
+        int samples_this_pass = 1 << pass;
+
+        std::cout << "\n=== Pass " << (pass + 1) << "/" << MAX_PASSES
+            << " | Samples: " << samples_this_pass << " ===\n";
+
+        if (pass > 0 && render_settings.use_adaptive_sampling) {
+            std::sort(tiles.begin(), tiles.end(),
+                [](const Tile& a, const Tile& b) { return a.variance > b.variance; });
+        }
+
+        int tiles_rendered = 0;
+        int tiles_skipped = 0;
+
+        for (auto& tile : tiles) {
+            if (tile.completed && tile.variance < render_settings.variance_threshold) {
+                tiles_skipped++;
+                continue;
+            }
+
+            // Params güncelle
+            params.tile_x = tile.x;
+            params.tile_y = tile.y;
+            params.tile_width = tile.width;
+            params.tile_height = tile.height;
+            params.samples_per_pixel = samples_this_pass;
+            params.current_pass = pass;
+            params.frame_number = frame_counter++;
+
+            // Sync copy sonra launch (önceki işlemin bitmesini bekle)
+            cudaStreamSynchronize(render_stream);
+
+            cudaMemcpyAsync(d_params, &params, sizeof(RayGenParams),
+                cudaMemcpyHostToDevice, render_stream);
+
+            OptixResult result = optixLaunch(
+                pipeline,
+                render_stream,
+                reinterpret_cast<CUdeviceptr>(d_params),
+                sizeof(RayGenParams),
+                &sbt,
+                tile.width,   // Launch width = tile width
+                tile.height,  // Launch height = tile height
+                1             // Depth = 1
+            );
+
+            if (result != OPTIX_SUCCESS) {
+                std::cerr << "OptiX launch failed: " << result << std::endl;
+                std::cerr << "Tile: " << tile.x << "," << tile.y
+                    << " Size: " << tile.width << "x" << tile.height << std::endl;
+                continue;
+            }
+
+            // Tile'ı kopyala
+            size_t src_offset = tile.y * width + tile.x;
+            uchar4* src_ptr = d_framebuffer + src_offset;
+
+            cudaMemcpy2DAsync(
+                tile_buffer.data(),
+                tile.width * sizeof(uchar4),
+                src_ptr,
+                width * sizeof(uchar4),
+                tile.width * sizeof(uchar4),
+                tile.height,
+                cudaMemcpyDeviceToHost,
+                copy_stream
+            );
+
+            cudaStreamSynchronize(copy_stream);
+
+            // Host framebuffer güncelle
+            for (int ty = 0; ty < tile.height; ty++) {
+                int dst_y = tile.y + ty;
+                int src_idx = ty * tile.width;
+                int dst_idx = dst_y * width + tile.x;
+                std::memcpy(&framebuffer[dst_idx], &tile_buffer[src_idx],
+                    tile.width * sizeof(uchar4));
+            }
+
+            // Display güncelle
+            for (int ty = 0; ty < tile.height; ty++) {
+                for (int tx = 0; tx < tile.width; tx++) {
+                    int px = tile.x + tx;
+                    int py = tile.y + ty;
+                    int fb_index = py * width + px;
+
+                    const uchar4& c = framebuffer[fb_index];
+                    Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
+                    Vec3 final_color = color_processor.processColor(raw_color, px, py);
+
+                    Uint8 r = static_cast<Uint8>(std::min(255.0f * final_color.x, 255.0f));
+                    Uint8 g = static_cast<Uint8>(std::min(255.0f * final_color.y, 255.0f));
+                    Uint8 b = static_cast<Uint8>(std::min(255.0f * final_color.z, 255.0f));
+
+                    int screen_index = (height - 1 - py) * row_stride + px;
+                    pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
+                }
+            }
+
+            tiles_rendered++;
+            tile.samples += samples_this_pass;
+
+            if (tiles_rendered % 16 == 0 || tiles_rendered == static_cast<int>(tiles.size() - tiles_skipped)) {
+                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                SDL_UpdateWindowSurface(window);
+
+                float progress = 100.0f * tiles_rendered / (tiles.size() - tiles_skipped);
+                auto now = std::chrono::high_resolution_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+
+                std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
+                    << progress << "% | "
+                    << tiles_rendered << "/" << (tiles.size() - tiles_skipped)
+                    << " tiles | " << elapsed << "s     " << std::flush;
+            }
+        }
+
+        std::cout << "\n";
+
+        // Variance calculation...
+        // (mevcut kodun aynısı)
+    }
+
+    // Final update
+    SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+    SDL_UpdateWindowSurface(window);
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
+    std::cout << "\n✓ Render completed in " << duration << "s\n";
+
+    // Cleanup
+    cudaFree(d_framebuffer);
+    cudaFree(d_accumulation);
+    cudaFree(d_params);
+    cudaStreamDestroy(render_stream);
+    cudaStreamDestroy(copy_stream);
+}
+*/
+void OptixWrapper::launch_random_pixel_mode_progressive(
+    SDL_Surface* surface, SDL_Window* window, int width, int height,
+    std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture
+) {
+
+    cudaGetDeviceProperties(&props, 0);
+    int max_threads_per_block = props.maxThreadsPerBlock;
+    int num_sms = props.multiProcessorCount;
+
+    int image_pixels = width * height;
+
+    // RTX 3060 için optimize batch size
+    // GPU'yu doyurmak için büyük batch, ama sık güncelleme için birden fazla batch biriktir
+    int pixels_per_launch = std::clamp(image_pixels, 32768, 256 * 1024); // Büyük batch
+    int display_update_interval = 2; // Her 1 batch'te bir ekranı güncelle
+
+    // ------------------ FRAMEBUFFER SETUP -----------------------
+    cudaMalloc(&d_framebuffer, width * height * sizeof(uchar4));
+
+    // Framebuffer'ı sıfırla (siyah başlat)
+    cudaMemset(d_framebuffer, 0, width * height * sizeof(uchar4));
+
+    params.framebuffer = d_framebuffer;
+    params.image_width = width;
+    params.image_height = height;
+    params.handle = traversable_handle;
+    params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
+
+    // Atmosfer parametreleri
+    params.atmosphere.sigma_s = 0.01f;
+    params.atmosphere.sigma_a = 0.01f;
+    params.atmosphere.g = 0.0f;
+    params.atmosphere.base_density = 0.001f;
+    params.atmosphere.temperature = 300.0f;
+    params.atmosphere.active = false;
+
     params.samples_per_pixel = render_settings.samples_per_pixel;
     params.min_samples = render_settings.min_samples;
-	params.max_samples = render_settings.max_samples;
+    params.max_samples = render_settings.max_samples;
     params.variance_threshold = render_settings.variance_threshold;
     params.max_depth = render_settings.max_bounces;
     params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
 
-    // Frame sayısını arttır
     params.frame_number = frame_counter;
     frame_counter++;
-
-    // Temporal blend: yeni frame %98, eski %2 katkı (daha hızlı converge için)
     params.temporal_blend = 0.95f;
-
-    // ------------------ VARYANS & AKÜMÜLASYON BUFFERLARI ------------------
-    // Buffer reallocation sadece gerektiğinde yapılıyor
-    if (width != prev_width || height != prev_height) {
-        if (d_variance_buffer) cudaFree(d_variance_buffer);
-        if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
-        if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
-
-        // Pinned memory kullanımı için
-        cudaMalloc(&d_variance_buffer, sizeof(float) * width * height);
-        cudaMalloc(&d_accumulation_buffer, sizeof(float) * width * height * 3); // RGB
-        cudaMalloc(&d_sample_count_buffer, sizeof(int) * width * height);
-       
-        cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
-        cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
-        cudaMemset(d_sample_count_buffer, 0, sizeof(int) * width * height);
-
-        prev_width = width;
-        prev_height = height;
-    }
-
-    params.variance_buffer = d_variance_buffer;
-    params.accumulation_buffer = d_accumulation_buffer;
-    params.sample_count_buffer = d_sample_count_buffer;
-
-    // ------------------ PARAMS DEVICE KOPYALAMA ------------------
-    
     cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
 
     // ------------------ PİKSEL KOORDİNATLARI ------------------
     std::vector<std::pair<int, int>> all_coords;
-    all_coords.reserve(width * height); // Önceden bellek ayırma - performans artışı
+    all_coords.reserve(width * height);
 
     for (int j = 0; j < height; ++j)
         for (int i = 0; i < width; ++i)
             all_coords.emplace_back(i, j);
 
-    // Daha hızlı rastgele karıştırma için sabit tohum
     static std::mt19937 rng(12345);
     std::shuffle(all_coords.begin(), all_coords.end(), rng);
 
     std::vector<int> coords_x(pixels_per_launch);
     std::vector<int> coords_y(pixels_per_launch);
 
-   
     cudaMalloc(reinterpret_cast<void**>(&d_coords_x), pixels_per_launch * sizeof(int));
     cudaMalloc(reinterpret_cast<void**>(&d_coords_y), pixels_per_launch * sizeof(int));
 
     size_t total_pixels = all_coords.size();
     size_t rendered_pixels = 0;
 
-    // Asenkron işlemler için CUDA akışları
     cudaStream_t render_stream;
     cudaStreamCreate(&render_stream);
 
-    for (size_t offset = 0; offset < total_pixels; offset += pixels_per_launch) {
-        size_t count = std::min<size_t>(pixels_per_launch, total_pixels - offset);
+    // Partial framebuffer - TÜM framebuffer'ı tutacak kadar büyük
+    // Ama sadece değişen kısımları işleyeceğiz
+    partial_framebuffer.resize(width * height);
+    std::vector<int> current_batch_x(pixels_per_launch);
+    std::vector<int> current_batch_y(pixels_per_launch);
 
+    // Accumulated batch tracking
+    std::vector<std::pair<int, uchar4>> accumulated_updates;
+    accumulated_updates.reserve(pixels_per_launch * display_update_interval);
+
+    // SDL pixel buffer
+    Uint32* pixels = (Uint32*)surface->pixels;
+    int row_stride = surface->pitch / 4;
+
+    auto start_time = std::chrono::high_resolution_clock::now();
+    int batch_counter = 0;
+
+    size_t count;
+    for (size_t offset = 0; offset < total_pixels; offset += pixels_per_launch) {
+        count = std::min<size_t>(pixels_per_launch, total_pixels - offset);
+
+        // Koordinatları hazırla ve sakla
         for (size_t k = 0; k < count; ++k) {
             int index = offset + k;
             coords_x[k] = all_coords[index].first;
             coords_y[k] = all_coords[index].second;
+            accumulated_coords.emplace_back(coords_x[k], coords_y[k]);
         }
 
-        // Asenkron veri transferi
-        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_x), coords_x.data(), count * sizeof(int),
-            cudaMemcpyHostToDevice, render_stream);
-        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_y), coords_y.data(), count * sizeof(int),
-            cudaMemcpyHostToDevice, render_stream);
+        // Async memory transfer
+        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_x), coords_x.data(),
+            count * sizeof(int), cudaMemcpyHostToDevice, render_stream);
+        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_y), coords_y.data(),
+            count * sizeof(int), cudaMemcpyHostToDevice, render_stream);
 
         params.launch_coords_x = reinterpret_cast<int*>(d_coords_x);
         params.launch_coords_y = reinterpret_cast<int*>(d_coords_y);
         params.batch_pixel_count = static_cast<int>(count);
 
-        cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams),
-            cudaMemcpyHostToDevice, render_stream);
+        cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params,
+            sizeof(RayGenParams), cudaMemcpyHostToDevice, render_stream);
 
+        // Render launch
         OPTIX_CHECK(optixLaunch(
             pipeline, render_stream,
             d_params, sizeof(RayGenParams),
             &sbt,
             static_cast<unsigned int>(count), 1, 1
         ));
-       
 
-        // Güncelleme aralığını ayarlama - her %10'da bir ekranı güncelle
-        bool should_update = (
-            (rendered_pixels % (total_pixels / update_frequency) == 0) ||
-            (offset + count >= total_pixels)
-            );
-      
-        if (should_update) {
-            // Render işlemi tamamlanmadan önce stream'in tamamlanmasını bekle
-            cudaStreamSynchronize(render_stream);
+        // TEK SEFERDE tüm framebuffer'ı kopyala
+        cudaMemcpyAsync(partial_framebuffer.data(),
+            d_framebuffer,
+            width * height * sizeof(uchar4),
+            cudaMemcpyDeviceToHost,
+            render_stream);
 
-            // Framebuffer'ı güncelle
-            cudaMemcpyAsync(framebuffer.data(), d_framebuffer, width * height * sizeof(uchar4),
-                cudaMemcpyDeviceToHost, render_stream);
-
-            // ------------------ SDL GÜNCELLEME ------------------
-            cudaStreamSynchronize(render_stream); // Framebuffer transferinin bitmesini bekle
-           
-            Uint32* pixel;
-            for (int j = 0; j < height; ++j) {
-                for (int i = 0; i < width; ++i) {
-                    const uchar4& c = framebuffer[j * width + i];
-
-                    Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
-                    Vec3 final_color = color_processor.processColor(raw_color, i, j);
-                    int r = static_cast<int>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
-                    int g = static_cast<int>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
-                    int b = static_cast<int>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
-
-                    int row_stride = surface->pitch / 4;
-                    pixel = (Uint32*)surface->pixels + (height - 1 - j) * row_stride + i;
-
-                    *pixel = SDL_MapRGB(surface->format, r, g, b);
-                   
-                }
-               
-            }           
-			// SDL yüzeyini güncelle 
-            //SDL_UpdateWindowSurface(window);
-        }
+        cudaStreamSynchronize(render_stream);
 
         rendered_pixels += count;
+        batch_counter++;
+
+        // Belirli aralıklarla VEYA son batch ise ekranı güncelle
+        bool should_update = (batch_counter % display_update_interval == 0) ||
+            (offset + pixels_per_launch >= total_pixels);
+
+        if (should_update && !accumulated_coords.empty()) {
+           
+
+            // Biriken tüm koordinatlardaki pikselleri güncelle
+            for (const auto& coord : accumulated_coords) {
+                int px = coord.first;
+                int py = coord.second;
+                int fb_index = py * width + px;
+                const uchar4& c = partial_framebuffer[fb_index];
+
+                Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
+                Vec3 final_color = color_processor.processColor(raw_color, px, py);
+
+                Uint8 r = static_cast<Uint8>(std::min(255.0f * final_color.x, 255.0f));
+                Uint8 g = static_cast<Uint8>(std::min(255.0f * final_color.y, 255.0f));
+                Uint8 b = static_cast<Uint8>(std::min(255.0f * final_color.z, 255.0f));
+
+                int screen_index = (height - 1 - py) * row_stride + px;
+                pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
+            }
+
+
+            // Texture ve window güncelle
+            SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+            SDL_UpdateWindowSurface(window);
+
+            // Accumulated coords'i temizle
+            accumulated_coords.clear();
+        }
+
+        // İlerleme bilgisi (sadece ekran güncellendiğinde)
+       /* if (should_update) {
+            float progress = (100.0f * rendered_pixels) / total_pixels;
+            auto current_time = std::chrono::high_resolution_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                current_time - start_time).count() / 1000.0f;
+
+            float pixels_per_sec = rendered_pixels / std::max(0.001f, elapsed);
+            float remaining_time = (total_pixels - rendered_pixels) / std::max(1.0f, pixels_per_sec);
+
+            std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
+                << progress << "% | "
+                << rendered_pixels << "/" << total_pixels << " pixels | "
+                << static_cast<int>(pixels_per_sec / 1000.0f) << "K px/s | "
+                << "ETA: " << static_cast<int>(remaining_time) << "s     "
+                << std::flush;
+        }*/
     }
 
-    // Son işlemler için stream'in tamamlanmasını bekle
-    cudaStreamSynchronize(render_stream);
+    //std::cout << std::endl << "Render completed!" << std::endl;
 
     // ------------------ TEMİZLİK ------------------
     cudaFree(reinterpret_cast<void*>(d_framebuffer));
@@ -912,16 +1049,6 @@ void OptixWrapper::launch_random_pixel_mode(
     cudaFree(reinterpret_cast<void*>(d_coords_x));
     cudaFree(reinterpret_cast<void*>(d_coords_y));
     cudaStreamDestroy(render_stream);
-
-    // Not: variance, accumulation ve sample_count bufferları sabit tutuluyor (bir sonraki frame için reuse!)
-
-   
-   // SDL_UpdateWindowSurface(window);
-
-    // Toplam süreyi ölç
-    //auto end_time = high_resolution_clock::now();
-    //auto duration = duration_cast<milliseconds>(end_time - start_time).count();
-    //std::cout << "Render süresi: " << duration << " ms" << std::endl;
 }
 
 void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
@@ -1007,13 +1134,13 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
 }
 
 bool OptixWrapper::SaveSurface(SDL_Surface* surface, const char* filename) {
-    // 🔒 Sabit ve değişmeyen klasör yolu
+    //  Sabit ve değişmeyen klasör yolu
     std::filesystem::path output_dir = "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/image";
 
     if (!std::filesystem::exists(output_dir)) {
         std::error_code ec;
         if (!std::filesystem::create_directories(output_dir, ec)) {
-            SDL_Log("Klasör oluşturulamadı: %s", ec.message().c_str());
+            SDL_Log("Could not create folder: %s", ec.message().c_str());
             return false;
         }
     }

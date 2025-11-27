@@ -420,7 +420,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
 		brdf_mis *= opacity; // BRDF MIS katkısını da opacity ile çarp
 
         // --- Toplam katkı ---
-        color += throughput * (payload.emission + direct+ brdf_mis);
+        color += throughput * (opacity * direct+ brdf_mis+ payload.emission);
        
         ray = scattered;
 		

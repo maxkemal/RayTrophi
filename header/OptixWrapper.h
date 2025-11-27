@@ -66,27 +66,19 @@ public:
     void initialize();
     bool isCudaAvailable();
     void setupOIDN(int width, int height);
-    void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
+    void applyOIDNDenoising(SDL_Surface* surface, bool denoise, float blend);
     void validateMaterialIndices(const OptixGeometryData& data);
     void setupPipeline(const char* raygen_ptx);
     void destroyTextureObjects();
     void buildFromData(const OptixGeometryData& data);
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
 
-    void launch_random_pixel_mode(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer);
-    uchar4* host_output_buffer = nullptr; // GPU'dan CPU'ya indirilen buffer
-
+  
+    void launch_tile_based_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
+    void launch_random_pixel_mode_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
+   
     void applyOIDNDenoising(SDL_Surface* surface, float blend_factor = 1.0f, bool use_albedo = false, float sharpness = 0.95f);
-   // void launch_random_pixel_mode(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer);
-
-    void launch_batch_random_pixel_mode(
-        SDL_Surface* surface, SDL_Window* window, int width, int height,
-        std::vector<uchar4>& framebuffer
-    );
-
-   // void launch_batch_random_pixel_mode(SDL_Surface* surface, SDL_Window* window, int width, int height);
-
-    void launch_single_pixel_mode(SDL_Surface* surface, SDL_Window* window, int width, int height);
+  
    
    // void launch(uchar4* output_buffer, int width, int height);
     bool trace(const Ray& ray, HitRecord& rec) const;
@@ -111,7 +103,7 @@ private:
     bool oidnInitialized = false;
     int oidnLastWidth = 0;
     int oidnLastHeight = 0;
-
+    cudaDeviceProp props;
     // OptiX context
     OptixDeviceContext context = nullptr;
     // header dosyasında
@@ -142,10 +134,21 @@ private:
     float* d_accumulation_buffer = nullptr;
     float* d_variance_buffer = nullptr;
     int* d_sample_count_buffer = nullptr;
-   
+    std::vector<uchar4> partial_framebuffer;
+
+    // Son ekran güncellemesinden bu yana işlenen piksellerin koordinatlarını biriktirir.
+    std::vector<std::pair<int, int>> accumulated_coords;
     int prev_width = 0;
     int prev_height = 0;
     int frame_counter = 1;
-
+     uchar4* host_output_buffer = nullptr; // GPU'dan CPU'ya indirilen buffer
+    uchar4* d_framebuffer = nullptr;
     // (İleride pipeline ve SBT buraya gelir)
+    struct Tile {
+        int x, y;
+        int width, height;
+        int samples;
+        float variance;
+        bool completed;
+    };
 };
