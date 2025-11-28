@@ -16,7 +16,7 @@ AABB surrounding_box(const AABB& box0, const AABB& box1) {
     float small_array[4], big_array[4];
     _mm_store_ps(small_array, small);
     _mm_store_ps(big_array, big);
-
+	
     // Vec3 nesneleri oluþtur ve döndür
     return AABB(
         Vec3(small_array[0], small_array[1], small_array[2]),

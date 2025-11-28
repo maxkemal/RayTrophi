@@ -6,7 +6,7 @@ constexpr double max_distance =10000.0;  // Maksimum mesafe
  float aspect_ratio = 16.0 / 9.0; // Sabit olarak float türünde tanýmlýyoruz
  int image_width = 1680*1;
  int image_height = static_cast<int>(image_width / aspect_ratio);
-constexpr double EPSILON = 1e-4f;
+constexpr float EPSILON = 1e-6f;
 constexpr float max_normal_distance = 10.0f;
 constexpr float max_normal_strength = 1.0f;
 std::atomic<int> next_row(0);

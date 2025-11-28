@@ -44,7 +44,7 @@ extern const double max_distance;
 extern  float aspect_ratio; // Sabit olarak double türünde tanýmlýyoruz
 extern  int image_width;
 extern  int image_height;
-extern const double EPSILON;
+extern const float EPSILON;
 extern std::atomic<int> next_row;
 extern const double infinity;
 extern  std::string baseDirectory;

@@ -28,7 +28,7 @@ struct alignas(64) ObjectInfo {
     float surface_area;  // Önbelleklenmiþ alan
     // 1. Varsayýlan constructor (STL konteynerleri için zorunlu)
     ObjectInfo() = default;
-    ObjectInfo(std::shared_ptr<Hittable> obj, double time0, double time1)
+    ObjectInfo(std::shared_ptr<Hittable> obj, float time0, float time1)
         : object(obj), centroid(0, 0, 0) {
         obj->bounding_box(time0, time1, box);
         centroid = (box.min + box.max) * 0.5;
@@ -36,7 +36,7 @@ struct alignas(64) ObjectInfo {
     }
 };
 
-constexpr float OBJECT_INTERSECTION_COST = 2.0;
+constexpr float OBJECT_INTERSECTION_COST = 1.0;
 inline float sah_cost(size_t num_left, const AABB& left_box,
     size_t num_right, const AABB& right_box) {
     // Önbelleklenmiþ deðerler otomatik kullanýlýr.

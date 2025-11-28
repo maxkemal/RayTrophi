@@ -180,57 +180,59 @@ float smoothstep(float edge0, float edge1, float x) {
     return x * x * (3.0f - 2.0f * x);
 }
 bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
-    // Vertexleri dönüþtürme
     const Vec3 edge1 = transformed_v1 - transformed_v0;
     const Vec3 edge2 = transformed_v2 - transformed_v0;
 
     Vec3 h = Vec3::cross(r.direction, edge2);
-    float a = Vec3::dot(edge1, h);   
-    float f = 1.0 / a;
+    float a = Vec3::dot(edge1, h);
+
+    // Paralellik kontrolü ÖNCE
+    if (fabs(a) < EPSILON)
+        return false;
+
+    float f = 1.0f / a;
     Vec3 s = r.origin - transformed_v0;
     float u = f * Vec3::dot(s, h);
 
-    if (u < 0.0 || u > 1.0)
+    // Toleranslý sýnýrlar
+    if (u < -EPSILON || u > 1.0f + EPSILON)
         return false;
 
     Vec3 q = Vec3::cross(s, edge1);
     float v = f * Vec3::dot(r.direction, q);
 
-    if (v < 0.0 || u + v > 1.0)
+    if (v < -EPSILON || (u + v) > 1.0f + EPSILON)
         return false;
 
     float t = f * Vec3::dot(edge2, q);
 
+    // Iþýðýn önünde mi?
     if (t < t_min || t > t_max)
         return false;
 
+    // Kaydýn doldurulmasý
     rec.triangle = this;
     rec.t = t;
     rec.point = r.at(t);
-    const float w = 1.0 - u - v;
-    rec.face_normal = Vec3::cross(edge1, edge2);    
-  
-    rec.set_face_normal(r, rec.face_normal);
-    rec.interpolated_normal = (w * transformed_n0 + u * transformed_n1 + v * transformed_n2).normalize();
-    rec.normal = rec.interpolated_normal.normalize();
-     
-    // Barycentric koordinatlarý hesapla
-    Vec3 bary = calculateBarycentricCoordinates(rec.point);
 
-    // UV koordinatlarýný interpolate et
+    double w = 1.0 - u - v;
+
+    rec.interpolated_normal =
+        (w * transformed_n0 + u * transformed_n1 + v * transformed_n2).normalize();
+
+    rec.normal = rec.interpolated_normal;
+
+    Vec3 bary = calculateBarycentricCoordinates(rec.point);
     Vec2 uv = bary.x * t0 + bary.y * t1 + bary.z * t2;
-   
+
     rec.uv = uv;
     rec.u = uv.u;
     rec.v = uv.v;
-    rec.material = mat_ptr;  
-    rec.set_face_normal(r, rec.interpolated_normal);
-    float opacity = rec.material->get_opacity(rec.uv);
-        if(opacity<1)
-			return false; // Iþýk geçiyor
-  
+    rec.material = mat_ptr;
+
     return true;
 }
+
 void Triangle::updateTransformedVertices() {
     transformed_v0 = finalTransform.transform_point(original_v0);
     transformed_v1 = finalTransform.transform_point(original_v1);
@@ -301,10 +303,7 @@ bool Triangle::bounding_box(float time0, float time1, AABB& output_box) const {
         std::max({ transformed_v0.z, transformed_v1.z, transformed_v2.z })
     );
 
-    double edge1_length = (transformed_v1 - transformed_v0).length();
-    double edge2_length = (transformed_v2 - transformed_v0).length();
-    double epsilon = std::min(edge1_length, edge2_length) * EPSILON;
-
-    output_box = AABB(small - epsilon, big + epsilon);
+    constexpr float DELTA = 1e-6f;
+    output_box = AABB(small - DELTA, big + DELTA);
     return true;
 }
