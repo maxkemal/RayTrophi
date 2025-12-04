@@ -215,7 +215,7 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const
     rec.t = t;
     rec.point = r.at(t);
 
-    double w = 1.0 - u - v;
+    float w = 1.0 - u - v;
 
     rec.interpolated_normal =
         (w * transformed_n0 + u * transformed_n1 + v * transformed_n2).normalize();
@@ -303,7 +303,7 @@ bool Triangle::bounding_box(float time0, float time1, AABB& output_box) const {
         std::max({ transformed_v0.z, transformed_v1.z, transformed_v2.z })
     );
 
-    constexpr float DELTA = 1e-6f;
+    constexpr float DELTA = 1e-5f;
     output_box = AABB(small - DELTA, big + DELTA);
     return true;
 }

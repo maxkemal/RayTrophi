@@ -75,7 +75,13 @@ public:
 
   
     void launch_tile_based_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
-    void launch_random_pixel_mode_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
+    void launch_random_pixel_mode_progressive(SDL_Surface* surface,
+        SDL_Window* window,
+        SDL_Renderer* renderer, // ⬅️ YENİ PARAMETRE
+        int width,
+        int height,
+        std::vector<uchar4>& framebuffer,
+        SDL_Texture* raytrace_texture);
    
     void applyOIDNDenoising(SDL_Surface* surface, float blend_factor = 1.0f, bool use_albedo = false, float sharpness = 0.95f);
   

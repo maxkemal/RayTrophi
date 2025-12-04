@@ -13,41 +13,59 @@ EmbreeBVH::~EmbreeBVH() {
 }
 
 void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    SCENE_LOG_INFO("[EmbreeBVH::build] Build started");
+
     std::vector<Vec3> vertices;
     std::vector<std::array<unsigned, 3>> indices;
     triangle_data.clear();
 
     unsigned vert_offset = 0;
+    size_t tri_count = 0;
 
+    // Objeleri üçgen olarak topla
     for (const auto& obj : objects) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (!tri) continue;
 
-        // Vertex buffer'a üçgenin köşe noktalarını ekle
         vertices.push_back(tri->v0);
         vertices.push_back(tri->v1);
         vertices.push_back(tri->v2);
 
-        // Index buffer (3'lü indeks)
         indices.push_back({ vert_offset, vert_offset + 1, vert_offset + 2 });
 
         triangle_data.push_back({
-       tri->v0, tri->v1, tri->v2,
-       tri->n0, tri->n1, tri->n2,
-       tri->t0, tri->t1, tri->t2,
-       tri->mat_ptr
+            tri->v0, tri->v1, tri->v2,
+            tri->n0, tri->n1, tri->n2,
+            tri->t0, tri->t1, tri->t2,
+            tri->mat_ptr
             });
 
         vert_offset += 3;
+        tri_count++;
+    }
+
+    if (tri_count == 0) {
+        SCENE_LOG_WARN("[EmbreeBVH::build] No triangles found");
+    }
+    else {
+        SCENE_LOG_INFO("[EmbreeBVH::build] Triangle count = " + std::to_string(tri_count));
     }
 
     RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+    if (!geom) {
+        SCENE_LOG_ERROR("[EmbreeBVH::build] Failed to create geometry");
+        return;
+    }
 
     // Vertex buffer
     Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
         sizeof(Vec3), vertices.size()
     );
+    if (!vertex_buffer) {
+        SCENE_LOG_ERROR("[EmbreeBVH::build] Failed to allocate vertex buffer");
+        return;
+    }
     std::memcpy(vertex_buffer, vertices.data(), sizeof(Vec3) * vertices.size());
 
     // Index buffer
@@ -55,15 +73,24 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
         sizeof(unsigned) * 3, indices.size()
     );
+    if (!index_buffer) {
+        SCENE_LOG_ERROR("[EmbreeBVH::build] Failed to allocate index buffer");
+        return;
+    }
     std::memcpy(index_buffer, indices.data(), sizeof(unsigned) * 3 * indices.size());
 
     rtcCommitGeometry(geom);
-    rtcAttachGeometry(scene, geom);
+    SCENE_LOG_INFO("[EmbreeBVH::build] Geometry committed");
+
+    unsigned geomID = rtcAttachGeometry(scene, geom);
     rtcReleaseGeometry(geom);
 
-    rtcCommitScene(scene);
+    SCENE_LOG_INFO("[EmbreeBVH::build] Geometry attached with ID = " + std::to_string(geomID));
 
+    rtcCommitScene(scene);
+    SCENE_LOG_INFO("[EmbreeBVH::build] BVH build completed");
 }
+
 
 
 void EmbreeBVH::updateGeometryFromTriangles() {
@@ -159,11 +186,11 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
 
 
             // Probabilistik karar: daha yoğun → daha düşük pass olasılığı
-            if (Vec3::random_double() < attenuation)
+            if (Vec3::random_float() < attenuation)
                 return false; // Işık geçti, zayıf gölge
         }
 
-        if (Vec3::random_double() > opacity)
+        if (Vec3::random_float() > opacity)
             return false; // ışık geçti
         return true; // gölgede
     }
@@ -223,32 +250,31 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec) co
 
     RTCIntersectArguments args;
     rtcInitIntersectArguments(&args);
-    args.flags = RTC_RAY_QUERY_FLAG_NONE;
 
     rtcIntersect1(scene, &rayhit, &args);
 
     if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID) {
         int prim_id = rayhit.hit.primID;
-        const TriangleData& tri = triangle_data[prim_id];  // doğrudan index
+        const TriangleData& tri = triangle_data[prim_id];
+
+        // Barycentric koordinatları doğrudan kullan
         float u = rayhit.hit.u;
         float v = rayhit.hit.v;
         float w = 1.0f - u - v;
 
-        Vec3 normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
-        Vec2 uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-        rec.uv = uv;
-		rec.u = uv.u;
-		rec.v = uv.v;
+       
+        rec.normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+        rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
+        rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
+        rec.uv = Vec2(rec.u, rec.v); // Gerekliyse
         rec.t = rayhit.ray.tfar;
         rec.point = ray.at(rec.t);
-		rec.normal = normal;
-	
-        rec.set_face_normal(ray, normal);
-        rec.material = tri.material;    
+        rec.set_face_normal(ray, rec.normal);
+        rec.material = tri.material;
 
         return true;
     }
-   
+
     return false;
 }
 void EmbreeBVH::clearAndRebuild(const std::vector<std::shared_ptr<Hittable>>& objects) {

@@ -11,7 +11,7 @@ bool Material::volumetric_scatter(const Ray& r_in, const HitRecord& rec, Vec3& a
 }
  Vec3 Material::getAnisotropicDirection() const {
      
-      return Vec3SIMD(1, 0, 0);
+      return Vec3(1, 0, 0);
   }
   float Material::getAnisotropy() const {
       

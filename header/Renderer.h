@@ -98,11 +98,11 @@ public:
 
     void draw_progress_bar(SDL_Surface* surface, float progress);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
-    void render_image(SDL_Surface* surface, SDL_Window* window,
+    void render_image(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
         const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene);
     Matrix4x4 calculateAnimationTransform(const AnimationData& animation, float currentTime);
    // void updateBVHForAnimatedObjects(ParallelBVHNode& bvh, const std::vector<std::shared_ptr<Hittable>>& animatedObjects);
-    void render_Animation(SDL_Surface* surface, SDL_Window* window, const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration,SceneData& scene);
+    void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration,SceneData& scene);
    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
     void create_scenefromMesh(const std::string& filename);
@@ -160,8 +160,11 @@ private:
     // Rastgele sıralama (shuffle)
     std::mt19937 gen; // Mersenne Twister 19937 generator
     std::uniform_real_distribution<float> dis;
-
+     SDL_Surface* front_buffer;  // Display için
+     SDL_Surface* back_buffer;   // Render için
+     std::mutex buffer_mutex;
     std::mutex mtx;
+    std::atomic<bool> frame_ready = false;
     float max(float a, float b) const { return a > b ? a : b; }
     // Adaptive sampling için ekstra bufferlar
     std::vector<Vec3> variance_map;
@@ -180,7 +183,7 @@ private:
     
     void render_worker(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const   Hittable* bvh, const std::shared_ptr<Camera>& camera, const int samples_per_pass, const int current_sample);
 
-    void update_display(SDL_Window* window, SDL_Surface* surface);
+    void update_display(SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Surface* surface, SDL_Renderer* renderer);
    
   
     void apply_normal_map( HitRecord& rec);
@@ -199,7 +202,7 @@ private:
 
     int pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights, const Vec3& hit_position);
 
-    Vec3 calculate_direct_lighting_single_light(const Hittable* bvh, const std::shared_ptr<Light>& light, const HitRecord& rec, const Vec3& normal, float ao_factor, const Ray& r_in);
+    Vec3 calculate_direct_lighting_single_light(const Hittable* bvh, const std::shared_ptr<Light>& light, const HitRecord& rec, const Vec3& normal, const Ray& r_in);
 
     Vec3 calculate_brdf_mis_single_light(const std::shared_ptr<Light>& light, const HitRecord& rec, const Ray& scattered, const Ray& ray_in);
   

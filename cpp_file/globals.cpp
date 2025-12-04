@@ -4,9 +4,9 @@ std::atomic<int> completed_pixels(0);
 constexpr double min_distance = 0.1;  // Minimum mesafe
 constexpr double max_distance =10000.0;  // Maksimum mesafe
  float aspect_ratio = 16.0 / 9.0; // Sabit olarak float türünde tanýmlýyoruz
- int image_width = 1680*1;
+ int image_width = 1280*1;
  int image_height = static_cast<int>(image_width / aspect_ratio);
-constexpr float EPSILON = 1e-6f;
+constexpr float EPSILON = 1e-7f;
 constexpr float max_normal_distance = 10.0f;
 constexpr float max_normal_strength = 1.0f;
 std::atomic<int> next_row(0);
@@ -29,6 +29,10 @@ int pending_width = 1680;
 int pending_height = 950;
 float pending_aspect_ratio = 16 / 9;
 bool pending_resolution_change=false;
+#define SCENE_LOG_INFO(msg)  g_sceneLog.add(LogType::Info, msg)
+#define SCENE_LOG_WARN(msg)  g_sceneLog.add(LogType::Warning, msg)
+#define SCENE_LOG_ERROR(msg) g_sceneLog.add(LogType::Error, msg)
+
 RenderSettings render_settings = {
     1,       // samples_per_pixel
     1,       // samples_per_pass
@@ -48,3 +52,4 @@ RenderSettings render_settings = {
     24,      // animation_fps
     false    // start_animation_render
 };
+UILogger g_sceneLog; // global logger’ýn tanýmý burada

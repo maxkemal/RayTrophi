@@ -34,7 +34,52 @@ struct RenderSettings {
     bool start_animation_render = false;
     bool save_image_requested = false;
 };
+enum class LogLevel { Info, Warning, Error };
 
+struct LogEntry {
+    std::string msg;
+    LogLevel level;
+};
+
+class UILogger {
+public:
+    void add(const std::string& msg, LogLevel level = LogLevel::Info) {
+        std::lock_guard<std::mutex> guard(lock);
+        lines.push_back({ msg, level });
+        std::cout << "[" << logLevelToString(level) << "] " << msg << std::endl;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> guard(lock);
+        lines.clear();
+    }
+
+    void getLines(std::vector<LogEntry>& out) {
+        std::lock_guard<std::mutex> guard(lock);
+        out = lines;
+    }
+
+private:
+    std::mutex lock;
+    std::vector<LogEntry> lines;
+
+    const char* logLevelToString(LogLevel level) {
+        switch (level) {
+        case LogLevel::Info: return "INFO";
+        case LogLevel::Warning: return "WARNING";
+        case LogLevel::Error: return "ERROR";
+        }
+        return "INFO";
+    }
+};
+
+// Global
+extern UILogger g_sceneLog;
+
+// Makrolar
+#define SCENE_LOG_INFO(msg) g_sceneLog.add(msg, LogLevel::Info)
+#define SCENE_LOG_WARN(msg) g_sceneLog.add(msg, LogLevel::Warning)
+#define SCENE_LOG_ERROR(msg) g_sceneLog.add(msg, LogLevel::Error)
 
 // Yalnýzca bildirim:
 extern RenderSettings render_settings;
@@ -70,4 +115,6 @@ extern int pending_width;
 extern int pending_height;
 extern float pending_aspect_ratio;
 extern float light_radius;
+
+
 #endif // GLOBALS_H

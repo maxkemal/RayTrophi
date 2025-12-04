@@ -4,6 +4,9 @@
 #include <filesystem>
 #include <execution>
 #include <EmbreeBVH.h>
+#include <imgui.h>
+#include <imgui_impl_sdlrenderer2.h>
+#include <scene_ui.h>
 
 // Global atmosphere değişkeni
 AtmosphereProperties g_atmosphere = {
@@ -14,7 +17,7 @@ AtmosphereProperties g_atmosphere = {
     300.0f   // sıcaklık (örnek: 300 Kelvin - 27°C)
 };
 
-void updatePixel(SDL_Surface* surface, int i, int j, const Vec3SIMD& color) {
+void updatePixel(SDL_Surface* surface, int i, int j, const Vec3& color) {
     Uint32* pixel = static_cast<Uint32*>(surface->pixels) + (surface->h - 1 - j) * surface->pitch / 4 + i;
 
     // Linear to sRGB dönüşüm (basit approx veya doğru dönüşüm kullanabilirsin)
@@ -25,12 +28,12 @@ void updatePixel(SDL_Surface* surface, int i, int j, const Vec3SIMD& color) {
             return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
         };
 
-    int r = static_cast<int>(255 * std::clamp(toSRGB(color.x()), 0.0f, 1.0f));
-    int g = static_cast<int>(255 * std::clamp(toSRGB(color.y()), 0.0f, 1.0f));
-    int b = static_cast<int>(255 * std::clamp(toSRGB(color.z()), 0.0f, 1.0f));
+    int r = static_cast<int>(255 * std::clamp(toSRGB(color.x), 0.0f, 1.0f));
+    int g = static_cast<int>(255 * std::clamp(toSRGB(color.y), 0.0f, 1.0f));
+    int b = static_cast<int>(255 * std::clamp(toSRGB(color.z), 0.0f, 1.0f));
 
     *pixel = SDL_MapRGB(surface->format, r, g, b);
-  
+
 }
 
 std::vector<Vec3> normal_buffer(image_width* image_height);
@@ -74,7 +77,7 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads = 0, bool
         device.commit();
     }
     catch (const std::exception& e) {
-        std::cerr << "Failed to create OIDN device: " << e.what() << std::endl;
+        SCENE_LOG_ERROR(std::string( "Failed to create OIDN device: ") + e.what() );
         return;
     }
 
@@ -96,10 +99,10 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads = 0, bool
         filter.execute();
         const char* errorMessage;
         if (device.getError(errorMessage) != oidn::Error::None)
-            std::cerr << "OIDN error: " << errorMessage << std::endl;
+            SCENE_LOG_ERROR(std::string( "OIDN error: ") + (errorMessage ));
     }
     catch (const std::exception& e) {
-        std::cerr << "OIDN execution failed: " << e.what() << std::endl;
+        SCENE_LOG_ERROR(std::string( "OIDN execution failed: ") + e.what());
         return;
     }
 
@@ -125,17 +128,17 @@ Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int
     initialize_halton_cache();
     initialize_sobol_cache();
     frame_buffer.resize(image_width * image_height);
-	sample_counts.resize(image_width * image_height, 0);
-	max_halton_index = MAX_SAMPLES_HALTON - 1; // Halton dizisi için maksimum indeks
-	
-	// Adaptive sampling için bufferlar
-	variance_buffer.resize(image_width * image_height, 0.0f);
-	
-	rendering_complete = false;
-	// Normal map buffer'ı başlat
-	normal_buffer.resize(image_width * image_height, Vec3(0.0f));
-	variance_map.resize(image_width * image_height, 0.0f);
-   
+    sample_counts.resize(image_width * image_height, 0);
+    max_halton_index = MAX_SAMPLES_HALTON - 1; // Halton dizisi için maksimum indeks
+
+    // Adaptive sampling için bufferlar
+    variance_buffer.resize(image_width * image_height, 0.0f);
+
+    rendering_complete = false;
+    // Normal map buffer'ı başlat
+    normal_buffer.resize(image_width * image_height, Vec3(0.0f));
+    variance_map.resize(image_width * image_height, 0.0f);
+
 
 }
 void Renderer::resetResolution(int w, int h) {
@@ -290,20 +293,23 @@ void Renderer::update_variance_map_hybrid(SDL_Surface* surface) {
 }
 static int point_light_pick_count = 0;
 static int directional_pick_count = 0;
-void Renderer::render_image(SDL_Surface* surface, SDL_Window* window,
+
+void Renderer::render_image(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
     const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene) {
+
     rendering_complete = false;
     unsigned int num_threads = std::thread::hardware_concurrency();
     std::vector<std::thread> threads;
- 
-    std::thread display_thread(&Renderer::update_display, this, window, surface);
+
+    std::thread display_thread(&Renderer::update_display, this, window, raytrace_texture, surface, renderer);
 
     const int num_passes = (total_samples_per_pixel + samples_per_pass - 1) / samples_per_pass;
 
-    for (int pass = 0; pass < num_passes; ++pass) {
-       // std::cout << "Starting pass " << pass + 1 << " of " << num_passes << std::endl;
+    auto start_time = std::chrono::high_resolution_clock::now();
 
-        //  Shuffle full-resolution pixel list
+    for (int pass = 0; pass < num_passes; ++pass) {
+
+        // Shuffle full-resolution pixel list
         std::vector<std::pair<int, int>> shuffled_pixel_list;
         for (int j = 0; j < image_height; ++j) {
             for (int i = 0; i < image_width; ++i) {
@@ -328,40 +334,50 @@ void Renderer::render_image(SDL_Surface* surface, SDL_Window* window,
                 pass * samples_per_pass
             );
         }
-       
-        for (auto& thread : threads) {
 
+        for (auto& thread : threads) {
             thread.join();
         }
-
         threads.clear();
 
+        // ----- İlerleme hesaplama -----
         float progress = static_cast<float>(pass + 1) / num_passes;
-        
-        char title[100];
-        snprintf(title, sizeof(title), "Rendering... %.1f%% Complete", progress * 100);
-        SDL_SetWindowTitle(window, title);       
-       
+        auto current_time = std::chrono::high_resolution_clock::now();
+        float elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - start_time).count() / 1000.0f;
+
+        float pixels_done = static_cast<float>((pass + 1) * image_width * image_height * samples_per_pass);
+        float total_pixels = static_cast<float>(image_width * image_height * total_samples_per_pixel);
+        float pixels_per_sec = pixels_done / std::max(0.001f, elapsed);
+        float remaining_time = (total_pixels - pixels_done) / std::max(1.0f, pixels_per_sec);
+        float fps = pixels_per_sec / (image_width * image_height);
+        // SDL başlık
+        char title[128];
+        std::snprintf(title, sizeof(title),
+            "Progress: %.1f%% | %.1fK px/s | ETA: %ds | FPS: %.1f",
+            progress * 100, pixels_per_sec / 1000.0f, static_cast<int>(remaining_time), fps);
+        SDL_SetWindowTitle(window, title);
+        SCENE_LOG_INFO(std::string(title));
+      
     }
 
     rendering_complete = true;
-    display_thread.join();   
-    //SDL_UpdateWindowSurface(window);   
-
+    display_thread.join();
+   
 }
 
-void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
+
+void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
     const int total_samples_per_pixel, const int samples_per_pass,
     float fps, float duration, SceneData& scene) {
 
     unsigned int num_threads = std::thread::hardware_concurrency();
     std::vector<std::thread> threads;
     auto start_time = std::chrono::steady_clock::now();
-    std::thread display_thread(&Renderer::update_display, this, window, surface);
+    std::thread display_thread(&Renderer::update_display, this, window, raytrace_texture, surface, renderer);
     float frame_time = 1.0f / fps;
     int total_frames = static_cast<int>(duration * fps);
     std::filesystem::create_directory("render"); // "render" klasörünü oluştur
-
+    SCENE_LOG_INFO("Starting animation render: " + std::to_string(total_frames) + " frames at " + std::to_string(fps) + " FPS");
     for (int frame = 0; frame < total_frames; ++frame) {
 
         std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
@@ -369,8 +385,8 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
         SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 0, 0, 0));
         float current_time = frame * frame_time;
 
-        std::cout << "\nFrame " << frame << " of " << total_frames
-            << " at time " << current_time << "s" << std::endl;
+        SCENE_LOG_INFO("Rendering frame " + std::to_string(frame + 1) + "/" + std::to_string(total_frames) +
+            " at time " + std::to_string(current_time) + "s");
 
         // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
         // Tüm düğümlerin (kemikler dahil) anlık animasyonlu global dönüşümlerini tutacak harita
@@ -406,10 +422,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
 
             std::string nodeName = tri->getNodeName();
 
-         
+
             if (!tri->vertexBoneWeights.empty() &&
                 tri->vertexBoneWeights[0].empty() && tri->vertexBoneWeights[1].empty() && tri->vertexBoneWeights[2].empty()) {
-              
+
             }
 
             bool isSkinnedMesh = false;
@@ -426,31 +442,31 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
                 // Bu bir skinned üçgen. Skinning uygula.
                // std::cout << "DEBUG: scene.boneData.boneNameToIndex.size() = " << scene.boneData.boneNameToIndex.size() << std::endl;
                 std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
-               // std::cout << "DEBUG: finalBoneMatrices size after creation = " << finalBoneMatrices.size() << std::endl;
+                // std::cout << "DEBUG: finalBoneMatrices size after creation = " << finalBoneMatrices.size() << std::endl;
 
                 for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
                     if (animatedGlobalNodeTransforms.count(boneName) == 0) {
-                        std::cerr << "Warning: Missing animation data for bone: " << boneName << "\n";
+                        SCENE_LOG_WARN("Missing animation data for bone: " + boneName);
                         continue;
                     }
 
                     // Global dönüşüm matrisini al
                     Matrix4x4 globalTransform = animatedGlobalNodeTransforms[boneName];
-                    
+
                     // Offset matrisini al
                     if (scene.boneData.boneOffsetMatrices.count(boneName) == 0) {
-                        std::cerr << "Warning: Missing offset matrix for bone: " << boneName << "\n";
+                        SCENE_LOG_WARN( "Warning: Missing offset matrix for bone: " + boneName);
                         continue;
                     }
                     Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
 
                     // Final matrisi hesapla
-                    finalBoneMatrices[boneIndex] = scene.boneData.globalInverseTransform * 
-                                                  globalTransform * 
-                                                  offsetMatrix;
+                    finalBoneMatrices[boneIndex] = scene.boneData.globalInverseTransform *
+                        globalTransform *
+                        offsetMatrix;
                 }
 
-               // std::cout << "[DEBUG] Skin uygulanıyor: " << tri->getNodeName() << "\n";
+                // std::cout << "[DEBUG] Skin uygulanıyor: " << tri->getNodeName() << "\n";
                 tri->apply_skinning(finalBoneMatrices);
 
             }
@@ -459,7 +475,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
                 if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
                     // Rigid nesneler için animasyonlu global transformu doğrudan kullan
                     tri->updateAnimationTransform(animatedGlobalNodeTransforms[nodeName]);
-                  //  std::cout << "[DEBUG]  Rigid transform uygulanıyor: " << tri->getNodeName() << "\n";
+                    //  std::cout << "[DEBUG]  Rigid transform uygulanıyor: " << tri->getNodeName() << "\n";
                 }
                 else {
                     // Eğer bu node için animasyon verisi yoksa, herhangi bir dönüşüm uygulamadan geç.
@@ -553,19 +569,19 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
             char title[100];
             snprintf(title, sizeof(title), "Rendering Frame %d/%d - %.1f%% Complete",
                 frame + 1, total_frames, (static_cast<float>(pass + 1) / num_passes) * 100);
-            SDL_SetWindowTitle(window, title);           
-            SDL_UpdateWindowSurface(window);
+
+            SDL_SetWindowTitle(window, title);
+           
         }
 
         // --- 6. Adım: Kareyi Kaydet ---
         char filename[100];
         snprintf(filename, sizeof(filename), "render/output_frame_%03d.png", frame + 1);
-        if (SaveSurface(surface, filename)) { // SaveSurface fonksiyonunuzun mevcut olduğunu varsayar
-            std::cout << "Frame " << (frame + 1) << "/" << total_frames
-                << " saved successfully as " << filename << std::endl;
+        if (SaveSurface(surface, filename)) {
+            SCENE_LOG_INFO("Frame " + std::to_string(frame + 1) + " saved successfully as " + filename);
         }
         else {
-            std::cerr << "Failed to save frame " << (frame + 1) << std::endl;
+            SCENE_LOG_ERROR("Failed to save frame " + std::to_string(frame + 1));
             return;
         }
     }
@@ -581,7 +597,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window,
 //}
 void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     if (!scene.initialized || scene.world.objects.empty()) {
-        std::cerr << "[BVH REBUILD] Scene not loaded yet, rebuild skipped.\n";
+        SCENE_LOG_WARN("Scene not loaded yet, BVH rebuild skipped.");
         return;
     }
 
@@ -591,66 +607,86 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
         embree_bvh->build(scene.world.objects);
         scene.bvh = embree_bvh;
-        std::cout << "[Embree] BVH rebuilt successfully.\n";
+        SCENE_LOG_INFO("[Embree] BVH rebuilt successfully.");
     }
     else {
-        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0,0);
-        std::cout << "[In-house BVH] BVH rebuilt successfully.\n";
+        scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0, 0);
+        SCENE_LOG_INFO("[In-house BVH] BVH rebuilt successfully.");
     }
 }
 
 
+
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path) {
-    std::cout << "[INFO] Test log\n" << std::flush;
 
     // Önce sahneyi sıfırla
     scene.world.clear();
     scene.lights.clear();
     scene.animatedObjects.clear();
     scene.animationDataList.clear();
-    scene.camera = nullptr;              // << önemli!
-    scene.bvh = nullptr;                // yeni BVH oluşturulacaksa önce sıfırlanmalı
-    scene.initialized = false;         // yeniden kurulacağı için
+    scene.camera = nullptr;
+    scene.bvh = nullptr;
+    scene.initialized = false;
     assimpLoader.clearTextureCache();
+
+    SCENE_LOG_INFO("Starting scene creation from: " + model_path);
+
     std::filesystem::path path(model_path);
     baseDirectory = path.parent_path().string() + "/";
+    SCENE_LOG_INFO("Base directory set to: " + baseDirectory);
 
     // ---- 1. Geometri ve animasyon yükle ----
+    SCENE_LOG_INFO("Loading model geometry and animations...");
     auto [loaded_triangles, loaded_animations, loaded_bone_data] = assimpLoader.loadModelToTriangles(model_path);
+
     scene.animationDataList = loaded_animations;
-    scene.animationDataList = loaded_animations;
-    scene.boneData = loaded_bone_data; // BURADA BONE DATA'YI ATAYIN!
- if (loaded_triangles.empty()) {
-        std::cerr << "[ERROR] No triangle data, scene loading failed: " << model_path << std::endl;
-		std::cerr << "Please provide a valid model file." << std::endl; 
-		
- }
- else {
-	 std::cout << "Loaded triangles from file " << loaded_triangles.size() << ".\n";
- }
+    scene.boneData = loaded_bone_data;
+
+    if (loaded_triangles.empty()) {
+        SCENE_LOG_ERROR("No triangle data, scene loading failed: " + model_path);
+        SCENE_LOG_ERROR("Please provide a valid model file.");
+    }
+    else {
+        SCENE_LOG_INFO("Successfully loaded triangles: " + std::to_string(loaded_triangles.size()));
+        SCENE_LOG_INFO("Loaded animations: " + std::to_string(loaded_animations.size()));
+    }
+
+    SCENE_LOG_INFO("Adding triangles to scene world...");
     for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
-
         auto hittable = std::dynamic_pointer_cast<Hittable>(tri);
         if (hittable) {
             auto animatedObj = std::make_shared<AnimatedObject>(std::vector<std::shared_ptr<Hittable>>{hittable});
             scene.animatedObjects.push_back(animatedObj);
         }
     }
-	
+    SCENE_LOG_INFO("Added " + std::to_string(scene.animatedObjects.size()) + " animated objects to scene.");
+
     // ---- 2. Kamera ve ışık verisi ----
+    SCENE_LOG_INFO("Loading camera and lighting data...");
     scene.lights = assimpLoader.getLights();
     scene.camera = assimpLoader.getDefaultCamera();
+
+    if (scene.camera) {
+        SCENE_LOG_INFO("Camera loaded successfully.");
+    }
+    else {
+        SCENE_LOG_WARN("No default camera found in model.");
+    }
+
+    SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
+
     // ⚡️ Selectable BVH (Embree or in-house BVH)
+    SCENE_LOG_INFO("Building BVH structure...");
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
-        embree_bvh->build(scene.world.objects);  // Provide triangles
+        embree_bvh->build(scene.world.objects);
         scene.bvh = embree_bvh;
-        std::cout << "[Embree] BVH structure built successfully." << std::endl;
+        SCENE_LOG_INFO("[Embree] BVH structure built successfully.");
     }
     else {
         scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0f, 1.0f);
-        std::cout << "[In-house BVH] BVH structure built successfully." << std::endl;
+        SCENE_LOG_INFO("[In-house BVH] BVH structure built successfully.");
     }
 
     // ---- 3. GPU OptiX setup ----
@@ -658,39 +694,58 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     {
         try
         {
-            std::cout << "Creating OptiX geometry (convert Triangles To Optix Data)...\n";
-
+            SCENE_LOG_INFO("OptiX GPU detected. Creating OptiX geometry data...");
             OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(loaded_triangles);
+            SCENE_LOG_INFO("Converting " + std::to_string(loaded_triangles.size()) + " triangles to OptiX format.");
+
             optix_gpu_ptr->validateMaterialIndices(optix_data);
+            SCENE_LOG_INFO("Material indices validated.");
+
             optix_gpu_ptr->buildFromData(optix_data);
+            SCENE_LOG_INFO("OptiX BVH and acceleration structures built.");
 
             if (scene.camera) {
-                std::cout << "Setting up the OptiX Camera...\n";
+                SCENE_LOG_INFO("Setting up OptiX camera parameters...");
                 optix_gpu_ptr->setCameraParams(*scene.camera);
+                SCENE_LOG_INFO("OptiX camera configured successfully.");
             }
 
             if (!scene.lights.empty()) {
-                std::cout << "OptiX multi-lights adjustment...\n";
+                SCENE_LOG_INFO("Configuring " + std::to_string(scene.lights.size()) + " lights for OptiX...");
                 optix_gpu_ptr->setLightParams(scene.lights);
+                SCENE_LOG_INFO("OptiX light parameters set successfully.");
             }
 
             optix_gpu_ptr->setBackgroundColor(scene.background_color);
+            SCENE_LOG_INFO("Background color set for OptiX rendering.");
         }
         catch (std::exception& e)
         {
-            std::cerr << "[OptiX ERROR] Falling back to CPU only: " << e.what() << "\n";
-            g_hasOptix = false; // GPU çökmüşse tamamen devre dışı bırakmak iyi
+            SCENE_LOG_ERROR(std::string("OptiX exception occurred: ") + e.what());
+            SCENE_LOG_WARN("Falling back to CPU-only rendering.");
+            g_hasOptix = false;
         }
     }
     else
     {
-        std::cout << "OptiX disabled. CPU-only path is active.\n";
+        if (!g_hasOptix) {
+            SCENE_LOG_INFO("OptiX not available. Using CPU-only path.");
+        }
+        else {
+            SCENE_LOG_INFO("OptiX disabled or not initialized. Using CPU-only path.");
+        }
     }
-    // ---- 5. Bilgi ver ----
-    std::cout << "The scene is created.\n";
-    
-        scene.initialized = true;
+
+    // ---- 4. Son bilgiler ----
+    SCENE_LOG_INFO("Scene creation completed successfully.");
+    SCENE_LOG_INFO("Scene info - Triangles: " + std::to_string(loaded_triangles.size()) +
+        ", Lights: " + std::to_string(scene.lights.size()) +
+        ", Animations: " + std::to_string(scene.animationDataList.size()));
+
+    scene.initialized = true;
+    SCENE_LOG_INFO("Scene initialization flag set to true.");
 }
+
 std::uniform_int_distribution<> dis_width(0, image_width - 1);
 std::uniform_int_distribution<> dis_height(0, image_height - 1);
 
@@ -719,12 +774,19 @@ void Renderer::render_worker(
     );
 }
 
-void Renderer::update_display(SDL_Window* window, SDL_Surface* surface) {
+void Renderer::update_display(SDL_Window* window, SDL_Texture* raytrace_texture,SDL_Surface* surface, SDL_Renderer* renderer) {
 
     while (!rendering_complete) {
+        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
 
-        SDL_UpdateWindowSurface(window);
-       // float progress = static_cast<float>(completed_pixels) / (image_width * image_height) * 100.0f;
+        // Renderer komutları
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Siyah temizleme
+        ImGui::Render();
+        SDL_RenderClear(renderer);
+        SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+        SDL_RenderPresent(renderer);
+        // float progress = static_cast<float>(completed_pixels) / (image_width * image_height) * 100.0f;
 
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -765,7 +827,7 @@ void Renderer::apply_normal_map(HitRecord& rec) {
 
         Mat3x3 TBN(tangent, bitangent, rec.normal);
         rec.interpolated_normal = (TBN * normal_from_map);
-		//rec.interpolated_normal = (rec.interpolated_normal + 0.5*rec.normal).normalize();
+        //rec.interpolated_normal = (rec.interpolated_normal + 0.5*rec.normal).normalize();
     }
     else {
         rec.interpolated_normal = rec.normal;
@@ -1171,9 +1233,9 @@ void Renderer::render_chunk(SDL_Surface* surface,
     const Hittable* bvh,
     const std::shared_ptr<Camera>& camera,
     const int total_samples_per_pixel,
-    const int current_sample)  
+    const int current_sample)
 {
-   // color_processor.preprocess(frame_buffer);
+    // color_processor.preprocess(frame_buffer);
 
     render_chunk_adaptive(surface, shuffled_pixel_list, next_pixel_index,
         world, lights, background_color, bvh, camera, total_samples_per_pixel);
@@ -1204,7 +1266,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
     // --- 1. Directional light varsa %33 ihtimalle seç ---
     for (int i = 0; i < light_count; i++) {
         if (lights[i]->type() == LightType::Directional) {
-            if (Vec3::random_double() < 0.33) {
+            if (Vec3::random_float() < 0.33) {
                 directional_pick_count++;
                 return i;
             }
@@ -1231,14 +1293,14 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
 
     // --- Eğer ağırlık yoksa fallback rastgele seçim ---
     if (total_weight < 1e-6f) {
-        int random_light = std::clamp(int(Vec3::random_double() * light_count), 0, light_count - 1);
+        int random_light = std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
         if (lights[random_light]->type() == LightType::Point) point_light_pick_count++;
         else if (lights[random_light]->type() == LightType::Directional) directional_pick_count++;
         return random_light;
     }
 
     // --- Weighted seçim ---
-    float r = Vec3::random_double() * total_weight;
+    float r = Vec3::random_float() * total_weight;
     float accum = 0.0f;
     for (int i = 0; i < light_count; i++) {
         accum += weights[i];
@@ -1250,7 +1312,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
     }
 
     // --- Güvenlik fallback ---
-    int fallback = std::clamp(int(Vec3::random_double() * light_count), 0, light_count - 1);
+    int fallback = std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
     if (lights[fallback]->type() == LightType::Point) point_light_pick_count++;
     else if (lights[fallback]->type() == LightType::Directional) directional_pick_count++;
     return fallback;
@@ -1260,8 +1322,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     const Hittable* bvh,
     const std::shared_ptr<Light>& light,
     const HitRecord& rec,
-    const Vec3& normal,
-    float ao_factor,
+    const Vec3& normal,   
     const Ray& r_in
 ) {
     Vec3 direct_light(0.0f);
@@ -1315,7 +1376,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         return direct_light;
 
     float NdotL = std::fmax(Vec3::dot(N, L), 0.00001f);
-   
+
 
     // --- BRDF Hesabı (Specular + Diffuse) ---
     Vec3 H = (L + V).normalize();
@@ -1323,19 +1384,19 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     float NdotH = std::fmax(Vec3::dot(N, H), 0.00001f);
     float VdotH = std::fmax(Vec3::dot(V, H), 0.00001f);
 
-    float alpha = max(roughness * roughness,0.01f);
+    float alpha = max(roughness * roughness, 0.01f);
     PrincipledBSDF psdf;
     // Specular bileşeni
     float D = psdf.DistributionGGX(N, H, roughness);
     float G = psdf.GeometrySmith(N, V, L, roughness);
     Vec3 F = psdf.fresnelSchlickRoughness(VdotH, F0, roughness);
 
-    Vec3 specular = psdf.evalSpecular(N,V,L,F0,roughness);
+    Vec3 specular = psdf.evalSpecular(N, V, L, F0, roughness);
 
     // Diffuse bileşeni
     Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
-    Vec3 k_d =  (1.0f - metallic);
-    Vec3 diffuse = k_d * albedo/M_PI;
+    Vec3 k_d = (1.0f - metallic);
+    Vec3 diffuse = k_d * albedo / M_PI;
 
     // Toplam BRDF
     Vec3 brdf = diffuse + specular;
@@ -1352,23 +1413,23 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     const Vec3& background_color, int depth, int sample_index) {
     Vec3 final_color(0, 0, 0);
     Vec3 throughput(1, 1, 1);
-    Ray current_ray = r;    
+    Ray current_ray = r;
 
-	// --- Ray tracing döngüsü ---
+    // --- Ray tracing döngüsü ---
     for (int bounce = 0; bounce < render_settings.max_bounces; ++bounce) {
         HitRecord rec;
 
         if (!bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), rec)) {
             float falloff = (bounce == 0) ? 1.0f : std::pow(0.5f, bounce); // Enerji kaybı
-            final_color += throughput * background_color* falloff;
+            final_color += throughput * background_color * falloff;
             break;
         }
 
         int light_index = -1;
         if (!lights.empty())
             light_index = pick_smart_light(lights, rec.point);
-		// --- Normal harita uygulaması ---
-		// apply_interpolated_normal(rec);
+        // --- Normal harita uygulaması ---
+        // apply_interpolated_normal(rec);
          // HitRecord nesnesinin normal harita bilgilerini kullanarak 'interpolated_normal' üyesini günceller.
         // 'rec' parametresi hem girdi hem de çıktı olarak kullanılır.
         apply_normal_map(rec);
@@ -1381,14 +1442,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         throughput *= attenuation;
 
         // --- Russian Roulette ---
-       
-            float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
-            float continuation_prob = std::clamp(max_channel, 0.0f, 0.98f);
-            if (bounce > 2) { // İlk birkaç atışta devam et, sonra RR uygula
-                if (Vec3::random_double() > continuation_prob)
-                    break;
-                throughput /= continuation_prob;
-            }
+
+        float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
+        float continuation_prob = std::clamp(max_channel, 0.0f, 0.98f);
+        if (bounce > 2) { // İlk birkaç atışta devam et, sonra RR uygula
+            if (Vec3::random_float() > continuation_prob)
+                break;
+            throughput /= continuation_prob;
+        }
         // --- Emissive katkı ---
         Vec3 emitted = rec.material->getEmission(rec.uv, rec.point);
         float transmission = rec.material->getTransmission(rec.uv);
@@ -1399,11 +1460,11 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // --- Direct light sadece ışık varsa hesapla ---
         if (light_index >= 0) {
             direct_light = calculate_direct_lighting_single_light(
-                bvh, lights[light_index], rec, rec.interpolated_normal, 0.0f, current_ray);
+                bvh, lights[light_index], rec, rec.interpolated_normal,  current_ray);
             direct_light *= (1.0f - transmission);
         }
 
-        final_color += throughput * (emitted + 10*direct_light)* opacity;
+        final_color += throughput * (emitted + 10 * direct_light) * opacity;
 
         current_ray = scattered;
     }
@@ -1419,7 +1480,7 @@ float Renderer::radical_inverse(unsigned int bits) {
     return float(bits) * 2.3283064365386963e-10f; // 1 / (2^32)
 }
 float Renderer::compute_ambient_occlusion(HitRecord& rec, const ParallelBVHNode* bvh) {
-    
+
 
     const int baseSamples = 2;
     const int maxAdditionalSamples = 2;
@@ -1428,7 +1489,7 @@ float Renderer::compute_ambient_occlusion(HitRecord& rec, const ParallelBVHNode*
 
     // Adaptive sampling based on surface complexity
     Vec3 normal = rec.normal;
-    float complexity = 1.0f - std::abs(Vec3::dot(normal,(Vec3(0, 1, 0))));
+    float complexity = 1.0f - std::abs(Vec3::dot(normal, (Vec3(0, 1, 0))));
     int numSamples = baseSamples + static_cast<int>(complexity * maxAdditionalSamples);
 
     float occlusion = 0.0f;

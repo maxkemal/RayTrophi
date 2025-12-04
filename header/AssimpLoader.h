@@ -247,50 +247,67 @@ public:
     // Hem Triangle hem de AnimationData döndüren metod
     std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>, BoneData>
         loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr) {
+        SCENE_LOG_INFO("Starting model loading: " + filename);
+
         BoneData boneData;
 
+        SCENE_LOG_INFO("Importing file with Assimp...");
         this->scene = importer.ReadFile(filename,
-            //aiProcess_Triangulate |           // Önce üçgenlere böl
-            aiProcess_GenSmoothNormals |      // Normalleri oluştur
-             aiProcess_JoinIdenticalVertices  //Aynı olan vertexleri birleştir
-          //  aiProcess_GenNormals              // Normal haritaları oluşturur
-         //   aiProcess_CalcTangentSpace       // Tangent ve bitangent hesapla
-
+            aiProcess_GenSmoothNormals |
+            aiProcess_JoinIdenticalVertices
         );
-        //importer.SetPropertyFloat(AI_CONFIG_PP_GSN_MAX_SMOOTHING_ANGLE, 45.0f);  // 45 derece örnek açıdır, bunu ihtiyacınıza göre değiştirebilirsiniz.
+
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
-            std::cerr << "Assimp error: " << importer.GetErrorString() << std::endl;
+            SCENE_LOG_ERROR("Assimp import failed: " + std::string(importer.GetErrorString()));
             return {};
         }
+
         if (!scene || !scene->mRootNode) {
-            std::cerr << "Assimp load error: " << importer.GetErrorString() << std::endl;
+            SCENE_LOG_ERROR("Scene or root node is null: " + std::string(importer.GetErrorString()));
             return {};
         }
-        cameras.clear(); // ❗ Kameraları her model yüklemesinde sıfırla
-        lights.clear();  // Aynı mantık ışıklar için de geçerli
-      
-        // Node ağacını tarayıp nodeMap'e doldur
+
+        SCENE_LOG_INFO("Assimp file loaded successfully. Processing scene data...");
+
+        SCENE_LOG_INFO("Clearing existing cameras and lights...");
+        cameras.clear();
+        lights.clear();
+
+        SCENE_LOG_INFO("Building node map from scene hierarchy...");
         std::function<void(aiNode*)> recurse = [&](aiNode* node) {
             nodeMap[node->mName.C_Str()] = node;
             for (unsigned int i = 0; i < node->mNumChildren; ++i)
                 recurse(node->mChildren[i]);
             };
         recurse(scene->mRootNode);
+        SCENE_LOG_INFO("Node map built with " + std::to_string(nodeMap.size()) + " nodes.");
+
+        SCENE_LOG_INFO("Processing cameras...");
         processCameras(scene);
+        SCENE_LOG_INFO("Cameras processed: " + std::to_string(cameras.size()) + " camera(s) found.");
+
+        SCENE_LOG_INFO("Processing lights...");
         processLights(scene);
+        SCENE_LOG_INFO("Lights processed: " + std::to_string(lights.size()) + " light(s) found.");
+
         std::vector<std::shared_ptr<Triangle>> triangles;
-       
         OptixGeometryData geometry_data;
 
+        SCENE_LOG_INFO("Processing nodes to extract triangles...");
         processNodeToTriangles(scene->mRootNode, scene, triangles, &geometry_data);
+        SCENE_LOG_INFO("Triangle extraction completed: " + std::to_string(triangles.size()) + " triangles processed.");
+
+        SCENE_LOG_INFO("Processing bone data...");
         std::unordered_map<std::string, unsigned int> boneNameToIndex;
         std::unordered_map<std::string, aiNode*> boneNameToNode;
-
         processBones(scene, triangles, boneData);
-      
+
+        SCENE_LOG_INFO("Processing animations...");
         std::vector<AnimationData> animationDataList;
+
         if (scene->mNumAnimations > 0) {
-            std::cout << "Animations found, loading..." << std::endl;
+            SCENE_LOG_INFO("Found " + std::to_string(scene->mNumAnimations) + " animation(s) in model.");
+
             for (unsigned int i = 0; i < scene->mNumAnimations; ++i) {
                 const aiAnimation* animation = scene->mAnimations[i];
                 AnimationData animData;
@@ -299,32 +316,58 @@ public:
                 animData.duration = animation->mDuration;
                 animData.ticksPerSecond = animation->mTicksPerSecond;
 
-                std::cout << "Loaded Animation: " << animData.name
-                    << ", Duration: " << animData.duration
-                    << ", Ticks Per Second: " << animData.ticksPerSecond << std::endl;
+                SCENE_LOG_INFO("[Animation " + std::to_string(i + 1) + "] Name: " + animData.name +
+                    ", Duration: " + std::to_string(animData.duration) +
+                    ", TPS: " + std::to_string(animData.ticksPerSecond));
+
+                unsigned int totalKeys = 0;
 
                 for (unsigned int j = 0; j < animation->mNumChannels; ++j) {
                     const aiNodeAnim* channel = animation->mChannels[j];
                     std::string nodeName = channel->mNodeName.C_Str();
-                  
+
+                    SCENE_LOG_INFO("  [Channel " + std::to_string(j + 1) + "] Node: " + nodeName +
+                        ", Pos Keys: " + std::to_string(channel->mNumPositionKeys) +
+                        ", Rot Keys: " + std::to_string(channel->mNumRotationKeys) +
+                        ", Scale Keys: " + std::to_string(channel->mNumScalingKeys));
+
                     for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k) {
                         animData.positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
                     }
+
                     for (unsigned int k = 0; k < channel->mNumRotationKeys; ++k) {
                         animData.rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
                     }
+
                     for (unsigned int k = 0; k < channel->mNumScalingKeys; ++k) {
                         animData.scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
                     }
+
+                    totalKeys += channel->mNumPositionKeys + channel->mNumRotationKeys + channel->mNumScalingKeys;
                 }
+
+                SCENE_LOG_INFO("[Animation " + std::to_string(i + 1) + "] Total channels: " +
+                    std::to_string(animation->mNumChannels) + ", Total keys: " +
+                    std::to_string(totalKeys));
+
                 animationDataList.push_back(animData);
             }
+
+            SCENE_LOG_INFO("All " + std::to_string(animationDataList.size()) + " animation(s) loaded successfully.");
         }
         else {
-            std::cout << "No animations found in the file: " << filename << std::endl;
+            SCENE_LOG_INFO("No animations found in file: " + filename);
         }
+
+        SCENE_LOG_INFO("Model loading completed. Summary - Triangles: " +
+            std::to_string(triangles.size()) +
+            ", Animations: " + std::to_string(animationDataList.size()) +
+            ", Cameras: " + std::to_string(cameras.size()) +
+            ", Lights: " + std::to_string(lights.size()));
+
         return { triangles, animationDataList, boneData };
     }
+
     std::tuple<std::vector<Mesh>, std::vector<AnimationData>, BoneData>
         loadModelToMeshes(const std::string& filename) {
         Assimp::Importer importer;

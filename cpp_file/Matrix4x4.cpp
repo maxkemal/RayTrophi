@@ -67,7 +67,7 @@ Vec3 Matrix4x4::transform_point(const Vec3& point) const {
     double w = m[3][0] * point.x + m[3][1] * point.y + m[3][2] * point.z + m[3][3];
 
     if (w != 1.0f && w != 0.0f) {
-        return Vec3SIMD(x / w, y / w, z / w);
+        return Vec3(x / w, y / w, z / w);
     }
     return Vec3(x, y, z);
 }

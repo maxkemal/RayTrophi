@@ -4,12 +4,14 @@
 #include "Dielectric.h"
 #include <perlin.h>
 
-Dielectric::Dielectric(double index_of_refraction,  const Vec3& color, double caustic_intensity,
-     double tint_factor, double roughness, double scratch_density)
+Dielectric::Dielectric(float index_of_refraction,  const Vec3& color, float caustic_intensity,
+     float tint_factor, float roughness, float scratch_density)
     : color(color), caustic_intensity(caustic_intensity), 
     tint_factor(tint_factor), roughness(roughness) {
     // Slightly different IOR for each color channel to simulate dispersion
-    ir = { index_of_refraction, index_of_refraction * 1.01, index_of_refraction * 1.02 };
+    ir = Vec3(index_of_refraction,
+        index_of_refraction * 1.01f,
+        index_of_refraction * 1.02f);
 }
 float Dielectric::get_opacity(const Vec2& uv) const {
     return 1.0f;  // Dielectric materyal tamamen opak, bu yüzden 1.0 döndür
@@ -24,7 +26,7 @@ Vec3 Dielectric::calculate_reflected_attenuation(const Vec3& base_color, const V
     return apply_tint(reflected_color);  // Renk uygulandı
 }
 // Kırılan ışığın katkısını hesaplama
-Vec3 Dielectric::calculate_refracted_attenuation(const Vec3& base_color, double thickness, const Vec3& fresnel_factor, const std::array<double, 3>& ior) const {
+Vec3 Dielectric::calculate_refracted_attenuation(const Vec3& base_color, double thickness, const Vec3& fresnel_factor, const Vec3& ior) const {
     // Fresnel hesabından gelen kırılma bileşeni
     Vec3 refracted_color = base_color * (Vec3(1.0, 1.0, 1.0) - fresnel_factor);
 
@@ -116,7 +118,9 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     double sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 
     // Fresnel hesaplaması - kırılma indisi daha doğru kullanılıyor
-    Vec3 current_ir = rec.front_face ? ir : std::array<double, 3>{ 1.0 / ir[0], 1.0 / ir[1], 1.0 / ir[2] };
+    Vec3 reversed_ir = Vec3(1.0f / ir.x, 1.0f / ir.y, 1.0f / ir.z);
+
+    Vec3 current_ir = rec.front_face ? ir : reversed_ir;
     Vec3 fresnel_factor = fresnel(unit_direction, outward_normal, current_ir);
     double fresnel_reflect = fresnel_factor.y; // Yeşil kanal üzerinden hesaplamak daha doğru olabilir
 
@@ -138,7 +142,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     
     // Işık yönü hesaplaması
     Vec3 direction;
-    double random_val = Vec3::random_double();
+    double random_val = Vec3::random_float();
 
     if (random_val < reflect_prob) {
         // Yansıma
@@ -179,11 +183,11 @@ double Dielectric::getIndexOfRefraction() const {
     return ir[1];  // Return the green channel IOR as an average
 }
 
-Vec3 Dielectric::fresnel(const Vec3& incident, const Vec3& normal, const std::array<double, 3>& ior) const {
+Vec3 Dielectric::fresnel(const Vec3& incident, const Vec3& normal, const Vec3& ir_values) const {
     float cos_i = std::clamp(Vec3::dot(-incident, normal), -1.0f, 1.0f);
 
     // Havadan cama mı, camdan havaya mı?
-    float eta_i = 1.0f, eta_t = ior[1];
+    float eta_i = 1.0f, eta_t = ir_values[1];
     if (cos_i > 0.0f) std::swap(eta_i, eta_t);
 
     float sin_t2 = (eta_i / eta_t) * (eta_i / eta_t) * (1.0f - cos_i * cos_i);
@@ -191,13 +195,13 @@ Vec3 Dielectric::fresnel(const Vec3& incident, const Vec3& normal, const std::ar
 
     float cos_t = sqrt(1.0f - sin_t2);
 
-    float r0_r = ((ior[0] - eta_i) / (ior[0] + eta_i)) * ((ior[0] - eta_i) / (ior[0] + eta_i));
+    float r0_r = ((ir_values[0] - eta_i) / (ir_values[0] + eta_i)) * ((ir_values[0] - eta_i) / (ir_values[0] + eta_i));
     float fr_r = r0_r + (1.0f - r0_r) * pow(1.0f - fabs(cos_i), 3.0f);
 
-    float r0_g = ((ior[1] - eta_i) / (ior[1] + eta_i)) * ((ior[1] - eta_i) / (ior[1] + eta_i));
+    float r0_g = ((ir_values[1] - eta_i) / (ir_values[1] + eta_i)) * ((ir_values[1] - eta_i) / (ir_values[1] + eta_i));
     float fr_g = r0_g + (1.0f - r0_g) * pow(1.0f - fabs(cos_i), 3.0f);
 
-    float r0_b = ((ior[2] - eta_i) / (ior[2] + eta_i)) * ((ior[2] - eta_i) / (ior[2] + eta_i));
+    float r0_b = ((ir_values[2] - eta_i) / (ir_values[2] + eta_i)) * ((ir_values[2] - eta_i) / (ir_values[2] + eta_i));
     float fr_b = r0_b + (1.0f - r0_b) * pow(1.0f - fabs(cos_i), 3.0f);
 
     return Vec3(fr_r, fr_g, fr_b);

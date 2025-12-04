@@ -71,7 +71,7 @@ Vec3 Camera::random_in_unit_polygon(int sides) const {
     float edge_angle = edge_index * step;
 
     // Kenar boyunca rastgele bir nokta seç
-    float t = Vec3::random_double();
+    float t = Vec3::random_float();
     float x1 = cos(edge_angle);
     float y1 = sin(edge_angle);
 
@@ -83,7 +83,7 @@ Vec3 Camera::random_in_unit_polygon(int sides) const {
     float py = y1 * (1 - t) + y2 * t;
 
     // Ýçeri rastgele bir kaydýrma yaparak tam dolu hale getir
-    float shrink_factor = sqrt(Vec3::random_double()); // Ýç içe eþit doluluk için
+    float shrink_factor = sqrt(Vec3::random_float()); // Ýç içe eþit doluluk için
     px *= shrink_factor;
     py *= shrink_factor;
 

@@ -6,13 +6,25 @@
 #include <algorithm>    // std::min ve std::max için
 #include <SpotLight.h>
 #include <filesystem>
+#include <imgui.h>
+#include <imgui_impl_sdlrenderer2.h>
+
 #undef min              // Eğer min bir yerde macro tanımlandıysa temizler
 #undef max
 
-#define OPTIX_CHECK(call) \
-    do { OptixResult res = call; if (res != OPTIX_SUCCESS) { \
-        std::cerr << "OptiX error: " << res << " at " << __FILE__ << ":" << __LINE__ << "\n"; std::abort(); } \
-    } while(0)
+#define OPTIX_CHECK(call)                                                     \
+    do {                                                                      \
+        OptixResult res = call;                                               \
+        if (res != OPTIX_SUCCESS) {                                           \
+            SCENE_LOG_ERROR(                                                  \
+                std::string("OptiX error (") +                                \
+                std::to_string(res) +                                         \
+                ") at " + __FILE__ + ":" + std::to_string(__LINE__)          \
+            );                                                                 \
+            std::abort();                                                     \
+        }                                                                     \
+    } while (0)
+
 
 OptixWrapper::OptixWrapper()
     : Image_width(image_width), Image_height(image_height), color_processor(image_width, image_height) //  işte burada!
@@ -215,11 +227,23 @@ void OptixWrapper::setupOIDN(int width, int height)
     oidnOutputBuffer = nullptr;
     oidnFilter = nullptr;
 
-    if (!oidnDevice) {
-        oidnDevice = g_hasOptix ? oidn::newDevice(oidn::DeviceType::CUDA)
+    if (!oidnDevice)
+    {
+        bool useCUDA = g_hasOptix;
+
+        oidnDevice = useCUDA
+            ? oidn::newDevice(oidn::DeviceType::CUDA)
             : oidn::newDevice(oidn::DeviceType::CPU);
+
+        // Log
+        if (useCUDA)
+            std::cout << "[OIDN] Using CUDA device for denoising.\n";
+        else
+            std::cout << "[OIDN] Using CPU device for denoising.\n";
+
         oidnDevice.commit();
     }
+
 
     const size_t byteSize = width * height * 3 * sizeof(float);
 
@@ -301,32 +325,41 @@ void OptixWrapper::applyOIDNDenoising(SDL_Surface* surface, bool denoise, float 
 
 void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
     if (data.materials.empty()) {
-        std::cerr << " ERROR: No material available!\n";
+        SCENE_LOG_ERROR("No material available!");
         return;
     }
 
     if (data.indices.empty()) {
-        std::cerr << " ERROR: There are no triangles!\n";
+        SCENE_LOG_ERROR("There are no triangles!");
         return;
     }
 
     const auto& material_indices = data.material_indices;
 
     if (material_indices.empty()) {
-        std::cout << " Information: Material indices are empty, all will be considered as 0 by default.\n";
+        SCENE_LOG_INFO("Material indices are empty, default material (0) will be used for all triangles.");
         return;
     }
 
     for (size_t tri_idx = 0; tri_idx < material_indices.size(); ++tri_idx) {
         int mat_idx = material_indices[tri_idx];
 
-        if (mat_idx < 0 || mat_idx >= data.materials.size()) {
-            std::cerr << " WARNING: Invalid material index for triangle [" << tri_idx << "]: " << mat_idx << "\n";
+        if (mat_idx < 0 || mat_idx >= (int)data.materials.size()) {
+            SCENE_LOG_WARN(
+                "Invalid material index for triangle [" +
+                std::to_string(tri_idx) + "]: " +
+                std::to_string(mat_idx)
+            );
         }
     }
 
-    std::cout << " Material indices verified! (" << material_indices.size() << " triangle checked)\n";
+    SCENE_LOG_INFO(
+        "Material indices verified (" +
+        std::to_string(material_indices.size()) +
+        " triangles checked)"
+    );
 }
+
 
 void OptixWrapper::setupPipeline(const char* raygen_ptx) {
     // 1. Compile options
@@ -444,10 +477,10 @@ void OptixWrapper::destroyTextureObjects() {
 }
 
 void OptixWrapper::buildFromData(const OptixGeometryData& data) {
-    std::cout << " OptiX buildFromData is starting...\n";
+    SCENE_LOG_INFO(" OptiX buildFromData is starting...");
 
     if (data.vertices.empty() || data.indices.empty()) {
-        std::cerr << " Geometry data is empty!\n";
+        SCENE_LOG_ERROR(" Geometry data is empty!");
         return;
     }
     destroyTextureObjects();      
@@ -482,7 +515,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     if (data.material_indices.empty() || data.material_indices.size() != data.indices.size()) {
         default_material_indices.resize(data.indices.size(), 0);
         material_indices_ptr = default_material_indices.data();
-        std::cout << "Warning: Material indexes have been rebuilt.\n";
+        SCENE_LOG_WARN("Warning: Material indexes have been rebuilt.");
     }
     else {
         material_indices_ptr = data.material_indices.data();
@@ -533,16 +566,10 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
                 rec.data.has_metallic_tex = tex.has_metallic_tex;
                 rec.data.has_transmission_tex = tex.has_transmission_tex;
                 rec.data.has_opacity_tex = tex.has_opacity_tex;
-                //  DEBUG: Texture geçişi doğru mu?
-              /*  std::cout << "[SBT-TEX] Mat #" << mat_index
-                    << " | Albedo? " << tex.has_albedo_tex
-                    << " | Normal? " << tex.has_normal_tex
-                    << " | Roughness? " << tex.has_roughness_tex
-                    << " | TexPtr: " << tex.albedo_tex
-                    << "\n";*/
+               
             }
             else {
-                std::cerr << "[SBT-WARN] Mat #" << mat_index << " No texture found for!\n";
+                SCENE_LOG_WARN("[SBT-WARN] Mat #" + std::to_string(mat_index) + " has no texture!");
             }
             rec.data.material_id = static_cast<int>(mat_index);
             rec.data.vertices = reinterpret_cast<float3*>(d_vertices);
@@ -634,8 +661,11 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     d_bvh_output = d_output_buffer;
 
     cudaStreamSynchronize(stream);
-    std::cout << "OptiX buildFromData completed successfully! "
-        << data.materials.size() << " SBT record created for material.\n";
+    SCENE_LOG_INFO(
+        "OptiX buildFromData completed successfully! " +
+        std::to_string(data.materials.size()) +
+        " SBT record(s) created for material."
+    );
 }
 /*
 void OptixWrapper::launch_tile_based_progressive(
@@ -855,10 +885,17 @@ void OptixWrapper::launch_tile_based_progressive(
     cudaStreamDestroy(copy_stream);
 }
 */
+
 void OptixWrapper::launch_random_pixel_mode_progressive(
-    SDL_Surface* surface, SDL_Window* window, int width, int height,
-    std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture
+    SDL_Surface* surface,
+    SDL_Window* window,
+    SDL_Renderer* renderer, // ⬅️ YENİ PARAMETRE
+    int width,
+    int height,
+    std::vector<uchar4>& framebuffer,
+    SDL_Texture* raytrace_texture
 ) {
+    using namespace std::chrono;
 
     cudaGetDeviceProperties(&props, 0);
     int max_threads_per_block = props.maxThreadsPerBlock;
@@ -866,15 +903,36 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     int image_pixels = width * height;
 
-    // RTX 3060 için optimize batch size
-    // GPU'yu doyurmak için büyük batch, ama sık güncelleme için birden fazla batch biriktir
-    int pixels_per_launch = std::clamp(image_pixels, 32768, 256 * 1024); // Büyük batch
-    int display_update_interval = 2; // Her 1 batch'te bir ekranı güncelle
+    // ---------------- ADAPTIVE BATCH HESABI ----------------
+    // Kurallar:
+    // - Küçük görüntülerde: tek seferde komple render (overhead minimal).
+    // - Büyük görüntülerde: tile >= 512x512 (262144) tercih et.
+    const int MIN_TILE = 512 * 512;        // 262144
+    const int MAX_TILE = 1024 * 1024;      // 1048576
+   
+    int pixels_per_launch = image_pixels;
+    if (image_pixels > MIN_TILE) {
+        // Target temel: her SM için bir miktar iş bırak (512 thread/SM hedef)
+        int target_threads = num_sms * 512; // yaklaşık hedef thread sayısı
+        // Pixel-per-thread 1 kabul ederek hedef pixel sayısı:
+        int target_pixels = target_threads;
+        // Clamp hedefi makul tile aralığına al
+        int clamped = std::clamp(target_pixels, MIN_TILE, std::min(image_pixels, MAX_TILE));
+        // Ayrıca image büyüklüğüne göre tile sayısını mantıklı böl (ör. 4 tile veya 8 tile)
+        // Burada tercihen kaç tile yapılacağına göre ayarla:
+        int desired_tiles = std::clamp(image_pixels / clamped, 1, 16);
+        pixels_per_launch = std::min(image_pixels, std::max(clamped, image_pixels / desired_tiles));
+    }
+    else {
+        // Küçük resim: tek seferde tamamla
+        pixels_per_launch = image_pixels;
+    }
+
+    // display update interval: küçük çözünürlükte sık, büyükte seyrek
+    int display_update_interval = (image_pixels <= MIN_TILE) ? 1 : std::clamp(image_pixels / (pixels_per_launch * 2), 1, 4);
 
     // ------------------ FRAMEBUFFER SETUP -----------------------
     cudaMalloc(&d_framebuffer, width * height * sizeof(uchar4));
-
-    // Framebuffer'ı sıfırla (siyah başlat)
     cudaMemset(d_framebuffer, 0, width * height * sizeof(uchar4));
 
     params.framebuffer = d_framebuffer;
@@ -883,7 +941,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.handle = traversable_handle;
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
 
-    // Atmosfer parametreleri
+    // Atmosfer ve diğer parametreler aynen
     params.atmosphere.sigma_s = 0.01f;
     params.atmosphere.sigma_a = 0.01f;
     params.atmosphere.g = 0.0f;
@@ -906,7 +964,6 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // ------------------ PİKSEL KOORDİNATLARI ------------------
     std::vector<std::pair<int, int>> all_coords;
     all_coords.reserve(width * height);
-
     for (int j = 0; j < height; ++j)
         for (int i = 0; i < width; ++i)
             all_coords.emplace_back(i, j);
@@ -914,8 +971,11 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     static std::mt19937 rng(12345);
     std::shuffle(all_coords.begin(), all_coords.end(), rng);
 
-    std::vector<int> coords_x(pixels_per_launch);
-    std::vector<int> coords_y(pixels_per_launch);
+    // Dinamik batch vektörleri (maks pixels_per_launch kadar)
+    std::vector<int> coords_x;
+    std::vector<int> coords_y;
+    coords_x.reserve(pixels_per_launch);
+    coords_y.reserve(pixels_per_launch);
 
     cudaMalloc(reinterpret_cast<void**>(&d_coords_x), pixels_per_launch * sizeof(int));
     cudaMalloc(reinterpret_cast<void**>(&d_coords_y), pixels_per_launch * sizeof(int));
@@ -926,39 +986,46 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     cudaStream_t render_stream;
     cudaStreamCreate(&render_stream);
 
-    // Partial framebuffer - TÜM framebuffer'ı tutacak kadar büyük
-    // Ama sadece değişen kısımları işleyeceğiz
     partial_framebuffer.resize(width * height);
-    std::vector<int> current_batch_x(pixels_per_launch);
-    std::vector<int> current_batch_y(pixels_per_launch);
-
-    // Accumulated batch tracking
-    std::vector<std::pair<int, uchar4>> accumulated_updates;
-    accumulated_updates.reserve(pixels_per_launch * display_update_interval);
+    std::vector<std::pair<int, int>> accumulated_coords;
+    accumulated_coords.reserve(pixels_per_launch * display_update_interval);
 
     // SDL pixel buffer
     Uint32* pixels = (Uint32*)surface->pixels;
     int row_stride = surface->pitch / 4;
 
-    auto start_time = std::chrono::high_resolution_clock::now();
+    auto start_time = high_resolution_clock::now();
+    auto last_present_time = start_time;
+    double fps_ema = 0.0;
+    const double ema_alpha = 0.15; // fps smoothing
+
     int batch_counter = 0;
+    SCENE_LOG_INFO("OptiX progressive render launched.");
+    SCENE_LOG_INFO("Device: " + std::string(props.name) +
+        " | SMs: " + std::to_string(num_sms) +
+        " | Max threads per block: " + std::to_string(max_threads_per_block));
+
+    SCENE_LOG_INFO("Total pixels: " + std::to_string(total_pixels) +
+        " | Pixels per launch: " + std::to_string(pixels_per_launch) +
+        " | Display update interval: " + std::to_string(display_update_interval));
 
     size_t count;
     for (size_t offset = 0; offset < total_pixels; offset += pixels_per_launch) {
         count = std::min<size_t>(pixels_per_launch, total_pixels - offset);
-
-        // Koordinatları hazırla ve sakla
+        size_t last_logged_pixels = 0;
+        coords_x.clear();
+        coords_y.clear();
         for (size_t k = 0; k < count; ++k) {
             int index = offset + k;
-            coords_x[k] = all_coords[index].first;
-            coords_y[k] = all_coords[index].second;
-            accumulated_coords.emplace_back(coords_x[k], coords_y[k]);
+            coords_x.push_back(all_coords[index].first);
+            coords_y.push_back(all_coords[index].second);
+            accumulated_coords.emplace_back(coords_x.back(), coords_y.back());
         }
 
         // Async memory transfer
-        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_x), coords_x.data(),
+        cudaMemcpyAsync(reinterpret_cast<int*>(d_coords_x), coords_x.data(),
             count * sizeof(int), cudaMemcpyHostToDevice, render_stream);
-        cudaMemcpyAsync(reinterpret_cast<void*>(d_coords_y), coords_y.data(),
+        cudaMemcpyAsync(reinterpret_cast<int*>(d_coords_y), coords_y.data(),
             count * sizeof(int), cudaMemcpyHostToDevice, render_stream);
 
         params.launch_coords_x = reinterpret_cast<int*>(d_coords_x);
@@ -968,7 +1035,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params,
             sizeof(RayGenParams), cudaMemcpyHostToDevice, render_stream);
 
-        // Render launch
+        // Render launch (count threads)
         OPTIX_CHECK(optixLaunch(
             pipeline, render_stream,
             d_params, sizeof(RayGenParams),
@@ -976,7 +1043,9 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             static_cast<unsigned int>(count), 1, 1
         ));
 
-        // TEK SEFERDE tüm framebuffer'ı kopyala
+        // *** Daha verimli: sadece değişen piksellerin D2H kopyalanması çok daha hızlı olur.
+        // Burada pratiklik için tüm framebuffer'ı kopyalıyoruz. İstersen sadece 'coords_x/y' ile
+        // tek tek pikselleri CUDA kernel ile host-buffer'a yazdırıp D2H kopyasını küçültebiliriz.
         cudaMemcpyAsync(partial_framebuffer.data(),
             d_framebuffer,
             width * height * sizeof(uchar4),
@@ -988,14 +1057,11 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         rendered_pixels += count;
         batch_counter++;
 
-        // Belirli aralıklarla VEYA son batch ise ekranı güncelle
         bool should_update = (batch_counter % display_update_interval == 0) ||
             (offset + pixels_per_launch >= total_pixels);
 
         if (should_update && !accumulated_coords.empty()) {
-           
-
-            // Biriken tüm koordinatlardaki pikselleri güncelle
+            // Geri dönen pikselleri surface'a yaz
             for (const auto& coord : accumulated_coords) {
                 int px = coord.first;
                 int py = coord.second;
@@ -1011,45 +1077,70 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
                 int screen_index = (height - 1 - py) * row_stride + px;
                 pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
+               
             }
 
-
-            // Texture ve window güncelle
+            // Texture ve renderer güncelle
             SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-            SDL_UpdateWindowSurface(window);
+            // --- FPS hesaplama (moving-average) ---
+            auto now = high_resolution_clock::now();
+            double delta_s = duration_cast<duration<double>>(now - last_present_time).count();
+            last_present_time = now;
+            double inst_fps = (delta_s > 0.0) ? (1.0 / delta_s) : 0.0;
+            if (fps_ema <= 0.0) fps_ema = inst_fps;
+            else fps_ema = ema_alpha * inst_fps + (1.0 - ema_alpha) * fps_ema;
 
-            // Accumulated coords'i temizle
+            // --- Progress hesaplama ---
+            double elapsed = duration_cast<duration<double>>(now - start_time).count();
+            double progress = 100.0 * double(rendered_pixels) / double(total_pixels);
+            double pps = rendered_pixels / std::max(1e-6, elapsed);
+            double eta = (total_pixels - rendered_pixels) / std::max(1.0, pps);
+            char progress_text[128];
+            float pixels_per_sec = rendered_pixels / std::max(0.001, elapsed);
+            float remaining_time = (total_pixels - rendered_pixels) / std::max(1.0f, pixels_per_sec);
+            // SDL ve ImGui için metin
+            std::snprintf(progress_text, sizeof(progress_text),
+                "Progress: %.1f%% | %zu/%zu px | %.1fK px/s | ETA: %ds | FPS: %.1f",
+                progress, rendered_pixels, total_pixels, pixels_per_sec / 1000.0f,
+                static_cast<int>(remaining_time), fps_ema
+            );
+            if (rendered_pixels - last_logged_pixels >= total_pixels / 10) { // her %10'da log
+                last_logged_pixels = rendered_pixels;
+                SCENE_LOG_INFO("Progress: " + std::to_string(100.0 * rendered_pixels / total_pixels) +
+                    "% (" + std::to_string(rendered_pixels) + "/" + std::to_string(total_pixels) + " pixels)");
+            }
+            //// ImGui overlay: progress + fps
+            //ImGui::SetNextWindowBgAlpha(0.35f);
+            //ImGui::Begin("Raytrophi Render Info", nullptr,
+            //    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+            //    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+            //ImGui::Text("Progress: %.1f %%", progress);
+            //ImGui::Text("Pixels: %zu / %zu", rendered_pixels, total_pixels);
+            //ImGui::Text("Elapsed: %.1fs  ETA: %.0fs", elapsed, eta);
+            //ImGui::Text("Throughput: %.1f Kpx/s", pps / 1000.0);
+            //ImGui::Text("FPS: %.1f", fps_ema);
+            //ImGui::End();
+            
+            // Render UI + texture
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            ImGui::Render();
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+            SDL_RenderPresent(renderer);
+            SDL_SetWindowTitle(window, progress_text);
             accumulated_coords.clear();
         }
-
-        // İlerleme bilgisi (sadece ekran güncellendiğinde)
-       /* if (should_update) {
-            float progress = (100.0f * rendered_pixels) / total_pixels;
-            auto current_time = std::chrono::high_resolution_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                current_time - start_time).count() / 1000.0f;
-
-            float pixels_per_sec = rendered_pixels / std::max(0.001f, elapsed);
-            float remaining_time = (total_pixels - rendered_pixels) / std::max(1.0f, pixels_per_sec);
-
-            std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
-                << progress << "% | "
-                << rendered_pixels << "/" << total_pixels << " pixels | "
-                << static_cast<int>(pixels_per_sec / 1000.0f) << "K px/s | "
-                << "ETA: " << static_cast<int>(remaining_time) << "s     "
-                << std::flush;
-        }*/
     }
-
-    //std::cout << std::endl << "Render completed!" << std::endl;
-
-    // ------------------ TEMİZLİK ------------------
+    SCENE_LOG_INFO("OptiX progressive render completed. Total pixels: " + std::to_string(total_pixels));
+    // Temizlik
     cudaFree(reinterpret_cast<void*>(d_framebuffer));
     cudaFree(reinterpret_cast<void*>(d_params));
     cudaFree(reinterpret_cast<void*>(d_coords_x));
     cudaFree(reinterpret_cast<void*>(d_coords_y));
     cudaStreamDestroy(render_stream);
 }
+
 
 void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.origin = toFloat3(cpuCamera.origin);

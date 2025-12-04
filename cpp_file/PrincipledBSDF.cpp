@@ -192,7 +192,7 @@ bool PrincipledBSDF::scatter(
 
     // 3. Transmission varsa cam/şeffaf gibi davran
     // Transmission check (e.g. glass-like material)
-    if (Vec3::random_double() < transmissionValue) {
+    if (Vec3::random_float() < transmissionValue) {
         Dielectric dielectricMat(
             ior, albedo, 1.0, 1.0, roughness, 0
         ); // IOR vs. daha gelişmiş hale getirilebilir
@@ -201,7 +201,7 @@ bool PrincipledBSDF::scatter(
 
     // 4. Mikrofacet yönü için Half-Vector oluştur
     // Sample a GGX-based half-vector for microfacet reflection
-    Vec3 H = importanceSampleGGX(Vec3::random_double(), Vec3::random_double(), roughness, N);
+    Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), roughness, N);
     Vec3 metal_dir = Vec3::reflect(-V, H).normalize();
     Vec3 cosine_dir = Vec3::random_cosine_direction(N);
 
@@ -218,7 +218,7 @@ bool PrincipledBSDF::scatter(
     // 7. Stokastik seçim: F.x oranında speküler, geri kalanı difüz
     // Stochastic selection based on Fresnel reflectance
     Vec3 sampled_dir;
-    float randVal = Vec3::random_double();
+    float randVal = Vec3::random_float();
     Vec3 specular = evalSpecular(N, V, sampled_dir, F0, roughness);
     // Attenuation ayır
     if (randVal < F.x) {
@@ -340,8 +340,8 @@ void PrincipledBSDF::precomputeLUT() {
     lutInitialized = true;
 }
 Vec3 PrincipledBSDF::computeAnisotropicDirection(const Vec3& N, const Vec3& T, const Vec3& B, float roughness, float anisotropy) const {
-    float r1 = Vec3::random_double();
-    float r2 = Vec3::random_double();
+    float r1 = Vec3::random_float();
+    float r2 = Vec3::random_float();
 
     float phi = 2 * M_PI * r1;
     float cosTheta = std::sqrt((1 - r2) / (1 + (anisotropy * anisotropy - 1) * r2));
@@ -391,9 +391,9 @@ Vec3 PrincipledBSDF::computeSubsurfaceScattering(const Vec3& N, const Vec3& V, c
     for (int i = 0; i < numSamples; i++) {
         // Işığın içte ne kadar ilerlediğini rastgele belirle
         Vec3 randomOffset = Vec3(
-            Vec3::random_double() * subsurfaceRadius.x,
-            Vec3::random_double() * subsurfaceRadius.y,
-            Vec3::random_double() * subsurfaceRadius.z
+            Vec3::random_float() * subsurfaceRadius.x,
+            Vec3::random_float() * subsurfaceRadius.y,
+            Vec3::random_float() * subsurfaceRadius.z
         );
 
         // Yeni bir yön belirle (Henyey-Greenstein kullanabiliriz)
@@ -411,8 +411,8 @@ Vec3 PrincipledBSDF::computeSubsurfaceScattering(const Vec3& N, const Vec3& V, c
 
 
 Vec3 PrincipledBSDF::sample_henyey_greenstein(const Vec3& wi, double g) const {
-    double rand1 = Vec3::random_double();
-    double rand2 = Vec3::random_double();
+    double rand1 = Vec3::random_float();
+    double rand2 = Vec3::random_float();
 
     // HG (Henyey-Greenstein) phase function için cos(theta) hesapla
     double cos_theta;

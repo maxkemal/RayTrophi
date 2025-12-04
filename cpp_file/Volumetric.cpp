@@ -28,7 +28,7 @@ float Volumetric::get_opacity(const Vec2& uv) const {
 
 bool Volumetric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     // Hacim içinde örnekleme noktası
-    Vec3 inside_sample_point = rec.point + r_in.direction * Vec3::random_double(0.01, 0.05);
+    Vec3 inside_sample_point = rec.point + r_in.direction * Vec3::random_float(0.01, 0.05);
 
     // Gürültü bazlı yoğunluk
     float local_density = calculate_density(inside_sample_point);
@@ -85,7 +85,7 @@ double Volumetric::calculate_absorption(double distance_to_center) const {
 
 
 Vec3 Volumetric::sample_henyey_greenstein(const Vec3& wi, double g) const {
-    double cos_theta = 1.0 - 2.0 * Vec3::random_double();
+    double cos_theta = 1.0 - 2.0 * Vec3::random_float();
     double distance_to_center = wi.length();
     double local_density = calculate_density(wi);  // bu biraz yorumlanabilir, wi pozisyona karşılık gelmiyor ama idare eder
     double modified_g = g * local_density;
@@ -93,12 +93,12 @@ Vec3 Volumetric::sample_henyey_greenstein(const Vec3& wi, double g) const {
     if (std::abs(modified_g) > 0.001) {
         cos_theta = (1.0 + modified_g * modified_g -
             std::pow((1.0 - modified_g * modified_g) /
-                (1.0 + modified_g * (2.0 * Vec3::random_double() - 1.0)), 2)) /
+                (1.0 + modified_g * (2.0 * Vec3::random_float() - 1.0)), 2)) /
             (2.0 * modified_g);
     }
 
     double sin_theta = std::sqrt(1.0 - cos_theta * cos_theta);
-    const double phi = 2.0 * M_PI * Vec3::random_double();
+    const double phi = 2.0 * M_PI * Vec3::random_float();
     Vec3 u = Vec3::random_unit_vector().cross(wi).normalize();
     Vec3 v = wi.cross(u);
     return (u * std::cos(phi) * sin_theta +

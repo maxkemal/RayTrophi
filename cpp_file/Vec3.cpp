@@ -2,28 +2,38 @@
 #include <cstdlib>
 #include <limits>
 #include <random>
+#include <cmath>
+#include <algorithm>
+#include <stdexcept>
 
-// Static random number generator initialization
-static std::mt19937 rng;
-static std::uniform_real_distribution<double> dist(0.0, 1.0);
+// --- Random Number Generator Optimization ---
+// Statik olarak bir kez baþlatýlýr
+static std::mt19937 rng(std::random_device{}());
+static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
 // Constructors
-Vec3::Vec3() : x(0), y(0), z(0) {}
+Vec3::Vec3() : x(0.0f), y(0.0f), z(0.0f) {}
 Vec3::Vec3(float value) : x(value), y(value), z(value) {}
 Vec3::Vec3(float x, float y, float z) : x(x), y(y), z(z) {}
-Vec3::Vec3(const std::array<double, 3>& arr) : x(arr[0]), y(arr[1]), z(arr[2]) {}
+// double array constructor'u kaldýrýldý
 
-// Access operators
+// Access operators (Daha temiz switch yapýsý)
 float Vec3::operator[](int index) const {
-    if (index == 0) return x;
-    else if (index == 1) return y;
-    return z;
+    switch (index) {
+    case 0: return x;
+    case 1: return y;
+    case 2: return z;
+    default: throw std::out_of_range("Vec3 index out of range");
+    }
 }
 
 float& Vec3::operator[](int index) {
-    if (index == 0) return x;
-    else if (index == 1) return y;
-    return z;
+    switch (index) {
+    case 0: return x;
+    case 1: return y;
+    case 2: return z;
+    default: throw std::out_of_range("Vec3 index out of range");
+    }
 }
 
 // Arithmetic operators
@@ -44,9 +54,9 @@ Vec3& Vec3::operator*=(float t) { x *= t; y *= t; z *= t; return *this; }
 Vec3& Vec3::operator*=(const Vec3& v) { x *= v.x; y *= v.y; z *= v.z; return *this; }
 
 Vec3& Vec3::operator/=(float t) {
-    constexpr float EPSILON = std::numeric_limits<float>::epsilon();
-    if (fabs(t) < EPSILON) {
-        *this = Vec3(0, 0, 0);
+    constexpr float EPSILON = 1e-6f; // float hassasiyeti için güvenli eþik
+    if (std::abs(t) < EPSILON) {
+        x = y = z = 0.0f;
         return *this;
     }
     float inv_t = 1.0f / t;
@@ -56,7 +66,7 @@ Vec3& Vec3::operator/=(float t) {
 
 // Comparison operators
 bool Vec3::operator==(const Vec3& other) const {
-    const float epsilon = std::numeric_limits<float>::epsilon() * 100.0f;
+    const float epsilon = 1e-5f;
     return (std::abs(x - other.x) < epsilon &&
         std::abs(y - other.y) < epsilon &&
         std::abs(z - other.z) < epsilon);
@@ -67,12 +77,12 @@ bool Vec3::operator!=(const Vec3& other) const {
 }
 
 // Vector operations
-float Vec3::length() const { return sqrt(length_squared()); }
+float Vec3::length() const { return std::sqrt(length_squared()); }
 float Vec3::length_squared() const { return x * x + y * y + z * z; }
 
 Vec3 Vec3::normalize() const {
     float len_sq = length_squared();
-    if (len_sq > std::numeric_limits<float>::epsilon()) {
+    if (len_sq > 1e-6f) { // Sýfýra bölme ve near_zero kontrolü
         float inv_len = 1.0f / std::sqrt(len_sq);
         return Vec3(x * inv_len, y * inv_len, z * inv_len);
     }
@@ -90,6 +100,7 @@ Vec3 Vec3::abs() const {
 }
 
 Vec3 Vec3::orient(const Vec3& local) const {
+    // Bu, TBN (Tangent, Bitangent, Normal) matrisi oluþturur.
     Vec3 tangent = (std::abs(z) > 0.999f) ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(0.0f, 0.0f, 1.0f);
     Vec3 bitangent = cross(tangent).normalize();
     tangent = bitangent.cross(*this);
@@ -102,8 +113,8 @@ Vec3 Vec3::cwiseProduct(const Vec3& v) const { return *this * v; }
 float Vec3::max_component() const { return std::max(x, std::max(y, z)); }
 
 bool Vec3::near_zero() const {
-    const auto s = std::numeric_limits<float>::epsilon();
-    return (fabs(x) < s) && (fabs(y) < s) && (fabs(z) < s);
+    const auto s = 1e-6f; // Sabit float epsilon kullan
+    return (std::fabs(x) < s) && (std::fabs(y) < s) && (std::fabs(z) < s);
 }
 
 float Vec3::luminance() const {
@@ -124,10 +135,10 @@ Vec3 Vec3::reflect(const Vec3& v, const Vec3& n) {
 
 Vec3 Vec3::refract(const Vec3& uv, const Vec3& n, float etai_over_etat) {
     auto uv_normalized = uv.normalize();
-    double cos_theta = std::fmin(Vec3::dot(-uv_normalized, n), 1.0);
+    float cos_theta = std::fmin(Vec3::dot(-uv_normalized, n), 1.0f);
     Vec3 r_out_perp = etai_over_etat * (uv_normalized + cos_theta * n);
     float k = 1.0f - r_out_perp.length_squared();
-    if (k < 0) return Vec3::reflect(uv_normalized, n);
+    if (k < 0.0f) return Vec3::reflect(uv_normalized, n);
     Vec3 r_out_parallel = -std::sqrt(k) * n;
     return (r_out_perp + r_out_parallel).normalize();
 }
@@ -154,7 +165,7 @@ Vec3 Vec3::lerp(const Vec3& a, const Vec3& b, float t) {
 }
 
 Vec3 Vec3::lerp(const Vec3& a, const Vec3& b, const Vec3& t) {
-    return a * (Vec3(1.0) - t) + b * t;
+    return a * (Vec3(1.0f) - t) + b * t;
 }
 
 float Vec3::lerpf(float a, float b, float t) {
@@ -182,17 +193,21 @@ float Vec3::average(const Vec3& v) {
 }
 
 // Random generation functions
-Vec3 Vec3::random() { return Vec3(random_double(), random_double(), random_double()); }
-Vec3 Vec3::random(double min, double max) {
-    return Vec3(random_double(min, max), random_double(min, max), random_double(min, max));
+float Vec3::random_float(float min, float max) {
+    return min + (max - min) * dist(rng);
+}
+
+Vec3 Vec3::random() { return Vec3(random_float(), random_float(), random_float()); }
+Vec3 Vec3::random(float min, float max) {
+    return Vec3(random_float(min, max), random_float(min, max), random_float(min, max));
 }
 
 Vec3 Vec3::random_in_unit_sphere() {
-    double u = random_double(-1, 1);
-    double theta = random_double(0, 2 * M_PI);
-    double r = pow(random_double(), 1.0 / 3.0);
-    double sq = sqrt(1 - u * u);
-    return Vec3(r * sq * cos(theta), r * sq * sin(theta), r * u);
+    float u = random_float(-1.0f, 1.0f);
+    float theta = random_float(0.0f, 2.0f * M_PI);
+    float r = std::pow(random_float(), 1.0f / 3.0f);
+    float sq = std::sqrt(1.0f - u * u);
+    return Vec3(r * sq * std::cos(theta), r * sq * std::sin(theta), r * u);
 }
 
 Vec3 Vec3::random_in_hemisphere(const Vec3& normal) {
@@ -201,31 +216,31 @@ Vec3 Vec3::random_in_hemisphere(const Vec3& normal) {
 }
 
 Vec3 Vec3::random_unit_vector() {
-    auto a = random_double(0, 2 * M_PI);
-    auto z = random_double(-1, 1);
-    auto r = sqrt(1 - z * z);
-    return Vec3(r * cos(a), r * sin(a), z);
+    auto a = random_float(0.0f, 2.0f * M_PI);
+    auto z = random_float(-1.0f, 1.0f);
+    auto r = std::sqrt(1.0f - z * z);
+    return Vec3(r * std::cos(a), r * std::sin(a), z);
 }
 
 Vec3 Vec3::random_in_unit_disk() {
-    double r = sqrt(random_double());
-    double theta = 2 * M_PI * random_double();
-    return Vec3(r * cos(theta), r * sin(theta), 0);
+    float r = std::sqrt(random_float());
+    float theta = 2.0f * M_PI * random_float();
+    return Vec3(r * std::cos(theta), r * std::sin(theta), 0.0f);
 }
 
 Vec3 Vec3::random_cosine_direction(const Vec3& normal) {
-    double r1 = random_double();
-    double r2 = random_double();
-    double phi = 2 * M_PI * r1;
-    double cos_theta = sqrt(1.0 - r2);
-    double sin_theta = sqrt(r2);
-    double x = cos(phi) * sin_theta;
-    double y = sin(phi) * sin_theta;
-    double z = cos_theta;
+    float r1 = random_float();
+    float r2 = random_float();
+    float phi = 2.0f * M_PI * r1;
+    float cos_theta = std::sqrt(1.0f - r2);
+    float sin_theta = std::sqrt(r2);
+    float x = std::cos(phi) * sin_theta;
+    float y = std::sin(phi) * sin_theta;
+    float z = cos_theta;
 
     Vec3 N = normal.normalize();
-    Vec3 tangent = (fabs(N.x) > 0.9) ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
-    tangent = (tangent - N * dot(N,tangent)).normalize();
+    Vec3 tangent = (std::abs(N.x) > 0.9f) ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
+    tangent = (tangent - N * dot(N, tangent)).normalize();
     Vec3 bitangent = N.cross(tangent);
     return (tangent * x + bitangent * y + N * z).normalize();
 }
@@ -244,27 +259,16 @@ Vec3 Vec3::sample_hemisphere_cosine_weighted(const Vec3& normal, float u, float 
 }
 
 Vec3 Vec3::sphericalDirection(float sinTheta, float cosTheta, float phi) {
-    return Vec3(sinTheta * cos(phi), sinTheta * sin(phi), cosTheta);
+    return Vec3(sinTheta * std::cos(phi), sinTheta * std::sin(phi), cosTheta);
 }
 
-Vec3 Vec3::from_spherical(double theta, double phi, double r) {
-    return Vec3(r * sin(theta) * cos(phi),
-        r * sin(theta) * sin(phi),
-        r * cos(theta));
+Vec3 Vec3::from_spherical(float theta, float phi, float r) {
+    return Vec3(r * std::sin(theta) * std::cos(phi),
+        r * std::sin(theta) * std::sin(phi),
+        r * std::cos(theta));
 }
 
-// Random number utilities
-double Vec3::random_double(double min, double max) {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_real_distribution<double> dis(0.0, 1.0);
-    return min + (max - min) * dis(gen);
-}
-
-// Conversion operators
-Vec3::operator std::array<double, 3>() const {
-    return { x, y, z };
-}
+// Conversion operators (Kaldýrýldý)
 
 // Friend functions
 std::ostream& operator<<(std::ostream& os, const Vec3& v) {
@@ -272,7 +276,7 @@ std::ostream& operator<<(std::ostream& os, const Vec3& v) {
     return os;
 }
 
-Vec3 operator*(double t, const Vec3& v) {
+Vec3 operator*(float t, const Vec3& v) {
     return Vec3(v.x * t, v.y * t, v.z * t);
 }
 
@@ -282,6 +286,6 @@ Vec3 operator/(float scalar, const Vec3& v) {
 
 // Non-member functions
 Vec3 unit_vector(const Vec3& v) {
-    double len = v.length();
-    return (len > 0.0) ? v / len : Vec3(0, 0, 0);
+    float len = v.length();
+    return (len > 1e-6f) ? v / len : Vec3(0, 0, 0);
 }
