@@ -1,0 +1,425 @@
+.NET Framework için MSBuild sürüm 17.14.23+b0019275e
+Oluşturma başlatıldı: 10.12.2025 15:09:43.
+
+1 düğümünde "e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj" projesi (varsayılan hedefler).
+PrepareForBuild:
+  Yapılandırılmış çıkış etkinleştirildi. Derleyici tanılamasının biçimlendirmesi hata hiyerarşisini yansıtır. Daha fazla ayrıntı için bkz. https://aka.ms/cpp/structured-output.
+InitializeBuildStatus:
+  "raytraci.5bac7720\x64\Release\raytraci.5bac7720.tlog\unsuccessfulbuild" öğesine erişiliyor.
+ClCompile:
+  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\CL.exe /c /I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include" /Zi /nologo /W3 /WX- /diagnostics:column /sdl /MP /O2 /Oi /Ot /GT /GL /D NDEBUG /D _CONSOLE /D _CRT_SECURE_NO_WARNINGS /D _UNICODE /D UNICODE /Gm- /MD /GS /Gy- /Qpar- /arch:AVX2 /fp:precise /Zc:wchar_t /Zc:forScope- /Zc:inline /std:c++20 /Fo"raytraci.5bac7720\x64\Release\\" /Fd"raytraci.5bac7720\x64\Release\vc143.pdb" /external:W3 /Gd /TP /FC /errorReport:queue source\cpp_file\scene_ui_temp.cpp
+cl : komut satırı  warning D9035: 'Zc:forScope-' seçeneği kullanım dışı ve ileride yayınlanacak bir sürümden çıkarılacak [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  scene_ui_temp.cpp
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\chrono(2359,9): warning C4530: C++ özel durum işleyicisi kullanıldı, ancak geriye doğru izleme semantiği etkinleştirilmedi. /EHsc belirtin [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Vec3.h(14,9): warning C4005: 'M_PI': makro yeniden tanımlama [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include\SDL_stdinc.h(620,9):
+      önceki 'M_PI' tanımına bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244: '=': 'float' - '_Ty' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:         with [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:         [ [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:             _Ty=uint8_t [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:         ] [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244: '=': 'float' - '_Ty' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:         with [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:         [ [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:             _Ty=uint8_t [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:         ] [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(40,46): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(40,41): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(46,47): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(46,41): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(71,25): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(79,52): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(79,46): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AreaLight.h(50,25): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(22,48): warning C4244: 'bağımsız değişken': 'int' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(22,24): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(49,51): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(49,44): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(49,37): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(82,15): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(83,15): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(84,15): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,59): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,65): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,71): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,77): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(17,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(18,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(19,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(20,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(112,24): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(113,23): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(114,24): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(63,29): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(64,45): warning C4244: '+=': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(66,26): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(112,54): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(129,29): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(130,45): warning C4244: '+=': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(132,26): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(232,26): warning C4305: 'başlatılıyor': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(233,42): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(233,33): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(233,24): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(493,56): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(493,50): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AnimatedObject.h(48,44): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AnimatedObject.h(77,42): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AnimatedObject.h(221,30): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\scene_data.h(12,40): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\scene_data.h(12,36): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\scene_data.h(12,32): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(19,8): error C2011: 'ThemeColors': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(19,8):
+      'ThemeColors' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(33,8): error C2011: 'ThemeStyle': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(33,8):
+      'ThemeStyle' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(45,8): error C2011: 'Theme': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(45,8):
+      'Theme' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(51,7): error C2011: 'ThemeManager': 'class' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(51,7):
+      'ThemeManager' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(95,43): error C2572: 'UIWidgets::BeginSection': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(94,10):
+      'UIWidgets::BeginSection' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(96,28): error C2572: 'UIWidgets::BeginSection': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(94,10):
+      'UIWidgets::BeginSection' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(100,59): error C2572: 'UIWidgets::GetSectionFlags': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(100,24):
+      'UIWidgets::GetSectionFlags' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(105,28): error C2572: 'UIWidgets::BeginColoredSection': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(103,10):
+      'UIWidgets::BeginColoredSection' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(111,43): error C2572: 'UIWidgets::StateButton': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(110,10):
+      'UIWidgets::StateButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(112,45): error C2572: 'UIWidgets::StateButton': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(110,10):
+      'UIWidgets::StateButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(113,36): error C2572: 'UIWidgets::StateButton': varsayılan parametrenin yeniden tanımlanması: parametre 3 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(110,10):
+      'UIWidgets::StateButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(117,36): error C2572: 'UIWidgets::PrimaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(116,10):
+      'UIWidgets::PrimaryButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(118,24): error C2572: 'UIWidgets::PrimaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(116,10):
+      'UIWidgets::PrimaryButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(122,36): error C2572: 'UIWidgets::SecondaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(121,10):
+      'UIWidgets::SecondaryButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(123,24): error C2572: 'UIWidgets::SecondaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(121,10):
+      'UIWidgets::SecondaryButton' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(131,30): error C2572: 'UIWidgets::SliderWithHelp': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(128,10):
+      'UIWidgets::SliderWithHelp' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(142,30): error C2572: 'UIWidgets::DragFloatWithHelp': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(139,10):
+      'UIWidgets::DragFloatWithHelp' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(153,16): error C2011: 'UIWidgets::StatusType': 'enum' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(153,16):
+      'UIWidgets::StatusType' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(158,31): error C2572: 'UIWidgets::ProgressBarEx': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(157,10):
+      'UIWidgets::ProgressBarEx' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(159,40): error C2572: 'UIWidgets::ProgressBarEx': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(157,10):
+      'UIWidgets::ProgressBarEx' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(167,68): error C2572: 'UIWidgets::BeginLabelValuePair': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(167,10):
+      'UIWidgets::BeginLabelValuePair' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(176,8): error C2011: 'PanelState': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(176,8):
+      'PanelState' bildirimine bakın
+  
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(183,7): error C2011: 'PanelManager': 'class' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  ('source/cpp_file/scene_ui_temp.cpp' kaynak dosyası derleniyor)
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(183,7):
+      'PanelManager' bildirimine bakın
+  
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(114,43): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(154,44): error C2027: tanımsız 'ThemeManager' türü kullanıldı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(51,7):
+      'ThemeManager' bildirimine bakın
+  
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(154,44): error C3861: 'instance': tanımlayıcı bulunamadı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(159,26): error C3536: 'themeNames': başlatılmadan önce kullanılamaz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(158,20): error C2661: 'ImGui::Combo': hiçbir aşırı yüklenmiş işlev 2 bağımsız değişken almaz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+      e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(158,20):
+      '(const char [13], int *)' bağımsız değişken listesi eşlenmeye çalışılırken
+  
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(221,34): warning C4244: '=': 'int' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(222,35): warning C4244: '=': 'int' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(283,82): error C2027: tanımsız 'UIWidgets::StatusType' türü kullanıldı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+      E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern.h(153,16):
+      'UIWidgets::StatusType' bildirimine bakın
+  
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(283,82): error C2065: 'Warning': bildirimi yapılmamış tanımlayıcı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(683,15): error C2601: 'SceneUI::ClampWindowToDisplay': yerel işlev tanımları geçersiz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+      e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(413,5):
+      bu satır henüz eşlenmemiş '{' içeriyor
+  
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(722,15): error C2601: 'SceneUI::drawAnimationSettings': yerel işlev tanımları geçersiz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+      e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(413,5):
+      bu satır henüz eşlenmemiş '{' içeriyor
+  
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(742,9): error C3861: 'HelpMarker': tanımlayıcı bulunamadı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(747,9): error C3861: 'HelpMarker': tanımlayıcı bulunamadı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+"e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj" Projesini Oluşturma İşlemi Tamamlandı (varsayılan hedefler) -- BAŞARISIZ OLDU.
+
+Oluşturma BAŞARISIZ OLDU.
+
+"e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj" (varsayılan hedef) (1) ->
+(ClCompile hedefi) -> 
+  cl : komut satırı  warning D9035: 'Zc:forScope-' seçeneği kullanım dışı ve ileride yayınlanacak bir sürümden çıkarılacak [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\chrono(2359,9): warning C4530: C++ özel durum işleyicisi kullanıldı, ancak geriye doğru izleme semantiği etkinleştirilmedi. /EHsc belirtin [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Vec3.h(14,9): warning C4005: 'M_PI': makro yeniden tanımlama [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244: '=': 'float' - '_Ty' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:         with [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:         [ [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:             _Ty=uint8_t [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(557,50): warning C4244:         ] [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244: '=': 'float' - '_Ty' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:         with [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:         [ [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:             _Ty=uint8_t [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h(569,50): warning C4244:         ] [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(40,46): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(40,41): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(46,47): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(46,41): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(71,25): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(79,52): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h(79,46): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AreaLight.h(50,25): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(22,48): warning C4244: 'bağımsız değişken': 'int' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(22,24): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(49,51): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(49,44): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(49,37): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(82,15): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(83,15): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\perlin.h(84,15): warning C4244: 'başlatılıyor': 'float' - 'int' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,59): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,65): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,71): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(12,77): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(17,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(18,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(19,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(20,14): warning C4244: '/=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(112,24): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(113,23): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\quaternion.h(114,24): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(63,29): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(64,45): warning C4244: '+=': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(66,26): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(112,54): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(129,29): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(130,45): warning C4244: '+=': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(132,26): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(232,26): warning C4305: 'başlatılıyor': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(233,42): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(233,33): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(233,24): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(493,56): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h(493,50): warning C4244: 'bağımsız değişken': 'const double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AnimatedObject.h(48,44): warning C4244: 'bağımsız değişken': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AnimatedObject.h(77,42): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AnimatedObject.h(221,30): warning C4244: 'başlatılıyor': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\scene_data.h(12,40): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\scene_data.h(12,36): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\scene_data.h(12,32): warning C4305: 'bağımsız değişken': 'double' iken 'float' olarak kesildi [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(114,43): warning C4244: '=': 'double' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(221,34): warning C4244: '=': 'int' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(222,35): warning C4244: '=': 'int' - 'float' dönüşümü; veri kaybı olabilir [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+
+
+"e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj" (varsayılan hedef) (1) ->
+(ClCompile hedefi) -> 
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(19,8): error C2011: 'ThemeColors': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(33,8): error C2011: 'ThemeStyle': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(45,8): error C2011: 'Theme': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(51,7): error C2011: 'ThemeManager': 'class' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(95,43): error C2572: 'UIWidgets::BeginSection': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(96,28): error C2572: 'UIWidgets::BeginSection': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(100,59): error C2572: 'UIWidgets::GetSectionFlags': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(105,28): error C2572: 'UIWidgets::BeginColoredSection': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(111,43): error C2572: 'UIWidgets::StateButton': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(112,45): error C2572: 'UIWidgets::StateButton': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(113,36): error C2572: 'UIWidgets::StateButton': varsayılan parametrenin yeniden tanımlanması: parametre 3 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(117,36): error C2572: 'UIWidgets::PrimaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(118,24): error C2572: 'UIWidgets::PrimaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(122,36): error C2572: 'UIWidgets::SecondaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(123,24): error C2572: 'UIWidgets::SecondaryButton': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(131,30): error C2572: 'UIWidgets::SliderWithHelp': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(142,30): error C2572: 'UIWidgets::DragFloatWithHelp': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(153,16): error C2011: 'UIWidgets::StatusType': 'enum' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(158,31): error C2572: 'UIWidgets::ProgressBarEx': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(159,40): error C2572: 'UIWidgets::ProgressBarEx': varsayılan parametrenin yeniden tanımlanması: parametre 2 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(167,68): error C2572: 'UIWidgets::BeginLabelValuePair': varsayılan parametrenin yeniden tanımlanması: parametre 1 [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(176,8): error C2011: 'PanelState': 'struct' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ui_modern_temp.h(183,7): error C2011: 'PanelManager': 'class' türü yeniden tanımı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(154,44): error C2027: tanımsız 'ThemeManager' türü kullanıldı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(154,44): error C3861: 'instance': tanımlayıcı bulunamadı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(159,26): error C3536: 'themeNames': başlatılmadan önce kullanılamaz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(158,20): error C2661: 'ImGui::Combo': hiçbir aşırı yüklenmiş işlev 2 bağımsız değişken almaz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(283,82): error C2027: tanımsız 'UIWidgets::StatusType' türü kullanıldı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(283,82): error C2065: 'Warning': bildirimi yapılmamış tanımlayıcı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(683,15): error C2601: 'SceneUI::ClampWindowToDisplay': yerel işlev tanımları geçersiz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(722,15): error C2601: 'SceneUI::drawAnimationSettings': yerel işlev tanımları geçersiz [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(742,9): error C3861: 'HelpMarker': tanımlayıcı bulunamadı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+  e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\scene_ui_temp.cpp(747,9): error C3861: 'HelpMarker': tanımlayıcı bulunamadı [e:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raytrac_sdl2.vcxproj]
+
+    54 Uyarı
+    33 Hata
+
+Geçen Süre 00:00:02.28

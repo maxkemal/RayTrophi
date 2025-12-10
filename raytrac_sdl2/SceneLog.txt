@@ -1,0 +1,2 @@
+[INFO] Found RTX-capable device: NVIDIA GeForce RTX 3060 (SM 8.6)
+[INFO] OptiX is ready!

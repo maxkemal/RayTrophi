@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|ARM">
+      <Configuration>Debug</Configuration>
+      <Platform>ARM</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|ARM">
+      <Configuration>Release</Configuration>
+      <Platform>ARM</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <Keyword>Win32Proj</Keyword>
+    <ProjectGuid>{5bac7720-07df-4c9c-b8ac-aaf8fe410cd8}</ProjectGuid>
+    <RootNamespace>raytracsdl2</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>raytracing_render_code</ProjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <EnableFuzzer>false</EnableFuzzer>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <EnableFuzzer>false</EnableFuzzer>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.props" />
+  </ImportGroup>
+  <ImportGroup Label="Shared">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <IncludePath>E:\SDL2-2.30.4\include;C:\oidn-2.3.0.x64.windows\include;D:\assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;$(IncludePath)</IncludePath>
+    <LibraryPath>C:\oidn-2.3.0.x64.windows\lib;E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;D:\assimp\out\build\x64-Release\lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+    <IncludePath>E:\SDL2-2.30.4\include;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\imgui;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\lib;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\lib;$(LibraryPath)</LibraryPath>
+    <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+    <IncludePath>E:\SDL2-2.30.4\include;$(IncludePath)</IncludePath>
+    <LibraryPath>E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>Default</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ExceptionHandling>false</ExceptionHandling>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
+      <SupportJustMyCode>false</SupportJustMyCode>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>false</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>Default</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ExceptionHandling>false</ExceptionHandling>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <EnableParallelCodeGeneration>false</EnableParallelCodeGeneration>
+      <Optimization>MaxSpeed</Optimization>
+      <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;embree4.lib;tbb12.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="source\cpp_file\Main.h" />
+    <ClInclude Include="source\header\scene_data.h" />
+    <ClInclude Include="source\header\scene_ui.h" />
+
+    <ClInclude Include="source\header\stb_image_write.h" />
+    <ClInclude Include="source\header\ui_modern.h" />
+
+    <ClInclude Include="source\imgui\imconfig.h" />
+    <ClInclude Include="source\imgui\imgui.h" />
+    <ClInclude Include="source\imgui\imgui_impl_sdl2.h" />
+    <ClInclude Include="source\imgui\imgui_impl_sdlrenderer2.h" />
+    <ClInclude Include="source\imgui\imgui_internal.h" />
+    <None Include="source\cpp_file\scatter_volume_step.h" />
+    <ClInclude Include="source\header\AtmosphereProperties.h" />
+    <None Include="source\cpp_file\material_scatter.cuh" />
+    <None Include="source\cpp_file\vec3_utils.cuh" />
+    <None Include="source\cpp_file\random_utils.cuh" />
+    <None Include="source\cpp_file\ray_color.cuh" />
+    <None Include="source\cpp_file\trace_ray.cuh" />
+    <None Include="source\cpp_file\gpucamera.cuh" />
+    <ClInclude Include="source\header\AABB.h" />
+    <ClInclude Include="source\header\AnimatedObject.h" />
+    <ClInclude Include="source\header\AreaLight.h" />
+    <ClInclude Include="source\header\AssimpLoader.h" />
+    <ClInclude Include="source\header\AtmosphericEffects.h" />
+    <ClInclude Include="source\header\Box.h" />
+    <ClInclude Include="source\header\Camera.h" />
+    <ClInclude Include="source\header\Dielectric.h" />
+    <ClInclude Include="source\header\DiffuseLight.h" />
+    <ClInclude Include="source\header\DirectionalLight.h" />
+    <ClInclude Include="source\header\EmbreeBVH.h" />
+    <ClInclude Include="source\header\EmissiveMaterial.h" />
+    <ClInclude Include="source\header\globals.h" />
+    <ClInclude Include="source\header\Hittable.h" />
+    <ClInclude Include="source\header\HittableList.h" />
+    <ClInclude Include="source\header\hit_result.h" />
+    <ClInclude Include="source\header\json.hpp" />
+    <ClInclude Include="source\header\Light.h" />
+    <ClInclude Include="source\header\Material.h" />
+    <ClInclude Include="source\header\material_gpu.h" />
+    <ClInclude Include="source\header\Matrix4x4.h" />
+    <ClInclude Include="source\header\Mesh.h" />
+    <ClInclude Include="source\header\OptixWrapper.h" />
+    <ClInclude Include="source\header\ParallelBVHNode.h" />
+    <ClInclude Include="source\header\params.h" />
+    <ClInclude Include="source\header\payload.h" />
+    <ClInclude Include="source\header\perlin.h" />
+    <ClInclude Include="source\header\Plane.h" />
+    <ClInclude Include="source\header\PointLight.h" />
+    <ClInclude Include="source\header\PrincipledBSDF.h" />
+    <ClInclude Include="source\header\Quaternion.h" />
+    <ClInclude Include="source\header\Ray.h" />
+    <ClInclude Include="source\header\Renderer.h" />
+    <ClInclude Include="source\header\resource.h" />
+    <ClInclude Include="source\header\sbt_data.h" />
+    <ClInclude Include="source\header\sbt_record.h" />
+    <ClInclude Include="source\header\SmartUVProjection.h" />
+    <ClInclude Include="source\header\Sphere.h" />
+    <ClInclude Include="source\header\SpotLight.h" />
+    <ClInclude Include="source\header\Texture.h" />
+    <ClInclude Include="source\header\ThreadLocalRNG.h" />
+    <ClInclude Include="source\header\Triangle.h" />
+    <ClInclude Include="source\header\Vec2.h" />
+    <ClInclude Include="source\header\Vec3.h" />
+    <ClInclude Include="source\header\Vec3SIMD.h" />
+    <ClInclude Include="source\header\Volumetric.h" />
+    <ClInclude Include="source\header\CPUInfo.h" />
+    <ClInclude Include="source\header\ColorProcessingParams.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="raytracing_render_code.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\cpp_file\AABB.cpp" />
+    <ClCompile Include="source\cpp_file\AreaLight.cpp" />
+    <ClCompile Include="source\cpp_file\AssimpLoader.cpp" />
+    <ClCompile Include="source\cpp_file\AtmosphericEffects.cpp" />
+    <ClCompile Include="source\cpp_file\Box.cpp" />
+    <ClCompile Include="source\cpp_file\Camera.cpp" />
+    <ClCompile Include="source\cpp_file\Dielectric.cpp" />
+    <ClCompile Include="source\cpp_file\DirectionalLight.cpp" />
+    <ClCompile Include="source\cpp_file\EmbreeBVH.cpp" />
+    <ClCompile Include="source\cpp_file\EmissiveMaterial.cpp" />
+    <ClCompile Include="source\cpp_file\globals.cpp" />
+    <ClCompile Include="source\cpp_file\HittableList.cpp" />
+    <ClCompile Include="source\cpp_file\Light.cpp" />
+    <ClCompile Include="source\cpp_file\Main.cpp" />
+    <ClCompile Include="source\cpp_file\Material.cpp" />
+    <ClCompile Include="source\cpp_file\Matrix4x4.cpp" />
+    <ClCompile Include="source\cpp_file\Mesh.cpp" />
+    <ClCompile Include="source\cpp_file\OptixWrapper.cpp" />
+    <ClCompile Include="source\cpp_file\ParallelBVHNode.cpp" />
+    <ClCompile Include="source\cpp_file\PointLight.cpp" />
+    <ClCompile Include="source\cpp_file\PrincipledBSDF.cpp" />
+    <ClCompile Include="source\cpp_file\Renderer.cpp" />
+    <ClCompile Include="source\cpp_file\scene_ui.cpp" />
+
+    <ClCompile Include="source\cpp_file\SmartUVProjection.cpp" />
+    <ClCompile Include="source\cpp_file\Sphere.cpp" />
+    <ClCompile Include="source\cpp_file\SpotLight.cpp" />
+    <ClCompile Include="source\cpp_file\Texture.cpp" />
+    <ClCompile Include="source\cpp_file\ThreadLocalRNG.cpp" />
+    <ClCompile Include="source\cpp_file\Triangle.cpp" />
+    <ClCompile Include="source\cpp_file\ui_modern.cpp" />
+
+    <ClCompile Include="source\cpp_file\Vec2.cpp" />
+    <ClCompile Include="source\cpp_file\Vec3.cpp" />
+    <ClCompile Include="source\cpp_file\Vec3SIMD.cpp" />
+    <ClCompile Include="source\cpp_file\Volumetric.cpp" />
+    <ClCompile Include="source\imgui\imgui.cpp" />
+    <ClCompile Include="source\imgui\imgui_draw.cpp" />
+    <ClCompile Include="source\imgui\imgui_impl_sdl2.cpp" />
+    <ClCompile Include="source\imgui\imgui_impl_sdlrenderer2.cpp" />
+    <ClCompile Include="source\imgui\imgui_tables.cpp" />
+    <ClCompile Include="source\imgui\imgui_widgets.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="source\cpp_file\raygen.cu">
+      <FileType>Document</FileType>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">--use_fast_math --expt-relaxed-constexpr --expt-extended-lambda
+ %(AdditionalOptions)</AdditionalOptions>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="source\res\RayTrophi_icon.ico" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.targets" />
+  </ImportGroup>
+</Project>
