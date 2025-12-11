@@ -1144,7 +1144,15 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
     for (const auto& light : lights) {
         LightGPU l = {};
         const Vec3& color = light->color;
-        float intensity = light->intensity*10;
+        float intensity = light->intensity * 10;
+
+        // Initialize default values for new fields
+        l.inner_cone_cos = 1.0f;
+        l.outer_cone_cos = 0.0f;
+        l.area_width = 0.0f;
+        l.area_height = 0.0f;
+        l.area_u = make_float3(1, 0, 0);
+        l.area_v = make_float3(0, 1, 0);
 
         if (auto pointLight = std::dynamic_pointer_cast<PointLight>(light)) {
             const Vec3& pos = pointLight->position;
@@ -1159,7 +1167,7 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
             l.direction = make_float3(dir.x, dir.y, dir.z);
             l.color = make_float3(color.x, color.y, color.z);
             l.intensity = intensity;
-            l.radius = dirLight->getDiskRadius(); // disk ışık yarıçapı
+            l.radius = dirLight->getDiskRadius();
             l.type = 1;
         }
         else if (auto areaLight = std::dynamic_pointer_cast<AreaLight>(light)) {
@@ -1169,8 +1177,16 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
             l.direction = make_float3(dir.x, dir.y, dir.z);
             l.color = make_float3(color.x, color.y, color.z);
             l.intensity = intensity;
-            l.radius = 0.0f; // gerekirse hesaplanır
+            l.radius = 0.0f;
             l.type = 2;
+            
+            // AreaLight ek parametreleri
+            l.area_width = areaLight->getWidth();
+            l.area_height = areaLight->getHeight();
+            Vec3 u = areaLight->getU();
+            Vec3 v = areaLight->getV();
+            l.area_u = make_float3(u.x, u.y, u.z);
+            l.area_v = make_float3(v.x, v.y, v.z);
         }
         else if (auto spotLight = std::dynamic_pointer_cast<SpotLight>(light)) {
             const Vec3& pos = spotLight->position;
@@ -1181,6 +1197,12 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
             l.intensity = intensity;
             l.radius = 0.0f;
             l.type = 3;
+            
+            // SpotLight cone angle parametreleri
+            float angleDeg = spotLight->getAngleDegrees();
+            float angleRad = angleDeg * (M_PI / 180.0f);
+            l.inner_cone_cos = cosf(angleRad * 0.8f);  // İç cone (daha dar)
+            l.outer_cone_cos = cosf(angleRad);          // Dış cone (tam açı)
         }
 
         gpuLights.push_back(l);

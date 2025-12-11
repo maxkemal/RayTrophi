@@ -21,6 +21,16 @@ struct LightGPU {
     float intensity;        // toplam güç (lümen)
     float radius;           // yumuşak gölge için
     int type;               // 0 = point, 1 = directional, 2 = area, 3 = spot
+    
+    // SpotLight ek parametreleri
+    float inner_cone_cos;   // iç cone açısının kosinüsü
+    float outer_cone_cos;   // dış cone açısının kosinüsü
+    
+    // AreaLight ek parametreleri
+    float area_width;       // AreaLight genişliği
+    float area_height;      // AreaLight yüksekliği
+    float3 area_u;          // AreaLight U vektörü
+    float3 area_v;          // AreaLight V vektörü
 };
 
 struct RayGenParams {

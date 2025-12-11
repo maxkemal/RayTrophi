@@ -59,26 +59,33 @@ __device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
         }
     }
 
-    // --- Point light seçim ---
-    float weights[128];  // max light sayısı 32 varsayımı
+    // --- Tüm ışık türleri için akıllı seçim ---
+    float weights[128];
     float total_weight = 0.0f;
 
     for (int i = 0; i < light_count; i++) {
         const LightGPU& light = optixLaunchParams.lights[i];
-        if (light.type == 0) {
-            float dist = length(light.position - hit_position);
-            dist = fmaxf(dist, 1.0f); // minimum 1.0f uzaklık
-
-            // Enerji katkısını hesaba kat (daha yakın, daha enerjik olanlara öncelik)
-            float falloff = 1.0f / (dist * dist); // inverse square
-            float intensity = luminance(light.color * light.intensity);
+        float dist = length(light.position - hit_position);
+        dist = fmaxf(dist, 1.0f);
+        
+        float falloff = 1.0f / (dist * dist);
+        float intensity = luminance(light.color * light.intensity);
+        
+        if (light.type == 0) { // Point Light
             weights[i] = falloff * intensity;
-
-            total_weight += weights[i];
+        }
+        else if (light.type == 2) { // Area Light
+            float area = light.area_width * light.area_height;
+            weights[i] = falloff * intensity * fminf(area, 10.0f);
+        }
+        else if (light.type == 3) { // Spot Light
+            weights[i] = falloff * intensity * 0.8f;
         }
         else {
             weights[i] = 0.0f;
         }
+        
+        total_weight += weights[i];
     }
 
     // --- Eğer total_weight çok düşükse fallback ---
@@ -112,6 +119,25 @@ __device__ float3 sample_directional_light(const LightGPU& light, const float3& 
     return wi_out;
 }
 
+// AreaLight için rastgele nokta örnekleme
+__device__ float3 sample_area_light(const LightGPU& light, curandState* rng) {
+    float rand_u = random_float(rng) - 0.5f;
+    float rand_v = random_float(rng) - 0.5f;
+    return light.position 
+        + light.area_u * rand_u * light.area_width 
+        + light.area_v * rand_v * light.area_height;
+}
+
+// SpotLight için cone falloff hesabı
+__device__ float spot_light_falloff(const LightGPU& light, const float3& wi) {
+    float cos_theta = dot(-wi, normalize(light.direction));
+    if (cos_theta < light.outer_cone_cos) return 0.0f;
+    if (cos_theta > light.inner_cone_cos) return 1.0f;
+    // Smooth falloff between inner and outer cone
+    float t = (cos_theta - light.outer_cone_cos) / (light.inner_cone_cos - light.outer_cone_cos + 1e-6f);
+    return t * t;  // Quadratic falloff
+}
+
 __device__ float3 calculate_light_contribution(
     const LightGPU& light,
     const GpuMaterial& material,
@@ -137,6 +163,29 @@ __device__ float3 calculate_light_contribution(
         wi = sample_directional_light(light, payload.position, rng, wi);
         attenuation = 1.0f;
         distance = 1e8f;
+    }
+    else if (light.type == 2) { // Area Light
+        float3 light_sample = sample_area_light(light, rng);
+        float3 L = light_sample - payload.position;
+        distance = length(L);
+        if (distance < 1e-3f) return make_float3(0.0f, 0.0f, 0.0f);
+        wi = normalize(L);
+        
+        // Cosine falloff based on light normal
+        float3 light_normal = normalize(cross(light.area_u, light.area_v));
+        float cos_light = fmaxf(dot(-wi, light_normal), 0.0f);
+        attenuation = cos_light / (distance * distance);
+    }
+    else if (light.type == 3) { // Spot Light
+        float3 L = light.position - payload.position;
+        distance = length(L);
+        if (distance < 1e-3f) return make_float3(0.0f, 0.0f, 0.0f);
+        wi = normalize(L);
+        
+        // Spot cone falloff
+        float falloff = spot_light_falloff(light, wi);
+        if (falloff < 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
+        attenuation = falloff / (distance * distance);
     }
     else {
         return make_float3(0.0f, 0.0f, 0.0f);
@@ -165,6 +214,14 @@ __device__ float3 calculate_light_contribution(
         float cos_epsilon = cos(apparent_angle);
         float solid_angle = 2.0f * M_PIf * (1.0f - cos_epsilon);
         pdf_light = 1.0f / solid_angle;
+    }
+    else if (light.type == 2) { // Area Light
+        float area = light.area_width * light.area_height;
+        pdf_light = 1.0f / fmaxf(area, 1e-4f);
+    }
+    else if (light.type == 3) { // Spot Light
+        float solid_angle = 2.0f * M_PIf * (1.0f - light.outer_cone_cos);
+        pdf_light = 1.0f / fmaxf(solid_angle, 1e-4f);
     }
 
     float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
@@ -211,6 +268,27 @@ __device__ float3 calculate_direct_lighting(
         attenuation = 1.0f;
         distance = 1e8f;
     }
+    else if (light.type == 2) { // Area Light
+        float3 light_sample = sample_area_light(light, rng);
+        float3 L = light_sample - payload.position;
+        distance = length(L);
+        if (distance < 1e-3f) return result;
+        wi = normalize(L);
+        
+        float3 light_normal = normalize(cross(light.area_u, light.area_v));
+        float cos_light = fmaxf(dot(-wi, light_normal), 0.0f);
+        attenuation = cos_light / (distance * distance);
+    }
+    else if (light.type == 3) { // Spot Light
+        float3 L = light.position - payload.position;
+        distance = length(L);
+        if (distance < 1e-3f) return result;
+        wi = normalize(L);
+        
+        float falloff = spot_light_falloff(light, wi);
+        if (falloff < 1e-4f) return result;
+        attenuation = falloff / (distance * distance);
+    }
     else {
         return result;
     }
@@ -241,7 +319,15 @@ __device__ float3 calculate_direct_lighting(
         float apparent_angle = atan2(light.radius, 1000.0f);
         float cos_epsilon = cos(apparent_angle);
         float solid_angle = 2.0f * M_PIf * (1.0f - cos_epsilon);
-        pdf_light = (1.0f / solid_angle)* pdf_light_select;
+        pdf_light = (1.0f / solid_angle) * pdf_light_select;
+    }
+    else if (light.type == 2) { // Area Light
+        float area = light.area_width * light.area_height;
+        pdf_light = (1.0f / fmaxf(area, 1e-4f)) * pdf_light_select;
+    }
+    else if (light.type == 3) { // Spot Light
+        float solid_angle = 2.0f * M_PIf * (1.0f - light.outer_cone_cos);
+        pdf_light = (1.0f / fmaxf(solid_angle, 1e-4f)) * pdf_light_select;
     }
 
     float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
