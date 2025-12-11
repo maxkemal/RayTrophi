@@ -23,6 +23,7 @@
 #include <globals.h>
 #include "EmbreeBVH.h"
 #include "sbt_data.h"
+#include "MaterialManager.h"
 #include <set>
 struct MeshInstance {
     int meshIndex; // aiMesh ID
@@ -480,8 +481,9 @@ public:
         for (const auto& tri : triangles) {
             uint3 tri_indices;
 
-            Vec3 verts[3] = { tri->transformed_v0, tri->transformed_v1, tri->transformed_v2 };
-            Vec3 norms[3] = { tri->transformed_n0, tri->transformed_n1, tri->transformed_n2 };
+            // Use accessor methods for vertex positions and normals
+            Vec3 verts[3] = { tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2) };
+            Vec3 norms[3] = { tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2) };
             Vec2 uvs[3] = { tri->t0, tri->t1, tri->t2 };
 
             for (int i = 0; i < 3; ++i) {
@@ -501,9 +503,13 @@ public:
 
             data.indices.push_back(tri_indices);
 
-            // Benzersiz materyal + texture anahtarı
+            // Get material using the new accessor (falls back to mat_ptr for compatibility)
+            auto material = tri->getMaterial();
+            if (!material) continue;
+
+            // Unique material + texture key
             GpuMaterialWithTextures key;
-            key.material = *tri->mat_ptr->gpuMaterial;
+            key.material = *material->gpuMaterial;
             key.albedoTexID = static_cast<size_t>(tri->textureBundle.albedo_tex);
             key.normalTexID = static_cast<size_t>(tri->textureBundle.normal_tex);
             key.roughnessTexID = static_cast<size_t>(tri->textureBundle.roughness_tex);
@@ -519,11 +525,8 @@ public:
             else {
                 gpuIndex = static_cast<int>(gpuMaterials.size());
                 gpuMaterials.push_back(key.material);
-                data.textures.push_back(tri->textureBundle); // textures paralel sırada tutulur
+                data.textures.push_back(tri->textureBundle);
                 materialMap[key] = gpuIndex;
-
-               /* std::cout << "[GpuMaterial] Yeni materyal eklendi: "
-                    << tri->mat_ptr->materialName << " -> Index " << gpuIndex << "\n";*/
             }
 
             data.material_indices.push_back(gpuIndex);
@@ -883,14 +886,26 @@ private:
         normalTransform.Inverse();
         normalTransform.Transpose();
 
+        // Get or create material ID - saves 70+ bytes per triangle!
+        uint16_t materialID = MaterialManager::INVALID_MATERIAL_ID;
+        if (material) {
+            std::string matName = material->materialName.empty() 
+                ? "Material_" + nodeName + "_" + std::to_string(mesh->mMaterialIndex)
+                : material->materialName;
+            materialID = MaterialManager::getInstance().getOrCreateMaterialID(matName, material);
+        }
+
+        // Create shared transform for all triangles in this mesh - saves 248 bytes per triangle!
+        auto sharedTransform = std::make_shared<Transform>();
+        sharedTransform->setBase(convertMatrix(transform));
+
         for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
             const aiFace& face = mesh->mFaces[i];
-            if (face.mNumIndices != 3) continue; // Sadece üçgen yüzleri işleyin
+            if (face.mNumIndices != 3) continue;
 
             std::vector<Vec3> vertices;
             std::vector<Vec3> normals;
             std::vector<Vec2> texCoords;
-          
 
             for (unsigned int j = 0; j < 3; j++) {
                 unsigned int index = face.mIndices[j];
@@ -916,21 +931,26 @@ private:
                 else {
                     texCoords.emplace_back(0.0f, 0.0f);
                 }
-
-              
             }
 
+            // Use optimized constructor with materialID
             auto triangle = std::make_shared<Triangle>(
                 vertices[0], vertices[1], vertices[2],
                 normals[0], normals[1], normals[2],
                 texCoords[0], texCoords[1], texCoords[2],
-              
-                material,
-                mesh->mMaterialIndex
+                materialID
             );
 
+            // Set shared transform (all triangles in this mesh share the same transform)
+            triangle->setTransformHandle(sharedTransform);
+
+            // Legacy compatibility (kept for backward compat, will be removed later)
             triangle->mat_ptr = material;
-            triangle->gpuMaterialPtr = material->gpuMaterial;
+            if (material) {
+                triangle->gpuMaterialPtr = material->gpuMaterial;
+                triangle->materialName = material->materialName;
+            }
+
             triangle->setNodeName(nodeName);
             triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
             triangle->setFaceIndex(static_cast<int>(triangles.size()));

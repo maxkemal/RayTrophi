@@ -30,6 +30,19 @@ set(CUDA_SOURCE "source/cpp_file/raygen.cu")
 set(PTX_OUTPUT "${CMAKE_BINARY_DIR}/raygen.ptx")
 
 # Custom command to generate PTX
+# NOTE: PTX depends on these headers too - if they change, PTX must be rebuilt
+set(PTX_HEADER_DEPS
+    "source/header/material_gpu.h"
+    "source/header/params.h"
+    "source/header/payload.h"
+    "source/header/sbt_data.h"
+    "source/cpp_file/material_scatter.cuh"
+    "source/cpp_file/vec3_utils.cuh"
+    "source/cpp_file/random_utils.cuh"
+    "source/cpp_file/ray_color.cuh"
+    "source/cpp_file/trace_ray.cuh"
+)
+
 add_custom_command(
     OUTPUT ${PTX_OUTPUT}
     COMMAND ${CMAKE_CUDA_COMPILER}
@@ -37,11 +50,12 @@ add_custom_command(
     -o "${PTX_OUTPUT}"
     -I"${OPTIX_ROOT}/include"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/header"
+    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/cpp_file"
     --use_fast_math
     --maxrregcount=64
     -gencode=arch=compute_86,code=compute_86
     -allow-unsupported-compiler
-    DEPENDS ${CUDA_SOURCE}
+    DEPENDS ${CUDA_SOURCE} ${PTX_HEADER_DEPS}
     COMMENT "Compiling CUDA to PTX: ${CUDA_SOURCE}"
 )
 

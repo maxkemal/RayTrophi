@@ -37,6 +37,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
             tri->v0, tri->v1, tri->v2,
             tri->n0, tri->n1, tri->n2,
             tri->t0, tri->t1, tri->t2,
+            tri->getMaterialID(),
             tri->mat_ptr
             });
 
@@ -270,7 +271,8 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec) co
         rec.t = rayhit.ray.tfar;
         rec.point = ray.at(rec.t);
         rec.set_face_normal(ray, rec.normal);
-        rec.material = tri.material;
+        rec.material = tri.getMaterialShared();
+        rec.materialID = tri.materialID;
 
         return true;
     }
@@ -309,17 +311,35 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
         data.uvs.push_back(make_float2(tri.t2.x, tri.t2.y));
 
         // Material
-        GpuMaterial gpuMat;
+        GpuMaterial gpuMat = {};  // Zero-initialize all fields
         if (tri.material) {
             Vec3 albedoColor = tri.material->getPropertyValue(tri.material->albedoProperty, Vec2(0.5f, 0.5f));
             gpuMat.albedo = make_float3(albedoColor.x, albedoColor.y, albedoColor.z);
+            gpuMat.opacity = tri.material->get_opacity(Vec2(0.5f, 0.5f));
             gpuMat.roughness = tri.material->getPropertyValue(tri.material->roughnessProperty, Vec2(0.5f, 0.5f)).y;
             gpuMat.metallic = tri.material->getPropertyValue(tri.material->metallicProperty, Vec2(0.5f, 0.5f)).z;
+            gpuMat.clearcoat = 0.0f;
             gpuMat.transmission = tri.material->getPropertyValue(tri.material->transmissionProperty, Vec2(0.5f, 0.5f)).x;
+            Vec3 emissionColor = tri.material->getEmission(Vec2(0.5f, 0.5f), Vec3(0,0,0));
+            gpuMat.emission = make_float3(emissionColor.x, emissionColor.y, emissionColor.z);
             gpuMat.ior = tri.material->getIOR();
+            gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
+            gpuMat.subsurface = 0.0f;
+            gpuMat.artistic_albedo_response = 1.0f;
         }
         else {
-            gpuMat = { make_float3(1, 0, 1), 0.5f, 0.0f, 0.0f, 1.5f }; // fallback pembe
+            // Fallback pink material - properly initialize all fields
+            gpuMat.albedo = make_float3(1.0f, 0.0f, 1.0f);
+            gpuMat.opacity = 1.0f;
+            gpuMat.roughness = 0.5f;
+            gpuMat.metallic = 0.0f;
+            gpuMat.clearcoat = 0.0f;
+            gpuMat.transmission = 0.0f;
+            gpuMat.emission = make_float3(0.0f, 0.0f, 0.0f);
+            gpuMat.ior = 1.5f;
+            gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
+            gpuMat.subsurface = 0.0f;
+            gpuMat.artistic_albedo_response = 1.0f;
         }
 
         // Benzersiz materyal kontrolu (basit ekle, hash'e gerek yok burada)

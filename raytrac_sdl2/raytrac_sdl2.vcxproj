@@ -303,6 +303,8 @@
     <ClInclude Include="source\header\Volumetric.h" />
     <ClInclude Include="source\header\CPUInfo.h" />
     <ClInclude Include="source\header\ColorProcessingParams.h" />
+    <ClInclude Include="source\header\MaterialManager.h" />
+    <ClInclude Include="source\header\Transform.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -344,6 +346,8 @@
     <ClCompile Include="source\cpp_file\Vec3.cpp" />
     <ClCompile Include="source\cpp_file\Vec3SIMD.cpp" />
     <ClCompile Include="source\cpp_file\Volumetric.cpp" />
+    <ClCompile Include="source\cpp_file\MaterialManager.cpp" />
+    <ClCompile Include="source\cpp_file\DiffuseLight.cpp" />
     <ClCompile Include="source\imgui\imgui.cpp" />
     <ClCompile Include="source\imgui\imgui_draw.cpp" />
     <ClCompile Include="source\imgui\imgui_impl_sdl2.cpp" />
