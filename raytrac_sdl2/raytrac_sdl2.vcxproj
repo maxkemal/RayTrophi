@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -260,17 +260,14 @@
     <ClInclude Include="source\header\AreaLight.h" />
     <ClInclude Include="source\header\AssimpLoader.h" />
     <ClInclude Include="source\header\AtmosphericEffects.h" />
-    <ClInclude Include="source\header\Box.h" />
     <ClInclude Include="source\header\Camera.h" />
     <ClInclude Include="source\header\Dielectric.h" />
     <ClInclude Include="source\header\DiffuseLight.h" />
     <ClInclude Include="source\header\DirectionalLight.h" />
     <ClInclude Include="source\header\EmbreeBVH.h" />
-    <ClInclude Include="source\header\EmissiveMaterial.h" />
     <ClInclude Include="source\header\globals.h" />
     <ClInclude Include="source\header\Hittable.h" />
     <ClInclude Include="source\header\HittableList.h" />
-    <ClInclude Include="source\header\hit_result.h" />
     <ClInclude Include="source\header\json.hpp" />
     <ClInclude Include="source\header\Light.h" />
     <ClInclude Include="source\header\Material.h" />
@@ -282,7 +279,6 @@
     <ClInclude Include="source\header\params.h" />
     <ClInclude Include="source\header\payload.h" />
     <ClInclude Include="source\header\perlin.h" />
-    <ClInclude Include="source\header\Plane.h" />
     <ClInclude Include="source\header\PointLight.h" />
     <ClInclude Include="source\header\PrincipledBSDF.h" />
     <ClInclude Include="source\header\Quaternion.h" />
@@ -292,7 +288,6 @@
     <ClInclude Include="source\header\sbt_data.h" />
     <ClInclude Include="source\header\sbt_record.h" />
     <ClInclude Include="source\header\SmartUVProjection.h" />
-    <ClInclude Include="source\header\Sphere.h" />
     <ClInclude Include="source\header\SpotLight.h" />
     <ClInclude Include="source\header\Texture.h" />
     <ClInclude Include="source\header\ThreadLocalRNG.h" />
@@ -314,12 +309,10 @@
     <ClCompile Include="source\cpp_file\AreaLight.cpp" />
     <ClCompile Include="source\cpp_file\AssimpLoader.cpp" />
     <ClCompile Include="source\cpp_file\AtmosphericEffects.cpp" />
-    <ClCompile Include="source\cpp_file\Box.cpp" />
     <ClCompile Include="source\cpp_file\Camera.cpp" />
     <ClCompile Include="source\cpp_file\Dielectric.cpp" />
     <ClCompile Include="source\cpp_file\DirectionalLight.cpp" />
     <ClCompile Include="source\cpp_file\EmbreeBVH.cpp" />
-    <ClCompile Include="source\cpp_file\EmissiveMaterial.cpp" />
     <ClCompile Include="source\cpp_file\globals.cpp" />
     <ClCompile Include="source\cpp_file\HittableList.cpp" />
     <ClCompile Include="source\cpp_file\Light.cpp" />
@@ -335,7 +328,6 @@
     <ClCompile Include="source\cpp_file\scene_ui.cpp" />
 
     <ClCompile Include="source\cpp_file\SmartUVProjection.cpp" />
-    <ClCompile Include="source\cpp_file\Sphere.cpp" />
     <ClCompile Include="source\cpp_file\SpotLight.cpp" />
     <ClCompile Include="source\cpp_file\Texture.cpp" />
     <ClCompile Include="source\cpp_file\ThreadLocalRNG.cpp" />
