@@ -1186,8 +1186,8 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
 
         // TEK YER: ColorProcessor her şeyi yapsın → sRGB 0-1 döner
         Vec3 ldr = color_processor.processColor(final_color, i, j);
-        // CPU'da linear → ekstra gamma lazım
-        float cpu_gamma = 1.0f / 2.2f;
+        // GPU ile uyumlu gamma (eski: 2.2f)
+        float cpu_gamma = 1.0f / 1.2f;
         uint8_t r = uint8_t(powf(ldr.x, cpu_gamma) * 255.0f + 0.5f);
         uint8_t g = uint8_t(powf(ldr.y, cpu_gamma) * 255.0f + 0.5f);
         uint8_t b = uint8_t(powf(ldr.z, cpu_gamma) * 255.0f + 0.5f);
@@ -1245,8 +1245,8 @@ void Renderer::render_chunk_fixed_sampling(SDL_Surface* surface,
 
         // TEK YER: ColorProcessor her şeyi yapsın → sRGB 0-1 döner
         Vec3 ldr = color_processor.processColor(avg_color, i, j);
-        // CPU'da linear → ekstra gamma lazım
-        float cpu_gamma = 1.0f / 2.2f;
+        // GPU ile uyumlu gamma (eski: 2.2f)
+        float cpu_gamma = 1.0f / 1.2f;
         uint8_t r = uint8_t(powf(ldr.x, cpu_gamma) * 255.0f + 0.5f);
         uint8_t g = uint8_t(powf(ldr.y, cpu_gamma) * 255.0f + 0.5f);
         uint8_t b = uint8_t(powf(ldr.z, cpu_gamma) * 255.0f + 0.5f);
@@ -1309,30 +1309,40 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
         }
     }
 
-    // --- 2. Point lightlardan ağırlıklı seçim ---
+    // --- 2. Tüm ışık türlerinden ağırlıklı seçim (GPU ile uyumlu) ---
     std::vector<float> weights(light_count, 0.0f);
     float total_weight = 0.0f;
 
     for (int i = 0; i < light_count; i++) {
+        Vec3 delta = lights[i]->position - hit_position;
+        float distance = std::max(1.0f, delta.length());
+        float falloff = 1.0f / (distance * distance);
+        float intensity = luminance(lights[i]->color * lights[i]->intensity);
+
         if (lights[i]->type() == LightType::Point) {
-            Vec3 delta = lights[i]->position - hit_position;
-            float distance = std::max(1.0f, delta.length());
-
-            // Enerjiye göre ağırlık: yakın ve güçlü ışık öncelikli
-            float falloff = 1.0f / (distance * distance);
-            float intensity = luminance(lights[i]->intensity);
             weights[i] = falloff * intensity;
-
-            total_weight += weights[i];
         }
+        else if (lights[i]->type() == LightType::Area) {
+            // GPU ile uyumlu: area etkisi
+            auto areaLight = std::dynamic_pointer_cast<AreaLight>(lights[i]);
+            if (areaLight) {
+                float area = areaLight->getWidth() * areaLight->getHeight();
+                weights[i] = falloff * intensity * std::min(area, 10.0f);
+            }
+        }
+        else if (lights[i]->type() == LightType::Spot) {
+            weights[i] = falloff * intensity * 0.8f;
+        }
+        else {
+            weights[i] = 0.0f;
+        }
+
+        total_weight += weights[i];
     }
 
     // --- Eğer ağırlık yoksa fallback rastgele seçim ---
     if (total_weight < 1e-6f) {
-        int random_light = std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
-        if (lights[random_light]->type() == LightType::Point) point_light_pick_count++;
-        else if (lights[random_light]->type() == LightType::Directional) directional_pick_count++;
-        return random_light;
+        return std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
     }
 
     // --- Weighted seçim ---
@@ -1341,17 +1351,12 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
     for (int i = 0; i < light_count; i++) {
         accum += weights[i];
         if (r <= accum) {
-            if (lights[i]->type() == LightType::Point) point_light_pick_count++;
-            else if (lights[i]->type() == LightType::Directional) directional_pick_count++;
             return i;
         }
     }
 
     // --- Güvenlik fallback ---
-    int fallback = std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
-    if (lights[fallback]->type() == LightType::Point) point_light_pick_count++;
-    else if (lights[fallback]->type() == LightType::Directional) directional_pick_count++;
-    return fallback;
+    return std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
 }
 
 Vec3 Renderer::calculate_direct_lighting_single_light(
@@ -1402,6 +1407,52 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         float area = 4.0f * M_PI * point->getRadius() * point->getRadius();
         pdf_light = (1.0f / area) * pdf_light_select;
     }
+    else if (auto areaLight = std::dynamic_pointer_cast<AreaLight>(light)) {
+        // GPU ile uyumlu AreaLight sampling
+        light_sample = areaLight->random_point();
+        to_light = light_sample - hit_point;
+        light_distance = to_light.length();
+        L = to_light / light_distance;
+        
+        // Light normal (cross of u and v vectors)
+        Vec3 light_normal = Vec3::cross(areaLight->getU(), areaLight->getV()).normalize();
+        float cos_light = std::fmax(Vec3::dot(-L, light_normal), 0.0f);
+        attenuation = cos_light / (light_distance * light_distance);
+        
+        Li = areaLight->getIntensity(hit_point, light_sample) * attenuation;
+        
+        float area = areaLight->getWidth() * areaLight->getHeight();
+        pdf_light = (1.0f / std::fmax(area, 1e-4f)) * pdf_light_select;
+    }
+    else if (auto spotLight = std::dynamic_pointer_cast<SpotLight>(light)) {
+        // GPU ile uyumlu SpotLight sampling
+        light_sample = spotLight->position;
+        to_light = light_sample - hit_point;
+        light_distance = to_light.length();
+        L = to_light / light_distance;
+        
+        // Spot cone falloff
+        float cos_theta = Vec3::dot(-L, spotLight->direction.normalize());
+        float angleDeg = spotLight->getAngleDegrees();
+        float angleRad = angleDeg * (M_PI / 180.0f);
+        float inner_cos = cosf(angleRad * 0.8f);
+        float outer_cos = cosf(angleRad);
+        
+        float falloff = 0.0f;
+        if (cos_theta > inner_cos) falloff = 1.0f;
+        else if (cos_theta > outer_cos) {
+            float t = (cos_theta - outer_cos) / (inner_cos - outer_cos + 1e-6f);
+            falloff = t * t;
+        }
+        
+        if (falloff < 1e-4f) return direct_light;
+        
+        attenuation = falloff / (light_distance * light_distance);
+        Li = spotLight->getIntensity(hit_point, light_sample) * attenuation;
+        
+        float solid_angle = 2.0f * M_PI * (1.0f - outer_cos);
+        pdf_light = (1.0f / std::fmax(solid_angle, 1e-4f)) * pdf_light_select;
+    }
     else {
         return direct_light;
     }
@@ -1429,16 +1480,27 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     Vec3 specular = psdf.evalSpecular(N, V, L, F0, roughness);
 
-    // Diffuse bileşeni
+    // Diffuse bileşeni - GPU ile uyumlu
     Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
-    Vec3 k_d = (1.0f - metallic);
+    // GPU formülü: k_d = (1 - F_avg) * (1 - metallic)
+    Vec3 k_d = (Vec3(1.0f) - F_avg) * (1.0f - metallic);
     Vec3 diffuse = k_d * albedo / M_PI;
 
     // Toplam BRDF
     Vec3 brdf = diffuse + specular;
 
+    // --- MIS (Multiple Importance Sampling) ---
+    // PDF BRDF hesapla
+    Vec3 incoming = -L; // Light direction (incoming to surface)
+    Vec3 outgoing = V;  // View direction
+    float pdf_brdf_val = psdf.pdf(rec, incoming, outgoing);
+    float pdf_brdf_val_mis = std::clamp(pdf_brdf_val, 0.01f, 5000.0f);
+
+    float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
+
     // Işık katkısı
-    Vec3 direct = brdf * Li * NdotL;
+    // GPU formülü: (f * Li * NdotL) * mis_weight
+    Vec3 direct = brdf * Li * NdotL * mis_weight;
 
     return direct;
 }
@@ -1461,15 +1523,15 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             break;
         }
 
+        // --- Normal harita uygulaması ---
+        apply_normal_map(rec);
+
+        // --- Random light selection for Next Event Estimation ---
         int light_index = -1;
         if (!lights.empty())
             light_index = pick_smart_light(lights, rec.point);
-        // --- Normal harita uygulaması ---
-        // apply_interpolated_normal(rec);
-         // HitRecord nesnesinin normal harita bilgilerini kullanarak 'interpolated_normal' üyesini günceller.
-        // 'rec' parametresi hem girdi hem de çıktı olarak kullanılır.
-        apply_normal_map(rec);
 
+        // --- Scatter & Indirect ---
         Vec3 attenuation;
         Ray scattered;
         if (!rec.material->scatter(current_ray, rec, attenuation, scattered))
@@ -1478,29 +1540,30 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         throughput *= attenuation;
 
         // --- Russian Roulette ---
-
-        float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
-        float continuation_prob = std::clamp(max_channel, 0.0f, 0.98f);
-        if (bounce > 2) { // İlk birkaç atışta devam et, sonra RR uygula
-            if (Vec3::random_float() > continuation_prob)
+        if (bounce > 2) { 
+            float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
+            float p = std::clamp(max_channel, 0.0f, 0.98f);
+             if (Vec3::random_float() > p)
                 break;
-            throughput /= continuation_prob;
+            throughput /= p;
         }
-        // --- Emissive katkı ---
+
+        // --- Emission & Direct Lighting ---
         Vec3 emitted = rec.material->getEmission(rec.uv, rec.point);
-        float transmission = rec.material->getTransmission(rec.uv);
-        float opacity = rec.material->get_opacity(rec.uv);
-
+        
         Vec3 direct_light(0.0f);
-
-        // --- Direct light sadece ışık varsa hesapla ---
         if (light_index >= 0) {
             direct_light = calculate_direct_lighting_single_light(
-                bvh, lights[light_index], rec, rec.interpolated_normal,  current_ray);
+                bvh, lights[light_index], rec, rec.interpolated_normal, current_ray);
+            
+            float transmission = rec.material->getTransmission(rec.uv);
             direct_light *= (1.0f - transmission);
         }
-		
-        final_color += throughput * (emitted + direct_light * 10) * opacity;
+        
+        float opacity = rec.material->get_opacity(rec.uv);
+        
+        // Eski mantığa dönüş: emitted + direct_light
+        final_color += throughput * (emitted + direct_light) * opacity;
 
         current_ray = scattered;
     }

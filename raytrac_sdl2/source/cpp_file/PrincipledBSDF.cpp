@@ -195,6 +195,7 @@ bool PrincipledBSDF::scatter(
         return true;
     }
 
+
  
     // 3. Transmission varsa cam/şeffaf gibi davran
     // Transmission check (e.g. glass-like material)
@@ -219,8 +220,9 @@ bool PrincipledBSDF::scatter(
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
     float cosTheta = std::fmax(Vec3::dot(V, L), 1e-4);
     Vec3 F = fresnelSchlickRoughness(cosTheta, F0, roughness);
-    Vec3 F_avg = F0 + (Vec3(1.0f) - F0) /21.0f;
-    Vec3 k_d =  (1.0f - metallic);
+    Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
+    // GPU ile uyumlu: k_d = (1 - F_avg) * (1 - metallic)
+    Vec3 k_d = (Vec3(1.0f) - F_avg) * (1.0f - metallic);
     // 7. Stokastik seçim: F.x oranında speküler, geri kalanı difüz
     // Stochastic selection based on Fresnel reflectance
     Vec3 sampled_dir;
@@ -252,9 +254,13 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
     float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0);
 
     // GGX sample: assume isotropic
-    float alpha =max(roughness * roughness,0.01f);
+    // GPU ile uyumlu D terimi
+    float alpha = max(roughness * roughness, 0.001f);
+    float alpha2 = alpha * alpha;
     float NdotH = max(Vec3::dot(rec.normal, (outgoing + incoming)), 0.001);
-    float D = (alpha * alpha) / (M_PI * powf((NdotH * NdotH * (alpha * alpha - 1.0f) + 1.0f), 2));
+    float NdotH2 = NdotH * NdotH;
+    float denom = (NdotH2 * (alpha2 - 1.0f) + 1.0f);
+    float D = alpha2 / (M_PI * denom * denom);
 
     float pdf_specular = D * NdotH / (4.0f * std::fmax(Vec3::dot(outgoing, (incoming + outgoing)), 0.001));
     float pdf_diffuse = cos_theta / M_PI;
@@ -264,32 +270,31 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
 }
 
 float PrincipledBSDF::GeometrySchlickGGX(float NdotV, float roughness) const {
-    float r = (roughness * roughness);
-    float k = (r * r) /2.0f; // Changed from /2.0 to /8.0 for better approximation
-
+    // GPU ile uyumlu: k = roughness^2 / 2 (eski: roughness^4 / 2 idi)
+    float k = max(roughness * roughness, 0.01f) / 2.0f;
     return NdotV / (NdotV * (1.0f - k) + k);
 }
 
 float PrincipledBSDF::DistributionGGX(const Vec3& N, const Vec3& H, float roughness) const {
+    // GPU ile uyumlu GGX NDF
     float alpha = max(roughness * roughness, 0.001f);
     float alpha2 = alpha * alpha;
     float NdotH = fmax(Vec3::dot(N, H), 0.0001f);
     float NdotH2 = NdotH * NdotH;
-    float denom = M_PI * (NdotH2 * (alpha2 - 1.0f) + 1.0f);
-    float denom_rcp = 1.0f / (denom * denom);  // Bölme yerine ters çevirme
-    return alpha2 * denom_rcp;
+    // GPU formülü: alpha2 / (PI * denom^2)
+    float denom = (NdotH2 * (alpha2 - 1.0f) + 1.0f);
+    return alpha2 / (M_PI * denom * denom);
 }
 
 float PrincipledBSDF::GeometrySmith(const Vec3& N, const Vec3& V, const Vec3& L, float roughness) const {
-
-    float k = max(roughness * roughness,0.001f) /2.0f;
+    // GPU ile uyumlu formül
+    float k = max(roughness * roughness, 0.01f) / 2.0f;
     float NdotV = fmax(Vec3::dot(N, V), 0.0001f);
     float NdotL = fmax(Vec3::dot(N, L), 0.0001f);
 
-    float denomV = NdotV * (1.0f - k) + k;
-    float denomL = NdotL * (1.0f - k) + k;
-    return (NdotV / denomV) * (NdotL / denomL);
-
+    float G1_V = NdotV / (NdotV * (1.0f - k) + k);
+    float G1_L = NdotL / (NdotL * (1.0f - k) + k);
+    return G1_V * G1_L;
 }
 // Optimization 5: Use importance sampling for more efficient Monte Carlo integration
 Vec3 PrincipledBSDF::importanceSampleGGX(float u1, float u2, float roughness, const Vec3& N) const {
@@ -315,13 +320,14 @@ Vec3 PrincipledBSDF::evalSpecular(const Vec3& N, const Vec3& V, const Vec3& L, c
     return (NDF * G * F) / denominator;
 }
 Vec3 PrincipledBSDF::fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const {
-    cosTheta = fmax(cosTheta, 0.0001f);  // Küçük değerler için koruma
-    float cosTheta1m = (1.0f - cosTheta);
-    float exponent = cosTheta1m * cosTheta1m * cosTheta1m * cosTheta1m * cosTheta1m;
-    float alpha = roughness * roughness;  // Mikrofacet modeline uygun
-    Vec3 Fmax = Vec3::mix(F0, Vec3(1.0), alpha);
-
-    return F0 + (Fmax - F0) * exponent;  // Doğru formül
+    // GPU ile uyumlu Fresnel formülü
+    cosTheta = fmax(cosTheta, 0.0001f);
+    float oneMinusCos = 1.0f - cosTheta;
+    float pow5 = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos;
+    
+    // GPU formülüyle aynı: F0 + (max(1-roughness, F0) - F0) * pow5
+    Vec3 Fmax = Vec3::max(Vec3(1.0f - roughness), F0);
+    return F0 + (Fmax - F0) * pow5;
 }
 
 
