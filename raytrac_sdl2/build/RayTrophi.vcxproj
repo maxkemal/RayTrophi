@@ -347,7 +347,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <CustomBuild Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\9c68b946b271f09d3d134e3834762a5c\raygen.ptx.rule">
       <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling CUDA to PTX: source/cpp_file/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -355,12 +355,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling CUDA to PTX: source/cpp_file/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -368,12 +368,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling CUDA to PTX: source/cpp_file/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -381,12 +381,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling CUDA to PTX: source/cpp_file/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/header" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/cpp_file" --use_fast_math --maxrregcount=64 -gencode=arch=compute_86,code=compute_86 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -394,7 +394,7 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;%(AdditionalInputs)</AdditionalInputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
     </CustomBuild>
@@ -461,17 +461,16 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\AreaLight.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\AssimpLoader.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\AtmosphericEffects.cpp" />
-    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Box.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Camera.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Dielectric.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\DiffuseLight.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\DirectionalLight.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\EmbreeBVH.cpp" />
-    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\EmissiveMaterial.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\HittableList.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Light.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Main.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Material.cpp" />
+    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\MaterialManager.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Matrix4x4.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Mesh.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\OptixWrapper.cpp" />
@@ -480,7 +479,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\PrincipledBSDF.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Renderer.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\SmartUVProjection.cpp" />
-    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Sphere.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\SpotLight.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Texture.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\ThreadLocalRNG.cpp" />
@@ -505,7 +503,6 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AssimpLoader.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AtmosphereProperties.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AtmosphericEffects.h" />
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Box.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\CPUInfo.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Camera.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ColorProcessingParams.h" />
@@ -513,33 +510,31 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\DiffuseLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\DirectionalLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\EmbreeBVH.h" />
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\EmissiveMaterial.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Hittable.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\HittableList.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Light.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\MaterialManager.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Matrix4x4.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Mesh.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\OptixWrapper.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ParallelBVHNode.h" />
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Plane.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\PointLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\PrincipledBSDF.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Quaternion.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Ray.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Renderer.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\SmartUVProjection.h" />
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Sphere.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\SpotLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Texture.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ThreadLocalRNG.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Transform.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Triangle.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Vec2.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Vec3.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Vec3SIMD.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Volumetric.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\globals.h" />
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\hit_result.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\material_gpu.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\params.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\payload.h" />

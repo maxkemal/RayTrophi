@@ -13,9 +13,6 @@
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\AtmosphericEffects.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Box.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Camera.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -31,9 +28,6 @@
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\EmbreeBVH.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\EmissiveMaterial.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\HittableList.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -44,6 +38,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Material.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\MaterialManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Matrix4x4.cpp">
@@ -68,9 +65,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\SmartUVProjection.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\Sphere.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\cpp_file\SpotLight.cpp">
@@ -147,9 +141,6 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\AtmosphericEffects.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Box.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\CPUInfo.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -171,9 +162,6 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\EmbreeBVH.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\EmissiveMaterial.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Hittable.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -186,6 +174,9 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Material.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\MaterialManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Matrix4x4.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -196,9 +187,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ParallelBVHNode.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Plane.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\PointLight.h">
@@ -219,9 +207,6 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\SmartUVProjection.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Sphere.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\SpotLight.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -229,6 +214,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\ThreadLocalRNG.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Transform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\Triangle.h">
@@ -247,9 +235,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\globals.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\hit_result.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header\material_gpu.h">
