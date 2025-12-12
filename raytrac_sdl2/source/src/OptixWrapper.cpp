@@ -469,19 +469,63 @@ void OptixWrapper::setupPipeline(const char* raygen_ptx) {
     sbt.hitgroupRecordCount = 1;
 }
 void OptixWrapper::destroyTextureObjects() {
+    int texture_obj_count = 0;
+    int array_count = 0;
+    
+    // 1. Texture Object'leri yok et
     for (const auto& record : hitgroup_records) {
         const HitGroupData& data = record.data;
 
-        if (data.albedo_tex) cudaDestroyTextureObject(data.albedo_tex);
-        if (data.roughness_tex) cudaDestroyTextureObject(data.roughness_tex);
-        if (data.normal_tex) cudaDestroyTextureObject(data.normal_tex);
-        if (data.metallic_tex) cudaDestroyTextureObject(data.metallic_tex);
-        if (data.transmission_tex) cudaDestroyTextureObject(data.transmission_tex);
-        if (data.opacity_tex) cudaDestroyTextureObject(data.opacity_tex);
-        if (data.emission_tex) cudaDestroyTextureObject(data.emission_tex);
+        if (data.albedo_tex) { 
+            cudaDestroyTextureObject(data.albedo_tex); 
+            texture_obj_count++;
+        }
+        if (data.roughness_tex) { 
+            cudaDestroyTextureObject(data.roughness_tex); 
+            texture_obj_count++;
+        }
+        if (data.normal_tex) { 
+            cudaDestroyTextureObject(data.normal_tex); 
+            texture_obj_count++;
+        }
+        if (data.metallic_tex) { 
+            cudaDestroyTextureObject(data.metallic_tex); 
+            texture_obj_count++;
+        }
+        if (data.transmission_tex) { 
+            cudaDestroyTextureObject(data.transmission_tex); 
+            texture_obj_count++;
+        }
+        if (data.opacity_tex) { 
+            cudaDestroyTextureObject(data.opacity_tex); 
+            texture_obj_count++;
+        }
+        if (data.emission_tex) { 
+            cudaDestroyTextureObject(data.emission_tex); 
+            texture_obj_count++;
+        }
     }
 
-    hitgroup_records.clear(); // artık geçmiş yok
+    // 2. CUDA Array'leri serbest bırak (CRITICAL FIX!)
+    for (auto& array : texture_arrays) {
+        if (array) {
+            cudaError_t err = cudaFreeArray(array);
+            if (err != cudaSuccess) {
+                SCENE_LOG_WARN("[GPU CLEANUP] cudaFreeArray failed: " + std::string(cudaGetErrorString(err)));
+            }
+            else {
+                array_count++;
+            }
+            array = nullptr;
+        }
+    }
+    texture_arrays.clear();
+
+    // 3. SBT records'ları temizle
+    hitgroup_records.clear();
+    
+    SCENE_LOG_INFO("[GPU CLEANUP] Destroyed " + std::to_string(texture_obj_count) + 
+                   " texture objects and " + std::to_string(array_count) + " CUDA arrays.");
 }
 
 void OptixWrapper::buildFromData(const OptixGeometryData& data) {
