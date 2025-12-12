@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -103,7 +103,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>E:\SDL2-2.30.4\include;C:\oidn-2.3.0.x64.windows\include;D:\assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;$(IncludePath)</IncludePath>
+    <IncludePath>E:\SDL2-2.30.4\include;C:\oidn-2.3.0.x64.windows\include;D:\assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include;$(IncludePath)</IncludePath>
     <LibraryPath>C:\oidn-2.3.0.x64.windows\lib;E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;D:\assimp\out\build\x64-Release\lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
@@ -111,7 +111,7 @@
     <LibraryPath>E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui;$(IncludePath)</IncludePath>
     <LibraryPath>E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\lib;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -235,121 +235,121 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
-    <ClInclude Include="source\cpp_file\Main.h" />
-    <ClInclude Include="source\header\scene_data.h" />
-    <ClInclude Include="source\header\scene_ui.h" />
-    <ClInclude Include="source\header\stb_image_write.h" />
-    <ClInclude Include="source\header\ui_modern.h" />
-    <ClInclude Include="source\imgui\imconfig.h" />
-    <ClInclude Include="source\imgui\imgui.h" />
-    <ClInclude Include="source\imgui\imgui_impl_sdl2.h" />
-    <ClInclude Include="source\imgui\imgui_impl_sdlrenderer2.h" />
-    <ClInclude Include="source\imgui\imgui_internal.h" />
-    <None Include="source\cpp_file\scatter_volume_step.h" />
-    <ClInclude Include="source\header\AtmosphereProperties.h" />
-    <None Include="source\cpp_file\material_scatter.cuh" />
-    <None Include="source\cpp_file\vec3_utils.cuh" />
-    <None Include="source\cpp_file\random_utils.cuh" />
-    <None Include="source\cpp_file\ray_color.cuh" />
-    <None Include="source\cpp_file\trace_ray.cuh" />
-    <None Include="source\cpp_file\gpucamera.cuh" />
-    <ClInclude Include="source\header\AABB.h" />
-    <ClInclude Include="source\header\AnimatedObject.h" />
-    <ClInclude Include="source\header\AreaLight.h" />
-    <ClInclude Include="source\header\AssimpLoader.h" />
-    <ClInclude Include="source\header\AtmosphericEffects.h" />
-    <ClInclude Include="source\header\Camera.h" />
-    <ClInclude Include="source\header\Dielectric.h" />
-    <ClInclude Include="source\header\DiffuseLight.h" />
-    <ClInclude Include="source\header\DirectionalLight.h" />
-    <ClInclude Include="source\header\EmbreeBVH.h" />
-    <ClInclude Include="source\header\globals.h" />
-    <ClInclude Include="source\header\Hittable.h" />
-    <ClInclude Include="source\header\HittableList.h" />
-    <ClInclude Include="source\header\json.hpp" />
-    <ClInclude Include="source\header\Light.h" />
-    <ClInclude Include="source\header\Material.h" />
-    <ClInclude Include="source\header\material_gpu.h" />
-    <ClInclude Include="source\header\Matrix4x4.h" />
-    <ClInclude Include="source\header\Mesh.h" />
-    <ClInclude Include="source\header\OptixWrapper.h" />
-    <ClInclude Include="source\header\ParallelBVHNode.h" />
-    <ClInclude Include="source\header\params.h" />
-    <ClInclude Include="source\header\payload.h" />
-    <ClInclude Include="source\header\perlin.h" />
-    <ClInclude Include="source\header\PointLight.h" />
-    <ClInclude Include="source\header\PrincipledBSDF.h" />
-    <ClInclude Include="source\header\Quaternion.h" />
-    <ClInclude Include="source\header\Ray.h" />
-    <ClInclude Include="source\header\Renderer.h" />
-    <ClInclude Include="source\header\resource.h" />
-    <ClInclude Include="source\header\sbt_data.h" />
-    <ClInclude Include="source\header\sbt_record.h" />
-    <ClInclude Include="source\header\SpotLight.h" />
-    <ClInclude Include="source\header\Texture.h" />
-    <ClInclude Include="source\header\ThreadLocalRNG.h" />
-    <ClInclude Include="source\header\Triangle.h" />
-    <ClInclude Include="source\header\Vec2.h" />
-    <ClInclude Include="source\header\Vec3.h" />
-    <ClInclude Include="source\header\Vec3SIMD.h" />
-    <ClInclude Include="source\header\Volumetric.h" />
-    <ClInclude Include="source\header\CPUInfo.h" />
-    <ClInclude Include="source\header\ColorProcessingParams.h" />
-    <ClInclude Include="source\header\MaterialManager.h" />
-    <ClInclude Include="source\header\Transform.h" />
+    <ClInclude Include="source\src\Main.h" />
+    <ClInclude Include="source\include\scene_data.h" />
+    <ClInclude Include="source\include\scene_ui.h" />
+    <ClInclude Include="source\include\stb_image_write.h" />
+    <ClInclude Include="source\include\ui_modern.h" />
+    <ClInclude Include="source\external\imgui\imconfig.h" />
+    <ClInclude Include="source\external\imgui\imgui.h" />
+    <ClInclude Include="source\external\imgui\imgui_impl_sdl2.h" />
+    <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h" />
+    <ClInclude Include="source\external\imgui\imgui_internal.h" />
+    <None Include="source\src\scatter_volume_step.h" />
+    <ClInclude Include="source\include\AtmosphereProperties.h" />
+    <None Include="source\src\material_scatter.cuh" />
+    <None Include="source\src\vec3_utils.cuh" />
+    <None Include="source\src\random_utils.cuh" />
+    <None Include="source\src\ray_color.cuh" />
+    <None Include="source\src\trace_ray.cuh" />
+    <None Include="source\src\gpucamera.cuh" />
+    <ClInclude Include="source\include\AABB.h" />
+    <ClInclude Include="source\include\AnimatedObject.h" />
+    <ClInclude Include="source\include\AreaLight.h" />
+    <ClInclude Include="source\include\AssimpLoader.h" />
+    <ClInclude Include="source\include\AtmosphericEffects.h" />
+    <ClInclude Include="source\include\Camera.h" />
+    <ClInclude Include="source\include\Dielectric.h" />
+    <ClInclude Include="source\include\DiffuseLight.h" />
+    <ClInclude Include="source\include\DirectionalLight.h" />
+    <ClInclude Include="source\include\EmbreeBVH.h" />
+    <ClInclude Include="source\include\globals.h" />
+    <ClInclude Include="source\include\Hittable.h" />
+    <ClInclude Include="source\include\HittableList.h" />
+    <ClInclude Include="source\include\json.hpp" />
+    <ClInclude Include="source\include\Light.h" />
+    <ClInclude Include="source\include\Material.h" />
+    <ClInclude Include="source\include\material_gpu.h" />
+    <ClInclude Include="source\include\Matrix4x4.h" />
+    <ClInclude Include="source\include\Mesh.h" />
+    <ClInclude Include="source\include\OptixWrapper.h" />
+    <ClInclude Include="source\include\ParallelBVHNode.h" />
+    <ClInclude Include="source\include\params.h" />
+    <ClInclude Include="source\include\payload.h" />
+    <ClInclude Include="source\include\perlin.h" />
+    <ClInclude Include="source\include\PointLight.h" />
+    <ClInclude Include="source\include\PrincipledBSDF.h" />
+    <ClInclude Include="source\include\Quaternion.h" />
+    <ClInclude Include="source\include\Ray.h" />
+    <ClInclude Include="source\include\Renderer.h" />
+    <ClInclude Include="source\include\resource.h" />
+    <ClInclude Include="source\include\sbt_data.h" />
+    <ClInclude Include="source\include\sbt_record.h" />
+    <ClInclude Include="source\include\SpotLight.h" />
+    <ClInclude Include="source\include\Texture.h" />
+    <ClInclude Include="source\include\ThreadLocalRNG.h" />
+    <ClInclude Include="source\include\Triangle.h" />
+    <ClInclude Include="source\include\Vec2.h" />
+    <ClInclude Include="source\include\Vec3.h" />
+    <ClInclude Include="source\include\Vec3SIMD.h" />
+    <ClInclude Include="source\include\Volumetric.h" />
+    <ClInclude Include="source\include\CPUInfo.h" />
+    <ClInclude Include="source\include\ColorProcessingParams.h" />
+    <ClInclude Include="source\include\MaterialManager.h" />
+    <ClInclude Include="source\include\Transform.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="source\cpp_file\AABB.cpp" />
-    <ClCompile Include="source\cpp_file\AreaLight.cpp" />
-    <ClCompile Include="source\cpp_file\AssimpLoader.cpp" />
-    <ClCompile Include="source\cpp_file\AtmosphericEffects.cpp" />
-    <ClCompile Include="source\cpp_file\Camera.cpp" />
-    <ClCompile Include="source\cpp_file\Dielectric.cpp" />
-    <ClCompile Include="source\cpp_file\DirectionalLight.cpp" />
-    <ClCompile Include="source\cpp_file\EmbreeBVH.cpp" />
-    <ClCompile Include="source\cpp_file\globals.cpp" />
-    <ClCompile Include="source\cpp_file\HittableList.cpp" />
-    <ClCompile Include="source\cpp_file\Light.cpp" />
-    <ClCompile Include="source\cpp_file\Main.cpp" />
-    <ClCompile Include="source\cpp_file\Material.cpp" />
-    <ClCompile Include="source\cpp_file\Matrix4x4.cpp" />
-    <ClCompile Include="source\cpp_file\Mesh.cpp" />
-    <ClCompile Include="source\cpp_file\OptixWrapper.cpp" />
-    <ClCompile Include="source\cpp_file\ParallelBVHNode.cpp" />
-    <ClCompile Include="source\cpp_file\PointLight.cpp" />
-    <ClCompile Include="source\cpp_file\PrincipledBSDF.cpp" />
-    <ClCompile Include="source\cpp_file\Renderer.cpp" />
-    <ClCompile Include="source\cpp_file\scene_ui.cpp" />
-    <ClCompile Include="source\cpp_file\SpotLight.cpp" />
-    <ClCompile Include="source\cpp_file\Texture.cpp" />
-    <ClCompile Include="source\cpp_file\ThreadLocalRNG.cpp" />
-    <ClCompile Include="source\cpp_file\Triangle.cpp" />
-    <ClCompile Include="source\cpp_file\ui_modern.cpp" />
-    <ClCompile Include="source\cpp_file\Vec2.cpp" />
-    <ClCompile Include="source\cpp_file\Vec3.cpp" />
-    <ClCompile Include="source\cpp_file\Vec3SIMD.cpp" />
-    <ClCompile Include="source\cpp_file\Volumetric.cpp" />
-    <ClCompile Include="source\cpp_file\MaterialManager.cpp" />
-    <ClCompile Include="source\cpp_file\DiffuseLight.cpp" />
-    <ClCompile Include="source\imgui\imgui.cpp" />
-    <ClCompile Include="source\imgui\imgui_draw.cpp" />
-    <ClCompile Include="source\imgui\imgui_impl_sdl2.cpp" />
-    <ClCompile Include="source\imgui\imgui_impl_sdlrenderer2.cpp" />
-    <ClCompile Include="source\imgui\imgui_tables.cpp" />
-    <ClCompile Include="source\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="source\src\AABB.cpp" />
+    <ClCompile Include="source\src\AreaLight.cpp" />
+    <ClCompile Include="source\src\AssimpLoader.cpp" />
+    <ClCompile Include="source\src\AtmosphericEffects.cpp" />
+    <ClCompile Include="source\src\Camera.cpp" />
+    <ClCompile Include="source\src\Dielectric.cpp" />
+    <ClCompile Include="source\src\DirectionalLight.cpp" />
+    <ClCompile Include="source\src\EmbreeBVH.cpp" />
+    <ClCompile Include="source\src\globals.cpp" />
+    <ClCompile Include="source\src\HittableList.cpp" />
+    <ClCompile Include="source\src\Light.cpp" />
+    <ClCompile Include="source\src\Main.cpp" />
+    <ClCompile Include="source\src\Material.cpp" />
+    <ClCompile Include="source\src\Matrix4x4.cpp" />
+    <ClCompile Include="source\src\Mesh.cpp" />
+    <ClCompile Include="source\src\OptixWrapper.cpp" />
+    <ClCompile Include="source\src\ParallelBVHNode.cpp" />
+    <ClCompile Include="source\src\PointLight.cpp" />
+    <ClCompile Include="source\src\PrincipledBSDF.cpp" />
+    <ClCompile Include="source\src\Renderer.cpp" />
+    <ClCompile Include="source\src\scene_ui.cpp" />
+    <ClCompile Include="source\src\SpotLight.cpp" />
+    <ClCompile Include="source\src\Texture.cpp" />
+    <ClCompile Include="source\src\ThreadLocalRNG.cpp" />
+    <ClCompile Include="source\src\Triangle.cpp" />
+    <ClCompile Include="source\src\ui_modern.cpp" />
+    <ClCompile Include="source\src\Vec2.cpp" />
+    <ClCompile Include="source\src\Vec3.cpp" />
+    <ClCompile Include="source\src\Vec3SIMD.cpp" />
+    <ClCompile Include="source\src\Volumetric.cpp" />
+    <ClCompile Include="source\src\MaterialManager.cpp" />
+    <ClCompile Include="source\src\DiffuseLight.cpp" />
+    <ClCompile Include="source\external\imgui\imgui.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_impl_sdlrenderer2.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_tables.cpp" />
+    <ClCompile Include="source\external\imgui\imgui_widgets.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="source\cpp_file\raygen.cu">
+    <None Include="source\src\raygen.cu">
       <FileType>Document</FileType>
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">--use_fast_math --expt-relaxed-constexpr --expt-extended-lambda
  %(AdditionalOptions)</AdditionalOptions>
     </None>
   </ItemGroup>
   <ItemGroup>
-    <Image Include="source\res\RayTrophi_icon.ico" />
+    <Image Include="source\resources\RayTrophi_icon.ico" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
