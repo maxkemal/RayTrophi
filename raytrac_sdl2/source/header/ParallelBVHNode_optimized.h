@@ -14,7 +14,7 @@ class ParallelBVHNode : public Hittable {
 private:    
   
     static std::atomic<int> active_threads;
-    static constexpr size_t MIN_OBJECTS_PER_THREAD = 8192;
+    static constexpr size_t MIN_OBJECTS_PER_THREAD = 8192;  // Increased from 1024 for better performance
     static constexpr int MAX_DEPTH = 32;
     static bool box_compare(const std::shared_ptr<Hittable> a, const std::shared_ptr<Hittable> b, int axis);
     static bool box_x_compare(const std::shared_ptr<Hittable> a, const std::shared_ptr<Hittable> b);
@@ -31,7 +31,7 @@ public:
 
     bool updateTree(const std::vector<std::shared_ptr<Hittable>>& animated_objects, float time0, float time1);
     bool occluded(const Ray& ray, float t_min, float t_max) const override {
-        // hýzlý versiyon: sadece t varsa true döner, detay alma
+        // hizli versiyon: sadece t varsa true doner, detay alma
         HitRecord dummy;
         return hit(ray, t_min, t_max, dummy);
     }

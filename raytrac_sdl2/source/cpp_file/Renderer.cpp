@@ -612,7 +612,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     }
     else {
         scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0, 0);
-        SCENE_LOG_INFO("[In-house BVH] BVH rebuilt successfully.");
+        SCENE_LOG_INFO("[RayTrophi: RT_BVH] BVH rebuilt successfully.");
     }
 }
 
@@ -677,7 +677,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
 
     SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
 
-    // ⚡️ Selectable BVH (Embree or in-house BVH)
+    //  Selectable BVH (Embree or in-house BVH)
     SCENE_LOG_INFO("Building BVH structure...");
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
@@ -687,7 +687,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     }
     else {
         scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0f, 1.0f);
-        SCENE_LOG_INFO("[In-house BVH] BVH structure built successfully.");
+        SCENE_LOG_INFO("[RayTrophi: RT_BVH]  structure built successfully.");
     }
 
     // ---- 3. GPU OptiX setup ----
