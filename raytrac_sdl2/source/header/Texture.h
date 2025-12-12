@@ -158,78 +158,18 @@ public:
         is_gpu_uploaded = false;
         std::string texture_name = name.empty() ? "unnamed_texture" : name;
 
-        // Cache kontrol et
-        if (!name.empty()) {
-            FileTextureCache::FileTextureInfo cached_info;  // ← Bu olmalı          
-            // Cache hit durumunda pixel yükleme
-            if (FileTextureCache::instance().get(name, cached_info)) {
+        // Cache kontrol et - SADECE embedded texture için (name boş değilse)
+        if (!name.empty() && name.find("embedded_") == 0) {
+            TextureCache::TextureInfo cached_info;
+            // Cache hit durumunda SADECE metadata'yı al, pixel decode etme!
+            if (TextureCache::instance().get(name, cached_info)) {
+                SCENE_LOG_INFO("[EMBEDDED CACHE HIT] Skipping decode, using cached metadata: " + name);
                 width = cached_info.width;
                 height = cached_info.height;
                 has_alpha = cached_info.has_alpha;
                 is_gray_scale = cached_info.is_gray_scale;
-
-                SDL_Surface* surface = IMG_Load(name.c_str());
-                if (surface) {
-                    int pixel_count = width * height;
-                    pixels.resize(pixel_count);
-
-                    SDL_LockSurface(surface);  // ← EKLENDİ!
-                    SDL_PixelFormat* fmt = surface->format;  // ← Format kaydedildi
-                    uint8_t* data = static_cast<uint8_t*>(surface->pixels);
-                    int pitch = surface->pitch;
-                    int bpp = fmt->BytesPerPixel;
-
-                    // Paralel yükleme (ilk yükleme gibi)
-                    std::atomic<bool> is_gray_atomic(true);
-                    int num_threads = std::thread::hardware_concurrency();
-                    std::vector<std::thread> threads;
-
-                    auto process_chunk = [&](int start_y, int end_y) {
-                        bool local_is_gray = true;
-                        for (int y = start_y; y < end_y; ++y) {
-                            uint8_t* row_ptr = data + y * pitch;
-                            for (int x = 0; x < width; ++x) {
-                                Uint32 pixel;
-                                memcpy(&pixel, row_ptr + x * bpp, bpp);
-
-                                Uint8 r, g, b, a;
-                                SDL_GetRGBA(pixel, fmt, &r, &g, &b, &a);  // ← fmt kullan
-                                CompactVec4 px(r, g, b, a);
-                                pixels[y * width + x] = px;
-
-                                if (local_is_gray && !px.is_gray()) {
-                                    local_is_gray = false;
-                                }
-                            }
-                        }
-                        if (!local_is_gray) is_gray_atomic.store(false);
-                        };
-
-                    int chunk_height = (height + num_threads - 1) / num_threads;
-                    for (int i = 0; i < num_threads; ++i) {
-                        int start_y = i * chunk_height;
-                        int end_y = std::min(start_y + chunk_height, height);
-                        if (start_y < height) {
-                            threads.emplace_back(process_chunk, start_y, end_y);
-                        }
-                    }
-
-                    for (auto& t : threads) t.join();
-
-                    SDL_UnlockSurface(surface);  // ← EKLENDİ!
-                    SDL_FreeSurface(surface);
-                    m_is_loaded = true;
-
-                    SCENE_LOG_INFO("[FILE CACHE HIT] " + name +
-                        " | Decoded with " + std::to_string(num_threads) + " threads");
-                    return;
-                }
-                else {
-                    SCENE_LOG_ERROR("[FILE CACHE HIT BUT LOAD FAILED] " + name);
-                    pixels.clear();
-                    m_is_loaded = false;
-                    return;
-                }
+                m_is_loaded = false;  // ← Bu texture zaten cache'de, pixel decode'a gerek yok
+                return;  // ← Constructor'dan çık, decode yapma!
             }
         }
 
@@ -525,8 +465,8 @@ public:
 
     ~Texture() {
         cleanup_gpu();
-        IMG_Quit();
-        TextureCache::instance().clear();
+        // Do NOT clear the cache here - it's a singleton shared across all textures!
+        // TextureCache and FileTextureCache are singletons and should persist
     }
     void loadOpacityMap(const std::string& filename) {
         SDL_Surface* surface = IMG_Load(filename.c_str());

@@ -538,10 +538,32 @@ public:
 
 
     void clearTextureCache() {
+        SCENE_LOG_INFO("[TEXTURE CLEANUP] Starting texture cache cleanup...");
+        int gpu_cleaned = 0;
+        int cpu_cleaned = 0;
+        
+        // 1. AssimpLoader'ın local cache'ini temizle
         for (auto& [name, tex] : textureCache) {
-            if (tex) tex->cleanup_gpu(); // GPU belleği temizle
+            if (tex) {
+                tex->cleanup_gpu(); // GPU belleği temizle
+                gpu_cleaned++;
+            }
         }
+        cpu_cleaned = textureCache.size();
         textureCache.clear(); // CPU cache'i temizle
+        
+        // 2. Global singleton cache'leri de temizle
+        size_t global_texture_cache_size = TextureCache::instance().size();
+        size_t global_file_cache_size = FileTextureCache::instance().size();
+        
+        TextureCache::instance().clear();
+        FileTextureCache::instance().clear();
+        
+        SCENE_LOG_INFO("[TEXTURE CLEANUP] Complete! Stats:");
+        SCENE_LOG_INFO("  - GPU textures cleaned: " + std::to_string(gpu_cleaned));
+        SCENE_LOG_INFO("  - CPU cache entries removed: " + std::to_string(cpu_cleaned));
+        SCENE_LOG_INFO("  - Global TextureCache cleared: " + std::to_string(global_texture_cache_size) + " entries");
+        SCENE_LOG_INFO("  - Global FileTextureCache cleared: " + std::to_string(global_file_cache_size) + " entries");
     }
     // AssimpLoader sınıfı içinde veya uygun bir namespace'de
      void calculateAnimatedNodeTransformsRecursive(
@@ -708,16 +730,15 @@ private:
 
                         for (int vi = 0; vi < 3; ++vi) {
                             if (indices[vi] == vertexId) {
-                                if (tri->vertexBoneWeights.size() != 3)
-                                    tri->vertexBoneWeights.resize(3);
-                                if (tri->originalVertexPositions.size() != 3)
-                                    tri->originalVertexPositions.resize(3);
-
-                                tri->vertexBoneWeights[vi].emplace_back(globalBoneIndex, weight);
-
-                                if (vi == 0) tri->originalVertexPositions[0] = tri->original_v0;
-                                if (vi == 1) tri->originalVertexPositions[1] = tri->original_v1;
-                                if (vi == 2) tri->originalVertexPositions[2] = tri->original_v2;
+                                // Initialize skin data if needed
+                                tri->initializeSkinData();
+                                
+                                // Get current bone weights for this vertex
+                                auto currentWeights = tri->getSkinBoneWeights(vi);
+                                currentWeights.emplace_back(globalBoneIndex, weight);
+                                
+                                // Set updated bone weights
+                                tri->setSkinBoneWeights(vi, currentWeights);
 
                                 found = true;
                                 break;
@@ -944,12 +965,6 @@ private:
             // Set shared transform (all triangles in this mesh share the same transform)
             triangle->setTransformHandle(sharedTransform);
 
-            // Legacy compatibility (kept for backward compat, will be removed later)
-            triangle->mat_ptr = material;
-            if (material) {
-                triangle->gpuMaterialPtr = material->gpuMaterial;
-                triangle->materialName = material->materialName;
-            }
 
             triangle->setNodeName(nodeName);
             triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
@@ -1272,20 +1287,37 @@ private:
               
            }
 
-           std::shared_ptr<Texture> texture;
+            std::shared_ptr<Texture> texture;
 
-           for (const auto& texInfo : textureInfos)
-           {
-               const std::string& path = texInfo.path;
-               TextureType ttype = convertToTextureType(texInfo.type);
+            for (const auto& texInfo : textureInfos)
+            {
+                const std::string& path = texInfo.path;
+                TextureType ttype = convertToTextureType(texInfo.type);
 
-               // Embedded mı?
-               const aiTexture* emb = scene->GetEmbeddedTexture(path.c_str());
+                // Embedded mı?
+                const aiTexture* emb = scene->GetEmbeddedTexture(path.c_str());
 
-               if (emb)
-                   texture = std::make_shared<Texture>(emb, ttype);
-               else
-                   texture = loadTextureWithCache(path, ttype);
+                if (emb) {
+                    // Embedded texture için unique cache key oluştur
+                    // Format: "embedded_<pointer_address>_<type>"
+                    std::string embeddedKey = "embedded_" + 
+                        std::to_string(reinterpret_cast<uintptr_t>(emb)) + 
+                        "_" + std::to_string(static_cast<int>(ttype));
+
+                    // Cache'de var mı kontrol et
+                    auto cacheIt = textureCache.find(embeddedKey);
+                    if (cacheIt != textureCache.end()) {
+                        texture = cacheIt->second;
+                        SCENE_LOG_INFO("[EMBEDDED CACHE HIT] Reusing texture: " + path + " | Key: " + embeddedKey);
+                    } else {
+                        // Cache'de yok, yeni oluştur ve cache'e ekle
+                        texture = std::make_shared<Texture>(emb, ttype, embeddedKey);
+                        textureCache[embeddedKey] = texture;
+                        SCENE_LOG_INFO("[EMBEDDED CACHE MISS] Created new texture: " + path + " | Key: " + embeddedKey);
+                    }
+                }
+                else
+                    texture = loadTextureWithCache(path, ttype);
 
               
                if (!texture || !texture->is_loaded())

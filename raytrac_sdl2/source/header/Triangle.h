@@ -224,60 +224,32 @@ public:
     const Vec3& n1_cref() const { return vertices[1].normal; }
     const Vec3& n2_cref() const { return vertices[2].normal; }
 
-    // For backward compatibility with code using direct member access
-    // These are read-only and return current transformed positions
-    Vec3 v0, v1, v2;  // Keep for backward compat, synced with vertices[].position
-    Vec3 n0, n1, n2;  // Keep for backward compat, synced with vertices[].normal
-
-    // Original/transformed for backward compatibility
-    Vec3 original_v0, original_v1, original_v2;
-    Vec3 original_n0, original_n1, original_n2;
-    Vec3 transformed_v0, transformed_v1, transformed_v2;
-    Vec3 transformed_n0, transformed_n1, transformed_n2;
-
-    // Legacy skinning access
-    std::vector<std::vector<std::pair<int, float>>> vertexBoneWeights;
-    std::vector<Vec3> originalVertexPositions;
-
-    // Legacy material pointer (kept for gradual migration)
-    std::shared_ptr<Material> mat_ptr;
-    std::shared_ptr<GpuMaterial> gpuMaterialPtr;
-    std::string materialName;
-
-    // Legacy transform (kept for gradual migration)
-    Matrix4x4 transform;
-
 private:
     // ========================================================================
     // Optimized Data Members
     // ========================================================================
     
-    TriangleVertexData vertices[3];           // Consolidated vertex data (48 bytes)
+    TriangleVertexData vertices[3];           // Consolidated vertex data (144 bytes)
     uint16_t materialID;                       // Material lookup ID (2 bytes)
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
-    std::optional<SkinnedTriangleData> skinData; // Optional skinning data
+    std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
     
-    std::string nodeName;
-    int faceIndex = -1;
-    std::array<unsigned int, 3> assimpVertexIndices;
+    std::string nodeName;                      // 32 bytes avg
+    int faceIndex = -1;                        // 4 bytes
+    std::array<unsigned int, 3> assimpVertexIndices; // 12 bytes
 
     // AABB Caching
-    mutable AABB cachedAABB;
-    mutable bool aabbDirty = true;
+    mutable AABB cachedAABB;                  // 24 bytes
+    mutable bool aabbDirty = true;            // 1 byte
 
-    // Legacy transform members (for gradual migration)
-    Matrix4x4 baseTransform_legacy;
-    Matrix4x4 currentTransform_legacy;
-    Matrix4x4 finalTransform_legacy;
-
-    // Scratch buffers for apply_skinning
-    mutable Vec3 blendedPos, blendedNorm;
+    // Scratch buffers for apply_skinning (reused across calls)
+    mutable Vec3 blendedPos, blendedNorm;     // 24 bytes
 
     // ========================================================================
     // Internal Methods
     // ========================================================================
     
-    void syncLegacyMembers();  // Sync new vertex array with legacy v0/v1/v2 etc.
+    // syncLegacyMembers() - REMOVED (no longer needed)
 };
 
 #endif // TRIANGLE_H

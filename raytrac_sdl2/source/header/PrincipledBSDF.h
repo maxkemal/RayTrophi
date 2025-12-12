@@ -7,7 +7,6 @@
 #include "Ray.h"
 #include "Hittable.h"
 #include <memory>
-#include "SmartUVProjection.h"
 
 class PrincipledBSDF : public Material {
 public:

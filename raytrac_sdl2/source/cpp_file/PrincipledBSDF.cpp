@@ -159,7 +159,7 @@ bool PrincipledBSDF::scatter(
 ) const {
     // UV koordinatları, texture dönüşümünü uygula
     // Apply UV transformation (if needed)
-    Vec2 uv = useSmartUVProjection ? Vec2(rec.u, rec.v) : applyTextureTransform(rec.u, rec.v);
+    Vec2 uv = applyTextureTransform(rec.u, rec.v);
 
     // Albedo, roughness, metallic gibi değerleri al (texture olabilir)
     // Fetch BRDF properties (may be textured)

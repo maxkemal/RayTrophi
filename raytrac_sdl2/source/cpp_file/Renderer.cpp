@@ -436,21 +436,8 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 
             std::string nodeName = tri->getNodeName();
 
-
-            if (!tri->vertexBoneWeights.empty() &&
-                tri->vertexBoneWeights[0].empty() && tri->vertexBoneWeights[1].empty() && tri->vertexBoneWeights[2].empty()) {
-
-            }
-
-            bool isSkinnedMesh = false;
-            if (tri->vertexBoneWeights.size() == 3) {
-                if (!tri->vertexBoneWeights[0].empty() ||
-                    !tri->vertexBoneWeights[1].empty() ||
-                    !tri->vertexBoneWeights[2].empty()) {
-                    isSkinnedMesh = true;
-                }
-            }
-
+            // Check if this is a skinned mesh using new API
+            bool isSkinnedMesh = tri->hasSkinData();
 
             if (isSkinnedMesh) {
                 // Bu bir skinned üçgen. Skinning uygula.
@@ -1186,7 +1173,7 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
 
         // TEK YER: ColorProcessor her şeyi yapsın → sRGB 0-1 döner
         Vec3 ldr = color_processor.processColor(final_color, i, j);
-        // GPU ile uyumlu gamma (eski: 2.2f)
+        // Gamma 2.2 (Standart sRGB monitör gamması) - Görüntüyü aydınlatır
         float cpu_gamma = 1.0f / 1.2f;
         uint8_t r = uint8_t(powf(ldr.x, cpu_gamma) * 255.0f + 0.5f);
         uint8_t g = uint8_t(powf(ldr.y, cpu_gamma) * 255.0f + 0.5f);
@@ -1245,7 +1232,7 @@ void Renderer::render_chunk_fixed_sampling(SDL_Surface* surface,
 
         // TEK YER: ColorProcessor her şeyi yapsın → sRGB 0-1 döner
         Vec3 ldr = color_processor.processColor(avg_color, i, j);
-        // GPU ile uyumlu gamma (eski: 2.2f)
+        // Gamma 2.2 (Standart sRGB monitör gamması)
         float cpu_gamma = 1.0f / 1.2f;
         uint8_t r = uint8_t(powf(ldr.x, cpu_gamma) * 255.0f + 0.5f);
         uint8_t g = uint8_t(powf(ldr.y, cpu_gamma) * 255.0f + 0.5f);
@@ -1393,6 +1380,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         L = -directional->random_point();
         light_sample = hit_point + L * 1e8f;
         to_light = L;
+        attenuation = 1.0f; // Directional light falloff yok
         light_distance = std::numeric_limits<float>::infinity();
         Li = directional->getIntensity(hit_point, light_sample);
     }
@@ -1402,7 +1390,12 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         light_distance = to_light.length();
         L = to_light / light_distance;
 
-        Li = point->getIntensity(hit_point, light_sample);
+        // DÜZELTME: PointLight sınıfı getIntensity içinde zaten falloff (1/d^2) uyguluyor.
+        // Burada tekrar uygularsak ışık çok zayıflıyor (1/d^4).
+        attenuation = 1.0f; 
+        
+        // Point Light Specific Boost: Global çarpan kaldırıldı, sadece Point Light 10 kat güçlendirildi.
+        Li = point->getIntensity(hit_point, light_sample) * attenuation * 10.0f;
 
         float area = 4.0f * M_PI * point->getRadius() * point->getRadius();
         pdf_light = (1.0f / area) * pdf_light_select;
@@ -1458,6 +1451,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     }
 
     // --- Shadow ---
+    // GPU ile uyumlu shadow bias (eski: 0.0001f -> self-shadowing yapabilir)
     Ray shadow_ray(hit_point + N * 0.0001f, L);
     if (bvh->occluded(shadow_ray, 0.0001f, light_distance))
         return direct_light;
@@ -1528,8 +1522,15 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
         // --- Random light selection for Next Event Estimation ---
         int light_index = -1;
-        if (!lights.empty())
-            light_index = pick_smart_light(lights, rec.point);
+        float pdf_light_select = 1.0f;
+        int light_count = static_cast<int>(lights.size());
+
+        if (light_count > 0) {
+             // GPU ile eitleme: Basit rastgele seçim
+             // pick_smart_light yerine simple uniform sample
+            light_index = std::clamp(static_cast<int>(Vec3::random_float() * light_count), 0, light_count - 1);
+            pdf_light_select = 1.0f / light_count; 
+        }
 
         // --- Scatter & Indirect ---
         Vec3 attenuation;
@@ -1553,16 +1554,23 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         
         Vec3 direct_light(0.0f);
         if (light_index >= 0) {
+            // EKSİK OLAN: Point Light falloff'u calculate_direct_lighting_single_light içine eklenmeli
+            // O fonksiyonu güncellemeliyiz. Aşağıda güncelleyeceğiz.
             direct_light = calculate_direct_lighting_single_light(
                 bvh, lights[light_index], rec, rec.interpolated_normal, current_ray);
             
+            // Monte Carlo Estimator: Value / PDF
+            // PDF_select = 1/N. Value / (1/N) = Value * N.
+            direct_light *= static_cast<float>(light_count);
+
+            // GPU Uyumluluğu: Global *10 çarpanı kaldırıldı (sadece point light için gerekli)
+            // direct_light *= 10.0f;
+
             float transmission = rec.material->getTransmission(rec.uv);
             direct_light *= (1.0f - transmission);
         }
         
         float opacity = rec.material->get_opacity(rec.uv);
-        
-        // Eski mantığa dönüş: emitted + direct_light
         final_color += throughput * (emitted + direct_light) * opacity;
 
         current_ray = scattered;

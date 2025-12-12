@@ -14,33 +14,25 @@
 /**
  * @brief Optimized triangle data for Embree BVH
  * 
- * Now stores materialID (2 bytes) instead of shared_ptr (16+ bytes)
- * while maintaining legacy material pointer for backward compatibility.
+ * Stores materialID (2 bytes) instead of shared_ptr (16+ bytes).
+ * Material access is always through MaterialManager for consistency.
  */
 struct TriangleData {
-    Vec3 v0, v1, v2;
-    Vec3 n0, n1, n2;
-    Vec2 t0, t1, t2;
+    Vec3 v0, v1, v2;          // 36 bytes
+    Vec3 n0, n1, n2;          // 36 bytes
+    Vec2 t0, t1, t2;          // 24 bytes
+    uint16_t materialID;      // 2 bytes
     
-    // Optimized: Material ID for MaterialManager lookup
-    uint16_t materialID = 0xFFFF;
+    // Total: 98 bytes (was 114 bytes with shared_ptr)
+    // Savings: 16 bytes per triangle!
     
-    // Legacy: Keep material pointer for backward compatibility
-    std::shared_ptr<Material> material;
-    
-    // Helper to get material (prefers ID lookup, falls back to pointer)
+    // Helper methods for material access via MaterialManager
     Material* getMaterial() const {
-        if (materialID != 0xFFFF) {
-            return MaterialManager::getInstance().getMaterial(materialID);
-        }
-        return material.get();
+        return MaterialManager::getInstance().getMaterial(materialID);
     }
     
     std::shared_ptr<Material> getMaterialShared() const {
-        if (materialID != 0xFFFF) {
-            return MaterialManager::getInstance().getMaterialShared(materialID);
-        }
-        return material;
+        return MaterialManager::getInstance().getMaterialShared(materialID);
     }
 };
 

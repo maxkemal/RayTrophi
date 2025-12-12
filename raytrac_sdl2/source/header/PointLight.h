@@ -16,7 +16,7 @@ public:
         position = Vec3(0.0f);
         color = Vec3(1.0f);
         intensity = 1.0f;
-		radius = 0.1f; // Varsayýlan yarýçap
+		radius = 0.1f; // Varsayï¿½lan yarï¿½ï¿½ap
     }
 
     PointLight(const Vec3& pos, const Vec3& input_intens, float rad,

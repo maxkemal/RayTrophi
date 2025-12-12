@@ -27,18 +27,17 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (!tri) continue;
 
-        vertices.push_back(tri->v0);
-        vertices.push_back(tri->v1);
-        vertices.push_back(tri->v2);
+        vertices.push_back(tri->getVertexPosition(0));
+        vertices.push_back(tri->getVertexPosition(1));
+        vertices.push_back(tri->getVertexPosition(2));
 
         indices.push_back({ vert_offset, vert_offset + 1, vert_offset + 2 });
 
         triangle_data.push_back({
-            tri->v0, tri->v1, tri->v2,
-            tri->n0, tri->n1, tri->n2,
+            tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2),
+            tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
             tri->t0, tri->t1, tri->t2,
-            tri->getMaterialID(),
-            tri->mat_ptr
+            tri->getMaterialID()
             });
 
         vert_offset += 3;
@@ -122,19 +121,19 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
         auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
         if (!tri) continue;
 
-        vertex_buffer[i * 3 + 0] = tri->v0;
-        vertex_buffer[i * 3 + 1] = tri->v1;
-        vertex_buffer[i * 3 + 2] = tri->v2;
+        vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
+        vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
+        vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
 
         // TriangleData içindeki gölge bilgisi de güncellensin
-        triangle_data[i].v0 = tri->v0;
-        triangle_data[i].v1 = tri->v1;
-        triangle_data[i].v2 = tri->v2;
+        triangle_data[i].v0 = tri->getVertexPosition(0);
+        triangle_data[i].v1 = tri->getVertexPosition(1);
+        triangle_data[i].v2 = tri->getVertexPosition(2);
 
         if (triangle_data[i].n0 != Vec3()) {
-            triangle_data[i].n0 = tri->n0;
-            triangle_data[i].n1 = tri->n1;
-            triangle_data[i].n2 = tri->n2;
+            triangle_data[i].n0 = tri->getVertexNormal(0);
+            triangle_data[i].n1 = tri->getVertexNormal(1);
+            triangle_data[i].n2 = tri->getVertexNormal(2);
         }
     }
 
@@ -173,11 +172,12 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
 
         Vec2 uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
 
-        float opacity = tri.material->get_opacity(uv);
+        auto material = tri.getMaterialShared();
+        float opacity = material ? material->get_opacity(uv) : 1.0f;
        
-        if (tri.material->type() == MaterialType::Volumetric) {
+        if (material && material->type() == MaterialType::Volumetric) {
             double distance = rayhit.ray.tfar;
-            const auto* volume = static_cast<const Volumetric*>(tri.material.get());
+            const auto* volume = static_cast<const Volumetric*>(material.get());
 
             // Yönlü ışığın geçtiği noktadaki örnekleme
             Vec3 sample_point = ray.origin + ray.direction * distance;
@@ -312,17 +312,18 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
 
         // Material
         GpuMaterial gpuMat = {};  // Zero-initialize all fields
-        if (tri.material) {
-            Vec3 albedoColor = tri.material->getPropertyValue(tri.material->albedoProperty, Vec2(0.5f, 0.5f));
+        auto material = tri.getMaterialShared();
+        if (material) {
+            Vec3 albedoColor = material->getPropertyValue(material->albedoProperty, Vec2(0.5f, 0.5f));
             gpuMat.albedo = make_float3(albedoColor.x, albedoColor.y, albedoColor.z);
-            gpuMat.opacity = tri.material->get_opacity(Vec2(0.5f, 0.5f));
-            gpuMat.roughness = tri.material->getPropertyValue(tri.material->roughnessProperty, Vec2(0.5f, 0.5f)).y;
-            gpuMat.metallic = tri.material->getPropertyValue(tri.material->metallicProperty, Vec2(0.5f, 0.5f)).z;
+            gpuMat.opacity = material->get_opacity(Vec2(0.5f, 0.5f));
+            gpuMat.roughness = material->getPropertyValue(material->roughnessProperty, Vec2(0.5f, 0.5f)).y;
+            gpuMat.metallic = material->getPropertyValue(material->metallicProperty, Vec2(0.5f, 0.5f)).z;
             gpuMat.clearcoat = 0.0f;
-            gpuMat.transmission = tri.material->getPropertyValue(tri.material->transmissionProperty, Vec2(0.5f, 0.5f)).x;
-            Vec3 emissionColor = tri.material->getEmission(Vec2(0.5f, 0.5f), Vec3(0,0,0));
+            gpuMat.transmission = material->getPropertyValue(material->transmissionProperty, Vec2(0.5f, 0.5f)).x;
+            Vec3 emissionColor = material->getEmission(Vec2(0.5f, 0.5f), Vec3(0,0,0));
             gpuMat.emission = make_float3(emissionColor.x, emissionColor.y, emissionColor.z);
-            gpuMat.ior = tri.material->getIOR();
+            gpuMat.ior = material->getIOR();
             gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
             gpuMat.subsurface = 0.0f;
             gpuMat.artistic_albedo_response = 1.0f;

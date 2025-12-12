@@ -17,7 +17,6 @@ Triangle::Triangle()
     for (int i = 0; i < 3; ++i) {
         vertices[i] = TriangleVertexData();
     }
-    initialize_transforms();
 }
 
 Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
@@ -45,21 +44,15 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
     vertices[2].normal = nc.normalize();
     vertices[2].originalNormal = nc.normalize();
 
-    // Sync legacy members
-    syncLegacyMembers();
-    
-    initialize_transforms();
     update_bounding_box();
-    updateTransformedVertices();
 }
 
-// Legacy constructor with shared_ptr
+// Legacy constructor with shared_ptr (for backward compatibility)
 Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
                    const Vec3& na, const Vec3& nb, const Vec3& nc,
                    const Vec2& ta, const Vec2& tb, const Vec2& tc,
                    std::shared_ptr<Material> m)
     : t0(ta), t1(tb), t2(tc)
-    , mat_ptr(m)
     , faceIndex(-1)
     , aabbDirty(true)
 {
@@ -69,8 +62,6 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
             m->materialName.empty() ? "Material_" + std::to_string(reinterpret_cast<uintptr_t>(m.get())) : m->materialName,
             m
         );
-        gpuMaterialPtr = m->gpuMaterial;
-        materialName = m->materialName;
     } else {
         materialID = MaterialManager::INVALID_MATERIAL_ID;
     }
@@ -91,47 +82,7 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
     vertices[2].normal = nc.normalize();
     vertices[2].originalNormal = nc.normalize();
 
-    // Sync legacy members
-    syncLegacyMembers();
-
-    initialize_transforms();
     update_bounding_box();
-    updateTransformedVertices();
-}
-
-// ============================================================================
-// Sync Legacy Members
-// ============================================================================
-
-void Triangle::syncLegacyMembers() {
-    // Sync position
-    v0 = vertices[0].position;
-    v1 = vertices[1].position;
-    v2 = vertices[2].position;
-    
-    // Sync normals
-    n0 = vertices[0].normal;
-    n1 = vertices[1].normal;
-    n2 = vertices[2].normal;
-    
-    // Sync original positions
-    original_v0 = vertices[0].original;
-    original_v1 = vertices[1].original;
-    original_v2 = vertices[2].original;
-    
-    // Sync original normals
-    original_n0 = vertices[0].originalNormal;
-    original_n1 = vertices[1].originalNormal;
-    original_n2 = vertices[2].originalNormal;
-    
-    // Sync transformed (same as position after transform)
-    transformed_v0 = vertices[0].position;
-    transformed_v1 = vertices[1].position;
-    transformed_v2 = vertices[2].position;
-    
-    transformed_n0 = vertices[0].normal;
-    transformed_n1 = vertices[1].normal;
-    transformed_n2 = vertices[2].normal;
 }
 
 // ============================================================================
@@ -139,23 +90,15 @@ void Triangle::syncLegacyMembers() {
 // ============================================================================
 
 std::shared_ptr<Material> Triangle::getMaterial() const {
-    // First try the legacy pointer for backward compatibility
-    if (mat_ptr) {
-        return mat_ptr;
-    }
-    // Otherwise use MaterialManager
     return MaterialManager::getInstance().getMaterialShared(materialID);
 }
 
 void Triangle::setMaterial(const std::shared_ptr<Material>& mat) {
-    mat_ptr = mat;
     if (mat) {
         materialID = MaterialManager::getInstance().getOrCreateMaterialID(
             mat->materialName.empty() ? "Material_" + std::to_string(reinterpret_cast<uintptr_t>(mat.get())) : mat->materialName,
             mat
         );
-        gpuMaterialPtr = mat->gpuMaterial;
-        materialName = mat->materialName;
     } else {
         materialID = MaterialManager::INVALID_MATERIAL_ID;
     }
@@ -183,10 +126,6 @@ void Triangle::set_normals(const Vec3& normal0, const Vec3& normal1, const Vec3&
     vertices[0].normal = normal0.normalize();
     vertices[1].normal = normal1.normalize();
     vertices[2].normal = normal2.normalize();
-    
-    n0 = vertices[0].normal;
-    n1 = vertices[1].normal;
-    n2 = vertices[2].normal;
 }
 
 // ============================================================================
@@ -194,7 +133,6 @@ void Triangle::set_normals(const Vec3& normal0, const Vec3& normal1, const Vec3&
 // ============================================================================
 
 void Triangle::set_transform(const Matrix4x4& t) {
-    transform = t;
     if (transformHandle) {
         transformHandle->setCurrent(t);
     }
@@ -210,15 +148,16 @@ Matrix4x4 Triangle::getTransformMatrix() const {
     if (transformHandle) {
         return transformHandle->getFinal();
     }
-    return finalTransform_legacy;
+    return Matrix4x4::identity();
 }
 
 void Triangle::update_bounding_box() const {
     if (!aabbDirty) return;
 
-    Vec3 tv0 = transformed_v0;
-    Vec3 tv1 = transformed_v1;
-    Vec3 tv2 = transformed_v2;
+    // Use current vertex positions
+    const Vec3& tv0 = vertices[0].position;
+    const Vec3& tv1 = vertices[1].position;
+    const Vec3& tv2 = vertices[2].position;
 
     Vec3 minPoint(
         std::min({ tv0.x, tv1.x, tv2.x }),
@@ -268,35 +207,36 @@ const std::vector<std::pair<int, float>>& Triangle::getSkinBoneWeights(int verte
     return empty;
 }
 
-// Legacy access
+// Legacy access (for gradual migration - returns reference to temporary)
 std::vector<std::vector<std::pair<int, float>>>& Triangle::getVertexBoneWeights() {
     initializeSkinData();
-    // Keep legacy member in sync
-    vertexBoneWeights = skinData->vertexBoneWeights;
-    return vertexBoneWeights;
+    return skinData->vertexBoneWeights;
 }
 
 std::vector<Vec3>& Triangle::getOriginalVertexPositions() {
     initializeSkinData();
-    originalVertexPositions = skinData->originalVertexPositions;
-    return originalVertexPositions;
+    return skinData->originalVertexPositions;
 }
 
 Vec3 Triangle::apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const {
-    const auto& boneWeights = hasSkinData() ? skinData->vertexBoneWeights[vi] : vertexBoneWeights[vi];
-    const auto& origPositions = hasSkinData() ? skinData->originalVertexPositions : originalVertexPositions;
+    if (!hasSkinData()) return vertices[vi].position;
+    
+    const auto& boneWeights = skinData->vertexBoneWeights[vi];
+    const auto& origPosition = skinData->originalVertexPositions[vi];
     
     Vec3 blended = Vec3(0);
     for (const auto& [boneIdx, weight] : boneWeights) {
-        Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(origPositions[vi]);
+        Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(origPosition);
         blended += transformed * weight;
     }
     return blended;
 }
 
 void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
-    const auto& boneWeights = hasSkinData() ? skinData->vertexBoneWeights : vertexBoneWeights;
-    const auto& origPositions = hasSkinData() ? skinData->originalVertexPositions : originalVertexPositions;
+    if (!hasSkinData()) return;
+
+    const auto& boneWeights = skinData->vertexBoneWeights;
+    const auto& origPositions = skinData->originalVertexPositions;
 
     // Validation check
     if (boneWeights.size() != 3 || origPositions.size() != 3 ||
@@ -308,7 +248,6 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
             vertices[i].position = vertices[i].original;
             vertices[i].normal = vertices[i].originalNormal;
         }
-        syncLegacyMembers();
         return;
     }
 
@@ -342,8 +281,6 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
         vertices[vi].normal = blendedNorm.normalize();
     }
 
-    // Sync legacy members
-    syncLegacyMembers();
     aabbDirty = true;
 }
 
@@ -364,8 +301,13 @@ Vec3 Triangle::apply_bone_to_normal(const Vec3& originalNormal,
 // ============================================================================
 
 bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const {
-    const Vec3 edge1 = transformed_v1 - transformed_v0;
-    const Vec3 edge2 = transformed_v2 - transformed_v0;
+    // Use current vertex positions (already transformed)
+    const Vec3& v0 = vertices[0].position;
+    const Vec3& v1 = vertices[1].position;
+    const Vec3& v2 = vertices[2].position;
+    
+    const Vec3 edge1 = v1 - v0;
+    const Vec3 edge2 = v2 - v0;
 
     Vec3 h = Vec3::cross(r.direction, edge2);
     float a = Vec3::dot(edge1, h);
@@ -375,7 +317,7 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const
         return false;
 
     float f = 1.0f / a;
-    Vec3 s = r.origin - transformed_v0;
+    Vec3 s = r.origin - v0;
     float u = f * Vec3::dot(s, h);
 
     // Tolerant boundaries
@@ -404,7 +346,7 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const
 
     // Interpolate normal directly with barycentric coordinates
     rec.interpolated_normal =
-        (w * transformed_n0 + u * transformed_n1 + v * transformed_n2).normalize();
+        (w * vertices[0].normal + u * vertices[1].normal + v * vertices[2].normal).normalize();
 
     rec.normal = rec.interpolated_normal;
 
@@ -415,14 +357,15 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const
     rec.u = uv.u;
     rec.v = uv.v;
     
-    // Set material - use legacy pointer for backward compatibility
-    rec.material = mat_ptr ? mat_ptr : MaterialManager::getInstance().getMaterialShared(materialID);
+    // Set material from MaterialManager
+    rec.material = MaterialManager::getInstance().getMaterialShared(materialID);
+    rec.materialID = materialID;
 
     return true;
 }
 
 // ============================================================================
-// Transform Initialization
+// Transform Initialization & Updates
 // ============================================================================
 
 void Triangle::updateTransformedVertices() {
@@ -434,7 +377,6 @@ void Triangle::updateTransformedVertices() {
         vertices[i].normal = normalTransform.transform_vector(vertices[i].originalNormal).normalize();
     }
 
-    syncLegacyMembers();
     aabbDirty = true;
     update_bounding_box();
 }
@@ -444,7 +386,6 @@ void Triangle::setNodeName(const std::string& name) {
 }
 
 void Triangle::setBaseTransform(const Matrix4x4& t) {
-    baseTransform_legacy = t;
     if (transformHandle) {
         transformHandle->setBase(t);
     }
@@ -457,20 +398,9 @@ void Triangle::initialize_transforms() {
         vertices[i].original = vertices[i].position;
         vertices[i].originalNormal = vertices[i].normal.normalize();
     }
-
-    // Initialize transforms
-    baseTransform_legacy = Matrix4x4::identity();
-    currentTransform_legacy = Matrix4x4::identity();
-    finalTransform_legacy = Matrix4x4::identity();
-    transform = Matrix4x4::identity();
-
-    syncLegacyMembers();
 }
 
 void Triangle::updateAnimationTransform(const Matrix4x4& animTransform) {
-    currentTransform_legacy = animTransform;
-    finalTransform_legacy = currentTransform_legacy;
-    
     if (transformHandle) {
         transformHandle->setCurrent(animTransform);
     }
