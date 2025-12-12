@@ -236,7 +236,49 @@ RayTrophi/
 
 ## 🎨 Galeri
 
-*(Render edilmiş görsellerinizi buraya ekleyin)*
+### 🎬 Demo Reel
+
+[![RayTrophi 2025 Showreel](https://img.youtube.com/vi/Vcn4Dp0ICxk/maxresdefault.jpg)](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)
+
+**[▶️ Demo Reel'i YouTube'da İzleyin](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)**
+
+### 🖼️ Render Örnekleri
+
+<div align="center">
+
+#### Mimari Görselleştirme
+<img src="render_samples/1.png" width="800" alt="Karmaşık İç Mekan Sahnesi - 3.3M Üçgen">
+<p><i>Gelişmiş aydınlatma ile karmaşık mimari sahne - 3.3M üçgen, Embree BVH</i></p>
+
+#### Ürün Renderlaması
+<img src="render_samples/indoor2.png" width="800" alt="İç Mekan Tasarımı">
+<p><i>Volumetrik aydınlatma ve subsurface scattering ile iç mekan tasarımı</i></p>
+
+#### GPU Hızlandırmalı Rendering
+<img src="render_samples/output1.png" width="800" alt="OptiX GPU Rendering">
+<p><i>OptiX ile gerçek zamanlı GPU rendering - 500M+ rays/saniye</i></p>
+
+#### Stilize Rendering
+<img src="render_samples/stylesed_winter_dragon1.png" width="800" alt="Ejderha Modeli">
+<p><i>Özel materyaller ve prosedürel texture'lar ile stilize ejderha</i></p>
+
+#### CPU Path Tracing
+<img src="render_samples/RayTrophi_cpu1.png" width="800" alt="CPU Rendering">
+<p><i>Progressive refinement ile saf CPU path tracing</i></p>
+
+#### Materyaller & Texture'lar
+<img src="render_samples/stylize_cpu.png" width="800" alt="Materyal Gösterimi">
+<p><i>PBR texture'lar ile Principled BSDF materyalleri</i></p>
+
+#### Açık Hava Sahnesi
+<img src="render_samples/yelken.png" width="800" alt="Yelkenli Sahnesi">
+<p><i>Doğal aydınlatma ile açık hava ortamı</i></p>
+
+#### Gerçek Zamanlı UI
+<img src="render_samples/Ekran görüntüsü 2025-12-04 161755.png" width="800" alt="ImGui Arayüzü">
+<p><i>Canlı parametre ayarlamaları ile interaktif ImGui arayüzü</i></p>
+
+</div>
 
 ---
 

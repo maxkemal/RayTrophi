@@ -236,7 +236,49 @@ RayTrophi/
 
 ## 🎨 Gallery
 
-*(Add your rendered images here)*
+### 🎬 Demo Reel
+
+[![RayTrophi 2025 Showreel](https://img.youtube.com/vi/Vcn4Dp0ICxk/maxresdefault.jpg)](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)
+
+**[▶️ Watch Full Demo Reel on YouTube](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)**
+
+### 🖼️ Render Samples
+
+<div align="center">
+
+#### Architectural Visualization
+<img src="render_samples/1.png" width="800" alt="Complex Indoor Scene - 3.3M Triangles">
+<p><i>Complex architectural scene with advanced lighting - 3.3M triangles, Embree BVH</i></p>
+
+#### Product Rendering
+<img src="render_samples/indoor2.png" width="800" alt="Interior Design">
+<p><i>Interior design with volumetric lighting and subsurface scattering</i></p>
+
+#### GPU Accelerated Rendering
+<img src="render_samples/output1.png" width="800" alt="OptiX GPU Rendering">
+<p><i>Real-time GPU rendering with OptiX - 500M+ rays/second</i></p>
+
+#### Stylized Rendering
+<img src="render_samples/stylesed_winter_dragon1.png" width="800" alt="Dragon Model">
+<p><i>Stylized dragon with custom materials and procedural textures</i></p>
+
+#### CPU Path Tracing
+<img src="render_samples/RayTrophi_cpu1.png" width="800" alt="CPU Rendering">
+<p><i>Pure CPU path tracing with progressive refinement</i></p>
+
+#### Materials & Textures
+<img src="render_samples/stylize_cpu.png" width="800" alt="Material Showcase">
+<p><i>Principled BSDF materials with PBR textures</i></p>
+
+#### Outdoor Scene
+<img src="render_samples/yelken.png" width="800" alt="Sailboat Scene">
+<p><i>Outdoor environment with natural lighting</i></p>
+
+#### Real-time UI
+<img src="render_samples/Ekran görüntüsü 2025-12-04 161755.png" width="800" alt="ImGui Interface">
+<p><i>Interactive ImGui interface with live parameter adjustments</i></p>
+
+</div>
 
 ---
 
