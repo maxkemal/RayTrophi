@@ -592,7 +592,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         // --- CPU Section ---
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "CPU (BVH)");
         const char* bvh_options[] = { "Embree", "RT_BVH (RayTrophi)" };
-        static int current_bvh = ctx.render_settings.UI_use_embree ? 0 : 1;
+        int current_bvh = ctx.render_settings.UI_use_embree ? 0 : 1;
 
         bool hovered = false;
 

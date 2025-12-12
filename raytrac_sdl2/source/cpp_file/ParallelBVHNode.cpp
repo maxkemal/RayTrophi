@@ -11,7 +11,7 @@
 #include <execution>
 #include <numeric>
 #include <mutex>
-
+#include <chrono>
 std::atomic<int> ParallelBVHNode::active_threads(0);
 
 ParallelBVHNode::ParallelBVHNode(const std::vector<std::shared_ptr<Hittable>>& src_objects,
@@ -59,7 +59,7 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
 
 
     std::vector<ObjectInfo> object_infos;
-    object_infos.resize(object_span);
+    object_infos.resize(object_span);  // !
     AABB overall_box;
 
     // Object bilgilerini paralel hesapla

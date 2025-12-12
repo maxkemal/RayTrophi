@@ -14,7 +14,7 @@ class ParallelBVHNode : public Hittable {
 private:    
   
     static std::atomic<int> active_threads;
-    static constexpr size_t MIN_OBJECTS_PER_THREAD = 1024;
+    static constexpr size_t MIN_OBJECTS_PER_THREAD = 8192;
     static constexpr int MAX_DEPTH = 32;
     static bool box_compare(const std::shared_ptr<Hittable> a, const std::shared_ptr<Hittable> b, int axis);
     static bool box_x_compare(const std::shared_ptr<Hittable> a, const std::shared_ptr<Hittable> b);
