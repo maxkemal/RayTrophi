@@ -333,7 +333,6 @@
     <ClCompile Include="source\src\Vec3SIMD.cpp" />
     <ClCompile Include="source\src\Volumetric.cpp" />
     <ClCompile Include="source\src\MaterialManager.cpp" />
-    <ClCompile Include="source\src\DiffuseLight.cpp" />
     <ClCompile Include="source\external\imgui\imgui.cpp" />
     <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
     <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp" />

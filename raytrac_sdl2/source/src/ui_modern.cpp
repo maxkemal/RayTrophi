@@ -4,7 +4,7 @@
  * ThemeManager, UIWidgets ve PanelManager implementasyonlarÄ±.
  */
 
-#include "../header/ui_modern.h"
+#include "ui_modern.h"
 #include <fstream>
 #include <algorithm>
 

@@ -214,7 +214,7 @@ bool PrincipledBSDF::scatter(
 
     // Geçiş katsayısı daha net kontrol edilsin
    
-    Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness).normalize();
+    Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness*0.1f).normalize();
     //Vec3 diffuse_dir = cosine_dir.normalize();
     // Fresnel term determines reflectance vs diffuse ratio
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
