@@ -308,10 +308,7 @@
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\src\MaterialManager.cpp">
-      <Filter>Kaynak Dosyalar</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\DiffuseLight.cpp">
-      <Filter>Kaynak Dosyalar</Filter>
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
