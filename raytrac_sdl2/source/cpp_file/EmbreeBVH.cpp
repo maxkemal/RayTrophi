@@ -1,10 +1,15 @@
 ﻿#include "EmbreeBVH.h"
 #include <cassert>
+#include <chrono>
 #include <Volumetric.h>
 
 EmbreeBVH::EmbreeBVH() {
     device = rtcNewDevice(nullptr);
     scene = rtcNewScene(device);
+    
+    // Configure scene for optimal BVH build performance
+    rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM); // Balance between build time and ray tracing performance
+    rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC); // Allow dynamic updates
 }
 
 EmbreeBVH::~EmbreeBVH() {
@@ -13,81 +18,107 @@ EmbreeBVH::~EmbreeBVH() {
 }
 
 void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    auto build_start = std::chrono::high_resolution_clock::now();
     SCENE_LOG_INFO("[EmbreeBVH::build] Build started");
 
-    std::vector<Vec3> vertices;
-    std::vector<std::array<unsigned, 3>> indices;
-    triangle_data.clear();
-
-    unsigned vert_offset = 0;
+    // First pass: Count triangles
     size_t tri_count = 0;
-
-    // Objeleri üçgen olarak topla
     for (const auto& obj : objects) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (!tri) continue;
-
-        vertices.push_back(tri->getVertexPosition(0));
-        vertices.push_back(tri->getVertexPosition(1));
-        vertices.push_back(tri->getVertexPosition(2));
-
-        indices.push_back({ vert_offset, vert_offset + 1, vert_offset + 2 });
-
-        triangle_data.push_back({
-            tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2),
-            tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
-            tri->t0, tri->t1, tri->t2,
-            tri->getMaterialID()
-            });
-
-        vert_offset += 3;
-        tri_count++;
+        if (std::dynamic_pointer_cast<Triangle>(obj)) {
+            tri_count++;
+        }
     }
 
     if (tri_count == 0) {
         SCENE_LOG_WARN("[EmbreeBVH::build] No triangles found");
-    }
-    else {
-        SCENE_LOG_INFO("[EmbreeBVH::build] Triangle count = " + std::to_string(tri_count));
+        return;
     }
 
+    SCENE_LOG_INFO("[EmbreeBVH::build] Triangle count = " + std::to_string(tri_count));
+
+    // Pre-allocate all vectors to avoid reallocation overhead
+    triangle_data.clear();
+    triangle_data.reserve(tri_count);
+
+    // Create geometry
     RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
     if (!geom) {
         SCENE_LOG_ERROR("[EmbreeBVH::build] Failed to create geometry");
         return;
     }
 
-    // Vertex buffer
+    // Allocate Embree buffers directly (no intermediate vectors!)
     Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
-        sizeof(Vec3), vertices.size()
+        sizeof(Vec3), tri_count * 3
     );
     if (!vertex_buffer) {
         SCENE_LOG_ERROR("[EmbreeBVH::build] Failed to allocate vertex buffer");
+        rtcReleaseGeometry(geom);
         return;
     }
-    std::memcpy(vertex_buffer, vertices.data(), sizeof(Vec3) * vertices.size());
 
-    // Index buffer
     unsigned* index_buffer = (unsigned*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
-        sizeof(unsigned) * 3, indices.size()
+        sizeof(unsigned) * 3, tri_count
     );
     if (!index_buffer) {
         SCENE_LOG_ERROR("[EmbreeBVH::build] Failed to allocate index buffer");
+        rtcReleaseGeometry(geom);
         return;
     }
-    std::memcpy(index_buffer, indices.data(), sizeof(unsigned) * 3 * indices.size());
 
+    // Second pass: Fill buffers directly (single pass, no redundant copies)
+    size_t tri_idx = 0;
+    for (const auto& obj : objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (!tri) continue;
+
+        unsigned base_idx = static_cast<unsigned>(tri_idx * 3);
+
+        // Write directly to Embree's vertex buffer
+        vertex_buffer[base_idx + 0] = tri->getVertexPosition(0);
+        vertex_buffer[base_idx + 1] = tri->getVertexPosition(1);
+        vertex_buffer[base_idx + 2] = tri->getVertexPosition(2);
+
+        // Write directly to Embree's index buffer
+        index_buffer[tri_idx * 3 + 0] = base_idx + 0;
+        index_buffer[tri_idx * 3 + 1] = base_idx + 1;
+        index_buffer[tri_idx * 3 + 2] = base_idx + 2;
+
+        // Store triangle data (single copy)
+        triangle_data.push_back({
+            tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2),
+            tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
+            tri->t0, tri->t1, tri->t2,
+            tri->getMaterialID()
+        });
+
+        tri_idx++;
+    }
+
+    auto data_prep_end = std::chrono::high_resolution_clock::now();
+    auto data_prep_ms = std::chrono::duration_cast<std::chrono::milliseconds>(data_prep_end - build_start).count();
+    SCENE_LOG_INFO("[EmbreeBVH::build] Data preparation took " + std::to_string(data_prep_ms) + " ms");
+
+    // Commit geometry
     rtcCommitGeometry(geom);
     SCENE_LOG_INFO("[EmbreeBVH::build] Geometry committed");
 
     unsigned geomID = rtcAttachGeometry(scene, geom);
     rtcReleaseGeometry(geom);
-
     SCENE_LOG_INFO("[EmbreeBVH::build] Geometry attached with ID = " + std::to_string(geomID));
 
+    // Commit scene (this is where BVH construction happens)
+    auto bvh_start = std::chrono::high_resolution_clock::now();
     rtcCommitScene(scene);
+    auto bvh_end = std::chrono::high_resolution_clock::now();
+    
+    auto bvh_build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(bvh_end - bvh_start).count();
+    auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(bvh_end - build_start).count();
+    
+    SCENE_LOG_INFO("[EmbreeBVH::build] BVH construction took " + std::to_string(bvh_build_ms) + " ms");
+    SCENE_LOG_INFO("[EmbreeBVH::build] Total build time: " + std::to_string(total_ms) + " ms");
     SCENE_LOG_INFO("[EmbreeBVH::build] BVH build completed");
 }
 
@@ -199,34 +230,38 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
     return false;
 }
 void EmbreeBVH::buildFromTriangleData(const std::vector<TriangleData>& triangles) {
-    triangle_data = triangles; // Kopyala
+    triangle_data = triangles; // Store triangle data
 
-    std::vector<Vec3> vertices;
-    std::vector<std::array<unsigned, 3>> indices;
-
-    unsigned vert_offset = 0;
-    for (const auto& tri : triangles) {
-        vertices.push_back(tri.v0);
-        vertices.push_back(tri.v1);
-        vertices.push_back(tri.v2);
-
-        indices.push_back({ vert_offset, vert_offset + 1, vert_offset + 2 });
-        vert_offset += 3;
-    }
+    if (triangles.empty()) return;
 
     RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
 
+    // Allocate buffers directly
     Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
-        sizeof(Vec3), vertices.size()
+        sizeof(Vec3), triangles.size() * 3
     );
-    std::memcpy(vertex_buffer, vertices.data(), sizeof(Vec3) * vertices.size());
 
     unsigned* index_buffer = (unsigned*)rtcSetNewGeometryBuffer(
         geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
-        sizeof(unsigned) * 3, indices.size()
+        sizeof(unsigned) * 3, triangles.size()
     );
-    std::memcpy(index_buffer, indices.data(), sizeof(unsigned) * 3 * indices.size());
+
+    // Write directly to buffers (no intermediate vectors!)
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        const auto& tri = triangles[i];
+        unsigned base_idx = static_cast<unsigned>(i * 3);
+
+        // Vertices
+        vertex_buffer[base_idx + 0] = tri.v0;
+        vertex_buffer[base_idx + 1] = tri.v1;
+        vertex_buffer[base_idx + 2] = tri.v2;
+
+        // Indices
+        index_buffer[i * 3 + 0] = base_idx + 0;
+        index_buffer[i * 3 + 1] = base_idx + 1;
+        index_buffer[i * 3 + 2] = base_idx + 2;
+    }
 
     rtcCommitGeometry(geom);
     rtcAttachGeometry(scene, geom);
