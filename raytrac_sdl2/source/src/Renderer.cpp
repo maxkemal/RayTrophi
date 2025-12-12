@@ -620,7 +620,11 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
 
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path) {
 
-    // Önce sahneyi sıfırla
+    SCENE_LOG_INFO("========================================");
+    SCENE_LOG_INFO("SCENE CLEANUP: Starting comprehensive cleanup...");
+    SCENE_LOG_INFO("========================================");
+
+    // ---- 1. Sahne verilerini sıfırla ----
     scene.world.clear();
     scene.lights.clear();
     scene.animatedObjects.clear();
@@ -628,8 +632,30 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     scene.camera = nullptr;
     scene.bvh = nullptr;
     scene.initialized = false;
+    SCENE_LOG_INFO("[SCENE CLEANUP] Scene data structures cleaned.");
+
+    // ---- 2. MaterialManager'ı temizle ----
+    size_t material_count_before = MaterialManager::getInstance().getMaterialCount();
+    MaterialManager::getInstance().clear();
+    SCENE_LOG_INFO("[MATERIAL CLEANUP] MaterialManager cleared: " + std::to_string(material_count_before) + " materials removed.");
+
+    // ---- 3. CPU Texture Cache'leri temizle ----
     assimpLoader.clearTextureCache();
 
+    // ---- 4. GPU OptiX Texture'larını temizle ----
+    if (g_hasOptix && optix_gpu_ptr) {
+        try {
+            optix_gpu_ptr->destroyTextureObjects();
+            SCENE_LOG_INFO("[GPU CLEANUP] OptiX texture objects destroyed.");
+        }
+        catch (std::exception& e) {
+            SCENE_LOG_WARN("[GPU CLEANUP] Exception during texture cleanup: " + std::string(e.what()));
+        }
+    }
+
+    SCENE_LOG_INFO("========================================");
+    SCENE_LOG_INFO("SCENE CLEANUP: Completed successfully!");
+    SCENE_LOG_INFO("========================================");
     SCENE_LOG_INFO("Starting scene creation from: " + model_path);
 
     std::filesystem::path path(model_path);
