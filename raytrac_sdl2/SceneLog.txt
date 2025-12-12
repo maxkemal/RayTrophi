@@ -1,2 +1,1405 @@
 [INFO] Found RTX-capable device: NVIDIA GeForce RTX 3060 (SM 8.6)
 [INFO] OptiX is ready!
+[INFO] Starting async scene load...
+[INFO] [TEXTURE CLEANUP] Starting texture cache cleanup...
+[INFO] [TEXTURE CLEANUP] Complete! Stats:
+[INFO]   - GPU textures cleaned: 0
+[INFO]   - CPU cache entries removed: 0
+[INFO]   - Global TextureCache cleared: 0 entries
+[INFO]   - Global FileTextureCache cleared: 0 entries
+[INFO] Starting scene creation from: E:\data\home\1.glb
+[INFO] Base directory set to: E:\data\home/
+[INFO] Loading model geometry and animations...
+[INFO] Starting model loading: E:\data\home\1.glb
+[INFO] Importing file with Assimp...
+[INFO] Assimp file loaded successfully. Processing scene data...
+[INFO] Clearing existing cameras and lights...
+[INFO] Building node map from scene hierarchy...
+[INFO] Node map built with 5 nodes.
+[INFO] Processing cameras...
+[INFO] ---- Camera Loaded: Camera
+[INFO] Pos: (-0,320872, 4,863304, 20,494976) | LookAt: (-0,323797, 4,709057, 19,506948) | Up: (-0,000456, 0,988032, -0,154246) | Aspect:1,777778 | FOV:22,895195
+[INFO] Cameras processed: 1 camera(s) found.
+[INFO] Processing lights...
+[INFO] Total lights in scene: 1
+[INFO] Processing light: Light (Point)
+[INFO] Light created: Light | Type: Point | Pos: (4,076245, 5,903862, 2,642324) | Dir: (0,000000, 0,000000, 0,000000) | Color: (0,577350, 0,577350, 0,577350) | Power: 94,139404
+[INFO] Lights processed: 1 light(s) found.
+[INFO] Processing nodes to extract triangles...
+[INFO] Process Material: material
+[INFO] Process Material: 
+[INFO] Triangle extraction completed: 14 triangles processed.
+[INFO] Processing bone data...
+[INFO] Processing animations...
+[INFO] Found 2 animation(s) in model.
+[INFO] [Animation 1] Name: CubeAction, Duration: 833,333313, TPS: 1000,000000
+[INFO]   [Channel 1] Node: Cube, Pos Keys: 21, Rot Keys: 2, Scale Keys: 2
+[INFO] [Animation 1] Total channels: 1, Total keys: 25
+[INFO] [Animation 2] Name: LightAction, Duration: 791,666687, TPS: 1000,000000
+[INFO]   [Channel 1] Node: Light, Pos Keys: 20, Rot Keys: 2, Scale Keys: 2
+[INFO] [Animation 2] Total channels: 1, Total keys: 24
+[INFO] All 2 animation(s) loaded successfully.
+[INFO] Model loading completed. Summary - Triangles: 14, Animations: 2, Cameras: 1, Lights: 1
+[INFO] Successfully loaded triangles: 14
+[INFO] Loaded animations: 2
+[INFO] Adding triangles to scene world...
+[INFO] Added 14 animated objects to scene.
+[INFO] Loading camera and lighting data...
+[INFO] Camera loaded successfully.
+[INFO] Loaded lights: 1
+[INFO] Building BVH structure...
+[INFO] [EmbreeBVH::build] Build started
+[INFO] [EmbreeBVH::build] Triangle count = 14
+[INFO] [EmbreeBVH::build] Data preparation took 0 ms
+[INFO] [EmbreeBVH::build] Geometry committed
+[INFO] [EmbreeBVH::build] Geometry attached with ID = 0
+[INFO] [EmbreeBVH::build] BVH construction took 1 ms
+[INFO] [EmbreeBVH::build] Total build time: 1 ms
+[INFO] [EmbreeBVH::build] BVH build completed
+[INFO] [Embree] BVH structure built successfully.
+[INFO] OptiX GPU detected. Creating OptiX geometry data...
+[INFO] Converting 14 triangles to OptiX format.
+[INFO] Material indices verified (14 triangles checked)
+[INFO] Material indices validated.
+[INFO]  OptiX buildFromData is starting...
+[INFO] OptiX buildFromData completed successfully! 2 SBT record(s) created for material.
+[INFO] OptiX BVH and acceleration structures built.
+[INFO] Setting up OptiX camera parameters...
+[INFO] OptiX camera configured successfully.
+[INFO] Configuring 1 lights for OptiX...
+[INFO] OptiX light parameters set successfully.
+[INFO] Background color set for OptiX rendering.
+[INFO] Scene creation completed successfully.
+[INFO] Scene info - Triangles: 14, Lights: 1, Animations: 2
+[INFO] Scene initialization flag set to true.
+[INFO] Scene loaded successfully.
+[INFO] Progress: 100,0% | 7200,0K px/s | ETA: 0s | FPS: 7,8
+[INFO] Progress: 100,0% | 13755,2K px/s | ETA: 0s | FPS: 14,9
+[INFO] Progress: 100,0% | 13165,7K px/s | ETA: 0s | FPS: 14,3
+[INFO] Progress: 100,0% | 12126,3K px/s | ETA: 0s | FPS: 13,2
+[INFO] Progress: 100,0% | 12126,3K px/s | ETA: 0s | FPS: 13,2
+[INFO] Progress: 100,0% | 11968,8K px/s | ETA: 0s | FPS: 13,0
+[INFO] Progress: 100,0% | 11239,0K px/s | ETA: 0s | FPS: 12,2
+[INFO] Progress: 100,0% | 10127,5K px/s | ETA: 0s | FPS: 11,0
+[INFO] Starting async scene load...
+[INFO] [TEXTURE CLEANUP] Starting texture cache cleanup...
+[INFO] [TEXTURE CLEANUP] Complete! Stats:
+[INFO]   - GPU textures cleaned: 0
+[INFO]   - CPU cache entries removed: 0
+[INFO]   - Global TextureCache cleared: 0 entries
+[INFO]   - Global FileTextureCache cleared: 0 entries
+[INFO] Starting scene creation from: E:\data\home\catgirl.glb
+[INFO] Base directory set to: E:\data\home/
+[INFO] Loading model geometry and animations...
+[INFO] Starting model loading: E:\data\home\catgirl.glb
+[INFO] Importing file with Assimp...
+[INFO] Assimp file loaded successfully. Processing scene data...
+[INFO] Clearing existing cameras and lights...
+[INFO] Building node map from scene hierarchy...
+[INFO] Node map built with 59 nodes.
+[INFO] Processing cameras...
+[INFO] ---- Camera Loaded: Camera
+[INFO] Pos: (0,522593, 0,823946, 2,326613) | LookAt: (0,206879, 0,954944, 1,386845) | Up: (0,041718, 0,991383, 0,124178) | Aspect:1,768421 | FOV:33,332222
+[INFO] Cameras processed: 1 camera(s) found.
+[INFO] Processing lights...
+[INFO] Total lights in scene: 3
+[INFO] Processing light: Light (Point)
+[INFO] Light created: Light | Type: Point | Pos: (0,881415, 1,755993, 1,569914) | Dir: (0,000000, 0,000000, 0,000000) | Color: (0,577350, 0,577350, 0,577350) | Power: 12,915927
+[INFO] Processing light: Light.001 (Point)
+[INFO] Light created: Light.001 | Type: Point | Pos: (-0,765593, 1,274132, 0,694273) | Dir: (-0,000000, 0,000000, 0,000000) | Color: (0,577350, 0,577350, 0,577350) | Power: 4,706970
+[INFO] Processing light: Light.002 (Point)
+[INFO] Light created: Light.002 | Type: Point | Pos: (0,812007, 0,398671, 0,938382) | Dir: (0,000000, 0,000000, 0,000000) | Color: (0,577350, 0,577350, 0,577350) | Power: 4,706970
+[INFO] Lights processed: 3 light(s) found.
+[INFO] Processing nodes to extract triangles...
+[INFO] Process Material: belt_rings
+[INFO] Process Material: belt
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 39ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *0 | Key: embedded_1922645995520_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: black_suit_
+[INFO] Material has texture: type=6 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 42ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *1 | Key: embedded_1922645987792_2
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[INFO] Process Material: black_suit_
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *1 | Key: embedded_1922645987792_2
+[INFO] Process Material: black_suit_
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *1 | Key: embedded_1922645987792_2
+[INFO] Process Material: black_suit_
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *1 | Key: embedded_1922645987792_2
+[INFO] Process Material: buckle
+[INFO] Process Material: head
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 42ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *2 | Key: embedded_1922645984480_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 38ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *3 | Key: embedded_1922645988896_2
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[INFO] Process Material: head
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *2 | Key: embedded_1922645984480_1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *3 | Key: embedded_1922645988896_2
+[INFO] Process Material: head
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *2 | Key: embedded_1922645984480_1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *3 | Key: embedded_1922645988896_2
+[INFO] Process Material: head
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *2 | Key: embedded_1922645984480_1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *3 | Key: embedded_1922645988896_2
+[INFO] Process Material: head
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *2 | Key: embedded_1922645984480_1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *3 | Key: embedded_1922645988896_2
+[INFO] Process Material: head
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *2 | Key: embedded_1922645984480_1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *3 | Key: embedded_1922645988896_2
+[INFO] Process Material: earing
+[INFO] Process Material: eye_ball_left
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 38ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *4 | Key: embedded_1922645985584_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyeball_right
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 36ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *5 | Key: embedded_1922645996624_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyebrow_top_left_1
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 34ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *6 | Key: embedded_1922645986688_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyebrow_top_right
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 47ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *7 | Key: embedded_1922645993312_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyelash_bottom_left
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | grayscale | 16 threads | 34ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *8 | Key: embedded_1922645990000_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyelash_bottom_right
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | grayscale | 16 threads | 35ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *9 | Key: embedded_1922645981168_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyelash_top_left
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | grayscale | 16 threads | 34ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *10 | Key: embedded_1922645997728_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: eyelash_top_right
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | grayscale | 16 threads | 35ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *11 | Key: embedded_1922645991104_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: hair_now_
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 42ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *12 | Key: embedded_1922645994416_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 44ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *13 | Key: embedded_1922645982272_2
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[INFO] Process Material: hair_now_
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *12 | Key: embedded_1922645994416_1
+[INFO] [EMBEDDED CACHE HIT] Reusing texture: *13 | Key: embedded_1922645982272_2
+[INFO] Process Material: hand
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 39ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *14 | Key: embedded_1922645992208_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 39ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *15 | Key: embedded_1922645998832_2
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[INFO] Process Material: nails_
+[INFO] Material has texture: type=1 count=1
+[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
+[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | 16 threads | 43ms
+[INFO] [EMBEDDED CACHE MISS] Created new texture: *16 | Key: embedded_1922645983376_1
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: teeth
+[INFO] Triangle extraction completed: 1599182 triangles processed.
+[INFO] Processing bone data...
+[INFO] Processing animations...
+[INFO] No animations found in file: E:\data\home\catgirl.glb
+[INFO] Model loading completed. Summary - Triangles: 1599182, Animations: 0, Cameras: 1, Lights: 3
+[INFO] Successfully loaded triangles: 1599182
+[INFO] Loaded animations: 0
+[INFO] Adding triangles to scene world...
+[INFO] Added 1599182 animated objects to scene.
+[INFO] Loading camera and lighting data...
+[INFO] Camera loaded successfully.
+[INFO] Loaded lights: 3
+[INFO] Building BVH structure...
+[INFO] [EmbreeBVH::build] Build started
+[INFO] [EmbreeBVH::build] Triangle count = 1599182
+[INFO] [EmbreeBVH::build] Data preparation took 316 ms
+[INFO] [EmbreeBVH::build] Geometry committed
+[INFO] [EmbreeBVH::build] Geometry attached with ID = 0
+[INFO] [EmbreeBVH::build] BVH construction took 77 ms
+[INFO] [EmbreeBVH::build] Total build time: 393 ms
+[INFO] [EmbreeBVH::build] BVH build completed
+[INFO] [Embree] BVH structure built successfully.
+[INFO] OptiX GPU detected. Creating OptiX geometry data...
+[INFO] Converting 1599182 triangles to OptiX format.
+[INFO] Material indices verified (1599182 triangles checked)
+[INFO] Material indices validated.
+[INFO]  OptiX buildFromData is starting...
+[INFO] OptiX buildFromData completed successfully! 18 SBT record(s) created for material.
+[INFO] OptiX BVH and acceleration structures built.
+[INFO] Setting up OptiX camera parameters...
+[INFO] OptiX camera configured successfully.
+[INFO] Configuring 3 lights for OptiX...
+[INFO] OptiX light parameters set successfully.
+[INFO] Background color set for OptiX rendering.
+[INFO] Scene creation completed successfully.
+[INFO] Scene info - Triangles: 1599182, Lights: 3, Animations: 0
+[INFO] Scene initialization flag set to true.
+[INFO] Scene loaded successfully.
+[INFO] Progress: 100,0% | 7876,9K px/s | ETA: 0s | FPS: 8,5
+[INFO] Starting async scene load...
+[INFO] [TEXTURE CLEANUP] Starting texture cache cleanup...
+[INFO] [TEXTURE CLEANUP] Complete! Stats:
+[INFO]   - GPU textures cleaned: 17
+[INFO]   - CPU cache entries removed: 17
+[INFO]   - Global TextureCache cleared: 17 entries
+[INFO]   - Global FileTextureCache cleared: 0 entries
+[INFO] Starting scene creation from: E:\data\home\bedroom.gltf
+[INFO] Base directory set to: E:\data\home/
+[INFO] Loading model geometry and animations...
+[INFO] Starting model loading: E:\data\home\bedroom.gltf
+[INFO] Importing file with Assimp...
+[INFO] Assimp file loaded successfully. Processing scene data...
+[INFO] Clearing existing cameras and lights...
+[INFO] Building node map from scene hierarchy...
+[INFO] Node map built with 770 nodes.
+[INFO] Processing cameras...
+[INFO] ---- Camera Loaded: Camera
+[INFO] Pos: (2,943325, 1,195926, 13,047393) | LookAt: (3,003145, 1,173705, 12,049431) | Up: (0,001331, 0,999753, -0,022181) | Aspect:1,768421 | FOV:35,289691
+[INFO] Cameras processed: 1 camera(s) found.
+[INFO] Processing lights...
+[INFO] Total lights in scene: 2
+[INFO] Processing light: Light.001 (Directional)
+[INFO] Light created: Light.001 | Type: Directional | Pos: (-2,145116, 2,510378, -0,108043) | Dir: (0,916338, -0,341458, 0,209118) | Color: (0,666793, 0,558796, 0,493086) | Power: 5,121530
+[INFO] Processing light: Point (Point)
+[INFO] Light created: Point | Type: Point | Pos: (2,643156, 2,710723, 5,521091) | Dir: (0,000000, 0,000000, 0,000000) | Color: (0,577350, 0,577350, 0,577350) | Power: 23,534851
+[INFO] Lights processed: 2 light(s) found.
+[INFO] Processing nodes to extract triangles...
+[INFO] Process Material: 2023051321530124
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\6.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\6.jpg | Resolution: 1209x1206
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\6.jpg' | 1209x1206 | opaque | color | Threads: 16 | Cache size now: 1 | Total time: 81ms
+[INFO] Texture uploaded to GPU successfully | 1209x1206 | sRGB->Linear converted
+[INFO] Process Material: 2023051321530122
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\3.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\3.jpg | Resolution: 925x920
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\3.jpg' | 925x920 | opaque | color | Threads: 16 | Cache size now: 2 | Total time: 33ms
+[INFO] Texture uploaded to GPU successfully | 925x920 | sRGB->Linear converted
+[INFO] Process Material: 2023051321530121
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530122
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530123
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\4.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\4.jpg | Resolution: 1224x1217
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\4.jpg' | 1224x1217 | opaque | color | Threads: 16 | Cache size now: 3 | Total time: 42ms
+[INFO] Texture uploaded to GPU successfully | 1224x1217 | sRGB->Linear converted
+[INFO] Process Material: 2023051321530122
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530124
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530125
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\2023051111300140.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\2023051111300140.jpg | Resolution: 1250x1245
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\2023051111300140.jpg' | 1250x1245 | opaque | color | Threads: 16 | Cache size now: 4 | Total time: 60ms
+[INFO] Texture uploaded to GPU successfully | 1250x1245 | sRGB->Linear converted
+[INFO] Process Material: 2023051321530126
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\sjosdhqc_4K_Albedo.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\sjosdhqc_4K_Albedo.jpg | Resolution: 4096x4096
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\sjosdhqc_4K_Albedo.jpg' | 4096x4096 | opaque | color | Threads: 16 | Cache size now: 5 | Total time: 266ms
+[INFO] Texture uploaded to GPU successfully | 4096x4096 | sRGB->Linear converted
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\sjosdhqc_4K_Normal.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\sjosdhqc_4K_Normal.jpg | Resolution: 4096x4096
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\sjosdhqc_4K_Normal.jpg' | 4096x4096 | opaque | color | Threads: 16 | Cache size now: 6 | Total time: 281ms
+[INFO] Texture uploaded to GPU successfully | 4096x4096 | Linear (no conversion)
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\sjosdhqc_4K_Roughness.png' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\sjosdhqc_4K_Roughness.png | Resolution: 4096x4096
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\sjosdhqc_4K_Roughness.png' | 4096x4096 | opaque | color | Threads: 16 | Cache size now: 7 | Total time: 428ms
+[INFO] Texture uploaded to GPU successfully | 4096x4096 | Linear (no conversion)
+[INFO] Process Material: 2023051321530125
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530125
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530125
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530125
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 2023051321530122
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__2
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\2023051321530039.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\2023051321530039.jpg | Resolution: 1157x1599
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\2023051321530039.jpg' | 1157x1599 | opaque | color | Threads: 16 | Cache size now: 8 | Total time: 53ms
+[INFO] Texture uploaded to GPU successfully | 1157x1599 | sRGB->Linear converted
+[INFO] Process Material: material__1
+[INFO] Process Material: material__3
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\2023051321530040.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\2023051321530040.jpg | Resolution: 972x784
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\2023051321530040.jpg' | 972x784 | opaque | color | Threads: 16 | Cache size now: 9 | Total time: 30ms
+[INFO] Texture uploaded to GPU successfully | 972x784 | sRGB->Linear converted
+[INFO] Process Material: material__4
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\110.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\110.jpg | Resolution: 702x837
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\110.jpg' | 702x837 | opaque | color | Threads: 16 | Cache size now: 10 | Total time: 27ms
+[INFO] Texture uploaded to GPU successfully | 702x837 | sRGB->Linear converted
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: material__1
+[INFO] Process Material: 23_4_100054
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100056
+[INFO] Process Material: 23_4_100057
+[INFO] Process Material: 23_4_100058
+[INFO] Process Material: 23_4_100059
+[INFO] Process Material: 23_4_100061
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: material__5
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100056
+[INFO] Process Material: 23_4_100056
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100071
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100055
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100069
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100072
+[INFO] Process Material: 23_4_100072
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100062
+[INFO] Process Material: 23_4_100078
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100053.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100053.jpg | Resolution: 279x912
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100053.jpg' | 279x912 | opaque | color | Threads: 16 | Cache size now: 11 | Total time: 45ms
+[INFO] Texture uploaded to GPU successfully | 279x912 | sRGB->Linear converted
+[INFO] Process Material: 23_4_100079
+[INFO] Process Material: 23_4_100080
+[INFO] Process Material: 23_4_100081
+[INFO] Process Material: 23_4_100083
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100056.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100056.jpg | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100056.jpg' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 12 | Total time: 94ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: 23_4_100084
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100058.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100058.jpg | Resolution: 3702x3702
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100058.jpg' | 3702x3702 | opaque | color | Threads: 16 | Cache size now: 13 | Total time: 161ms
+[INFO] Texture uploaded to GPU successfully | 3702x3702 | sRGB->Linear converted
+[INFO] Process Material: 23_4_100086
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100060.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100060.jpg | Resolution: 6455x6455
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100060.jpg' | 6455x6455 | opaque | color | Threads: 16 | Cache size now: 14 | Total time: 423ms
+[INFO] Texture uploaded to GPU successfully | 6455x6455 | sRGB->Linear converted
+[INFO] Process Material: 23_4_100087
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100061.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100061.jpg | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100061.jpg' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 15 | Total time: 85ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100068.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100068.jpg | Resolution: 887x904
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100068.jpg' | 887x904 | opaque | color | Threads: 16 | Cache size now: 16 | Total time: 50ms
+[INFO] Texture uploaded to GPU successfully | 887x904 | sRGB->Linear converted
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100093
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100090
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100091
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 23_4_100093
+[INFO] Process Material: 23_4_100094
+[INFO] Process Material: 23_4_100095
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\23.4.100071.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\23.4.100071.jpg | Resolution: 564x1126
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\23.4.100071.jpg' | 564x1126 | opaque | color | Threads: 16 | Cache size now: 17 | Total time: 27ms
+[INFO] Texture uploaded to GPU successfully | 564x1126 | sRGB->Linear converted
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 46546037
+[INFO] Process Material: 46546037
+[INFO] Process Material: 46546037
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 001
+[INFO] Process Material: 46546038_2
+[INFO] Process Material: 46546040
+[INFO] Process Material: 46546041
+[INFO] Process Material: 46546040
+[INFO] Process Material: 46546031
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\46546054.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\46546054.jpg | Resolution: 3000x3000
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\46546054.jpg' | 3000x3000 | opaque | color | Threads: 16 | Cache size now: 18 | Total time: 103ms
+[INFO] Texture uploaded to GPU successfully | 3000x3000 | sRGB->Linear converted
+[INFO] Process Material: vray_46546030_1
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\46546037.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\46546037.jpg | Resolution: 1143x1143
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\46546037.jpg' | 1143x1143 | opaque | color | Threads: 16 | Cache size now: 19 | Total time: 29ms
+[INFO] Texture uploaded to GPU successfully | 1143x1143 | sRGB->Linear converted
+[INFO] Process Material: vray_46546030_1
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 46546041
+[INFO] Process Material: 46546040
+[INFO] Process Material: 46546031
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: 46546040
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\buer230315A009.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\buer230315A009.jpg | Resolution: 346x800
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\buer230315A009.jpg' | 346x800 | opaque | color | Threads: 16 | Cache size now: 20 | Total time: 50ms
+[INFO] Texture uploaded to GPU successfully | 346x800 | sRGB->Linear converted
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_1
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\buer230315A011.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\buer230315A011.jpg | Resolution: 157x800
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\buer230315A011.jpg' | 157x800 | opaque | color | Threads: 16 | Cache size now: 21 | Total time: 47ms
+[INFO] Texture uploaded to GPU successfully | 157x800 | sRGB->Linear converted
+[INFO] Process Material: aaa003_2
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\buer230315A013.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\buer230315A013.jpg | Resolution: 69x800
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\buer230315A013.jpg' | 69x800 | opaque | color | Threads: 16 | Cache size now: 22 | Total time: 22ms
+[INFO] Texture uploaded to GPU successfully | 69x800 | sRGB->Linear converted
+[INFO] Process Material: aaa004
+[INFO] Process Material: aaa002
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_1
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_2
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_1
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_2
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_1
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_2
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_1
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa003_2
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: aaa005
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa135
+[INFO] Process Material: aaa136
+[INFO] Process Material: aaa138
+[INFO] Process Material: aaa139
+[INFO] Process Material: aaa140
+[INFO] Process Material: aaa135
+[INFO] Process Material: 1
+[INFO] Process Material: 1
+[INFO] Process Material: vray_çœÿçš®é»‘è‰²
+[INFO] Process Material: vray_
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\1.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\1.jpg | Resolution: 1135x1130
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\1.jpg' | 1135x1130 | opaque | color | Threads: 16 | Cache size now: 23 | Total time: 42ms
+[INFO] Texture uploaded to GPU successfully | 1135x1130 | sRGB->Linear converted
+[INFO] Process Material: f1027
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\ukmobfecw_2K_Albedo.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\ukmobfecw_2K_Albedo.jpg | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\ukmobfecw_2K_Albedo.jpg' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 24 | Total time: 102ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\ukmobfecw_2K_Normal.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\ukmobfecw_2K_Normal.jpg | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\ukmobfecw_2K_Normal.jpg' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 25 | Total time: 160ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\ukmobfecw_2K_Roughness.png' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\ukmobfecw_2K_Roughness.png | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\ukmobfecw_2K_Roughness.png' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 26 | Total time: 134ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1002
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\udgkcenl_2K_Albedo.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\udgkcenl_2K_Albedo.jpg | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\udgkcenl_2K_Albedo.jpg' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 27 | Total time: 143ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | sRGB->Linear converted
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\udgkcenl_2K_Normal.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\udgkcenl_2K_Normal.jpg | Resolution: 2048x2048
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\udgkcenl_2K_Normal.jpg' | 2048x2048 | opaque | color | Threads: 16 | Cache size now: 28 | Total time: 75ms
+[INFO] Texture uploaded to GPU successfully | 2048x2048 | Linear (no conversion)
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1008
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1010_1
+[INFO] Process Material: material__0
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1011
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: f1011
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: f1028.001
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1036_2
+[INFO] Process Material: f1036_2
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1026
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\2-F042.png' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\2-F042.png | Resolution: 4096x4096
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\2-F042.png' | 4096x4096 | alpha | color | Threads: 16 | Cache size now: 29 | Total time: 441ms
+[INFO] Texture uploaded to GPU successfully | 4096x4096 | sRGB->Linear converted
+[INFO] Process Material: f1027
+[INFO] Process Material: f1027
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1026
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: f1027
+[INFO] Process Material: f1027
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1026
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: f1026
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1027
+[INFO] Process Material: f1027
+[INFO] Process Material: f1027
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1028
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036_2
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: g
+[INFO] Process Material: f1036
+[INFO] Material has texture: type=1 count=1
+[INFO] Material has texture: type=6 count=1
+[INFO] Material has texture: type=15 count=1
+[INFO] Material has texture: type=16 count=1
+[INFO] Process Material: jian
+[INFO] Material has texture: type=1 count=1
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texture\justeasy.cn_map_202209141206137773.jpg' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texture\justeasy.cn_map_202209141206137773.jpg | Resolution: 1500x995
+[INFO] [FILE LOAD SUCCESS] 'E:\data\home\texture\justeasy.cn_map_202209141206137773.jpg' | 1500x995 | opaque | color | Threads: 16 | Cache size now: 30 | Total time: 43ms
+[INFO] Texture uploaded to GPU successfully | 1500x995 | sRGB->Linear converted
+[INFO] Process Material: jian
+[INFO] Material has texture: type=1 count=1
+[INFO] Process Material: g
+[INFO] Triangle extraction completed: 4215234 triangles processed.
+[INFO] Processing bone data...
+[INFO] Processing animations...
+[INFO] No animations found in file: E:\data\home\bedroom.gltf
+[INFO] Model loading completed. Summary - Triangles: 4215234, Animations: 0, Cameras: 1, Lights: 2
+[INFO] Successfully loaded triangles: 4215234
+[INFO] Loaded animations: 0
+[INFO] Adding triangles to scene world...
+[INFO] Added 4215234 animated objects to scene.
+[INFO] Loading camera and lighting data...
+[INFO] Camera loaded successfully.
+[INFO] Loaded lights: 2
+[INFO] Building BVH structure...
+[INFO] [EmbreeBVH::build] Build started
+[INFO] [EmbreeBVH::build] Triangle count = 4215234
+[INFO] [EmbreeBVH::build] Data preparation took 803 ms
+[INFO] [EmbreeBVH::build] Geometry committed
+[INFO] [EmbreeBVH::build] Geometry attached with ID = 0
+[INFO] [EmbreeBVH::build] BVH construction took 220 ms
+[INFO] [EmbreeBVH::build] Total build time: 1024 ms
+[INFO] [EmbreeBVH::build] BVH build completed
+[INFO] [Embree] BVH structure built successfully.
+[INFO] OptiX GPU detected. Creating OptiX geometry data...
+[INFO] Converting 4215234 triangles to OptiX format.
+[INFO] Material indices verified (4215234 triangles checked)
+[INFO] Material indices validated.
+[INFO]  OptiX buildFromData is starting...
+[INFO] OptiX buildFromData completed successfully! 59 SBT record(s) created for material.
+[INFO] OptiX BVH and acceleration structures built.
+[INFO] Setting up OptiX camera parameters...
+[INFO] OptiX camera configured successfully.
+[INFO] Configuring 2 lights for OptiX...
+[INFO] OptiX light parameters set successfully.
+[INFO] Background color set for OptiX rendering.
+[INFO] Scene creation completed successfully.
+[INFO] Scene info - Triangles: 4215234, Lights: 2, Animations: 0
+[INFO] Scene initialization flag set to true.
+[INFO] Scene loaded successfully.
+[INFO] Progress: 100,0% | 858,9K px/s | ETA: 0s | FPS: 0,9
+[INFO] Progress: 100,0% | 872,7K px/s | ETA: 0s | FPS: 0,9
+[INFO] OptiX enabled
+[INFO] Progress: 100,0% | 867,8K px/s | ETA: 0s | FPS: 0,9
+[INFO] OptiX disabled
+[INFO] Progress: 100,0% | 874,4K px/s | ETA: 0s | FPS: 0,9
+[INFO] Progress: 100,0% | 834,0K px/s | ETA: 0s | FPS: 0,9

@@ -238,10 +238,8 @@
     <ClInclude Include="source\cpp_file\Main.h" />
     <ClInclude Include="source\header\scene_data.h" />
     <ClInclude Include="source\header\scene_ui.h" />
-
     <ClInclude Include="source\header\stb_image_write.h" />
     <ClInclude Include="source\header\ui_modern.h" />
-
     <ClInclude Include="source\imgui\imconfig.h" />
     <ClInclude Include="source\imgui\imgui.h" />
     <ClInclude Include="source\imgui\imgui_impl_sdl2.h" />
@@ -287,7 +285,6 @@
     <ClInclude Include="source\header\resource.h" />
     <ClInclude Include="source\header\sbt_data.h" />
     <ClInclude Include="source\header\sbt_record.h" />
-    <ClInclude Include="source\header\SmartUVProjection.h" />
     <ClInclude Include="source\header\SpotLight.h" />
     <ClInclude Include="source\header\Texture.h" />
     <ClInclude Include="source\header\ThreadLocalRNG.h" />
@@ -326,14 +323,11 @@
     <ClCompile Include="source\cpp_file\PrincipledBSDF.cpp" />
     <ClCompile Include="source\cpp_file\Renderer.cpp" />
     <ClCompile Include="source\cpp_file\scene_ui.cpp" />
-
-    <ClCompile Include="source\cpp_file\SmartUVProjection.cpp" />
     <ClCompile Include="source\cpp_file\SpotLight.cpp" />
     <ClCompile Include="source\cpp_file\Texture.cpp" />
     <ClCompile Include="source\cpp_file\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\cpp_file\Triangle.cpp" />
     <ClCompile Include="source\cpp_file\ui_modern.cpp" />
-
     <ClCompile Include="source\cpp_file\Vec2.cpp" />
     <ClCompile Include="source\cpp_file\Vec3.cpp" />
     <ClCompile Include="source\cpp_file\Vec3SIMD.cpp" />

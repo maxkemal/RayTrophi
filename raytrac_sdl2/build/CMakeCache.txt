@@ -14,6 +14,9 @@
 # EXTERNAL cache entries
 ########################
 
+//Path to Assimp root
+ASSIMP_ROOT:PATH=E:/RayTrophi_projesi/dis_bagimliliklar/Assimp
+
 //Path to a program.
 CMAKE_AR:FILEPATH=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe
 
@@ -106,7 +109,7 @@ CMAKE_MODULE_LINKER_FLAGS_RELEASE:STRING=/INCREMENTAL:NO
 CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO:STRING=/debug /INCREMENTAL
 
 //Path to a program.
-CMAKE_MT:FILEPATH=C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/mt.exe
+CMAKE_MT:FILEPATH=CMAKE_MT-NOTFOUND
 
 //Value Computed by CMake
 CMAKE_PROJECT_DESCRIPTION:STATIC=
@@ -133,7 +136,7 @@ CMAKE_PROJECT_VERSION_PATCH:STATIC=
 CMAKE_PROJECT_VERSION_TWEAK:STATIC=
 
 //RC compiler
-CMAKE_RC_COMPILER:FILEPATH=C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/rc.exe
+CMAKE_RC_COMPILER:FILEPATH=rc
 
 //Flags for Windows Resource Compiler during all build types.
 CMAKE_RC_FLAGS:STRING=-DWIN32
@@ -425,6 +428,15 @@ CUDA_nvrtc_static_LIBRARY:FILEPATH=C:/Program Files/NVIDIA GPU Computing Toolkit
 //Path to a library.
 CUDA_pcsamplingutil_LIBRARY:FILEPATH=C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/extras/CUPTI/lib64/pcsamplingutil.lib
 
+//Path to Embree root
+EMBREE_ROOT:PATH=E:/RayTrophi_projesi/dis_bagimliliklar/embree-4.4.0.x64.windows
+
+//Path to OIDN root
+OIDN_ROOT:PATH=E:/RayTrophi_projesi/dis_bagimliliklar/oidn-2.3.0.x64.windows
+
+//Path to OptiX SDK
+OPTIX_ROOT:PATH=C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0
+
 //Value Computed by CMake
 RayTrophi_BINARY_DIR:STATIC=E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build
 
@@ -433,6 +445,12 @@ RayTrophi_IS_TOP_LEVEL:STATIC=ON
 
 //Value Computed by CMake
 RayTrophi_SOURCE_DIR:STATIC=E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2
+
+//Path to SDL2 Image root directory
+SDL2_IMAGE_ROOT:PATH=E:/SDL2-2.30.4/SDL2_image-2.8.2
+
+//Path to SDL2 root directory
+SDL2_ROOT:PATH=E:/SDL2-2.30.4
 
 
 ########################

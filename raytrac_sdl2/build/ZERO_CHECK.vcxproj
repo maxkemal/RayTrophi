@@ -70,7 +70,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Midl>
-      <AdditionalIncludeDirectories>E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\imgui;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;E:\SDL2-2.30.4\include;E:\SDL2-2.30.4\SDL2_image-2.8.2\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -80,7 +80,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Midl>
-      <AdditionalIncludeDirectories>E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\imgui;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;E:\SDL2-2.30.4\include;E:\SDL2-2.30.4\SDL2_image-2.8.2\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -90,7 +90,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
     <Midl>
-      <AdditionalIncludeDirectories>E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\imgui;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;E:\SDL2-2.30.4\include;E:\SDL2-2.30.4\SDL2_image-2.8.2\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -100,7 +100,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
     <Midl>
-      <AdditionalIncludeDirectories>E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\header;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\imgui;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;E:\SDL2-2.30.4\include;E:\SDL2-2.30.4\SDL2_image-2.8.2\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>

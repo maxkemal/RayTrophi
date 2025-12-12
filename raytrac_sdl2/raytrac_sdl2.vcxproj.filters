@@ -39,9 +39,6 @@
     <ClInclude Include="source\header\AtmosphericEffects.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\header\Box.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\header\Camera.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -81,9 +78,6 @@
     <ClInclude Include="source\header\ParallelBVHNode.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\header\Plane.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\header\PointLight.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -100,12 +94,6 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\header\resource.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
-    <ClInclude Include="source\header\SmartUVProjection.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
-    <ClInclude Include="source\header\Sphere.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\header\SpotLight.h">
@@ -147,9 +135,6 @@
     <ClInclude Include="source\header\DiffuseLight.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\header\EmissiveMaterial.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\header\EmbreeBVH.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -157,9 +142,6 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\header\payload.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
-    <ClInclude Include="source\header\hit_result.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\header\sbt_data.h">
@@ -201,14 +183,14 @@
     <ClInclude Include="source\cpp_file\Main.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
-    <ClInclude Include="source\header\scene_ui_temp.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\header\ui_modern.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\header\ui_modern_temp.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
+    <ClInclude Include="source\header\MaterialManager.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\header\Transform.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -227,9 +209,6 @@
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\cpp_file\AtmosphericEffects.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\cpp_file\Box.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\cpp_file\Camera.cpp">
@@ -277,12 +256,6 @@
     <ClCompile Include="source\cpp_file\Renderer.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
-    <ClCompile Include="source\cpp_file\SmartUVProjection.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\cpp_file\Sphere.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
     <ClCompile Include="source\cpp_file\SpotLight.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
@@ -305,9 +278,6 @@
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\cpp_file\Volumetric.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\cpp_file\EmissiveMaterial.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\cpp_file\EmbreeBVH.cpp">
@@ -334,14 +304,14 @@
     <ClCompile Include="source\imgui\imgui_impl_sdlrenderer2.cpp">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClCompile>
-    <ClCompile Include="source\cpp_file\scene_ui_temp.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
     <ClCompile Include="source\cpp_file\ui_modern.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
-    <ClCompile Include="source\cpp_file\ui_modern_temp.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <ClCompile Include="source\cpp_file\MaterialManager.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\cpp_file\DiffuseLight.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
