@@ -389,18 +389,42 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     auto start_time = std::chrono::steady_clock::now();
    // std::thread display_thread(&Renderer::update_display, this, window, raytrace_texture, surface, renderer);
     float frame_time = 1.0f / fps;
-    int total_frames = static_cast<int>(duration * fps);
+    
+    // Frame range'i animasyon verisinden al
+    int start_frame = 0;
+    int end_frame = static_cast<int>(duration * fps);
+    
+    if (!scene.animationDataList.empty()) {
+        auto& anim = scene.animationDataList[0];
+        start_frame = anim.startFrame;
+        end_frame = anim.endFrame;
+        SCENE_LOG_INFO("Using animation frame range from file: " + std::to_string(start_frame) + " - " + std::to_string(end_frame));
+    }
+    
+    int total_frames = end_frame - start_frame + 1;
     std::filesystem::create_directory("render"); // "render" klasörünü oluştur
-    SCENE_LOG_INFO("Starting animation render: " + std::to_string(total_frames) + " frames at " + std::to_string(fps) + " FPS");
-    for (int frame = 0; frame < total_frames; ++frame) {
+    SCENE_LOG_INFO("Starting animation render: " + std::to_string(total_frames) + " frames (Frame " + 
+                   std::to_string(start_frame) + " to " + std::to_string(end_frame) + ") at " + std::to_string(fps) + " FPS");
+    
+    for (int frame = start_frame; frame <= end_frame; ++frame) {
 
         std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
         std::fill(sample_counts.begin(), sample_counts.end(), 0);
         SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 0, 0, 0));
-        float current_time = frame * frame_time;
+        
+        // Frame'i time'a çevir
+        // İlk frame (start_frame) = time 0, sonraki her frame = +frame_time
+        float current_time = (frame - start_frame) * frame_time;
 
-        SCENE_LOG_INFO("Rendering frame " + std::to_string(frame + 1) + "/" + std::to_string(total_frames) +
+        SCENE_LOG_INFO("Rendering frame " + std::to_string(frame) + "/" + std::to_string(end_frame) +
             " at time " + std::to_string(current_time) + "s");
+        
+        // Debug: Kamera pozisyonunu logla
+        if (scene.camera) {
+            SCENE_LOG_INFO("  Camera BEFORE animation update - Pos: " + scene.camera->lookfrom.toString() + 
+                          ", LookAt: " + scene.camera->lookat.toString());
+        }
+
 
         // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
         // Tüm düğümlerin (kemikler dahil) anlık animasyonlu global dönüşümlerini tutacak harita
@@ -473,24 +497,84 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             }
             else {
                 // Bu bir katı (rigid) üçgen. Node dönüşümünü uygula.
-                if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
-                    // Rigid nesneler için animasyonlu global transformu doğrudan kullan
-                    tri->updateAnimationTransform(animatedGlobalNodeTransforms[nodeName]);
-                    //  std::cout << "[DEBUG]  Rigid transform uygulanıyor: " << tri->getNodeName() << "\n";
+                // Önce bu node için gerçekten animasyon keyframe'i olup olmadığını kontrol et
+                bool nodeHasAnimation = false;
+                for (const auto& anim : scene.animationDataList) {
+                    if (anim.positionKeys.count(nodeName) > 0 ||
+                        anim.rotationKeys.count(nodeName) > 0 ||
+                        anim.scalingKeys.count(nodeName) > 0) {
+                        nodeHasAnimation = true;
+                        break;
+                    }
                 }
+                
+                if (nodeHasAnimation && animatedGlobalNodeTransforms.count(nodeName) > 0) {
+                    // Bu node için animasyon keyframe'i var, animasyonlu transformu uygula
+                    Matrix4x4 animTransform = animatedGlobalNodeTransforms[nodeName];
+                    
+                    // animTransform zaten GLOBAL transform (parent chain dahil)
+                    // Bu yüzden bunu base olarak set ediyoruz, current identity olacak
+                    auto transformHandle = tri->getTransformHandle();
+                    if (transformHandle) {
+                        transformHandle->setBase(animTransform);
+                        transformHandle->setCurrent(Matrix4x4::identity());
+                        tri->updateTransformedVertices();
+                    }
+                    
+                    if (frame == start_frame) {
+                        // Transform matrisinin translation kısmını çıkar
+                        Vec3 translation(animTransform.m[0][3], animTransform.m[1][3], animTransform.m[2][3]);
+                        SCENE_LOG_INFO("  Object '" + nodeName + "' HAS animation - Transform translation: " + translation.toString());
+                    }
+                }
+
                 else {
-                    // Eğer bu node için animasyon verisi yoksa, herhangi bir dönüşüm uygulamadan geç.
-                    // Veya başlangıçtaki pozisyonunda kalmasını istiyorsanız `tri->updateAnimationTransform(Matrix4x4::identity());`
-                    // gibi bir şey yapabilirsiniz, ama original_vX zaten yüklenmiş olmalı.
-                   // std::cout << "[DEBUG]  Rigid transform atlandı (animasyon verisi veya node bulunamadı): " << tri->getNodeName() << "\n";
+                    // Animasyon yoksa, static global transform'u uygula
+                    // updateAnimationTransform() orijinal vertex'lerden başladığı için
+                    // her frame'de transform uygulanması gerekiyor
+                    if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
+                        // animatedGlobalNodeTransforms'da var ama animasyon keyframe'i yok
+                        // Bu demek ki static transform (bind pose)
+                        Matrix4x4 staticTransform = animatedGlobalNodeTransforms[nodeName];
+                        
+                        auto transformHandle = tri->getTransformHandle();
+                        if (transformHandle) {
+                            transformHandle->setBase(staticTransform);
+                            transformHandle->setCurrent(Matrix4x4::identity());
+                            tri->updateTransformedVertices();
+                        }
+                        
+                        if (frame == start_frame) {
+                            Vec3 translation(staticTransform.m[0][3], staticTransform.m[1][3], staticTransform.m[2][3]);
+                            SCENE_LOG_INFO("  Object '" + nodeName + "' has NO animation - Static transform translation: " + translation.toString());
+                        }
+                    }
+                    else {
+                        // Node map'te hiç yok, orijinal transform'u koru
+                        if (frame == start_frame) {
+                            SCENE_LOG_INFO("  Object '" + nodeName + "' not in transform map - keeping original");
+                        }
+                    }
                 }
             }
         }
 
-        // --- 3. Adım: Işık ve Kamera Animasyonlarını Güncelle ---
+        // --- 3. Adım: Işık Animasyonlarını Güncelle (sadece gerçekten animasyon keyframe'i varsa) ---
         for (auto& light : scene.lights) {
-            const aiNode* node = assimpLoader.getNodeByName(light->nodeName);
-            if (!node || animatedGlobalNodeTransforms.count(light->nodeName) == 0) continue;
+            // Önce bu ışık için gerçekten animasyon keyframe'i olup olmadığını kontrol et
+            bool lightHasAnimation = false;
+            for (const auto& anim : scene.animationDataList) {
+                if (anim.positionKeys.count(light->nodeName) > 0 ||
+                    anim.rotationKeys.count(light->nodeName) > 0 ||
+                    anim.scalingKeys.count(light->nodeName) > 0) {
+                    lightHasAnimation = true;
+                    break;
+                }
+            }
+            
+            if (!lightHasAnimation || animatedGlobalNodeTransforms.count(light->nodeName) == 0) {
+                continue; // Animasyon yoksa ışığı olduğu gibi bırak
+            }
 
             Matrix4x4 finalTransform = animatedGlobalNodeTransforms[light->nodeName];
 
@@ -505,23 +589,52 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             }
         }
 
-        if (scene.camera) {
-            if (animatedGlobalNodeTransforms.count(scene.camera->nodeName) > 0) {
-                Matrix4x4 animTransform = animatedGlobalNodeTransforms[scene.camera->nodeName];
 
-                // Pozisyon ve yön
-                Vec3 pos = animTransform.transform_point(Vec3(0, 0, 0));
-                Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
-                Vec3 look = pos + forward;
-                scene.camera->lookfrom = pos;
-                scene.camera->lookat = look;
-                if (scene.camera->vup.length_squared() < 1e-8) { // Up vektörü sıfır olmasın
-                    scene.camera->vup = Vec3(0, 1, 0); // Varsayılan up vektörü
+        // --- 3b. Kamera Animasyonunu Güncelle (sadece gerçekten animasyon keyframe'i varsa) ---
+        // Kamera için animasyon keyframe'i olup olmadığını kontrol et
+        bool cameraHasAnimation = false;
+        if (scene.camera) {
+            for (const auto& anim : scene.animationDataList) {
+                if (anim.positionKeys.count(scene.camera->nodeName) > 0 ||
+                    anim.rotationKeys.count(scene.camera->nodeName) > 0 ||
+                    anim.scalingKeys.count(scene.camera->nodeName) > 0) {
+                    cameraHasAnimation = true;
+                    break;
                 }
-                // Kameranın diğer vektörlerini de güncelleyin (right, up vb.)
-                scene.camera->update_camera_vectors();
             }
         }
+        
+        if (scene.camera && cameraHasAnimation && animatedGlobalNodeTransforms.count(scene.camera->nodeName) > 0) {
+            Matrix4x4 animTransform = animatedGlobalNodeTransforms[scene.camera->nodeName];
+
+            // Pozisyon ve yön
+            Vec3 pos = animTransform.transform_point(Vec3(0, 0, 0));
+            Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
+            Vec3 look = pos + forward;
+            
+            scene.camera->lookfrom = pos;
+            scene.camera->lookat = look;
+            
+            // Up vektörünü de transform et (animasyonda kamera dönebilir)
+            Vec3 up = animTransform.transform_vector(Vec3(0, 1, 0)).normalize();
+            if (up.length_squared() > 1e-8) {
+                scene.camera->vup = up;
+            } else {
+                scene.camera->vup = Vec3(0, 1, 0); // Fallback
+            }
+            
+            // Kameranın internal vektörlerini güncelle
+            scene.camera->update_camera_vectors();
+            
+            SCENE_LOG_INFO("  Camera AFTER animation update - Pos: " + scene.camera->lookfrom.toString() + 
+                          ", LookAt: " + scene.camera->lookat.toString());
+        }
+        else if (scene.camera) {
+            SCENE_LOG_INFO("  Camera has NO animation keyframes - keeping original position");
+        }
+
+
+        // Animasyon yoksa kamerayı olduğu gibi bırak (model yüklenirken zaten doğru pozisyona yerleştirilmiş)
 
         // --- 4. Adım: BVH'yi Güncelle ---
         // Tüm sahne nesneleri (üçgenler) güncellendikten sonra BVH'yi yeniden inşa et
@@ -577,12 +690,12 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 
         // --- 6. Adım: Kareyi Kaydet ---
         char filename[100];
-        snprintf(filename, sizeof(filename), "render/output_frame_%03d.png", frame + 1);
+        snprintf(filename, sizeof(filename), "render/output_frame_%04d.png", frame);
         if (SaveSurface(surface, filename)) {
-            SCENE_LOG_INFO("Frame " + std::to_string(frame + 1) + " saved successfully as " + filename);
+            SCENE_LOG_INFO("Frame " + std::to_string(frame) + " saved successfully as " + filename);
         }
         else {
-            SCENE_LOG_ERROR("Failed to save frame " + std::to_string(frame + 1));
+            SCENE_LOG_ERROR("Failed to save frame " + std::to_string(frame));
             return;
         }
     }
