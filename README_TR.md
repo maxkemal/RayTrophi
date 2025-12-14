@@ -23,9 +23,10 @@
 ### 🎯 Temel Özellikler
 
 - **Hibrit Rendering**: CPU (Embree/Özel BVH) ve GPU (OptiX) hızlandırması arasında sorunsuz geçiş
+- **Blender Cycles Kalitesi**: Path tracing, adaptive sampling ve progressive rendering
 - **Üretime Hazır**: Principled BSDF, gelişmiş materyaller, volumetric, subsurface scattering
-- **Yüksek Performans**: Optimize BVH yapısı (<1s 3.3M üçgen için), çok thread'li rendering
-- **Gerçek Zamanlı Önizleme**: ImGui ile interaktif UI, canlı parametre ayarlamaları
+- **Yüksek Performans**: Optimize BVH yapısı (<1s 3.3M üçgen için), %75 bellek tasarruflu üçgen yapısı
+- **Gerçek Zamanlı Önizleme**: ImGui ile modern interaktif UI, animasyon timeline
 - **Endüstri Standardı**: AssImp yükleyici 40+ 3D format destekler (GLTF, FBX, OBJ, vb.)
 
 ---
@@ -49,11 +50,13 @@
   - ✅ Çoklu önem örneklemesi ile yumuşak gölgeler
 
 - **Gelişmiş Özellikler**
+  - ✅ **Birikimli (Accumulative) Render**: Gürültüsüz, yüksek kaliteli çıktı için zamanla biriken örnekleme
+  - ✅ **Adaptif Örnekleme (Adaptive Sampling)**: Gürültülü bölgelere odaklanan akıllı render motoru
   - ✅ Derinlik Alanı (DOF)
-  - ✅ Hareket Bulanıklığı
+  - ✅ Hareket Bulanıklığı (Motion Blur)
   - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
   - ✅ Ton haritalama & post-processing
-  - ✅ Kemik tabanlı iskelet animasyonu
+  - ✅ **Gelişmiş Animasyon**: Kemik (bone) animasyonu, quaternion interpolasyonu ve timeline kontrolü
 
 ### 🚀 Performans & Optimizasyon
 
@@ -63,20 +66,22 @@
   - OptiX GPU hızlandırma yapısı
 
 - **Optimizasyonlar**
+- **Optimizasyonlar**
   - SIMD vektör işlemleri
   - Çok thread'li tile tabanlı rendering
   - Progressive refinement (ilerlemeli iyileştirme)
-  - Adaptive sampling (uyarlanabilir örnekleme)
-  - Bellek optimize üçgen gösterimi (146 byte/üçgen)
+  - **Bellek Optimizasyonu**: Üçgen başına 612 byte -> 146 byte'a düşürüldü (%75 tasarruf)
+  - **Güvenli Texture Sistemi**: Unicode dosya yolları ve bozuk formatlar için crash korumalı yükleyici
+  - Önbellekli Texture Yönetimi (Cache Hit/Miss optimizasyonu)
 
 ### 🖥️ Kullanıcı Arayüzü
 
-- Modern ImGui tabanlı arayüz
-- Gerçek zamanlı parametre ayarlama
-- Sahne hiyerarşi görüntüleyici
-- Materyal editörü
+- Modern ImGui tabanlı koyu tema (Dark UI)
+- **Animasyon Timeline Paneli**: Play/Pause, Scrubbing, Kare atlama
+- Render Kalite Presetleri (Düşük, Orta, Yüksek, Ultra)
+- Dinamik Çözünürlük Ayarları (Resolution Scaling)
+- Sahne hiyerarşi görüntüleyici ve Materyal editörü
 - Performans metrikleri (FPS, rays/s, bellek kullanımı)
-- Çoklu render backend seçimi
 
 ---
 

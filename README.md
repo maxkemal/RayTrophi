@@ -23,9 +23,10 @@
 ### 🎯 Key Highlights
 
 - **Hybrid Rendering**: Seamlessly switch between CPU (Embree/Custom BVH) and GPU (OptiX) acceleration
+- **Blender Cycles Quality**: Path tracing, adaptive sampling, and progressive rendering competing with top-tier renderers
 - **Production-Ready**: Principled BSDF, advanced materials, volumetrics, subsurface scattering
-- **High Performance**: Optimized BVH construction (<1s for 3.3M triangles), multi-threaded rendering
-- **Real-time Preview**: Interactive UI with ImGui, live parameter adjustments
+- **High Performance**: Optimized BVH construction (<1s for 3.3M triangles), 75% memory-optimized triangle structure
+- **Real-time Preview**: Modern interactive UI with ImGui, animation timeline
 - **Industry Standard**: AssImp loader supports 40+ 3D formats (GLTF, FBX, OBJ, etc.)
 
 ---
@@ -49,11 +50,13 @@
   - ✅ Soft shadows with multiple importance sampling
 
 - **Advanced Features**
+  - ✅ **Accumulative Rendering**: Progressive path tracing for noise-free, high-quality output
+  - ✅ **Adaptive Sampling**: Intelligent sampling engine focusing on noisy areas
   - ✅ Depth of Field (DOF)
   - ✅ Motion Blur
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
-  - ✅ Bone-based skeletal animation
+  - ✅ **Advanced Animation**: Bone animation, quaternion interpolation, and timeline control
 
 ### 🚀 Performance & Optimization
 
@@ -66,17 +69,18 @@
   - SIMD vector operations
   - Multi-threaded tile-based rendering
   - Progressive refinement
-  - Adaptive sampling
-  - Memory-optimized triangle representation (146 bytes/triangle)
+  - **Memory Optimization**: Triangular footprint reduced from 612 to 146 bytes (75% reduction)
+  - **Robust Texture System**: Crash-proof loader for Unicode paths and corrupted formats
+  - Cached Texture Management (Optimized Hit/Miss logic)
 
 ### 🖥️ User Interface
 
-- Modern ImGui-based interface
-- Real-time parameter tweaking
-- Scene hierarchy viewer
-- Material editor
+- Modern ImGui-based Dark UI with Docking
+- **Animation Timeline Panel**: Play/Pause, Scrubbing, Frame skipping
+- Render Quality Presets (Low, Medium, High, Ultra)
+- Dynamic Resolution Scaling
+- Scene hierarchy viewer and Material editor
 - Performance metrics (FPS, rays/s, memory usage)
-- Multiple render backend selection
 
 ---
 
