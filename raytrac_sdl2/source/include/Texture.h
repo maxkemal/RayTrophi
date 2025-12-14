@@ -216,45 +216,67 @@ public:
             if (surface) {
                 int pixel_count = width * height;
                 pixels.resize(pixel_count);
-                SDL_LockSurface(surface);
+                if (SDL_LockSurface(surface) != 0) {
+                    SCENE_LOG_ERROR("Failed to lock surface (cache hit) for: " + filename);
+                    SDL_FreeSurface(surface);
+                    return;
+                }
+
+                SDL_Surface* converted_surface = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+                SDL_UnlockSurface(surface);
+                SDL_FreeSurface(surface);
+
+                if (!converted_surface) {
+                     SCENE_LOG_ERROR("Failed to convert surface format (cache hit) for: " + filename);
+                     return;
+                }
+                surface = converted_surface;
+                
+                if (SDL_LockSurface(surface) != 0) {
+                     SCENE_LOG_ERROR("Failed to lock converted surface (cache hit) for: " + filename);
+                     SDL_FreeSurface(surface);
+                     return;
+                }
+
                 SDL_PixelFormat* fmt = surface->format;
                 uint8_t* data = static_cast<uint8_t*>(surface->pixels);
+                if (!data) {
+                    SCENE_LOG_ERROR("Converted Surface pixels are null (cache hit) for: " + filename);
+                    SDL_UnlockSurface(surface);
+                    SDL_FreeSurface(surface);
+                    return;
+                }
+
                 int pitch = surface->pitch;
                 int bpp = fmt->BytesPerPixel;
+                if(bpp != 4) {
+                     SCENE_LOG_ERROR("Converted surface (cache hit) BPP != 4");
+                     SDL_UnlockSurface(surface);
+                     SDL_FreeSurface(surface);
+                     return;
+                }
 
-                std::atomic<bool> is_gray_atomic(true);
-                int num_threads = std::thread::hardware_concurrency();
-                std::vector<std::thread> threads;
+                bool is_gray_local = true;
 
-                auto process_chunk = [&](int start_y, int end_y) {
-                    bool local_is_gray = true;
-                    for (int y = start_y; y < end_y; ++y) {
-                        uint8_t* row_ptr = data + y * pitch;
+                try {
+                    for (int y = 0; y < height; ++y) {
+                         Uint32* row_ptr = reinterpret_cast<Uint32*>(data + y * pitch);
                         for (int x = 0; x < width; ++x) {
-                            Uint32 pixel;
-                            memcpy(&pixel, row_ptr + x * bpp, bpp);
+                            Uint32 pixel_val = row_ptr[x];
                             Uint8 r, g, b, a;
-                            SDL_GetRGBA(pixel, fmt, &r, &g, &b, &a);
+                            SDL_GetRGBA(pixel_val, fmt, &r, &g, &b, &a);
                             CompactVec4 px(r, g, b, a);
                             pixels[y * width + x] = px;
-                            if (local_is_gray && !px.is_gray()) {
-                                local_is_gray = false;
+                            if (is_gray_local && !px.is_gray()) {
+                                is_gray_local = false;
                             }
                         }
                     }
-                    if (!local_is_gray) is_gray_atomic.store(false);
-                    };
+                } catch(...) {}
 
-                int chunk_height = (height + num_threads - 1) / num_threads;
-                for (int i = 0; i < num_threads; ++i) {
-                    int start_y = i * chunk_height;
-                    int end_y = std::min(start_y + chunk_height, height);
-                    if (start_y < height) {
-                        threads.emplace_back(process_chunk, start_y, end_y);
-                    }
-                }
+                
+                is_gray_scale = is_gray_local; // Just set local
 
-                for (auto& t : threads) t.join();
                 SDL_UnlockSurface(surface);
                 SDL_FreeSurface(surface);
                 m_is_loaded = true;
@@ -264,7 +286,7 @@ public:
 
                 SCENE_LOG_INFO("[FILE CACHE HIT] " + filename +
                     " | " + std::to_string(width) + "x" + std::to_string(height) +
-                    " | Decoded with " + std::to_string(num_threads) + " threads" +
+                    " | Single-threaded safe load" +
                     " | " + std::to_string(duration.count()) + "ms");
                 return;
             }
@@ -294,60 +316,105 @@ public:
         SCENE_LOG_INFO("[FILE DECODE] Starting decode for: " + filename +
             " | Resolution: " + std::to_string(width) + "x" + std::to_string(height));
 
-        SDL_LockSurface(surface);
+        if (SDL_LockSurface(surface) != 0) {
+            SCENE_LOG_ERROR("Failed to lock surface for: " + filename + " | Error: " + std::string(SDL_GetError()));
+            SDL_FreeSurface(surface);
+             return;
+        }
+
+        // Convert to RGBA32 to ensure consistent memory layout and avoid format issues
+        SDL_Surface* converted_surface = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_UnlockSurface(surface); // Unlock original
+        SDL_FreeSurface(surface);   // Free original
+
+        if (!converted_surface) {
+            SCENE_LOG_ERROR("Failed to convert surface format for: " + filename + " | Error: " + std::string(SDL_GetError()));
+            return;
+        }
+
+        surface = converted_surface; // Use converted one
+        width = surface->w;
+        height = surface->h;
+        
+        if (SDL_LockSurface(surface) != 0) {
+             SCENE_LOG_ERROR("Failed to lock converted surface for: " + filename);
+             SDL_FreeSurface(surface);
+             return;
+        }
+
         SDL_PixelFormat* fmt = surface->format;
         uint8_t* data = static_cast<uint8_t*>(surface->pixels);
+        if (!data) {
+             SCENE_LOG_ERROR("Converted surface pixels are null for: " + filename);
+             SDL_UnlockSurface(surface);
+             SDL_FreeSurface(surface);
+             return;
+        }
+        
         int pitch = surface->pitch;
         int bpp = fmt->BytesPerPixel;
         has_alpha = SDL_ISPIXELFORMAT_ALPHA(fmt->format);
 
-        // Paralel pixel extraction + decode
-        pixels.resize(pixel_count);
-        std::atomic<bool> is_gray_atomic(true);
-        int num_threads = std::thread::hardware_concurrency();
-        std::vector<std::thread> threads;
+        // Paranoid check
+        if (bpp != 4) {
+             SCENE_LOG_ERROR("Converted surface BPP is not 4! It is: " + std::to_string(bpp));
+             SDL_UnlockSurface(surface);
+             SDL_FreeSurface(surface);
+             return;
+        }
 
-        auto process_chunk = [&](int start_y, int end_y) {
-            bool local_is_gray = true;
-            for (int y = start_y; y < end_y; ++y) {
-                uint8_t* row_ptr = data + y * pitch;
+        pixels.resize(width * height);
+        bool is_gray_local = true;
+
+        try {
+            // Direct memory access for 32-bit RGBA
+            // SDL_PIXELFORMAT_RGBA32 -> Memory: R, G, B, A (on Little Endian usually)
+            // But we use SDL_GetRGBA to be safe or just mask
+            // Optimally, since we converted to RGBA32, we know the layout. 
+            // RGBA32 Alias: SDL_PIXELFORMAT_RGBA8888 on Big Endian, ABGR8888 on Little Endian?
+            // Actually SDL defines RGBA32 as the format where R is the first byte in memory? 
+            // Let's rely on SDL_GetRGBA to decode the Uint32 just to be safe from Endianness confusion, 
+            // but since we iterating by ptr, we can read Uint32.
+            
+            for (int y = 0; y < height; ++y) {
+                Uint32* row_ptr = reinterpret_cast<Uint32*>(data + y * pitch);
                 for (int x = 0; x < width; ++x) {
-                    Uint32 pixel;
-                    memcpy(&pixel, row_ptr + x * bpp, bpp);
-
+                    Uint32 pixel_val = row_ptr[x];
                     Uint8 r, g, b, a;
-                    SDL_GetRGBA(pixel, fmt, &r, &g, &b, &a);
+                    SDL_GetRGBA(pixel_val, fmt, &r, &g, &b, &a); // Optimized by SDL for specific formats
+
                     CompactVec4 px(r, g, b, a);
                     pixels[y * width + x] = px;
 
-                    if (local_is_gray && !px.is_gray()) {
-                        local_is_gray = false;
+                    if (is_gray_local && !px.is_gray()) {
+                        is_gray_local = false;
                     }
                 }
             }
-            if (!local_is_gray) is_gray_atomic.store(false);
-            };
-
-        // Y koordinatını böl (cache locality daha iyi)
-        int chunk_height = (height + num_threads - 1) / num_threads;
-        for (int i = 0; i < num_threads; ++i) {
-            int start_y = i * chunk_height;
-            int end_y = std::min(start_y + chunk_height, height);
-            if (start_y < height) {
-                threads.emplace_back(process_chunk, start_y, end_y);
-            }
+        }
+        catch (const std::exception& e) {
+             SCENE_LOG_ERROR("Exception during pixel copy: " + std::string(e.what()));
+        }
+        catch (...) {
+             SCENE_LOG_ERROR("Unknown exception during pixel copy");
         }
 
-        for (auto& t : threads) t.join();
-
-        is_gray_scale = is_gray_atomic.load();
-
+        is_gray_scale = is_gray_local;
         SDL_UnlockSurface(surface);
-        SDL_FreeSurface(surface);
+        SDL_FreeSurface(surface); // Free converted surface
         m_is_loaded = true;
 
-        // Cache'e kaydet
-        auto mod_time = std::filesystem::last_write_time(filename).time_since_epoch().count();
+        // Cache update with correct data
+        std::time_t mod_time = 0;
+        try {
+            mod_time = std::filesystem::last_write_time(filename).time_since_epoch().count();
+        }
+        catch (const std::exception& e) {
+            SCENE_LOG_WARN("Failed to get file modification time for: " + filename + " Error: " + e.what());
+        }
+        catch (...) {
+            SCENE_LOG_WARN("Failed to get file modification time for: " + filename);
+        }
         FileTextureCache::instance().put(filename, { width, height, has_alpha, is_gray_scale, mod_time });
 
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -356,7 +423,7 @@ public:
         SCENE_LOG_INFO("[FILE LOAD SUCCESS] '" + filename + "' | " + std::to_string(width) + "x" +
             std::to_string(height) + (has_alpha ? " | alpha" : " | opaque") +
             (is_gray_scale ? " | grayscale" : " | color") +
-            " | Threads: " + std::to_string(num_threads) +
+            " | Single-threaded safe load" +
             " | Cache size now: " + std::to_string(FileTextureCache::instance().size()) +
             " | Total time: " + std::to_string(duration.count()) + "ms");
     }
@@ -485,8 +552,18 @@ public:
         is_gray_scale = true;    // Öncelikle gri varsayalım
         alphas.resize(width * height);
 
-        SDL_LockSurface(surface);
+        if (SDL_LockSurface(surface) != 0) {
+            SCENE_LOG_ERROR("Failed to lock surface for opacity map: " + filename);
+            SDL_FreeSurface(surface);
+            return;
+        }
         Uint8* pixelData = static_cast<Uint8*>(surface->pixels);
+        if (!pixelData) {
+            SCENE_LOG_ERROR("Opacity map surface pixels are null: " + filename);
+            SDL_UnlockSurface(surface);
+            SDL_FreeSurface(surface);
+            return;
+        }
         SDL_PixelFormat* format = surface->format;
 
         if (format->BitsPerPixel == 8) {
@@ -584,7 +661,7 @@ private:
             };
 
         // Daha büyük chunks (thread startup overhead'i azalt)
-        int chunk_size = std::max(65536, (pixel_count + num_threads - 1) / num_threads);
+        int chunk_size = (((65536) > ((pixel_count + num_threads - 1) / num_threads)) ? (65536) : ((pixel_count + num_threads - 1) / num_threads));
         for (int i = 0; i < pixel_count; i += chunk_size) {
             int start = i;
             int end = std::min(start + chunk_size, pixel_count);
@@ -633,56 +710,72 @@ private:
         SCENE_LOG_INFO("COMPRESSED decode start: " + std::to_string(width) + "x" +
             std::to_string(height) + " (" + std::to_string(pixel_count) + " pixels)");
 
-        SDL_LockSurface(surface);
+        if (SDL_LockSurface(surface) != 0) {
+            SCENE_LOG_ERROR("[DECODE ERROR] Failed to lock surface");
+            SDL_FreeSurface(surface);
+            return;
+        }
+
+        SDL_Surface* converted_surface = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_UnlockSurface(surface);
+        SDL_FreeSurface(surface);
+
+        if (!converted_surface) {
+            SCENE_LOG_ERROR("[DECODE ERROR] Failed to convert surface");
+            return;
+        }
+
+        surface = converted_surface;
+        width = surface->w;
+        height = surface->h;
+
+        if (SDL_LockSurface(surface) != 0) {
+            SCENE_LOG_ERROR("[DECODE ERROR] Failed to lock converted surface");
+            SDL_FreeSurface(surface);
+            return;
+        }
+
         SDL_PixelFormat* fmt = surface->format;
         uint8_t* dataSurf = static_cast<uint8_t*>(surface->pixels);
+        if (!dataSurf) {
+            SCENE_LOG_ERROR("[DECODE ERROR] Converted surface pixels null");
+            SDL_UnlockSurface(surface);
+            SDL_FreeSurface(surface);
+            return;
+        }
+
         int pitch = surface->pitch;
         int bpp = fmt->BytesPerPixel;
         has_alpha = SDL_ISPIXELFORMAT_ALPHA(fmt->format);
 
-        std::atomic<bool> is_gray_atomic(true);
-        int num_threads = std::thread::hardware_concurrency();
-        std::vector<std::thread> threads;
+        if(bpp != 4) {
+             SCENE_LOG_ERROR("[DECODE ERROR] Converted BPP != 4");
+             SDL_UnlockSurface(surface);
+             SDL_FreeSurface(surface);
+             return;
+        }
 
-        // Y-koordinatına göre böl (row-major = cache friendly)
-        auto process_chunk = [&](int start_y, int end_y) {
-            bool local_is_gray = true;
+        bool is_gray_local = true;
 
-            for (int y = start_y; y < end_y; ++y) {
-                uint8_t* row_ptr = dataSurf + y * pitch;
-
-                // İç loop'u optimize et: pointer arithmetic minimize
+        try {
+            for (int y = 0; y < height; ++y) {
+                Uint32* row_ptr = reinterpret_cast<Uint32*>(dataSurf + y * pitch);
                 for (int x = 0; x < width; ++x) {
-                    Uint32 pixel;
-                    memcpy(&pixel, row_ptr + x * bpp, bpp);
-
+                    Uint32 pixel_val = row_ptr[x];
                     Uint8 r, g, b, a;
-                    SDL_GetRGBA(pixel, fmt, &r, &g, &b, &a);
+                    SDL_GetRGBA(pixel_val, fmt, &r, &g, &b, &a);
+
                     CompactVec4 px(r, g, b, a);
                     pixels[y * width + x] = px;
 
-                    if (local_is_gray && !px.is_gray()) {
-                        local_is_gray = false;
+                    if (is_gray_local && !px.is_gray()) {
+                        is_gray_local = false;
                     }
                 }
             }
+        } catch(...) {}
 
-            if (!local_is_gray) is_gray_atomic.store(false);
-            };
-
-        // Y'yi böl (height'ın 1/num_threads'ini her thread işlesin)
-        int chunk_height = std::max(1, (height + num_threads - 1) / num_threads);
-        for (int i = 0; i < num_threads; ++i) {
-            int start_y = i * chunk_height;
-            int end_y = std::min(start_y + chunk_height, height);
-            if (start_y < height) {
-                threads.emplace_back(process_chunk, start_y, end_y);
-            }
-        }
-
-        for (auto& t : threads) t.join();
-
-        is_gray_scale = is_gray_atomic.load();
+        is_gray_scale = is_gray_local;
         m_is_loaded = true;
 
         SDL_UnlockSurface(surface);
@@ -694,7 +787,7 @@ private:
         SCENE_LOG_INFO("[SUCCESS] COMPRESSED texture decoded -> " + std::to_string(width) + "x" +
             std::to_string(height) + (has_alpha ? " | alpha" : " | opaque") +
             (is_gray_scale ? " | grayscale" : " | color") + " | " +
-            std::to_string(num_threads) + " threads | " +
+            "Single-threaded safe load | " +
             std::to_string(duration.count()) + "ms");
     }
 
