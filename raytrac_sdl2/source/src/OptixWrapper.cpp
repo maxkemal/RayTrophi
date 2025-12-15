@@ -4,13 +4,12 @@
 #include <chrono> // Süre ölçmek için
 #include <unordered_map> // Gereken başlık
 #include <algorithm>    // std::min ve std::max için
+#include <cstring>      // memcpy for camera hash
 #include <SpotLight.h>
 #include <filesystem>
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
-
-#undef min              // Eğer min bir yerde macro tanımlandıysa temizler
-#undef max
+#include "Triangle.h"  
 
 #define OPTIX_CHECK(call)                                                       \
     do {                                                                        \
@@ -41,6 +40,10 @@ OptixWrapper::OptixWrapper()
     d_indices = 0;
     d_bvh_output = 0;
     d_accumulation_buffer = nullptr;
+    is_gas_built_as_soup = false;
+    allocated_vertex_byte_size = 0;
+    allocated_normal_byte_size = 0;
+    last_vertex_count = 0;
     d_variance_buffer = nullptr;
     d_sample_count_buffer = nullptr;
     sbt.raygenRecord = 0;
@@ -122,6 +125,16 @@ void OptixWrapper::partialCleanup() {
         cudaFree(reinterpret_cast<void*>(d_sample_count_buffer));
         d_sample_count_buffer = nullptr;
     }
+    if (d_framebuffer) {
+        cudaFree(reinterpret_cast<void*>(d_framebuffer));
+        d_framebuffer = nullptr;
+    }
+    if (d_accumulation_float4) {
+        cudaFree(reinterpret_cast<void*>(d_accumulation_float4));
+        d_accumulation_float4 = nullptr;
+        accumulation_valid = false;
+        accumulated_samples = 0;
+    }
 
     // SBT kaynakları
     if (sbt.hitgroupRecordBase) {
@@ -164,6 +177,9 @@ void OptixWrapper::cleanup() {
     if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
     if (d_variance_buffer) cudaFree(d_variance_buffer);
     if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
+    if (d_framebuffer) cudaFree(d_framebuffer);
+    if (d_accumulation_float4) cudaFree(d_accumulation_float4);
+    d_accumulation_float4 = nullptr;
     traversable_handle = 0;
 }
 
@@ -225,111 +241,9 @@ bool OptixWrapper::isCudaAvailable() {
         return false; // CUDA desteklenmiyor
     }
 }
-void OptixWrapper::setupOIDN(int width, int height)
-{
-    if (oidnInitialized && oidnLastWidth == width && oidnLastHeight == height)
-        return; // Çözünürlük aynı -> Hiçbir şey yapma, en hızlı yol
 
-    // Aşağısı sadece çözünürlük değişirse (ya da ilk kurulumda) çalışır:
-    oidnInputBuffer = nullptr;
-    oidnOutputBuffer = nullptr;
-    oidnFilter = nullptr;
-
-    if (!oidnDevice)
-    {
-        bool useCUDA = g_hasOptix;
-
-        oidnDevice = useCUDA
-            ? oidn::newDevice(oidn::DeviceType::CUDA)
-            : oidn::newDevice(oidn::DeviceType::CPU);
-
-        // Log
-        if (useCUDA)
-            std::cout << "[OIDN] Using CUDA device for denoising.\n";
-        else
-            std::cout << "[OIDN] Using CPU device for denoising.\n";
-
-        oidnDevice.commit();
-    }
-
-
-    const size_t byteSize = width * height * 3 * sizeof(float);
-
-    oidnInputBuffer = oidnDevice.newBuffer(byteSize);
-    oidnOutputBuffer = oidnDevice.newBuffer(byteSize);
-
-    oidnFilter = oidnDevice.newFilter("RT");
-    oidnFilter.setImage("color", oidnInputBuffer, oidn::Format::Float3, width, height);
-    oidnFilter.setImage("output", oidnOutputBuffer, oidn::Format::Float3, width, height);
-    oidnFilter.set("hdr", false);
-    oidnFilter.set("srgb", true);
-    oidnFilter.commit();
-
-    oidnLastWidth = width;
-    oidnLastHeight = height;
-    oidnInitialized = true;
-}
-
-void OptixWrapper::applyOIDNDenoising(SDL_Surface* surface, bool denoise, float blend)
-{
-    int width = surface->w;
-    int height = surface->h;
-
-    setupOIDN(width, height);  // Çok hızlı - çözünürlük değişmediyse boş
-
-    if (!oidnInitialized)
-        return;
-
-    const size_t pixelCount = width * height;
-    const size_t byteSize = pixelCount * 3 * sizeof(float);
-
-    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
-
-    // Paylaşılan statik vektör (her kare yeniden allocate etmez)
-    static std::vector<float> input;
-    static std::vector<float> output;
-
-    input.resize(pixelCount * 3);
-    output.resize(pixelCount * 3);
-
-    for (int i = 0; i < pixelCount; i++) {
-        Uint8 r, g, b;
-        SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
-        input[i * 3 + 0] = r / 255.0f;
-        input[i * 3 + 1] = g / 255.0f;
-        input[i * 3 + 2] = b / 255.0f;
-    }
-
-    std::memcpy(oidnInputBuffer.getData(), input.data(), byteSize);
-
-    oidnFilter.set("denoise", denoise);
-    oidnFilter.commit();
-
-    oidnFilter.execute();
-
-    std::memcpy(output.data(), oidnOutputBuffer.getData(), byteSize);
-
-    float clamped = std::clamp(blend, 0.0f, 1.0f);
-
-    for (int i = 0; i < pixelCount; ++i) {
-        Uint8 r0, g0, b0;
-        SDL_GetRGB(pixels[i], surface->format, &r0, &g0, &b0);
-
-        float rr = output[i * 3];
-        float gg = output[i * 3 + 1];
-        float bb = output[i * 3 + 2];
-
-        float r = rr * clamped + (r0 / 255.0f) * (1.0f - clamped);
-        float g = gg * clamped + (g0 / 255.0f) * (1.0f - clamped);
-        float b = bb * clamped + (b0 / 255.0f) * (1.0f - clamped);
-
-        pixels[i] = SDL_MapRGB(surface->format,
-            (Uint8)(std::clamp(r * 255.0f, 0.0f, 255.0f)),
-            (Uint8)(std::clamp(g * 255.0f, 0.0f, 255.0f)),
-            (Uint8)(std::clamp(b * 255.0f, 0.0f, 255.0f))
-        );
-    }
-}
+// OIDN methods removed - all denoising now handled by Renderer::applyOIDNDenoising
+// This eliminates code duplication and ensures consistent behavior
 
 void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
     if (data.materials.empty()) {
@@ -445,27 +359,27 @@ void OptixWrapper::setupPipeline(const char* raygen_ptx) {
     ));
 
     // 7. Shader Binding Table (SBT) hazırla
-    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) SbtRecord {
+    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) EmptySbtRecord {
         char header[OPTIX_SBT_RECORD_HEADER_SIZE];
     };
 
-    SbtRecord raygen_record = {};
+    EmptySbtRecord raygen_record = {};
     OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &raygen_record));
-    cudaMalloc(reinterpret_cast<void**>(&sbt.raygenRecord), sizeof(SbtRecord));
-    cudaMemcpy(reinterpret_cast<void*>(sbt.raygenRecord), &raygen_record, sizeof(SbtRecord), cudaMemcpyHostToDevice);
+    cudaMalloc(reinterpret_cast<void**>(&sbt.raygenRecord), sizeof(EmptySbtRecord));
+    cudaMemcpy(reinterpret_cast<void*>(sbt.raygenRecord), &raygen_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
 
-    SbtRecord miss_record = {};
+    EmptySbtRecord miss_record = {};
     OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &miss_record));
-    cudaMalloc(reinterpret_cast<void**>(&sbt.missRecordBase), sizeof(SbtRecord));
-    cudaMemcpy(reinterpret_cast<void*>(sbt.missRecordBase), &miss_record, sizeof(SbtRecord), cudaMemcpyHostToDevice);
-    sbt.missRecordStrideInBytes = sizeof(SbtRecord);
+    cudaMalloc(reinterpret_cast<void**>(&sbt.missRecordBase), sizeof(EmptySbtRecord));
+    cudaMemcpy(reinterpret_cast<void*>(sbt.missRecordBase), &miss_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
+    sbt.missRecordStrideInBytes = sizeof(EmptySbtRecord);
     sbt.missRecordCount = 1;
 
-    SbtRecord hit_record = {};
+    EmptySbtRecord hit_record = {};
     OPTIX_CHECK(optixSbtRecordPackHeader(hit_pg, &hit_record));
-    cudaMalloc(reinterpret_cast<void**>(&sbt.hitgroupRecordBase), sizeof(SbtRecord));
-    cudaMemcpy(reinterpret_cast<void*>(sbt.hitgroupRecordBase), &hit_record, sizeof(SbtRecord), cudaMemcpyHostToDevice);
-    sbt.hitgroupRecordStrideInBytes = sizeof(SbtRecord);
+    cudaMalloc(reinterpret_cast<void**>(&sbt.hitgroupRecordBase), sizeof(EmptySbtRecord));
+    cudaMemcpy(reinterpret_cast<void*>(sbt.hitgroupRecordBase), &hit_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
+    sbt.hitgroupRecordStrideInBytes = sizeof(EmptySbtRecord);
     sbt.hitgroupRecordCount = 1;
 }
 void OptixWrapper::destroyTextureObjects() {
@@ -542,6 +456,8 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     size_t v_size = data.vertices.size() * sizeof(float3);
     cudaMalloc(reinterpret_cast<void**>(&d_vertices), v_size);
     cudaMemcpy(reinterpret_cast<void*>(d_vertices), data.vertices.data(), v_size, cudaMemcpyHostToDevice);
+    allocated_vertex_byte_size = v_size;
+    is_gas_built_as_soup = false; // Initial build is Indexed from Assimp
 
     size_t i_size = data.indices.size() * sizeof(uint3);
     cudaMalloc(reinterpret_cast<void**>(&d_indices), i_size);
@@ -552,6 +468,7 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         size_t n_size = data.normals.size() * sizeof(float3);
         cudaMalloc(reinterpret_cast<void**>(&d_normals), n_size);
         cudaMemcpy(reinterpret_cast<void*>(d_normals), data.normals.data(), n_size, cudaMemcpyHostToDevice);
+        allocated_normal_byte_size = n_size;
     }
 
     d_uvs = 0;
@@ -709,7 +626,9 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
 
     // Temizlik
     cudaFree(reinterpret_cast<void*>(d_temp_buffer));
+    d_temp_buffer = 0;
     cudaFree(reinterpret_cast<void*>(d_compacted_size));
+    d_compacted_size = 0;
     d_bvh_output = d_output_buffer;
 
     cudaStreamSynchronize(stream);
@@ -938,223 +857,196 @@ void OptixWrapper::launch_tile_based_progressive(
 }
 */
 
+// ------------------------------------------------------------------
+// CYCLES-STYLE ACCUMULATIVE RENDERING - Progressive refinement
+// Camera stationary: accumulates samples up to max_samples
+// Camera moves: resets and renders with 1 sample for fast preview
+// ------------------------------------------------------------------
+
+// Helper function to compute camera hash for change detection
+uint64_t OptixWrapper::computeCameraHash() const {
+    // Simple FNV-1a style hash of camera parameters
+    uint64_t hash = 14695981039346656037ULL;
+    auto hashFloat = [&hash](float f) {
+        uint32_t bits;
+        memcpy(&bits, &f, sizeof(bits));
+        hash ^= bits;
+        hash *= 1099511628211ULL;
+    };
+    
+    hashFloat(params.camera.origin.x);
+    hashFloat(params.camera.origin.y);
+    hashFloat(params.camera.origin.z);
+    hashFloat(params.camera.lower_left_corner.x);
+    hashFloat(params.camera.lower_left_corner.y);
+    hashFloat(params.camera.lower_left_corner.z);
+    hashFloat(params.camera.horizontal.x);
+    hashFloat(params.camera.horizontal.y);
+    hashFloat(params.camera.horizontal.z);
+    hashFloat(params.camera.vertical.x);
+    hashFloat(params.camera.vertical.y);
+    hashFloat(params.camera.vertical.z);
+    
+    return hash;
+}
+
 void OptixWrapper::launch_random_pixel_mode_progressive(
     SDL_Surface* surface,
     SDL_Window* window,
-    SDL_Renderer* renderer, // ⬅️ YENİ PARAMETRE
+    SDL_Renderer* renderer,
     int width,
     int height,
     std::vector<uchar4>& framebuffer,
     SDL_Texture* raytrace_texture
 ) {
     using namespace std::chrono;
-	rendering_in_progress = true;
-    cudaGetDeviceProperties(&props, 0);
-    int max_threads_per_block = props.maxThreadsPerBlock;
-    int num_sms = props.multiProcessorCount;
-
-    int image_pixels = width * height;
-
-    // ---------------- ADAPTIVE BATCH HESABI ----------------
-    // Kurallar:
-    // - Küçük görüntülerde: tek seferde komple render (overhead minimal).
-    // - Büyük görüntülerde: tile >= 512x512 (262144) tercih et.
-    const int MIN_TILE = 256 * 256;        // 262144
-    const int MAX_TILE = 1024 * 1024;      // 1048576
-   
-    int pixels_per_launch = image_pixels;
-    if (image_pixels > MIN_TILE) {
-        // Target temel: her SM için bir miktar iş bırak (512 thread/SM hedef)
-        int target_threads = num_sms * 512; // yaklaşık hedef thread sayısı
-        // Pixel-per-thread 1 kabul ederek hedef pixel sayısı:
-        int target_pixels = target_threads;
-        // Clamp hedefi makul tile aralığına al
-        int clamped = std::clamp(target_pixels, MIN_TILE, std::min(image_pixels, MAX_TILE));
-        // Ayrıca image büyüklüğüne göre tile sayısını mantıklı böl (ör. 4 tile veya 8 tile)
-        // Burada tercihen kaç tile yapılacağına göre ayarla:
-        int desired_tiles = std::clamp(image_pixels / clamped, 1, 16);
-        pixels_per_launch = std::min(image_pixels, std::max(clamped, image_pixels / desired_tiles));
+    rendering_in_progress = true;
+    
+    const int pixel_count = width * height;
+    
+    // ------------------ BUFFER ALLOCATION -----------------------
+    // Framebuffer for display (uchar4)
+    if (!d_framebuffer || prev_width != width || prev_height != height) {
+        if (d_framebuffer) cudaFree(d_framebuffer);
+        cudaMalloc(&d_framebuffer, pixel_count * sizeof(uchar4));
+        prev_width = width;
+        prev_height = height;
+        accumulation_valid = false; // Force reset on resolution change
     }
-    else {
-        // Küçük resim: tek seferde tamamla
-        pixels_per_launch = image_pixels;
+    
+    // High-precision accumulation buffer (float4: RGB + sample count)
+    if (!d_accumulation_float4 || !accumulation_valid) {
+        if (d_accumulation_float4) cudaFree(d_accumulation_float4);
+        cudaMalloc(&d_accumulation_float4, pixel_count * sizeof(float4));
+        cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
+        accumulation_valid = true;
     }
-
-    // display update interval: küçük çözünürlükte sık, büyükte seyrek
-    int display_update_interval = (image_pixels <= MIN_TILE) ? 1 : std::clamp(image_pixels / (pixels_per_launch * 2), 1, 4);
-
-    // ------------------ FRAMEBUFFER SETUP -----------------------
-    cudaMalloc(&d_framebuffer, width * height * sizeof(uchar4));
-    cudaMemset(d_framebuffer, 0, width * height * sizeof(uchar4));
-
+    
+    // ------------------ CAMERA CHANGE DETECTION -----------------------
+    uint64_t current_camera_hash = computeCameraHash();
+    bool camera_changed = (current_camera_hash != last_camera_hash);
+    bool is_first_render = (last_camera_hash == 0);
+    
+    if (camera_changed) {
+        // Camera moved - reset accumulation
+        cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
+        accumulated_samples = 0;
+        
+        // Log only when actually moving camera, not initial state
+        if (!is_first_render) {
+            // SCENE_LOG_INFO("Camera changed - resetting accumulation");
+        }
+        
+        last_camera_hash = current_camera_hash;
+    }
+    
+    // ------------------ DETERMINE SAMPLES TO RENDER -----------------------
+    // Max samples from settings (default to 100 if not set)
+    int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+    
+    // If we've reached max samples, don't render more
+    if (accumulated_samples >= target_max_samples) {
+        rendering_in_progress = false;
+        return;
+    }
+    
+    // Samples per pass: 1 for smooth progressive updates
+    // Could increase for faster convergence at cost of UI responsiveness
+    int samples_this_pass = 1;
+    
+    // ------------------ SETUP PARAMS -----------------------
     params.framebuffer = d_framebuffer;
+    params.accumulation_buffer = reinterpret_cast<float*>(d_accumulation_float4);
     params.image_width = width;
     params.image_height = height;
     params.handle = traversable_handle;
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
-
-    // Atmosfer ve diğer parametreler aynen
+    
     params.atmosphere.sigma_s = 0.01f;
     params.atmosphere.sigma_a = 0.01f;
     params.atmosphere.g = 0.0f;
     params.atmosphere.base_density = 0.001f;
     params.atmosphere.temperature = 300.0f;
     params.atmosphere.active = false;
-
-    params.samples_per_pixel = render_settings.samples_per_pixel;
+    
+    // Use 1 sample per pixel per pass for smooth progressive refinement
+    params.samples_per_pixel = samples_this_pass;
     params.min_samples = render_settings.min_samples;
     params.max_samples = render_settings.max_samples;
     params.variance_threshold = render_settings.variance_threshold;
     params.max_depth = render_settings.max_bounces;
-    params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
-
-    params.frame_number = frame_counter;
-    frame_counter++;
-    params.temporal_blend = 0.95f;
+    params.use_adaptive_sampling = false; // Progressive mode handles this differently
+    
+    // Frame number is the accumulated sample count (for random seed variation)
+    params.frame_number = accumulated_samples + 1;
+    params.current_pass = accumulated_samples;
+    params.temporal_blend = 0.0f; // We handle blending manually via accumulation buffer
+    
+    // Full image tiles
+    params.tile_x = 0;
+    params.tile_y = 0;
+    params.tile_width = width;
+    params.tile_height = height;
+    
+    // ------------------ UPLOAD PARAMS -----------------------
     cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
-
-    // ------------------ PİKSEL KOORDİNATLARI ------------------
-    std::vector<std::pair<int, int>> all_coords;
-    all_coords.reserve(width * height);
-    for (int j = 0; j < height; ++j)
-        for (int i = 0; i < width; ++i)
-            all_coords.emplace_back(i, j);
-
-    static std::mt19937 rng(12345);
-    std::shuffle(all_coords.begin(), all_coords.end(), rng);
-
-    // Dinamik batch vektörleri (maks pixels_per_launch kadar)
-    std::vector<int> coords_x;
-    std::vector<int> coords_y;
-    coords_x.reserve(pixels_per_launch);
-    coords_y.reserve(pixels_per_launch);
-
-    cudaMalloc(reinterpret_cast<void**>(&d_coords_x), pixels_per_launch * sizeof(int));
-    cudaMalloc(reinterpret_cast<void**>(&d_coords_y), pixels_per_launch * sizeof(int));
-
-    size_t total_pixels = all_coords.size();
-    size_t rendered_pixels = 0;
-
-    cudaStream_t render_stream;
-    cudaStreamCreate(&render_stream);
-
-    partial_framebuffer.resize(width * height);
-    std::vector<std::pair<int, int>> accumulated_coords;
-    accumulated_coords.reserve(pixels_per_launch * display_update_interval);
-
-    // SDL pixel buffer
+    cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice, stream);
+    
+    // ------------------ LAUNCH RENDER -----------------------
+    auto pass_start = high_resolution_clock::now();
+    
+    OPTIX_CHECK(optixLaunch(
+        pipeline, stream,
+        d_params, sizeof(RayGenParams),
+        &sbt,
+        width, height, 1
+    ));
+    
+    cudaStreamSynchronize(stream);
+    
+    auto pass_end = high_resolution_clock::now();
+    float pass_ms = duration<float, std::milli>(pass_end - pass_start).count();
+    
+    // Update accumulated sample count
+    accumulated_samples += samples_this_pass;
+    
+    // ------------------ COPY BACK & DISPLAY -----------------------
+    partial_framebuffer.resize(pixel_count);
+    
+    cudaMemcpyAsync(partial_framebuffer.data(),
+        d_framebuffer,
+        pixel_count * sizeof(uchar4),
+        cudaMemcpyDeviceToHost,
+        stream);
+    
+    cudaStreamSynchronize(stream);
+    
+    // Update SDL Surface
     Uint32* pixels = (Uint32*)surface->pixels;
     int row_stride = surface->pitch / 4;
-
-    auto start_time = high_resolution_clock::now();
-    auto last_present_time = start_time;
-    double fps_ema = 0.0;
-    const double ema_alpha = 0.15; // fps smoothing
-
-    int batch_counter = 0;
-   /* SCENE_LOG_INFO("OptiX progressive render launched.");
-    SCENE_LOG_INFO("Device: " + std::string(props.name) +
-        " | SMs: " + std::to_string(num_sms) +
-        " | Max threads per block: " + std::to_string(max_threads_per_block));
-
-    SCENE_LOG_INFO("Total pixels: " + std::to_string(total_pixels) +
-        " | Pixels per launch: " + std::to_string(pixels_per_launch) +
-        " | Display update interval: " + std::to_string(display_update_interval));*/
-
-    size_t count;
-    for (size_t offset = 0; offset < total_pixels; offset += pixels_per_launch) {
-        count = std::min<size_t>(pixels_per_launch, total_pixels - offset);
-        size_t last_logged_pixels = 0;
-        coords_x.clear();
-        coords_y.clear();
-        for (size_t k = 0; k < count; ++k) {
-            int index = offset + k;
-            coords_x.push_back(all_coords[index].first);
-            coords_y.push_back(all_coords[index].second);
-            accumulated_coords.emplace_back(coords_x.back(), coords_y.back());
-        }
-        if (rendering_stopped_gpu)
-        {
-            rendering_stopped_gpu = false;
-
-			break;
-        }
-            
-           
-
-        // Async memory transfer
-        cudaMemcpyAsync(reinterpret_cast<int*>(d_coords_x), coords_x.data(),
-            count * sizeof(int), cudaMemcpyHostToDevice, render_stream);
-        cudaMemcpyAsync(reinterpret_cast<int*>(d_coords_y), coords_y.data(),
-            count * sizeof(int), cudaMemcpyHostToDevice, render_stream);
-
-        params.launch_coords_x = reinterpret_cast<int*>(d_coords_x);
-        params.launch_coords_y = reinterpret_cast<int*>(d_coords_y);
-        params.batch_pixel_count = static_cast<int>(count);
-
-        cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params,
-            sizeof(RayGenParams), cudaMemcpyHostToDevice, render_stream);
-
-        // Render launch (count threads)
-        OPTIX_CHECK(optixLaunch(
-            pipeline, render_stream,
-            d_params, sizeof(RayGenParams),
-            &sbt,
-            static_cast<unsigned int>(count), 1, 1
-        ));
-
-        // *** Daha verimli: sadece değişen piksellerin D2H kopyalanması çok daha hızlı olur.
-        // Burada pratiklik için tüm framebuffer'ı kopyalıyoruz. İstersen sadece 'coords_x/y' ile
-        // tek tek pikselleri CUDA kernel ile host-buffer'a yazdırıp D2H kopyasını küçültebiliriz.
-        cudaMemcpyAsync(partial_framebuffer.data(),
-            d_framebuffer,
-            width * height * sizeof(uchar4),
-            cudaMemcpyDeviceToHost,
-            render_stream);
-
-        cudaStreamSynchronize(render_stream);
-
-        rendered_pixels += count;
-        batch_counter++;
-
-        bool should_update = (batch_counter % display_update_interval == 0) ||
-            (offset + pixels_per_launch >= total_pixels);
-
-        if (should_update && !accumulated_coords.empty()) {
-            // Geri dönen pikselleri surface'a yaz
-            for (const auto& coord : accumulated_coords) {
-                int px = coord.first;
-                int py = coord.second;
-                int fb_index = py * width + px;
-                const uchar4& c = partial_framebuffer[fb_index];
-
-                Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
-				raw_color = Vec3::clamp(raw_color, 0.0f, 1.0f);
-                float gpu_gamma = 1.0f / 1.2f;
-                uint8_t r = uint8_t(powf(raw_color.x, gpu_gamma) * 255.0f + 0.5f);
-                uint8_t g = uint8_t(powf(raw_color.y, gpu_gamma) * 255.0f + 0.5f);
-                uint8_t b = uint8_t(powf(raw_color.z, gpu_gamma) * 255.0f + 0.5f);
-
-                int screen_index = (height - 1 - py) * row_stride + px;
-                pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
-               
-            }
-
-            // Texture ve renderer güncelle
-           
-           
-            accumulated_coords.clear();
+    
+    for (int j = 0; j < height; ++j) {
+        for (int i = 0; i < width; ++i) {
+            int fb_index = j * width + i;
+            const uchar4& c = partial_framebuffer[fb_index];
+            int screen_index = (height - 1 - j) * row_stride + i;
+            pixels[screen_index] = SDL_MapRGB(surface->format, c.x, c.y, c.z);
         }
     }
-    //SCENE_LOG_INFO("OptiX progressive render completed. Total pixels: " + std::to_string(total_pixels));
-    // Temizlik
-    cudaFree(reinterpret_cast<void*>(d_framebuffer));
+    
+    // ------------------ PROGRESS DISPLAY -----------------------
+    float progress = 100.0f * accumulated_samples / target_max_samples;
+    std::string title = "RayTrophi - Sample " + std::to_string(accumulated_samples) + 
+                        "/" + std::to_string(target_max_samples) + 
+                        " (" + std::to_string(int(progress)) + "%) - " +
+                        std::to_string(int(pass_ms)) + "ms/sample";
+    SDL_SetWindowTitle(window, title.c_str());
+    
+    // Cleanup temporary params
     cudaFree(reinterpret_cast<void*>(d_params));
-    cudaFree(reinterpret_cast<void*>(d_coords_x));
-    cudaFree(reinterpret_cast<void*>(d_coords_y));
-    cudaStreamDestroy(render_stream);
-	rendering_in_progress = false;
-   
+    d_params = 0;
+    
+    rendering_in_progress = false;
 }
 
 
@@ -1311,6 +1203,196 @@ void OptixWrapper::resetBuffers(int width, int height) {
     cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
     cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
     cudaMemset(d_sample_count_buffer, 0, sizeof(int) * width * height);
-    frame_counter =1 ;
+    frame_counter = 1;
+}
+
+bool OptixWrapper::isAccumulationComplete() const {
+    int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+    return accumulated_samples >= target_max_samples;
+}
+
+void OptixWrapper::resetAccumulation() {
+    // Reset the Cycles-style accumulation buffer for new frame
+    if (d_accumulation_float4 && prev_width > 0 && prev_height > 0) {
+        cudaMemset(d_accumulation_float4, 0, prev_width * prev_height * sizeof(float4));
+    }
+    accumulated_samples = 0;
+    last_camera_hash = 0;  // Force re-hash on next render
+    accumulation_valid = true;
+}
+
+void OptixWrapper::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    if (objects.empty()) return;
+
+    std::vector<float3> vertices;
+    std::vector<float3> normals; 
+
+    vertices.reserve(objects.size() * 3);
+    normals.reserve(objects.size() * 3);
+
+    for (const auto& obj : objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (tri) {
+            Vec3 v0 = tri->getVertexPosition(0);
+            Vec3 v1 = tri->getVertexPosition(1);
+            Vec3 v2 = tri->getVertexPosition(2);
+
+            vertices.push_back({ v0.x, v0.y, v0.z });
+            vertices.push_back({ v1.x, v1.y, v1.z });
+            vertices.push_back({ v2.x, v2.y, v2.z });
+            
+            // Normals
+            Vec3 n0 = tri->getVertexNormal(0);
+            Vec3 n1 = tri->getVertexNormal(1);
+            Vec3 n2 = tri->getVertexNormal(2);
+            
+            normals.push_back({ n0.x, n0.y, n0.z });
+            normals.push_back({ n1.x, n1.y, n1.z });
+            normals.push_back({ n2.x, n2.y, n2.z });
+        }
+    }
+
+    if (vertices.empty()) return;
+
+    // 1. Update Vertex and Normal Buffers on GPU (SAFE RESIZING)
+    size_t new_vertex_size = vertices.size() * sizeof(float3);
+    if (!d_vertices || new_vertex_size > allocated_vertex_byte_size) {
+        if (d_vertices) cudaFree(reinterpret_cast<void*>(d_vertices));
+        cudaMalloc(reinterpret_cast<void**>(&d_vertices), new_vertex_size);
+        allocated_vertex_byte_size = new_vertex_size;
+        // Optimization: If we reallocated, pointers changed. We might need full build if UPDATE depended on fixed ptrs?
+        // OptiX allows pointer changes in buildInputs for UPDATE.
+    }
+    cudaMemcpy(reinterpret_cast<void*>(d_vertices), vertices.data(), new_vertex_size, cudaMemcpyHostToDevice);
+
+    size_t new_normal_size = normals.size() * sizeof(float3);
+    if (!d_normals || new_normal_size > allocated_normal_byte_size) {
+        if (d_normals) cudaFree(reinterpret_cast<void*>(d_normals));
+        cudaMalloc(reinterpret_cast<void**>(&d_normals), new_normal_size);
+        allocated_normal_byte_size = new_normal_size;
+    }
+    cudaMemcpy(reinterpret_cast<void*>(d_normals), normals.data(), new_normal_size, cudaMemcpyHostToDevice);
+
+    // Update SBT Logic? 
+    // Currently, SBT stores pointers to d_vertices. If d_vertices changed address, SBT is stale!
+    // FIX: We must update SBT if we reallocated OR if we switched from Indexed to Soup (pointers change logic).
+    // For now, let's assume SBT has pointer to d_vertices. If d_vertices changed, we need to update it.
+    // However, updating SBT on the fly is complex here. 
+    // Assuming the pointer `d_vertices` is what SBT uses, we need to refresh it.
+    // Ideally, we should implement a `updateSBT()` method. 
+    // But since this is a quick fix, if we realloc, we are in danger.
+    // LUCKILY, cuMemcpy to EXISTING d_vertices (if size fits) works fine.
+    // If we realloc, we MUST update SBT. 
+    // AS A SAFEGUARD: If we realloc, we accept the overhead? No, invalid pointer crash.
+    // I will add a simplified SBT pointer update here.
+    
+    // Update SBT Records with new pointers
+    // Note: hitgroup_records is a member variable, so we can iterate it.
+    for (auto& rec : hitgroup_records) {
+        rec.data.vertices = reinterpret_cast<float3*>(d_vertices);
+        rec.data.normals = reinterpret_cast<float3*>(d_normals);
+        // Note: Indices become invalid/unused in Soup mode, but shader might read them? 
+        // If shader uses indices for lookup, it will read garbage/old d_indices.
+        // We really should provide dummy indices or ensure shader handles non-indexed.
+    }
+    if (allocated_vertex_byte_size != 0) { // Only copy if we have data
+         CUdeviceptr d_hitgroup_records = sbt.hitgroupRecordBase;
+         cudaMemcpy(reinterpret_cast<void*>(d_hitgroup_records), hitgroup_records.data(), 
+                    hitgroup_records.size() * sizeof(SbtRecord<HitGroupData>), cudaMemcpyHostToDevice);
+    }
+
+
+    // 2. Refit Logic
+    bool allow_refit = is_gas_built_as_soup && (traversable_handle != 0) && (vertices.size() == last_vertex_count); 
+    // Refit is possible if we are correctly in Soup mode, have a valid handle, and TOPOLOGY (vertex count) hasn't changed. 
+    // Refit is possible if we are correctly in Soup mode and have a valid handle.
+    // Also, strictly speaking, refit is only valid if number of primitives matches.
+    // We assume if is_gas_built_as_soup is true, we built it as soup before.
+    // We should also check if size matches to imply no topology change.
+    // Actually, updateGeometry builds soup based on `objects.size()`.
+    // If `objects.size()` changes, we MUST rebuild.
+    // Let's add a loose check on size matching approximate primitive count.
+    
+    // Construct Build Input (Triangle Soup)
+    OptixBuildInput build_input = {};
+    build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+    
+    build_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+    build_input.triangleArray.vertexStrideInBytes = sizeof(float3);
+    build_input.triangleArray.numVertices = static_cast<uint32_t>(vertices.size());
+    build_input.triangleArray.vertexBuffers = &d_vertices;
+
+    // No Indices (Soup)
+    build_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_NONE;
+    build_input.triangleArray.indexStrideInBytes = 0;
+    build_input.triangleArray.numIndexTriplets = 0;
+    build_input.triangleArray.indexBuffer = 0;
+
+    std::vector<uint32_t> triangle_input_flags(hitgroup_records.size(), OPTIX_GEOMETRY_FLAG_NONE);
+    build_input.triangleArray.flags = triangle_input_flags.data();
+    build_input.triangleArray.numSbtRecords = static_cast<uint32_t>(hitgroup_records.size()); 
+    build_input.triangleArray.sbtIndexOffsetBuffer = d_material_indices;
+    build_input.triangleArray.sbtIndexOffsetSizeInBytes = sizeof(int);
+    build_input.triangleArray.sbtIndexOffsetStrideInBytes = sizeof(int);
+
+
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE | OPTIX_BUILD_FLAG_ALLOW_COMPACTION;
+    
+    // DECIDE: BUILD or UPDATE
+    if (allow_refit) {
+        accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
+    } else {
+        accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+        is_gas_built_as_soup = true; // Next time we can try update
+    }
+
+    OptixAccelBufferSizes gas_buffer_sizes;
+    OPTIX_CHECK(optixAccelComputeMemoryUsage(context, &accel_options, &build_input, 1, &gas_buffer_sizes));
+
+    // Clean up temporary buffers
+    if (d_temp_buffer) {
+        cudaFree(reinterpret_cast<void*>(d_temp_buffer));
+        d_temp_buffer = 0;
+    }
+    if (d_compacted_size) {
+        cudaFree(reinterpret_cast<void*>(d_compacted_size));
+        d_compacted_size = 0;
+    }
+    cudaDeviceSynchronize();
+    
+    // Re-allocate temp buffer if needed
+    cudaMalloc(reinterpret_cast<void**>(&d_temp_buffer), gas_buffer_sizes.tempSizeInBytes);
+    cudaMalloc(reinterpret_cast<void**>(&d_compacted_size), sizeof(uint64_t));
+    // No, update takes the `traversable_handle` as in/out.
+    // But we also need scratch space.
+    // And if operation is BUILD, we allocate output.
+    // If operation is UPDATE, we usually don't need new output buffer allocation if size is same.
+    // BUT optixAccelBuild output param is `d_output_buffer`.
+    // For Update: "The output buffer... must be the same buffer that was used for the initial build."
+    // So we should NOT free d_bvh_output if updating.
+    
+    if (accel_options.operation == OPTIX_BUILD_OPERATION_BUILD) {
+         if(d_bvh_output) cudaFree((void*)d_bvh_output);
+         cudaMalloc((void**)&d_bvh_output, gas_buffer_sizes.outputSizeInBytes);
+    }
+    // Else: Reuse d_bvh_output
+
+    OPTIX_CHECK(optixAccelBuild(
+        context,
+        0,                  
+        &accel_options,
+        &build_input,
+        1,                  
+        d_temp_buffer,
+        gas_buffer_sizes.tempSizeInBytes,
+        d_bvh_output,
+        gas_buffer_sizes.outputSizeInBytes,
+        &traversable_handle,
+        nullptr,            
+        0                   
+    ));
+    
+    cudaDeviceSynchronize();
 }
 

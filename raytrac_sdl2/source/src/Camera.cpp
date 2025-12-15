@@ -8,14 +8,14 @@ Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, f
     blade_count(blade_count), fov(vfov), origin(lookfrom)
 {
     lens_radius = aperture * 0.5f;
-	near_dist = 0.1; // Yakýn mesafe, genellikle 0.1 olarak ayarlanýr
-	far_dist = focus_dist * 2.0; // Uzak mesafe, odak uzaklýðýnýn iki katý olarak ayarlanýr
+    near_dist = 0.1; // Yakýn mesafe, genellikle 0.1 olarak ayarlanýr
+    far_dist = focus_dist * 2.0; // Uzak mesafe, odak uzaklýðýnýn iki katý olarak ayarlanýr
     update_camera_vectors();
 }
 
-Camera::Camera() 
-    : aperture(0.0), aspect(0.0), aspect_ratio(0.0), blade_count(0), far_dist(0.0), 
-      focus_dist(0.0), fov(0.0), lens_radius(0.0), near_dist(0.0), vfov(0.0) {
+Camera::Camera()
+    : aperture(0.0), aspect(0.0), aspect_ratio(0.0), blade_count(0), far_dist(0.0),
+    focus_dist(0.0), fov(0.0), lens_radius(0.0), near_dist(0.0), vfov(0.0) {
 }
 Ray Camera::get_ray(float s, float t) const {
     Vec3 rd = lens_radius * random_in_unit_polygon(blade_count);
@@ -157,7 +157,23 @@ bool Camera::isAABBInFrustum(const AABB& aabb) const {
     }
     return true;  // AABB frustum içinde
 }
-
+void Camera::reset() {
+    lookfrom = init_lookfrom;
+    lookat = init_lookat;
+    vup = init_vup;
+    vfov = init_vfov;
+    aperture = init_aperture;
+    focus_dist = init_focus_dist;
+    update_camera_vectors();
+}
+void Camera::save_initial_state() {
+    init_lookfrom = lookfrom;
+    init_lookat = lookat;
+    init_vup = vup;
+    init_vfov = vfov;
+    init_aperture = aperture;
+    init_focus_dist = focus_dist;
+}
 std::vector<AABB> Camera::performFrustumCulling(const std::vector<AABB>& objects) const {
     std::vector<AABB> visibleObjects;
     for (const auto& obj : objects) {

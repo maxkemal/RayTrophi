@@ -248,7 +248,7 @@ __device__ bool transmission_scatter(
         direction = normalize(lerp(direction, random_dir, roughness*0.1f));
     }
 
-    //  Transmission rengi hesapla
+    //  Transmission rengi hesapla - Beer's Law
     float thickness = 0.1f;
 
     float3 tint = material.albedo;   
@@ -259,17 +259,38 @@ __device__ bool transmission_scatter(
             make_float3(tex.x, tex.y, tex.z);
     }
 
-    float3 transmission_color = make_float3(
-        expf(-tint.x * thickness),
-        expf(-tint.y * thickness),
-        expf(-tint.z * thickness)
+    // Beer's Law: absorbans için ters renk kullan (açık renkler daha az soğurur)
+    float3 absorption = make_float3(
+        (1.0f - tint.x) * thickness,
+        (1.0f - tint.y) * thickness,
+        (1.0f - tint.z) * thickness
     );
-    float transmission_weight = (1.0f - schlick(cos_theta, eta)* material.transmission);
-    float3 result = tint;
+    float3 transmission_color = make_float3(
+        expf(-absorption.x),
+        expf(-absorption.y),
+        expf(-absorption.z)
+    );
+    
+    // Fresnel katkısını ekle - yüksek transmission'da daha fazla geçiş
+    float fresnel = schlick(cos_theta, eta);
+    float transmission_factor = 1.0f - fresnel * (1.0f - material.transmission);
+    
+    // Şeffaf camlar için tint yerine transmission_color kullan
+    // Transmission = 1.0 ise neredeyse tam ışık geçisi (hafif tint ile)
+    float3 result = lerp(tint, transmission_color, material.transmission) * transmission_factor;
+    
+    // Çok şeffaf materyaller için minimum attenuation garantisi
+    if (material.transmission > 0.9f) {
+        result = make_float3(
+            fmaxf(result.x, 0.9f),
+            fmaxf(result.y, 0.9f),
+            fmaxf(result.z, 0.9f)
+        );
+    }
 
     //  Caustic katkısı
     float3 caustic = calculate_caustic_gpu(unit_direction, outward_normal, direction, tint, 0.1f);
-    result += caustic;
+    result += caustic * 0.05f;  // Caustic etkisini azalt
 
     *attenuation = result;
     *scattered = Ray(payload.position + outward_normal * 0.00001f, normalize(direction));
@@ -296,7 +317,7 @@ __device__ bool scatter_material(
 		N = make_float3(0.0f, 0.0f, 1.0f); // Normal sıfırsa Z eksenine yönlendir
 	}
    
-    float3 albedo = material.albedo;
+    float3 albedo = material.albedo/M_PIf;
     if (payload.has_albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
         albedo = (tex.y == 0.0f && tex.z == 0.0f) ?
@@ -306,19 +327,31 @@ __device__ bool scatter_material(
    
     float opacity = material.opacity;
     opacity *= get_alpha_gpu(payload, uv);
+    
+    // Tam şeffaf (opacity ≈ 0) durumunda direkt geç, hayalet görüntü bırakma
+    if (opacity < 0.001f) {
+        // Tamamen şeffaf - ışın hiç etkileşime girmeden geçer
+        *attenuation = make_float3(1.0f, 1.0f, 1.0f);  // Hiç soğurma yok
+        *scattered = Ray(payload.position + ray_in.direction * 0.001f, ray_in.direction);
+        *pdf = 1.0f;
+        *is_specular = true;  // Delta dağılım - MIS atla
+        return true;
+    }
+    
     if (opacity < 1.0f) {
-        // Opacity olasılığı ile kararlaştır: geç mi, yansıt mı?
+        // Yarı-şeffaf: stokastik olarak opak veya şeffaf yol seç
         if (random_float(rng) < opacity) {
-            // Opaque kısım - normal reflection
-			*attenuation *= albedo;
+            // Opak yol seçildi - normal BRDF değerlendirmesi devam edecek
+            // Attenuation'ı opacity ile ÇARPMA - sadece BRDF sonucu kullanılacak
         }
         else {
-            // Transparent kısım - geç
-            *attenuation *= make_float3(1.0f, 1.0f, 1.0f);  // Full transmission
+            // Şeffaf yol seçildi - ışın geçer
+            *attenuation = make_float3(1.0f, 1.0f, 1.0f);  // Tam geçiş
             *scattered = Ray(payload.position + ray_in.direction * 0.001f, ray_in.direction);
+            *pdf = 1.0f;
+            *is_specular = true;  // Delta dağılım
             return true;
         }
-
     }
     float3 emission = material.emission;
     if (payload.has_emission_tex) {
@@ -391,7 +424,7 @@ __device__ bool scatter_material(
 
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
-    float3 diffuse = k_d * albedo/M_PIf ;
+    float3 diffuse = k_d * albedo ;
     float3 specular = F;
     *pdf = pdf_brdf(material, wo, wi, payload.normal);   
     *scattered = Ray(payload.position + L * 0.001f, L);

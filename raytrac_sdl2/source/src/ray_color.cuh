@@ -301,7 +301,7 @@ __device__ float3 calculate_direct_lighting(
     Ray shadow_ray(origin, wi);
 
     OptixHitResult shadow_payload = {};
-    trace_shadow_ray(shadow_ray, &shadow_payload, 0.001f, distance);
+    trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
     if (shadow_payload.hit) return result;
 
     // ==== BRDF & PDF ====
@@ -452,8 +452,14 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             }
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
         if (light_count == 0) {
-            color += throughput * payload.emission;
-            throughput *= attenuation;
+            // Emission texture varsa kullan
+            float3 emission = payload.emission;
+            if (payload.has_emission_tex) {
+                float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
+                emission = make_float3(tex.x, tex.y, tex.z) * mat.emission;
+            }
+            color += throughput * emission;
+            // throughput zaten satır 443'te attenuation ile çarpıldı, tekrar çarpma!
             ray = scattered;
             continue;
         }
@@ -470,8 +476,9 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         }
 
         // --- BRDF yönünde MIS katkı ---
+        // Specular (delta dağılım) yüzeylerde MIS yapma - transmission/opacity geçişleri dahil
         float3 brdf_mis = make_float3(0.0f, 0.0f, 0.0f);
-        if (light_index >= 0) {
+        if (!is_specular && light_index >= 0) {
 
             const LightGPU& light = optixLaunchParams.lights[light_index];
             float3 wi = normalize(scattered.direction);
@@ -501,12 +508,10 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                 }
             }
         }
-        float opacity = mat.opacity;
-        direct *= opacity; 
-		brdf_mis *= opacity; // BRDF MIS katkısını da opacity ile çarp
-
+      
+        float3 emission = payload.emission;
         // --- Toplam katkı ---
-        color += throughput * (opacity * direct+ brdf_mis+ payload.emission);
+        color += throughput * (direct + brdf_mis + emission);
        
         ray = scattered;
 		

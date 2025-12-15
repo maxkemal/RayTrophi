@@ -16,9 +16,9 @@ set(OIDN_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/oidn-2.3.0.x64.windows" CA
 set(ASSIMP_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/Assimp" CACHE PATH "Path to Assimp root")
 
 # --- SOURCE FILES ---
-file(GLOB SOURCES_CPP "source/cpp_file/*.cpp")
-file(GLOB SOURCES_IMGUI "source/imgui/*.cpp")
-file(GLOB HEADERS "source/header/*.h" "source/imgui/*.h")
+file(GLOB SOURCES_CPP "source/src/*.cpp")
+file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
+file(GLOB HEADERS "source/include/*.h" "source/external/imgui/*.h")
 
 # Gather all sources
 set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${HEADERS})
@@ -26,21 +26,21 @@ set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${HEADERS})
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
 
-set(CUDA_SOURCE "source/cpp_file/raygen.cu")
+set(CUDA_SOURCE "source/src/raygen.cu")
 set(PTX_OUTPUT "${CMAKE_BINARY_DIR}/raygen.ptx")
 
 # Custom command to generate PTX
 # NOTE: PTX depends on these headers too - if they change, PTX must be rebuilt
 set(PTX_HEADER_DEPS
-    "source/header/material_gpu.h"
-    "source/header/params.h"
-    "source/header/payload.h"
-    "source/header/sbt_data.h"
-    "source/cpp_file/material_scatter.cuh"
-    "source/cpp_file/vec3_utils.cuh"
-    "source/cpp_file/random_utils.cuh"
-    "source/cpp_file/ray_color.cuh"
-    "source/cpp_file/trace_ray.cuh"
+    "source/include/material_gpu.h"
+    "source/include/params.h"
+    "source/include/payload.h"
+    "source/include/sbt_data.h"
+    "source/src/material_scatter.cuh"
+    "source/src/vec3_utils.cuh"
+    "source/src/random_utils.cuh"
+    "source/src/ray_color.cuh"
+    "source/src/trace_ray.cuh"
 )
 
 add_custom_command(
@@ -49,8 +49,8 @@ add_custom_command(
     -ptx "${CMAKE_CURRENT_SOURCE_DIR}/${CUDA_SOURCE}"
     -o "${PTX_OUTPUT}"
     -I"${OPTIX_ROOT}/include"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/header"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/cpp_file"
+    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/include"
+    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src"
     --use_fast_math
     --maxrregcount=64
     -gencode=arch=compute_86,code=compute_86
@@ -64,8 +64,9 @@ add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUT})
 
 # --- INCLUDE DIRECTORIES ---
 target_include_directories(${PROJECT_NAME} PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/source/header"
-    "${CMAKE_CURRENT_SOURCE_DIR}/source/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/external/imgui"
     "${OPTIX_ROOT}/include"
     "${SDL2_ROOT}/include"
     "${SDL2_IMAGE_ROOT}/include"

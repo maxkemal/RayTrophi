@@ -1,4 +1,4 @@
-#ifndef GLOBALS_H
+ï»¿#ifndef GLOBALS_H
 #define GLOBALS_H
 
 #include <mutex>
@@ -10,30 +10,61 @@
 #include <filesystem>
 #include <fstream>
 
+// Quality presets for easy selection
+enum class QualityPreset {
+    Preview = 0,      // Fast, noisy - good for quick previews
+    Production = 1,   // Balanced quality/speed
+    Cinematic = 2     // Highest quality, slowest
+};
+
 struct RenderSettings {
+    // Quality Preset
+    QualityPreset quality_preset = QualityPreset::Preview;
+    
     // Sampling
-    int samples_per_pixel;
-    int samples_per_pass;
-    int max_bounces;
+    int samples_per_pixel = 1;
+    int samples_per_pass = 1;
+    int max_bounces = 4;
 
     // Adaptive Sampling
-    bool use_adaptive_sampling;
-    int min_samples;
-    int max_samples;
-    float variance_threshold;
+    bool use_adaptive_sampling = true;
+    int min_samples = 1;
+    int max_samples = 32;
+    float variance_threshold = 0.1f;
 
     // Denoiser
-    bool use_denoiser;
-    float denoiser_blend_factor;
+    bool use_denoiser = false;
+    float denoiser_blend_factor = 1.0f;
 
     // Backend
-    bool use_optix;
-    bool UI_use_embree;
+    bool use_optix = false;
+    bool UI_use_embree = true;
+    
     // Animation
-    float animation_duration;
-    int animation_fps;
+    float animation_duration = 1.0f;
+    int animation_fps = 24;
     bool start_animation_render = false;
     bool save_image_requested = false;
+	int animation_start_frame = 0;
+	int animation_end_frame = 0;
+    int animation_current_frame = 0;
+    std::string animation_output_folder = "";
+    
+    // Animation playback (timeline icin)
+    bool animation_is_playing = false;
+    int animation_playback_frame = 0;
+    
+    // Render progress tracking (for UI display)
+    int render_current_samples = 0;
+    int render_target_samples = 256;
+    float render_progress = 0.0f;
+    bool is_rendering_active = false;
+    bool is_render_paused = false;
+    
+    // Render time estimation
+    float render_elapsed_seconds = 0.0f;
+    float render_estimated_remaining = 0.0f;
+    float avg_sample_time_ms = 0.0f;
 };
 enum class LogLevel { Info, Warning, Error };
 
@@ -50,10 +81,10 @@ struct LogEntry {
 class UILogger {
 public:
     UILogger() {
-        // Program EXE’nin yanýna log dosyasý oluþturur
+        // Program EXEâ€™nin yanÄ±na log dosyasÄ± oluÅŸturur
         logFile.open("SceneLog.txt", std::ios::out | std::ios::app);
         if (!logFile.is_open()) {
-            std::cerr << "[LOGGER ERROR] Log dosyasý açýlamadý!\n";
+            std::cerr << "[LOGGER ERROR] Log dosyasÄ± aÃ§Ä±lamadÄ±!\n";
         }
     }
 
@@ -69,13 +100,13 @@ public:
 
         const char* prefix = logLevelToString(level);
 
-        // UI için hafýzaya
+        // UI iÃ§in hafÄ±zaya
         lines.push_back({ msg, level });
 
         // Konsola
         std::cout << "[" << prefix << "] " << msg << std::endl;
 
-        // Dosyaya — CRASH olsa bile satýr kaybolmaz
+        // Dosyaya â€” CRASH olsa bile satÄ±r kaybolmaz
         if (logFile.is_open()) {
             logFile << "[" << prefix << "] " << msg << std::endl;
             logFile.flush();
@@ -86,7 +117,7 @@ public:
         std::lock_guard<std::mutex> guard(lock);
         lines.clear();
 
-        // Dosyayý da sýfýrlayalým
+        // DosyayÄ± da sÄ±fÄ±rlayalÄ±m
         if (logFile.is_open()) {
             logFile.close();
             logFile.open("SceneLog.txt", std::ios::out | std::ios::trunc);
@@ -122,12 +153,12 @@ extern UILogger g_sceneLog;
 
 
 
-// Yalnýzca bildirim:
+// YalnÄ±zca bildirim:
 extern RenderSettings render_settings;
 extern std::atomic<int> completed_pixels;
 extern const double min_distance;
 extern const double max_distance;
-extern  float aspect_ratio; // Sabit olarak double türünde tanýmlýyoruz
+extern  float aspect_ratio; // Sabit olarak double tÃ¼rÃ¼nde tanÄ±mlÄ±yoruz
 extern  int image_width;
 extern  int image_height;
 extern const float EPSILON;
@@ -157,7 +188,8 @@ extern int pending_height;
 extern float pending_aspect_ratio;
 extern float light_radius;
 extern bool render_finished;
-extern bool rendering_in_progress;
-extern bool rendering_stopped_gpu;
+extern std::atomic<bool> rendering_in_progress;
+extern std::atomic<bool> rendering_stopped_gpu;
 extern std::atomic<bool> rendering_stopped_cpu;
+
 #endif // GLOBALS_H

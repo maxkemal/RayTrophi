@@ -110,6 +110,7 @@ SDL_Renderer* renderer = nullptr;
 SDL_Surface* surface = nullptr;
 SDL_Surface* original_surface = nullptr;
 SDL_Texture* raytrace_texture = nullptr;
+std::mutex surface_mutex;  // Surface erişimi için mutex
 SceneUI ui;
 SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
@@ -157,35 +158,21 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
 void reset_render_resolution(int w, int h)
 {
     // ------------------------------------------------------------------
-    // 0. MEVCUT RAYTRACE SURFACE'I YAKALA (ImGui panelleri olmadan)
+    // 1. SDL Pencere Boyutunu Güncelle
     // ------------------------------------------------------------------
-    SDL_Surface* temp_surface = nullptr;
-
-    // Yalnızca 'surface' (CPU tarafındaki raytrace çıktısı) var ise kopyala
-    if (surface) {
-        // Mevcut surface boyutlarını al
-        int current_w = surface->w;
-        int current_h = surface->h;
-
-        // Geçici bir yüzey oluştur
-        temp_surface = SDL_CreateRGBSurfaceWithFormat(0, current_w, current_h, 32, SDL_PIXELFORMAT_RGBA32);
-
-        // Mevcut raytrace çıktısını (surface) temp_surface'a kopyala
-        // Bu, sadece render verisidir (ImGui dahil değildir).
-        SDL_BlitSurface(surface, nullptr, temp_surface, nullptr);
-    }
-
+    SDL_SetWindowSize(window, w, h);
+    
     // ------------------------------------------------------------------
-    // 1. SDL kaynaklarını sıfırla (DESTROY)
+    // 2. SDL kaynaklarını sıfırla (DESTROY)
     // ------------------------------------------------------------------
     if (raytrace_texture) SDL_DestroyTexture(raytrace_texture);
-    if (surface) SDL_FreeSurface(surface); // Eski raytrace surface'ı sil
+    if (surface) SDL_FreeSurface(surface);
     if (original_surface) SDL_FreeSurface(original_surface);
 
     // ------------------------------------------------------------------
-    // 2. Yeni kaynakları oluştur (CREATE)
+    // 3. Yeni kaynakları oluştur (CREATE)
     // ------------------------------------------------------------------
-    surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32); // Yeni surface
+    surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
     original_surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
     raytrace_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
         SDL_TEXTUREACCESS_STREAMING, w, h);
@@ -195,47 +182,32 @@ void reset_render_resolution(int w, int h)
         return;
     }
 
-    // ------------------------------------------------------------------
-    // 3. YAKALANAN VERİYİ YENİ SURFACE'A VE TEXTURE'A KOPYALA
-    // ------------------------------------------------------------------
-    if (temp_surface) {
-        // Yeni Surface'ı siyahla doldur
-        SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 0));
-
-        // Eski içeriği (temp_surface) yeni surface'ın sol üst köşesine kopyala
-        SDL_Rect src_rect = { 0, 0, temp_surface->w, temp_surface->h };
-        SDL_Rect dst_rect = { 0, 0, w, h };
-
-        dst_rect.w = min(w, temp_surface->w);
-        dst_rect.h = min(h, temp_surface->h);
-
-        // Surface'lar arası blit işlemi (ImGui'siz raytrace verisi)
-        SDL_BlitSurface(temp_surface, &src_rect, surface, &dst_rect);
-
-        // Yeni surface verisini Texture'a aktar (GPU'ya gönder)
-        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-
-        // Geçici yüzeyi temizle
-        SDL_FreeSurface(temp_surface);
-
-        // EKRANI HEMEN GÜNCELLE
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-
-        // ImGui panellerini çizmeden sadece görüntüyü sun.
-        // ImGui bir sonraki ana döngü iterasyonunda çizilecektir.
-        SDL_RenderPresent(renderer);
-    }
+    // Siyah ekranla başla
+    SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
+    SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
+    
+    // Texture'ı güncelle
+    SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+    
+    // Ekranı güncelle
+    SDL_RenderClear(renderer);
+    SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+    SDL_RenderPresent(renderer);
 
     // ------------------------------------------------------------------
-    // 4. Diğer Bileşenleri Güncelle
+    // 4. Aspect ratio ve global değişkenleri güncelle
+    // ------------------------------------------------------------------
+    aspect_ratio = (float)w / h;
+    
+    // ------------------------------------------------------------------
+    // 5. Diğer Bileşenleri Güncelle
     // ------------------------------------------------------------------
     ray_renderer.resetResolution(w, h);
-    if (use_optix && g_hasOptix) { optix_gpu.resetBuffers(w, h); }
+    // Always resize OptiX buffers if available
+    if (g_hasOptix) { optix_gpu.resetBuffers(w, h); }
     color_processor.resize(w, h);
 
     SCENE_LOG_INFO("Render resolution updated: " + std::to_string(w) + "x" + std::to_string(h));
-
 }
 static bool isRTX(int major, int minor)
 {
@@ -444,6 +416,8 @@ int main(int argc, char* argv[]) {
 
     if (initializeOptixIfAvailable(optix_gpu)) {
         SCENE_LOG_INFO("OptiX is ready!");
+        render_settings.use_optix = true;
+        ui_ctx.render_settings.use_optix = true;
     }
     else {
         SCENE_LOG_WARN("Falling back to CPU rendering.");
@@ -454,19 +428,73 @@ int main(int argc, char* argv[]) {
     while (!quit) {
         camera_moved = false;
        // start_render = false;
+       
+       // Update Texture if rendering is happening in background (for visualization)
+        if (rendering_in_progress && scene.initialized) {
+            static auto last_tex_update = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            // 10 FPS visual update for animation
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tex_update).count() > 100) { 
+                SDL_LockSurface(surface);
+                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                SDL_UnlockSurface(surface);
+                last_tex_update = now;
+            }
+        }
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
         ui.draw(ui_ctx);
+        
+        // Handle resolution change - SKIP RENDERING THIS FRAME
         if (pending_resolution_change) {
             pending_resolution_change = false;
+            
+            // CRITICAL: Prevent any rendering during resolution change
+            rendering_stopped_cpu = true;
+            rendering_stopped_gpu = true;
+            
+            // Reset accumulation buffers BEFORE resolution change
+            ray_renderer.resetCPUAccumulation();
+            if (g_hasOptix) {
+                optix_gpu.resetAccumulation();
+            }
+            
+            // Reset render state
+            render_settings.is_rendering_active = false;
+            render_settings.render_current_samples = 0;
+            render_settings.render_progress = 0.0f;
+            render_settings.render_elapsed_seconds = 0.0f;
+            render_settings.render_estimated_remaining = 0.0f;
+            render_settings.avg_sample_time_ms = 0.0f;
+            
+            // Change resolution
             image_width = pending_width;
             image_height = pending_height;
             reset_render_resolution(image_width, image_height);
-
+            
+            // Reset stop flags and allow rendering
+            rendering_stopped_cpu = false;
+            rendering_stopped_gpu = false;
+            render_settings.is_render_paused = false;
+            start_render = true;  // Trigger fresh render at new resolution
+            
+            SCENE_LOG_INFO("Resolution changed to " + std::to_string(image_width) + "x" + std::to_string(image_height));
+            
+            // Skip to next loop iteration - render starts next frame
+            ImGui::Render();
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+            SDL_RenderPresent(renderer);
+            continue;  // Skip rest of loop
         }
         while (SDL_PollEvent(&e)) {
             // surface = SDL_GetWindowSurface(window);
+            if (e.type == SDL_KEYDOWN) {
+                if (e.key.keysym.sym == SDLK_s && (e.key.keysym.mod & KMOD_CTRL)) {
+                     ui_ctx.render_settings.save_image_requested = true;
+                }
+            }
+
             if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
             {
                // image_width = pending_width;
@@ -499,24 +527,66 @@ int main(int argc, char* argv[]) {
 
             if (e.type == SDL_MOUSEMOTION && dragging && scene.camera && mouse_control_enabled) {
                 // Mouse ImGui widgetlerinin üzerindeyse kamera dönmesin
-                if (!ImGui::GetIO().WantCaptureMouse) {
+                if (!ImGui::GetIO().WantCaptureMouse) { // Not on UI
                     int dx = e.motion.x - last_mouse_x;
                     int dy = e.motion.y - last_mouse_y;
 
-                    yaw += dx * mouse_sensitivity;
-                    pitch -= dy * mouse_sensitivity;
-                    pitch = std::clamp(pitch, -89.9f, 89.9f);
+                    const Uint8* state = SDL_GetKeyboardState(NULL);
+                    bool is_shift_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
 
-                    float rad_yaw = yaw * 3.14159265f / 180.0f;
-                    float rad_pitch = pitch * 3.14159265f / 180.0f;
+                    if (is_shift_pressed) {
+                        // PANNING (Shift + Middle Mouse)
+                        float pan_speed = mouse_sensitivity * 0.1f * scene.camera->focus_dist; 
+                        
+                        Vec3 right = scene.camera->u; 
+                        Vec3 up = scene.camera->v;    
+                        
+                        Vec3 offset = right * -(float)dx * pan_speed + up * (float)dy * pan_speed;
+                        
+                        scene.camera->lookfrom += offset;
+                        scene.camera->lookat += offset;
+                        
+                        scene.camera->update_camera_vectors();
+                    }
+                    else {
+                        // Check for Control Key (Zoom)
+                        bool is_ctrl_pressed = state[SDL_SCANCODE_LCTRL] || state[SDL_SCANCODE_RCTRL];
+                        
+                        if (is_ctrl_pressed) {
+                            // ZOOM (Ctrl + Middle Mouse Drag Up/Down)
+                            // Dragging mouse Up (negative dy) = Zoom In
+                            // Dragging mouse Down (positive dy) = Zoom Out
+                            
+                            float zoom_speed = 0.05f * scene.camera->focus_dist;
+                            float zoom_amount = -(float)dy * zoom_speed * 0.1f; 
 
-                    Vec3 direction;
-                    direction.x = cosf(rad_yaw) * cosf(rad_pitch);
-                    direction.y = sinf(rad_pitch);
-                    direction.z = sinf(rad_yaw) * cosf(rad_pitch);
+                            Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                            scene.camera->lookfrom += forward * zoom_amount;
+                            scene.camera->lookat += forward * zoom_amount; // pan-zoom vs dolly-zoom? 
+                            // Blender "Zoom" usually acts like Dolly (moves camera), keeping LookAt distance relative?
+                            // Actually pure dolly moves camera but maintains focus distance for DOF?
+                            // Let's emulate scroll wheel logic: move both.
+                            
+                            scene.camera->update_camera_vectors();
+                        }
+                        else {
+                            // ORBIT / ROTATION (Middle Mouse only)
+                            yaw += dx * mouse_sensitivity;
+                            pitch -= dy * mouse_sensitivity;
+                            pitch = std::clamp(pitch, -89.9f, 89.9f);
 
-                    direction = direction.normalize();
-                    scene.camera->setLookDirection(direction);
+                            float rad_yaw = yaw * 3.14159265f / 180.0f;
+                            float rad_pitch = pitch * 3.14159265f / 180.0f;
+
+                            Vec3 direction;
+                            direction.x = cosf(rad_yaw) * cosf(rad_pitch);
+                            direction.y = sinf(rad_pitch);
+                            direction.z = sinf(rad_yaw) * cosf(rad_pitch);
+
+                            direction = direction.normalize();
+                            scene.camera->setLookDirection(direction);
+                        }
+                    }
 
                     last_mouse_x = e.motion.x;
                     last_mouse_y = e.motion.y;
@@ -598,7 +668,7 @@ int main(int argc, char* argv[]) {
         auto now = std::chrono::steady_clock::now();
         auto delta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_camera_move_time).count();
         camera_moved_recently = (delta_ms < 50);
-        if (rayhit && scene.initialized) {
+        /*if (rayhit && scene.initialized) {
             rayhit = false;
             start_render = true;
             ray = scene.camera->get_ray(u, v);
@@ -610,108 +680,196 @@ int main(int argc, char* argv[]) {
             else {
                 SCENE_LOG_INFO("No hit detected.");
             }
-        }
-        std::mutex surface_mutex;
-        if (start_render && scene.initialized) {
-            start_render = false;
-            mouse_control_enabled = false;
-            std::thread cpu_thread([&]() {
-                auto start_time = std::chrono::high_resolution_clock::now();
+        }*/
+        // New Render Logic
+        if (scene.initialized) {
 
-                if (ui_ctx.render_settings.use_optix && g_hasOptix) {
-                    //std::cout << "Starting Optix Render... " << std::endl;
-                    if (scene.camera) {
-                        optix_gpu.setCameraParams(*scene.camera);
-                        Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                        yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
-                        pitch = asinf(dir.y) * 180.0f / 3.14159265f;
-                    }
-                    if (!scene.lights.empty())
-                        optix_gpu.setLightParams(scene.lights);
-                    optix_gpu.setBackgroundColor(scene.background_color);
-
-                    std::vector<uchar4> framebuffer(image_width * image_height);
-                    optix_gpu.resetBuffers(image_width, image_height);
-
-                    // Bu fonksiyon artık kendi içinde progressive update yapacak
-                    optix_gpu.launch_random_pixel_mode_progressive(surface, window, renderer, image_width, image_height, framebuffer, raytrace_texture);
-
-                    if (ui_ctx.render_settings.use_denoiser) {
-                        //std::cout << "Applying OIDN Denoising..." << std::endl;
-                        ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
-                        // Denoising sonrası da texture'ı güncelle
-
-                    }
-                   
+            // 1. Handle Animation Render Request
+            // Prioritize this over interactive loop
+            if (ui_ctx.render_settings.start_animation_render) {
+                
+                if (rendering_in_progress) {
+                     // Already running something heavy, ignore new request
+                     SCENE_LOG_WARN("Cannot start animation: Rendering already in progress.");
+                     ui_ctx.render_settings.start_animation_render = false;
+                     render_settings.start_animation_render = false;
                 }
                 else {
-                    ray_renderer.render_image(
-                        surface, window, raytrace_texture, renderer,
-                        sample_count, sample_per_pass, scene
-                    );
-
-                    if (ui_ctx.render_settings.use_denoiser) {
-                        ray_renderer.applyOIDNDenoising(surface, 0, true,
-                            ui_ctx.render_settings.denoiser_blend_factor);
-                    }
-
-                }
-                if (ui_ctx.render_settings.start_animation_render && scene.initialized) {
-                    SCENE_LOG_INFO("Starting animation render...");
-                    Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                    yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
-                    pitch = asinf(dir.y) * 180.0f / 3.14159265f;
-
-                    ray_renderer.render_Animation(surface, window, raytrace_texture, renderer,
-                        sample_count, sample_per_pass,
-                        ui_ctx.render_settings.animation_fps,
-                        ui_ctx.render_settings.animation_duration,
-                        scene);
-
-                    if (render_settings.use_denoiser) {
-                        SCENE_LOG_INFO("Applying OIDN denoising on animation render...");
-                        ray_renderer.applyOIDNDenoising(surface, 0, true, denoiser_blend_factor);
-                        SCENE_LOG_INFO("OIDN denoising applied on animation render.");
-                    }
-
-                   
+                    // Start Animation
+                    ui_ctx.render_settings.start_animation_render = false;
                     render_settings.start_animation_render = false;
-                    SCENE_LOG_INFO("Animation render completed.");
-                }
+                    rendering_in_progress = true; // Set block flag immediately
+                    
+                    start_render = false; // Cancel any pending interactive render
+                    
+                    SCENE_LOG_INFO("Starting animation render...");
+                    std::string output_folder = "render_animation";
+                    SCENE_LOG_INFO("Output folder set to: " + output_folder);
 
-                mouse_control_enabled = true;
-                auto end_time = std::chrono::high_resolution_clock::now();
-                last_render_time_ms =
-                    std::chrono::duration<float, std::milli>(end_time - start_time).count() / 1000.0f;
-                // RENDER BİTTİKTEN SONRA - orijinal surface'ı güncelle
-                {
-                    std::lock_guard<std::mutex> lock(surface_mutex);
-                    SDL_FreeSurface(original_surface);
-                    original_surface = SDL_ConvertSurface(surface, surface->format, 0);                   
+                    // Capture local copies of settings to avoid thread race
+                    int anim_sample_count = sample_count;
+                    int anim_sample_per_pass = sample_per_pass;
+                    int anim_fps = ui_ctx.render_settings.animation_fps;
+                    float anim_duration = ui_ctx.render_settings.animation_duration;
+                    bool anim_use_denoiser = ui_ctx.render_settings.use_denoiser;
+                    float anim_denoiser_blend = ui_ctx.render_settings.denoiser_blend_factor;
+                    bool anim_use_optix = ui_ctx.render_settings.use_optix;
+                    
+                    // Detach thread
+                    std::thread anim_thread([=]() {
+                        ray_renderer.render_Animation(surface, window, raytrace_texture, renderer,
+                            anim_sample_count, anim_sample_per_pass,
+                            anim_fps, anim_duration,
+                            scene,
+                            output_folder,
+                            anim_use_denoiser,
+                            anim_denoiser_blend,
+                            &optix_gpu,
+                            anim_use_optix);
+                            
+                         SCENE_LOG_INFO("Animation render completed.");
+                    });
+                    anim_thread.detach();
                 }
-               
-                });
+            }
 
-            cpu_thread.detach();
-            
+
+            // 2. Handle Interactive Render (One Frame / Progressive)
+            // ONLY if no background rendering is happening
+            if (start_render) {
+                 if (rendering_in_progress) {
+                     // Block interactive render if animation is running
+                     start_render = false;
+                 }
+                 else {
+                     // Safe to start new render
+                     start_render = false;
+
+                     // Reset stop flags for new render
+                     rendering_stopped_cpu = false;
+                     rendering_stopped_gpu = false;
+
+                    // --- Animation State Update ---
+                    float fps = ui_ctx.render_settings.animation_fps;
+                    if (fps <= 0.0f) fps = 24.0f;
+                    int start_f = ui_ctx.render_settings.animation_start_frame;
+                    int current_f = ui_ctx.render_settings.animation_playback_frame;
+                    float time = (current_f - start_f) / fps;
+
+                    if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+                        // ============ SYNCHRONOUS OPTIX RENDER (No Thread) ============
+                        // Each pass is ~10-50ms for 1 sample, fast enough for UI
+                        
+                        bool geometry_updated = ray_renderer.updateAnimationState(scene, time);
+                        
+                        if (geometry_updated) {
+                            optix_gpu.updateGeometry(scene.world.objects);
+                        }
+                        
+                        if (scene.camera) {
+                            optix_gpu.setCameraParams(*scene.camera);
+                            Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                            yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
+                            pitch = asinf(dir.y) * 180.0f / 3.14159265f;
+                        }
+                        if (!scene.lights.empty())
+                            optix_gpu.setLightParams(scene.lights);
+                        optix_gpu.setBackgroundColor(scene.background_color);
+
+                        std::vector<uchar4> framebuffer(image_width * image_height);
+                        
+                        // Single pass render (1 sample) - fast, no UI blocking
+                        auto sample_start = std::chrono::high_resolution_clock::now();
+                        
+                        optix_gpu.launch_random_pixel_mode_progressive(
+                            surface, window, renderer, 
+                            image_width, image_height, 
+                            framebuffer, raytrace_texture
+                        );
+                        
+                        auto sample_end = std::chrono::high_resolution_clock::now();
+                        float sample_time_ms = std::chrono::duration<float, std::milli>(sample_end - sample_start).count();
+                        
+                        // Update progress for UI
+                        int prev_samples = render_settings.render_current_samples;
+                        render_settings.render_current_samples = optix_gpu.getAccumulatedSamples();
+                        render_settings.render_target_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+                        render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
+                        render_settings.is_rendering_active = !optix_gpu.isAccumulationComplete();
+                        
+                        // Update time estimation
+                        if (render_settings.render_current_samples > prev_samples) {
+                            // Moving average for sample time
+                            render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + sample_time_ms * 0.2f;
+                            render_settings.render_elapsed_seconds += sample_time_ms / 1000.0f;
+                            
+                            int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
+                            render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
+                        }
+                        
+                        // ===== ALWAYS DENOISE WHEN ENABLED =====
+                        // Denoise after every sample - user never sees noisy image
+                        if (ui_ctx.render_settings.use_denoiser && optix_gpu.getAccumulatedSamples() > 0) {
+                            ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                        }
+                    }
+                    else {
+                        // ============ SYNCHRONOUS CPU RENDER (Like OptiX) ============
+                        // Each pass is 1 sample per pixel, accumulates progressively
+                        
+                        ray_renderer.updateAnimationState(scene, time);
+                        
+                        // Single pass render (1 sample) - uses accumulation internally
+                        auto sample_start = std::chrono::high_resolution_clock::now();
+                        
+                        ray_renderer.render_progressive_pass(surface, window, scene, 1);
+                        
+                        auto sample_end = std::chrono::high_resolution_clock::now();
+                        float sample_time_ms = std::chrono::duration<float, std::milli>(sample_end - sample_start).count();
+                        
+                        // Update progress for UI
+                        int prev_samples = render_settings.render_current_samples;
+                        render_settings.render_current_samples = ray_renderer.getCPUAccumulatedSamples();
+                        render_settings.render_target_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+                        render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
+                        render_settings.is_rendering_active = !ray_renderer.isCPUAccumulationComplete();
+                        
+                        // Update time estimation
+                        if (render_settings.render_current_samples > prev_samples) {
+                            // Moving average for sample time
+                            render_settings.avg_sample_time_ms = render_settings.avg_sample_time_ms * 0.8f + sample_time_ms * 0.2f;
+                            render_settings.render_elapsed_seconds += sample_time_ms / 1000.0f;
+                            
+                            int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
+                            render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
+                        }
+                        
+                        // ===== ALWAYS DENOISE WHEN ENABLED =====
+                        // Denoise after every sample - user never sees noisy image
+                        if (ui_ctx.render_settings.use_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0) {
+                            ray_renderer.applyOIDNDenoising(surface, 0, true,
+                                ui_ctx.render_settings.denoiser_blend_factor);
+                        }
+                    }
+                 }
+            }
         }
 
         // Tonemap reset ve apply
         if (!start_render) {
             if (reset_tonemap) {
-                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
-                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);               
                 reset_tonemap = false;
                 SCENE_LOG_INFO("Tonemap reset applied.");
             }
 
             if (apply_tonemap) {
-                applyToneMappingToSurface(surface, original_surface, color_processor);
-                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                applyToneMappingToSurface(surface, original_surface, color_processor);               
                 apply_tonemap = false;
                 SCENE_LOG_INFO("Tonemap applied.");
             }
         }
+
 
         // Image save
         if (ui_ctx.render_settings.save_image_requested && original_surface) {
@@ -727,15 +885,81 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);        
+        
+        // ---- Animation Playback Preview ----
+
+        static int last_playback_frame = -1;
+
+        // Check for frame changes (Scrubbing or Playback)
+        int current_playback_frame = ui_ctx.render_settings.animation_playback_frame;
+        if (current_playback_frame != last_playback_frame) {
+            
+            // Update 3D Scene State for Live Preview
+            if (!rendering_in_progress && scene.initialized) {
+                float fps = ui_ctx.render_settings.animation_fps;
+                if (fps <= 0.0f) fps = 24.0f;
+                
+                int start_frame = ui_ctx.render_settings.animation_start_frame;
+                float time = (current_playback_frame - start_frame) / fps;
+                
+                // Update animation state immediately
+                ray_renderer.updateAnimationState(scene, time);
+                
+                // Update OptiX if needed
+                if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+                    optix_gpu.updateGeometry(scene.world.objects);
+                    if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
+                    optix_gpu.setLightParams(scene.lights);
+                    // Reset accumulation for new frame
+                    optix_gpu.resetAccumulation();
+                } else {
+                    // Reset CPU accumulation for new frame
+                    ray_renderer.resetCPUAccumulation();
+                }
+                
+                // Trigger preview render
+                start_render = true;
+            }
+            
+            last_playback_frame = current_playback_frame;
+        }
+        
+        // ============ CYCLES-STYLE AUTO-PROGRESSIVE ACCUMULATION ============
+        // When camera is stationary, keep accumulating samples until max is reached
+        // SKIP during animation playback or when paused
+        bool is_playing = ui_ctx.render_settings.animation_is_playing;
+        bool is_paused = ui_ctx.render_settings.is_render_paused;
+        
+        if (scene.initialized && 
+            !camera_moved_recently &&
+            !start_render &&
+            !is_playing &&
+            !is_paused) {  // Don't accumulate when paused
+            
+            bool accumulation_complete = false;
+            
+            if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+                accumulation_complete = optix_gpu.isAccumulationComplete();
+            } else {
+                accumulation_complete = ray_renderer.isCPUAccumulationComplete();
+            }
+            
+            if (!accumulation_complete) {
+                // Automatically trigger next sample pass
+                start_render = true;
+            }
+        }
+
+        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+        SDL_FreeSurface(original_surface);
+        original_surface = SDL_ConvertSurface(surface, surface->format, 0);
         ImGui::Render();       
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
-        //std::this_thread::sleep_for(std::chrono::milliseconds(8));  
-		SDL_Delay(16); // yaklaşık 60 FPS
+        SDL_Delay(16); // ~60 FPS
 
     }
     
