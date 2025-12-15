@@ -64,6 +64,8 @@ enum class BVHType {
     OptixGPU
 };
 
+class OptixWrapper;
+
 class Renderer {
 public:
 
@@ -73,7 +75,7 @@ public:
 
     static bool isCudaAvailable();
 
-    static void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
+    void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
 
     Renderer(int image_width, int image_height, int max_depth, int samples_per_pixel);
     void resetResolution(int w, int h);
@@ -106,7 +108,11 @@ public:
         const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene);
     Matrix4x4 calculateAnimationTransform(const AnimationData& animation, float currentTime);
    // void updateBVHForAnimatedObjects(ParallelBVHNode& bvh, const std::vector<std::shared_ptr<Hittable>>& animatedObjects);
-    void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration,SceneData& scene);
+    void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, 
+        const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, SceneData& scene,
+        const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
+        OptixWrapper* optix_gpu = nullptr, bool use_optix = false);
+    bool updateAnimationState(SceneData& scene, float time);
    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
     void create_scenefromMesh(const std::string& filename);
@@ -219,8 +225,40 @@ private:
     Vec3 calculate_global_illumination(const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const HitRecord& rec, const Vec3& normal, const Vec3& view_direction, const Vec3& background_color);
    
     
-      SDL_Window* window;
-  
+    // OIDN Members
+    oidn::DeviceRef oidnDevice;
+    oidn::FilterRef oidnFilter;
+    std::mutex oidnMutex;
+    bool oidnInitialized = false;
+
+    // OIDN Buffer Cache - performans optimizasyonu
+    // Boyut değişmedikçe buffer'lar yeniden kullanılır
+    oidn::BufferRef oidnColorBuffer;
+    oidn::BufferRef oidnOutputBuffer;
+    std::vector<float> oidnColorData;    // CPU tarafı color buffer cache
+    int oidnCachedWidth = 0;
+    int oidnCachedHeight = 0;
+
+    void initOIDN(); // Helper to init device
+    float lastAnimationUpdateTime = -1.0f; // Track animation time
+    SDL_Window* window;
+   
+public:
+    // ============ CYCLES-STYLE ACCUMULATIVE RENDERING (CPU) ============
+    struct Vec4 { float x, y, z, w; };  // For accumulation buffer (RGB + sample count)
+    
+    // Accumulation state
+    std::vector<Vec4> cpu_accumulation_buffer;
+    int cpu_accumulated_samples = 0;
+    uint64_t cpu_last_camera_hash = 0;
+    bool cpu_accumulation_valid = false;
+    
+    // Progressive render functions
+    void render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass = 1);
+    void resetCPUAccumulation();
+    bool isCPUAccumulationComplete() const;
+    int getCPUAccumulatedSamples() const { return cpu_accumulated_samples; }
+    uint64_t computeCPUCameraHash(const Camera& cam) const;
     
 };
 #endif // RENDERER_H

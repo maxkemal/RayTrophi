@@ -3,10 +3,12 @@
 #include "SpotLight.h"
 #include <filesystem>
 #include <execution>
+#include <cstring>      // std::memcpy for camera hash
 #include <EmbreeBVH.h>
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
+#include "OptixWrapper.h"
 
 // Global atmosphere değişkeni
 AtmosphereProperties g_atmosphere = {
@@ -58,80 +60,123 @@ bool Renderer::isCudaAvailable() {
         return false; // CUDA desteklenmiyor
     }
 }
-void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads = 0, bool denoise = true, float blend = 0.8f) {
+// Helper to initialize OIDN device once
+void Renderer::initOIDN() {
+    if (oidnInitialized) return;
+
+    try {
+        if (g_hasOptix) {
+            oidnDevice = oidn::newDevice(oidn::DeviceType::CUDA);
+        }
+        else {
+            oidnDevice = oidn::newDevice(oidn::DeviceType::CPU);
+        }
+        oidnDevice.commit();
+        oidnInitialized = true;
+        
+    }
+    catch (const std::exception& e) {
+        SCENE_LOG_ERROR(std::string("Failed to initialize OIDN device: ") + e.what());
+    }
+}
+
+void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
     if (!surface) return;
+
+    std::lock_guard<std::mutex> lock(oidnMutex);
+
+    // Initialize device if not ready
+    if (!oidnInitialized) {
+        initOIDN();
+        if (!oidnInitialized) return; // Failed to init
+    }
 
     Uint32* pixels = static_cast<Uint32*>(surface->pixels);
     int width = surface->w;
     int height = surface->h;
+    size_t pixelCount = static_cast<size_t>(width) * height;
+    size_t bufferSize = pixelCount * 3;
 
-    // Renk verisini normalize ederek buffer'a aktar
-    std::vector<float> colorBuffer(width * height * 3);
-    for (int i = 0; i < width * height; ++i) {
+    // ===== BUFFER CACHE OPTIMIZATION =====
+    // Boyut değiştiyse buffer'ları yeniden oluştur
+    bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
+    
+    if (sizeChanged) {
+        // CPU buffer'ı resize et
+        oidnColorData.resize(bufferSize);
+        
+        // OIDN buffer'larını yeniden oluştur
+        try {
+            oidnColorBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
+            oidnOutputBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
+            
+            // Filter'ı yeniden oluştur ve commit et (boyut değiştiği için)
+            oidnFilter = oidnDevice.newFilter("RT");
+            oidnFilter.setImage("color", oidnColorBuffer, oidn::Format::Float3, width, height);
+            oidnFilter.setImage("output", oidnOutputBuffer, oidn::Format::Float3, width, height);
+            oidnFilter.set("hdr", false);
+            oidnFilter.set("srgb", true);
+            oidnFilter.commit();
+            
+            oidnCachedWidth = width;
+            oidnCachedHeight = height;
+            
+            SCENE_LOG_INFO("OIDN buffers recreated for new resolution: " + 
+                std::to_string(width) + "x" + std::to_string(height));
+        }
+        catch (const std::exception& e) {
+            SCENE_LOG_ERROR(std::string("OIDN buffer creation failed: ") + e.what());
+            return;
+        }
+    }
+
+    // ===== PIXEL DATA TRANSFER =====
+    // Surface'den color buffer'a aktar (bu her zaman gerekli)
+    for (size_t i = 0; i < pixelCount; ++i) {
         Uint8 r, g, b;
         SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
-        colorBuffer[i * 3] = r / 255.0f;
-        colorBuffer[i * 3 + 1] = g / 255.0f;
-        colorBuffer[i * 3 + 2] = b / 255.0f;
+        oidnColorData[i * 3] = r / 255.0f;
+        oidnColorData[i * 3 + 1] = g / 255.0f;
+        oidnColorData[i * 3 + 2] = b / 255.0f;
     }
-
-    // Device seçimi
-    oidn::DeviceRef device;
-    try {
-        if (g_hasOptix) {
-            device = oidn::newDevice(oidn::DeviceType::CUDA);
-        }
-        else {
-            device = oidn::newDevice(oidn::DeviceType::CPU);
-        }
-        device.set("numThreads", numThreads);
-        device.commit();
-    }
-    catch (const std::exception& e) {
-        SCENE_LOG_ERROR(std::string( "Failed to create OIDN device: ") + e.what() );
-        return;
-    }
-
-    // Buffer oluşturma
-    oidn::BufferRef colorOIDNBuffer = device.newBuffer(colorBuffer.size() * sizeof(float));
-    oidn::BufferRef outputOIDNBuffer = device.newBuffer(colorBuffer.size() * sizeof(float));
-    std::memcpy(colorOIDNBuffer.getData(), colorBuffer.data(), colorBuffer.size() * sizeof(float));
-
-    // Filtreyi ayarla
-    oidn::FilterRef filter = device.newFilter("RT");
-    filter.setImage("color", colorOIDNBuffer, oidn::Format::Float3, width, height);
-    filter.setImage("output", outputOIDNBuffer, oidn::Format::Float3, width, height);
-    filter.set("hdr", false);
-    filter.set("srgb", true);
-    filter.set("denoise", denoise);
-    filter.commit();
 
     try {
-        filter.execute();
+        // Cache'lenmiş buffer'a yaz
+        oidnColorBuffer.write(0, bufferSize * sizeof(float), oidnColorData.data());
+
+        // Denoise çalıştır (filter zaten commit edilmiş durumda)
+        oidnFilter.execute();
+        
         const char* errorMessage;
-        if (device.getError(errorMessage) != oidn::Error::None)
-            SCENE_LOG_ERROR(std::string( "OIDN error: ") + (errorMessage ));
+        if (oidnDevice.getError(errorMessage) != oidn::Error::None) {
+            SCENE_LOG_ERROR(std::string("OIDN error: ") + errorMessage);
+        }
+            
+        // Sonucu oku
+        oidnOutputBuffer.read(0, bufferSize * sizeof(float), oidnColorData.data());
     }
     catch (const std::exception& e) {
-        SCENE_LOG_ERROR(std::string( "OIDN execution failed: ") + e.what());
+        SCENE_LOG_ERROR(std::string("OIDN execution failed: ") + e.what());
         return;
     }
 
+    // ===== RESULT BLENDING =====
     // Sonucu karıştır ve geri yaz
-    std::memcpy(colorBuffer.data(), outputOIDNBuffer.getData(), colorBuffer.size() * sizeof(float));
-    for (int i = 0; i < width * height; ++i) {
+    for (size_t i = 0; i < pixelCount; ++i) {
         Uint8 r_orig, g_orig, b_orig;
         SDL_GetRGB(pixels[i], surface->format, &r_orig, &g_orig, &b_orig);
 
-        Uint8 r = static_cast<Uint8>((colorBuffer[i * 3] * blend + r_orig / 255.0f * (1 - blend)) * 255);
-        Uint8 g = static_cast<Uint8>((colorBuffer[i * 3 + 1] * blend + g_orig / 255.0f * (1 - blend)) * 255);
-        Uint8 b = static_cast<Uint8>((colorBuffer[i * 3 + 2] * blend + b_orig / 255.0f * (1 - blend)) * 255);
+        float r_denoised = std::clamp(oidnColorData[i * 3], 0.0f, 1.0f);
+        float g_denoised = std::clamp(oidnColorData[i * 3 + 1], 0.0f, 1.0f);
+        float b_denoised = std::clamp(oidnColorData[i * 3 + 2], 0.0f, 1.0f);
+
+        Uint8 r = static_cast<Uint8>((r_denoised * blend + r_orig / 255.0f * (1 - blend)) * 255);
+        Uint8 g = static_cast<Uint8>((g_denoised * blend + g_orig / 255.0f * (1 - blend)) * 255);
+        Uint8 b = static_cast<Uint8>((b_denoised * blend + b_orig / 255.0f * (1 - blend)) * 255);
 
         pixels[i] = SDL_MapRGB(surface->format, r, g, b);
     }
 }
-
-
 
 Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int max_depth)
     : image_width(image_width), image_height(image_height), aspect_ratio(static_cast<double>(image_width) / image_height), halton_cache(new float[MAX_DIMENSIONS * MAX_SAMPLES_HALTON]), color_processor(image_width, image_height)
@@ -167,7 +212,10 @@ void Renderer::resetResolution(int w, int h) {
 
     // Optional: zero the actual frame buffer content
     std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
-
+    
+    // OIDN cache invalidate - buffer'lar bir sonraki denoise'da yeniden oluşturulacak
+    oidnCachedWidth = 0;
+    oidnCachedHeight = 0;
 }
 
 
@@ -189,20 +237,28 @@ void Renderer::draw_progress_bar(SDL_Surface* surface, float progress) {
     snprintf(percent_text, sizeof(percent_text), "%.1f%%", progress * 100);
 
 }
-bool Renderer::SaveSurface(SDL_Surface* surface, const char* file_path) {
-    SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
-    /* int imgFlags = IMG_INIT_PNG;
-     if (!(IMG_Init(imgFlags) & imgFlags)) {
-         SDL_Log("SDL_image could not initialize! SDL_image Error: %s\n", IMG_GetError());
-         SDL_Quit();
-         return 1;
-     }*/
+bool Renderer::SaveSurface(SDL_Surface* surface, const char* file_path)
+{
+   
+    // Aynı isimde dosya varsa silmeye çalış (zorla yazma)
+    if (std::filesystem::exists(file_path)) {
+        std::error_code ec;
+        std::filesystem::remove(file_path, ec);
+        if (ec) {
+            SDL_Log("Dosya silinemiyor. Başka bir işlem tarafından kullanılıyor olabilir.");
+            return false;
+        }
+    }
 
-    if (surface_to_save == NULL) {
-        SDL_Log("Couldn't convert surface: %s", SDL_GetError());
+    SDL_Surface* surface_to_save =
+        SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
+
+    if (!surface_to_save) {
+        SDL_Log("Surface format conversion failed: %s", SDL_GetError());
         return false;
     }
 
+   
     int result = IMG_SavePNG(surface_to_save, file_path);
     SDL_FreeSurface(surface_to_save);
 
@@ -372,7 +428,6 @@ void Renderer::render_image(SDL_Surface* surface, SDL_Window* window, SDL_Textur
         SCENE_LOG_INFO(std::string(title));
       
     }
-   
     render_finished = true;
 	rendering_in_progress = false;
     //display_thread.join();
@@ -380,330 +435,382 @@ void Renderer::render_image(SDL_Surface* surface, SDL_Window* window, SDL_Textur
 }
 
 
+bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
+    // Optimization: Skip update if time hasn't changed significantly
+    if (std::abs(current_time - lastAnimationUpdateTime) < 0.0001f) {
+        return false;
+    }
+    lastAnimationUpdateTime = current_time;
+
+    // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
+    std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
+
+    if (assimpLoader.getScene() && assimpLoader.getScene()->mRootNode && !scene.animationDataList.empty()) {
+        Matrix4x4 identityParentTransform = Matrix4x4::identity(); 
+
+        std::map<std::string, const AnimationData*> animationLookupMap;
+        for (const auto& anim : scene.animationDataList) {
+            for (const auto& pair : anim.positionKeys) animationLookupMap[pair.first] = &anim;
+            for (const auto& pair : anim.rotationKeys) animationLookupMap[pair.first] = &anim;
+            for (const auto& pair : anim.scalingKeys) animationLookupMap[pair.first] = &anim;
+        }
+
+        assimpLoader.calculateAnimatedNodeTransformsRecursive(
+            assimpLoader.getScene()->mRootNode,
+            identityParentTransform,
+            animationLookupMap,
+            current_time,
+            animatedGlobalNodeTransforms
+        );
+    }
+
+    // --- 2. Adım: Üçgenleri Animasyon Türüne Göre Güncelle ---
+    for (auto& obj : scene.world.objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (!tri) continue;
+
+        std::string nodeName = tri->getNodeName();
+        bool isSkinnedMesh = tri->hasSkinData();
+
+        if (isSkinnedMesh) {
+            std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+
+            // CRITICAL FIX: Extract true Armature/Root transform from bone transforms
+            // Problem: animatedGlobalNodeTransforms has "Armature" as Identity, but bones have -1 scale
+            // This means the coordinate conversion is applied at scene root level
+            // Solution: Extract the common parent transform from first bone
+            Matrix4x4 armatureTransform = Matrix4x4::identity();
+            bool armatureFound = false;
+            
+            // Find first valid bone and extract its parent transform
+            for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
+                if (animatedGlobalNodeTransforms.count(boneName) > 0 && 
+                    scene.boneData.boneOffsetMatrices.count(boneName) > 0) {
+                    
+                    Matrix4x4 boneGlobal = animatedGlobalNodeTransforms[boneName];
+                    Matrix4x4 boneOffset = scene.boneData.boneOffsetMatrices[boneName];
+                    
+                    // If bone global transform has -1 scale but offset is Identity,
+                    // the -1 comes from parent (armature/root)
+                    // Check first element: if boneGlobal[0][0] is negative but offset[0][0] is positive
+                    if (boneGlobal.m[0][0] < 0 && boneOffset.m[0][0] > 0) {
+                        // Extract armature transform: use a simple -1 scale on appropriate axis
+                        // For Blender Z-up to Y-up, it's typically -1 on X
+                        armatureTransform.m[0][0] = -1.0f;
+                        armatureTransform.m[1][1] = 1.0f;
+                        armatureTransform.m[2][2] = 1.0f;
+                        armatureTransform.m[3][3] = 1.0f;
+                        armatureFound = true;
+                        SCENE_LOG_INFO("[BONE FIX] Detected coordinate conversion: -1 scale on X axis");
+                    }
+                    break;
+                }
+            }
+
+            if (!armatureFound) {
+                SCENE_LOG_INFO("[BONE FIX] No coordinate conversion detected, using Identity");
+            }
+
+            for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
+                if (animatedGlobalNodeTransforms.count(boneName) == 0) {
+                     // SCENE_LOG_WARN("Missing animation data for bone: " + boneName);
+                    continue;
+                }
+
+                Matrix4x4 globalTransform = animatedGlobalNodeTransforms[boneName];
+                if (scene.boneData.boneOffsetMatrices.count(boneName) == 0) continue;
+                Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
+
+                // Y-Z swap for Blender Z-up → Y-up
+                Matrix4x4 localBoneTransform = scene.boneData.globalInverseTransform * globalTransform;
+                
+                // Apply Y-Z coordinate swap
+                Matrix4x4 coordinate_swap = Matrix4x4::identity();
+                coordinate_swap.m[1][1] = 0.0f;  coordinate_swap.m[1][2] = 1.0f;   // Y ← Z
+                coordinate_swap.m[2][1] = -1.0f; coordinate_swap.m[2][2] = 0.0f;   // Z ← -Y
+                localBoneTransform = coordinate_swap * localBoneTransform * coordinate_swap.inverse();
+                
+                // Apply armature rotation fix (only -1 scale correction)
+                Matrix4x4 armatureRotation = armatureTransform;
+                armatureRotation.m[0][3] = 0.0f;
+                armatureRotation.m[1][3] = 0.0f;
+                armatureRotation.m[2][3] = 0.0f;
+                
+                Matrix4x4 armatureRotationInv = armatureRotation.inverse();
+                Matrix4x4 correctedBoneTransform = armatureRotationInv * localBoneTransform;
+                Matrix4x4 correctedOffsetMatrix = armatureRotation * offsetMatrix * armatureRotationInv;
+                
+                finalBoneMatrices[boneIndex] = correctedBoneTransform * correctedOffsetMatrix;
+                
+                // Debug
+                static int logCount = 0;
+                if (logCount < 3 && boneIndex < 3) {
+                    SCENE_LOG_INFO("[BONE DEBUG] Bone #" + std::to_string(boneIndex) + ": " + boneName);
+                    SCENE_LOG_INFO("[BONE DEBUG]   Original Position: (" + std::to_string(globalTransform.m[0][3]) + ", " + std::to_string(globalTransform.m[1][3]) + ", " + std::to_string(globalTransform.m[2][3]) + ")");
+                    SCENE_LOG_INFO("[BONE DEBUG]   After Coord Swap: (" + std::to_string(localBoneTransform.m[0][3]) + ", " + std::to_string(localBoneTransform.m[1][3]) + ", " + std::to_string(localBoneTransform.m[2][3]) + ")");
+                    SCENE_LOG_INFO("[BONE DEBUG]   Final: (" + std::to_string(correctedBoneTransform.m[0][3]) + ", " + std::to_string(correctedBoneTransform.m[1][3]) + ", " + std::to_string(correctedBoneTransform.m[2][3]) + ")");
+                    if (boneIndex == 2) logCount++;
+                }
+            }
+            
+            // CRITICAL FIX: Disable double-transform for skinned meshes
+            auto transformHandle = tri->getTransformHandle();
+            if (transformHandle) {
+                transformHandle->setBase(Matrix4x4::identity());
+                transformHandle->setCurrent(Matrix4x4::identity());
+            }
+
+            tri->apply_skinning(finalBoneMatrices);
+        }
+        else {
+            bool nodeHasAnimation = false;
+            for (const auto& anim : scene.animationDataList) {
+                if (anim.positionKeys.count(nodeName) > 0 ||
+                    anim.rotationKeys.count(nodeName) > 0 ||
+                    anim.scalingKeys.count(nodeName) > 0) {
+                    nodeHasAnimation = true;
+                    break;
+                }
+            }
+            
+            if (nodeHasAnimation && animatedGlobalNodeTransforms.count(nodeName) > 0) {
+                Matrix4x4 animTransform = animatedGlobalNodeTransforms[nodeName];
+                auto transformHandle = tri->getTransformHandle();
+                if (transformHandle) {
+                    transformHandle->setBase(animTransform);
+                    transformHandle->setCurrent(Matrix4x4::identity());
+                    tri->updateTransformedVertices();
+                }
+            }
+            else {
+                if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
+                    Matrix4x4 staticTransform = animatedGlobalNodeTransforms[nodeName];
+                    auto transformHandle = tri->getTransformHandle();
+                    if (transformHandle) {
+                        transformHandle->setBase(staticTransform);
+                        transformHandle->setCurrent(Matrix4x4::identity());
+                        tri->updateTransformedVertices();
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 3. Adım: Işık ve Kamera Animasyonları ---
+    for (auto& light : scene.lights) {
+        bool lightHasAnimation = false;
+        for (const auto& anim : scene.animationDataList) {
+            if (anim.positionKeys.count(light->nodeName) > 0 ||
+                anim.rotationKeys.count(light->nodeName) > 0 ||
+                anim.scalingKeys.count(light->nodeName) > 0) {
+                lightHasAnimation = true;
+                break;
+            }
+        }
+        
+        if (!lightHasAnimation || animatedGlobalNodeTransforms.count(light->nodeName) == 0) continue;
+
+        Matrix4x4 finalTransform = animatedGlobalNodeTransforms[light->nodeName];
+        light->position = finalTransform.transform_point(Vec3(0, 0, 0));
+        if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
+            light->direction = finalTransform.transform_vector(Vec3(0, 0, -1)).normalize();
+        }
+    }
+
+    bool cameraHasAnimation = false;
+    if (scene.camera) {
+        for (const auto& anim : scene.animationDataList) {
+            if (anim.positionKeys.count(scene.camera->nodeName) > 0 ||
+                anim.rotationKeys.count(scene.camera->nodeName) > 0 ||
+                anim.scalingKeys.count(scene.camera->nodeName) > 0) {
+                cameraHasAnimation = true;
+                break;
+            }
+        }
+    }
+    
+    if (scene.camera && cameraHasAnimation && animatedGlobalNodeTransforms.count(scene.camera->nodeName) > 0) {
+        // Apply global inverse REMOVED. Static camera works without it.
+        // We suspect globalInverse was introducing the "tilt" (sola yatık).
+        // We KEEP the manual UP vector flip because user confirmed it fixed "tepetaklak". (Upside down)
+        
+        Matrix4x4 animTransform = animatedGlobalNodeTransforms[scene.camera->nodeName];
+        
+        Vec3 pos = animTransform.transform_point(Vec3(0, 0, 0));
+        // Blender cameras usually point down -Z.
+        Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
+        
+        // FIX: Force Global Up (0, 1, 0) to prevent unwanted Roll/Tilt (sola yatık).
+        // This mimics "Track To" constraint behavior where the camera stays level.
+        // If the camera needs to roll (bank), this line should be reverted to use transformed up.
+        // Note on position precision: Small errors (e.g. -0.003 instad of 0) are due to Linear vs Bezier interpolation differences.
+        Vec3 up = Vec3(0, 1, 0); 
+        
+        scene.camera->lookfrom = pos;
+        scene.camera->lookat = pos + forward;
+        
+        // Handle Gimbal Lock: If looking straight up/down, keep previous up or logic might fail slightly.
+        if (abs(Vec3::dot(forward, up)) < 0.99f) {
+             scene.camera->vup = up;
+        }
+        scene.camera->update_camera_vectors();
+    }
+
+    // --- 4. Adım: BVH Güncelle ---
+    auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+    if (embree_ptr) {
+        embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+    }
+    return true;
+}
+
 void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
     const int total_samples_per_pixel, const int samples_per_pass,
-    float fps, float duration, SceneData& scene) {
+    float fps, float duration, SceneData& scene, const std::string& output_folder, bool use_denoiser, float denoiser_blend,
+    OptixWrapper* optix_gpu, bool use_optix) {
 
+    render_finished = false;
+    rendering_complete = false;
+    rendering_in_progress = true;
+    rendering_stopped_cpu = false;
+    rendering_stopped_gpu = false;
+    
     unsigned int num_threads = std::thread::hardware_concurrency();
     std::vector<std::thread> threads;
     auto start_time = std::chrono::steady_clock::now();
-   // std::thread display_thread(&Renderer::update_display, this, window, raytrace_texture, surface, renderer);
     float frame_time = 1.0f / fps;
     
-    // Frame range'i animasyon verisinden al
-    int start_frame = 0;
-    int end_frame = static_cast<int>(duration * fps);
+    extern RenderSettings render_settings;
+    extern bool g_hasOptix; // Ensure we can access global flag
+
+    // Frame range'i UI settings'den al
+    int start_frame = render_settings.animation_start_frame;
+    int end_frame = render_settings.animation_end_frame;
     
-    if (!scene.animationDataList.empty()) {
+    if (start_frame == 0 && end_frame == 0 && !scene.animationDataList.empty()) {
         auto& anim = scene.animationDataList[0];
         start_frame = anim.startFrame;
         end_frame = anim.endFrame;
-        SCENE_LOG_INFO("Using animation frame range from file: " + std::to_string(start_frame) + " - " + std::to_string(end_frame));
+        SCENE_LOG_INFO("Settings range invalid, using animation frame range from file: " + std::to_string(start_frame) + " - " + std::to_string(end_frame));
+    } else {
+         SCENE_LOG_INFO("Using animation frame range from User Settings: " + std::to_string(start_frame) + " - " + std::to_string(end_frame));
     }
     
     int total_frames = end_frame - start_frame + 1;
-    std::filesystem::create_directory("render"); // "render" klasörünü oluştur
+    
+    if (!output_folder.empty()) {
+        std::filesystem::create_directories(output_folder);
+        SCENE_LOG_INFO("Animation frames will be saved to: " + output_folder);
+    }
+    
     SCENE_LOG_INFO("Starting animation render: " + std::to_string(total_frames) + " frames (Frame " + 
                    std::to_string(start_frame) + " to " + std::to_string(end_frame) + ") at " + std::to_string(fps) + " FPS");
+
+    // Check if OptiX is valid
+    bool run_optix = use_optix && optix_gpu && g_hasOptix;
+    if (use_optix && !run_optix) {
+        SCENE_LOG_WARN("OptiX requested but not available/valid. Falling back to CPU.");
+    }
     
     for (int frame = start_frame; frame <= end_frame; ++frame) {
+        
+        render_settings.animation_current_frame = frame;
+        
+        if (rendering_stopped_cpu || rendering_stopped_gpu) {
+            SCENE_LOG_WARN("Animation rendering stopped by user at frame " + std::to_string(frame));
+            break;
+        }
 
+        // Clear CPU buffers anyway (for safety/consistency)
         std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
         std::fill(sample_counts.begin(), sample_counts.end(), 0);
         SDL_FillRect(surface, NULL, SDL_MapRGB(surface->format, 0, 0, 0));
         
-        // Frame'i time'a çevir
-        // İlk frame (start_frame) = time 0, sonraki her frame = +frame_time
         float current_time = (frame - start_frame) * frame_time;
 
         SCENE_LOG_INFO("Rendering frame " + std::to_string(frame) + "/" + std::to_string(end_frame) +
-            " at time " + std::to_string(current_time) + "s");
+            " at time " + std::to_string(current_time) + "s (Mode: " + (run_optix ? "OptiX" : "CPU") + ")");
         
-        // Debug: Kamera pozisyonunu logla
-        if (scene.camera) {
-            SCENE_LOG_INFO("  Camera BEFORE animation update - Pos: " + scene.camera->lookfrom.toString() + 
-                          ", LookAt: " + scene.camera->lookat.toString());
-        }
+        // --- UPDATE ANIMATION ---
+        // Returns true if geometry changed
+        bool geometry_changed = this->updateAnimationState(scene, current_time);
 
-
-        // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
-        // Tüm düğümlerin (kemikler dahil) anlık animasyonlu global dönüşümlerini tutacak harita
-        std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
-
-        // Animasyon verileri ve sahne kök düğümü mevcutsa işle
-        if (assimpLoader.getScene() && assimpLoader.getScene()->mRootNode && !scene.animationDataList.empty()) {
-            Matrix4x4 identityParentTransform = Matrix4x4::identity(); // Kök düğümün parent transformu identity'dir
-
-            // Animasyon verilerini düğüm ismine göre hızlı erişim için bir harita oluştur
-            std::map<std::string, const AnimationData*> animationLookupMap;
-            for (const auto& anim : scene.animationDataList) {
-                // Her animasyon kanalını node ismine eşle
-                for (const auto& pair : anim.positionKeys) animationLookupMap[pair.first] = &anim;
-                for (const auto& pair : anim.rotationKeys) animationLookupMap[pair.first] = &anim;
-                for (const auto& pair : anim.scalingKeys) animationLookupMap[pair.first] = &anim;
+        if (run_optix) {
+            // --- OPTIX RENDER PATH ---
+            
+            // 1. Update Geometry if needed
+            if (geometry_changed) {
+                 optix_gpu->updateGeometry(scene.world.objects);
             }
 
-            // Rekürsif fonksiyonu çağırarak tüm düğümlerin animasyonlu global transformlarını doldur
-            assimpLoader.calculateAnimatedNodeTransformsRecursive( // AssimpLoader:: static metodunu çağır
-                assimpLoader.getScene()->mRootNode, // Sahnenin kök düğümünü AssimpLoader'dan al
-                identityParentTransform,
-                animationLookupMap,
-                current_time,
-                animatedGlobalNodeTransforms
-            );
+            // 2. Set Scene Params
+            if (scene.camera) optix_gpu->setCameraParams(*scene.camera);
+            optix_gpu->setLightParams(scene.lights);
+            optix_gpu->setBackgroundColor(scene.background_color);
+            
+            // 3. Reset Cycles-style Accumulation for new frame
+            optix_gpu->resetAccumulation();
+            
+            // 4. Render Loop (Accumulate Samples until target reached)
+            std::vector<uchar4> temp_framebuffer(surface->w * surface->h);
+            
+            // Render until max samples reached
+            while (!optix_gpu->isAccumulationComplete() && !rendering_stopped_gpu) {
+                 // Launch progressive render (accumulates 1 sample)
+                 optix_gpu->launch_random_pixel_mode_progressive(surface, window, renderer, surface->w, surface->h, temp_framebuffer, raytrace_texture);
+            }
+        } 
+        else {
+            // --- CPU RENDER PATH ---
+            
+            // Reset CPU accumulation for new frame
+            resetCPUAccumulation();
+            
+            // Render until max samples reached
+            while (!isCPUAccumulationComplete() && !rendering_stopped_cpu) {
+                render_progressive_pass(surface,window, scene, 1);
+            }
         }
 
-        // --- 2. Adım: Üçgenleri Animasyon Türüne Göre Güncelle ---
-        for (auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (!tri) continue;
-
-            std::string nodeName = tri->getNodeName();
-
-            // Check if this is a skinned mesh using new API
-            bool isSkinnedMesh = tri->hasSkinData();
-
-            if (isSkinnedMesh) {
-                // Bu bir skinned üçgen. Skinning uygula.
-               // std::cout << "DEBUG: scene.boneData.boneNameToIndex.size() = " << scene.boneData.boneNameToIndex.size() << std::endl;
-                std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
-                // std::cout << "DEBUG: finalBoneMatrices size after creation = " << finalBoneMatrices.size() << std::endl;
-
-                for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
-                    if (animatedGlobalNodeTransforms.count(boneName) == 0) {
-                        SCENE_LOG_WARN("Missing animation data for bone: " + boneName);
-                        continue;
-                    }
-
-                    // Global dönüşüm matrisini al
-                    Matrix4x4 globalTransform = animatedGlobalNodeTransforms[boneName];
-
-                    // Offset matrisini al
-                    if (scene.boneData.boneOffsetMatrices.count(boneName) == 0) {
-                        SCENE_LOG_WARN( "Warning: Missing offset matrix for bone: " + boneName);
-                        continue;
-                    }
-                    Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
-
-                    // Final matrisi hesapla
-                    finalBoneMatrices[boneIndex] = scene.boneData.globalInverseTransform *
-                        globalTransform *
-                        offsetMatrix;
-                }
-
-                // std::cout << "[DEBUG] Skin uygulanıyor: " << tri->getNodeName() << "\n";
-                tri->apply_skinning(finalBoneMatrices);
-
+        // --- COMMON: Denoiser & Save ---
+        
+        if (use_denoiser) {
+            SCENE_LOG_INFO("Applying denoiser to frame " + std::to_string(frame));
+            // Note: For OptiX, launch_random... might have already denoised if internal settings were set,
+            // but Renderer::applyOIDNDenoising works on SDL Surface, so it's safe to call again or instead.
+            // If OptiX Wrapper already denoised, we might be double denoising?
+            // OptixWrapper::launch... doesn't verify denoiser usage inside the loop shown in step 7/38.
+            // But Main.cpp calls ray_renderer.applyOIDNDenoising for single frame.
+            // So we call it here too.
+            applyOIDNDenoising(surface, 0, true, denoiser_blend);
+        }
+        
+        if (!output_folder.empty()) {
+            char filename[256];
+            snprintf(filename, sizeof(filename), "%s/frame_%04d.png", output_folder.c_str(), frame);
+             // Ensure texture is updated for display before saving
+            // REMOVED: Unsafe SDL calls from worker thread. Main thread handles display.
+            
+            if (SaveSurface(surface, filename)) {
+                SCENE_LOG_INFO("Frame saved: " + std::string(filename));
             }
             else {
-                // Bu bir katı (rigid) üçgen. Node dönüşümünü uygula.
-                // Önce bu node için gerçekten animasyon keyframe'i olup olmadığını kontrol et
-                bool nodeHasAnimation = false;
-                for (const auto& anim : scene.animationDataList) {
-                    if (anim.positionKeys.count(nodeName) > 0 ||
-                        anim.rotationKeys.count(nodeName) > 0 ||
-                        anim.scalingKeys.count(nodeName) > 0) {
-                        nodeHasAnimation = true;
-                        break;
-                    }
-                }
-                
-                if (nodeHasAnimation && animatedGlobalNodeTransforms.count(nodeName) > 0) {
-                    // Bu node için animasyon keyframe'i var, animasyonlu transformu uygula
-                    Matrix4x4 animTransform = animatedGlobalNodeTransforms[nodeName];
-                    
-                    // animTransform zaten GLOBAL transform (parent chain dahil)
-                    // Bu yüzden bunu base olarak set ediyoruz, current identity olacak
-                    auto transformHandle = tri->getTransformHandle();
-                    if (transformHandle) {
-                        transformHandle->setBase(animTransform);
-                        transformHandle->setCurrent(Matrix4x4::identity());
-                        tri->updateTransformedVertices();
-                    }
-                    
-                    if (frame == start_frame) {
-                        // Transform matrisinin translation kısmını çıkar
-                        Vec3 translation(animTransform.m[0][3], animTransform.m[1][3], animTransform.m[2][3]);
-                        SCENE_LOG_INFO("  Object '" + nodeName + "' HAS animation - Transform translation: " + translation.toString());
-                    }
-                }
-
-                else {
-                    // Animasyon yoksa, static global transform'u uygula
-                    // updateAnimationTransform() orijinal vertex'lerden başladığı için
-                    // her frame'de transform uygulanması gerekiyor
-                    if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
-                        // animatedGlobalNodeTransforms'da var ama animasyon keyframe'i yok
-                        // Bu demek ki static transform (bind pose)
-                        Matrix4x4 staticTransform = animatedGlobalNodeTransforms[nodeName];
-                        
-                        auto transformHandle = tri->getTransformHandle();
-                        if (transformHandle) {
-                            transformHandle->setBase(staticTransform);
-                            transformHandle->setCurrent(Matrix4x4::identity());
-                            tri->updateTransformedVertices();
-                        }
-                        
-                        if (frame == start_frame) {
-                            Vec3 translation(staticTransform.m[0][3], staticTransform.m[1][3], staticTransform.m[2][3]);
-                            SCENE_LOG_INFO("  Object '" + nodeName + "' has NO animation - Static transform translation: " + translation.toString());
-                        }
-                    }
-                    else {
-                        // Node map'te hiç yok, orijinal transform'u koru
-                        if (frame == start_frame) {
-                            SCENE_LOG_INFO("  Object '" + nodeName + "' not in transform map - keeping original");
-                        }
-                    }
-                }
+                SCENE_LOG_ERROR("Failed to save frame " + std::to_string(frame));
+                rendering_stopped_cpu = true;
+                break;
             }
-        }
-
-        // --- 3. Adım: Işık Animasyonlarını Güncelle (sadece gerçekten animasyon keyframe'i varsa) ---
-        for (auto& light : scene.lights) {
-            // Önce bu ışık için gerçekten animasyon keyframe'i olup olmadığını kontrol et
-            bool lightHasAnimation = false;
-            for (const auto& anim : scene.animationDataList) {
-                if (anim.positionKeys.count(light->nodeName) > 0 ||
-                    anim.rotationKeys.count(light->nodeName) > 0 ||
-                    anim.scalingKeys.count(light->nodeName) > 0) {
-                    lightHasAnimation = true;
-                    break;
-                }
-            }
-            
-            if (!lightHasAnimation || animatedGlobalNodeTransforms.count(light->nodeName) == 0) {
-                continue; // Animasyon yoksa ışığı olduğu gibi bırak
-            }
-
-            Matrix4x4 finalTransform = animatedGlobalNodeTransforms[light->nodeName];
-
-            // Pozisyon
-            Vec3 pos = finalTransform.transform_point(Vec3(0, 0, 0));
-            light->position = pos;
-
-            // Yön (Directional ve Spot için)
-            if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
-                Vec3 forward = finalTransform.transform_vector(Vec3(0, 0, -1)).normalize();
-                light->direction = forward;
-            }
-        }
-
-
-        // --- 3b. Kamera Animasyonunu Güncelle (sadece gerçekten animasyon keyframe'i varsa) ---
-        // Kamera için animasyon keyframe'i olup olmadığını kontrol et
-        bool cameraHasAnimation = false;
-        if (scene.camera) {
-            for (const auto& anim : scene.animationDataList) {
-                if (anim.positionKeys.count(scene.camera->nodeName) > 0 ||
-                    anim.rotationKeys.count(scene.camera->nodeName) > 0 ||
-                    anim.scalingKeys.count(scene.camera->nodeName) > 0) {
-                    cameraHasAnimation = true;
-                    break;
-                }
-            }
-        }
-        
-        if (scene.camera && cameraHasAnimation && animatedGlobalNodeTransforms.count(scene.camera->nodeName) > 0) {
-            Matrix4x4 animTransform = animatedGlobalNodeTransforms[scene.camera->nodeName];
-
-            // Pozisyon ve yön
-            Vec3 pos = animTransform.transform_point(Vec3(0, 0, 0));
-            Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
-            Vec3 look = pos + forward;
-            
-            scene.camera->lookfrom = pos;
-            scene.camera->lookat = look;
-            
-            // Up vektörünü de transform et (animasyonda kamera dönebilir)
-            Vec3 up = animTransform.transform_vector(Vec3(0, 1, 0)).normalize();
-            if (up.length_squared() > 1e-8) {
-                scene.camera->vup = up;
-            } else {
-                scene.camera->vup = Vec3(0, 1, 0); // Fallback
-            }
-            
-            // Kameranın internal vektörlerini güncelle
-            scene.camera->update_camera_vectors();
-            
-            SCENE_LOG_INFO("  Camera AFTER animation update - Pos: " + scene.camera->lookfrom.toString() + 
-                          ", LookAt: " + scene.camera->lookat.toString());
-        }
-        else if (scene.camera) {
-            SCENE_LOG_INFO("  Camera has NO animation keyframes - keeping original position");
-        }
-
-
-        // Animasyon yoksa kamerayı olduğu gibi bırak (model yüklenirken zaten doğru pozisyona yerleştirilmiş)
-
-        // --- 4. Adım: BVH'yi Güncelle ---
-        // Tüm sahne nesneleri (üçgenler) güncellendikten sonra BVH'yi yeniden inşa et
-        if (use_embree) {
-            auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
-            if (embree_ptr) { // Nullptr kontrolü
-                embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
-            }
-        }
-        // else { /* OptiX için BVH güncellemesi, eğer kullanılıyorsa */ }
-
-
-        // --- 5. Adım: Sahneyi Render Et ---
-        const int num_passes = (total_samples_per_pixel + samples_per_pass - 1) / samples_per_pass;
-        for (int pass = 0; pass < num_passes; ++pass) {
-            next_row.store(0);
-            //threads.clear();
-            std::vector<std::pair<int, int>> shuffled_pixel_list;
-            for (int j = 0; j < image_height; ++j) {
-                for (int i = 0; i < image_width; ++i) {
-                    shuffled_pixel_list.emplace_back(i, j);
-                }
-            }
-            std::shuffle(shuffled_pixel_list.begin(), shuffled_pixel_list.end(), std::mt19937(std::random_device{}()));
-            std::atomic<int> next_pixel_index = 0;
-
-            for (unsigned int t = 0; t < num_threads; ++t) {
-                threads.emplace_back(&Renderer::render_chunk, this,
-                    surface,
-                    std::cref(shuffled_pixel_list),
-                    std::ref(next_pixel_index),
-                    std::cref(scene.world),
-                    std::cref(scene.lights),
-                    scene.background_color,
-                    scene.bvh.get(),
-                    scene.camera,
-                    samples_per_pass,
-                    pass * samples_per_pass
-                );
-            }
-
-            for (auto& thread : threads) {
-                thread.join();
-            }
-            threads.clear();
-            char title[100];
-            snprintf(title, sizeof(title), "Rendering Frame %d/%d - %.1f%% Complete",
-                frame + 1, total_frames, (static_cast<float>(pass + 1) / num_passes) * 100);
-
-          //  SDL_SetWindowTitle(window, title);
-           
-        }
-
-        // --- 6. Adım: Kareyi Kaydet ---
-        char filename[100];
-        snprintf(filename, sizeof(filename), "render/output_frame_%04d.png", frame);
-        if (SaveSurface(surface, filename)) {
-            SCENE_LOG_INFO("Frame " + std::to_string(frame) + " saved successfully as " + filename);
-        }
-        else {
-            SCENE_LOG_ERROR("Failed to save frame " + std::to_string(frame));
-            return;
         }
     }
-
+   
     rendering_complete = true;
-   // display_thread.join();
+    rendering_in_progress = false;
+    render_finished = true;
 
-    //SDL_SetWindowTitle(window, "Rendering Completed - All Frames Saved");
+    if (rendering_stopped_cpu || rendering_stopped_gpu) {
+        SCENE_LOG_WARN("Animation rendering was stopped by user.");
+    } else {
+        SCENE_LOG_INFO("Animation rendering completed successfully!");
+    }
 }
 //void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
 //    std::string default_path = "e:/data/home/bedroom.gltf";
@@ -808,6 +915,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     scene.camera = assimpLoader.getDefaultCamera();
 
     if (scene.camera) {
+        scene.camera->save_initial_state(); // Save loaded state as initial for reset
         SCENE_LOG_INFO("Camera loaded successfully.");
     }
     else {
@@ -1534,7 +1642,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         attenuation = 1.0f; 
         
         // Point Light Specific Boost: Global çarpan kaldırıldı, sadece Point Light 10 kat güçlendirildi.
-        Li = point->getIntensity(hit_point, light_sample) * attenuation * 10.0f;
+        Li = point->getIntensity(hit_point, light_sample) * attenuation ;
 
         float area = 4.0f * M_PI * point->getRadius() * point->getRadius();
         pdf_light = (1.0f / area) * pdf_light_select;
@@ -1805,4 +1913,219 @@ inline Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughn
     Vec3 oneMinusRough = Vec3(1.0f - roughness); // roughness → F'nin tavanını etkiler
     Vec3 fresnel = F0 + (Vec3::max(oneMinusRough, F0) - F0) * factor;
     return fresnel;
+}
+
+// ============================================================================
+// CYCLES-STYLE ACCUMULATIVE RENDERING (CPU)
+// ============================================================================
+
+uint64_t Renderer::computeCPUCameraHash(const Camera& cam) const {
+    // FNV-1a hash of camera parameters
+    uint64_t hash = 14695981039346656037ULL;
+    auto hashFloat = [&hash](float f) {
+        uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        hash ^= bits;
+        hash *= 1099511628211ULL;
+    };
+    
+    hashFloat(cam.lookfrom.x);
+    hashFloat(cam.lookfrom.y);
+    hashFloat(cam.lookfrom.z);
+    hashFloat(cam.lookat.x);
+    hashFloat(cam.lookat.y);
+    hashFloat(cam.lookat.z);
+    hashFloat(cam.vup.x);
+    hashFloat(cam.vup.y);
+    hashFloat(cam.vup.z);
+    hashFloat(cam.vfov);
+    
+    return hash;
+}
+
+void Renderer::resetCPUAccumulation() {
+    cpu_accumulated_samples = 0;
+    cpu_accumulation_valid = false;
+    cpu_last_camera_hash = 0;  // Reset camera hash for animation frames
+    if (!cpu_accumulation_buffer.empty()) {
+        std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{0.0f, 0.0f, 0.0f, 0.0f});
+    }
+}
+
+bool Renderer::isCPUAccumulationComplete() const {
+    extern RenderSettings render_settings;
+    int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+    return cpu_accumulated_samples >= target_max_samples;
+}
+
+void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass) {
+    extern RenderSettings render_settings;
+    
+    // Ensure accumulation buffer is allocated
+    const size_t pixel_count = image_width * image_height;
+    if (cpu_accumulation_buffer.size() != pixel_count) {
+        cpu_accumulation_buffer.resize(pixel_count, Vec4{0.0f, 0.0f, 0.0f, 0.0f});
+        cpu_accumulation_valid = true;
+    }
+    
+    // Camera change detection
+    if (scene.camera) {
+        uint64_t current_hash = computeCPUCameraHash(*scene.camera);
+        bool is_first = (cpu_last_camera_hash == 0);
+        
+        if (current_hash != cpu_last_camera_hash) {
+            // Camera changed - reset accumulation
+            std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{0.0f, 0.0f, 0.0f, 0.0f});
+            cpu_accumulated_samples = 0;
+            
+            if (!is_first) {
+                // SCENE_LOG_INFO("CPU: Camera changed - resetting accumulation");
+            }
+            
+            cpu_last_camera_hash = current_hash;
+        }
+    }
+    
+    // Check if already complete
+    int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+    if (cpu_accumulated_samples >= target_max_samples) {
+        return; // Already done
+    }
+    
+    // Multi-threaded rendering with accumulation
+    unsigned int num_threads = std::thread::hardware_concurrency();
+    std::vector<std::thread> threads;
+    
+    // Build pixel list
+    std::vector<std::pair<int, int>> pixel_list;
+    pixel_list.reserve(pixel_count);
+    for (int j = 0; j < image_height; ++j) {
+        for (int i = 0; i < image_width; ++i) {
+            pixel_list.emplace_back(i, j);
+        }
+    }
+    
+    // Shuffle for better cache and visual distribution
+    std::shuffle(pixel_list.begin(), pixel_list.end(), std::mt19937(std::random_device{}()));
+    
+    // Sparse progressive: First few samples render fewer pixels for faster preview
+    // Sample 1: 1/16 pixels, Sample 2: 1/8, Sample 3: 1/4, Sample 4: 1/2, Sample 5+: all
+    int sparse_divisor = 1;
+    if (cpu_accumulated_samples == 0) sparse_divisor = 16;  // First pass: 1/16 pixels
+    else if (cpu_accumulated_samples == 1) sparse_divisor = 8;
+    else if (cpu_accumulated_samples == 2) sparse_divisor = 4;
+    else if (cpu_accumulated_samples == 3) sparse_divisor = 2;
+    
+    size_t pixels_to_render = pixel_list.size() / sparse_divisor;
+    if (pixels_to_render < 1000) pixels_to_render = pixel_list.size();  // Safety minimum
+    
+    std::atomic<int> next_pixel_index{0};
+    std::atomic<bool> should_stop{false};
+    
+    // Worker function for progressive accumulation
+    auto progressive_worker = [&](int thread_id) {
+        std::mt19937 rng(std::random_device{}() + thread_id + cpu_accumulated_samples * 1337);
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        
+        while (!should_stop.load(std::memory_order_relaxed)) {
+            // Check global stop flag
+            if (rendering_stopped_cpu.load(std::memory_order_relaxed)) {
+                should_stop.store(true, std::memory_order_relaxed);
+                break;
+            }
+            
+            int idx = next_pixel_index.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= static_cast<int>(pixels_to_render)) break;
+            
+            int i = pixel_list[idx].first;
+            int j = pixel_list[idx].second;
+            int pixel_index = j * image_width + i;
+            
+            Vec3 color_sum(0.0f);
+            
+            // Render samples for this pass
+            for (int s = 0; s < samples_this_pass; ++s) {
+                float u = (i + dist(rng)) / float(image_width);
+                float v = (j + dist(rng)) / float(image_height);
+                
+                Ray ray = scene.camera->get_ray(u, v);
+                Vec3 sample_color = ray_color(ray, scene.bvh.get(), scene.lights, 
+                                              scene.background_color, render_settings.max_bounces);
+                color_sum += sample_color;
+            }
+            
+            Vec3 new_color = color_sum / float(samples_this_pass);
+            
+            // Accumulate with previous samples
+            Vec4& accum = cpu_accumulation_buffer[pixel_index];
+            float prev_samples = accum.w;
+            
+            if (prev_samples > 0.0f) {
+                // Progressive blend
+                float new_total = prev_samples + samples_this_pass;
+                Vec3 prev_color(accum.x, accum.y, accum.z);
+                Vec3 blended = (prev_color * prev_samples + new_color * samples_this_pass) / new_total;
+                
+                accum.x = blended.x;
+                accum.y = blended.y;
+                accum.z = blended.z;
+                accum.w = new_total;
+                new_color = blended;
+            } else {
+                // First sample
+                accum.x = new_color.x;
+                accum.y = new_color.y;
+                accum.z = new_color.z;
+                accum.w = float(samples_this_pass);
+            }
+            
+            // Write to surface with tone mapping
+            auto toSRGB = [](float c) {
+                if (c <= 0.0031308f)
+                    return 12.92f * c;
+                else
+                    return 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
+            };
+            
+            int r = static_cast<int>(255 * std::clamp(toSRGB(new_color.x), 0.0f, 1.0f));
+            int g = static_cast<int>(255 * std::clamp(toSRGB(new_color.y), 0.0f, 1.0f));
+            int b = static_cast<int>(255 * std::clamp(toSRGB(new_color.z), 0.0f, 1.0f));
+            
+            Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+            int screen_index = (surface->h - 1 - j) * (surface->pitch / 4) + i;
+            pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
+        }
+    };
+    
+    // Launch threads
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    for (unsigned int t = 0; t < num_threads; ++t) {
+        threads.emplace_back(progressive_worker, t);
+    }
+    
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    float pass_ms = std::chrono::duration<float, std::milli>(end_time - start_time).count();
+
+    // Check if stopped
+    if (rendering_stopped_cpu.load()) {
+        SCENE_LOG_WARN("CPU Render stopped by user");
+        return;
+    }
+    
+    cpu_accumulated_samples += samples_this_pass;
+    
+    // Update window title with progress
+    if (window) {
+        float progress = 100.0f * cpu_accumulated_samples / target_max_samples;
+        std::string title = "RayTrophi CPU - Sample " + std::to_string(cpu_accumulated_samples) + 
+                            "/" + std::to_string(target_max_samples) + 
+                            " (" + std::to_string(int(progress)) + "%) - " + 
+                            std::to_string(int(pass_ms)) + "ms/sample";
+        SDL_SetWindowTitle(window, title.c_str());
+    }
 }

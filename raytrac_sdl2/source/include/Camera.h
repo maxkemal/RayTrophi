@@ -40,7 +40,7 @@ public:
     float fov;
     float aspect_ratio;
     float vfov;
-   // Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist);
+    // Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist);
 
     Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
     Camera();
@@ -59,9 +59,10 @@ public:
     float calculate_bokeh_intensity(const Vec3& point) const;
 
     Vec3 create_bokeh_shape(const Vec3& color, float intensity) const;
-
+    void reset();
+    void save_initial_state();
     bool isPointInFrustum(const Vec3& point, float size) const;
-     Matrix4x4 getRotationMatrix() const ;
+    Matrix4x4 getRotationMatrix() const;
     bool isAABBInFrustum(const AABB& aabb) const;
     std::vector<AABB> performFrustumCulling(const std::vector<AABB>& objects) const;
     Vec3 lower_left_corner;
@@ -69,6 +70,13 @@ public:
     Vec3 vertical;
     float lens_radius;
 private:
+    // Initial state for reset
+    Vec3 init_lookfrom;
+    Vec3 init_lookat;
+    Vec3 init_vup;
+    float init_vfov;
+    float init_aperture;
+    float init_focus_dist;
     void updateFrustumPlanes();
 
     Vec3 getViewDirection() const;

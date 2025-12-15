@@ -139,11 +139,23 @@ __device__ inline float3 abs(const float3& a) {
 // === Color & Utility ===
 
 __device__ inline uchar4 make_color(const float3& c) {
-
+    // 1. Negatif değerleri sıfırla
+    float3 color = make_float3(
+        fmaxf(c.x, 0.0f),
+        fmaxf(c.y, 0.0f),
+        fmaxf(c.z, 0.0f)
+    );
+    
+    // 2. Basit Reinhard tone mapping (HDR -> LDR)
+    // Bu sayede 1.0'dan büyük değerler de korunur
+    color = color / (color + make_float3(1.0f, 1.0f, 1.0f));
+    
+    // 3. Gamma correction (Linear -> sRGB, gamma ≈ 2.2)
+    // 1/2.2 ≈ 0.4545, ama 1/2.0 daha hızlı ve yeterince iyi
     float3 gamma_corrected = make_float3(
-        powf(fminf(c.x, 1.0f), 1.0f / 1.4f),
-        powf(fminf(c.y, 1.0f), 1.0f / 1.4f),
-        powf(fminf(c.z, 1.0f), 1.0f / 1.4f)
+        powf(color.x, 1.0f / 2.2f),
+        powf(color.y, 1.0f / 2.2f),
+        powf(color.z, 1.0f / 2.2f)
     );
 
     return make_uchar4(

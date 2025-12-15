@@ -39,9 +39,11 @@ public:
      void drawLightsContent(UIContext& ctx);
      void drawRenderSettingsPanel(UIContext& ctx, float screen_y);
      static void ClampWindowToDisplay();
-     void drawAnimationSettings(UIContext& ctx);
+     void drawAnimationSettings(UIContext& ctx);  // Deprecated - timeline panel kullanılıyor
+     void drawTimelinePanel(UIContext& ctx, float screen_y);  // Yeni timeline panel (Blender tarzı)
+     void drawControlsContent(); // New method for controls/help tab
      void draw(UIContext& ctx);
-     float panel_alpha = 0.75f; // varsayılan
+     float panel_alpha = 0.25f; // varsayılan
 private:
     bool showResolutionPanel = true; // class üyesi
     bool camera_initialized = false;

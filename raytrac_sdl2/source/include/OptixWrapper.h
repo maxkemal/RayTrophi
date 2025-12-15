@@ -19,8 +19,8 @@
 #include "sbt_record.h"
 #include <ColorProcessingParams.h>
 #include <OpenImageDenoise/oidn.hpp>
-#include "sbt_record.h"
 #include <sbt_data.h>
+
 
 struct OptixGeometryData {
     std::vector<float3> vertices;
@@ -65,25 +65,25 @@ public:
 
     void initialize();
     bool isCudaAvailable();
-    void setupOIDN(int width, int height);
-    void applyOIDNDenoising(SDL_Surface* surface, bool denoise, float blend);
+    // OIDN denoising is now handled by Renderer::applyOIDNDenoising
     void validateMaterialIndices(const OptixGeometryData& data);
     void setupPipeline(const char* raygen_ptx);
     void destroyTextureObjects();
     void buildFromData(const OptixGeometryData& data);
+    void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // Dynamic update for animation
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
 
   
     void launch_tile_based_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
     void launch_random_pixel_mode_progressive(SDL_Surface* surface,
         SDL_Window* window,
-        SDL_Renderer* renderer, // ⬅️ YENİ PARAMETRE
+        SDL_Renderer* renderer, // YENİ PARAMETRE
         int width,
         int height,
         std::vector<uchar4>& framebuffer,
         SDL_Texture* raytrace_texture);
    
-    void applyOIDNDenoising(SDL_Surface* surface, float blend_factor = 1.0f, bool use_albedo = false, float sharpness = 0.95f);
+    // Removed: applyOIDNDenoising - use Renderer::applyOIDNDenoising instead
   
    
    // void launch(uchar4* output_buffer, int width, int height);
@@ -96,26 +96,25 @@ public:
     void setLightParams(const std::vector<std::shared_ptr<Light>>& lights);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
     void resetBuffers(int width, int height);
+    
+    // Cycles-style accumulation status
+    bool isAccumulationComplete() const;
+    int getAccumulatedSamples() const { return accumulated_samples; }
+    void resetAccumulation();  // Reset accumulation for new frame (animation)
   
       ColorProcessor color_processor;
 
 
 
 private:
-    oidn::DeviceRef oidnDevice;
-    oidn::FilterRef oidnFilter;
-    oidn::BufferRef oidnInputBuffer;
-    oidn::BufferRef oidnOutputBuffer;
-    bool oidnInitialized = false;
-    int oidnLastWidth = 0;
-    int oidnLastHeight = 0;
+    // OIDN members removed - denoising handled by Renderer class
     cudaDeviceProp props;
     // OptiX context
     OptixDeviceContext context = nullptr;
     // header dosyasında
     std::vector<SbtRecord<HitGroupData>> hitgroup_records;
     
-    // ✅ Texture CUDA array tracking (memory leak fix)
+    //  Texture CUDA array tracking (memory leak fix)
     std::vector<cudaArray_t> texture_arrays;
     
     CUstream stream = nullptr;
@@ -161,4 +160,19 @@ private:
         float variance;
         bool completed;
     };
+
+    // Optimization state tracking
+    bool is_gas_built_as_soup = false;
+    size_t allocated_vertex_byte_size = 0;
+    size_t allocated_normal_byte_size = 0;
+    size_t last_vertex_count = 0;
+    
+    // Cycles-style accumulative rendering state
+    uint64_t last_camera_hash = 0;           // Camera state hash for change detection
+    int accumulated_samples = 0;              // Total samples accumulated so far
+    bool accumulation_valid = false;          // Is current accumulation buffer valid?
+    float4* d_accumulation_float4 = nullptr;  // High precision accumulation buffer (float4)
+    
+    // Helper function to compute camera hash
+    uint64_t computeCameraHash() const;
 };

@@ -1,0 +1,34 @@
+# Build output
+build/
+Release/
+Debug/
+x64/
+*.ptx
+
+# IDE files
+*.user
+*.nvuser
+*.aps
+*.suo
+*.sdf
+*.opensdf
+.vs/
+.agent/
+
+# Backup/Temp files
+*.zip
+*.bak
+*.tmp
+*.log
+*.txt
+!README.txt
+
+# Log files from app
+SceneLog.txt
+build_log*.txt
+
+# ImGui settings
+imgui.ini
+
+# Raytracing temp
+raytraci.*/

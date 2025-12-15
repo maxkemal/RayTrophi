@@ -2,7 +2,6 @@
 #include "Ray.h"
 #include "AABB.h"
 #include "globals.h"
-#include <Dielectric.h>
 #include <cmath>
 
 // ============================================================================
@@ -253,32 +252,53 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
 
     // Process each vertex
     for (int vi = 0; vi < 3; ++vi) {
-        blendedPos = Vec3(0);
-        blendedNorm = Vec3(0);
-
         if (boneWeights[vi].empty()) {
             vertices[vi].position = vertices[vi].original;
             vertices[vi].normal = vertices[vi].originalNormal;
             continue;
         }
 
-        // Blend bones for position and normal
+        // Linear Blend Skinning (standard approach)
+        Matrix4x4 blendedBoneMatrix = Matrix4x4::zero();
+        
         for (const auto& [boneIdx, weight] : boneWeights[vi]) {
             if (boneIdx >= static_cast<int>(finalBoneMatrices.size()) || weight < 1e-6f) {
                 continue;
             }
-
-            Vec3 transformedVertex = finalBoneMatrices[boneIdx].transform_point(origPositions[vi]);
-            blendedPos += transformedVertex * weight;
-
-            // Transform normal with inverse-transpose
-            Matrix4x4 normalMatrix = finalBoneMatrices[boneIdx].inverse().transpose();
-            Vec3 transformedNormal = normalMatrix.transform_vector(vertices[vi].originalNormal);
-            blendedNorm += transformedNormal * weight;
+            
+            // Blend bone matrices
+            const Matrix4x4& boneMatrix = finalBoneMatrices[boneIdx];
+            for (int i = 0; i < 4; ++i) {
+                for (int j = 0; j < 4; ++j) {
+                    blendedBoneMatrix.m[i][j] += boneMatrix.m[i][j] * weight;
+                }
+            }
         }
 
-        vertices[vi].position = blendedPos;
-        vertices[vi].normal = blendedNorm.normalize();
+        // Apply to vertex
+        vertices[vi].position = blendedBoneMatrix.transform_point(origPositions[vi]);
+        
+        // Apply to normal
+        Matrix4x4 normalMatrix = blendedBoneMatrix.inverse().transpose();
+        vertices[vi].normal = normalMatrix.transform_vector(vertices[vi].originalNormal).normalize();
+        
+        // Debug logging for first vertex only, once
+        static bool logged_skinning = false;
+        if (!logged_skinning && vi == 0 && !boneWeights[vi].empty()) {
+            SCENE_LOG_INFO("[SKINNING DEBUG] Triangle node: " + nodeName);
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[SKINNING DEBUG] Original vertex position: (%.3f, %.3f, %.3f)", 
+                     origPositions[vi].x, origPositions[vi].y, origPositions[vi].z);
+            SCENE_LOG_INFO(std::string(buf));
+            snprintf(buf, sizeof(buf), "[SKINNING DEBUG] Transformed vertex position: (%.3f, %.3f, %.3f)", 
+                     vertices[vi].position.x, vertices[vi].position.y, vertices[vi].position.z);
+            SCENE_LOG_INFO(std::string(buf));
+            SCENE_LOG_INFO("[SKINNING DEBUG] Bone weights count: " + std::to_string(boneWeights[vi].size()));
+            for (const auto& [boneIdx, weight] : boneWeights[vi]) {
+                SCENE_LOG_INFO("[SKINNING DEBUG]   Bone " + std::to_string(boneIdx) + " weight: " + std::to_string(weight));
+            }
+            logged_skinning = true;
+        }
     }
 
     aabbDirty = true;

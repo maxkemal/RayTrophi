@@ -190,7 +190,7 @@ bool PrincipledBSDF::scatter(
     }
     // 2. Emissive malzeme varsa doğrudan ışık katkısı verir
    // If material emits light, return its emission
-    if (emission.length() > 0.01f) {
+    if (emission.length() > 0.1f) {
         attenuation = emission;
         return true;
     }

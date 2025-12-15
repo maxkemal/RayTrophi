@@ -5,7 +5,10 @@
 #include "scene_data.h"
 #include <windows.h>
 #include <commdlg.h>
+#include <shlobj.h>  // SHBrowseForFolder için
 #include <string>
+#include <chrono>  // Playback timing için
+#include <filesystem>  // Frame dosyalarını kontrol için
 
 static int new_width = image_width;
 static int new_height = image_height;
@@ -14,6 +17,7 @@ static int aspect_h = 9;
 static bool modelLoaded = false;
 static bool loadFeedback = false; // geçici hata geri bildirimi
 static float feedbackTimer = 0.0f;
+bool show_animation_panel = true; // Default closed as requested
 
 // Not: ScaleColor ve HelpMarker artık UIWidgets namespace'inde tanımlı
 
@@ -108,43 +112,254 @@ void SceneUI::ClampWindowToDisplay()
     }
 }
 
-void SceneUI::drawAnimationSettings(UIContext& ctx)
+// Timeline Panel - Blender tarzı ayrı panel (en altta)
+void SceneUI::drawTimelinePanel(UIContext& ctx, float screen_y)
 {
-    ImGuiTreeNodeFlags flags =
-        ImGuiTreeNodeFlags_Framed |
-        ImGuiTreeNodeFlags_SpanFullWidth |
-        //ImGuiTreeNodeFlags_DefaultOpen |
-        ImGuiTreeNodeFlags_AllowItemOverlap |
-        ImGuiTreeNodeFlags_FramePadding;
-    // Sadece bu node'un text rengini kırmızı yap
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
+    static int start_frame = 0;
+    static int end_frame = 100;
+    static bool frame_range_initialized = false;
+    static bool is_playing = false;
+    static int playback_frame = 0;
+    static auto last_frame_time = std::chrono::steady_clock::now();
+    
+    // Timeline panelini en altta göster
+    float timeline_height = 140.0f;
+    ImGui::SetNextWindowPos(ImVec2(0, screen_y - timeline_height), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, timeline_height), ImGuiCond_Always);
+    
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
+   
+    ImGui::Begin("##Timeline", nullptr, flags);
+  
+    
+    if (!ctx.scene.animationDataList.empty()) {
+        auto& anim = ctx.scene.animationDataList[0];
+        
+        // Detect if we switched to a different animation (or first load) by checking source limits
+        static int cached_source_start = -1;
+        static int cached_source_end = -1;
 
-    bool open = ImGui::TreeNodeEx("Animation Rendering (Experimental)", flags);
-
-    ImGui::PopStyleColor();
-    if (open)
-    {
-
-        ImGui::SliderFloat("Duration (sec)",
-            &ctx.render_settings.animation_duration,
-            0.1f, 60.0f, "%.1f");
-        UIWidgets::HelpMarker("Length of the animation in seconds.");
-
-        ImGui::SliderInt("FPS",
-            &ctx.render_settings.animation_fps,
-            1, 60);
-        UIWidgets::HelpMarker("Frames per second for animation rendering.");
-
-        ImGui::Spacing();
-
-        if (ImGui::Button("Start CPU Animation Render", ImVec2(-1, 0)))
-        {
-            ctx.render_settings.start_animation_render = true;
-            ctx.start_render = true;
+        // If the source (file) limits differ from what we have cached, it means a new file/anim was loaded.
+        // We should reset the UI selection to the full range of this new animation.
+        if (anim.startFrame != cached_source_start || anim.endFrame != cached_source_end) {
+            frame_range_initialized = false;
+            cached_source_start = anim.startFrame;
+            cached_source_end = anim.endFrame;
         }
 
-        ImGui::TreePop();
+        // Initialize or Reset defaults
+        if (!frame_range_initialized) {
+            start_frame = anim.startFrame;
+            end_frame = anim.endFrame;
+            playback_frame = start_frame;
+            ctx.render_settings.animation_start_frame = start_frame;
+            ctx.render_settings.animation_end_frame = end_frame;
+            frame_range_initialized = true;
+        }
+        
+        int total_frames = end_frame - start_frame + 1;
+        bool is_rendering = rendering_in_progress;
+        
+        // --- ÜST SATIR: Frame Range ve Ayarlar ---
+        ImGui::PushItemWidth(150);
+        if (ImGui::SliderInt("Start", &start_frame, anim.startFrame, anim.endFrame)) {
+            ctx.render_settings.animation_start_frame = start_frame;
+            if (playback_frame < start_frame) playback_frame = start_frame;
+        }
+        ImGui::SameLine();
+        if (ImGui::SliderInt("End", &end_frame, anim.startFrame, anim.endFrame)) {
+            ctx.render_settings.animation_end_frame = end_frame;
+            if (playback_frame > end_frame) playback_frame = end_frame;
+        }
+        ImGui::PopItemWidth();
+        
+        if (start_frame > end_frame) {
+            end_frame = start_frame;
+            ctx.render_settings.animation_end_frame = end_frame;
+        }
+        
+        ImGui::SameLine();
+        ImGui::Text("|");
+        ImGui::SameLine();
+        
+        ImGui::PushItemWidth(80);
+        ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);
+        ImGui::PopItemWidth();
+        
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%d frames)", total_frames);
+        
+        // --- ORTA SATIR: Playback Controls (Blender tarzı) ---
+        ImGui::Spacing();
+        
+        // Play/Pause/Stop butonları
+        // if (is_rendering) ImGui::BeginDisabled(); // Removed to allow stopping during playback
+        
+        if (ImGui::Button(is_playing ? "||" : "|>", ImVec2(30, 25))) {
+            is_playing = !is_playing;
+            if (is_playing) {
+                last_frame_time = std::chrono::steady_clock::now();
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(is_playing ? "Pause" : "Play");
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("[]", ImVec2(30, 25))) {
+            is_playing = false;
+            playback_frame = start_frame;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Stop");
+        }
+        
+        // if (is_rendering) ImGui::EndDisabled();
+        
+        ImGui::SameLine();
+        ImGui::Text("|");
+        ImGui::SameLine();
+        
+        // Current frame display
+        ImGui::Text("Frame:");
+        ImGui::SameLine();
+        ImGui::PushItemWidth(60);
+        if (ImGui::InputInt("##CurrentFrame", &playback_frame, 0, 0)) {
+            playback_frame = std::clamp(playback_frame, start_frame, end_frame);
+        }
+        ImGui::PopItemWidth();
+        
+        
+        // Playback logic - sadece state güncelleme
+        if (is_playing && !is_rendering) {
+            auto now = std::chrono::steady_clock::now();
+            float elapsed = std::chrono::duration<float>(now - last_frame_time).count();
+            float frame_duration = 1.0f / ctx.render_settings.animation_fps;
+            
+            if (elapsed >= frame_duration) {
+                playback_frame++;
+                if (playback_frame > end_frame) {
+                    playback_frame = start_frame; // Reset to start
+                    is_playing = false; // Stop playback
+                }
+                last_frame_time = now;
+            }
+        }
+        
+        // Playback state'i RenderSettings'e yaz (Main.cpp okuyacak)
+        ctx.render_settings.animation_is_playing = is_playing;
+        ctx.render_settings.animation_playback_frame = playback_frame;
+        
+        ImGui::SameLine();
+        ImGui::Dummy(ImVec2(20, 0));
+        ImGui::SameLine();
+        
+        // Output folder (Auto-generated)
+        ImGui::Text("Output: Auto-generated/render_animation");
+
+        
+        // --- TIMELINE SCRUBBER BAR (Blender tarzı) ---
+        ImGui::Spacing();
+        
+        // Render progress veya playback progress
+        int current_display_frame = is_rendering ? ctx.render_settings.animation_current_frame : playback_frame;
+        float scrubber_progress = (float)(current_display_frame - start_frame) / (float)total_frames;
+        
+       
+        ImGui::PushItemWidth(-1);
+        if (ImGui::SliderInt("##Scrubber", &current_display_frame, start_frame, end_frame, "")) {
+            if (!is_rendering) {
+                playback_frame = current_display_frame;
+            }
+        }
+        ImGui::PopItemWidth();      
+        
+        // Scrubber üzerinde frame numarası ve durum göster
+        ImVec2 scrubber_min = ImGui::GetItemRectMin();
+        ImVec2 scrubber_max = ImGui::GetItemRectMax();
+        ImVec2 scrubber_size = ImVec2(scrubber_max.x - scrubber_min.x, scrubber_max.y - scrubber_min.y);
+        
+        char frame_label[64];
+        if (is_rendering) {
+            snprintf(frame_label, sizeof(frame_label), "Rendering: %d / %d", current_display_frame, end_frame);
+        } else if (is_playing) {
+            snprintf(frame_label, sizeof(frame_label), "Playing: %d", current_display_frame);
+        } else {
+            snprintf(frame_label, sizeof(frame_label), "Frame: %d", current_display_frame);
+        }
+        
+        ImVec2 text_size = ImGui::CalcTextSize(frame_label);
+        ImVec2 text_pos = ImVec2(
+            scrubber_min.x + (scrubber_size.x - text_size.x) * 0.5f,
+            scrubber_min.y + (scrubber_size.y - text_size.y) * 0.5f
+        );
+        
+        ImGui::GetWindowDrawList()->AddText(text_pos, IM_COL32(255, 255, 255, 200), frame_label);
+        
+        // --- ALT SATIR: Render Butonları ---
+        ImGui::Spacing();
+        
+        if (is_rendering) ImGui::BeginDisabled();
+        
+        if (ImGui::Button("Render Animation", ImVec2(130, 22))) {
+            ctx.render_settings.start_animation_render = true;
+            ctx.start_render = true;
+            is_playing = false; // Playback'i durdur
+            SCENE_LOG_INFO("Starting animation render...");
+        }
+        
+        if (is_rendering) ImGui::EndDisabled();
+        
+        ImGui::SameLine();
+        
+        if (!is_rendering) ImGui::BeginDisabled();
+        
+        if (ImGui::Button("Stop Render", ImVec2(90, 22))) {
+            rendering_stopped_cpu = true;
+            rendering_stopped_gpu = true;
+            SCENE_LOG_WARN("Stop requested by user.");
+        }
+        
+        if (!is_rendering) ImGui::EndDisabled();
+        
+        // Frame sayısı bilgisi
+        if (!ctx.render_settings.animation_output_folder.empty()) {
+            ImGui::SameLine();
+            ImGui::Dummy(ImVec2(10, 0));
+            ImGui::SameLine();
+            
+            // Render edilmiş frame sayısını say
+            int rendered_count = 0;
+            for (int f = start_frame; f <= end_frame; f++) {
+                char check_path[512];
+                snprintf(check_path, sizeof(check_path), "%s/frame_%04d.png", 
+                        ctx.render_settings.animation_output_folder.c_str(), f);
+                if (std::filesystem::exists(check_path)) {
+                    rendered_count++;
+                }
+            }
+            
+            if (rendered_count > 0) {
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), 
+                    "%d/%d frames rendered", rendered_count, total_frames);
+            } else {
+                ImGui::TextDisabled("No frames rendered yet");
+            }
+        }
+        
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "No animation data loaded.");
+        frame_range_initialized = false;
     }
+    
+    ImGui::End();
+}
+
+// Eski drawAnimationSettings metodunu kaldırdık, artık kullanılmıyor
+void SceneUI::drawAnimationSettings(UIContext& ctx)
+{
+    // Bu metod artık kullanılmıyor - timeline panel'e taşındı
 }
 
 void SceneUI::drawLogPanelEmbedded()
@@ -198,7 +413,11 @@ void SceneUI::drawLogPanelEmbedded()
     // Eğer header açıksa logu göster
     if (open)
     {
-        ImGui::BeginChild("scroll_log", ImVec2(0, 150), true);
+        // Mevcut boşluğu doldur (en az 100px)
+        float avail_y = ImGui::GetContentRegionAvail().y;
+        if (avail_y < 100.0f) avail_y = 150.0f; 
+
+        ImGui::BeginChild("scroll_log", ImVec2(0, avail_y), true);
 
         static size_t lastCount = 0;
         std::vector<LogEntry> lines;
@@ -446,6 +665,14 @@ void SceneUI::drawCameraContent(UIContext& ctx)
         }
         UIWidgets::EndSection();
     }
+
+    // -------- Actions --------
+    UIWidgets::Divider();
+    if (UIWidgets::SecondaryButton("Reset Camera", ImVec2(120, 0))) {
+        ctx.scene.camera->reset();
+        ctx.start_render = true; // Trigger re-render
+        SCENE_LOG_INFO("Camera reset to initial state.");
+    }
 }
 
 void SceneUI::drawLightsContent(UIContext& ctx)
@@ -485,8 +712,21 @@ void SceneUI::drawLightsContent(UIContext& ctx)
 }
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 {
+    // Dinamik yükseklik hesabı - Timeline açıksa yer aç
+    extern bool show_animation_panel;
+    float bottom_margin = 20.0f; 
+    if (show_animation_panel && ctx.scene.initialized) {
+        bottom_margin = 160.0f; // Timeline height (140) + padding
+    }
+
+    // Maksimum yükseklik constraint'i ekle
+    ImGui::SetNextWindowSizeConstraints(
+        ImVec2(300, 200),                 // Min size
+        ImVec2(FLT_MAX, screen_y - bottom_margin) // Max height
+    );
+
     ImGui::SetNextWindowSize(ImVec2(400, screen_y - 20), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(1040, screen_y - 420), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(1040, 20), ImGuiCond_FirstUseEver);
     ImGui::Begin("Properties", nullptr);
 
     if (ImGui::BeginTabBar("MainPropertiesTabs"))
@@ -494,6 +734,14 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (ImGui::BeginTabItem("System")) {
             drawThemeSelector();
             drawResolutionPanel();
+
+            if (UIWidgets::BeginSection("Panels", ImVec4(0.6f, 0.4f, 0.7f, 1.0f))) {
+                extern bool show_animation_panel; // Defined at file scope
+                ImGui::Checkbox("Show Animation Pnl", &show_animation_panel);
+                UIWidgets::HelpMarker("Show/Hide the bottom timeline panel");
+                UIWidgets::EndSection();
+            }
+
             ImGui::EndTabItem();
         }
 
@@ -519,11 +767,22 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         );
 
         if (!file.empty()) {
+            // Render işlemleri devam ediyorsa durdur
+            rendering_stopped_cpu = true;
+            rendering_stopped_gpu = true;
+            
             scene_loading = true;
             scene_loading_done = false;
             active_model_path = file;
 
             std::thread loader_thread([this, file, &ctx]() {
+                // Wait for render thread to fully stop (max 2 seconds)
+                int wait_count = 0;
+                while (rendering_in_progress && wait_count < 20) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    wait_count++;
+                }
+
                 SCENE_LOG_INFO("Starting async scene load...");
                 ctx.scene.clear();
                 ctx.renderer.create_scene(ctx.scene, ctx.optix_gpu_ptr, file);
@@ -648,27 +907,153 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         }
 
 
+        // ============ QUALITY PRESET ============
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.4f, 1), "Quality Preset");
+        
+        const char* preset_names[] = { "Preview", "Production", "Cinematic" };
+        int current_preset = static_cast<int>(ctx.render_settings.quality_preset);
+        
+        static bool show_resolution_popup = false;
+        static int suggested_width = 0;
+        static int suggested_height = 0;
+        static std::string preset_name_for_popup;
+        
+        ImGui::PushItemWidth(180);
+        if (ImGui::Combo("##QualityPreset", &current_preset, preset_names, IM_ARRAYSIZE(preset_names))) {
+            ctx.render_settings.quality_preset = static_cast<QualityPreset>(current_preset);
+            
+            // Reset render time tracking
+            ctx.render_settings.render_elapsed_seconds = 0.0f;
+            ctx.render_settings.render_estimated_remaining = 0.0f;
+            ctx.render_settings.avg_sample_time_ms = 0.0f;
+            
+            // Apply preset settings
+            switch (ctx.render_settings.quality_preset) {
+                case QualityPreset::Preview:
+                    ctx.render_settings.max_samples = 32;
+                    ctx.render_settings.max_bounces = 4;
+                    ctx.render_settings.use_denoiser = true;
+                    ctx.render_settings.denoiser_blend_factor = 0.9f;
+                    suggested_width = 1280; suggested_height = 720;
+                    preset_name_for_popup = "Preview (720p)";
+                    SCENE_LOG_INFO("Quality Preset: Preview (32 samples, 4 bounces)");
+                    break;
+                    
+                case QualityPreset::Production:
+                    ctx.render_settings.max_samples = 256;
+                    ctx.render_settings.max_bounces = 8;
+                    ctx.render_settings.use_denoiser = true;
+                    ctx.render_settings.denoiser_blend_factor = 0.7f;
+                    suggested_width = 1920; suggested_height = 1080;
+                    preset_name_for_popup = "Production (1080p)";
+                    SCENE_LOG_INFO("Quality Preset: Production (256 samples, 8 bounces)");
+                    break;
+                    
+                case QualityPreset::Cinematic:
+                    ctx.render_settings.max_samples = 1024;
+                    ctx.render_settings.max_bounces = 16;
+                    ctx.render_settings.use_denoiser = true;
+                    ctx.render_settings.denoiser_blend_factor = 0.5f;
+                    suggested_width = 2560; suggested_height = 1440;
+                    preset_name_for_popup = "Cinematic (2K)";
+                    SCENE_LOG_INFO("Quality Preset: Cinematic (1024 samples, 16 bounces)");
+                    break;
+            }
+            
+            // Check if resolution change is suggested
+            if (image_width != suggested_width || image_height != suggested_height) {
+                show_resolution_popup = true;
+            }
+        }
+        ImGui::PopItemWidth();
+        
+        ImGui::SameLine();
+        UIWidgets::HelpMarker(
+            "Preview: 720p, 32 samples, 4 bounces - Fast positioning\n"
+            "Production: 1080p, 256 samples, 8 bounces - Balanced\n"
+            "Cinematic: 2K, 1024 samples, 16 bounces - Final quality"
+        );
+        
+       
+        
+        if (ImGui::BeginPopupModal("Change Resolution?", &show_resolution_popup, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Recommended resolution for %s:", preset_name_for_popup.c_str());
+            ImGui::Text("%dx%d", suggested_width, suggested_height);
+            ImGui::Separator();
+            ImGui::Text("Current: %dx%d", image_width, image_height);
+            ImGui::Spacing();
+            
+            if (ImGui::Button("Apply Resolution", ImVec2(140, 0))) {
+                pending_width = suggested_width;
+                pending_height = suggested_height;
+                pending_aspect_ratio = (float)suggested_width / suggested_height;
+                pending_resolution_change = true;
+                
+                // Sync resolution panel static variables
+                new_width = suggested_width;
+                new_height = suggested_height;
+                aspect_w = 16;  // All presets use 16:9
+                aspect_h = 9;
+                
+                // Update preset_index to match
+                if (suggested_width == 1280 && suggested_height == 720) {
+                    preset_index = 1;  // HD 720p
+                } else if (suggested_width == 1920 && suggested_height == 1080) {
+                    preset_index = 2;  // Full HD 1080p
+                } else if (suggested_width == 2560 && suggested_height == 1440) {
+                    preset_index = 3;  // 1440p
+                } else {
+                    preset_index = 0;  // Custom
+                }
+                
+                // Allow rendering to restart after resolution change
+                ctx.render_settings.is_render_paused = false;
+                ctx.start_render = true;
+                
+                show_resolution_popup = false;
+                ImGui::CloseCurrentPopup();
+                SCENE_LOG_INFO("Resolution changed to " + std::to_string(suggested_width) + "x" + std::to_string(suggested_height));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Keep Current", ImVec2(140, 0))) {
+                show_resolution_popup = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
 
         ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1), "Adaptive Sampling");
+        ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1), "Sampling Settings");
 
-        // Min Samples
-        if (ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples, 1.0f, 1, 1024)) {
-           // SCENE_LOG_INFO("Min Samples changed to " + std::to_string(ctx.render_settings.min_samples));
+        // Use Adaptive Sampling Checkbox
+        if (ImGui::Checkbox("Use Adaptive Sampling", &ctx.render_settings.use_adaptive_sampling)) {
+             // Log...
         }
-        UIWidgets::HelpMarker("Minimum number of samples per pixel before noise variance is evaluated.");
+        UIWidgets::HelpMarker("Enable intelligent sampling that focuses more rays on noisy areas.");
 
-        // Max Samples
-        if (ImGui::DragInt("Max Samples", &ctx.render_settings.max_samples, 1.0f, 1, 2048)) {
-            //SCENE_LOG_INFO("Max Samples changed to " + std::to_string(ctx.render_settings.max_samples));
-        }
-        UIWidgets::HelpMarker("Maximum number of samples per pixel. Higher values allow cleaner results but take longer.");
+        if (ctx.render_settings.use_adaptive_sampling) {
+            ImGui::Indent(); 
+            
+            // Min Samples
+            ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples, 1.0f, 1, 1024);
+            UIWidgets::HelpMarker("Minimum number of samples per pixel before noise variance is evaluated.");
 
-        // Variance Threshold
-        if (ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.001f, 1.0f, "%.5f")) {
-           // SCENE_LOG_INFO("Variance Threshold changed to " + std::to_string(ctx.render_settings.variance_threshold));
+            // Max Samples
+            ImGui::DragInt("Max Samples", &ctx.render_settings.max_samples,1.0f, 1, 4096);
+            UIWidgets::HelpMarker("Maximum target samples per pixel for noisy areas.");
+
+            // Variance Threshold
+            ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.001f, 1.0f, "%.5f");
+            UIWidgets::HelpMarker("Noise tolerance. Lower values mean better quality but longer render times.");
+            
+            ImGui::Unindent();
+        } 
+        else {
+            // Samples Per Pixel (Sadece Adaptive KAPALIYSA Görünür)
+            ImGui::DragInt("Samples Per Pixel (Fixed)", &ctx.render_settings.samples_per_pixel, 1.0f, 1, 64);
+            UIWidgets::HelpMarker("Number of samples calculated per frame. Use this for consistent performance.");
         }
-        UIWidgets::HelpMarker("Pixels with variance below this threshold will stop sampling early. Lower = cleaner but slower.");
 
         // Max Bounces
         ImGui::Separator();
@@ -686,30 +1071,152 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 std::to_string(int(ctx.scene.background_color.y * 255)) + ", " +
                 std::to_string(int(ctx.scene.background_color.z * 255)) + ")");
         }
-        // -- - START BUTTON-- -
+        // --- START/STOP BUTTONS + PROGRESS ---
         ImGui::Separator();
-        if (rendering_in_progress) {
-            ImGui::BeginDisabled(); // Butonu pasif yap
+        
+        // Progress bar with color gradient
+        float progress = ctx.render_settings.render_progress;
+        int current = ctx.render_settings.render_current_samples;
+        int target = ctx.render_settings.render_target_samples;
+        bool is_active = ctx.render_settings.is_rendering_active;
+        
+        // Progress bar color: red -> yellow -> green
+        ImVec4 progress_color;
+        if (progress < 0.5f) {
+            progress_color = ImVec4(1.0f, progress * 2.0f, 0.0f, 1.0f);  // Red to Yellow
+        } else {
+            progress_color = ImVec4(1.0f - (progress - 0.5f) * 2.0f, 1.0f, 0.0f, 1.0f);  // Yellow to Green
         }
-        if (ImGui::Button("Start Render", ImVec2(150, 0))) {
-            ctx.start_render = true;
+        
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progress_color);
+        char overlay[64];
+        snprintf(overlay, sizeof(overlay), "Sample %d / %d (%.1f%%)", current, target, progress * 100.0f);
+        ImGui::ProgressBar(progress, ImVec2(-1, 20), overlay);
+        ImGui::PopStyleColor();
+        
+        // Render time display
+        float elapsed = ctx.render_settings.render_elapsed_seconds;
+        float remaining = ctx.render_settings.render_estimated_remaining;
+        
+        if (is_active || elapsed > 0.0f) {
+            int elapsed_min = (int)(elapsed / 60.0f);
+            int elapsed_sec = (int)elapsed % 60;
+            int remaining_min = (int)(remaining / 60.0f);
+            int remaining_sec = (int)remaining % 60;
+            
+            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), 
+                "Elapsed: %02d:%02d  |  Remaining: %02d:%02d", 
+                elapsed_min, elapsed_sec, remaining_min, remaining_sec);
         }
-        if (rendering_in_progress) {
-            ImGui::EndDisabled();
+        
+        ImGui::Spacing();
+        
+        bool is_paused = ctx.render_settings.is_render_paused;
+        bool accumulation_done = (progress >= 1.0f);
+        bool is_stopped = is_paused && (current == 0);  // Stopped = paused with no progress
+        
+        // Start/Pause Toggle Button
+        const char* start_pause_label;
+        ImVec4 button_color;
+        
+        if (!is_active && !is_paused) {
+            // Not rendering - show "Start Render"
+            start_pause_label = "Start Render";
+            button_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f);  // Green
+        } else if (is_stopped) {
+            // Stopped (after Stop button) - show "Start Render"
+            start_pause_label = "Start Render";
+            button_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f);  // Green
+        } else if (is_paused) {
+            // Paused mid-render - show "Resume"
+            start_pause_label = "Resume";
+            button_color = ImVec4(0.2f, 0.6f, 0.9f, 1.0f);  // Blue
+        } else if (is_active && !accumulation_done) {
+            // Rendering - show "Pause"
+            start_pause_label = "Pause";
+            button_color = ImVec4(0.9f, 0.7f, 0.2f, 1.0f);  // Orange
+        } else {
+            // Completed - show "Restart"
+            start_pause_label = "Restart";
+            button_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f);  // Green
         }
-        // --- STOP BUTTON ---
+        
+        ImGui::PushStyleColor(ImGuiCol_Button, button_color);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(button_color.x * 1.2f, button_color.y * 1.2f, button_color.z * 1.2f, 1.0f));
+        
+        if (ImGui::Button(start_pause_label, ImVec2(150, 0))) {
+            if (!is_active && !is_paused) {
+                // Start new render
+                ctx.start_render = true;
+                ctx.render_settings.is_render_paused = false;
+                SCENE_LOG_INFO("Start Render clicked");
+            } else if (is_stopped) {
+                // Start from stopped state
+                ctx.start_render = true;
+                ctx.render_settings.is_render_paused = false;
+                SCENE_LOG_INFO("Start Render from stopped state");
+            } else if (is_paused) {
+                // Resume mid-render
+                ctx.render_settings.is_render_paused = false;
+                ctx.start_render = true;  // Trigger render to continue
+                SCENE_LOG_INFO("Render resumed");
+            } else if (is_active && !accumulation_done) {
+                // Pause
+                ctx.render_settings.is_render_paused = true;
+                SCENE_LOG_INFO("Render paused");
+            } else {
+                // Restart (after completion)
+                ctx.start_render = true;
+                ctx.render_settings.is_render_paused = false;
+                // Reset accumulation
+                rendering_stopped_gpu = true;
+                rendering_stopped_cpu = true;
+                SCENE_LOG_INFO("Render restarted");
+            }
+        }
+        ImGui::PopStyleColor(2);
+        
+        // Stop Button - always enabled when rendering or paused
         ImGui::SameLine();
-
-        if (!rendering_in_progress)
-            ImGui::BeginDisabled();               // Render durduysa Stop pasif
-
-        if (ImGui::Button("Stop", ImVec2(150, 0))) {
-            rendering_stopped_gpu = true;        // Render durdur sinyali
-            rendering_stopped_cpu = true;
+        bool can_stop = is_active || is_paused;
+        
+        if (!can_stop) {
+            ImGui::BeginDisabled();
         }
-
-        if (!rendering_in_progress)
+        
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+        
+        if (ImGui::Button("Stop", ImVec2(150, 0))) {
+            // Set stop flags
+            rendering_stopped_gpu = true;
+            rendering_stopped_cpu = true;
+            
+            // Reset render state
+            ctx.render_settings.is_rendering_active = false;
+            ctx.render_settings.is_render_paused = true;  // Keep paused to prevent auto-restart
+            ctx.render_settings.render_current_samples = 0;
+            ctx.render_settings.render_progress = 0.0f;
+            
+            // Reset render time
+            ctx.render_settings.render_elapsed_seconds = 0.0f;
+            ctx.render_settings.render_estimated_remaining = 0.0f;
+            ctx.render_settings.avg_sample_time_ms = 0.0f;
+            
+            // Reset accumulation buffers
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            
+            SCENE_LOG_WARN("Render stopped and reset");
+        }
+        
+        ImGui::PopStyleColor(2);
+        
+        if (!can_stop) {
             ImGui::EndDisabled();
+        }
 
     }
     else {
@@ -727,22 +1234,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
 
 
-
-    // Show current render time text
-    ImGui::Text("Last Render Time: %.4f sec", last_render_time_ms);
-    // Clamp to [0, 1] range for progress bar
-    float normalized = std::fmin(last_render_time_ms / 1000.0f, 1.0f); // 1 saniyeyi 100%
-    // Label inside progress bar
-    char label1[64];
-    snprintf(label1, sizeof(label), "%.4f sec", last_render_time_ms);
-    // Bar visualization
-    ImGui::ProgressBar(normalized, ImVec2(-1, 25), label1);
-
-    ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1), "Animation");
-
-    drawAnimationSettings(ctx);
-
+    // Animation settings timeline paneline taşındı
     ImGui::Spacing();
 
     ImGui::Separator();
@@ -774,6 +1266,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             ImGui::EndTabItem();
         }
 
+        if (ImGui::BeginTabItem("Controls")) {
+             drawControlsContent();
+             ImGui::EndTabItem();
+        }
+
         ImGui::EndTabBar();
     }
     ImGui::End();
@@ -789,7 +1286,14 @@ void SceneUI::draw(UIContext& ctx)
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, panel_alpha));
 
     drawRenderSettingsPanel(ctx, screen_y);
-    //drawLogConsole();
+    
+    // Timeline panelini en altta göster (Blender tarzı)
+    // Timeline panelini en altta göster (Blender tarzı)
+    extern bool show_animation_panel;
+    if (ctx.scene.initialized && show_animation_panel) {
+        drawTimelinePanel(ctx, screen_y);
+    }
+    
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
@@ -797,3 +1301,72 @@ void SceneUI::draw(UIContext& ctx)
 
 
 
+
+void SceneUI::drawControlsContent()
+{
+     UIWidgets::ColoredHeader("Camera Controls", ImVec4(1.0f, 0.9f, 0.4f, 1.0f));
+     UIWidgets::Divider();
+     
+     ImGui::BulletText("Rotate: Middle Mouse Drag");
+     ImGui::BulletText("Pan: Shift + Middle Mouse Drag");
+     ImGui::BulletText("Zoom: Mouse Wheel OR Ctrl + Middle Mouse Drag");
+     ImGui::BulletText("Move Forward/Back: W / S");
+     ImGui::BulletText("Move Left/Right: A / D");
+     ImGui::BulletText("Move Up/Down: Q / E");
+     
+     ImGui::Spacing();
+     UIWidgets::ColoredHeader("Shortcuts", ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+     UIWidgets::Divider();
+     ImGui::BulletText("Save Image: Ctrl + S"); 
+     
+     ImGui::Spacing();
+     UIWidgets::ColoredHeader("Interface Guide", ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+     UIWidgets::Divider();
+     
+     if (ImGui::CollapsingHeader("Render Settings")) {
+         ImGui::BulletText("Quality Preset: Quick setup for Preview (Fast) vs Cinematic (High Quality).");
+         ImGui::BulletText("Use OptiX: Enable NVIDIA GPU acceleration (Requires RTX card).");
+         ImGui::BulletText("Use Denoiser: Clean up noise using AI (OIDN).");
+         ImGui::BulletText("Start/Stop: Control the rendering process.");
+         ImGui::TextDisabled("  * Pausing allows you to resume later.");
+         ImGui::TextDisabled("  * Stopping resets the progress.");
+     }
+     
+     if (ImGui::CollapsingHeader("Sampling")) {
+         ImGui::BulletText("Adaptive Sampling: Focuses rays on noisy areas for efficiency.");
+         ImGui::BulletText("Max Samples: The target quality level (higher = less noise).");
+         ImGui::BulletText("Max Bounces: Light reflection depth (higher = more realistic light).");
+     }
+     
+     if (ImGui::CollapsingHeader("Timeline & Animation")) {
+         ImGui::BulletText("Play/Pause: Preview animation movement.");
+         ImGui::BulletText("Scrubbing: Drag the timeline handle to jump to frames.");
+         ImGui::BulletText("Render Animation: Renders the full sequence to the output folder.");
+     }
+     
+     if (ImGui::CollapsingHeader("Camera Panel")) {
+         ImGui::BulletText("FOV: Field of View (Zoom level).");
+         ImGui::BulletText("Aperture: Controls Depth of Field (Blur amount).");
+         ImGui::BulletText("Focus Dist: Distance to the sharpest point.");
+         ImGui::BulletText("Reset Camera: Restores the initial view.");
+     }
+     
+     if (ImGui::CollapsingHeader("Lights Panel")) {
+         ImGui::BulletText("Lists all light sources in the scene.");
+         ImGui::BulletText("Allows adjusting Intensity (Brightness) and Color.");
+         ImGui::BulletText("Supports Point, Directional, Area, and Spot lights.");
+     }
+     
+     if (ImGui::CollapsingHeader("Post-FX Panel")) {
+         ImGui::BulletText("Main: Adjust Gamma, Exposure, Saturation, and Color Temperature.");
+         ImGui::BulletText("Tonemapping: Choose from AGX, ACES, Filmic, etc.");
+         ImGui::BulletText("Effects: Add Vignette (dark corners) to frame the image.");
+         ImGui::BulletText("Apply/Reset: Post-processing is applied AFTER rendering.");
+     }
+
+     if (ImGui::CollapsingHeader("System Panel")) {
+         ImGui::BulletText("Theme: Switch between Dark/Light/Classic themes.");
+         ImGui::BulletText("Resolution: Set render resolution (Presets like 720p, 1080p, 4K).");
+         ImGui::BulletText("Animation Panel: Toggle visibility of the timeline.");
+     }
+}

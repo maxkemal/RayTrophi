@@ -37,21 +37,43 @@ struct AnimationData {
     std::map<std::string, std::vector<aiVectorKey>> positionKeys;
     std::map<std::string, std::vector<aiQuatKey>> rotationKeys;
     std::map<std::string, std::vector<aiVectorKey>> scalingKeys;
+    
+    // Frame range bilgisi (Blender'dan gelen)
+    int startFrame = 0;
+    int endFrame = 0;
 
-    Matrix4x4 calculateAnimationTransform(const AnimationData& animData, float time, const std::string& nodeName)
+    Matrix4x4 calculateAnimationTransform(const AnimationData& animData, float time, const std::string& nodeName, const Matrix4x4& defaultTransform)
         const {
         // Animasyon süresini normalize et
         double animationTime = fmod(time * ticksPerSecond, duration);
 
-        // Varsayılan dönüşüm değerleri
-        Vec3 position(0, 0, 0);
-        Quaternion rotation(0, 0, 0, 1);
-        Vec3 scaling(1, 1, 1);
+        // Decompose default transform to retrieve Bind Pose values
+        aiMatrix4x4 aiDef;
+        aiDef.a1 = defaultTransform.m[0][0]; aiDef.a2 = defaultTransform.m[0][1]; aiDef.a3 = defaultTransform.m[0][2]; aiDef.a4 = defaultTransform.m[0][3];
+        aiDef.b1 = defaultTransform.m[1][0]; aiDef.b2 = defaultTransform.m[1][1]; aiDef.b3 = defaultTransform.m[1][2]; aiDef.b4 = defaultTransform.m[1][3];
+        aiDef.c1 = defaultTransform.m[2][0]; aiDef.c2 = defaultTransform.m[2][1]; aiDef.c3 = defaultTransform.m[2][2]; aiDef.c4 = defaultTransform.m[2][3];
+        aiDef.d1 = defaultTransform.m[3][0]; aiDef.d2 = defaultTransform.m[3][1]; aiDef.d3 = defaultTransform.m[3][2]; aiDef.d4 = defaultTransform.m[3][3];
 
-        // Position interpolasyonu
-        auto posIt = positionKeys.find(nodeName);
-        if (posIt != positionKeys.end() && !posIt->second.empty()) {
-            const auto& keys = posIt->second;
+        aiVector3D defScale, defPos;
+        aiQuaternion defRot;
+        aiDef.Decompose(defScale, defRot, defPos);
+
+        bool hasPos = positionKeys.count(nodeName) && !positionKeys.at(nodeName).empty();
+        bool hasRot = rotationKeys.count(nodeName) && !rotationKeys.at(nodeName).empty();
+        bool hasScl = scalingKeys.count(nodeName) && !scalingKeys.at(nodeName).empty();
+
+        if (!hasPos && !hasRot && !hasScl) {
+            return defaultTransform;
+        }
+
+        Matrix4x4 translationMatrix = Matrix4x4::identity();
+        Matrix4x4 rotationMatrix = Matrix4x4::identity();
+        Matrix4x4 scaleMatrix = Matrix4x4::identity();
+
+        // --- POSITION ---
+        if (hasPos) {
+            Vec3 position(0, 0, 0);
+            const auto& keys = positionKeys.at(nodeName);
 
             size_t frameIndex = 0;
             for (size_t i = 0; i < keys.size() - 1; i++) {
@@ -75,12 +97,16 @@ struct AnimationData {
                 start.y + (end.y - start.y) * factor,
                 start.z + (end.z - start.z) * factor
             );
+            translationMatrix = Matrix4x4::translation(position);
+        } else {
+             // Fallback to Bind Pose Position
+             translationMatrix = Matrix4x4::translation(Vec3(defPos.x, defPos.y, defPos.z));
         }
 
-        // Rotation interpolasyonu
-        auto rotIt = rotationKeys.find(nodeName);
-        if (rotIt != rotationKeys.end() && !rotIt->second.empty()) {
-            const auto& keys = rotIt->second;
+        // --- ROTATION ---
+        if (hasRot) {
+            Quaternion rotation(0, 0, 0, 1);
+            const auto& keys = rotationKeys.at(nodeName);
 
             size_t frameIndex = 0;
             for (size_t i = 0; i < keys.size() - 1; i++) {
@@ -97,27 +123,20 @@ struct AnimationData {
             double factor = (deltaTime == 0) ? 0.0 :
                 (animationTime - keys[frameIndex].mTime) / deltaTime;
 
-            Quaternion start(
-                keys[frameIndex].mValue.x,
-                keys[frameIndex].mValue.y,
-                keys[frameIndex].mValue.z,
-                keys[frameIndex].mValue.w
-            );
-
-            Quaternion end(
-                keys[nextFrameIndex].mValue.x,
-                keys[nextFrameIndex].mValue.y,
-                keys[nextFrameIndex].mValue.z,
-                keys[nextFrameIndex].mValue.w
-            );
-
+            Quaternion start(keys[frameIndex].mValue.x, keys[frameIndex].mValue.y, keys[frameIndex].mValue.z, keys[frameIndex].mValue.w);
+            Quaternion end(keys[nextFrameIndex].mValue.x, keys[nextFrameIndex].mValue.y, keys[nextFrameIndex].mValue.z, keys[nextFrameIndex].mValue.w);
             rotation = Quaternion::slerp(start, end, factor);
+            rotationMatrix = rotation.toMatrix();
+        } else {
+             // Fallback to Bind Pose Rotation (Fixes FBX flipped camera issues)
+             Quaternion defQ(defRot.x, defRot.y, defRot.z, defRot.w);
+             rotationMatrix = defQ.toMatrix();
         }
 
-        // Scaling interpolasyonu
-        auto scaleIt = scalingKeys.find(nodeName);
-        if (scaleIt != scalingKeys.end() && !scaleIt->second.empty()) {
-            const auto& keys = scaleIt->second;
+        // --- SCALING ---
+        if (hasScl) {
+            Vec3 scaling(1, 1, 1);
+            const auto& keys = scalingKeys.at(nodeName);
 
             size_t frameIndex = 0;
             for (size_t i = 0; i < keys.size() - 1; i++) {
@@ -141,12 +160,11 @@ struct AnimationData {
                 start.y + (end.y - start.y) * factor,
                 start.z + (end.z - start.z) * factor
             );
+            scaleMatrix = Matrix4x4::scaling(scaling);
+        } else {
+            // Fallback to Bind Pose Scale
+             scaleMatrix = Matrix4x4::scaling(Vec3(defScale.x, defScale.y, defScale.z));
         }
-
-        // Dönüşüm matrislerini oluştur
-        Matrix4x4 translationMatrix = Matrix4x4::translation(position);
-        Matrix4x4 rotationMatrix = rotation.toMatrix();
-        Matrix4x4 scaleMatrix = Matrix4x4::scaling(scaling);
 
         // Matrisleri birleştir: Final = Translation * Rotation * Scale
         return translationMatrix * rotationMatrix * scaleMatrix;
@@ -194,7 +212,7 @@ public:
 
         if (!node) return transform;
 
-        const aiNode* current = node->mParent; // 🔥 Sadece parent'ları alacağız
+        const aiNode* current = node->mParent; //  Sadece parent'ları alacağız
         while (current) {
             transform = current->mTransformation * transform;
             current = current->mParent;
@@ -256,7 +274,9 @@ public:
         SCENE_LOG_INFO("Importing file with Assimp...");
         this->scene = importer.ReadFile(filename,
             aiProcess_GenSmoothNormals |
-            aiProcess_JoinIdenticalVertices
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_Triangulate |
+            aiProcess_CalcTangentSpace
         );
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
@@ -292,17 +312,19 @@ public:
         processLights(scene);
         SCENE_LOG_INFO("Lights processed: " + std::to_string(lights.size()) + " light(s) found.");
 
+        SCENE_LOG_INFO("Building Bone Data...");
+      
+        buildBoneData(scene, boneData);
+
         std::vector<std::shared_ptr<Triangle>> triangles;
         OptixGeometryData geometry_data;
 
         SCENE_LOG_INFO("Processing nodes to extract triangles...");
-        processNodeToTriangles(scene->mRootNode, scene, triangles, &geometry_data);
+        processNodeToTriangles(scene->mRootNode, scene, triangles, boneData, &geometry_data);
         SCENE_LOG_INFO("Triangle extraction completed: " + std::to_string(triangles.size()) + " triangles processed.");
 
-        SCENE_LOG_INFO("Processing bone data...");
-        std::unordered_map<std::string, unsigned int> boneNameToIndex;
-        std::unordered_map<std::string, aiNode*> boneNameToNode;
-        processBones(scene, triangles, boneData);
+        // NOTE: Bone weights now assigned inside processNodeToTriangles -> processTriangles
+        // Old processBones call removed.
 
         SCENE_LOG_INFO("Processing animations...");
         std::vector<AnimationData> animationDataList;
@@ -348,9 +370,44 @@ public:
                     totalKeys += channel->mNumPositionKeys + channel->mNumRotationKeys + channel->mNumScalingKeys;
                 }
 
+                // Frame range hesapla (tüm keyframe'lerden min/max time bul)
+                double minTime = std::numeric_limits<double>::max();
+                double maxTime = std::numeric_limits<double>::lowest();
+                
+                // Position keys
+                for (const auto& [nodeName, keys] : animData.positionKeys) {
+                    for (const auto& key : keys) {
+                        minTime = std::min(minTime, key.mTime);
+                        maxTime = std::max(maxTime, key.mTime);
+                    }
+                }
+                
+                // Rotation keys
+                for (const auto& [nodeName, keys] : animData.rotationKeys) {
+                    for (const auto& key : keys) {
+                        minTime = std::min(minTime, key.mTime);
+                        maxTime = std::max(maxTime, key.mTime);
+                    }
+                }
+                
+                // Scaling keys
+                for (const auto& [nodeName, keys] : animData.scalingKeys) {
+                    for (const auto& key : keys) {
+                        minTime = std::min(minTime, key.mTime);
+                        maxTime = std::max(maxTime, key.mTime);
+                    }
+                }
+                
+                // Time'ı frame'e çevir
+                if (animData.ticksPerSecond > 0) {
+                    animData.startFrame = static_cast<int>(std::round(minTime / animData.ticksPerSecond * 24.0)); // Blender default 24 FPS
+                    animData.endFrame = static_cast<int>(std::round(maxTime / animData.ticksPerSecond * 24.0));
+                }
+
                 SCENE_LOG_INFO("[Animation " + std::to_string(i + 1) + "] Total channels: " +
                     std::to_string(animation->mNumChannels) + ", Total keys: " +
-                    std::to_string(totalKeys));
+                    std::to_string(totalKeys) + 
+                    ", Frame range: " + std::to_string(animData.startFrame) + "-" + std::to_string(animData.endFrame));
 
                 animationDataList.push_back(animData);
             }
@@ -574,15 +631,21 @@ public:
         std::unordered_map<std::string, Matrix4x4>& animatedGlobalTransformsStore
     ) {
         std::string nodeName = node->mName.C_Str();
-        Matrix4x4 nodeLocalTransform = convert(node->mTransformation); // Varsayılan olarak bind pose lokal transform
+        
+        // Varsayılan olarak node'un static (bind pose) local transform'unu al
+        Matrix4x4 nodeLocalTransform = convert(node->mTransformation);
 
         // Eğer bu düğüm için animasyon verisi varsa, animasyonlu lokal transformu hesapla
         if (animationMap.count(nodeName) > 0) {
             const AnimationData* anim = animationMap.at(nodeName);
-            // AnimationData::calculateAnimationTransform zaten lokal animasyon transformunu döndürmeli
-            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, nodeName);
+            // AnimationData::calculateAnimationTransform animasyon keyframe'lerinden transform oluşturur
+            // Blender'dan gelen animasyon keyframe'leri zaten objenin doğru pozisyonunu içerir
+            // YENİ: Bind pose'u (nodeLocalTransform) varsayılan olarak gönderiyoruz.
+            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, nodeName, nodeLocalTransform);
         }
+        // Animasyon yoksa, static transform kullanılır (yukarıda zaten atandı)
 
+        // Parent'ın global transform'u ile bu node'un local transform'unu birleştir
         Matrix4x4 currentAnimatedGlobalTransform = parentAnimatedGlobalTransform * nodeLocalTransform;
         animatedGlobalTransformsStore[nodeName] = currentAnimatedGlobalTransform;
 
@@ -670,91 +733,47 @@ private:
         std::cout << "[processBonesForMeshes] Completed. Total bones: " << boneData.boneNameToIndex.size() << std::endl;
     }
 
-    void processBones(
-        const aiScene* scene,
-        std::vector<std::shared_ptr<Triangle>>& triangles,
-        BoneData& boneData
-    ) {
-        std::cout << "[processBones] Starting...\n";
+    void buildBoneData(const aiScene* scene, BoneData& boneData) {
+        SCENE_LOG_INFO("[buildBoneData] Starting bone map generation...");
 
-        // 0. Temizle
         boneData.boneNameToIndex.clear();
         boneData.boneNameToNode.clear();
         boneData.boneOffsetMatrices.clear();
-
-        // 1. Global inverse transform (root node'dan)
         boneData.globalInverseTransform = convert(scene->mRootNode->mTransformation).inverse();
-        std::cout << "[processBones] Global inverse transform received.\n";
 
-        // 2. Node map oluştur (bone isimlerini düğümle eşleştirmek için)
+        // Node map
         std::unordered_map<std::string, aiNode*> nodeMap;
         std::function<void(aiNode*)> collectNodes = [&](aiNode* node) {
             nodeMap[node->mName.C_Str()] = node;
             for (unsigned int i = 0; i < node->mNumChildren; ++i)
                 collectNodes(node->mChildren[i]);
-            };
+        };
         collectNodes(scene->mRootNode);
-        std::cout << "[processBones] Node map created. Total: " << nodeMap.size() << " node.\n";
 
-        // 3. Meshleri dolaş
-        for (unsigned int meshIndex = 0; meshIndex < scene->mNumMeshes; ++meshIndex) {
-            aiMesh* mesh = scene->mMeshes[meshIndex];
+        // Iterate all meshes to find all unique bones
+        for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
+            aiMesh* mesh = scene->mMeshes[m];
             if (!mesh->HasBones()) continue;
 
-            std::cout << "[Mesh " << meshIndex << "] Number of bones: " << mesh->mNumBones << std::endl;
-
-            for (unsigned int boneIndex = 0; boneIndex < mesh->mNumBones; ++boneIndex) {
-                aiBone* bone = mesh->mBones[boneIndex];
+            for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
+                aiBone* bone = mesh->mBones[b];
                 std::string boneName = bone->mName.C_Str();
 
-                // 3.1. Bone index
-                if (boneData.boneNameToIndex.count(boneName) == 0)
-                    boneData.boneNameToIndex[boneName] = static_cast<unsigned int>(boneData.boneNameToIndex.size());
-
-                unsigned int globalBoneIndex = boneData.boneNameToIndex[boneName];
-
-                // 3.2. Node eşlemesi
-                boneData.boneNameToNode[boneName] = nodeMap.count(boneName) ? nodeMap[boneName] : nullptr;
-
-                // 3.3. Offset matrix
-                boneData.boneOffsetMatrices[boneName] = convert(bone->mOffsetMatrix);
-
-                // 3.4. Ağırlıkları işle
-                for (unsigned int w = 0; w < bone->mNumWeights; ++w) {
-                    unsigned int vertexId = bone->mWeights[w].mVertexId;
-                    float weight = bone->mWeights[w].mWeight;
-                    bool found = false;
-
-                    for (auto& tri : triangles) {
-                        const auto& indices = tri->getAssimpVertexIndices();
-
-                        for (int vi = 0; vi < 3; ++vi) {
-                            if (indices[vi] == vertexId) {
-                                // Initialize skin data if needed
-                                tri->initializeSkinData();
-                                
-                                // Get current bone weights for this vertex
-                                auto currentWeights = tri->getSkinBoneWeights(vi);
-                                currentWeights.emplace_back(globalBoneIndex, weight);
-                                
-                                // Set updated bone weights
-                                tri->setSkinBoneWeights(vi, currentWeights);
-
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (found) break;
+                if (boneData.boneNameToIndex.find(boneName) == boneData.boneNameToIndex.end()) {
+                    unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
+                    boneData.boneNameToIndex[boneName] = id;
+                    
+                    // Haritayı doldur
+                    if (nodeMap.find(boneName) != nodeMap.end()) {
+                        boneData.boneNameToNode[boneName] = nodeMap[boneName];
+                    } else {
+                         // SCENE_LOG_WARN("Bone node not found in hierarchy: " + boneName);
                     }
-
-                    if (!found) {
-                       // std::cerr << "[WARNING] vertexId " << vertexId << " için triangle bulunamadı!\n";
-                    }
+                    boneData.boneOffsetMatrices[boneName] = convert(bone->mOffsetMatrix);
                 }
             }
         }
-
-        std::cout << "[processBones] Completed. Total number of bones: " << boneData.boneNameToIndex.size() << std::endl;
+        SCENE_LOG_INFO("[buildBoneData] Completed. Total unique bones: " + std::to_string(boneData.boneNameToIndex.size()));
     }
 
 
@@ -781,7 +800,7 @@ private:
     }
 
    // std::vector<std::shared_ptr<Camera>> cameras;
-     void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, OptixGeometryData* geometry_data = nullptr) {
+     void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, const BoneData& boneData, OptixGeometryData* geometry_data = nullptr) {
         aiMatrix4x4 globalTransform = getGlobalTransform(node);
 
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
@@ -798,7 +817,7 @@ private:
             size_t triangleStart = triangles.size();
 
             // Mesh'teki üçgenleri ekle
-            processTriangles(mesh, globalTransform, node->mName.C_Str(), convertedMaterial, triangles);
+            processTriangles(mesh, globalTransform, node->mName.C_Str(), convertedMaterial, triangles, boneData);
 
             // Yeni eklenen tüm üçgenlere textureBundle kopyala
             for (size_t t = triangleStart; t < triangles.size(); ++t) {
@@ -842,7 +861,7 @@ private:
 
         // Çocuk node'ları işle
         for (unsigned int i = 0; i < node->mNumChildren; i++) {
-            processNodeToTriangles(node->mChildren[i], scene, triangles, geometry_data);
+            processNodeToTriangles(node->mChildren[i], scene, triangles, boneData, geometry_data);
         }
     }
      Mesh processMesh(aiMesh* mesh, aiNode* node, const aiScene* scene, const BoneData& boneData, const std::vector<std::shared_ptr<Material>>& materials) {
@@ -901,7 +920,8 @@ private:
         const aiMatrix4x4& transform,
         const std::string& nodeName,
         const std::shared_ptr<Material>& material,
-        std::vector<std::shared_ptr<Triangle>>& triangles)
+        std::vector<std::shared_ptr<Triangle>>& triangles,
+        const BoneData& boneData)
     {
         aiMatrix4x4 normalTransform = transform;
         normalTransform.Inverse();
@@ -920,6 +940,28 @@ private:
         auto sharedTransform = std::make_shared<Transform>();
         sharedTransform->setBase(convertMatrix(transform));
 
+        // --- NEW: Pre-process bone weights for this mesh ---
+        // This ensures every vertex gets its correct weight list before triangle splits
+        std::vector<std::vector<std::pair<int, float>>> meshVertexWeights(mesh->mNumVertices);
+        if (mesh->HasBones()) {
+            for (unsigned int i = 0; i < mesh->mNumBones; i++) {
+                aiBone* bone = mesh->mBones[i];
+                std::string boneName(bone->mName.C_Str());
+                
+                auto it = boneData.boneNameToIndex.find(boneName);
+                if (it != boneData.boneNameToIndex.end()) {
+                    int globalBoneIndex = it->second;
+                    for (unsigned int w = 0; w < bone->mNumWeights; w++) {
+                        const aiVertexWeight& vw = bone->mWeights[w];
+                        if (vw.mVertexId < mesh->mNumVertices) {
+                            meshVertexWeights[vw.mVertexId].emplace_back(globalBoneIndex, vw.mWeight);
+                        }
+                    }
+                }
+            }
+        }
+        // ---------------------------------------------------
+
         for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
             const aiFace& face = mesh->mFaces[i];
             if (face.mNumIndices != 3) continue;
@@ -931,17 +973,15 @@ private:
             for (unsigned int j = 0; j < 3; j++) {
                 unsigned int index = face.mIndices[j];
 
-                // Vertex
+                // Vertex - Mesh-local space'de sakla, transform etme!
+                // Transform sharedTransform tarafından uygulanacak
                 aiVector3D vertex = mesh->mVertices[index];
-                aiVector3D transformedVertex = transform * vertex;
-                vertices.emplace_back(transformedVertex.x, transformedVertex.y, transformedVertex.z);
+                vertices.emplace_back(vertex.x, vertex.y, vertex.z);
 
-                // Normal
+                // Normal - Mesh-local space'de sakla
                 if (mesh->HasNormals()) {
                     aiVector3D normal = mesh->mNormals[index];
-                    aiVector3D transformedNormal = normalTransform * normal;
-                    transformedNormal.Normalize();
-                    normals.emplace_back(transformedNormal.x, transformedNormal.y, transformedNormal.z);
+                    normals.emplace_back(normal.x, normal.y, normal.z);
                 }
 
                 // UV
@@ -964,11 +1004,23 @@ private:
 
             // Set shared transform (all triangles in this mesh share the same transform)
             triangle->setTransformHandle(sharedTransform);
+            
+            // İlk transform'u uygula (başlangıç pozisyonu için)
+            triangle->updateTransformedVertices();
 
 
             triangle->setNodeName(nodeName);
             triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
             triangle->setFaceIndex(static_cast<int>(triangles.size()));
+
+            // --- NEW: Assign weights to triangle vertices ---
+            if (mesh->HasBones()) {
+                triangle->initializeSkinData();
+                triangle->setSkinBoneWeights(0, meshVertexWeights[face.mIndices[0]]);
+                triangle->setSkinBoneWeights(1, meshVertexWeights[face.mIndices[1]]);
+                triangle->setSkinBoneWeights(2, meshVertexWeights[face.mIndices[2]]);
+            }
+            // ------------------------------------------------
 
             triangles.push_back(triangle);
         }

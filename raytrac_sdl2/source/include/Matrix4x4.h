@@ -8,7 +8,7 @@
 class Mat3x3 {
 public:
     float m[3][3];
-
+   
     // Varsayılan yapılandırıcı (birim matris oluşturur)  
     Mat3x3() {
         for (int i = 0; i < 3; ++i)
@@ -16,7 +16,8 @@ public:
                 m[i][j] = (i == j) ? 1.0f : 0.0f; // Identity matrix  
     }
 
-
+  
+    
 
     // Vec3 kullanan yapılandırıcı  
     Mat3x3(Vec3 tangent, Vec3 bitangent, Vec3 normal) {
@@ -82,6 +83,14 @@ public:
 class Matrix4x4 {
 public:
     float  m[4][4];
+    static Matrix4x4 zero() {
+        Matrix4x4 m;
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++)
+                m.m[i][j] = 0.0f;
+        return m;
+    }
+
     Matrix4x4() {
         for (int i = 0; i < 4; ++i)
             for (int j = 0; j < 4; ++j)
