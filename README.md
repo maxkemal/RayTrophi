@@ -46,7 +46,8 @@
   - ✅ Point lights, Directional lights
   - ✅ Area lights (mesh-based)
   - ✅ Emissive materials
-  - ✅ Environment/HDRI lighting
+  - ✅ **HDR/EXR Environment Maps** (equirectangular projection)
+  - ✅ **Nishita Sky Model** (physically-based atmospheric scattering)
   - ✅ Soft shadows with multiple importance sampling
 
 - **Advanced Features**
@@ -106,7 +107,8 @@ All dependencies are managed automatically:
 - AssImp 5.x (model loading)
 - ImGui (UI)
 - OpenMP (parallelization)
-- stb_image (texture loading)
+- stb_image (HDR/texture loading)
+- **TinyEXR** (EXR format support)
 - Intel OIDN (denoising)
 - CUDA/OptiX (GPU rendering - optional)
 
@@ -429,7 +431,8 @@ This project is licensed under the MIT License - see the [LICENSE](source/LICENS
 - **ImGui** - Dear ImGui for user interface
 - **SDL2** - Simple DirectMedia Layer
 - **Intel OIDN** - Open Image Denoise
-- **stb** - Sean Barrett's public domain libraries
+- **stb** - Sean Barrett's public domain libraries (stb_image for HDR)
+- **TinyEXR** - Syoyo Fujita's EXR loader library
 
 ---
 
