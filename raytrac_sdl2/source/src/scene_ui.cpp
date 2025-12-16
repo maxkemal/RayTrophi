@@ -809,19 +809,65 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     // ═══════════════════════════════════════════════════════════
     else if (current_mode == WORLD_MODE_NISHITA) {
         NishitaSkyParams params = world.getNishitaParams();
+        static bool syncWithDirectionalLight = false;
         
-        // Sun Position Section
-        if (UIWidgets::BeginSection("Sun Position", ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
-            if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
-                changed = true;
+        // Sync with Directional Light Section
+        if (UIWidgets::BeginSection("Light Sync", ImVec4(0.6f, 0.8f, 1.0f, 1.0f))) {
+            if (ImGui::Checkbox("Sync with Scene Light", &syncWithDirectionalLight)) {
+                // Checkbox toggled
             }
-            UIWidgets::HelpMarker("Sun height above horizon (0 = horizon, 90 = zenith)");
+            UIWidgets::HelpMarker("Automatically sync sun direction with the first directional light in the scene");
             
-            if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
-                changed = true;
+            if (syncWithDirectionalLight) {
+                // Find first directional light
+                bool foundDirLight = false;
+                for (const auto& light : ctx.scene.lights) {
+                    if (light && light->type() == LightType::Directional) {
+                        // Convert light direction to elevation/azimuth
+                        Vec3 dir = normalize(light->direction);
+                        
+                        // Elevation: angle from horizon (Y component)
+                        float elevation = asinf(dir.y) * 180.0f / M_PI;
+                        
+                        // Azimuth: horizontal angle (XZ plane)
+                        float azimuth = atan2f(dir.x, dir.z) * 180.0f / M_PI;
+                        if (azimuth < 0) azimuth += 360.0f;
+                        
+                        // Update params if different
+                        if (fabsf(params.sun_elevation - elevation) > 0.1f || 
+                            fabsf(params.sun_azimuth - azimuth) > 0.1f) {
+                            params.sun_elevation = elevation;
+                            params.sun_azimuth = azimuth;
+                            changed = true;
+                        }
+                        
+                        foundDirLight = true;
+                        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Synced with Directional Light");
+                        break;
+                    }
+                }
+                
+                if (!foundDirLight) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "No directional light found");
+                }
             }
-            UIWidgets::HelpMarker("Sun horizontal rotation (compass direction)");
             UIWidgets::EndSection();
+        }
+        
+        // Sun Position Section (disabled if syncing)
+        if (!syncWithDirectionalLight) {
+            if (UIWidgets::BeginSection("Sun Position", ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
+                if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
+                    changed = true;
+                }
+                UIWidgets::HelpMarker("Sun height above horizon (0 = horizon, 90 = zenith)");
+                
+                if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
+                    changed = true;
+                }
+                UIWidgets::HelpMarker("Sun horizontal rotation (compass direction)");
+                UIWidgets::EndSection();
+            }
         }
         
         // Sun Appearance Section
