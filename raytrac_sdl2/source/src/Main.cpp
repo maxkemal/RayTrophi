@@ -12,6 +12,22 @@
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#define TINYEXR_USE_MINIZ 0
+#define TINYEXR_USE_STB_ZLIB 1  // Use stb's zlib if available
+// Fix Windows.h min/max macro conflicts
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#define NOMINMAX
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
 
 bool SaveSurface(SDL_Surface* surface, const char* file_path) {
     SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
@@ -774,7 +790,7 @@ int main(int argc, char* argv[]) {
                         }
                         if (!scene.lights.empty())
                             optix_gpu.setLightParams(scene.lights);
-                        optix_gpu.setBackgroundColor(scene.background_color);
+                        optix_gpu.setWorld(ray_renderer.world.getGPUData());
 
                         std::vector<uchar4> framebuffer(image_width * image_height);
                         

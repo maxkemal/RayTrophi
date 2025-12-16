@@ -1,38 +1,137 @@
 ﻿#pragma once
 #include "trace_ray.cuh"
+#include <math_constants.h>
+
+#ifndef M_1_PIf
+#define M_1_PIf 0.318309886183790671538f
+#endif
 #include "material_scatter.cuh"
 #include "random_utils.cuh"
 #include "ray.h"
 #include "scatter_volume_step.h"
 
-extern AtmosphereProperties g_atmosphere;
-__device__ void compute_atmosphere(
-    const Ray& ray, float t_max, const AtmosphereProperties& params,
-    float3* out_transmittance, float3* out_inscattered)
-{
-    // Ray marching (basit)
-    const int steps = 32;
-    float3 transmittance = make_float3(1.0f, 1.0f, 1.0f);
-    float3 inscattered = make_float3(0.0f, 0.0f, 0.0f);
-    float dt = t_max / steps;
-
-    for (int i = 0; i < steps; ++i) {
-        float t = dt * (i + 0.5f);
-        float3 pos = ray.origin + t * ray.direction;
-
-        float density = params.base_density * exp(-pos.y * 0.001f); // basit height decay
-        float3 scatter = make_float3(params.sigma_s * density, params.sigma_s * density, params.sigma_s * density);
-        float3 absorb = make_float3(params.sigma_a * density, params.sigma_a * density, params.sigma_a * density);
-
-        float3 step_transmittance = exp_componentwise(-dt * absorb);
-        transmittance *= step_transmittance;
-
-        float3 incident = make_float3(1.0f, 1.0f, 1.0f); // Güneş ışığı vs.
-        inscattered += transmittance * scatter * incident * dt;
+__device__ float3 evaluate_background(const WorldData& world, const float3& dir) {
+    if (world.mode == 0) { // WORLD_MODE_COLOR
+        return world.color;
     }
+    else if (world.mode == 1) { // WORLD_MODE_HDRI
+        if (world.env_texture) {
+            float theta = acosf(dir.y);
+            float phi = atan2f(-dir.z, dir.x) + M_PIf;
+            
+            float u = phi * (0.5f * M_1_PIf); // 0..1
+            float v = theta * M_1_PIf;        // 0..1
+            
+            u -= world.env_rotation / (2.0f * M_PIf);
+            u -= floorf(u);
+            
+            float4 tex = tex2D<float4>(world.env_texture, u, v);
+            return make_float3(tex.x, tex.y, tex.z) * world.env_intensity;
+        }
+        return world.color;
+    }
+    else if (world.mode == 2) { // WORLD_MODE_NISHITA
+        // Nishita Sky Model (Single Scattering)
+        float3 sunDir = normalize(world.nishita.sun_direction);
+        float planetRadius = world.nishita.planet_radius;
+        float atmosphereRadius = world.nishita.atmosphere_height;
+        float Rt = atmosphereRadius;
+        float Rg = planetRadius;
+        
+        // Assume camera is on ground at (0, Rg, 0)
+        float3 camPos = make_float3(0.0f, Rg + 10.0f, 0.0f); 
+        float3 rayDir = normalize(dir);
+        
+        // Ray-Sphere Intersection (Atmosphere)
+        float a = dot(rayDir, rayDir);
+        float b = 2.0f * dot(rayDir, camPos);
+        float c = dot(camPos, camPos) - Rt * Rt;
+        float delta = b * b - 4.0f * a * c;
+        
+        if (delta < 0.0f) return make_float3(0.0f, 0.0f, 0.0f);
+        
+        float t1 = (-b - sqrtf(delta)) / (2.0f * a);
+        float t2 = (-b + sqrtf(delta)) / (2.0f * a);
+        float t = (t1 >= 0.0f) ? t1 : t2;
+        if (t < 0.0f) return make_float3(0.0f, 0.0f, 0.0f);
+        
+        int numSamples = 8;
+        float stepSize = t / (float)numSamples;
+        
+        float3 totalRayleigh = make_float3(0.0f, 0.0f, 0.0f);
+        float3 totalMie = make_float3(0.0f, 0.0f, 0.0f);
+        
+        float opticalDepthRayleigh = 0.0f;
+        float opticalDepthMie = 0.0f;
+        
+        // Phase Functions
+        float mu = dot(rayDir, sunDir);
+        float phaseR = 3.0f / (16.0f * M_PIf) * (1.0f + mu * mu);
+        float g = world.nishita.mie_anisotropy;
+        float phaseM = 3.0f / (8.0f * M_PIf) * ((1.0f - g * g) * (1.0f + mu * mu)) / ((2.0f + g * g) * powf(1.0f + g * g - 2.0f * g * mu, 1.5f));
+        
+        float currentT = 0.0f;
+        
+        for (int i = 0; i < numSamples; ++i) {
+            float3 samplePos = camPos + rayDir * (currentT + stepSize * 0.5f);
+            float height = length(samplePos) - Rg;
+            if (height < 0.0f) height = 0.0f;
+            
+            float hr = expf(-height / world.nishita.rayleigh_density);
+            float hm = expf(-height / world.nishita.mie_density);
+            
+            opticalDepthRayleigh += hr * stepSize;
+            opticalDepthMie += hm * stepSize;
+            
+            // Optical depth to sun
+            float b_light = 2.0f * dot(sunDir, samplePos);
+            float c_light = dot(samplePos, samplePos) - Rt * Rt;
+            float delta_light = b_light * b_light - 4.0f * c_light;
+            
+            if (delta_light >= 0.0f) {
+                float t_light = (-b_light + sqrtf(delta_light)) / 2.0f;
+                
+                int numLightSamples = 4;
+                float lightStep = t_light / (float)numLightSamples;
+                float lightOpticalRayleigh = 0.0f;
+                float lightOpticalMie = 0.0f;
+                
+                for(int j=0; j<numLightSamples; ++j) {
+                    float3 lightSamplePos = samplePos + sunDir * (lightStep * (j + 0.5f));
+                    float lightHeight = length(lightSamplePos) - Rg;
+                    if(lightHeight < 0.0f) lightHeight = 0.0f;
+                    
+                    lightOpticalRayleigh += expf(-lightHeight / world.nishita.rayleigh_density) * lightStep;
+                    lightOpticalMie += expf(-lightHeight / world.nishita.mie_density) * lightStep;
+                }
+                
+                float3 tau = world.nishita.rayleigh_scattering * (opticalDepthRayleigh + lightOpticalRayleigh) + 
+                             world.nishita.mie_scattering * 1.1f * (opticalDepthMie + lightOpticalMie);
+                             
+                float3 attenuation = make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
+                
+                totalRayleigh += attenuation * hr * stepSize;
+                totalMie += attenuation * hm * stepSize;
+            }
+            currentT += stepSize;
+        }
+        
+        float3 L = (totalRayleigh * world.nishita.rayleigh_scattering * phaseR + 
+                totalMie * world.nishita.mie_scattering * phaseM) * world.nishita.sun_intensity;
 
-    *out_transmittance = transmittance;
-    *out_inscattered = inscattered;
+        // Add Sun Disk
+        // Sun angular radius ~0.266 degrees (0.00465 rad)
+        const float sun_radius = 0.02f; // Increased for visibility (~1.15 degrees)
+        if (dot(rayDir, sunDir) > cosf(sun_radius)) {
+            // Transmittance to space (accumulated optical depth)
+            float3 tau = world.nishita.rayleigh_scattering * opticalDepthRayleigh + 
+                         world.nishita.mie_scattering * 1.1f * opticalDepthMie;
+            float3 transmittance = make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
+            L += transmittance * world.nishita.sun_intensity * 100.0f; // Direct sun (scaled for visibility)
+        }
+        return L;
+    }
+    return make_float3(0.0f, 0.0f, 0.0f);
 }
 
 __device__ float power_heuristic(float pdf_a, float pdf_b) {
@@ -249,7 +348,8 @@ __device__ float3 calculate_direct_lighting(
     float3 wi;
     float distance = 1.0f;
     float attenuation = 1.0f;
-    const float shadow_bias = 1e-2f;
+    const float shadow_bias = 1e-3f; // Match CPU bias (was 1e-2f)
+
 
     // ==== Light sampling ====
     if (light.type == 0) { // Point Light
@@ -301,7 +401,7 @@ __device__ float3 calculate_direct_lighting(
     Ray shadow_ray(origin, wi);
 
     OptixHitResult shadow_payload = {};
-    trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
+    trace_shadow_ray(shadow_ray, &shadow_payload, shadow_bias, distance);
     if (shadow_payload.hit) return result;
 
     // ==== BRDF & PDF ====
@@ -404,10 +504,12 @@ __device__ float3 calculate_brdf_mis(
 __device__ float3 ray_color(Ray ray, curandState* rng) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
-    //bool specular_bounce = false;
     const int max_depth = optixLaunchParams.max_depth;
     int light_count = optixLaunchParams.light_count;
     int light_index = (light_count > 0) ? pick_smart_light(ray.origin, rng) : -1;
+    
+    // Firefly önleme için maksimum katkı limiti
+    const float MAX_CONTRIBUTION = 100.0f;
 
     for (int bounce = 0; bounce < max_depth; ++bounce) {
 
@@ -415,17 +517,16 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         trace_ray(ray, &payload);
 
         if (!payload.hit) {
-			// --- Eğer ışık yoksa arka plan rengi ve atmosfer katkısı ekle ---
-            float3 transmittance = make_float3(1.0f, 1.0f, 1.0f);
-            float3 inscattered = make_float3(0.0f, 0.0f, 0.0f);
-            if (optixLaunchParams.atmosphere.active) {
-                float t_far = 1000.0f; // max distance (gerekirse dinamik al)
-                compute_atmosphere(ray, t_far, optixLaunchParams.atmosphere, &transmittance, &inscattered);
-            }
+            // --- Arka plan rengi ---
+            float3 bg_color = evaluate_background(optixLaunchParams.world, ray.direction);
            
-            color += throughput * (optixLaunchParams.background_color  * transmittance + inscattered) ;
+            // Bounce bazlı arka plan azaltma - ilk bounce tam, sonrakiler azaltılmış
+            // Bu, yansımalarda arka plan renginin yüzeyleri boyamasını önler
+            float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
+            float3 bg_contribution = bg_color * bg_factor;
+            
+            color += throughput * bg_contribution;
             break;
-           
         }
 
         float3 wo = -normalize(ray.direction);
@@ -441,62 +542,127 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             break;
        
         throughput *= attenuation;
-        // --- Russian roulette ---
-       
-            float p = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
-            p = clamp(p, 0.0f, 0.98f);
-            if (bounce > 2) {
-                if (random_float(rng) > p)
-                    break;
-                throughput /= p;
+
+        // --- GPU VOLUMETRIC RENDERING (SMOKE) ---
+        if (mat.anisotropic > 0.9f) { // Flagged as Volumetric
+            // Ray Marching only if entering the volume
+            if (dot(ray.direction, payload.normal) < 0.0f) {
+                // Find exit point
+                Ray march_ray(payload.position + ray.direction * 0.01f, ray.direction);
+                OptixHitResult exit_payload = {};
+                trace_ray(march_ray, &exit_payload);
+
+                if (exit_payload.hit) {
+                    float dist = length(exit_payload.position - payload.position);
+                    // dist limiting to avoid infinite march
+                    if(dist > 20.0f) dist = 20.0f; 
+
+                    int steps = 12; // Low step count for performance
+                    float step_size = dist / steps;
+                    float3 current_pos = payload.position;
+                    float total_density = 0.0f;
+
+                    for (int i = 0; i < steps; i++) {
+                        current_pos += ray.direction * step_size * (random_float(rng) * 0.5f + 0.75f); // Jittered step
+
+                        // Simple procedural noise for smoke
+                        float3 s = current_pos * 3.5f; 
+                        float noise = fabsf(sinf(s.x) * sinf(s.y + s.z * 0.5f) * cosf(s.z));
+                        float density = fmaxf(0.0f, noise - 0.2f) * 4.0f; // Hardcoded parameters matching "Test Smoke"
+                        
+                        // Fade edges (approximate based on assumptions, hard on pure ray march without SDF)
+                        
+                        total_density += density * step_size;
+                    }
+                    
+                    // Beer's Law (Transmittance)
+                    float3 volume_albedo = make_float3(0.8f, 0.8f, 0.8f); // Grey smoke
+                    float absorption = 0.2f;
+                    float3 transmittance = make_float3(
+                        expf(-total_density * absorption * (1.0f - volume_albedo.x)),
+                        expf(-total_density * absorption * (1.0f - volume_albedo.y)),
+                        expf(-total_density * absorption * (1.0f - volume_albedo.z))
+                    );
+
+                    throughput *= transmittance;
+                    
+                    // Add some scattered light (ambient approximation)
+                    // color += throughput * make_float3(0.05f) * total_density; 
+
+                    // Skip the volume interior by moving ray to exit point
+                    scattered = Ray(exit_payload.position + ray.direction * 0.001f, ray.direction);
+                }
             }
+        }
+        
+        // --- Throughput clamp - aşırı parlak yansımaları önle ---
+        float max_throughput = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
+        if (max_throughput > MAX_CONTRIBUTION) {
+            throughput *= (MAX_CONTRIBUTION / max_throughput);
+        }
+        
+        // --- Russian roulette - bounce > 2'den sonra ---
+        float p = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
+        p = clamp(p, 0.05f, 0.95f);  // Daha sıkı sınırlar
+        if (bounce > 2) {
+            if (random_float(rng) > p)
+                break;
+            throughput /= p;
+            
+            // Russian roulette sonrası tekrar clamp
+            max_throughput = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
+            if (max_throughput > MAX_CONTRIBUTION) {
+                throughput *= (MAX_CONTRIBUTION / max_throughput);
+            }
+        }
+        
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
         if (light_count == 0) {
-            // Emission texture varsa kullan
             float3 emission = payload.emission;
             if (payload.has_emission_tex) {
                 float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
                 emission = make_float3(tex.x, tex.y, tex.z) * mat.emission;
             }
             color += throughput * emission;
-            // throughput zaten satır 443'te attenuation ile çarpıldı, tekrar çarpma!
             ray = scattered;
             continue;
         }
 
-            light_index = pick_smart_light(payload.position, rng);
+        light_index = pick_smart_light(payload.position, rng);
        
-        // --- Direkt katkı ---
+        // --- Direkt ışık katkısı ---
         float3 direct = make_float3(0.0f, 0.0f, 0.0f);
         if (!is_specular && light_index >= 0) {
             direct = calculate_light_contribution(
                 optixLaunchParams.lights[light_index], mat, payload, wo, rng
             );
-			 // Direkt katkıyı throughput ile çarp
+            // Firefly kontrolü - aşırı parlak direkt katkıları sınırla
+            float direct_lum = luminance(direct);
+            if (direct_lum > MAX_CONTRIBUTION) {
+                direct *= (MAX_CONTRIBUTION / direct_lum);
+            }
         }
 
         // --- BRDF yönünde MIS katkı ---
-        // Specular (delta dağılım) yüzeylerde MIS yapma - transmission/opacity geçişleri dahil
         float3 brdf_mis = make_float3(0.0f, 0.0f, 0.0f);
         if (!is_specular && light_index >= 0) {
-
             const LightGPU& light = optixLaunchParams.lights[light_index];
             float3 wi = normalize(scattered.direction);
             float pdf_brdf_val_mis = clamp(pdf, 0.1f, 5000.0f);
             float pdf_light = 1.0f;
             float NdotL = fmaxf(dot(payload.normal, wi), 0.0f);
 
-            if (light.type == 1) {
+            if (light.type == 1) { // Directional
                 float3 L = normalize(light.direction);
                 if (dot(wi, L) > 0.999f) {
                     float solid_angle = 2.0f * M_PIf * (1.0f - cos(atan2(light.radius, 1000.0f)));
                     pdf_light = 1.0f / solid_angle;
                     float mis_weight = power_heuristic(pdf_brdf_val_mis, pdf_light);
                     float3 f = evaluate_brdf(mat, payload, wo, wi);
-                    brdf_mis += f * light.intensity*light.color * NdotL * mis_weight;
+                    brdf_mis += f * light.intensity * light.color * NdotL * mis_weight;
                 }
             }
-            if (light.type == 0) {
+            if (light.type == 0) { // Point
                 float3 delta = light.position - payload.position;
                 float dist = length(delta);
                 if (dist < light.radius * 1.05f) {
@@ -504,19 +670,37 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                     pdf_light = 1.0f / area;
                     float mis_weight = power_heuristic(pdf_brdf_val_mis, pdf_light);
                     float3 f = evaluate_brdf(mat, payload, wo, wi);
-                    brdf_mis += f * (light.intensity*light.color / (dist * dist)) * NdotL * mis_weight;
+                    brdf_mis += f * (light.intensity * light.color / (dist * dist)) * NdotL * mis_weight;
                 }
+            }
+            
+            // Firefly kontrolü - aşırı parlak BRDF MIS katkılarını sınırla
+            float brdf_lum = luminance(brdf_mis);
+            if (brdf_lum > MAX_CONTRIBUTION) {
+                brdf_mis *= (MAX_CONTRIBUTION / brdf_lum);
             }
         }
       
         float3 emission = payload.emission;
+        
         // --- Toplam katkı ---
-        color += throughput * (direct + brdf_mis + emission);
+        float3 total_contribution = direct + brdf_mis + emission;
+        
+        // Son firefly kontrolü
+        float total_lum = luminance(total_contribution);
+        if (total_lum > MAX_CONTRIBUTION * 2.0f) {
+            total_contribution *= (MAX_CONTRIBUTION * 2.0f / total_lum);
+        }
+        
+        color += throughput * total_contribution;
        
         ray = scattered;
-		
-
     }
+
+    // Final clamp - NaN ve Inf kontrolü
+    color.x = isfinite(color.x) ? fminf(fmaxf(color.x, 0.0f), 100.0f) : 0.0f;
+    color.y = isfinite(color.y) ? fminf(fmaxf(color.y, 0.0f), 100.0f) : 0.0f;
+    color.z = isfinite(color.z) ? fminf(fmaxf(color.z, 0.0f), 100.0f) : 0.0f;
 
     return color;
 }

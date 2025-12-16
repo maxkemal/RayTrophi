@@ -3,6 +3,8 @@
 #include <string>
 #include <unordered_map>
 #include <SDL_image.h>
+#include "stb_image.h"
+#include "tinyexr.h"
 #include <cuda_runtime.h>
 #include "Vec2.h"
 #include "Vec3SIMD.h"
@@ -239,6 +241,7 @@ public:
         }
         m_is_loaded = false;
         is_gpu_uploaded = false;
+        is_hdr = false;
         std::string texture_name = name.empty() ? "unnamed_texture" : name;
 
         // Cache kontrol et - SADECE embedded texture için (name boş değilse)
@@ -284,6 +287,71 @@ public:
 
         m_is_loaded = false;
         is_gpu_uploaded = false;
+        is_hdr = false;
+        
+        // Detect HDR/EXR formats
+        std::string ext = filename.substr(filename.find_last_of(".") + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        
+        // Handle EXR files with TinyEXR
+        if (ext == "exr") {
+            float* rgba = nullptr;
+            int w, h;
+            const char* err = nullptr;
+            
+            int ret = LoadEXR(&rgba, &w, &h, filename.c_str(), &err);
+            if (ret == TINYEXR_SUCCESS && rgba) {
+                width = w;
+                height = h;
+                is_hdr = true;
+                float_pixels.resize(width * height);
+                
+                // Copy RGBA float data to float4 vector
+                for(int i = 0; i < width * height; ++i) {
+                    float_pixels[i] = make_float4(rgba[i*4], rgba[i*4+1], rgba[i*4+2], rgba[i*4+3]);
+                }
+                
+                free(rgba);
+                m_is_loaded = true;
+                
+                SCENE_LOG_INFO("[EXR LOAD] Loaded EXR texture: " + filename + " | " + 
+                    std::to_string(width) + "x" + std::to_string(height));
+                return;
+            } else {
+                std::string errMsg = err ? err : "Unknown error";
+                SCENE_LOG_ERROR("Failed to load EXR texture: " + filename + " | Error: " + errMsg);
+                if (err) FreeEXRErrorMessage(err);
+                // Fall through to try other loaders
+            }
+        }
+        
+        // Handle HDR files with stb_image
+        if (ext == "hdr") {
+            int w, h, c;
+            float* data = stbi_loadf(filename.c_str(), &w, &h, &c, 4); // Force 4 channels
+            if (data) {
+                width = w;
+                height = h;
+                is_hdr = true;
+                float_pixels.resize(width * height);
+                
+                // Copy to float4 vector
+                for(int i = 0; i < width * height; ++i) {
+                    float_pixels[i] = make_float4(data[i*4], data[i*4+1], data[i*4+2], data[i*4+3]);
+                }
+                
+                stbi_image_free(data);
+                m_is_loaded = true;
+                
+                SCENE_LOG_INFO("[HDR LOAD] Loaded HDR texture: " + filename + " | " +
+                    std::to_string(width) + "x" + std::to_string(height));
+                return;
+            } else {
+                SCENE_LOG_ERROR("Failed to load HDR texture: " + filename + " | STB Error: " + stbi_failure_reason());
+                // Fall through to try SDL_image
+            }
+        }
+
         auto start_time = std::chrono::high_resolution_clock::now();
 
         // Cache kontrol et
@@ -467,13 +535,20 @@ public:
             " | Total time: " + std::to_string(duration.count()) + "ms");
     }
     Vec3 get_color(float u, float v) const {
-        if (!m_is_loaded || pixels.empty()) return Vec3(0);
+        if (!m_is_loaded) return Vec3(0);
         u = std::clamp(u, 0.0f, 1.0f);
         v = std::clamp(v, 0.0f, 1.0f);
         int x = static_cast<int>(u * (width - 1));
         int y = static_cast<int>((1.0 - v) * (height - 1));
         x = std::clamp(x, 0, width - 1);
         y = std::clamp(y, 0, height - 1);
+        
+        if (is_hdr && !float_pixels.empty()) {
+             float4 p = float_pixels[y * width + x];
+             return Vec3(p.x, p.y, p.z);
+        }
+
+        if (pixels.empty()) return Vec3(0);
         return pixels[y * width + x].to_linear_rgb(is_srgb, is_aces);
     }
 
@@ -509,46 +584,65 @@ public:
         // Emission: Intensity/HDR değerleri içerir, sRGB dönüşümü karartır → dönüşüm yok
         // Normal, Roughness, Metallic, AO, Transmission, Opacity → Linear data, dönüşüm yok
         bool needs_srgb_conversion = (type == TextureType::Albedo);
-        
-        // Pixel verilerini uchar4'e dönüştür
-        std::vector<uchar4> cuda_data(pixels.size());
-        
-        if (needs_srgb_conversion) {
-            // sRGB → Linear dönüşümü LUT ile HIZLI yap
-            const auto& lut = SRGBToLinearLUT::instance();
-            for (size_t i = 0; i < pixels.size(); ++i) {
-                auto& p = pixels[i];
-                cuda_data[i] = make_uchar4(
-                    lut[p.r],
-                    lut[p.g],
-                    lut[p.b],
-                    p.a  // Alpha kanalı linear kalır
-                );
-            }
+        cudaError_t err;
+
+        if (is_hdr) {
+             // Float4 Texture Upload
+             cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
+             err = cudaMallocArray(&cuda_array, &desc, width, height);
+             if (err != cudaSuccess) {
+                 SCENE_LOG_ERROR("cudaMallocArray (float) failed: " + std::string(cudaGetErrorString(err)));
+                 return false;
+             }
+             err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
+                 width * sizeof(float4),
+                 width * sizeof(float4), height,
+                 cudaMemcpyHostToDevice);
+             if (err != cudaSuccess) {
+                 SCENE_LOG_ERROR("cudaMemcpy2DToArray (float) failed: " + std::string(cudaGetErrorString(err)));
+                 return false;
+             }
         } else {
-            // Linear data texture'ları - dönüşüm yok
-            for (size_t i = 0; i < pixels.size(); ++i) {
-                auto& p = pixels[i];
-                cuda_data[i] = make_uchar4(p.r, p.g, p.b, p.a);
+            // Pixel verilerini uchar4'e dönüştür
+            std::vector<uchar4> cuda_data(pixels.size());
+            
+            if (needs_srgb_conversion) {
+                // sRGB → Linear dönüşümü LUT ile HIZLI yap
+                const auto& lut = SRGBToLinearLUT::instance();
+                for (size_t i = 0; i < pixels.size(); ++i) {
+                    auto& p = pixels[i];
+                    cuda_data[i] = make_uchar4(
+                        lut[p.r],
+                        lut[p.g],
+                        lut[p.b],
+                        p.a  // Alpha kanalı linear kalır
+                    );
+                }
+            } else {
+                // Linear data texture'ları - dönüşüm yok
+                for (size_t i = 0; i < pixels.size(); ++i) {
+                    auto& p = pixels[i];
+                    cuda_data[i] = make_uchar4(p.r, p.g, p.b, p.a);
+                }
             }
-        }
 
-        // CUDA array oluştur
-        cudaChannelFormatDesc desc = cudaCreateChannelDesc<uchar4>();
-        cudaError_t err = cudaMallocArray(&cuda_array, &desc, width, height);
-        if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("cudaMallocArray failed: " + std::string(cudaGetErrorString(err)));
-            return false;
-        }
+            // CUDA array oluştur
+            cudaChannelFormatDesc desc = cudaCreateChannelDesc<uchar4>();
+            err = cudaMallocArray(&cuda_array, &desc, width, height);
+            if (err != cudaSuccess) {
+                SCENE_LOG_ERROR("cudaMallocArray failed: " + std::string(cudaGetErrorString(err)));
+                return false;
+            }
 
-        // Veriyi GPU'ya kopyala
-        err = cudaMemcpy2DToArray(cuda_array, 0, 0, cuda_data.data(),
-            width * sizeof(uchar4),
-            width * sizeof(uchar4), height,
-            cudaMemcpyHostToDevice);
-        if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("cudaMemcpy2DToArray failed: " + std::string(cudaGetErrorString(err)));
-            return false;
+            // Veriyi GPU'ya kopyala
+            err = cudaMemcpy2DToArray(cuda_array, 0, 0, cuda_data.data(),
+                width * sizeof(uchar4),
+                width * sizeof(uchar4), height,
+                cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) {
+                SCENE_LOG_ERROR("cudaMemcpy2DToArray failed: " + std::string(cudaGetErrorString(err)));
+                return false;
+            }
         }
 
         // Texture descriptor oluştur
@@ -560,7 +654,7 @@ public:
         texDesc.addressMode[0] = cudaAddressModeWrap;
         texDesc.addressMode[1] = cudaAddressModeWrap;
         texDesc.filterMode = cudaFilterModeLinear;
-        texDesc.readMode = cudaReadModeNormalizedFloat;
+        texDesc.readMode = is_hdr ? cudaReadModeElementType : cudaReadModeNormalizedFloat;
         texDesc.normalizedCoords = 1;
         // NOT: cudaTextureDesc'te sRGB flag yok - dönüşümü CPU'da yaptık
 
@@ -683,6 +777,10 @@ public:
     bool is_gray_scale = true;
     bool m_is_loaded = false;
     bool is_gpu_uploaded = false;
+    int width = 0, height = 0;
+    std::vector<CompactVec4> pixels;
+    std::vector<float4> float_pixels; // For HDR
+    bool is_hdr = false;
 private:
     // ===== decode_raw() OPTIMIZED - SIMD + Paralel =====
     void decode_raw(const aiTexture* tex) {
@@ -852,10 +950,6 @@ private:
             std::to_string(duration.count()) + "ms");
     }
 
-   
-   
-    std::vector<CompactVec4> pixels;
-    int width = 0, height = 0;
    
     std::vector<uint8_t> alphas;  // float yerine 1 byte kullanıyoruz
 

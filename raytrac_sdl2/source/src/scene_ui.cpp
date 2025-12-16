@@ -710,6 +710,176 @@ void SceneUI::drawLightsContent(UIContext& ctx)
         }
     }
 }
+void SceneUI::drawWorldContent(UIContext& ctx) {
+    World& world = ctx.renderer.world;
+    WorldMode current_mode = world.getMode();
+    
+    UIWidgets::ColoredHeader("Environment Settings", ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
+    UIWidgets::Divider();
+    
+    bool changed = false;
+    
+    // ═══════════════════════════════════════════════════════════
+    // Sky Model Selection
+    // ═══════════════════════════════════════════════════════════
+    if (UIWidgets::BeginSection("Sky Model", ImVec4(0.4f, 0.6f, 0.9f, 1.0f))) {
+        const char* modes[] = { "Solid Color", "HDRI Environment", "Nishita Sky" };
+        int mode_idx = static_cast<int>(current_mode);
+        
+        ImGui::PushItemWidth(-1);
+        if (ImGui::Combo("##SkyModel", &mode_idx, modes, IM_ARRAYSIZE(modes))) {
+            world.setMode(static_cast<WorldMode>(mode_idx));
+            changed = true;
+        }
+        ImGui::PopItemWidth();
+        UIWidgets::EndSection();
+    }
+    
+    ImGui::Spacing();
+    
+    // ═══════════════════════════════════════════════════════════
+    // Solid Color Mode
+    // ═══════════════════════════════════════════════════════════
+    if (current_mode == WORLD_MODE_COLOR) {
+        if (UIWidgets::BeginSection("Background", ImVec4(0.6f, 0.4f, 0.8f, 1.0f))) {
+            Vec3 color = world.getColor();
+            if (ImGui::ColorEdit3("Color", &color.x)) {
+                world.setColor(color);
+                ctx.scene.background_color = color;
+                changed = true;
+            }
+            
+            float intensity = world.getColorIntensity();
+            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f)) {
+                world.setColorIntensity(intensity);
+                changed = true;
+            }
+            UIWidgets::EndSection();
+        }
+    }
+    // ═══════════════════════════════════════════════════════════
+    // HDRI Environment Mode
+    // ═══════════════════════════════════════════════════════════
+    else if (current_mode == WORLD_MODE_HDRI) {
+        if (UIWidgets::BeginSection("HDRI Map", ImVec4(0.2f, 0.7f, 0.5f, 1.0f))) {
+            // Load Button
+            if (UIWidgets::PrimaryButton("Load Environment", ImVec2(-1, 0))) {
+#ifdef _WIN32
+                std::string file = openFileDialogW(L"Environment Maps\0*.hdr;*.exr;*.jpg;*.jpeg;*.png\0HDR/EXR\0*.hdr;*.exr\0All Files\0*.*\0");
+                if (!file.empty()) {
+                    world.setHDRI(file);
+                    changed = true;
+                }
+#endif
+            }
+            
+            // Current file display
+            std::string path = world.getHDRIPath();
+            if (!path.empty()) {
+                size_t lastSlash = path.find_last_of("/\\");
+                std::string filename = (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "%s", filename.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(No HDRI loaded)");
+            }
+            UIWidgets::EndSection();
+        }
+        
+        if (UIWidgets::BeginSection("Transform", ImVec4(0.5f, 0.6f, 0.8f, 1.0f))) {
+            // Rotation - Use SliderFloat for better 360 control
+            float rotation = world.getHDRIRotation();
+            if (ImGui::SliderFloat("Rotation", &rotation, 0.0f, 360.0f, "%.1f deg")) {
+                world.setHDRIRotation(rotation);
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Rotate the environment map around Y axis (0-360 degrees)");
+            
+            // Intensity
+            float intensity = world.getHDRIIntensity();
+            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f, "%.2f")) {
+                world.setHDRIIntensity(intensity);
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Brightness multiplier for the environment");
+            UIWidgets::EndSection();
+        }
+    }
+    // ═══════════════════════════════════════════════════════════
+    // Nishita Sky Mode
+    // ═══════════════════════════════════════════════════════════
+    else if (current_mode == WORLD_MODE_NISHITA) {
+        NishitaSkyParams params = world.getNishitaParams();
+        
+        // Sun Position Section
+        if (UIWidgets::BeginSection("Sun Position", ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
+            if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Sun height above horizon (0 = horizon, 90 = zenith)");
+            
+            if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Sun horizontal rotation (compass direction)");
+            UIWidgets::EndSection();
+        }
+        
+        // Sun Appearance Section
+        if (UIWidgets::BeginSection("Sun Appearance", ImVec4(1.0f, 0.5f, 0.3f, 1.0f))) {
+            if (ImGui::SliderFloat("Intensity", &params.sun_intensity, 0.1f, 50.0f, "%.1f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Sun brightness (affects sky illumination and sun disk)");
+            
+            if (ImGui::SliderFloat("Size", &params.sun_density, 0.5f, 5.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Visual sun disk size multiplier");
+            UIWidgets::EndSection();
+        }
+        
+        // Atmosphere Section (Collapsible for advanced users)
+        if (ImGui::CollapsingHeader("Atmosphere (Advanced)")) {
+            ImGui::Indent();
+            
+            if (ImGui::SliderFloat("Air Density", &params.dust_density, 0.0f, 5.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Atmospheric particle density - affects haze and color");
+            
+            if (ImGui::SliderFloat("Mie Anisotropy", &params.mie_anisotropy, 0.0f, 0.99f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Sun glow directionality (0 = uniform, 0.8+ = strong forward scatter)");
+            
+            ImGui::Unindent();
+        }
+        
+        // Update sun direction from elevation/azimuth
+        if (changed) {
+            float elevationRad = params.sun_elevation * M_PI / 180.0f;
+            float azimuthRad = params.sun_azimuth * M_PI / 180.0f;
+            params.sun_direction = make_float3(
+                cosf(elevationRad) * sinf(azimuthRad),
+                sinf(elevationRad),
+                cosf(elevationRad) * cosf(azimuthRad)
+            );
+            world.setNishitaParams(params);
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════
+    // Apply Changes
+    // ═══════════════════════════════════════════════════════════
+    if (changed) {
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.optix_gpu_ptr) {
+            ctx.optix_gpu_ptr->setWorld(world.getGPUData());
+            ctx.optix_gpu_ptr->resetAccumulation();
+        }
+    }
+}
+
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 {
     // Dinamik yükseklik hesabı - Timeline açıksa yer aç
@@ -1248,6 +1418,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     ImGui::Spacing();
     drawLogPanelEmbedded(); // *** burada çağırıyoruz ***
 
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("World")) {
+            drawWorldContent(ctx);
             ImGui::EndTabItem();
         }
 

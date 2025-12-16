@@ -46,7 +46,8 @@
   - ✅ Nokta ışıklar, Yönlü ışıklar
   - ✅ Alan ışıkları (mesh tabanlı)
   - ✅ Işık yayan materyaller
-  - ✅ Environment/HDRI aydınlatma
+  - ✅ **HDR/EXR Environment Haritaları** (equirectangular projeksiyon)
+  - ✅ **Nishita Gökyüzü Modeli** (fizik tabanlı atmosferik saçılım)
   - ✅ Çoklu önem örneklemesi ile yumuşak gölgeler
 
 - **Gelişmiş Özellikler**
@@ -107,7 +108,8 @@ Tüm bağımlılıklar otomatik yönetilir:
 - AssImp 5.x (model yükleme)
 - ImGui (UI)
 - OpenMP (paralelleştirme)
-- stb_image (texture yükleme)
+- stb_image (HDR/texture yükleme)
+- **TinyEXR** (EXR format desteği)
 - Intel OIDN (denoising)
 - CUDA/OptiX (GPU rendering - opsiyonel)
 
@@ -430,7 +432,8 @@ Bu proje MIT Lisansı altında lisanslanmıştır - detaylar için [LICENSE](sou
 - **ImGui** - Dear ImGui kullanıcı arayüzü için
 - **SDL2** - Simple DirectMedia Layer
 - **Intel OIDN** - Open Image Denoise
-- **stb** - Sean Barrett'ın public domain kütüphaneleri
+- **stb** - Sean Barrett'ın public domain kütüphaneleri (HDR için stb_image)
+- **TinyEXR** - Syoyo Fujita'nın EXR yükleyici kütüphanesi
 
 ---
 
