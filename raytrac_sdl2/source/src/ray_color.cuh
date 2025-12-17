@@ -77,8 +77,13 @@ __device__ float3 render_cloud_layer(
     float g = fmaxf(0.0f, fminf(0.95f, world.nishita.mie_anisotropy));
     
     for (int i = 0; i < numSteps; ++i) {
-        float jitterSeed = (float)i + (rayDir.x * 53.0f + rayDir.z * 91.0f) * 10.0f;
-        float3 pos = cloudCamPos + rayDir * (t + stepSize * hash(jitterSeed));
+        // Better Jitter using Interleaved Gradient Noise logic adapted for Ray Direction
+        // This removes banding artifacts much better than simple hash
+        float3 magic = make_float3(0.06711056f, 0.00583715f, 52.9829189f);
+        float2 uv = make_float2(rayDir.x + rayDir.y * 19.19f, rayDir.z + rayDir.x * 23.23f) + (float)i * 0.15f;
+        float jitter = frac(magic.z * frac(dot(uv, make_float2(magic.x, magic.y))));
+        
+        float3 pos = cloudCamPos + rayDir * (t + stepSize * jitter);
         
         float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
         float heightGradient = 4.0f * heightFraction * (1.0f - heightFraction);
