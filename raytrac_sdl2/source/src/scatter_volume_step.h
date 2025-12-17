@@ -45,18 +45,26 @@ __device__ float sample_density(const float3& pos) {
     noise = clamp(noise, -0.5f, 0.5f); // Sinüs aralığını güvene alalım
     return noise + 0.5f; // [0,1] aralığına taşır (0.0 minimum - 1.0 maksimum)
 }
-__device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color, const AtmosphereProperties& atmosphere, curandState* rng)
+__device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color, const WorldData& world, curandState* rng)
 {
-    if (atmosphere.sigma_s <= 0.0f) {
+    // Placeholder mapping since we removed AtmosphereProperties
+    float density = world.volume_density;
+    float anisotropy = world.volume_anisotropy;
+    // Assuming simple uniform fog for now if density > 0
+    // But since we don't have sigma_s/a directly, let's use density as sigma_s and a small default for sigma_a
+    
+    if (density <= 0.0f) {
         return false;
     }
+    float sigma_s = density;
+    float sigma_a = 0.0f; // Pure scattering for now? or small abs.
 
     // 1. Scatter mesafesi örnekle
-    float scatter_distance = -logf(random_float(rng)) / atmosphere.sigma_s;
+    float scatter_distance = -logf(random_float(rng)) / sigma_s;
     ray.origin += scatter_distance * ray.direction;
 
     // 2. Absorption uygula
-    throughput *= expf(-atmosphere.sigma_a * scatter_distance);
+    throughput *= expf(-sigma_a * scatter_distance);
 
     // 3. Işık katkısını hacimden hesapla
     float3 scatter_color = make_float3(0.0f, 0.0f, 0.0f);
@@ -88,12 +96,12 @@ __device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color,
         trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
 
         if (!shadow_payload.hit) { // Eğer ışık görünüyorsa
-            float phase = compute_phase_function(-ray.direction, light_dir, atmosphere.g);
+            float phase = compute_phase_function(-ray.direction, light_dir, anisotropy);
             scatter_color +=  make_float3(light_intensity * phase, light_intensity * phase,light_intensity * phase); //  Işık rengini ve şiddetini phase ile ağırlıkla
         }
     }
-    float density = sample_density(ray.origin);
-    scatter_color *= density; // yoğunluğa göre azalt/arttır
+    float local_density = sample_density(ray.origin);
+    scatter_color *= local_density; // yoğunluğa göre azalt/arttır
     // 4. Color katkısı ekle
     color += throughput * scatter_color;
 
@@ -106,12 +114,12 @@ __device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color,
     float rand2 = random_float(rng);
 
     float cos_theta;
-    if (fabsf(atmosphere.g) < 1e-3f) {
+    if (fabsf(anisotropy) < 1e-3f) {
         cos_theta = 1.0f - 2.0f * rand1;
     }
     else {
-        float sqr_term = (1.0f - atmosphere.g * atmosphere.g) / (1.0f - atmosphere.g + 2.0f * atmosphere.g * rand1);
-        cos_theta = (1.0f + atmosphere.g * atmosphere.g - sqr_term * sqr_term) / (2.0f * atmosphere.g);
+        float sqr_term = (1.0f - anisotropy * anisotropy) / (1.0f - anisotropy + 2.0f * anisotropy * rand1);
+        cos_theta = (1.0f + anisotropy * anisotropy - sqr_term * sqr_term) / (2.0f * anisotropy);
     }
 
     float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));

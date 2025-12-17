@@ -7,12 +7,254 @@
 #endif
 #include "material_scatter.cuh"
 #include "random_utils.cuh"
+#include "CloudNoise.cuh"
 #include "ray.h"
 #include "scatter_volume_step.h"
 
+// Helper function to render a single cloud layer
+// Returns ONLY the cloud color contribution (not blended with background)
+// Modifies transmittance based on cloud density encountered
+__device__ float3 render_cloud_layer(
+    const WorldData& world, 
+    const float3& rayDir, 
+    float3 bg_color,  // Used for ambient calculation only
+    float cloudMinY, float cloudMaxY,
+    float scale, float coverage, float densityMult,
+    float& transmittance  // In/out parameter
+) {
+    // Use actual camera Y position
+    float camY = (world.camera_y != 0.0f) ? world.camera_y : world.nishita.altitude;
+    float3 cloudCamPos = make_float3(0.0f, camY, 0.0f);
+    
+    // Ray-Plane Intersection
+    float t_enter, t_exit;
+    
+    // No color contribution for all these early-exit cases
+    float3 noCloud = make_float3(0.0f, 0.0f, 0.0f);
+    
+    if (cloudCamPos.y < cloudMinY) {
+        if (rayDir.y <= 0.0f) return noCloud;  // Looking down, can't see clouds above
+        t_enter = (cloudMinY - cloudCamPos.y) / rayDir.y;
+        t_exit = (cloudMaxY - cloudCamPos.y) / rayDir.y;
+    }
+    else if (cloudCamPos.y > cloudMaxY) {
+        if (rayDir.y >= 0.0f) return noCloud;  // Looking up, can't see clouds below
+        t_enter = (cloudMaxY - cloudCamPos.y) / rayDir.y;
+        t_exit = (cloudMinY - cloudCamPos.y) / rayDir.y;
+    }
+    else {
+        t_enter = 0.0f;
+        if (rayDir.y > 0.001f) {
+            t_exit = (cloudMaxY - cloudCamPos.y) / rayDir.y;
+        } else if (rayDir.y < -0.001f) {
+            t_exit = (cloudMinY - cloudCamPos.y) / rayDir.y;
+        } else {
+            t_exit = 30000.0f;
+        }
+    }
+    
+    if (t_exit <= 0.0f || t_exit <= t_enter) return noCloud;  // No valid intersection
+    if (t_enter < 0.0f) t_enter = 0.0f;
+    
+    // Horizon fade
+    float h_val = rayDir.y / 0.15f;
+    float h_t = fmaxf(0.0f, fminf(1.0f, fabsf(h_val)));
+    float horizonFade = h_t * h_t * (3.0f - 2.0f * h_t);
+    
+    // Quality-based step count
+    float quality = fmaxf(0.1f, fminf(3.0f, world.nishita.cloud_quality));
+    int baseSteps = (int)(48.0f * quality);
+    int numSteps = baseSteps + (int)((float)baseSteps * (1.0f - h_t));
+    
+    float stepSize = (t_exit - t_enter) / (float)numSteps;
+    float3 cloudColor = make_float3(0.0f, 0.0f, 0.0f);
+    float t = t_enter;
+    
+    float localDensityMult = densityMult * horizonFade;
+    
+    float3 ambientSky = bg_color * 0.3f;
+    float3 sunDirection = normalize(world.nishita.sun_direction);
+    float g = fmaxf(0.0f, fminf(0.95f, world.nishita.mie_anisotropy));
+    
+    for (int i = 0; i < numSteps; ++i) {
+        float jitterSeed = (float)i + (rayDir.x * 53.0f + rayDir.z * 91.0f) * 10.0f;
+        float3 pos = cloudCamPos + rayDir * (t + stepSize * hash(jitterSeed));
+        
+        float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
+        float heightGradient = 4.0f * heightFraction * (1.0f - heightFraction);
+        heightGradient = fmaxf(0.0f, fminf(1.0f, heightGradient));
+        
+        float3 offsetPos = pos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
+        float3 noisePos = offsetPos * scale;
+        
+        float rawDensity = cloud_shape(noisePos, coverage);
+        float density = rawDensity * heightGradient;
+        
+        if (density > 0.003f) {
+            density *= localDensityMult;
+            
+            // ═══════════════════════════════════════════════════════════
+            // LIGHT MARCHING (Self-Shadowing) - Controllable via UI
+            // ═══════════════════════════════════════════════════════════
+            float lightTransmittance = 1.0f;
+            int lightSteps = world.nishita.cloud_light_steps;  // UI controlled
+            
+            if (lightSteps > 0 && sunDirection.y > 0.01f) {
+                float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.01f, sunDirection.y) / (float)lightSteps;
+                lightStepSize = fminf(lightStepSize, 500.0f);
+                
+                for (int j = 1; j <= lightSteps; ++j) {
+                    float3 lightPos = pos + sunDirection * (lightStepSize * (float)j);
+                    
+                    if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
+                    
+                    float3 lightNoisePos = (lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z)) * scale;
+                    float lightDensity = cloud_shape(lightNoisePos, coverage);
+                    
+                    float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
+                    float lightHeightGrad = 4.0f * lh * (1.0f - lh);
+                    lightDensity *= lightHeightGrad * localDensityMult;
+                    
+                    // Use absorption parameter
+                    lightTransmittance *= expf(-lightDensity * lightStepSize * 0.015f * world.nishita.cloud_absorption);
+                    
+                    if (lightTransmittance < 0.05f) break;
+                }
+            }
+            
+            // Apply shadow strength (UI controlled)
+            lightTransmittance = 1.0f - (1.0f - lightTransmittance) * world.nishita.cloud_shadow_strength;
+            
+            // ═══════════════════════════════════════════════════════════
+            // ADVANCED COLOR CALCULATION
+            // ═══════════════════════════════════════════════════════════
+            float cosTheta = dot(rayDir, sunDirection);
+            
+            // Henyey-Greenstein phase function
+            float phase = (1.0f - g * g) / (4.0f * 3.14159f * powf(1.0f + g * g - 2.0f * g * cosTheta, 1.5f));
+            
+            // Powder effect
+            float powder = powderEffect(density, cosTheta);
+            
+            // ═══════════════════════════════════════════════════════════
+            // SUN COLOR - IMPROVED GRADIENT (Sunset/Sunrise)
+            // ═══════════════════════════════════════════════════════════
+            float sunElevation = sunDirection.y;
+            
+            // Layered color transitions
+            float3 sunColor;
+            if (sunElevation > 0.5f) {
+                // High sun - warm white
+                sunColor = make_float3(1.0f, 0.98f, 0.95f);
+            } else if (sunElevation > 0.2f) {
+                // Golden hour
+                float t = (sunElevation - 0.2f) / 0.3f;
+                float3 goldenColor = make_float3(1.0f, 0.85f, 0.6f);
+                float3 whiteColor = make_float3(1.0f, 0.98f, 0.95f);
+                sunColor = goldenColor * (1.0f - t) + whiteColor * t;
+            } else if (sunElevation > 0.0f) {
+                // Sunset/sunrise - orange to red
+                float t = sunElevation / 0.2f;
+                float3 orangeColor = make_float3(1.0f, 0.6f, 0.3f);
+                float3 goldenColor = make_float3(1.0f, 0.85f, 0.6f);
+                sunColor = orangeColor * (1.0f - t) + goldenColor * t;
+            } else {
+                // Below horizon - deep orange/red
+                float t = fmaxf(0.0f, 1.0f + sunElevation * 5.0f);
+                float3 redColor = make_float3(0.8f, 0.3f, 0.1f);
+                float3 orangeColor = make_float3(1.0f, 0.6f, 0.3f);
+                sunColor = redColor * (1.0f - t) + orangeColor * t;
+            }
+            
+            // ═══════════════════════════════════════════════════════════
+            // DIRECT LIGHTING (with self-shadowing)
+            // ═══════════════════════════════════════════════════════════
+            float directIntensity = world.nishita.sun_intensity * phase * lightTransmittance * 5.0f;
+            float3 directLight = sunColor * directIntensity;
+            
+            // Silver lining (UI controlled intensity)
+            float silverBase = fmaxf(0.0f, cosTheta) * powder * lightTransmittance;
+            float silverLining = silverBase * 4.0f * world.nishita.cloud_silver_intensity;
+            directLight += sunColor * silverLining * world.nishita.sun_intensity;
+            
+            // ═══════════════════════════════════════════════════════════
+            // AMBIENT / MULTI-SCATTERING (UI controlled)
+            // ═══════════════════════════════════════════════════════════
+            float multiScatter = 0.25f * (1.0f - expf(-density * 4.0f));
+            
+            // Shadow color gradient - more blue in shadows
+            float shadowAmount = 1.0f - lightTransmittance;
+            float3 shadowColor = make_float3(0.12f, 0.18f, 0.35f);  // Deep blue shadow
+            
+            // Height-based ambient (upper parts brighter)
+            float heightFactor = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
+            float ambientBoost = 1.0f + heightFactor * 0.3f;
+            
+            float3 ambient = ambientSky * 0.35f * world.nishita.cloud_ambient_strength * ambientBoost;
+            ambient += shadowColor * world.nishita.sun_intensity * 0.12f * shadowAmount;
+            ambient += sunColor * multiScatter * world.nishita.sun_intensity * 0.4f;
+            
+            // ═══════════════════════════════════════════════════════════
+            // FINAL COLOR - Energy conserving
+            // ═══════════════════════════════════════════════════════════
+            float3 lightColor = directLight + ambient;
+            
+            float3 stepColor = lightColor * density;
+            float absorption = density * stepSize * 0.012f * world.nishita.cloud_absorption;
+            float stepTransmittance = expf(-absorption);
+            
+            cloudColor += stepColor * transmittance * (1.0f - stepTransmittance);
+            transmittance *= stepTransmittance;
+            
+            if (transmittance < 0.01f) break;
+        }
+        t += stepSize;
+    }
+    
+    return cloudColor;
+}
+
+// Main function to render all cloud layers
+__device__ float3 render_clouds(const WorldData& world, const float3& rayDir, float3 bg_color) {
+    if (!world.nishita.clouds_enabled && !world.nishita.cloud_layer2_enabled) {
+        return bg_color;
+    }
+
+    float transmittance = 1.0f;
+    float3 cloudColor = make_float3(0.0f, 0.0f, 0.0f);
+    
+    // === LAYER 1 (Primary clouds) ===
+    if (world.nishita.clouds_enabled) {
+        float scale = 0.003f / fmaxf(0.1f, world.nishita.cloud_scale);
+        float3 layer1 = render_cloud_layer(
+            world, rayDir, bg_color,
+            world.nishita.cloud_height_min, world.nishita.cloud_height_max,
+            scale, world.nishita.cloud_coverage, world.nishita.cloud_density,
+            transmittance
+        );
+        cloudColor += layer1;
+    }
+    
+    // === LAYER 2 (Secondary clouds - e.g., high cirrus) ===
+    if (world.nishita.cloud_layer2_enabled) {
+        float scale2 = 0.003f / fmaxf(0.1f, world.nishita.cloud2_scale);
+        float3 layer2 = render_cloud_layer(
+            world, rayDir, bg_color,
+            world.nishita.cloud2_height_min, world.nishita.cloud2_height_max,
+            scale2, world.nishita.cloud2_coverage, world.nishita.cloud2_density,
+            transmittance
+        );
+        cloudColor += layer2;
+    }
+    
+    // Final blend with background
+    // No artificial minimum - clouds should be fully transparent where there's no density
+    return bg_color * transmittance + cloudColor;
+}
+
 __device__ float3 evaluate_background(const WorldData& world, const float3& dir) {
     if (world.mode == 0) { // WORLD_MODE_COLOR
-        return world.color;
+        return render_clouds(world, dir, world.color);
     }
     else if (world.mode == 1) { // WORLD_MODE_HDRI
         if (world.env_texture) {
@@ -26,20 +268,18 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& dir)
             u -= floorf(u);
             
             float4 tex = tex2D<float4>(world.env_texture, u, v);
-            return make_float3(tex.x, tex.y, tex.z) * world.env_intensity;
+            return render_clouds(world, dir, make_float3(tex.x, tex.y, tex.z) * world.env_intensity);
         }
-        return world.color;
+        return render_clouds(world, dir, world.color);
     }
     else if (world.mode == 2) { // WORLD_MODE_NISHITA
-        // Nishita Sky Model (Single Scattering)
+        // Nishita Sky Model (Single Scattering) - Blender compatible
         float3 sunDir = normalize(world.nishita.sun_direction);
-        float planetRadius = world.nishita.planet_radius;
-        float atmosphereRadius = world.nishita.atmosphere_height;
-        float Rt = atmosphereRadius;
-        float Rg = planetRadius;
+        float Rg = world.nishita.planet_radius;                     // Ground radius (meters)
+        float Rt = Rg + world.nishita.atmosphere_height;            // Top of atmosphere (meters)
         
-        // Assume camera is on ground at (0, Rg, 0)
-        float3 camPos = make_float3(0.0f, Rg + 10.0f, 0.0f); 
+        // Camera position with altitude (meters)
+        float3 camPos = make_float3(0.0f, Rg + world.nishita.altitude, 0.0f);
         float3 rayDir = normalize(dir);
         
         // Ray-Sphere Intersection (Atmosphere)
@@ -105,8 +345,12 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& dir)
                     lightOpticalMie += expf(-lightHeight / world.nishita.mie_density) * lightStep;
                 }
                 
-                float3 tau = world.nishita.rayleigh_scattering * (opticalDepthRayleigh + lightOpticalRayleigh) + 
-                             world.nishita.mie_scattering * 1.1f * (opticalDepthMie + lightOpticalMie);
+                // Apply air and dust density multipliers
+                float3 rayleighScatter = world.nishita.rayleigh_scattering * world.nishita.air_density;
+                float3 mieScatter = world.nishita.mie_scattering * world.nishita.dust_density;
+                
+                float3 tau = rayleighScatter * (opticalDepthRayleigh + lightOpticalRayleigh) + 
+                             mieScatter * 1.1f * (opticalDepthMie + lightOpticalMie);
                              
                 float3 attenuation = make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
                 
@@ -116,20 +360,137 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& dir)
             currentT += stepSize;
         }
         
-        float3 L = (totalRayleigh * world.nishita.rayleigh_scattering * phaseR + 
-                totalMie * world.nishita.mie_scattering * phaseM) * world.nishita.sun_intensity;
+        // Apply air and dust density multipliers
+        float3 rayleighScatter = world.nishita.rayleigh_scattering * world.nishita.air_density;
+        float3 mieScatter = world.nishita.mie_scattering * world.nishita.dust_density;
+        
+        float3 L = (totalRayleigh * rayleighScatter * phaseR + 
+                totalMie * mieScatter * phaseM) * world.nishita.sun_intensity;
+        
+        // Apply ozone (affects blue channel - simple approximation)
+        float ozoneFactor = world.nishita.ozone_density;
+        L.x *= (1.0f + 0.1f * ozoneFactor);   // Slightly affect red
+        L.z *= (1.0f + 0.3f * ozoneFactor);   // Boost blue
 
-        // Add Sun Disk
-        // Sun angular radius ~0.266 degrees (0.00465 rad)
-        const float sun_radius = 0.02f; // Increased for visibility (~1.15 degrees)
+        // Add Sun Disk using sun_size (in degrees)
+        // Apply horizon magnification effect
+        float sunSizeDeg = world.nishita.sun_size;
+        float elevationFactor = 1.0f;
+        if (world.nishita.sun_elevation < 15.0f) {
+            elevationFactor = 1.0f + (15.0f - fmaxf(world.nishita.sun_elevation, -10.0f)) * 0.04f;
+        }
+        sunSizeDeg *= elevationFactor;
+        
+        float sun_radius = sunSizeDeg * (M_PIf / 180.0f) * 0.5f; // Half angle in radians
         if (dot(rayDir, sunDir) > cosf(sun_radius)) {
             // Transmittance to space (accumulated optical depth)
-            float3 tau = world.nishita.rayleigh_scattering * opticalDepthRayleigh + 
-                         world.nishita.mie_scattering * 1.1f * opticalDepthMie;
+            float3 tau = rayleighScatter * opticalDepthRayleigh + 
+                         mieScatter * 1.1f * opticalDepthMie;
             float3 transmittance = make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
-            L += transmittance * world.nishita.sun_intensity * 100.0f; // Direct sun (scaled for visibility)
+            L += transmittance * world.nishita.sun_intensity * 1000.0f; // Direct sun
         }
-        return L;
+        
+        // ═══════════════════════════════════════════════════════════
+        // Night Sky: Stars and Moon (visible when sun is low)
+        // ═══════════════════════════════════════════════════════════
+        float nightVal = (world.nishita.sun_elevation + 5.0f) / 20.0f;
+        float nightFactor = 1.0f - fminf(1.0f, fmaxf(0.0f, nightVal));
+        
+        if (nightFactor > 0.01f && world.nishita.stars_intensity > 0.0f) {
+            // Procedural stars using hash
+            float3 starDir = rayDir;
+            // Grid-based star positions
+            float starScale = 1000.0f;
+            float3 gridPos = make_float3(
+                floorf(starDir.x * starScale),
+                floorf(starDir.y * starScale),
+                floorf(starDir.z * starScale)
+            );
+            
+            // Simple hash function for star placement
+            float hash = fmodf(sinf(gridPos.x * 12.9898f + gridPos.y * 78.233f + gridPos.z * 45.164f) * 43758.5453f, 1.0f);
+            if (hash < 0.0f) hash = -hash;
+            
+            // Only some cells have stars
+            float starThreshold = 1.0f - world.nishita.stars_density * 0.1f;
+            if (hash > starThreshold && rayDir.y > 0.0f) {
+                // Star color (slightly varied)
+                float colorVar = fmodf(hash * 7.0f, 1.0f);
+                float3 starColor;
+                if (colorVar < 0.3f) {
+                    starColor = make_float3(1.0f, 0.9f, 0.8f); // Warm white
+                } else if (colorVar < 0.6f) {
+                    starColor = make_float3(0.9f, 0.95f, 1.0f); // Cool white
+                } else if (colorVar < 0.8f) {
+                    starColor = make_float3(1.0f, 0.7f, 0.5f); // Orange
+                } else {
+                    starColor = make_float3(0.7f, 0.8f, 1.0f); // Blue
+                }
+                
+                // Twinkle effect based on hash
+                float twinkle = 0.5f + 0.5f * sinf(hash * 100.0f);
+                float starBrightness = (hash - starThreshold) / (1.0f - starThreshold);
+                starBrightness = powf(starBrightness, 2.0f) * twinkle;
+                
+                L += starColor * starBrightness * world.nishita.stars_intensity * nightFactor * 0.1f;
+            }
+        }
+        
+        // Moon rendering
+        if (world.nishita.moon_enabled && nightFactor > 0.01f && world.nishita.moon_intensity > 0.0f) {
+            float moonElevRad = world.nishita.moon_elevation * M_PIf / 180.0f;
+            float moonAzimRad = world.nishita.moon_azimuth * M_PIf / 180.0f;
+            float3 moonDir = make_float3(
+                cosf(moonElevRad) * sinf(moonAzimRad),
+                sinf(moonElevRad),
+                cosf(moonElevRad) * cosf(moonAzimRad)
+            );
+            
+            // Horizon magnification effect (like sun)
+            float moonSizeDeg = world.nishita.moon_size;
+            float moonElevFactor = 1.0f;
+            if (world.nishita.moon_elevation < 15.0f) {
+                moonElevFactor = 1.0f + (15.0f - fmaxf(world.nishita.moon_elevation, -10.0f)) * 0.04f;
+            }
+            moonSizeDeg *= moonElevFactor;
+            
+            float moon_radius = moonSizeDeg * (M_PIf / 180.0f) * 0.5f;
+            float moonDot = dot(rayDir, moonDir);
+            
+            if (moonDot > cosf(moon_radius)) {
+                // Base moon color (slightly blue-white)
+                float3 moonColor = make_float3(0.9f, 0.9f, 0.95f);
+                
+                // Horizon color shift (orange/red when low)
+                if (world.nishita.moon_elevation < 20.0f) {
+                    float horizonBlend = (20.0f - fmaxf(world.nishita.moon_elevation, -5.0f)) / 25.0f;
+                    horizonBlend = fminf(1.0f, fmaxf(0.0f, horizonBlend));
+                    // Shift to warm orange color
+                    float3 horizonColor = make_float3(1.0f, 0.7f, 0.4f);
+                    moonColor.x = moonColor.x * (1.0f - horizonBlend) + horizonColor.x * horizonBlend;
+                    moonColor.y = moonColor.y * (1.0f - horizonBlend) + horizonColor.y * horizonBlend;
+                    moonColor.z = moonColor.z * (1.0f - horizonBlend) + horizonColor.z * horizonBlend;
+                }
+                
+                // Atmospheric dimming near horizon
+                float atmosphericDim = 1.0f;
+                if (world.nishita.moon_elevation < 10.0f) {
+                    atmosphericDim = 0.3f + 0.7f * fmaxf(0.0f, world.nishita.moon_elevation / 10.0f);
+                }
+                
+                // Phase shading (0 = new moon, 0.5 = full, 1 = new)
+                float phase = world.nishita.moon_phase;
+                float phaseFactor = fabsf(phase - 0.5f) * 2.0f;
+                float brightness = 1.0f - phaseFactor * 0.9f;
+                
+                L += moonColor * brightness * atmosphericDim * world.nishita.moon_intensity * nightFactor * 10.0f;
+            }
+        }
+        
+        // Global volumetric clouds handled by return statement below
+
+        
+        return render_clouds(world, dir, L);
     }
     return make_float3(0.0f, 0.0f, 0.0f);
 }

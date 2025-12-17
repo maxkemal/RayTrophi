@@ -660,7 +660,7 @@ void SceneUI::drawCameraContent(UIContext& ctx)
         UIWidgets::HelpMarker("Use mouse to rotate camera view");
         
         if (ctx.mouse_control_enabled) {
-            UIWidgets::SliderWithHelp("Sensitivity", &ctx.mouse_sensitivity, 0.01f, 0.5f,
+            UIWidgets::SliderWithHelp("Sensitivity", &ctx.mouse_sensitivity, 0.01f, 5.0f,
                                        "Mouse movement sensitivity", "%.3f");
         }
         UIWidgets::EndSection();
@@ -823,8 +823,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 bool foundDirLight = false;
                 for (const auto& light : ctx.scene.lights) {
                     if (light && light->type() == LightType::Directional) {
-                        // Convert light direction to elevation/azimuth
-                        Vec3 dir = normalize(light->direction);
+                        // Convert light direction to sun direction
+                        // Note: light->direction is the direction light TRAVELS (sun to ground)
+                        // We need direction TO the sun, so negate it
+                        Vec3 dir = -(light->direction.normalize());
                         
                         // Elevation: angle from horizon (Y component)
                         float elevation = asinf(dir.y) * 180.0f / M_PI;
@@ -854,44 +856,83 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             UIWidgets::EndSection();
         }
         
-        // Sun Position Section (disabled if syncing)
-        if (!syncWithDirectionalLight) {
-            if (UIWidgets::BeginSection("Sun Position", ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
-                if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Sun height above horizon (0 = horizon, 90 = zenith)");
-                
-                if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Sun horizontal rotation (compass direction)");
-                UIWidgets::EndSection();
-            }
-        }
-        
-        // Sun Appearance Section
-        if (UIWidgets::BeginSection("Sun Appearance", ImVec4(1.0f, 0.5f, 0.3f, 1.0f))) {
-            if (ImGui::SliderFloat("Intensity", &params.sun_intensity, 0.1f, 50.0f, "%.1f")) {
+        // Sun Position Section (controls both sun and directional light when synced)
+        const char* sunPosTitle = syncWithDirectionalLight ? "Sun/Light Position" : "Sun Position";
+        if (UIWidgets::BeginSection(sunPosTitle, ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
+            if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
                 changed = true;
             }
-            UIWidgets::HelpMarker("Sun brightness (affects sky illumination and sun disk)");
+            UIWidgets::HelpMarker(syncWithDirectionalLight ? 
+                "Sun/Light height above horizon - controls both sky sun and directional light" :
+                "Sun height above horizon (0 = horizon, 90 = zenith)");
             
-            if (ImGui::SliderFloat("Size", &params.sun_density, 0.5f, 5.0f, "%.2f")) {
+            if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
                 changed = true;
             }
-            UIWidgets::HelpMarker("Visual sun disk size multiplier");
+            UIWidgets::HelpMarker(syncWithDirectionalLight ?
+                "Sun/Light horizontal rotation - controls both sky sun and directional light" :
+                "Sun horizontal rotation (compass direction)");
             UIWidgets::EndSection();
         }
         
-        // Atmosphere Section (Collapsible for advanced users)
-        if (ImGui::CollapsingHeader("Atmosphere (Advanced)")) {
-            ImGui::Indent();
-            
-            if (ImGui::SliderFloat("Air Density", &params.dust_density, 0.0f, 5.0f, "%.2f")) {
+        // Sun Appearance Section
+        if (UIWidgets::BeginSection("Sun", ImVec4(1.0f, 0.5f, 0.3f, 1.0f))) {
+            if (ImGui::SliderFloat("Intensity", &params.sun_intensity, 0.0f, 100.0f, "%.1f")) {
                 changed = true;
             }
-            UIWidgets::HelpMarker("Atmospheric particle density - affects haze and color");
+            UIWidgets::HelpMarker("Brightness of the sun");
+            
+            // Calculate automatic sun size based on elevation (atmospheric magnification)
+            // Sun appears larger near horizon due to refraction
+            float autoSunSize = params.sun_size;
+            float elevationFactor = 1.0f;
+            if (params.sun_elevation < 15.0f) {
+                // Below 15 degrees, sun starts appearing larger
+                // At 0 degrees, size is ~1.5x, at -5 degrees, ~2x
+                elevationFactor = 1.0f + (15.0f - fmaxf(params.sun_elevation, -10.0f)) * 0.04f;
+            }
+            float displaySize = params.sun_size * elevationFactor;
+            
+            if (ImGui::SliderFloat("Size", &params.sun_size, 0.1f, 5.0f, "%.3f deg")) {
+                changed = true;
+            }
+            if (elevationFactor > 1.01f) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Effective: %.3f deg (horizon boost)", displaySize);
+            }
+            UIWidgets::HelpMarker("Angular diameter of the sun disc (real sun = 0.545°). Automatically increases near horizon.");
+            UIWidgets::EndSection();
+        }
+        
+        // Atmosphere Section (Blender-style parameters)
+        if (UIWidgets::BeginSection("Atmosphere", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+            if (ImGui::SliderFloat("Air", &params.air_density, 0.0f, 10.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Density of air molecules (Rayleigh scattering). Higher = denser atmosphere, more color shift at horizon");
+            
+            if (ImGui::SliderFloat("Dust", &params.dust_density, 0.0f, 10.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Density of dust/aerosols (Mie scattering). Higher = more haze and sun glow");
+            
+            if (ImGui::SliderFloat("Ozone", &params.ozone_density, 0.0f, 10.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Ozone layer density. Higher = bluer sky, affects color saturation");
+            
+            // Altitude in UI is shown in km, but stored in meters
+            float altitudeKm = params.altitude / 1000.0f;
+            if (ImGui::SliderFloat("Altitude", &altitudeKm, 0.0f, 60.0f, "%.1f km")) {
+                params.altitude = altitudeKm * 1000.0f;  // Convert back to meters
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Camera altitude above sea level. 0 = beach, 10 = airplane, 60 = edge of atmosphere");
+            UIWidgets::EndSection();
+        }
+        
+        // Advanced Physics (Collapsible)
+        if (ImGui::CollapsingHeader("Advanced Physics")) {
+            ImGui::Indent();
             
             if (ImGui::SliderFloat("Mie Anisotropy", &params.mie_anisotropy, 0.0f, 0.99f, "%.2f")) {
                 changed = true;
@@ -900,6 +941,58 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
             ImGui::Unindent();
         }
+        
+        // Night Sky Section (Stars)
+        if (UIWidgets::BeginSection("Night Sky", ImVec4(0.3f, 0.3f, 0.7f, 1.0f))) {
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f), "Stars (visible when sun is low)");
+            
+            if (ImGui::SliderFloat("Stars Intensity", &params.stars_intensity, 0.0f, 5.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Brightness of stars. Set to 0 to disable.");
+            
+            if (ImGui::SliderFloat("Stars Density", &params.stars_density, 0.0f, 1.0f, "%.2f")) {
+                changed = true;
+            }
+            UIWidgets::HelpMarker("How many stars appear (0 = few, 1 = many)");
+            UIWidgets::EndSection();
+        }
+        
+        // Moon Section
+        if (UIWidgets::BeginSection("Moon", ImVec4(0.8f, 0.8f, 0.5f, 1.0f))) {
+            bool moonEnabled = params.moon_enabled != 0;
+            if (ImGui::Checkbox("Show Moon", &moonEnabled)) {
+                params.moon_enabled = moonEnabled ? 1 : 0;
+                changed = true;
+            }
+            
+            if (params.moon_enabled) {
+                if (ImGui::SliderFloat("Moon Elevation", &params.moon_elevation, -10.0f, 90.0f, "%.1f deg")) {
+                    changed = true;
+                }
+                
+                if (ImGui::SliderFloat("Moon Azimuth", &params.moon_azimuth, 0.0f, 360.0f, "%.1f deg")) {
+                    changed = true;
+                }
+                
+                if (ImGui::SliderFloat("Moon Intensity", &params.moon_intensity, 0.0f, 5.0f, "%.2f")) {
+                    changed = true;
+                }
+                
+                if (ImGui::SliderFloat("Moon Size", &params.moon_size, 0.1f, 3.0f, "%.2f deg")) {
+                    changed = true;
+                }
+                UIWidgets::HelpMarker("Real moon = 0.52 degrees");
+                
+                if (ImGui::SliderFloat("Moon Phase", &params.moon_phase, 0.0f, 1.0f, "%.2f")) {
+                    changed = true;
+                }
+                UIWidgets::HelpMarker("0 = New Moon, 0.5 = Full Moon, 1 = New Moon");
+            }
+            UIWidgets::EndSection();
+        }
+
+
         
         // Update sun direction from elevation/azimuth
         if (changed) {
@@ -911,9 +1004,336 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 cosf(elevationRad) * cosf(azimuthRad)
             );
             world.setNishitaParams(params);
+            
+            // If sync is enabled, also update the directional light
+            if (syncWithDirectionalLight) {
+                for (auto& light : ctx.scene.lights) {
+                    if (light && light->type() == LightType::Directional) {
+                        // Light direction is opposite of sun direction (sun to ground)
+                        light->direction = Vec3(
+                            -params.sun_direction.x,
+                            -params.sun_direction.y,
+                            -params.sun_direction.z
+                        );
+                        break;
+                    }
+                }
+            }
         }
     }
     
+    // ═══════════════════════════════════════════════════════════
+    // Global Atmosphere (Clouds)
+    // ═══════════════════════════════════════════════════════════
+    ImGui::Spacing();
+    if (UIWidgets::BeginSection("Global Atmosphere (Clouds)", ImVec4(0.5f, 0.6f, 0.7f, 1.0f))) {
+        NishitaSkyParams cloudParams = world.getNishitaParams();
+        bool cloudParamsChanged = false;
+
+        bool cloudsEnabled = cloudParams.clouds_enabled != 0;
+        if (ImGui::Checkbox("Enable Volumetric Clouds", &cloudsEnabled)) {
+            cloudParams.clouds_enabled = cloudsEnabled ? 1 : 0;
+            cloudParamsChanged = true;
+        }
+        UIWidgets::HelpMarker("Render volumetric clouds over any sky model.\nNote: High Performance Cost!");
+
+        if (cloudParams.clouds_enabled) {
+            ImGui::Spacing();
+            
+            // === CLOUD QUALITY (Performance) ===
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Quality:");
+            static int quality_preset = 0; // Normal
+            const char* quality_presets[] = { "Fast Preview", "Low", "Normal", "High", "Ultra" };
+            float quality_values[] = { 0.25f, 0.5f, 1.0f, 1.5f, 2.5f };
+            
+            ImGui::PushItemWidth(120);
+            if (ImGui::Combo("##CloudQuality", &quality_preset, quality_presets, IM_ARRAYSIZE(quality_presets))) {
+                cloudParams.cloud_quality = quality_values[quality_preset];
+                cloudParamsChanged = true;
+            }
+            ImGui::PopItemWidth();
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%.0f-%.0f steps)", 
+                48.0f * cloudParams.cloud_quality, 
+                96.0f * cloudParams.cloud_quality);
+            UIWidgets::HelpMarker("Lower quality = faster render\nHigher quality = better details");
+            
+            ImGui::Spacing();
+            
+            // === WEATHER PRESETS (Combo Box) ===
+            static int weather_preset_index = 7; // Default to Custom
+            const char* weather_presets[] = { 
+                "Clear Sky", 
+                "Cirrus (Wispy)",
+                "Cumulus (Puffy)",
+                "Stratocumulus",
+                "Overcast", 
+                "Cumulonimbus (Storm)",
+                "Fog/Low Clouds",
+                "Custom" 
+            };
+            
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Weather Type:");
+            ImGui::PushItemWidth(-1);
+            if (ImGui::Combo("##WeatherType", &weather_preset_index, weather_presets, IM_ARRAYSIZE(weather_presets))) {
+                switch (weather_preset_index) {
+                    case 0: // Clear Sky
+                        cloudParams.clouds_enabled = 0;
+                        cloudParamsChanged = true;
+                        break;
+                    case 1: // Cirrus (Wispy high clouds) - VERY THIN layer
+                        cloudParams.cloud_height_min = 8000.0f;   // 8km - high altitude
+                        cloudParams.cloud_height_max = 8500.0f;   // Only 500m thick!
+                        cloudParams.cloud_scale = 15.0f;          // Very stretched/wispy
+                        cloudParams.cloud_coverage = 0.35f;       // Sparse
+                        cloudParams.cloud_density = 0.15f;        // Very transparent
+                        cloudParamsChanged = true;
+                        break;
+                    case 2: // Cumulus (Classic puffy clouds)
+                        cloudParams.cloud_height_min = 1000.0f;
+                        cloudParams.cloud_height_max = 3000.0f;
+                        cloudParams.cloud_scale = 3.0f;
+                        cloudParams.cloud_coverage = 0.4f;
+                        cloudParams.cloud_density = 1.5f;
+                        cloudParamsChanged = true;
+                        break;
+                    case 3: // Stratocumulus (Layered puffy)
+                        cloudParams.cloud_height_min = 500.0f;
+                        cloudParams.cloud_height_max = 2000.0f;
+                        cloudParams.cloud_scale = 2.0f;
+                        cloudParams.cloud_coverage = 0.6f;
+                        cloudParams.cloud_density = 1.2f;
+                        cloudParamsChanged = true;
+                        break;
+                    case 4: // Overcast (Stratus)
+                        cloudParams.cloud_height_min = 200.0f;
+                        cloudParams.cloud_height_max = 600.0f;
+                        cloudParams.cloud_scale = 0.5f;
+                        cloudParams.cloud_coverage = 0.9f;
+                        cloudParams.cloud_density = 2.5f;
+                        cloudParamsChanged = true;
+                        break;
+                    case 5: // Cumulonimbus (Storm/Rain clouds)
+                        cloudParams.cloud_height_min = 500.0f;
+                        cloudParams.cloud_height_max = 10000.0f;
+                        cloudParams.cloud_scale = 5.0f;
+                        cloudParams.cloud_coverage = 0.7f;
+                        cloudParams.cloud_density = 4.0f;
+                        cloudParamsChanged = true;
+                        break;
+                    case 6: // Fog/Low Clouds
+                        cloudParams.cloud_height_min = 0.0f;
+                        cloudParams.cloud_height_max = 200.0f;
+                        cloudParams.cloud_scale = 0.3f;
+                        cloudParams.cloud_coverage = 0.8f;
+                        cloudParams.cloud_density = 3.0f;
+                        cloudParamsChanged = true;
+                        break;
+                    case 7: // Custom
+                        break;
+                }
+            }
+            ImGui::PopItemWidth();
+            UIWidgets::HelpMarker("Cloud type presets:\n"
+                "- Cirrus: High wispy clouds\n"
+                "- Cumulus: Classic puffy clouds\n"
+                "- Stratocumulus: Layered clouds\n"
+                "- Overcast: Gray flat sky\n"
+                "- Cumulonimbus: Towering storm clouds\n"
+                "- Fog: Ground-level clouds");
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            
+            // Show detailed controls in a collapsible section or when Custom is selected
+            bool show_details = (weather_preset_index == 7); // Custom mode
+            
+            if (show_details || ImGui::CollapsingHeader("Cloud Details")) {
+                // Coverage
+                if (ImGui::SliderFloat("Coverage", &cloudParams.cloud_coverage, 0.0f, 1.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                    weather_preset_index = 7; // Switch to Custom when manually editing
+                }
+                UIWidgets::HelpMarker("Cloud coverage (0 = clear sky, 1 = overcast)");
+
+                // Density
+                if (ImGui::DragFloat("Density", &cloudParams.cloud_density, 0.05f, 0.0f, 10.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                    weather_preset_index = 7;
+                }
+                UIWidgets::HelpMarker("Cloud opacity multiplier (higher = more opaque clouds)");
+                
+                // Scale
+                if (ImGui::DragFloat("Scale", &cloudParams.cloud_scale, 0.1f, 0.1f, 100.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                    weather_preset_index = 7;
+                }
+                UIWidgets::HelpMarker("Cloud size.\nHigher = Larger clouds\nLower = Smaller, detailed clouds");
+
+                // Wind / Seed Offsets
+                if (ImGui::DragFloat("Offset X (Wind)", &cloudParams.cloud_offset_x, 10.0f, -100000.0f, 100000.0f, "%.0f m")) {
+                    cloudParamsChanged = true;
+                }
+                if (ImGui::DragFloat("Offset Z (Wind)", &cloudParams.cloud_offset_z, 10.0f, -100000.0f, 100000.0f, "%.0f m")) {
+                    cloudParamsChanged = true;
+                }
+                UIWidgets::HelpMarker("Shift cloud pattern for variety or wind animation");
+            }
+            
+            // ═══════════════════════════════════════════════════════════
+            // CLOUD LIGHTING SETTINGS
+            // ═══════════════════════════════════════════════════════════
+            if (ImGui::CollapsingHeader("Cloud Lighting")) {
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Self-Shadowing:");
+                
+                // Light Steps (0 = disabled for performance)
+                if (ImGui::SliderInt("Light Steps", &cloudParams.cloud_light_steps, 0, 12)) {
+                    cloudParamsChanged = true;
+                }
+                UIWidgets::HelpMarker("Number of light marching steps.\n0 = Disabled (fast)\n4-6 = Normal\n8-12 = High quality");
+                
+                // Shadow Strength
+                if (ImGui::SliderFloat("Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 2.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                }
+                UIWidgets::HelpMarker("Cloud self-shadowing intensity.\n0 = No shadows\n1 = Normal\n2 = Dark, dramatic shadows");
+                
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Lighting Effects:");
+                
+                // Silver Lining
+                if (ImGui::SliderFloat("Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 3.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                }
+                UIWidgets::HelpMarker("Bright rim effect when backlit by sun.\n0 = Off\n1 = Normal\n2+ = Strong glow");
+                
+                // Ambient Strength
+                if (ImGui::SliderFloat("Ambient Light", &cloudParams.cloud_ambient_strength, 0.0f, 2.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                }
+                UIWidgets::HelpMarker("Sky ambient light contribution.\nLower = Darker shadows\nHigher = Softer look");
+                
+                // Absorption
+                if (ImGui::SliderFloat("Absorption", &cloudParams.cloud_absorption, 0.2f, 3.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                }
+                UIWidgets::HelpMarker("Light absorption rate.\n0.5 = Thin, transparent\n1.0 = Normal\n2.0 = Thick, opaque");
+            }
+
+            // === LAYER 1 ALTITUDE ===
+            if (ImGui::TreeNode("Layer 1 Altitude")) {
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Layer 1: %.0f - %.0f m (%.0f m thick)", 
+                    cloudParams.cloud_height_min, cloudParams.cloud_height_max,
+                    cloudParams.cloud_height_max - cloudParams.cloud_height_min);
+                
+                if (ImGui::DragFloat("Min Height##L1", &cloudParams.cloud_height_min, 10.0f, 0.0f, 20000.0f, "%.0f m")) {
+                    cloudParamsChanged = true;
+                }
+                if (ImGui::DragFloat("Max Height##L1", &cloudParams.cloud_height_max, 10.0f, 0.0f, 20000.0f, "%.0f m")) {
+                    cloudParamsChanged = true;
+                }
+                ImGui::TreePop();
+            }
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            
+            // ==================================================================
+            // CLOUD LAYER 2 (Secondary/High Altitude)
+            // ==================================================================
+            bool layer2Enabled = cloudParams.cloud_layer2_enabled != 0;
+            if (ImGui::Checkbox("Enable Cloud Layer 2", &layer2Enabled)) {
+                cloudParams.cloud_layer2_enabled = layer2Enabled ? 1 : 0;
+                cloudParamsChanged = true;
+            }
+            UIWidgets::HelpMarker("Enable a second cloud layer.\nUseful for high cirrus above low cumulus.");
+            
+            if (cloudParams.cloud_layer2_enabled) {
+                ImGui::Indent();
+                ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2 Settings:");
+                
+                // Layer 2 presets
+                static int layer2_preset = 0;
+                const char* layer2_presets[] = { "Custom", "High Cirrus", "Mid Stratus", "Low Fog" };
+                if (ImGui::Combo("Layer 2 Preset", &layer2_preset, layer2_presets, IM_ARRAYSIZE(layer2_presets))) {
+                    switch (layer2_preset) {
+                        case 1: // High Cirrus
+                            cloudParams.cloud2_height_min = 8000.0f;
+                            cloudParams.cloud2_height_max = 9000.0f;
+                            cloudParams.cloud2_scale = 12.0f;
+                            cloudParams.cloud2_coverage = 0.25f;
+                            cloudParams.cloud2_density = 0.2f;
+                            cloudParamsChanged = true;
+                            break;
+                        case 2: // Mid Stratus
+                            cloudParams.cloud2_height_min = 2500.0f;
+                            cloudParams.cloud2_height_max = 3500.0f;
+                            cloudParams.cloud2_scale = 3.0f;
+                            cloudParams.cloud2_coverage = 0.5f;
+                            cloudParams.cloud2_density = 0.8f;
+                            cloudParamsChanged = true;
+                            break;
+                        case 3: // Low Fog
+                            cloudParams.cloud2_height_min = 0.0f;
+                            cloudParams.cloud2_height_max = 150.0f;
+                            cloudParams.cloud2_scale = 0.5f;
+                            cloudParams.cloud2_coverage = 0.7f;
+                            cloudParams.cloud2_density = 2.0f;
+                            cloudParamsChanged = true;
+                            break;
+                    }
+                }
+                
+                if (ImGui::SliderFloat("Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 1.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                    layer2_preset = 0;
+                }
+                if (ImGui::DragFloat("Density##L2", &cloudParams.cloud2_density, 0.05f, 0.0f, 5.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                    layer2_preset = 0;
+                }
+                if (ImGui::DragFloat("Scale##L2", &cloudParams.cloud2_scale, 0.1f, 0.1f, 50.0f, "%.2f")) {
+                    cloudParamsChanged = true;
+                    layer2_preset = 0;
+                }
+                
+                ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2: %.0f - %.0f m", 
+                    cloudParams.cloud2_height_min, cloudParams.cloud2_height_max);
+                if (ImGui::DragFloat("Min Height##L2", &cloudParams.cloud2_height_min, 50.0f, 0.0f, 20000.0f, "%.0f m")) {
+                    cloudParamsChanged = true;
+                    layer2_preset = 0;
+                }
+                if (ImGui::DragFloat("Max Height##L2", &cloudParams.cloud2_height_max, 50.0f, 0.0f, 20000.0f, "%.0f m")) {
+                    cloudParamsChanged = true;
+                    layer2_preset = 0;
+                }
+                
+                ImGui::Unindent();
+            }
+            
+            ImGui::Spacing();
+            
+            // Camera altitude info
+            if (ImGui::TreeNode("Camera Altitude Info")) {
+                ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.5f, 1.0f), "Camera Y: %.0f m", cloudParams.altitude);
+                
+                if (cloudParams.altitude >= cloudParams.cloud_height_min && 
+                    cloudParams.altitude <= cloudParams.cloud_height_max) {
+                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Camera is INSIDE Layer 1!");
+                }
+              
+                
+                ImGui::TreePop();
+            }
+        }
+        UIWidgets::EndSection();
+
+        if (cloudParamsChanged) {
+            world.setNishitaParams(cloudParams);
+            changed = true;
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════
     // Apply Changes
     // ═══════════════════════════════════════════════════════════
@@ -1518,10 +1938,6 @@ void SceneUI::draw(UIContext& ctx)
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
-
-
-
-
 
 void SceneUI::drawControlsContent()
 {

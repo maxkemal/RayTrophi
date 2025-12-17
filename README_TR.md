@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Versiyon](https://img.shields.io/badge/versiyon-1.0-blue.svg)
+![Versiyon](https://img.shields.io/badge/versiyon-1.1-blue.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -47,7 +47,12 @@
   - ✅ Alan ışıkları (mesh tabanlı)
   - ✅ Işık yayan materyaller
   - ✅ **HDR/EXR Environment Haritaları** (equirectangular projeksiyon)
-  - ✅ **Nishita Gökyüzü Modeli** (fizik tabanlı atmosferik saçılım)
+  - ✅- **Gelişmiş Nishita Gökyüzü Modeli**: 
+  - Blender uyumlu fiziksel atmosfer parametreleri (Air, Dust, Ozone, Altitude).
+  - **Gece/Gündüz Döngüsü**: Prosedürel yıldızlar ve ay ile otomatik geçiş.
+  - **Ay Özellikleri**: Ufukta büyüme efekti, kızıl renk değişimi, atmosferik sönümleme ve ay evreleri.
+  - **Güneş Halesi**: Yüksek Mie Anisotropy (0.98) ile gerçekçi atmosferik parlamalar.
+  - **Işık Senkronizasyonu**: Sahnedeki Directional Light'ı otomatik olarak güneş pozisyonuna kilitler.çılım)
   - ✅ Çoklu önem örneklemesi ile yumuşak gölgeler
 
 - **Gelişmiş Özellikler**
@@ -58,6 +63,12 @@
   - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
   - ✅ Ton haritalama & post-processing
   - ✅ **Gelişmiş Animasyon**: Kemik (bone) animasyonu, quaternion interpolasyonu ve timeline kontrolü
+  - ✅ **Gelişmiş Bulut Aydınlatma Kontrolleri** (YENİ):
+    - Işık Adımları (Light Steps): Volumetrik bulut kalitesi için
+    - Gölge Yoğunluğu (Shadow Strength): Gerçekçi bulut gölgeleri
+    - Ortam Aydınlatması (Ambient Strength): Bulut taban aydınlatması
+    - Gümüş Yoğunluğu (Silver Intensity): Güneş kenarı efektleri
+    - Bulut Absorpsiyonu (Absorption): Işık geçirgenlik kontrolü
 
 ### 🚀 Performans & Optimizasyon
 

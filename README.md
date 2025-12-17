@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.1-blue.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -47,7 +47,18 @@
   - ✅ Area lights (mesh-based)
   - ✅ Emissive materials
   - ✅ **HDR/EXR Environment Maps** (equirectangular projection)
-  - ✅ **Nishita Sky Model** (physically-based atmospheric scattering)
+  - ✅ **Global Volumetric Clouds**:
+    - **Any Sky Mode**: Decoupled rendering works seamlessly with HDRI, Solid Color, or Nishita Sky.
+    - **Physical Scattering**: Henyey-Greenstein phase function with controllable Anisotropy (Silver Lining).
+    - **High Quality**: Adaptive ray marching (up to 128 steps) and jittered sampling to eliminate banding artifacts.
+    - **Dynamic Control**: Wind/Seed offsets, Coverage, Density, and Altitude layers.
+    - **Soft Horizon**: Smart density fading prevents black horizon artifacts.
+  - ✅ **Advanced Nishita Sky Model**: 
+  - Physical atmosphere (Air, Dust, Ozone, Altitude) matching Blender concepts.
+  - **Day/Night Cycle**: Automatic transition with procedural stars and moon.
+  - **Moon Rendering**: Horizon size magnification, redness, atmospheric dimming, and phases.
+  - **Sun Glow**: High Mie Anisotropy (0.98) for realistic sun halos.
+  - **Light Sync**: Automatically synchronizes Scene Directional Light with Sky Sun position.)
   - ✅ Soft shadows with multiple importance sampling
 
 - **Advanced Features**
@@ -58,6 +69,12 @@
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
   - ✅ **Advanced Animation**: Bone animation, quaternion interpolation, and timeline control
+  - ✅ **Advanced Cloud Lighting Controls** (NEW):
+    - Light Steps control for volumetric cloud quality
+    - Shadow Strength for realistic cloud shadows
+    - Ambient Strength for cloud base illumination
+    - Silver Intensity (Silver Lining) for sun-edge effects
+    - Cloud Absorption for light penetration control
 
 ### 🚀 Performance & Optimization
 

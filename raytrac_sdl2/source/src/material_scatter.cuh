@@ -8,9 +8,14 @@
 #include <material_gpu.h>
 
 
+// Industry standard minimum alpha value (matches Disney/Cycles/PBRT)
+#define GPU_MIN_ALPHA 0.0001f
+#define GPU_MIN_DOT 0.0001f
+
 __device__ float G_SchlickGGX(float NdotV, float roughness) {
-    //float r = roughness+1.0f;
-    float k = max(roughness * roughness, 0.01f) /2.0f;
+    // Industry standard for Direct Lighting: k = (r+1)^2 / 8
+    float r = roughness + 1.0f;
+    float k = (r * r) / 8.0f;
     return NdotV / (NdotV * (1.0f - k) + k);
 }
 
@@ -20,11 +25,11 @@ __device__ float G_Smith(float NdotV, float NdotL, float roughness) {
 
 __device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N) {
     float3 H = normalize(wo + wi);
-    float NdotH = max(dot(N, H), 0.0001f);
-    float VdotH = max(dot(wo, H), 0.0001f);
+    float NdotH = max(dot(N, H), GPU_MIN_DOT);
+    float VdotH = max(dot(wo, H), GPU_MIN_DOT);
 
     float roughness = mat.roughness;
-    float alpha = max(roughness * roughness, 0.01f);
+    float alpha = max(roughness * roughness, GPU_MIN_ALPHA);
     float alpha2 = alpha * alpha;
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
     float D = alpha2 / (M_PIf * denom * denom);
@@ -67,14 +72,14 @@ __device__ float3 evaluate_brdf(
     float2 uv = payload.uv;
     uv = clamp(uv, 0.0f, 1.0f);
 
-    float NdotL = max(dot(N, wi), 0.0001f);
-    float NdotV = max(dot(N, wo), 0.0001f);
-    if (NdotL == 0 || NdotV == 0) return make_float3(0.0f, 0.0f, 0.0f);
+    float NdotL = max(dot(N, wi), GPU_MIN_DOT);
+    float NdotV = max(dot(N, wo), GPU_MIN_DOT);
+    if (NdotL < GPU_MIN_DOT || NdotV < GPU_MIN_DOT) return make_float3(0.0f, 0.0f, 0.0f);
 
     float3 H = normalize(wi + wo);
-    float NdotH = max(dot(N, H), 0.0001f);
-    float VdotH = max(dot(wo, H), 0.0001f);
-	if (NdotH == 0 || VdotH == 0) return make_float3(0.0f, 0.0f, 0.0f);
+    float NdotH = max(dot(N, H), GPU_MIN_DOT);
+    float VdotH = max(dot(wo, H), GPU_MIN_DOT);
+    if (NdotH < GPU_MIN_DOT || VdotH < GPU_MIN_DOT) return make_float3(0.0f, 0.0f, 0.0f);
     float3 albedo = material.albedo;
     if (payload.has_albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
@@ -106,7 +111,7 @@ __device__ float3 evaluate_brdf(
     }
   
 
-    float alpha = max(roughness * roughness, 0.001f);
+    float alpha = max(roughness * roughness, GPU_MIN_ALPHA);
     float alpha2 = alpha * alpha;
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
     float D = alpha2 / (M_PIf * denom * denom);

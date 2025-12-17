@@ -113,8 +113,7 @@ public:
         return 0.01f;
     }
     Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
-        return  emissionProperty* emissionProperty.intensity; // Hacimde yoğunlukla değişen ışık emisyonu
-
+        return getPropertyValue(emissionProperty, uv);
     }
     MaterialProperty opacityProperty;
     MaterialProperty albedoProperty;

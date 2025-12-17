@@ -787,6 +787,9 @@ int main(int argc, char* argv[]) {
                             Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                             yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
                             pitch = asinf(dir.y) * 180.0f / 3.14159265f;
+                            
+                            // Set camera Y for volumetric cloud parallax
+                            ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
                         }
                         if (!scene.lights.empty())
                             optix_gpu.setLightParams(scene.lights);
@@ -834,6 +837,11 @@ int main(int argc, char* argv[]) {
                         // Each pass is 1 sample per pixel, accumulates progressively
                         
                         ray_renderer.updateAnimationState(scene, time);
+                        
+                        // Set camera Y for volumetric cloud parallax
+                        if (scene.camera) {
+                            ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
+                        }
                         
                         // Single pass render (1 sample) - uses accumulation internally
                         auto sample_start = std::chrono::high_resolution_clock::now();
