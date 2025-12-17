@@ -123,10 +123,22 @@ __device__ inline float worleyFbm(float3 p, int octaves) {
 // CINEMATIC CLOUD SHAPE - Maya/Arnold/Houdini quality
 // Uses combination of Perlin FBM + Worley for realistic clouds
 // ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+// CINEMATIC CLOUD SHAPE - Maya/Arnold/Houdini quality
+// Uses combination of Perlin FBM + Worley for realistic clouds
+// ═══════════════════════════════════════════════════════════
 __device__ inline float cloud_shape(float3 p, float coverage) {
     // === LAYER 1: Base Shape (Low frequency Perlin) ===
     // This defines the overall cloud mass
     float baseShape = fbm(p * 0.8f, 4);
+    
+    // OPTIMIZATION: Early Exit / Cheap Check
+    // If the base shape is too thin, don't bother calculating expensive Worley noise
+    // The threshold logic matches the final density calculation below
+    float threshold = (1.0f - coverage) * 0.55f;
+    if (baseShape < threshold + 0.01f) {
+        return 0.0f;
+    }
     
     // === LAYER 2: Worley Cellular Structure ===
     // Creates the characteristic "puffy" cloud look
@@ -149,7 +161,6 @@ __device__ inline float cloud_shape(float3 p, float coverage) {
     
     // === COVERAGE REMAP ===
     // Smooth threshold based on coverage
-    float threshold = (1.0f - coverage) * 0.55f;
     float density = fmaxf(0.0f, combined - threshold);
     
     // === SOFT EDGE FALLOFF ===
