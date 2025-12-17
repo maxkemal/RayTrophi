@@ -186,9 +186,7 @@ void OptixWrapper::cleanup() {
 OptixWrapper::~OptixWrapper() {
     cleanup();
 }
-float3 to_float3(const Vec3& v) {
-    return make_float3(v.x, v.y, v.z);
-}
+
 
 
 void OptixWrapper::initialize() {
@@ -211,9 +209,7 @@ void OptixWrapper::initialize() {
     //std::cout << "OptiX Successfully initialized.\n";
 }
 
-inline float3 toFloat3(const Vec3& v) {
-    return make_float3(v.x, v.y, v.z);
-}
+
 void updatePixeloptix(SDL_Surface* surface, int i, int j, const Vec3SIMD& color) {
     Uint32* pixel = static_cast<Uint32*>(surface->pixels) + (surface->h - 1 - j) * surface->pitch / 4 + i;
 
@@ -901,9 +897,9 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 ) {
     using namespace std::chrono;
     rendering_in_progress = true;
-    
+
     const int pixel_count = width * height;
-    
+
     // ------------------ BUFFER ALLOCATION -----------------------
     // Framebuffer for display (uchar4)
     if (!d_framebuffer || prev_width != width || prev_height != height) {
@@ -913,7 +909,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         prev_height = height;
         accumulation_valid = false; // Force reset on resolution change
     }
-    
+
     // High-precision accumulation buffer (float4: RGB + sample count)
     if (!d_accumulation_float4 || !accumulation_valid) {
         if (d_accumulation_float4) cudaFree(d_accumulation_float4);
@@ -921,39 +917,39 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
         accumulation_valid = true;
     }
-    
+
     // ------------------ CAMERA CHANGE DETECTION -----------------------
     uint64_t current_camera_hash = computeCameraHash();
     bool camera_changed = (current_camera_hash != last_camera_hash);
     bool is_first_render = (last_camera_hash == 0);
-    
+
     if (camera_changed) {
         // Camera moved - reset accumulation
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
         accumulated_samples = 0;
-        
+
         // Log only when actually moving camera, not initial state
         if (!is_first_render) {
             // SCENE_LOG_INFO("Camera changed - resetting accumulation");
         }
-        
+
         last_camera_hash = current_camera_hash;
     }
-    
+
     // ------------------ DETERMINE SAMPLES TO RENDER -----------------------
     // Max samples from settings (default to 100 if not set)
     int target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
-    
+
     // If we've reached max samples, don't render more
     if (accumulated_samples >= target_max_samples) {
         rendering_in_progress = false;
         return;
     }
-    
+
     // Samples per pass: 1 for smooth progressive updates
     // Could increase for faster convergence at cost of UI responsiveness
     int samples_this_pass = 1;
-    
+
     // ------------------ SETUP PARAMS -----------------------
     params.framebuffer = d_framebuffer;
     params.accumulation_buffer = reinterpret_cast<float*>(d_accumulation_float4);
@@ -961,14 +957,9 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.image_height = height;
     params.handle = traversable_handle;
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
-    
-    params.atmosphere.sigma_s = 0.01f;
-    params.atmosphere.sigma_a = 0.01f;
-    params.atmosphere.g = 0.0f;
-    params.atmosphere.base_density = 0.001f;
-    params.atmosphere.temperature = 300.0f;
-    params.atmosphere.active = false;
-    
+
+
+
     // Use 1 sample per pixel per pass for smooth progressive refinement
     params.samples_per_pixel = samples_this_pass;
     params.min_samples = render_settings.min_samples;
@@ -976,55 +967,55 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.variance_threshold = render_settings.variance_threshold;
     params.max_depth = render_settings.max_bounces;
     params.use_adaptive_sampling = false; // Progressive mode handles this differently
-    
+
     // Frame number is the accumulated sample count (for random seed variation)
     params.frame_number = accumulated_samples + 1;
     params.current_pass = accumulated_samples;
     params.temporal_blend = 0.0f; // We handle blending manually via accumulation buffer
-    
+
     // Full image tiles
     params.tile_x = 0;
     params.tile_y = 0;
     params.tile_width = width;
     params.tile_height = height;
-    
+
     // ------------------ UPLOAD PARAMS -----------------------
     cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
     cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice, stream);
-    
+
     // ------------------ LAUNCH RENDER -----------------------
     auto pass_start = high_resolution_clock::now();
-    
+
     OPTIX_CHECK(optixLaunch(
         pipeline, stream,
         d_params, sizeof(RayGenParams),
         &sbt,
         width, height, 1
     ));
-    
+
     cudaStreamSynchronize(stream);
-    
+
     auto pass_end = high_resolution_clock::now();
     float pass_ms = duration<float, std::milli>(pass_end - pass_start).count();
-    
+
     // Update accumulated sample count
     accumulated_samples += samples_this_pass;
-    
+
     // ------------------ COPY BACK & DISPLAY -----------------------
     partial_framebuffer.resize(pixel_count);
-    
+
     cudaMemcpyAsync(partial_framebuffer.data(),
         d_framebuffer,
         pixel_count * sizeof(uchar4),
         cudaMemcpyDeviceToHost,
         stream);
-    
+
     cudaStreamSynchronize(stream);
-    
+
     // Update SDL Surface
     Uint32* pixels = (Uint32*)surface->pixels;
     int row_stride = surface->pitch / 4;
-    
+
     for (int j = 0; j < height; ++j) {
         for (int i = 0; i < width; ++i) {
             int fb_index = j * width + i;
@@ -1033,46 +1024,51 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             pixels[screen_index] = SDL_MapRGB(surface->format, c.x, c.y, c.z);
         }
     }
-    
+
     // ------------------ PROGRESS DISPLAY -----------------------
     float progress = 100.0f * accumulated_samples / target_max_samples;
-    std::string title = "RayTrophi - Sample " + std::to_string(accumulated_samples) + 
-                        "/" + std::to_string(target_max_samples) + 
-                        " (" + std::to_string(int(progress)) + "%) - " +
-                        std::to_string(int(pass_ms)) + "ms/sample";
+    std::string title = "RayTrophi - Sample " + std::to_string(accumulated_samples) +
+        "/" + std::to_string(target_max_samples) +
+        " (" + std::to_string(int(progress)) + "%) - " +
+        std::to_string(int(pass_ms)) + "ms/sample";
     SDL_SetWindowTitle(window, title.c_str());
-    
+
     // Cleanup temporary params
     cudaFree(reinterpret_cast<void*>(d_params));
     d_params = 0;
     
     rendering_in_progress = false;
 }
-
+    // Local helper to avoid linker collisions
+static inline float3 optix_to_float3(const Vec3& v) {
+    return make_float3(v.x, v.y, v.z);
+}
 
 void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
-    params.camera.origin = toFloat3(cpuCamera.origin);
-    params.camera.horizontal = toFloat3(cpuCamera.horizontal);
-    params.camera.vertical = toFloat3(cpuCamera.vertical);
-    params.camera.lower_left_corner = toFloat3(cpuCamera.lower_left_corner);
+    params.camera.origin = optix_to_float3(cpuCamera.origin);
+    params.camera.horizontal = optix_to_float3(cpuCamera.horizontal);
+    params.camera.vertical = optix_to_float3(cpuCamera.vertical);
+    params.camera.lower_left_corner = optix_to_float3(cpuCamera.lower_left_corner);
 
     // DOF için yeni parametreler:
-    params.camera.u = toFloat3(cpuCamera.u);
-    params.camera.v = toFloat3(cpuCamera.v);
-    params.camera.w = toFloat3(cpuCamera.w);
+    params.camera.u = optix_to_float3(cpuCamera.u);
+    params.camera.v = optix_to_float3(cpuCamera.v);
+    params.camera.w = optix_to_float3(cpuCamera.w);
 
     params.camera.lens_radius = static_cast<float>(cpuCamera.lens_radius);
     params.camera.focus_dist = static_cast<float>(cpuCamera.focus_dist);
 	params.camera.aperture = static_cast<float>(cpuCamera.aperture);
     params.camera.blade_count = cpuCamera.blade_count;
 }
-__host__ __device__ inline float length(const float3& v) {
+__host__ __device__ inline float optix_length(const float3& v) {
     return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
 
-void OptixWrapper::setBackgroundColor(const Vec3& color) {
-    params.background_color = make_float3(color.x, color.y, color.z);
+void OptixWrapper::setWorld(const WorldData& world) {
+    params.world = world;
+    // Sync legacy background color for now (optional, depends on shader)
+    params.background_color = world.color; 
 }
 void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lights) {
     std::vector<LightGPU> gpuLights;
@@ -1080,7 +1076,7 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
     for (const auto& light : lights) {
         LightGPU l = {};
         const Vec3& color = light->color;
-        float intensity = light->intensity * 10;
+        float intensity = light->intensity*5 ;
 
         // Initialize default values for new fields
         l.inner_cone_cos = 1.0f;

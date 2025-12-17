@@ -1,7 +1,7 @@
 ﻿#pragma once
 #include <vector_types.h>
 #include <material_gpu.h>
-#include "AtmosphereProperties.h"
+#include "World.h"
 struct gpuCamera {
     float3 origin;
     float3 lower_left_corner;
@@ -51,7 +51,7 @@ struct RayGenParams {
     float3 background_color;
     OptixTraversableHandle handle;
     GpuMaterial* materials;
-    AtmosphereProperties atmosphere;
+    WorldData world;
     // Yeni parametreler
     int min_samples;             // Minimum örnek sayısı
 	int max_samples;             // Maksimum örnek sayısı

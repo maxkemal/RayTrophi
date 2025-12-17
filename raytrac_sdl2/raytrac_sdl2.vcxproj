@@ -235,6 +235,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
+    <ClInclude Include="source\include\tinyexr.h" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
@@ -246,7 +247,6 @@
     <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h" />
     <ClInclude Include="source\external\imgui\imgui_internal.h" />
     <None Include="source\src\scatter_volume_step.h" />
-    <ClInclude Include="source\include\AtmosphereProperties.h" />
     <None Include="source\src\material_scatter.cuh" />
     <None Include="source\src\vec3_utils.cuh" />
     <None Include="source\src\random_utils.cuh" />
@@ -257,7 +257,6 @@
     <ClInclude Include="source\include\AnimatedObject.h" />
     <ClInclude Include="source\include\AreaLight.h" />
     <ClInclude Include="source\include\AssimpLoader.h" />
-    <ClInclude Include="source\include\AtmosphericEffects.h" />
     <ClInclude Include="source\include\Camera.h" />
     <ClInclude Include="source\include\Dielectric.h" />
     <ClInclude Include="source\include\DiffuseLight.h" />
@@ -297,6 +296,13 @@
     <ClInclude Include="source\include\ColorProcessingParams.h" />
     <ClInclude Include="source\include\MaterialManager.h" />
     <ClInclude Include="source\include\Transform.h" />
+    <ClInclude Include="source\include\World.h" />
+    <!-- Unified Rendering System for CPU/GPU Parity -->
+    <ClInclude Include="source\include\unified_types.h" />
+    <ClInclude Include="source\include\unified_brdf.h" />
+    <ClInclude Include="source\include\unified_light_sampling.h" />
+    <ClInclude Include="source\include\unified_converters.h" />
+    <ClInclude Include="source\include\unified_cpu_adapter.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -305,7 +311,6 @@
     <ClCompile Include="source\src\AABB.cpp" />
     <ClCompile Include="source\src\AreaLight.cpp" />
     <ClCompile Include="source\src\AssimpLoader.cpp" />
-    <ClCompile Include="source\src\AtmosphericEffects.cpp" />
     <ClCompile Include="source\src\Camera.cpp" />
     <ClCompile Include="source\src\Dielectric.cpp" />
     <ClCompile Include="source\src\DirectionalLight.cpp" />
@@ -332,6 +337,7 @@
     <ClCompile Include="source\src\Vec3.cpp" />
     <ClCompile Include="source\src\Vec3SIMD.cpp" />
     <ClCompile Include="source\src\Volumetric.cpp" />
+    <ClCompile Include="source\src\World.cpp" />
     <ClCompile Include="source\src\MaterialManager.cpp" />
     <ClCompile Include="source\external\imgui\imgui.cpp" />
     <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
@@ -339,6 +345,8 @@
     <ClCompile Include="source\external\imgui\imgui_impl_sdlrenderer2.cpp" />
     <ClCompile Include="source\external\imgui\imgui_tables.cpp" />
     <ClCompile Include="source\external\imgui\imgui_widgets.cpp" />
+    <!-- Unified Rendering System -->
+    <ClCompile Include="source\src\unified_converters.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="source\src\raygen.cu">

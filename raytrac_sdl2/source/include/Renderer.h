@@ -50,7 +50,7 @@
 #include "AABB.h"
 #include "Ray.h"
 #include "Hittable.h"
-#include "AtmosphericEffects.h"
+#include "World.h"
 #include "ParallelBVHNode.h"
 #include <OpenImageDenoise/oidn.hpp>
 #include "AnimatedObject.h"
@@ -123,6 +123,7 @@ public:
 
    
     void initializeBuffers(int image_width, int image_height);
+    World world;
     static std::vector<Vec3> normalMapBuffer;
     SDL_PixelFormat* pixelFormat;
     Uint8 Rshift, Gshift, Bshift;
@@ -181,7 +182,7 @@ private:
     // Adaptive sampling için ekstra bufferlar
     std::vector<Vec3> variance_map;
 
-    AtmosphericEffects atmosphericEffects;
+
     SDL_Renderer* sdlRenderer; // SDL_Renderer pointer'ı ekleyin
     std::shared_ptr<Texture> background_texture;
     Vec3 sample_directional_light(const ParallelBVHNode* bvh, const DirectionalLight* light, const HitRecord& rec, const Vec3& light_contribution);
@@ -218,7 +219,7 @@ private:
 
     Vec3 calculate_brdf_mis_single_light(const std::shared_ptr<Light>& light, const HitRecord& rec, const Ray& scattered, const Ray& ray_in);
   
-    Vec3 apply_atmospheric_effects(const Vec3& intensity, float distance, bool is_global);
+
     Vec3 calculate_specular(const Vec3& intensity, const Vec3& normal, const Vec3& to_light, const Vec3& view_direction, float shininess);
  
     Vec3 calculate_diffuse(const Vec3& intensity, float cos_theta, float metallic);

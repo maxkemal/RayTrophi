@@ -42,6 +42,7 @@ public:
      void drawAnimationSettings(UIContext& ctx);  // Deprecated - timeline panel kullanılıyor
      void drawTimelinePanel(UIContext& ctx, float screen_y);  // Yeni timeline panel (Blender tarzı)
      void drawControlsContent(); // New method for controls/help tab
+     void drawWorldContent(UIContext& ctx);
      void draw(UIContext& ctx);
      float panel_alpha = 0.25f; // varsayılan
 private:

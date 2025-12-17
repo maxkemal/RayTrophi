@@ -10,14 +10,15 @@
 #include <scene_ui.h>
 #include "OptixWrapper.h"
 
-// Global atmosphere değişkeni
-AtmosphereProperties g_atmosphere = {
-    0.01f,   // sigma_s → hafif sis
-    0.001f,  // sigma_a → hafif absorption
-    0.0f,    // g → izotropik scatter
-    1.0f,    // base density
-    300.0f   // sıcaklık (örnek: 300 Kelvin - 27°C)
-};
+// Unified rendering system for CPU/GPU parity
+#include "unified_types.h"
+#include "unified_brdf.h"
+#include "unified_light_sampling.h"
+#include "unified_converters.h"
+#include "PrincipledBSDF.h"
+#include "Volumetric.h"
+
+
 
 void Renderer::updatePixel(SDL_Surface* surface, int i, int j, const Vec3& color) {
     Uint32* pixel = static_cast<Uint32*>(surface->pixels) + (surface->h - 1 - j) * surface->pitch / 4 + i;
@@ -615,6 +616,14 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
         if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
             light->direction = finalTransform.transform_vector(Vec3(0, 0, -1)).normalize();
         }
+
+        // Link Nishita Sun to first Directional Light
+        if (light->type() == LightType::Directional) {
+            // Sun direction is opposite to light direction (to the sun vs from the sun)
+            world.setSunDirection(-light->direction);
+            // Optional: Sync intensity or use a multiplier? 
+            // For now just direction is critical for "visibility" (alignment of disk).
+        }
     }
 
     bool cameraHasAnimation = false;
@@ -746,7 +755,8 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // 2. Set Scene Params
             if (scene.camera) optix_gpu->setCameraParams(*scene.camera);
             optix_gpu->setLightParams(scene.lights);
-            optix_gpu->setBackgroundColor(scene.background_color);
+            // optix_gpu->setBackgroundColor(scene.background_color);
+            optix_gpu->setWorld(this->world.getGPUData());
             
             // 3. Reset Cycles-style Accumulation for new frame
             optix_gpu->resetAccumulation();
@@ -964,8 +974,12 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
                 SCENE_LOG_INFO("OptiX light parameters set successfully.");
             }
 
-            optix_gpu_ptr->setBackgroundColor(scene.background_color);
-            SCENE_LOG_INFO("Background color set for OptiX rendering.");
+            // optix_gpu_ptr->setBackgroundColor(scene.background_color);
+            this->world.setMode(WORLD_MODE_COLOR);
+            this->world.setColor(scene.background_color);
+            optix_gpu_ptr->setWorld(this->world.getGPUData());
+            
+            SCENE_LOG_INFO("World environment set for OptiX rendering.");
         }
         catch (std::exception& e)
         {
@@ -1420,8 +1434,8 @@ void Renderer::render_chunk_adaptive(SDL_Surface* surface,
 
         // TEK YER: ColorProcessor her şeyi yapsın → sRGB 0-1 döner
         Vec3 ldr = color_processor.processColor(final_color, i, j);
-        // Gamma 2.2 (Standart sRGB monitör gamması) - Görüntüyü aydınlatır
-        float cpu_gamma = 1.0f / 1.2f;
+        // Gamma 2.2 (Standart sRGB - GPU ile aynı: powf(color, 1.0f / 2.2f))
+        float cpu_gamma = 1.0f / 2.2f;
         uint8_t r = uint8_t(powf(ldr.x, cpu_gamma) * 255.0f + 0.5f);
         uint8_t g = uint8_t(powf(ldr.y, cpu_gamma) * 255.0f + 0.5f);
         uint8_t b = uint8_t(powf(ldr.z, cpu_gamma) * 255.0f + 0.5f);
@@ -1479,8 +1493,8 @@ void Renderer::render_chunk_fixed_sampling(SDL_Surface* surface,
 
         // TEK YER: ColorProcessor her şeyi yapsın → sRGB 0-1 döner
         Vec3 ldr = color_processor.processColor(avg_color, i, j);
-        // Gamma 2.2 (Standart sRGB monitör gamması)
-        float cpu_gamma = 1.0f / 1.2f;
+        // Gamma 2.2 (Standart sRGB - GPU ile aynı: powf(color, 1.0f / 2.2f))
+        float cpu_gamma = 1.0f / 2.2f;
         uint8_t r = uint8_t(powf(ldr.x, cpu_gamma) * 255.0f + 0.5f);
         uint8_t g = uint8_t(powf(ldr.y, cpu_gamma) * 255.0f + 0.5f);
         uint8_t b = uint8_t(powf(ldr.z, cpu_gamma) * 255.0f + 0.5f);
@@ -1519,11 +1533,7 @@ bool intersects_sphere(const Ray& ray, const Vec3& center, float radius) {
     float discriminant = b * b - 4 * a * c;
     return discriminant > 0;
 }
-inline float power_heuristic(float pdf_a, float pdf_b) {
-    float a2 = pdf_a * pdf_a;
-    float b2 = pdf_b * pdf_b;
-    return a2 / (a2 + b2 + 1e-4f);
-}
+
 float Renderer::luminance(const Vec3& color) {
     return 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
 }
@@ -1699,18 +1709,18 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     // --- Shadow ---
     // GPU ile uyumlu shadow bias (eski: 0.0001f -> self-shadowing yapabilir)
-    Ray shadow_ray(hit_point + N * 0.0001f, L);
-    if (bvh->occluded(shadow_ray, 0.0001f, light_distance))
+    Ray shadow_ray(hit_point + N * 0.001f, L);
+    if (bvh->occluded(shadow_ray, 0.001f, light_distance))
         return direct_light;
 
-    float NdotL = std::fmax(Vec3::dot(N, L), 0.00001f);
+    float NdotL = std::fmax(Vec3::dot(N, L), 0.0001f);
 
 
     // --- BRDF Hesabı (Specular + Diffuse) ---
     Vec3 H = (L + V).normalize();
-    float NdotV = std::fmax(Vec3::dot(N, V), 0.00001f);
-    float NdotH = std::fmax(Vec3::dot(N, H), 0.00001f);
-    float VdotH = std::fmax(Vec3::dot(V, H), 0.00001f);
+    float NdotV = std::fmax(Vec3::dot(N, V), 0.0001f);
+    float NdotH = std::fmax(Vec3::dot(N, H), 0.0001f);
+    float VdotH = std::fmax(Vec3::dot(V, H), 0.0001f);
 
     float alpha = max(roughness * roughness, 0.01f);
     PrincipledBSDF psdf;
@@ -1750,79 +1760,223 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     const std::vector<std::shared_ptr<Light>>& lights,
     const Vec3& background_color, int depth, int sample_index) {
-    Vec3 final_color(0, 0, 0);
-    Vec3 throughput(1, 1, 1);
+    
+    // =========================================================================
+    // UNIFIED RAY COLOR - Matches GPU ray_color.cuh exactly
+    // =========================================================================
+    
+    Vec3f color(0.0f);
+    Vec3f throughput(1.0f);
     Ray current_ray = r;
+    
+    int light_count = static_cast<int>(lights.size());
+    
+    // Pre-convert lights to unified format for this ray
+    // Note: In production, this should be done once per frame, not per ray
+    thread_local std::vector<UnifiedLight> unified_lights;
+    if (unified_lights.size() != lights.size()) {
+        unified_lights.clear();
+        unified_lights.reserve(lights.size());
+        for (const auto& light : lights) {
+            unified_lights.push_back(toUnifiedLight(light));
+        }
+    }
 
-    // --- Ray tracing döngüsü ---
     for (int bounce = 0; bounce < render_settings.max_bounces; ++bounce) {
         HitRecord rec;
 
         if (!bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), rec)) {
-            float falloff = (bounce == 0) ? 1.0f : std::pow(0.5f, bounce); // Enerji kaybı
-            final_color += throughput * background_color * falloff;
+            // --- Background contribution (matching GPU exactly) ---
+            // GPU: float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
+            float bg_factor = background_factor(bounce);
+            Vec3 eval_bg = world.evaluate(current_ray.direction);
+            Vec3f bg_contribution = toVec3f(eval_bg) * bg_factor;
+            color += throughput * bg_contribution;
             break;
         }
 
-        // --- Normal harita uygulaması ---
+        // --- Normal map application ---
         apply_normal_map(rec);
-
-        // --- Random light selection for Next Event Estimation ---
-        int light_index = -1;
-        float pdf_light_select = 1.0f;
-        int light_count = static_cast<int>(lights.size());
-
-        if (light_count > 0) {
-             // GPU ile eitleme: Basit rastgele seçim
-             // pick_smart_light yerine simple uniform sample
-            light_index = std::clamp(static_cast<int>(Vec3::random_float() * light_count), 0, light_count - 1);
-            pdf_light_select = 1.0f / light_count; 
+        
+        // --- Ensure correct normal orientation (faceforward) ---
+        Vec3f wo = toVec3f(-current_ray.direction.normalize());
+        Vec3f N = toVec3f(rec.interpolated_normal);
+        Vec3f geom_N = toVec3f(rec.normal);
+        
+        // Faceforward: flip normal if we hit backface
+        if (dot(wo, geom_N) < 0.0f) {
+            N = -N;
+            geom_N = -geom_N;
         }
+        
+        Vec3f hit_pos = toVec3f(rec.point);
 
-        // --- Scatter & Indirect ---
+        // --- Extract material parameters (with texture sampling) ---
+        Vec3f albedo(0.8f);
+        float roughness = 0.5f;
+        float metallic = 0.0f;
+        float opacity = 1.0f;
+        float transmission = 0.0f;
+        Vec3f emission(0.0f);
+        
+        if (rec.material) {
+            auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(rec.material);
+            if (pbsdf) {
+                Vec2 uv(rec.u, rec.v);
+                
+                // Albedo
+                Vec3 alb = pbsdf->getPropertyValue(pbsdf->albedoProperty, uv);
+                albedo = toVec3f(alb).clamp(0.01f, 1.0f);
+                
+                // Roughness (Y channel)
+                Vec3 rough = pbsdf->getPropertyValue(pbsdf->roughnessProperty, uv);
+                roughness = static_cast<float>(rough.y);
+                
+                // Metallic (Z channel)
+                Vec3 metal = pbsdf->getPropertyValue(pbsdf->metallicProperty, uv);
+                metallic = static_cast<float>(metal.z);
+                
+                // Opacity
+                opacity = pbsdf->get_opacity(uv);
+                
+                // Transmission
+                transmission = pbsdf->getTransmission(uv);
+                
+                // Emission
+                Vec3 em = pbsdf->getEmission(uv, Vec3(0.0f));
+                emission = toVec3f(em);
+            }
+        }
+        
+        // --- Add Emission (Volumetric & Surface) ---
+        if (rec.material && rec.material->type() == MaterialType::Volumetric) {
+             auto vol = std::static_pointer_cast<Volumetric>(rec.material);
+             Vec3 vol_emit = vol->getVolumetricEmission(toVec3(hit_pos), current_ray.direction);
+             emission += toVec3f(vol_emit);
+        }
+        
+        color += throughput * emission;
+
+        // --- Scatter ray ---
         Vec3 attenuation;
         Ray scattered;
-        if (!rec.material->scatter(current_ray, rec, attenuation, scattered))
+        if (!rec.material->scatter(current_ray, rec, attenuation, scattered)) {
             break;
+        }
 
-        throughput *= attenuation;
+        Vec3f atten_f = toVec3f(attenuation);
+        throughput *= atten_f;
+        
+        // --- Throughput clamp (matching GPU) ---
+        float max_throughput = throughput.max_component();
+        if (max_throughput > UnifiedConstants::MAX_CONTRIBUTION) {
+            throughput *= (UnifiedConstants::MAX_CONTRIBUTION / max_throughput);
+        }
 
-        // --- Russian Roulette ---
-        if (bounce > 2) { 
-            float max_channel = std::max(throughput.x, std::max(throughput.y, throughput.z));
-            float p = std::clamp(max_channel, 0.0f, 0.98f);
-             if (Vec3::random_float() > p)
+        // --- Russian Roulette (matching GPU exactly) ---
+        // GPU: if (bounce > 2) { p = clamp(p, 0.05f, 0.95f); ... }
+        if (bounce > UnifiedConstants::RR_START_BOUNCE) {
+            float p = russian_roulette_probability(throughput);
+            if (Vec3::random_float() > p) {
                 break;
+            }
             throughput /= p;
-        }
-
-        // --- Emission & Direct Lighting ---
-        Vec3 emitted = rec.material->getEmission(rec.uv, rec.point);
-        
-        Vec3 direct_light(0.0f);
-        if (light_index >= 0) {
-            // EKSİK OLAN: Point Light falloff'u calculate_direct_lighting_single_light içine eklenmeli
-            // O fonksiyonu güncellemeliyiz. Aşağıda güncelleyeceğiz.
-            direct_light = calculate_direct_lighting_single_light(
-                bvh, lights[light_index], rec, rec.interpolated_normal, current_ray);
             
-            // Monte Carlo Estimator: Value / PDF
-            // PDF_select = 1/N. Value / (1/N) = Value * N.
-            direct_light *= static_cast<float>(light_count);
+            // Post-RR clamp (matching GPU)
+            max_throughput = throughput.max_component();
+            if (max_throughput > UnifiedConstants::MAX_CONTRIBUTION) {
+                throughput *= (UnifiedConstants::MAX_CONTRIBUTION / max_throughput);
+            }
+        }
 
-            // GPU Uyumluluğu: Global *10 çarpanı kaldırıldı (sadece point light için gerekli)
-            // direct_light *= 10.0f;
-
-            float transmission = rec.material->getTransmission(rec.uv);
-            direct_light *= (1.0f - transmission);
+        // --- Direct lighting with unified functions ---
+        Vec3f direct_light(0.0f);
+        
+        if (light_count > 0 && transmission < 0.99f) {
+            // Pick light using smart selection (matches GPU pick_smart_light)
+            int light_index = pick_smart_light_unified(
+                unified_lights.data(),
+                light_count,
+                hit_pos,
+                Vec3::random_float()
+            );
+            
+            if (light_index >= 0) {
+                const UnifiedLight& light = unified_lights[light_index];
+                
+                // Sample light direction
+                Vec3f wi;
+                float distance;
+                float light_attenuation;
+                float rand_u = Vec3::random_float();
+                float rand_v = Vec3::random_float();
+                
+                bool valid = sample_light_direction(
+                    light, hit_pos, rand_u, rand_v,
+                    &wi, &distance, &light_attenuation
+                );
+                
+                if (valid) {
+                    float NdotL = dot(N, wi);
+                    
+                    if (NdotL > 0.001f) {
+                        // Shadow test
+                        Vec3 shadow_origin = rec.point + rec.interpolated_normal * UnifiedConstants::SHADOW_BIAS;
+                        Ray shadow_ray(shadow_origin, toVec3(wi));
+                        
+                        if (!bvh->occluded(shadow_ray, UnifiedConstants::SHADOW_BIAS, distance)) {
+                            // Evaluate BRDF using unified function (with transmission handling like GPU)
+                            float brdf_rand = Vec3::random_float();
+                            Vec3f f = evaluate_brdf_unified(N, wo, wi, albedo, roughness, metallic, transmission, brdf_rand);
+                            
+                            // Light PDF
+                            float pdf_light = compute_light_pdf(light, distance, 1.0f / light_count);
+                            
+                            // BRDF PDF for MIS
+                            float pdf_brdf = pdf_brdf_unified(N, wo, wi, roughness);
+                            float pdf_brdf_clamped = std::clamp(pdf_brdf, 0.01f, 5000.0f);
+                            
+                            // MIS weight
+                            float mis_weight = power_heuristic(pdf_light, pdf_brdf_clamped);
+                            
+                            // Light radiance
+                            Vec3f Li = light.color * light.intensity * light_attenuation;
+                            
+                            // Final contribution (matching GPU exactly)
+                            direct_light = f * Li * NdotL * mis_weight * static_cast<float>(light_count);
+                            
+                            // Firefly clamp (matching GPU)
+                            direct_light = clamp_contribution(direct_light, UnifiedConstants::MAX_CONTRIBUTION);
+                        }
+                    }
+                }
+            }
         }
         
-        float opacity = rec.material->get_opacity(rec.uv);
-        final_color += throughput * (emitted + direct_light) * opacity;
+        // NOTE: Transmission handling is now inside evaluate_brdf_unified (GPU-matching)
+
+        // --- Accumulate contribution ---
+        Vec3f total_contribution =  direct_light;
+        
+        // Final contribution clamp
+        float total_lum = total_contribution.luminance();
+        if (total_lum > UnifiedConstants::MAX_CONTRIBUTION * 2.0f) {
+            total_contribution *= (UnifiedConstants::MAX_CONTRIBUTION * 2.0f / total_lum);
+        }
+        
+        color += throughput * total_contribution * opacity;
 
         current_ray = scattered;
     }
-    return final_color;
+    
+    // --- Final NaN/Inf check and clamp (matching GPU) ---
+    // GPU: color.x = isfinite(color.x) ? fminf(fmaxf(color.x, 0.0f), 100.0f) : 0.0f;
+    if (!color.is_valid()) {
+        color = Vec3f(0.0f);
+    }
+    color = color.clamp(0.0f, 100.0f);
+    
+    return toVec3(color);
 }
 
 float Renderer::radical_inverse(unsigned int bits) {

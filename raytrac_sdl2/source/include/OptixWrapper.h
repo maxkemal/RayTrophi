@@ -9,6 +9,7 @@
 #include <Camera.h>
 #include <Light.h>
 #include "params.h"
+#include "World.h"
 #include <AreaLight.h>
 #include <PointLight.h>
 #include <DirectionalLight.h>
@@ -90,8 +91,8 @@ public:
     bool trace(const Ray& ray, HitRecord& rec) const;
     void cleanup();
     void setCameraParams(const Camera& camera);
-   // void setLightParams(const std::shared_ptr<Light>& light);
-    void setBackgroundColor(const Vec3& color);
+    // void setLightParams(const std::shared_ptr<Light>& light);
+    void setWorld(const WorldData& world);
 
     void setLightParams(const std::vector<std::shared_ptr<Light>>& lights);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);

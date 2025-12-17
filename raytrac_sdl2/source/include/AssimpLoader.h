@@ -1137,36 +1137,56 @@ private:
                     dir = dir.normalize();
                 }
 
-
                 aiColor3D col = aiLgt->mColorDiffuse;
-                Vec3 rawIntensity(col.r, col.g, col.b);
-                float power = rawIntensity.length();
-                if (power <= 0.0f) {
-                    SCENE_LOG_WARN("Invalid light power, fallback used for: " + name);
-                    power = 1.0f;
-                    rawIntensity = Vec3(1, 1, 1);
+                
+                // Preserve color tones, extract intensity properly
+                Vec3 color(col.r, col.g, col.b);
+                float maxComp = std::max({col.r, col.g, col.b});
+                float intensity = 1.0f;
+                
+                if (maxComp > 1.0f) {
+                    // HDR: normalize color, keep intensity
+                    intensity = maxComp;
+                    color = color / maxComp;
+                } else if (maxComp > 0.0f) {
+                    // LDR: use as-is
+                    intensity = 1.0f;
+                    // FIX: Convert sRGB color to Linear space for correct rendering
+                    // This prevents colors from looking washed out/dark
+                    color.x = powf(color.x, 2.2f);
+                    color.y = powf(color.y, 2.2f);
+                    color.z = powf(color.z, 2.2f);
+                } else {
+                    SCENE_LOG_WARN("Light has zero color, using white fallback: " + name);
+                    color = Vec3(1.0f);
+                    intensity = 0.1f;
                 }
-
-                Vec3 color = rawIntensity / power;
-                power /= 1000.0f;
+                
+                // Blender exports Watts. 
+                // Dividing by 100 provides a better baseline brightness (100W ~ 1.0 unit)
+                // This fixes the 'too dark' issue compared to Blender
+                intensity /= 1000.0f;
 
                 std::shared_ptr<Light> light = nullptr;
 
                 switch (aiLgt->mType)
                 {
                 case aiLightSource_DIRECTIONAL:
-                    light = std::make_shared<DirectionalLight>(dir, color * power, 10.0f);
+                    // Radius = 0.05f (approx 3 degrees) for reasonable soft shadows
+                    // Previous 10.0f was way too large, causing light direction to be random
+                    light = std::make_shared<DirectionalLight>(dir, color * intensity, 0.05f);
                     light->position = pos;
                     break;
 
                 case aiLightSource_POINT:
-                    light = std::make_shared<PointLight>(pos, color * power, 0.1f);
+                    light = std::make_shared<PointLight>(pos, color * intensity, 0.1f);
                     break;
 
                 case aiLightSource_SPOT:
                 {
                     float angleDeg = aiLgt->mAngleInnerCone * (180.0f / M_PI);
-                    light = std::make_shared<SpotLight>(pos, dir, color * power, angleDeg, 10.0f);
+                    // Radius = 0.0f for Spot lights (hard shadows default)
+                    light = std::make_shared<SpotLight>(pos, dir, color * intensity, angleDeg, 0.0f);
                     break;
                 }
 
@@ -1185,7 +1205,7 @@ private:
                         pos, u, v,
                         aiLgt->mSize.x,
                         aiLgt->mSize.y,
-                        color * power
+                        color * intensity
                     );
                     break;
                 }
@@ -1210,7 +1230,7 @@ private:
                     " | Pos: (" + std::to_string(pos.x) + ", " + std::to_string(pos.y) + ", " + std::to_string(pos.z) + ")" +
                     " | Dir: (" + std::to_string(dir.x) + ", " + std::to_string(dir.y) + ", " + std::to_string(dir.z) + ")" +
                     " | Color: (" + std::to_string(color.x) + ", " + std::to_string(color.y) + ", " + std::to_string(color.z) + ")" +
-                    " | Power: " + std::to_string(power)
+                    " | Intensity: " + std::to_string(intensity)
                 );
             }
         }
@@ -1516,11 +1536,12 @@ private:
            }
 
            if (materialNameStr.find("volume") != std::string::npos || materialNameStr.find("volumetric") != std::string::npos) {
-               Vec3 albedo = Vec3(color.r, color.g, color.b); // Açık mavi hacim için uygun
-               float density = 0.8f;               // Daha düşük yoğunluk genellikle görselde güzel durur
-               float scattering_factor = 0.5f;     // Saçılma etkisi (Heney-Greenstein)
-               float absorption_probability = 0.25f;
-               Vec3 emission = albedo; // Hafif morumsu bir emisyon, daha doğal
+               // TEST SETUP: Smoke Cloud defaults
+               Vec3 albedo = Vec3(0.8f, 0.8f, 0.8f); // Grey smoke
+               float density = 1.0f;                 // Moderate density
+               float scattering_factor = 0.6f;       // Forward scattering
+               float absorption_probability = 0.1f;
+               Vec3 emission = Vec3(0.0f);           // No emission for clearer smoke visualization
 
                // Gürültü oluştur
                auto noise = std::make_shared<Perlin>();
@@ -1529,6 +1550,24 @@ private:
                auto volumetric_material = std::make_shared<Volumetric>(
                    albedo, density, absorption_probability, scattering_factor, emission, noise
                );
+
+               // CRITICAL FIX: Ensure GPU material data is populated to prevent pointers errors
+               auto gpu = std::make_shared<GpuMaterial>();
+                gpu->albedo = make_float3(albedo.x, albedo.y, albedo.z);
+                gpu->emission = make_float3(emission.x, emission.y, emission.z);
+                gpu->roughness = 1.0f;
+                gpu->metallic = 0.0f;
+                gpu->opacity = 0.0f; // Surface invisible
+                gpu->transmission = 1.0f; 
+                gpu->ior = 1.0f;
+                gpu->anisotropic = 1.0f; // FLAG: 1.0 means IS_VOLUMETRIC
+                volumetric_material->gpuMaterial = gpu;
+
+               // Maintain texture bundle alignment
+               if (geometry_data) {
+                   OptixGeometryData::TextureBundle tex_bundle = {};
+                   geometry_data->textures.push_back(tex_bundle);
+               }
 
                return volumetric_material;
            }
@@ -1647,7 +1686,10 @@ private:
     }
     std::shared_ptr<Texture> loadTextureWithCache(const std::string& name, TextureType type)
     {
-        auto it = textureCache.find(name);
+        // Include type in cache key to prevent reusing Diffuse texture for Opacity etc.
+        std::string cacheKey = name + "_" + std::to_string(static_cast<int>(type));
+
+        auto it = textureCache.find(cacheKey);
         if (it != textureCache.end())
             return it->second;
 
@@ -1673,12 +1715,13 @@ private:
             }
         }
 
-        textureCache[name] = tex;
+        textureCache[cacheKey] = tex;
         return tex;
     }
     TextureType convertToTextureType(aiTextureType type) {
         switch (type) {
         case aiTextureType_DIFFUSE: return TextureType::Albedo;
+        case 12: /* aiTextureType_BASE_COLOR */ return TextureType::Albedo;
         case aiTextureType_SPECULAR: return TextureType::Unknown; // genelde linear
         case aiTextureType_EMISSIVE: return TextureType::Emission;
         case aiTextureType_NORMALS: return TextureType::Normal;

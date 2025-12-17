@@ -36,9 +36,6 @@
     <ClInclude Include="source\include\AssimpLoader.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\include\AtmosphericEffects.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\include\Camera.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -153,9 +150,6 @@
     <ClInclude Include="source\include\sbt_record.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\include\AtmosphereProperties.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\external\imgui\imgui.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
@@ -192,6 +186,27 @@
     <ClInclude Include="source\include\Transform.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\World.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_types.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_brdf.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_light_sampling.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_converters.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_cpu_adapter.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\tinyexr.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -206,9 +221,6 @@
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\src\AssimpLoader.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\AtmosphericEffects.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Camera.cpp">
@@ -280,6 +292,9 @@
     <ClCompile Include="source\src\Volumetric.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\World.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\EmbreeBVH.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
@@ -309,6 +324,9 @@
     </ClCompile>
     <ClCompile Include="source\src\MaterialManager.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\unified_converters.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
