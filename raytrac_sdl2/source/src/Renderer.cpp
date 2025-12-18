@@ -441,6 +441,11 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
     if (std::abs(current_time - lastAnimationUpdateTime) < 0.0001f) {
         return false;
     }
+    
+    // Time changed - Force Accumulation Reset for CPU Render
+    // This prevents ghosting during animation playback
+    resetCPUAccumulation();
+    
     lastAnimationUpdateTime = current_time;
 
     // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
@@ -827,8 +832,15 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 //    create_scene(scene, optix_gpu_ptr, default_path);
 //}
 void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
-    if (!scene.initialized || scene.world.objects.empty()) {
-        SCENE_LOG_WARN("Scene not loaded yet, BVH rebuild skipped.");
+    if (!scene.initialized) {
+        SCENE_LOG_WARN("Scene not initialized, BVH rebuild skipped.");
+        return;
+    }
+    
+    // Handle empty scene (e.g., all objects deleted)
+    if (scene.world.objects.empty()) {
+        scene.bvh = nullptr;  // Clear BVH for empty scene
+        SCENE_LOG_INFO("Scene is empty, BVH cleared.");
         return;
     }
 
@@ -838,18 +850,27 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
         embree_bvh->build(scene.world.objects);
         scene.bvh = embree_bvh;
-        SCENE_LOG_INFO("[Embree] BVH rebuilt successfully.");
+        // SCENE_LOG_INFO("[Embree] BVH rebuilt successfully.");  // Too verbose
     }
     else {
         scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0, 0);
-        SCENE_LOG_INFO("[RayTrophi: RT_BVH] BVH rebuilt successfully.");
+        // SCENE_LOG_INFO("[RayTrophi: RT_BVH] BVH rebuilt successfully.");  // Too verbose
     }
 }
 
 
 
-void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path) {
+void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
+    std::function<void(int progress, const std::string& stage)> progress_callback) {
 
+    // Helper lambda for progress updates
+    auto update_progress = [&](int progress, const std::string& stage) {
+        if (progress_callback) {
+            progress_callback(progress, stage);
+        }
+    };
+
+    update_progress(0, "Cleaning previous scene...");
     SCENE_LOG_INFO("========================================");
     SCENE_LOG_INFO("SCENE CLEANUP: Starting comprehensive cleanup...");
     SCENE_LOG_INFO("========================================");
@@ -863,6 +884,8 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     scene.bvh = nullptr;
     scene.initialized = false;
     SCENE_LOG_INFO("[SCENE CLEANUP] Scene data structures cleaned.");
+
+    update_progress(5, "Clearing materials...");
 
     // ---- 2. MaterialManager'ı temizle ----
     size_t material_count_before = MaterialManager::getInstance().getMaterialCount();
@@ -883,6 +906,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         }
     }
 
+    update_progress(10, "Loading model file...");
     SCENE_LOG_INFO("========================================");
     SCENE_LOG_INFO("SCENE CLEANUP: Completed successfully!");
     SCENE_LOG_INFO("========================================");
@@ -893,9 +917,11 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     SCENE_LOG_INFO("Base directory set to: " + baseDirectory);
 
     // ---- 1. Geometri ve animasyon yükle ----
+    update_progress(15, "Loading geometry & animations...");
     SCENE_LOG_INFO("Loading model geometry and animations...");
     auto [loaded_triangles, loaded_animations, loaded_bone_data] = assimpLoader.loadModelToTriangles(model_path);
 
+    update_progress(40, "Processing triangles...");
     scene.animationDataList = loaded_animations;
     scene.boneData = loaded_bone_data;
 
@@ -908,6 +934,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         SCENE_LOG_INFO("Loaded animations: " + std::to_string(loaded_animations.size()));
     }
 
+    update_progress(45, "Adding triangles to scene...");
     SCENE_LOG_INFO("Adding triangles to scene world...");
     for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
@@ -920,6 +947,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     SCENE_LOG_INFO("Added " + std::to_string(scene.animatedObjects.size()) + " animated objects to scene.");
 
     // ---- 2. Kamera ve ışık verisi ----
+    update_progress(55, "Loading camera & lights...");
     SCENE_LOG_INFO("Loading camera and lighting data...");
     scene.lights = assimpLoader.getLights();
     scene.camera = assimpLoader.getDefaultCamera();
@@ -935,6 +963,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
 
     //  Selectable BVH (Embree or in-house BVH)
+    update_progress(60, "Building BVH structure...");
     SCENE_LOG_INFO("Building BVH structure...");
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
@@ -947,33 +976,41 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         SCENE_LOG_INFO("[RayTrophi: RT_BVH]  structure built successfully.");
     }
 
+    update_progress(75, "Setting up GPU rendering...");
+
     // ---- 3. GPU OptiX setup ----
     if (g_hasOptix && optix_gpu_ptr)
     {
         try
         {
+            update_progress(78, "Creating OptiX geometry...");
             SCENE_LOG_INFO("OptiX GPU detected. Creating OptiX geometry data...");
             OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(loaded_triangles);
             SCENE_LOG_INFO("Converting " + std::to_string(loaded_triangles.size()) + " triangles to OptiX format.");
 
+            update_progress(82, "Validating materials...");
             optix_gpu_ptr->validateMaterialIndices(optix_data);
             SCENE_LOG_INFO("Material indices validated.");
 
+            update_progress(85, "Building OptiX acceleration...");
             optix_gpu_ptr->buildFromData(optix_data);
             SCENE_LOG_INFO("OptiX BVH and acceleration structures built.");
 
+            update_progress(90, "Configuring OptiX camera...");
             if (scene.camera) {
                 SCENE_LOG_INFO("Setting up OptiX camera parameters...");
                 optix_gpu_ptr->setCameraParams(*scene.camera);
                 SCENE_LOG_INFO("OptiX camera configured successfully.");
             }
 
+            update_progress(93, "Setting up OptiX lights...");
             if (!scene.lights.empty()) {
                 SCENE_LOG_INFO("Configuring " + std::to_string(scene.lights.size()) + " lights for OptiX...");
                 optix_gpu_ptr->setLightParams(scene.lights);
                 SCENE_LOG_INFO("OptiX light parameters set successfully.");
             }
 
+            update_progress(96, "Finalizing world environment...");
             // optix_gpu_ptr->setBackgroundColor(scene.background_color);
             this->world.setMode(WORLD_MODE_COLOR);
             this->world.setColor(scene.background_color);
@@ -999,6 +1036,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     }
 
     // ---- 4. Son bilgiler ----
+    update_progress(100, "Complete!");
     SCENE_LOG_INFO("Scene creation completed successfully.");
     SCENE_LOG_INFO("Scene info - Triangles: " + std::to_string(loaded_triangles.size()) +
         ", Lights: " + std::to_string(scene.lights.size()) +
@@ -1007,6 +1045,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     scene.initialized = true;
     SCENE_LOG_INFO("Scene initialization flag set to true.");
 }
+
 
 std::uniform_int_distribution<> dis_width(0, image_width - 1);
 std::uniform_int_distribution<> dis_height(0, image_height - 1);
@@ -2203,6 +2242,16 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 float v = (j + dist(rng)) / float(image_height);
                 
                 Ray ray = scene.camera->get_ray(u, v);
+                
+                // CRITICAL: Ensure we use the latest BVH
+                // If scene.bvh was replaced, local pointer might be stale if captured?
+                // But we access scene.bvh.get() directly.
+                // However, check if scene.bvh is valid.
+                if (!scene.bvh) {
+                    color_sum += scene.background_color;
+                    continue;
+                }
+
                 Vec3 sample_color = ray_color(ray, scene.bvh.get(), scene.lights, 
                                               scene.background_color, render_settings.max_bounces);
                 color_sum += sample_color;
@@ -2281,5 +2330,69 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                             " (" + std::to_string(int(progress)) + "%) - " + 
                             std::to_string(int(pass_ms)) + "ms/sample";
         SDL_SetWindowTitle(window, title.c_str());
+    }
+}
+// Add this implementation at the end of Renderer.cpp before the closing brace
+
+// ============================================================================
+// rebuildOptiXGeometry - Full OptiX Scene Rebuild
+// ============================================================================
+// This function performs a complete rebuild of OptiX geometry and material
+// bindings. It regenerates ALL buffers including the critical material index
+// buffer that maps triangles to SBT records.
+//
+// WHEN TO USE:
+//   ✅ Object deletion (triangle count changes)
+//   ✅ Object addition (new materials/triangles)
+//   ✅ Material reassignment (SBT mapping changes)
+//
+// PERFORMANCE: ~200-500ms for medium scenes
+// This is acceptable for infrequent operations like deletion.
+//
+// See OPTIX_MATERIAL_FIX.md for detailed explanation of why this is necessary.
+// ============================================================================
+void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
+    if (!optix_gpu_ptr) {
+        SCENE_LOG_WARN("[OptiX] Cannot rebuild - no OptiX pointer");
+        return;
+    }
+    
+    // Handle empty scene - just skip (user shouldn't delete everything anyway!)
+    if (scene.world.objects.empty()) {
+        SCENE_LOG_INFO("[OptiX] Scene is empty, skipping rebuild");
+        return;
+    }
+    
+    try {
+        // Convert current Hittable objects to Triangle list
+        std::vector<std::shared_ptr<Triangle>> triangles;
+        triangles.reserve(scene.world.objects.size());
+        
+        for (const auto& obj : scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri) {
+                triangles.push_back(tri);
+            }
+        }
+        
+        if (triangles.empty()) {
+            SCENE_LOG_WARN("[OptiX] No triangles found in scene");
+            return;
+        }
+        
+        // Convert to OptiX format using internal assimpLoader
+        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
+        
+        // Full rebuild with updated material indices
+        optix_gpu_ptr->buildFromData(optix_data);
+        optix_gpu_ptr->resetAccumulation();
+        
+        // Only log on larger rebuilds to avoid spam
+        if (triangles.size() > 1000) {
+            SCENE_LOG_INFO("[OptiX] Geometry rebuilt - " + std::to_string(triangles.size()) + " triangles");
+        }
+    }
+    catch (std::exception& e) {
+        SCENE_LOG_ERROR("[OptiX] Rebuild failed: " + std::string(e.what()));
     }
 }

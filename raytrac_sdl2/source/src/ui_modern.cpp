@@ -403,6 +403,26 @@ bool SecondaryButton(const char* label, const ImVec2& size, bool enabled) {
     return clicked && enabled;
 }
 
+bool DangerButton(const char* label, const ImVec2& size, bool enabled) {
+    const auto& theme = ThemeManager::instance().current();
+
+    if (!enabled)
+        ImGui::BeginDisabled();
+
+    ImGui::PushStyleColor(ImGuiCol_Button, theme.colors.error);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ScaleColor(theme.colors.error, 1.2f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ScaleColor(theme.colors.error, 0.8f));
+
+    bool clicked = ImGui::Button(label, size);
+
+    ImGui::PopStyleColor(3);
+
+    if (!enabled)
+        ImGui::EndDisabled();
+
+    return clicked && enabled;
+}
+
 bool SliderWithHelp(const char* label, float* value, float min, float max,
                     const char* tooltip, const char* format) {
     bool changed = ImGui::SliderFloat(label, value, min, max, format);
@@ -524,4 +544,35 @@ bool PanelManager::loadStates(const std::string& filepath) {
     
     return true;
 }
+
+// ============================================================================
+// THEME UI IMPLEMENTATION
+// ============================================================================
+namespace UIWidgets {
+
+void DrawThemeSelector(float& panel_alpha) {
+    // Note: BeginSection is UIWidgets::BeginSection
+    if (BeginSection("Interface / Theme", ImVec4(0.5f, 0.7f, 1.0f, 1.0f))) {
+        
+        auto& themeManager = ThemeManager::instance();
+        auto themeNames = themeManager.getAllThemeNames();
+        int currentThemeIdx = themeManager.currentIndex();
+
+        if (ImGui::Combo("Select Theme", &currentThemeIdx, 
+                         themeNames.data(), static_cast<int>(themeNames.size()))) {
+            themeManager.setTheme(currentThemeIdx);
+            themeManager.applyCurrentTheme(panel_alpha);
+        }
+
+        // Panel Transparency   
+        if (ImGui::SliderFloat("Panel Transparency", &panel_alpha, 0.1f, 1.0f, "%.2f")) {
+            ImGuiStyle& style = ImGui::GetStyle();
+            style.Colors[ImGuiCol_WindowBg].w = panel_alpha;
+        }
+
+        EndSection();
+    }
+}
+
+} // namespace UIWidgets
 

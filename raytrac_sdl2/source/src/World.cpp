@@ -1,4 +1,4 @@
-#include "World.h"
+﻿#include "World.h"
 #include "Texture.h"
 #include "globals.h"
 #include "vec3_utils.cuh" // For math helpers if needed, or just standard math
@@ -170,7 +170,7 @@ World::World() {
     data.nishita.sun_elevation = 45.0f;
     data.nishita.sun_azimuth = 180.0f;
     data.nishita.sun_direction = normalize(make_float3(0.0f, 0.707f, -0.707f));
-    data.nishita.sun_intensity = 50.0f;
+    data.nishita.sun_intensity = 20.0f;
     data.nishita.sun_size = 1.0f;        // Real sun angular size in degrees
     
     // Blender-style atmosphere multipliers (default 1.0)
@@ -212,7 +212,7 @@ World::World() {
     data.nishita.cloud2_height_max = 7000.0f; // 7km (thin layer)
     
     // Cloud Lighting defaults
-    data.nishita.cloud_light_steps = 6;      // Light marching steps (0 = disabled)
+    data.nishita.cloud_light_steps = 0;      // Light marching steps (0 = disabled)
     data.nishita.cloud_shadow_strength = 1.0f;
     data.nishita.cloud_ambient_strength = 1.0f;
     data.nishita.cloud_silver_intensity = 1.0f;
@@ -706,7 +706,7 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
                         // LIGHT MARCHING (Self-Shadowing)
                         // ═══════════════════════════════════════════════════════════
                         float lightTransmittance = 1.0f;
-                        int lightSteps = 4;  // Fewer steps for CPU performance
+                        int lightSteps = 0;  // Fewer steps for CPU performance
                         float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.01f, sunDirVec.y) / (float)lightSteps;
                         lightStepSize = fminf(lightStepSize, 500.0f);
                         

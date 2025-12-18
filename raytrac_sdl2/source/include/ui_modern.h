@@ -122,6 +122,13 @@ namespace UIWidgets {
         const ImVec2& size = ImVec2(0, 0),
         bool enabled = true);
 
+    // Kırmızı/Tehlike butonu
+    bool DangerButton(const char* label,
+        const ImVec2& size = ImVec2(0, 0),
+        bool enabled = true);
+
+    void DrawThemeSelector(float& panel_alpha);
+
     // -------- GİRİŞ ALANLARI --------
 
     // Label + Slider + Tooltip tek satırda

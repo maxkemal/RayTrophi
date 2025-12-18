@@ -1,6 +1,10 @@
 ﻿#include <SDL_main.h> 
 #include <fstream>
 #include <locale>
+#include <chrono>
+#include <vector>
+#include <atomic>
+#include <thread>
 #include <SDL_image.h>
 #include "Renderer.h"
 #include "CPUInfo.h"
@@ -126,6 +130,9 @@ SDL_Renderer* renderer = nullptr;
 SDL_Surface* surface = nullptr;
 SDL_Surface* original_surface = nullptr;
 SDL_Texture* raytrace_texture = nullptr;
+int saved_viewport_width = -1;
+int saved_viewport_height = -1;
+bool saved_window_maximized = false;
 std::mutex surface_mutex;  // Surface erişimi için mutex
 SceneUI ui;
 SceneData scene;
@@ -133,12 +140,14 @@ Renderer ray_renderer(image_width, image_height, 1, 1);
 OptixWrapper optix_gpu;
 ColorProcessor color_processor(image_width, image_height);
 std::string active_model_path;
+SceneSelection scene_selection;  // Scene selection manager
 UIContext ui_ctx{
    scene,
    ray_renderer,
    &optix_gpu,
    color_processor,
    render_settings,
+   scene_selection,  // Add selection reference
    sample_count,
    start_render,
    active_model_path,
@@ -301,6 +310,9 @@ bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
 
     return true;
 }
+
+
+
 void init_RayTrophi_Pro_Dark_Thema()
 {
     ImGuiStyle& style = ImGui::GetStyle();
@@ -429,6 +441,8 @@ int main(int argc, char* argv[]) {
    // ImGui::StyleColorsDark();
 
 	init_RayTrophi_Pro_Dark_Thema();// Özel tema uygula 
+	
+
 
     if (initializeOptixIfAvailable(optix_gpu)) {
         SCENE_LOG_INFO("OptiX is ready!");
@@ -442,10 +456,48 @@ int main(int argc, char* argv[]) {
     
     SDL_Event e;
     while (!quit) {
+
+        // --- AUTO RESIZE FOR FINAL RENDER ---
+        bool is_final_mode = ui_ctx.render_settings.is_final_render_mode;
+        
+        if (is_final_mode) {
+             int target_w = ui_ctx.render_settings.final_render_width;
+             int target_h = ui_ctx.render_settings.final_render_height;
+             
+             // Check if resize needed for final render
+             if (image_width != target_w || image_height != target_h) {
+                 if (saved_viewport_width == -1 && !pending_resolution_change) {
+                     // Save current (viewport) state
+                     saved_viewport_width = image_width;
+                     saved_viewport_height = image_height;
+                     saved_window_maximized = (SDL_GetWindowFlags(window) & SDL_WINDOW_MAXIMIZED);
+                     
+                     // Trigger resize
+                     pending_width = target_w;
+                     pending_height = target_h;
+                     pending_resolution_change = true;
+                     SCENE_LOG_INFO("Switching to Final Render Resolution.");
+                 }
+             }
+        } 
+        else {
+             // If not final mode, but we have a saved state, it means we must restore
+             if (saved_viewport_width != -1) {
+                  if ((image_width != saved_viewport_width || image_height != saved_viewport_height) && !pending_resolution_change) {
+                      pending_width = saved_viewport_width;
+                      pending_height = saved_viewport_height;
+                      pending_resolution_change = true;
+                      SCENE_LOG_INFO("Restoring Viewport Resolution.");
+                  } else if (image_width == saved_viewport_width && image_height == saved_viewport_height) {
+                      saved_viewport_width = -1; // Restoration done
+                  }
+             }
+        }
+        // ------------------------------------
+
         camera_moved = false;
-       // start_render = false;
-       
-       // Update Texture if rendering is happening in background (for visualization)
+
+        // Update Texture if rendering is happening in background (for visualization)
         if (rendering_in_progress && scene.initialized) {
             static auto last_tex_update = std::chrono::steady_clock::now();
             auto now = std::chrono::steady_clock::now();
@@ -460,7 +512,63 @@ int main(int argc, char* argv[]) {
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+        ui_ctx.ray_texture = raytrace_texture;
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // CLOUD NOISE GENERATION POPUP
+        // ═══════════════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════════════
+        // CLOUD NOISE GENERATION POPUP (REMOVED)
+        // ═══════════════════════════════════════════════════════════════════
+        /*
+        Code for manual cloud texture generation removed as per request.
+        The system now uses high-quality procedural generation by default.
+        */
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // SCENE LOADING POPUP
+        // ═══════════════════════════════════════════════════════════════════
+        if (ui.scene_loading.load()) {
+            ImGui::OpenPopup("Loading Scene...");
+            
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(420, 160));
+            
+            if (ImGui::BeginPopupModal("Loading Scene...", nullptr, 
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+                
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Loading 3D Model...");
+                ImGui::Spacing();
+                
+                // Real progress from loading thread
+                int progress = ui.scene_loading_progress.load();
+                float progress_f = progress / 100.0f;
+                
+                // Progress bar with percentage
+                char overlay[32];
+                snprintf(overlay, sizeof(overlay), "%d%%", progress);
+                ImGui::ProgressBar(progress_f, ImVec2(-1, 22), overlay);
+                
+                ImGui::Spacing();
+                
+                // Current stage text
+                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s", ui.scene_loading_stage.c_str());
+                
+                ImGui::EndPopup();
+            }
+        }
+        // Close scene loading popup when done
+        else if (ui.scene_loading_done.load()) {
+            ui.scene_loading_done = false;
+            // Scene loaded, popup will auto-close
+        }
+        
         ui.draw(ui_ctx);
+        ui.handleMouseSelection(ui_ctx); // Process mouse selection events
+        
+        // Scene Hierarchy panel now called inside ui.draw()
         
         // Handle resolution change - SKIP RENDERING THIS FRAME
         if (pending_resolution_change) {
@@ -487,9 +595,16 @@ int main(int argc, char* argv[]) {
             // Change resolution
             image_width = pending_width;
             image_height = pending_height;
-            reset_render_resolution(image_width, image_height);
-            
-            // Reset stop flags and allow rendering
+             reset_render_resolution(image_width, image_height);
+             
+             // Restore Maximize State if returning to saved viewport size
+             if (saved_viewport_width != -1 && image_width == saved_viewport_width && image_height == saved_viewport_height) {
+                 if (saved_window_maximized) {
+                     SDL_MaximizeWindow(window);
+                 }
+             }
+
+             // Reset stop flags and allow rendering
             rendering_stopped_cpu = false;
             rendering_stopped_gpu = false;
             render_settings.is_render_paused = false;
@@ -638,27 +753,28 @@ int main(int argc, char* argv[]) {
             Vec3 right = Vec3::cross(forward, scene.camera->vup).normalize();
             Vec3 up = scene.camera->vup;
 
-            if (key_state[SDL_SCANCODE_W]) {
+            // Arrow Keys for Camera Movement (avoids conflict with G/R/S gizmo shortcuts)
+            if (key_state[SDL_SCANCODE_UP]) {
                 scene.camera->lookfrom += forward * move_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_S]) {
+            if (key_state[SDL_SCANCODE_DOWN]) {
                 scene.camera->lookfrom -= forward * move_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_A]) {
+            if (key_state[SDL_SCANCODE_LEFT]) {
                 scene.camera->lookfrom -= right * move_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_D]) {
+            if (key_state[SDL_SCANCODE_RIGHT]) {
                 scene.camera->lookfrom += right * move_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_E]) {
+            if (key_state[SDL_SCANCODE_PAGEUP]) {
                 scene.camera->lookfrom += up * move_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_Q]) {
+            if (key_state[SDL_SCANCODE_PAGEDOWN]) {
                 scene.camera->lookfrom -= up * move_speed;
                 camera_moved = true;
             }
@@ -812,7 +928,10 @@ int main(int argc, char* argv[]) {
                         // Update progress for UI
                         int prev_samples = render_settings.render_current_samples;
                         render_settings.render_current_samples = optix_gpu.getAccumulatedSamples();
-                        render_settings.render_target_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+                        
+                        int effective_max_samples = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
+                        render_settings.render_target_samples = effective_max_samples > 0 ? effective_max_samples : 100;
+                        
                         render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
                         render_settings.is_rendering_active = !optix_gpu.isAccumulationComplete();
                         
@@ -826,9 +945,9 @@ int main(int argc, char* argv[]) {
                             render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
                         }
                         
-                        // ===== ALWAYS DENOISE WHEN ENABLED =====
-                        // Denoise after every sample - user never sees noisy image
-                        if (ui_ctx.render_settings.use_denoiser && optix_gpu.getAccumulatedSamples() > 0) {
+                        // ===== DENOISE LOGIC =====
+                        bool effective_denoiser = render_settings.is_final_render_mode ? render_settings.render_use_denoiser : render_settings.use_denoiser;
+                        if (effective_denoiser && optix_gpu.getAccumulatedSamples() > 0) {
                             ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
                         }
                     }
@@ -854,7 +973,10 @@ int main(int argc, char* argv[]) {
                         // Update progress for UI
                         int prev_samples = render_settings.render_current_samples;
                         render_settings.render_current_samples = ray_renderer.getCPUAccumulatedSamples();
-                        render_settings.render_target_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+                        
+                        int effective_max_samples = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
+                        render_settings.render_target_samples = effective_max_samples > 0 ? effective_max_samples : 100;
+                        
                         render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
                         render_settings.is_rendering_active = !ray_renderer.isCPUAccumulationComplete();
                         
@@ -868,9 +990,9 @@ int main(int argc, char* argv[]) {
                             render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
                         }
                         
-                        // ===== ALWAYS DENOISE WHEN ENABLED =====
-                        // Denoise after every sample - user never sees noisy image
-                        if (ui_ctx.render_settings.use_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0) {
+                        // ===== DENOISE LOGIC =====
+                        bool effective_denoiser = render_settings.is_final_render_mode ? render_settings.render_use_denoiser : render_settings.use_denoiser;
+                        if (effective_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0) {
                             ray_renderer.applyOIDNDenoising(surface, 0, true,
                                 ui_ctx.render_settings.denoiser_blend_factor);
                         }

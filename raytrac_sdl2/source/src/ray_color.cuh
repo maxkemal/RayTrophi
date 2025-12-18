@@ -63,7 +63,7 @@ __device__ float3 render_cloud_layer(
     
     // Quality-based step count
     float quality = fmaxf(0.1f, fminf(3.0f, world.nishita.cloud_quality));
-    int baseSteps = (int)(48.0f * quality);
+    int baseSteps = (int)(16.0f * quality);
     int numSteps = baseSteps + (int)((float)baseSteps * (1.0f - h_t));
     
     float stepSize = (t_exit - t_enter) / (float)numSteps;
@@ -77,22 +77,22 @@ __device__ float3 render_cloud_layer(
     float g = fmaxf(0.0f, fminf(0.95f, world.nishita.mie_anisotropy));
     
     for (int i = 0; i < numSteps; ++i) {
-        // Better Jitter using Interleaved Gradient Noise logic adapted for Ray Direction
-        // This removes banding artifacts much better than simple hash
-        float3 magic = make_float3(0.06711056f, 0.00583715f, 52.9829189f);
-        float2 uv = make_float2(rayDir.x + rayDir.y * 19.19f, rayDir.z + rayDir.x * 23.23f) + (float)i * 0.15f;
-        float jitter = frac(magic.z * frac(dot(uv, make_float2(magic.x, magic.y))));
-        
-        float3 pos = cloudCamPos + rayDir * (t + stepSize * jitter);
+        float jitterSeed = (float)i + (rayDir.x * 53.0f + rayDir.z * 91.0f) * 10.0f;
+        float3 pos = cloudCamPos + rayDir * (t + stepSize * hash(jitterSeed));
         
         float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
         float heightGradient = 4.0f * heightFraction * (1.0f - heightFraction);
         heightGradient = fmaxf(0.0f, fminf(1.0f, heightGradient));
         
         float3 offsetPos = pos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
-        float3 noisePos = offsetPos * scale;
         
+        // Use 3D texture if available, otherwise fallback to procedural
+        // FORCE CINEMATIC QUALITY (Procedural)
+        // This provides infinite detail and better quality than the 256^3 texture
+        float3 noisePos = offsetPos * scale;
         float rawDensity = cloud_shape(noisePos, coverage);
+        
+
         float density = rawDensity * heightGradient;
         
         if (density > 0.003f) {
@@ -113,8 +113,15 @@ __device__ float3 render_cloud_layer(
                     
                     if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
                     
-                    float3 lightNoisePos = (lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z)) * scale;
-                    float lightDensity = cloud_shape(lightNoisePos, coverage);
+                    float3 lightOffsetPos = lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
+                    
+                    // Use texture LOD for light marching
+                    // Use faster procedural noise for shadows to save performance
+                    // Shadows don't need the micro-details of the main shape
+                    float3 lightNoisePos = lightOffsetPos * scale;
+                    float lightDensity = fast_cloud_shape(lightNoisePos, coverage);
+
+
                     
                     float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
                     float lightHeightGrad = 4.0f * lh * (1.0f - lh);

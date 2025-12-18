@@ -207,6 +207,18 @@
     <ClInclude Include="source\include\tinyexr.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\SceneSelection.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\ImGuizmo.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SceneHistory.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SceneCommand.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -327,6 +339,18 @@
     </ClCompile>
     <ClCompile Include="source\src\unified_converters.cpp">
       <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\SceneSelection.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\ImGuizmo.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\SceneHistory.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\SceneCommand.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
