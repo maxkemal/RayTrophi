@@ -4,6 +4,13 @@
 
 #include "vec3_utils.cuh" // For float3 operators
 
+
+
+
+
+
+
+
 // Helper: fractional part
 __device__ inline float frac(float x) {
     return x - floorf(x);
@@ -70,29 +77,73 @@ __device__ inline float worley(float3 p) {
     return sqrtf(minDist);
 }
 
-// 3D Value Noise
+// Improved 3D hash - better distribution, no visible tiling
+__device__ inline float3 hash3_improved(float3 p) {
+    // Use larger prime multipliers and better mixing
+    p = make_float3(
+        dot(p, make_float3(127.1f, 311.7f, 74.7f)),
+        dot(p, make_float3(269.5f, 183.3f, 246.1f)),
+        dot(p, make_float3(113.5f, 271.9f, 124.6f))
+    );
+    return make_float3(
+        -1.0f + 2.0f * frac(sinf(p.x) * 43758.5453f),
+        -1.0f + 2.0f * frac(sinf(p.y) * 43758.5453f),
+        -1.0f + 2.0f * frac(sinf(p.z) * 43758.5453f)
+    );
+}
+
+// 3D Gradient Noise (Perlin-style) - NO VISIBLE TILING
 __device__ inline float noise3D(float3 x) {
-    float3 p = floor_float3(x);
+    float3 i = floor_float3(x);
     float3 f = frac(x);
     
-    // Smoothstep
-    f = f * f * (make_float3(3.0f, 3.0f, 3.0f) - 2.0f * f);
-
-    float n = p.x + p.y * 57.0f + p.z * 113.0f;
-
+    // Quintic interpolation (smoother than smoothstep)
+    float3 u = f * f * f * (f * (f * 6.0f - make_float3(15.0f, 15.0f, 15.0f)) + make_float3(10.0f, 10.0f, 10.0f));
+    
+    // 8 corner gradients
+    float3 ga = hash3_improved(i + make_float3(0.0f, 0.0f, 0.0f));
+    float3 gb = hash3_improved(i + make_float3(1.0f, 0.0f, 0.0f));
+    float3 gc = hash3_improved(i + make_float3(0.0f, 1.0f, 0.0f));
+    float3 gd = hash3_improved(i + make_float3(1.0f, 1.0f, 0.0f));
+    float3 ge = hash3_improved(i + make_float3(0.0f, 0.0f, 1.0f));
+    float3 gf = hash3_improved(i + make_float3(1.0f, 0.0f, 1.0f));
+    float3 gg = hash3_improved(i + make_float3(0.0f, 1.0f, 1.0f));
+    float3 gh = hash3_improved(i + make_float3(1.0f, 1.0f, 1.0f));
+    
+    // Distance vectors to corners
+    float3 pa = f - make_float3(0.0f, 0.0f, 0.0f);
+    float3 pb = f - make_float3(1.0f, 0.0f, 0.0f);
+    float3 pc = f - make_float3(0.0f, 1.0f, 0.0f);
+    float3 pd = f - make_float3(1.0f, 1.0f, 0.0f);
+    float3 pe = f - make_float3(0.0f, 0.0f, 1.0f);
+    float3 pf = f - make_float3(1.0f, 0.0f, 1.0f);
+    float3 pg = f - make_float3(0.0f, 1.0f, 1.0f);
+    float3 ph = f - make_float3(1.0f, 1.0f, 1.0f);
+    
+    // Dot products
+    float va = dot(ga, pa);
+    float vb = dot(gb, pb);
+    float vc = dot(gc, pc);
+    float vd = dot(gd, pd);
+    float ve = dot(ge, pe);
+    float vf = dot(gf, pf);
+    float vg = dot(gg, pg);
+    float vh = dot(gh, ph);
+    
+    // Trilinear interpolation
     return lerp_custom(
         lerp_custom(
-            lerp_custom(hash(n + 0.0f), hash(n + 1.0f), f.x),
-            lerp_custom(hash(n + 57.0f), hash(n + 58.0f), f.x), 
-            f.y
+            lerp_custom(va, vb, u.x),
+            lerp_custom(vc, vd, u.x),
+            u.y
         ),
         lerp_custom(
-            lerp_custom(hash(n + 113.0f), hash(n + 114.0f), f.x),
-            lerp_custom(hash(n + 170.0f), hash(n + 171.0f), f.x), 
-            f.y
-        ), 
-        f.z
-    );
+            lerp_custom(ve, vf, u.x),
+            lerp_custom(vg, vh, u.x),
+            u.y
+        ),
+        u.z
+    ) * 0.5f + 0.5f;  // Normalize to 0-1 range
 }
 
 // Fractal Brownian Motion (FBM) for cloud detail
@@ -123,22 +174,10 @@ __device__ inline float worleyFbm(float3 p, int octaves) {
 // CINEMATIC CLOUD SHAPE - Maya/Arnold/Houdini quality
 // Uses combination of Perlin FBM + Worley for realistic clouds
 // ═══════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════
-// CINEMATIC CLOUD SHAPE - Maya/Arnold/Houdini quality
-// Uses combination of Perlin FBM + Worley for realistic clouds
-// ═══════════════════════════════════════════════════════════
 __device__ inline float cloud_shape(float3 p, float coverage) {
     // === LAYER 1: Base Shape (Low frequency Perlin) ===
     // This defines the overall cloud mass
     float baseShape = fbm(p * 0.8f, 4);
-    
-    // OPTIMIZATION: Early Exit / Cheap Check
-    // If the base shape is too thin, don't bother calculating expensive Worley noise
-    // The threshold logic matches the final density calculation below
-    float threshold = (1.0f - coverage) * 0.55f;
-    if (baseShape < threshold + 0.01f) {
-        return 0.0f;
-    }
     
     // === LAYER 2: Worley Cellular Structure ===
     // Creates the characteristic "puffy" cloud look
@@ -161,6 +200,7 @@ __device__ inline float cloud_shape(float3 p, float coverage) {
     
     // === COVERAGE REMAP ===
     // Smooth threshold based on coverage
+    float threshold = (1.0f - coverage) * 0.55f;
     float density = fmaxf(0.0f, combined - threshold);
     
     // === SOFT EDGE FALLOFF ===
@@ -174,6 +214,45 @@ __device__ inline float cloud_shape(float3 p, float coverage) {
     density *= 1.5f;
     
     return density;
+}
+
+// ═══════════════════════════════════════════════════════════
+// FAST CLOUD SHAPE - Optimized for performance
+// Uses fewer octaves for ~5x faster calculation
+// ═══════════════════════════════════════════════════════════
+__device__ inline float fast_cloud_shape(float3 p, float coverage) {
+    // Simplified: Only 2 octave FBM + single Worley
+    float baseShape = fbm(p * 0.8f, 2);  // 2 octaves instead of 4
+    float worleyBase = 1.0f - worley(p * 1.2f) * 0.7f;
+    
+    // Simple detail (only 2 octaves)
+    float detail = fbm(p * 4.0f, 2) * 0.2f;
+    
+    float combined = baseShape * worleyBase - detail;
+    combined = fmaxf(0.0f, combined);
+    
+    // Coverage threshold
+    float threshold = (1.0f - coverage) * 0.5f;
+    float density = fmaxf(0.0f, combined - threshold);
+    
+    // Soft edge
+    density *= fminf(1.0f, density * 4.0f);
+    
+    return density * 1.5f;
+}
+
+// ═══════════════════════════════════════════════════════════
+// LOD CLOUD SHAPE - For light marching (lower quality OK)
+// ═══════════════════════════════════════════════════════════
+__device__ inline float cloud_shape_lod(float3 p, float coverage) {
+    // Ultra-simplified: Just 1 octave FBM + hash
+    float baseShape = noise3D(p * 0.8f);
+    float detail = noise3D(p * 3.0f) * 0.3f;
+    
+    float combined = baseShape - detail;
+    float threshold = (1.0f - coverage) * 0.4f;
+    
+    return fmaxf(0.0f, (combined - threshold) * 1.5f);
 }
 
 // ═══════════════════════════════════════════════════════════

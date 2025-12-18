@@ -95,6 +95,8 @@ struct WorldData {
     // Camera position for volumetric clouds (updated every frame)
     float camera_y;  // Camera Y position in world space
 
+
+
     // Volume (Placeholder for later)
     float volume_density;
     float volume_anisotropy;

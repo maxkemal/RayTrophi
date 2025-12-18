@@ -1,12 +1,20 @@
 ﻿#include "scene_ui.h"
 #include "ui_modern.h"
 #include "imgui.h"
+#include "ImGuizmo.h"  // Transform gizmo
 #include <string>
 #include "scene_data.h"
+#include "ParallelBVHNode.h"
+#include "Triangle.h"  // For object hierarchy
+#include "PrincipledBSDF.h" // For material editing
+#include "AssimpLoader.h"  // For scene rebuild after object changes
+#include "SceneCommand.h"  // For undo/redo
+#include <map>  // For mesh grouping
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>  // SHBrowseForFolder için
 #include <string>
+
 #include <chrono>  // Playback timing için
 #include <filesystem>  // Frame dosyalarını kontrol için
 
@@ -17,7 +25,7 @@ static int aspect_h = 9;
 static bool modelLoaded = false;
 static bool loadFeedback = false; // geçici hata geri bildirimi
 static float feedbackTimer = 0.0f;
-bool show_animation_panel = true; // Default closed as requested
+bool show_animation_panel = false; // Default closed as requested
 
 // Not: ScaleColor ve HelpMarker artık UIWidgets namespace'inde tanımlı
 
@@ -112,8 +120,8 @@ void SceneUI::ClampWindowToDisplay()
     }
 }
 
-// Timeline Panel - Blender tarzı ayrı panel (en altta)
-void SceneUI::drawTimelinePanel(UIContext& ctx, float screen_y)
+// Timeline Panel - Embedded Content
+void SceneUI::drawTimelineContent(UIContext& ctx)
 {
     static int start_frame = 0;
     static int end_frame = 100;
@@ -122,33 +130,22 @@ void SceneUI::drawTimelinePanel(UIContext& ctx, float screen_y)
     static int playback_frame = 0;
     static auto last_frame_time = std::chrono::steady_clock::now();
     
-    // Timeline panelini en altta göster
-    float timeline_height = 140.0f;
-    ImGui::SetNextWindowPos(ImVec2(0, screen_y - timeline_height), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, timeline_height), ImGuiCond_Always);
-    
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | 
-                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse;
-   
-    ImGui::Begin("##Timeline", nullptr, flags);
-  
-    
+    // NOT: Window creation code moved out to allow embedding
+
     if (!ctx.scene.animationDataList.empty()) {
         auto& anim = ctx.scene.animationDataList[0];
         
-        // Detect if we switched to a different animation (or first load) by checking source limits
+        // Detect if we switched to a different animation
         static int cached_source_start = -1;
         static int cached_source_end = -1;
 
-        // If the source (file) limits differ from what we have cached, it means a new file/anim was loaded.
-        // We should reset the UI selection to the full range of this new animation.
         if (anim.startFrame != cached_source_start || anim.endFrame != cached_source_end) {
             frame_range_initialized = false;
             cached_source_start = anim.startFrame;
             cached_source_end = anim.endFrame;
         }
 
-        // Initialize or Reset defaults
+        // Initialize defaults
         if (!frame_range_initialized) {
             start_frame = anim.startFrame;
             end_frame = anim.endFrame;
@@ -179,181 +176,87 @@ void SceneUI::drawTimelinePanel(UIContext& ctx, float screen_y)
             ctx.render_settings.animation_end_frame = end_frame;
         }
         
+        // Settings Group
         ImGui::SameLine();
-        ImGui::Text("|");
+        ImGui::TextDisabled("|");
         ImGui::SameLine();
         
-        ImGui::PushItemWidth(80);
+        ImGui::PushItemWidth(100);
         ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);
         ImGui::PopItemWidth();
         
         ImGui::SameLine();
         ImGui::TextDisabled("(%d frames)", total_frames);
         
-        // --- ORTA SATIR: Playback Controls (Blender tarzı) ---
+        // --- ORTA SATIR: Playback Controls ---
         ImGui::Spacing();
         
-        // Play/Pause/Stop butonları
-        // if (is_rendering) ImGui::BeginDisabled(); // Removed to allow stopping during playback
-        
-        if (ImGui::Button(is_playing ? "||" : "|>", ImVec2(30, 25))) {
+        // Play/Pause
+        if (UIWidgets::SecondaryButton(is_playing ? "||" : "|>", ImVec2(40, 24))) {
             is_playing = !is_playing;
             if (is_playing) {
                 last_frame_time = std::chrono::steady_clock::now();
             }
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip(is_playing ? "Pause" : "Play");
-        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(is_playing ? "Pause" : "Play");
         
         ImGui::SameLine();
-        if (ImGui::Button("[]", ImVec2(30, 25))) {
+        // Stop
+        if (UIWidgets::SecondaryButton("[]", ImVec2(40, 24))) {
             is_playing = false;
             playback_frame = start_frame;
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Stop");
-        }
-        
-        // if (is_rendering) ImGui::EndDisabled();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop & Reset");
         
         ImGui::SameLine();
-        ImGui::Text("|");
+        ImGui::TextDisabled("|");
         ImGui::SameLine();
         
-        // Current frame display
+        // Scrubbing / Current Frame
+        ImGui::AlignTextToFramePadding();
         ImGui::Text("Frame:");
         ImGui::SameLine();
-        ImGui::PushItemWidth(60);
+        
+        ImGui::PushItemWidth(80);
         if (ImGui::InputInt("##CurrentFrame", &playback_frame, 0, 0)) {
             playback_frame = std::clamp(playback_frame, start_frame, end_frame);
         }
         ImGui::PopItemWidth();
         
+        // Timeline Slider (Scrubber)
+        ImGui::SameLine();
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 10);
+        if (ImGui::SliderInt("##Scrubber", &playback_frame, start_frame, end_frame, "")) {
+             // Just scrubber
+        }
+        ImGui::PopItemWidth();
         
-        // Playback logic - sadece state güncelleme
+        // Logic Update
         if (is_playing && !is_rendering) {
             auto now = std::chrono::steady_clock::now();
             float elapsed = std::chrono::duration<float>(now - last_frame_time).count();
-            float frame_duration = 1.0f / ctx.render_settings.animation_fps;
+            float frame_duration = 1.0f / (float)ctx.render_settings.animation_fps;
             
             if (elapsed >= frame_duration) {
                 playback_frame++;
-                if (playback_frame > end_frame) {
-                    playback_frame = start_frame; // Reset to start
-                    is_playing = false; // Stop playback
-                }
+                if (playback_frame > end_frame) playback_frame = start_frame;
                 last_frame_time = now;
             }
         }
         
-        // Playback state'i RenderSettings'e yaz (Main.cpp okuyacak)
+        // Store user state
         ctx.render_settings.animation_is_playing = is_playing;
         ctx.render_settings.animation_playback_frame = playback_frame;
-        
-        ImGui::SameLine();
-        ImGui::Dummy(ImVec2(20, 0));
-        ImGui::SameLine();
-        
-        // Output folder (Auto-generated)
-        ImGui::Text("Output: Auto-generated/render_animation");
-
-        
-        // --- TIMELINE SCRUBBER BAR (Blender tarzı) ---
-        ImGui::Spacing();
-        
-        // Render progress veya playback progress
-        int current_display_frame = is_rendering ? ctx.render_settings.animation_current_frame : playback_frame;
-        float scrubber_progress = (float)(current_display_frame - start_frame) / (float)total_frames;
-        
-       
-        ImGui::PushItemWidth(-1);
-        if (ImGui::SliderInt("##Scrubber", &current_display_frame, start_frame, end_frame, "")) {
-            if (!is_rendering) {
-                playback_frame = current_display_frame;
-            }
-        }
-        ImGui::PopItemWidth();      
-        
-        // Scrubber üzerinde frame numarası ve durum göster
-        ImVec2 scrubber_min = ImGui::GetItemRectMin();
-        ImVec2 scrubber_max = ImGui::GetItemRectMax();
-        ImVec2 scrubber_size = ImVec2(scrubber_max.x - scrubber_min.x, scrubber_max.y - scrubber_min.y);
-        
-        char frame_label[64];
-        if (is_rendering) {
-            snprintf(frame_label, sizeof(frame_label), "Rendering: %d / %d", current_display_frame, end_frame);
-        } else if (is_playing) {
-            snprintf(frame_label, sizeof(frame_label), "Playing: %d", current_display_frame);
-        } else {
-            snprintf(frame_label, sizeof(frame_label), "Frame: %d", current_display_frame);
-        }
-        
-        ImVec2 text_size = ImGui::CalcTextSize(frame_label);
-        ImVec2 text_pos = ImVec2(
-            scrubber_min.x + (scrubber_size.x - text_size.x) * 0.5f,
-            scrubber_min.y + (scrubber_size.y - text_size.y) * 0.5f
-        );
-        
-        ImGui::GetWindowDrawList()->AddText(text_pos, IM_COL32(255, 255, 255, 200), frame_label);
-        
-        // --- ALT SATIR: Render Butonları ---
-        ImGui::Spacing();
-        
-        if (is_rendering) ImGui::BeginDisabled();
-        
-        if (ImGui::Button("Render Animation", ImVec2(130, 22))) {
-            ctx.render_settings.start_animation_render = true;
-            ctx.start_render = true;
-            is_playing = false; // Playback'i durdur
-            SCENE_LOG_INFO("Starting animation render...");
-        }
-        
-        if (is_rendering) ImGui::EndDisabled();
-        
-        ImGui::SameLine();
-        
-        if (!is_rendering) ImGui::BeginDisabled();
-        
-        if (ImGui::Button("Stop Render", ImVec2(90, 22))) {
-            rendering_stopped_cpu = true;
-            rendering_stopped_gpu = true;
-            SCENE_LOG_WARN("Stop requested by user.");
-        }
-        
-        if (!is_rendering) ImGui::EndDisabled();
-        
-        // Frame sayısı bilgisi
-        if (!ctx.render_settings.animation_output_folder.empty()) {
-            ImGui::SameLine();
-            ImGui::Dummy(ImVec2(10, 0));
-            ImGui::SameLine();
-            
-            // Render edilmiş frame sayısını say
-            int rendered_count = 0;
-            for (int f = start_frame; f <= end_frame; f++) {
-                char check_path[512];
-                snprintf(check_path, sizeof(check_path), "%s/frame_%04d.png", 
-                        ctx.render_settings.animation_output_folder.c_str(), f);
-                if (std::filesystem::exists(check_path)) {
-                    rendered_count++;
-                }
-            }
-            
-            if (rendered_count > 0) {
-                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), 
-                    "%d/%d frames rendered", rendered_count, total_frames);
-            } else {
-                ImGui::TextDisabled("No frames rendered yet");
-            }
-        }
+        ctx.render_settings.animation_current_frame = playback_frame; // For renderer preview
         
     } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "No animation data loaded.");
-        frame_range_initialized = false;
+        ImGui::TextColored(ImVec4(1,1,0,1), "No animation data found in scene.");
     }
-    
-    ImGui::End();
+}
+
+// Wrapper for compatibility (if needed) but essentially deprecated as a window creator
+void SceneUI::drawTimelinePanel(UIContext& ctx, float screen_y) {
+    drawTimelineContent(ctx);
 }
 
 // Eski drawAnimationSettings metodunu kaldırdık, artık kullanılmıyor
@@ -448,26 +351,7 @@ void SceneUI::drawLogPanelEmbedded()
 }
 
 void SceneUI::drawThemeSelector() {
-    if (UIWidgets::BeginSection("Interface / Theme", ImVec4(0.5f, 0.7f, 1.0f, 1.0f))) {
-        
-        auto& themeManager = ThemeManager::instance();
-        auto themeNames = themeManager.getAllThemeNames();
-        int currentThemeIdx = themeManager.currentIndex();
-
-        if (ImGui::Combo("Select Theme", &currentThemeIdx, 
-                         themeNames.data(), static_cast<int>(themeNames.size()))) {
-            themeManager.setTheme(currentThemeIdx);
-            themeManager.applyCurrentTheme(panel_alpha);
-        }
-
-        // Panel Transparency   
-        if (ImGui::SliderFloat("Panel Transparency", &panel_alpha, 0.1f, 1.0f, "%.2f")) {
-            ImGuiStyle& style = ImGui::GetStyle();
-            style.Colors[ImGuiCol_WindowBg].w = panel_alpha;
-        }
-
-        UIWidgets::EndSection();
-    }
+    UIWidgets::DrawThemeSelector(panel_alpha);
 }
 void SceneUI::drawResolutionPanel()
 {
@@ -1101,7 +985,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.cloud_height_min = 500.0f;
                         cloudParams.cloud_height_max = 2000.0f;
                         cloudParams.cloud_scale = 2.0f;
-                        cloudParams.cloud_coverage = 0.6f;
+                        cloudParams.cloud_coverage = 0.88f;
                         cloudParams.cloud_density = 1.2f;
                         cloudParamsChanged = true;
                         break;
@@ -1117,7 +1001,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.cloud_height_min = 500.0f;
                         cloudParams.cloud_height_max = 10000.0f;
                         cloudParams.cloud_scale = 5.0f;
-                        cloudParams.cloud_coverage = 0.7f;
+                        cloudParams.cloud_coverage = 0.9f;
                         cloudParams.cloud_density = 4.0f;
                         cloudParamsChanged = true;
                         break;
@@ -1125,7 +1009,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         cloudParams.cloud_height_min = 0.0f;
                         cloudParams.cloud_height_max = 200.0f;
                         cloudParams.cloud_scale = 0.3f;
-                        cloudParams.cloud_coverage = 0.8f;
+                        cloudParams.cloud_coverage = 0.9f;
                         cloudParams.cloud_density = 3.0f;
                         cloudParamsChanged = true;
                         break;
@@ -1346,597 +1230,759 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     }
 }
 
+
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 {
-    // Dinamik yükseklik hesabı - Timeline açıksa yer aç
-    extern bool show_animation_panel;
-    float bottom_margin = 20.0f; 
-    if (show_animation_panel && ctx.scene.initialized) {
-        bottom_margin = 160.0f; // Timeline height (140) + padding
-    }
+    // Dinamik yükseklik hesabı
+    extern bool show_animation_panel; 
+    // show_scene_log is member
+    
+    bool bottom_visible = show_animation_panel || show_scene_log;
+    float bottom_margin = bottom_visible ? (200.0f + 24.0f) : 24.0f; // Panel(200) + StatusBar(24)
 
-    // Maksimum yükseklik constraint'i ekle
+    float menu_height = 19.0f; 
+    float target_height = screen_y - menu_height - bottom_margin;
+
+    // Panel ayarları
+    // Lock Height to target_height (MinY = MaxY), allow Width resize (300-800)
     ImGui::SetNextWindowSizeConstraints(
-        ImVec2(300, 200),                 // Min size
-        ImVec2(FLT_MAX, screen_y - bottom_margin) // Max height
+        ImVec2(300, target_height),                 
+        ImVec2(800, target_height) 
     );
 
-    ImGui::SetNextWindowSize(ImVec2(400, screen_y - 20), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowPos(ImVec2(1040, 20), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Properties", nullptr);
-
-    if (ImGui::BeginTabBar("MainPropertiesTabs"))
-    {
-        if (ImGui::BeginTabItem("System")) {
-            drawThemeSelector();
-            drawResolutionPanel();
-
-            if (UIWidgets::BeginSection("Panels", ImVec4(0.6f, 0.4f, 0.7f, 1.0f))) {
-                extern bool show_animation_panel; // Defined at file scope
-                ImGui::Checkbox("Show Animation Pnl", &show_animation_panel);
-                UIWidgets::HelpMarker("Show/Hide the bottom timeline panel");
-                UIWidgets::EndSection();
-            }
-
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Render")) {
-    UIWidgets::ColoredHeader("Model & Scene", ImVec4(1.0f, 0.8f, 0.6f, 1.0f));
-    bool disabled = scene_loading.load();
-    if (disabled)
-        ImGui::BeginDisabled();
-
-    // Model yüklenmiş mi?
-    bool loaded = (ctx.scene.initialized);
-    const char* label = loaded ? "Loaded" : "Load Model";
-
-    // Modern StateButton kullan
-    if (UIWidgets::StateButton(label, loaded, 
-                                ImVec4(0.3f, 1.0f, 0.3f, 1.0f),  // Aktif: yeşil
-                                ImVec4(1.0f, 0.3f, 0.3f, 1.0f),  // Pasif: kırmızı
-                                ImVec2(100, 0)))
-    {
-#ifdef _WIN32
-        std::string file = openFileDialogW(
-            L"3D Files\0*.gltf;*.glb;*.fbx\0All Files\0*.*\0"
-        );
-
-        if (!file.empty()) {
-            // Render işlemleri devam ediyorsa durdur
-            rendering_stopped_cpu = true;
-            rendering_stopped_gpu = true;
-            
-            scene_loading = true;
-            scene_loading_done = false;
-            active_model_path = file;
-
-            std::thread loader_thread([this, file, &ctx]() {
-                // Wait for render thread to fully stop (max 2 seconds)
-                int wait_count = 0;
-                while (rendering_in_progress && wait_count < 20) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    wait_count++;
-                }
-
-                SCENE_LOG_INFO("Starting async scene load...");
-                ctx.scene.clear();
-                ctx.renderer.create_scene(ctx.scene, ctx.optix_gpu_ptr, file);
-                if (ctx.scene.camera)
-                    ctx.scene.camera->update_camera_vectors();
-                ctx.render_settings.start_animation_render = false;
-
-                SCENE_LOG_INFO("Scene loaded successfully.");
-                ctx.start_render = true;
-                scene_loading = false;
-                scene_loading_done = true;
-            });
-
-            loader_thread.detach();
-        }
-#endif
-    }
-
-    if (disabled)
-        ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::TextWrapped("Model: %s", active_model_path.c_str());
+    // LEFT SIDE DOCKING
+    ImGuiIO& io = ImGui::GetIO();
     
-    UIWidgets::Divider();
-    ImGui::PushItemWidth(180);
-    UIWidgets::ColoredHeader("Render Engine", ImVec4(1.0f, 0.8f, 0.6f, 1.0f));
+    // Position at (0, menu_height) -> TOP LEFT
+    ImGui::SetNextWindowPos(ImVec2(0, menu_height), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(side_panel_width, target_height), ImGuiCond_FirstUseEver);
 
+    // Remove NoResize flag
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-    if (ctx.scene.initialized) {
-        // --- GPU Section ---
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1), "GPU (OptiX)");
-        bool prev_use_optix = ctx.render_settings.use_optix;
-        if (!g_hasOptix) {
-            ImGui::BeginDisabled();
-            ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "(No RTX GPU detected)");
-            ImGui::EndDisabled();
-        }
-        else if (ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix)) {
-            if (ctx.render_settings.use_optix != prev_use_optix) {
-                SCENE_LOG_INFO(ctx.render_settings.use_optix ? "OptiX enabled" : "OptiX disabled");
-            }
-        }
-        ImGui::SameLine();
-        UIWidgets::HelpMarker("Enables GPU acceleration via NVIDIA OptiX. Requires an RTX-class GPU.");
+    if (ImGui::Begin("Properties", nullptr, flags))
+    {
+        // Update width if user resized
+        side_panel_width = ImGui::GetWindowWidth();
 
-        // --- Denoiser Section ---
-        ImGui::Separator();
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.6f, 1), "Denoiser");
-        bool prev_use_denoiser = ctx.render_settings.use_denoiser;
-        if (ImGui::Checkbox("Use Denoiser", &ctx.render_settings.use_denoiser)) {
-            if (ctx.render_settings.use_denoiser != prev_use_denoiser) {
-                SCENE_LOG_INFO(ctx.render_settings.use_denoiser ? "Denoiser enabled" : "Denoiser disabled");
-            }
-        }
-        ImGui::SameLine();
-        UIWidgets::HelpMarker("Applies denoising to reduce noise after rendering. Based on Intel OIDN.");
-        if (ctx.render_settings.use_denoiser) {
-            ImGui::SliderFloat("Denoiser Blend", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f, "%.2f");
-            ImGui::SameLine();
-            UIWidgets::HelpMarker("Blends the denoised result with the original. 1 = fully denoised, 0 = original image.");
-        }
-        // --- CPU Section ---
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "CPU (BVH)");
-        const char* bvh_options[] = { "Embree", "RT_BVH (RayTrophi)" };
-        int current_bvh = ctx.render_settings.UI_use_embree ? 0 : 1;
+        if (ImGui::BeginTabBar("MainPropertiesTabs"))
+        {
+            // -------------------------------------------------------------
+            // TAB: RENDER (Render Controls & Settings)
+            // -------------------------------------------------------------
 
-        bool hovered = false;
+            if (ImGui::BeginTabItem("Render")) {
+                
+                UIWidgets::ColoredHeader("Model & Scene", ImVec4(1.0f, 0.8f, 0.6f, 1.0f));
+                                
+                // LOAD MODEL BUTTON & STATUS
+                bool disabled = scene_loading.load();
+                if (disabled) ImGui::BeginDisabled();
 
-        ImGui::PushID("BVHCombo");
-        if (ImGui::BeginCombo("##BVHType", bvh_options[current_bvh])) {
-            for (int n = 0; n < IM_ARRAYSIZE(bvh_options); n++) {
-                bool is_selected = (current_bvh == n);
-                if (ImGui::Selectable(bvh_options[n], is_selected)) {
-                    current_bvh = n;
-                    ctx.render_settings.UI_use_embree = (current_bvh == 0);
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                bool loaded = (ctx.scene.initialized);
+                const char* label = loaded ? "Loaded" : "Load Model";
+
+                if (UIWidgets::StateButton(label, loaded,
+                    ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
+                    ImVec4(1.0f, 0.3f, 0.3f, 1.0f),
+                    ImVec2(100, 0)))
+                {
+#ifdef _WIN32
+                    std::string file = openFileDialogW(L"3D Files\0*.gltf;*.glb;*.fbx\0All Files\0*.*\0");
+                    if (!file.empty()) {
+                        // Stop current render
+                        rendering_stopped_cpu = true;
+                        rendering_stopped_gpu = true;
+                        
+                        // Start Async Load
+                        scene_loading = true;
+                        scene_loading_done = false;
+                        scene_loading_progress = 0;
+                        scene_loading_stage = "Preparing...";
+                        active_model_path = file;
+
+                        std::thread loader_thread([this, file, &ctx]() {
+                            int wait = 0;
+                            while(rendering_in_progress && wait++ < 20) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                            
+                            ctx.scene.clear();
+                            ctx.renderer.create_scene(ctx.scene, ctx.optix_gpu_ptr, file,
+                                [this](int p, const std::string& s) { scene_loading_progress = p; scene_loading_stage = s; });
+
+                            if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
+                            ctx.start_render = true;
+                            scene_loading = false;
+                            scene_loading_done = true;
+                            focus_scene_edit_tab = true; // Auto-focus Scene Edit after load
+                        });
+                        loader_thread.detach();
+                    }
+#endif
                 }
-                if (is_selected)
-                    ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-        hovered = ImGui::IsItemHovered();
-        ImGui::PopID();
-
-        // Warning badge for RT_BVH
-        if (!ctx.render_settings.UI_use_embree) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(1.0f, 0.15f, 0.15f, 1.0f),
-                "Experimental — Heavy Performance Cost");
-        }
-
-        // Tooltip
-        if (hovered) {
-            ImGui::BeginTooltip();
-            if (ctx.render_settings.UI_use_embree) {
-                ImGui::TextUnformatted(
-                    "Intel Embree BVH backend\n"
-                    "Stable, production-proven acceleration structure with "
-                    "advanced CPU optimizations.\n"
-                    "RayTrophi BVH (RT_BVH)\n"
-                    "Experimental high-performance BVH design still under active development.\n"
-                    "Currently lacks several optimizations (SIMD, wide nodes, memory compaction).\n"
-                    "Rebuilds and traversal can be significantly slower on complex scenes.\n"
-                    "Best suited for internal testing and research iterations."
-                );
-            }
-            else {
-                ImGui::TextUnformatted(
-                    "RayTrophi BVH (RT_BVH)\n"
-                    "Experimental high-performance BVH design still under active development.\n"
-                    "Currently lacks several optimizations (SIMD, wide nodes, memory compaction).\n"
-                    "Rebuilds and traversal can be significantly slower on complex scenes.\n"
-                    "Best suited for internal testing and research iterations."
-                );
-            }
-            ImGui::EndTooltip();
-        }
-
-
-        // ============ QUALITY PRESET ============
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.4f, 1), "Quality Preset");
-        
-        const char* preset_names[] = { "Preview", "Production", "Cinematic" };
-        int current_preset = static_cast<int>(ctx.render_settings.quality_preset);
-        
-        static bool show_resolution_popup = false;
-        static int suggested_width = 0;
-        static int suggested_height = 0;
-        static std::string preset_name_for_popup;
-        
-        ImGui::PushItemWidth(180);
-        if (ImGui::Combo("##QualityPreset", &current_preset, preset_names, IM_ARRAYSIZE(preset_names))) {
-            ctx.render_settings.quality_preset = static_cast<QualityPreset>(current_preset);
-            
-            // Reset render time tracking
-            ctx.render_settings.render_elapsed_seconds = 0.0f;
-            ctx.render_settings.render_estimated_remaining = 0.0f;
-            ctx.render_settings.avg_sample_time_ms = 0.0f;
-            
-            // Apply preset settings
-            switch (ctx.render_settings.quality_preset) {
-                case QualityPreset::Preview:
-                    ctx.render_settings.max_samples = 32;
-                    ctx.render_settings.max_bounces = 4;
-                    ctx.render_settings.use_denoiser = true;
-                    ctx.render_settings.denoiser_blend_factor = 0.9f;
-                    suggested_width = 1280; suggested_height = 720;
-                    preset_name_for_popup = "Preview (720p)";
-                    SCENE_LOG_INFO("Quality Preset: Preview (32 samples, 4 bounces)");
-                    break;
-                    
-                case QualityPreset::Production:
-                    ctx.render_settings.max_samples = 256;
-                    ctx.render_settings.max_bounces = 8;
-                    ctx.render_settings.use_denoiser = true;
-                    ctx.render_settings.denoiser_blend_factor = 0.7f;
-                    suggested_width = 1920; suggested_height = 1080;
-                    preset_name_for_popup = "Production (1080p)";
-                    SCENE_LOG_INFO("Quality Preset: Production (256 samples, 8 bounces)");
-                    break;
-                    
-                case QualityPreset::Cinematic:
-                    ctx.render_settings.max_samples = 1024;
-                    ctx.render_settings.max_bounces = 16;
-                    ctx.render_settings.use_denoiser = true;
-                    ctx.render_settings.denoiser_blend_factor = 0.5f;
-                    suggested_width = 2560; suggested_height = 1440;
-                    preset_name_for_popup = "Cinematic (2K)";
-                    SCENE_LOG_INFO("Quality Preset: Cinematic (1024 samples, 16 bounces)");
-                    break;
-            }
-            
-            // Check if resolution change is suggested
-            if (image_width != suggested_width || image_height != suggested_height) {
-                show_resolution_popup = true;
-            }
-        }
-        ImGui::PopItemWidth();
-        
-        ImGui::SameLine();
-        UIWidgets::HelpMarker(
-            "Preview: 720p, 32 samples, 4 bounces - Fast positioning\n"
-            "Production: 1080p, 256 samples, 8 bounces - Balanced\n"
-            "Cinematic: 2K, 1024 samples, 16 bounces - Final quality"
-        );
-        
-       
-        
-        if (ImGui::BeginPopupModal("Change Resolution?", &show_resolution_popup, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Recommended resolution for %s:", preset_name_for_popup.c_str());
-            ImGui::Text("%dx%d", suggested_width, suggested_height);
-            ImGui::Separator();
-            ImGui::Text("Current: %dx%d", image_width, image_height);
-            ImGui::Spacing();
-            
-            if (ImGui::Button("Apply Resolution", ImVec2(140, 0))) {
-                pending_width = suggested_width;
-                pending_height = suggested_height;
-                pending_aspect_ratio = (float)suggested_width / suggested_height;
-                pending_resolution_change = true;
+                if (disabled) ImGui::EndDisabled();
                 
-                // Sync resolution panel static variables
-                new_width = suggested_width;
-                new_height = suggested_height;
-                aspect_w = 16;  // All presets use 16:9
-                aspect_h = 9;
+                ImGui::SameLine();
+                ImGui::TextWrapped("%s", active_model_path.c_str());
+
+                // ---------------------------------------------------------
+                // RENDER CONFIGURATION & SAMPLING
+                // ---------------------------------------------------------
+                UIWidgets::Divider();
+                UIWidgets::ColoredHeader("Render Engine & Quality", ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+
+                // 1. Backend Selection
+                if (ImGui::TreeNodeEx("Backend & Acceleration", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    // GPU Selection
+                    bool optix_available = g_hasOptix;
+                    if (!optix_available) ImGui::BeginDisabled();
+                    if (ImGui::Checkbox("Use OptiX (GPU)", &ctx.render_settings.use_optix)) {
+                         ctx.start_render = true; // Trigger restart
+                    }
+                    if (!optix_available) { 
+                        ImGui::EndDisabled();
+                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) 
+                            ImGui::SetTooltip("No NVIDIA RTX GPU detected.");
+                    }
+
+                    // CPU Selection (Embree)
+                    if (!ctx.render_settings.use_optix) {
+                        ImGui::Indent();
+                        if (ImGui::Checkbox("Use Embree BVH (CPU)", &ctx.render_settings.UI_use_embree)) {
+                            extern bool use_embree;
+                            use_embree = ctx.render_settings.UI_use_embree; 
+                            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree); // Trigger rebuild
+                            ctx.renderer.resetCPUAccumulation();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Embree is faster but requires BVH rebuild on change.");
+                        ImGui::Unindent();
+                    }
+                    ImGui::TreePop();
+                }
+
+                // 2. Settings Tabs (Viewport vs Final)
+                ImGui::Spacing();
+                if (ImGui::BeginTabBar("RenderSettingsTabs")) {
+                    
+                    // --- VIEWPORT TAB ---
+                    if (ImGui::BeginTabItem("Viewport")) {
+                        ImGui::TextDisabled("Realtime Preview Settings");
+                        ImGui::Separator();
+                        
+                        ImGui::DragInt("Max Samples (Preview)", &ctx.render_settings.max_samples, 1, 1, 16384);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Limit for viewport accumulation. Set high for continuous refinement.");
+
+                        ImGui::Checkbox("Viewport Denoising", &ctx.render_settings.use_denoiser);
+                        if (ctx.render_settings.use_denoiser) {
+                            ImGui::Indent();
+                            ImGui::SliderFloat("Blend", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
+                            ImGui::Unindent();
+                        }
+                        ImGui::EndTabItem();
+                    }
+
+                    // --- FINAL RENDER TAB ---
+                    if (ImGui::BeginTabItem("Final Render")) {
+                        ImGui::TextDisabled("Output Settings");
+                        ImGui::Separator();
+                        
+                        // Resolution Controls
+                        ImGui::Text("Resolution:");
+                        
+                        const char* res_items[] = { "1280x720 (HD)", "1920x1080 (FHD)", "2560x1440 (2K)", "3840x2160 (4K)", "Custom" };
+                        static int current_res_item = 1; // Default 1080p
+                        
+                        if (ImGui::Combo("Preset", &current_res_item, res_items, IM_ARRAYSIZE(res_items))) {
+                            if (current_res_item == 0) { ctx.render_settings.final_render_width = 1280; ctx.render_settings.final_render_height = 720; }
+                            if (current_res_item == 1) { ctx.render_settings.final_render_width = 1920; ctx.render_settings.final_render_height = 1080; }
+                            if (current_res_item == 2) { ctx.render_settings.final_render_width = 2560; ctx.render_settings.final_render_height = 1440; }
+                            if (current_res_item == 3) { ctx.render_settings.final_render_width = 3840; ctx.render_settings.final_render_height = 2160; }
+                        }
+
+                        ImGui::PushItemWidth(80);
+                        if (ImGui::InputInt("W", &ctx.render_settings.final_render_width)) current_res_item = 4;
+                        ImGui::SameLine(); 
+                        if (ImGui::InputInt("H", &ctx.render_settings.final_render_height)) current_res_item = 4;
+                        ImGui::PopItemWidth();
+                        
+                        ImGui::TextDisabled("(Viewport size is unaffected until render starts)");
+
+                        ImGui::Separator();
+                        
+                        ImGui::Text("Quality:");
+                        ImGui::DragInt("Target Samples", &ctx.render_settings.final_render_samples, 16, 16, 65536);
+                        ImGui::Checkbox("Render Denoising", &ctx.render_settings.render_use_denoiser);
+                        
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        if (ImGui::Button("Start Final Render (F12)", ImVec2(-1, 30))) {
+                             extern bool show_render_window;
+                             show_render_window = true;
+                             ctx.render_settings.is_final_render_mode = true; // IMPORTANT
+                             ctx.start_render = true;
+                        }
+
+                        ImGui::Spacing();
+                        ImGui::Separator();
+                        ImGui::Text("Animation:");
+                        
+                        ImGui::PushItemWidth(70);
+                        ImGui::InputInt("Start##anim", &ctx.render_settings.animation_start_frame);
+                        ImGui::SameLine();
+                        ImGui::InputInt("End##anim",   &ctx.render_settings.animation_end_frame);
+                        ImGui::SameLine();
+                        ImGui::InputInt("FPS##anim",   &ctx.render_settings.animation_fps);
+                        ImGui::PopItemWidth();
+                        
+                        if (ImGui::Button("Render Animation Sequence", ImVec2(-1, 30))) {
+                             ctx.render_settings.start_animation_render = true;
+                        }
+                        ImGui::EndTabItem();
+                    }
+                    
+                    ImGui::EndTabBar();
+                }
+
+                // 3. Global Settings (Path Tracing)
+                ImGui::Spacing();
+                if (ImGui::TreeNodeEx("Light Paths & Optimization", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    ImGui::DragInt("Max Bounces", &ctx.render_settings.max_bounces, 1, 1, 32);
+                    
+                    ImGui::Checkbox("Adaptive Sampling", &ctx.render_settings.use_adaptive_sampling);
+                    if (ctx.render_settings.use_adaptive_sampling) {
+                        ImGui::Indent();
+                        ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.0001f, 1.0f, "%.4f");
+                        ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples, 1, 1, 64);
+                        ImGui::Unindent();
+                    }
+                    ImGui::TreePop();
+                }
+
+                // ---------------------------------------------------------
+                // CONTROL PANEL (Progress & Action)
+                // ---------------------------------------------------------
+                ImGui::Spacing();
+                ImGui::Separator();
                 
-                // Update preset_index to match
-                if (suggested_width == 1280 && suggested_height == 720) {
-                    preset_index = 1;  // HD 720p
-                } else if (suggested_width == 1920 && suggested_height == 1080) {
-                    preset_index = 2;  // Full HD 1080p
-                } else if (suggested_width == 2560 && suggested_height == 1440) {
-                    preset_index = 3;  // 1440p
+                // Progress Bar with overlay text
+                float progress = ctx.render_settings.render_progress;
+                int current = ctx.render_settings.render_current_samples;
+                int target = ctx.render_settings.render_target_samples;
+                
+                // Colorize progress bar based on state
+                ImVec4 progress_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f); // Green
+                if (ctx.render_settings.is_render_paused) progress_color = ImVec4(0.8f, 0.6f, 0.2f, 1.0f); // Orange
+                
+                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progress_color);
+                char overlay[64];
+                snprintf(overlay, sizeof(overlay), "%d / %d Samples (%.1f%%)", current, target, progress * 100.0f);
+                ImGui::ProgressBar(progress, ImVec2(-1, 24), overlay);
+                ImGui::PopStyleColor();
+
+                ImGui::Spacing();
+                
+                // Control Buttons
+                bool is_active = ctx.render_settings.is_rendering_active;
+                bool is_paused = ctx.render_settings.is_render_paused;
+                
+                float btn_w = ImGui::GetContentRegionAvail().x / 2.0f - 4.0f;
+                
+                // Start/Pause Button
+                if (is_active && !is_paused) {
+                    if (UIWidgets::SecondaryButton("Pause", ImVec2(btn_w, 30))) {
+                         ctx.render_settings.is_render_paused = true;
+                    }
                 } else {
-                    preset_index = 0;  // Custom
+                    const char* btn_label = is_paused ? "Resume Run" : "Start Render";
+                    if (UIWidgets::PrimaryButton(btn_label, ImVec2(btn_w, 30))) {
+                        ctx.render_settings.is_render_paused = false;
+                        if (!is_active) ctx.start_render = true;
+                    }
                 }
                 
-                // Allow rendering to restart after resolution change
-                ctx.render_settings.is_render_paused = false;
-                ctx.start_render = true;
+                ImGui::SameLine();
                 
-                show_resolution_popup = false;
-                ImGui::CloseCurrentPopup();
-                SCENE_LOG_INFO("Resolution changed to " + std::to_string(suggested_width) + "x" + std::to_string(suggested_height));
+                // Stop/Reset Button
+                if (UIWidgets::DangerButton("Stop & Reset", ImVec2(btn_w, 30))) {
+                    rendering_stopped_cpu = true;
+                    rendering_stopped_gpu = true;
+                    ctx.render_settings.render_progress = 0.0f;
+                    ctx.render_settings.render_current_samples = 0;
+                }
+                
+                ImGui::Spacing();
+                if (ImGui::Button("Save Final Image...", ImVec2(-1, 0))) {
+                    ctx.render_settings.save_image_requested = true;
+                }
+
+                ImGui::EndTabItem();
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Keep Current", ImVec2(140, 0))) {
-                show_resolution_popup = false;
-                ImGui::CloseCurrentPopup();
+
+            // -------------------------------------------------------------
+            // TAB: WORLD (Environment, Sky, Lights)
+            // -------------------------------------------------------------
+            if (ImGui::BeginTabItem("World")) {
+                drawWorldContent(ctx);
+                ImGui::Separator();
+                drawLightsContent(ctx);
+                ImGui::EndTabItem();
             }
-            ImGui::EndPopup();
-        }
 
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1), "Sampling Settings");
-
-        // Use Adaptive Sampling Checkbox
-        if (ImGui::Checkbox("Use Adaptive Sampling", &ctx.render_settings.use_adaptive_sampling)) {
-             // Log...
-        }
-        UIWidgets::HelpMarker("Enable intelligent sampling that focuses more rays on noisy areas.");
-
-        if (ctx.render_settings.use_adaptive_sampling) {
-            ImGui::Indent(); 
-            
-            // Min Samples
-            ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples, 1.0f, 1, 1024);
-            UIWidgets::HelpMarker("Minimum number of samples per pixel before noise variance is evaluated.");
-
-            // Max Samples
-            ImGui::DragInt("Max Samples", &ctx.render_settings.max_samples,1.0f, 1, 4096);
-            UIWidgets::HelpMarker("Maximum target samples per pixel for noisy areas.");
-
-            // Variance Threshold
-            ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.001f, 1.0f, "%.5f");
-            UIWidgets::HelpMarker("Noise tolerance. Lower values mean better quality but longer render times.");
-            
-            ImGui::Unindent();
-        } 
-        else {
-            // Samples Per Pixel (Sadece Adaptive KAPALIYSA Görünür)
-            ImGui::DragInt("Samples Per Pixel (Fixed)", &ctx.render_settings.samples_per_pixel, 1.0f, 1, 64);
-            UIWidgets::HelpMarker("Number of samples calculated per frame. Use this for consistent performance.");
-        }
-
-        // Max Bounces
-        ImGui::Separator();
-        if (ImGui::DragInt("Max Bounce", &ctx.render_settings.max_bounces, 1.0f, 1, 30)) {
-           // SCENE_LOG_INFO("Max Bounce changed to " + std::to_string(ctx.render_settings.max_bounces));
-        }
-        UIWidgets::HelpMarker("Maximum number of ray bounces. Higher values improve indirect lighting, reflections, and refractions but increase render time.");
-
-        // Environment
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.6f, 1), "Environment");
-        if (ImGui::ColorEdit3("Background Color", &ctx.scene.background_color.x)) {
-            SCENE_LOG_INFO("Background Color changed to RGB(" +
-                std::to_string(int(ctx.scene.background_color.x * 255)) + ", " +
-                std::to_string(int(ctx.scene.background_color.y * 255)) + ", " +
-                std::to_string(int(ctx.scene.background_color.z * 255)) + ")");
-        }
-        // --- START/STOP BUTTONS + PROGRESS ---
-        ImGui::Separator();
-        
-        // Progress bar with color gradient
-        float progress = ctx.render_settings.render_progress;
-        int current = ctx.render_settings.render_current_samples;
-        int target = ctx.render_settings.render_target_samples;
-        bool is_active = ctx.render_settings.is_rendering_active;
-        
-        // Progress bar color: red -> yellow -> green
-        ImVec4 progress_color;
-        if (progress < 0.5f) {
-            progress_color = ImVec4(1.0f, progress * 2.0f, 0.0f, 1.0f);  // Red to Yellow
-        } else {
-            progress_color = ImVec4(1.0f - (progress - 0.5f) * 2.0f, 1.0f, 0.0f, 1.0f);  // Yellow to Green
-        }
-        
-        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progress_color);
-        char overlay[64];
-        snprintf(overlay, sizeof(overlay), "Sample %d / %d (%.1f%%)", current, target, progress * 100.0f);
-        ImGui::ProgressBar(progress, ImVec2(-1, 20), overlay);
-        ImGui::PopStyleColor();
-        
-        // Render time display
-        float elapsed = ctx.render_settings.render_elapsed_seconds;
-        float remaining = ctx.render_settings.render_estimated_remaining;
-        
-        if (is_active || elapsed > 0.0f) {
-            int elapsed_min = (int)(elapsed / 60.0f);
-            int elapsed_sec = (int)elapsed % 60;
-            int remaining_min = (int)(remaining / 60.0f);
-            int remaining_sec = (int)remaining % 60;
-            
-            ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), 
-                "Elapsed: %02d:%02d  |  Remaining: %02d:%02d", 
-                elapsed_min, elapsed_sec, remaining_min, remaining_sec);
-        }
-        
-        ImGui::Spacing();
-        
-        bool is_paused = ctx.render_settings.is_render_paused;
-        bool accumulation_done = (progress >= 1.0f);
-        bool is_stopped = is_paused && (current == 0);  // Stopped = paused with no progress
-        
-        // Start/Pause Toggle Button
-        const char* start_pause_label;
-        ImVec4 button_color;
-        
-        if (!is_active && !is_paused) {
-            // Not rendering - show "Start Render"
-            start_pause_label = "Start Render";
-            button_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f);  // Green
-        } else if (is_stopped) {
-            // Stopped (after Stop button) - show "Start Render"
-            start_pause_label = "Start Render";
-            button_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f);  // Green
-        } else if (is_paused) {
-            // Paused mid-render - show "Resume"
-            start_pause_label = "Resume";
-            button_color = ImVec4(0.2f, 0.6f, 0.9f, 1.0f);  // Blue
-        } else if (is_active && !accumulation_done) {
-            // Rendering - show "Pause"
-            start_pause_label = "Pause";
-            button_color = ImVec4(0.9f, 0.7f, 0.2f, 1.0f);  // Orange
-        } else {
-            // Completed - show "Restart"
-            start_pause_label = "Restart";
-            button_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f);  // Green
-        }
-        
-        ImGui::PushStyleColor(ImGuiCol_Button, button_color);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(button_color.x * 1.2f, button_color.y * 1.2f, button_color.z * 1.2f, 1.0f));
-        
-        if (ImGui::Button(start_pause_label, ImVec2(150, 0))) {
-            if (!is_active && !is_paused) {
-                // Start new render
-                ctx.start_render = true;
-                ctx.render_settings.is_render_paused = false;
-                SCENE_LOG_INFO("Start Render clicked");
-            } else if (is_stopped) {
-                // Start from stopped state
-                ctx.start_render = true;
-                ctx.render_settings.is_render_paused = false;
-                SCENE_LOG_INFO("Start Render from stopped state");
-            } else if (is_paused) {
-                // Resume mid-render
-                ctx.render_settings.is_render_paused = false;
-                ctx.start_render = true;  // Trigger render to continue
-                SCENE_LOG_INFO("Render resumed");
-            } else if (is_active && !accumulation_done) {
-                // Pause
-                ctx.render_settings.is_render_paused = true;
-                SCENE_LOG_INFO("Render paused");
-            } else {
-                // Restart (after completion)
-                ctx.start_render = true;
-                ctx.render_settings.is_render_paused = false;
-                // Reset accumulation
-                rendering_stopped_gpu = true;
-                rendering_stopped_cpu = true;
-                SCENE_LOG_INFO("Render restarted");
+            // -------------------------------------------------------------
+            // TAB: CAMERA (Camera params, PostFX)
+            // -------------------------------------------------------------
+            if (ImGui::BeginTabItem("Camera")) {
+                drawCameraContent(ctx);
+                ImGui::Spacing();
+                drawToneMapContent(ctx);
+                ImGui::EndTabItem();
             }
-        }
-        ImGui::PopStyleColor(2);
-        
-        // Stop Button - always enabled when rendering or paused
-        ImGui::SameLine();
-        bool can_stop = is_active || is_paused;
-        
-        if (!can_stop) {
-            ImGui::BeginDisabled();
-        }
-        
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-        
-        if (ImGui::Button("Stop", ImVec2(150, 0))) {
-            // Set stop flags
-            rendering_stopped_gpu = true;
-            rendering_stopped_cpu = true;
-            
-            // Reset render state
-            ctx.render_settings.is_rendering_active = false;
-            ctx.render_settings.is_render_paused = true;  // Keep paused to prevent auto-restart
-            ctx.render_settings.render_current_samples = 0;
-            ctx.render_settings.render_progress = 0.0f;
-            
-            // Reset render time
-            ctx.render_settings.render_elapsed_seconds = 0.0f;
-            ctx.render_settings.render_estimated_remaining = 0.0f;
-            ctx.render_settings.avg_sample_time_ms = 0.0f;
-            
-            // Reset accumulation buffers
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->resetAccumulation();
+
+            // -------------------------------------------------------------
+            // TAB: SCENE (Hierarchy)
+            // -------------------------------------------------------------
+            ImGuiTabItemFlags tab_flags = 0;
+            if (focus_scene_edit_tab) {
+                tab_flags = ImGuiTabItemFlags_SetSelected;
+                focus_scene_edit_tab = false;
             }
-            
-            SCENE_LOG_WARN("Render stopped and reset");
+            if (ImGui::BeginTabItem("Scene Edit", nullptr, tab_flags)) {
+                drawSceneHierarchy(ctx);
+                ImGui::EndTabItem();
+            }
+
+            // -------------------------------------------------------------
+            // TAB: SYSTEM (App settings)
+            // -------------------------------------------------------------
+            if (ImGui::BeginTabItem("System")) {
+                drawThemeSelector();
+                drawResolutionPanel();
+                
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Checkbox("Show Log Window", &show_scene_log);
+                extern bool show_animation_panel;
+                ImGui::Checkbox("Show Timeline Panel", &show_animation_panel);
+                
+                ImGui::EndTabItem();
+            }
+
+            ImGui::EndTabBar();
         }
-        
-        ImGui::PopStyleColor(2);
-        
-        if (!can_stop) {
-            ImGui::EndDisabled();
-        }
-
-    }
-    else {
-        ImGui::BeginDisabled();
-        ImGui::Checkbox("Use OptiX", &ctx.render_settings.use_optix);
-        ImGui::Checkbox("Use Denoiser", &ctx.render_settings.use_denoiser);
-        ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples);
-        ImGui::DragInt("Max Samples", &ctx.render_settings.max_samples);
-        ImGui::SliderFloat("Variance Threshold", &ctx.render_settings.variance_threshold, 0.001f, 1.0f, "%.5f");
-        ImGui::DragInt("Max Bounce", &ctx.render_settings.max_bounces, 1.0f, 1, 32);
-        ImGui::ColorEdit3("Background Color", &ctx.scene.background_color.x);
-        ImGui::Button("Start Render", ImVec2(150, 0));
-        ImGui::EndDisabled();
-    }
-
-
-
-    // Animation settings timeline paneline taşındı
-    ImGui::Spacing();
-
-    ImGui::Separator();
-    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1), "Save Image");
-    if (ImGui::Button("Save Image As...", ImVec2(310, 0))) {
-        ctx.render_settings.save_image_requested = true;
-    }
-    // Show current render time text   
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::Spacing();
-    drawLogPanelEmbedded(); // *** burada çağırıyoruz ***
-
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("World")) {
-            drawWorldContent(ctx);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Camera")) {
-            drawCameraContent(ctx);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Lights")) {
-            drawLightsContent(ctx);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Post-FX")) {
-            drawToneMapContent(ctx);
-            ImGui::EndTabItem();
-        }
-
-        if (ImGui::BeginTabItem("Controls")) {
-             drawControlsContent();
-             ImGui::EndTabItem();
-        }
-
-        ImGui::EndTabBar();
     }
     ImGui::End();
-    ClampWindowToDisplay();
+}
+
+void SceneUI::drawMainMenuBar(UIContext& ctx)
+{
+    if (ImGui::BeginMainMenuBar())
+    {
+        if (ImGui::BeginMenu("File"))
+        {
+            if (ImGui::MenuItem("Open Scene...", "Ctrl+O")) {
+#ifdef _WIN32
+                std::string file = openFileDialogW(L"3D Files\0*.gltf;*.glb;*.fbx\0All Files\0*.*\0");
+                if (!file.empty()) {
+                    rendering_stopped_cpu = true;
+                    rendering_stopped_gpu = true;
+                    
+                    scene_loading = true;
+                    scene_loading_done = false;
+                    scene_loading_progress = 0;
+                    scene_loading_stage = "Wait...";
+                    active_model_path = file;
+
+                    std::thread loader_thread([this, file, &ctx]() {
+                         int wait_count = 0;
+                         while (rendering_in_progress && wait_count < 20) {
+                             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                             wait_count++;
+                         }
+                         ctx.scene.clear();
+                         ctx.renderer.create_scene(ctx.scene, ctx.optix_gpu_ptr, file,
+                            [this](int p, const std::string& s) {
+                                scene_loading_progress = p; scene_loading_stage = s;
+                            });
+                         if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
+                         ctx.start_render = true;
+                         scene_loading = false;
+                         scene_loading_done = true;
+                    });
+                    loader_thread.detach();
+                }
+#endif
+            }
+
+            if (ImGui::MenuItem("Save Image...", "Ctrl+S")) {
+                ctx.render_settings.save_image_requested = true;
+            }
+            
+            ImGui::Separator();
+            if (ImGui::MenuItem("Exit", "Alt+F4")) {
+                 extern bool quit; 
+                 quit = true;
+            }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Edit")) {
+             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, history.canUndo())) {
+                 history.undo(ctx);
+                 rebuildMeshCache(ctx.scene.world.objects);
+                 mesh_cache_valid = false;
+                 ctx.selection.updatePositionFromSelection();
+                 ctx.selection.selected.has_cached_aabb = false;
+            }
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, history.canRedo())) {
+                 history.redo(ctx);
+                 rebuildMeshCache(ctx.scene.world.objects);
+                 mesh_cache_valid = false;
+                 ctx.selection.updatePositionFromSelection();
+                 ctx.selection.selected.has_cached_aabb = false;
+            }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Render")) {
+             if (ImGui::MenuItem("Render Image", "F12")) {
+                 extern bool show_render_window;
+                 show_render_window = true;
+                 ctx.start_render = true;
+             }
+             ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("View"))
+        {
+            ImGui::MenuItem("Properties Panel", nullptr, &showSidePanel);
+            extern bool show_animation_panel;
+            ImGui::MenuItem("Bottom Panel", nullptr, &show_animation_panel); // Toggles bottom panel container
+            ImGui::MenuItem("Log Window", nullptr, &show_scene_log);
+            ImGui::EndMenu();
+        }
+        
+
+
+        if (ImGui::BeginMenu("Help"))
+        {
+            ImGui::MenuItem("Controls / Help", "F1", &show_controls_window);
+            ImGui::EndMenu();
+        }
+
+        ImGui::EndMainMenuBar();
+    }
 }
 
 void SceneUI::draw(UIContext& ctx)
 {
+    // 1. Draw Main Menu Bar (Top)
+    drawMainMenuBar(ctx);
 
     ImGuiIO& io = ImGui::GetIO();
     float screen_y = io.DisplaySize.y;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, panel_alpha));
-
-    drawRenderSettingsPanel(ctx, screen_y);
+    float screen_x = io.DisplaySize.x;
     
-    // Timeline panelini en altta göster (Blender tarzı)
-    // Timeline panelini en altta göster (Blender tarzı)
+    // Style adjustments for panels
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.13f, panel_alpha));
+
+    // 2. Draw Side Panel (LEFT)
+    float layout_left_offset = 0.0f;
+    if (showSidePanel) {
+        drawRenderSettingsPanel(ctx, screen_y);
+        layout_left_offset = side_panel_width; // Updated by resize in drawRenderSettingsPanel
+    }
+
+    // ---------------------------------------------------------
+    // STATUS BAR (Bottom Strip)
+    // ---------------------------------------------------------
+    float status_bar_height = 24.0f;
+    
+    ImGui::SetNextWindowPos(ImVec2(0, screen_y - status_bar_height));
+    ImGui::SetNextWindowSize(ImVec2(screen_x, status_bar_height));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 2));
+    
+    if (ImGui::Begin("StatusBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
+        
+        // Toggle Buttons
+        extern bool show_animation_panel;
+        
+        // Timeline Toggle
+        bool anim_active = show_animation_panel;
+        if (UIWidgets::StateButton(anim_active ? "[Timeline]" : "Timeline", anim_active, 
+            ImVec4(0.3f, 0.6f, 1.0f, 1.0f), ImVec4(0.2f, 0.2f, 0.2f, 1.0f), ImVec2(80, 20))) {
+            show_animation_panel = !show_animation_panel;
+            // Auto switch tab if opening
+            if (show_animation_panel) show_scene_log = false; // Optional: Single mode? Or just focus tab logic implies we might want logic.
+            // Let's keep them separate but maybe auto-hide log if timeline opens? 
+            // User requested "Minimize to Icon", so they toggle validity.
+        }
+        
+        ImGui::SameLine();
+        
+        // Console Toggle
+        bool log_active = show_scene_log;
+        if (UIWidgets::StateButton(log_active ? "[Console]" : "Console", log_active, 
+            ImVec4(0.3f, 0.6f, 1.0f, 1.0f), ImVec4(0.2f, 0.2f, 0.2f, 1.0f), ImVec2(80, 20))) {
+            show_scene_log = !show_scene_log;
+            if (show_scene_log) show_animation_panel = false; // Toggle behavior (one at a time preferable for bottom panel)
+        }
+        
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        
+        // Status Text
+        if (ctx.scene.initialized) {
+            ImGui::Text("Scene: %d Objects, %d Lights", (int)ctx.scene.world.objects.size(), (int)ctx.scene.lights.size());
+        } else {
+            ImGui::Text("Ready");
+        }
+        
+        // Right side: Progress
+        if (rendering_in_progress) {
+             float p = ctx.render_settings.render_progress * 100.0f;
+             std::string prog = "Rendering: " + std::to_string((int)p) + "%";
+             float w = ImGui::CalcTextSize(prog.c_str()).x;
+             ImGui::SameLine(screen_x - w - 20);
+             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", prog.c_str());
+        }
+
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+
+    // ---------------------------------------------------------
+    // BOTTOM PANEL (Timeline / Console)
+    // ---------------------------------------------------------
+    // Render ONLY if visible
     extern bool show_animation_panel;
-    if (ctx.scene.initialized && show_animation_panel) {
-        drawTimelinePanel(ctx, screen_y);
+    bool show_bottom = (show_animation_panel || show_scene_log);
+    float bottom_height = 120.0f;
+    
+    // Safety: If both are false, show_bottom is false, no panel drawn.
+    // If one is true, panel drawn above status bar.
+    
+    if (show_bottom) {
+        ImGui::SetNextWindowPos(ImVec2(layout_left_offset, screen_y - bottom_height - status_bar_height), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(screen_x - layout_left_offset, bottom_height), ImGuiCond_Always);
+        
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f)); // Slightly opaque
+        if (ImGui::Begin("BottomPanel", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) {
+            
+            if (ImGui::BeginTabBar("BottomTabs")) {
+                
+                // Tab 1: Timeline
+                // Only show tab if enabled (or always show logic? "Toggle" usually implies visibility)
+                // If we want "One Bottom Panel" that has tabs, and buttons toggle the PANEL, then we show tabs.
+                // But the user buttons were "Timeline" and "Console".
+                // If I click "Timeline", I expect Timeline tab to be active.
+                
+                // Logic: If show_animation_panel is TRUE, we show the tab.
+                // NOTE: We forced single-toggle in the status bar (clicking one closes other).
+                // So effectively this is a context switcher.
+                
+                if (show_animation_panel) {
+                     if (ImGui::BeginTabItem("Timeline", &show_animation_panel)) { 
+                        drawTimelineContent(ctx);
+                        ImGui::EndTabItem();
+                    }
+                }
+                
+                if (show_scene_log) {
+                    if (ImGui::BeginTabItem("Console", &show_scene_log)) {
+                        drawLogPanelEmbedded();
+                        ImGui::EndTabItem();
+                    }
+                }
+                
+                ImGui::EndTabBar();
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleColor();
     }
     
+    // Light Gizmos & Selection (Drawn here to handle selection priority)
+    bool gizmo_hit = false;
+    if (ctx.scene.camera && ctx.selection.show_gizmo) {
+        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+        ImGuiIO& io = ImGui::GetIO();
+        Camera& cam = *ctx.scene.camera;
+        
+        // Camera Projection Setup
+        Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+        Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+        Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+        float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
+        float tan_half_fov = tanf(fov_rad * 0.5f);
+        float aspect = io.DisplaySize.x / io.DisplaySize.y; 
+
+        auto Project = [&](const Vec3& p) -> ImVec2 {
+            Vec3 to_point = p - cam.lookfrom;
+            float depth = to_point.dot(cam_forward);
+            if (depth <= 0.1f) return ImVec2(-10000, -10000); 
+
+            float local_x = to_point.dot(cam_right);
+            float local_y = to_point.dot(cam_up);
+            float half_height = depth * tan_half_fov;
+            float half_width = half_height * aspect;
+            
+            return ImVec2(
+                ((local_x / half_width) * 0.5f + 0.5f) * io.DisplaySize.x,
+                (0.5f - (local_y / half_height) * 0.5f) * io.DisplaySize.y
+            );
+        };
+        
+        auto IsOnScreen = [](const ImVec2& v) { return v.x > -5000; };
+
+        for (auto& light : ctx.scene.lights) {
+            bool is_selected = (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light == light);
+            ImU32 col = IM_COL32(255, 255, 100, 180);
+            if (is_selected) col = IM_COL32(255, 100, 50, 255); 
+
+            Vec3 pos = light->position;
+            ImVec2 center = Project(pos);
+            bool visible = IsOnScreen(center);
+            
+            if (visible) {
+                 // Mouse Interaction (Priority Selection)
+                 // Radius increased to 20px for easier selection
+                 float d = sqrtf(powf(io.MousePos.x - center.x, 2) + powf(io.MousePos.y - center.y, 2));
+                 
+                 // Note: We check WantCaptureMouse usually to avoid clicking through UI windows, 
+                 // but since Gizmos are overlays, we want to click them. 
+                 // Typically if hovering a button, WantCaptureMouse is true.
+                 // We only want to select if NOT hovering other interactive ImGui elements.
+                 
+                 if (d < 20.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver()) {
+                      ctx.selection.selectLight(light);
+                      gizmo_hit = true;
+                 }
+                 
+                 // Draw Name if Selected
+                 if (is_selected) {
+                     std::string label = light->nodeName.empty() ? "Light" : light->nodeName;
+                     draw_list->AddText(ImVec2(center.x + 12, center.y - 12), col, label.c_str());
+                 }
+            }
+
+            if (light->type() == LightType::Point) {
+                // Point: Smaller Diamond + Emissive Core
+                float r = 0.2f; // Smaller radius
+                Vec3 pts[6] = {
+                    pos + Vec3(0, r, 0), pos + Vec3(0, -r, 0),
+                    pos + Vec3(r, 0, 0), pos + Vec3(-r, 0, 0),
+                    pos + Vec3(0, 0, r), pos + Vec3(0, 0, -r)
+                };
+                ImVec2 s_pts[6];
+                for(int i=0; i<6; ++i) s_pts[i] = Project(pts[i]);
+
+                if (visible) {
+                    draw_list->AddCircleFilled(center, 4.0f, IM_COL32(255, 255, 200, 200)); // Emissive Core
+                    // Wireframe
+                    draw_list->AddLine(s_pts[2], s_pts[4], col); draw_list->AddLine(s_pts[4], s_pts[3], col);
+                    draw_list->AddLine(s_pts[3], s_pts[5], col); draw_list->AddLine(s_pts[5], s_pts[2], col);
+                    draw_list->AddLine(s_pts[0], s_pts[2], col); draw_list->AddLine(s_pts[0], s_pts[3], col);
+                    draw_list->AddLine(s_pts[0], s_pts[4], col); draw_list->AddLine(s_pts[0], s_pts[5], col);
+                    draw_list->AddLine(s_pts[1], s_pts[2], col); draw_list->AddLine(s_pts[1], s_pts[3], col);
+                    draw_list->AddLine(s_pts[1], s_pts[4], col); draw_list->AddLine(s_pts[1], s_pts[5], col);
+                }
+            }
+            else if (light->type() == LightType::Directional) {
+                // Directional: Sun symbol + Arrow
+                if (visible) {
+                    draw_list->AddCircle(center, 8.0f, col, 0, 2.0f); // Sun Body
+                    // Rays
+                    for(int i=0; i<8; ++i) {
+                         float angle = i * (6.28f/8.0f);
+                         ImVec2 dir(cosf(angle), sinf(angle));
+                         draw_list->AddLine(
+                            ImVec2(center.x + dir.x*12, center.y + dir.y*12),
+                            ImVec2(center.x + dir.x*18, center.y + dir.y*18),
+                            col
+                         );
+                    }
+                    // Direction Arrow
+                    auto dl = std::dynamic_pointer_cast<DirectionalLight>(light);
+                    if (dl) {
+                         Vec3 end3d = pos + dl->direction.normalize() * 3.0f; // Long arrow
+                         ImVec2 end = Project(end3d);
+                         if (IsOnScreen(end)) {
+                            draw_list->AddLine(center, end, col, 2.0f);
+                            draw_list->AddCircleFilled(end, 3.0f, col); // Arrow tip
+                         }
+                    }
+                }
+            }
+            // Keep Area/Spot simple or similar to before, strictly projection for now
+            else if (light->type() == LightType::Area && visible) {
+                 draw_list->AddText(center, col, "[#]");
+            }
+            else if (light->type() == LightType::Spot && visible) {
+                 draw_list->AddText(center, col, "\\/");
+            }
+        }
+    }
+
+    // Scene Interaction (Picking)
+    if (ctx.scene.initialized && !gizmo_hit) {
+        handleMouseSelection(ctx);
+    }
+
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
+
+    // Help / Controls Window
+    if (show_controls_window) {
+        ImGui::SetNextWindowSize(ImVec2(500, 600), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Controls & Help", &show_controls_window)) {
+            drawControlsContent();
+        }
+        ImGui::End();
+    }
+    
+    // Lazy BVH / Scene Update (Fixes CPU Ghosting after Delete)
+    if (is_bvh_dirty) {
+         // SCENE_LOG_INFO("Updating Scene BVH (Dirty Flag)...");
+         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+         ctx.renderer.resetCPUAccumulation();
+         is_bvh_dirty = false;
+    }
+    
+    // F12 Global Shortcut for Render
+    if (ImGui::IsKeyPressed(ImGuiKey_F12)) {
+         extern bool show_render_window;
+         show_render_window = !show_render_window;
+         if (show_render_window) ctx.start_render = true;
+    }
+    
+    // Ctrl+Z / Ctrl+Y - Undo/Redo
+    if (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
+        if (history.canUndo()) {
+            history.undo(ctx);
+            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache
+            mesh_cache_valid = false;
+            ctx.selection.updatePositionFromSelection(); // Sync Gizmo center
+            ctx.selection.selected.has_cached_aabb = false; // Force bounding box rebuild
+        }
+    }
+    if ((ImGui::IsKeyPressed(ImGuiKey_Y) && ImGui::GetIO().KeyCtrl) ||
+        (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift)) {
+        if (history.canRedo()) {
+            history.redo(ctx);
+            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache
+            mesh_cache_valid = false;
+            ctx.selection.updatePositionFromSelection(); // Sync Gizmo center
+            ctx.selection.selected.has_cached_aabb = false; // Force bounding box rebuild
+        }
+    }
+    
+    // Draw Final Render Window
+    extern void DrawRenderWindow(UIContext& ctx);
+    DrawRenderWindow(ctx);
 }
 
 void SceneUI::drawControlsContent()
@@ -1947,14 +1993,29 @@ void SceneUI::drawControlsContent()
      ImGui::BulletText("Rotate: Middle Mouse Drag");
      ImGui::BulletText("Pan: Shift + Middle Mouse Drag");
      ImGui::BulletText("Zoom: Mouse Wheel OR Ctrl + Middle Mouse Drag");
-     ImGui::BulletText("Move Forward/Back: W / S");
-     ImGui::BulletText("Move Left/Right: A / D");
-     ImGui::BulletText("Move Up/Down: Q / E");
+     ImGui::BulletText("Move Forward/Back: Arrow Up / Arrow Down");
+     ImGui::BulletText("Move Left/Right: Arrow Left / Arrow Right");
+     ImGui::BulletText("Move Up/Down: PageUp / PageDown");
      
      ImGui::Spacing();
      UIWidgets::ColoredHeader("Shortcuts", ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
      UIWidgets::Divider();
      ImGui::BulletText("Save Image: Ctrl + S"); 
+     ImGui::BulletText("Undo: Ctrl + Z");
+     ImGui::BulletText("Redo: Ctrl + Y or Ctrl + Shift + Z");
+     ImGui::BulletText("Delete Object: Delete or X");
+     ImGui::BulletText("Duplicate Object: Shift + D");
+     ImGui::BulletText("Toggle Render Window: F12");
+     
+     ImGui::Spacing();
+     UIWidgets::ColoredHeader("Gizmo Controls", ImVec4(1.0f, 0.6f, 0.4f, 1.0f));
+     UIWidgets::Divider();
+     ImGui::BulletText("Move Mode: G (Translate)");
+     ImGui::BulletText("Rotate Mode: R");
+     ImGui::BulletText("Scale Mode: S");
+     ImGui::BulletText("Switch Mode: W (Cycle through modes)");
+     ImGui::TextDisabled("  * Click and drag gizmo handles to transform");
+     ImGui::TextDisabled("  * Changes apply immediately to selected object");
      
      ImGui::Spacing();
      UIWidgets::ColoredHeader("Interface Guide", ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
@@ -2007,3 +2068,1320 @@ void SceneUI::drawControlsContent()
          ImGui::BulletText("Animation Panel: Toggle visibility of the timeline.");
      }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENE HIERARCHY PANEL (Outliner)
+// ═══════════════════════════════════════════════════════════════════════════════
+void SceneUI::drawSceneHierarchy(UIContext& ctx) {
+    // Window creation logic removed - now embedded in tabs
+    
+    // Check if embedded in another window, if not create child
+    // Since we are moving to tab, we don't need window creation here
+
+    
+    SceneSelection& sel = ctx.selection;
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // DELETE LOGIC (Keyboard Shortcut)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Only process when viewport has focus (not UI panels)
+    if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && 
+        sel.hasSelection() && !ImGui::GetIO().WantCaptureKeyboard) {
+        bool deleted = false;
+        if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            auto& objs = ctx.scene.world.objects;
+            // Remove all triangles with the same node name (Group deletion)
+             std::string targetName = sel.selected.object->nodeName;
+             
+             // STEP 1: Collect objects to delete (for undo)
+             std::vector<std::shared_ptr<Triangle>> deleted_triangles;
+             for (const auto& h : objs) {
+                 auto t = std::dynamic_pointer_cast<Triangle>(h);
+                 if (t && t->nodeName == targetName) {
+                     deleted_triangles.push_back(t);
+                 }
+             }
+             
+             // STEP 2: Remove from scene
+             auto new_end = std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& h){
+                 auto t = std::dynamic_pointer_cast<Triangle>(h);
+                 return t && t->nodeName == targetName;
+             });
+             
+             if (new_end != objs.end()) {
+                 size_t before_count = objs.size();
+                 objs.erase(new_end, objs.end());
+                 size_t after_count = objs.size();
+                 deleted = true;
+                 
+                 // SCENE_LOG_INFO("Deleted " + std::to_string(before_count - after_count) + 
+                 //               " triangles. Scene now has " + std::to_string(after_count) + " objects.");  // Verbose
+                 
+                 // STEP 3: Record undo command
+                 auto command = std::make_unique<DeleteObjectCommand>(targetName, deleted_triangles);
+                 history.record(std::move(command));
+                 
+                 // STEP 4: Rebuild GPU structures
+                 // CRITICAL: Material index buffer MUST be regenerated
+                 // When triangles are deleted, the index buffer shrinks
+                 // If we don't rebuild, index buffer size != triangle count
+                 // This causes material shifting and rendering artifacts
+                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                 ctx.renderer.resetCPUAccumulation();
+                 if (ctx.optix_gpu_ptr) {
+                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                 }
+                 
+                 // STEP 5: Refresh UI cache
+                 rebuildMeshCache(ctx.scene.world.objects);
+                 mesh_cache_valid = false;
+                 
+                 // STEP 6: Trigger render restart
+                 ctx.start_render = true;
+             }
+        }
+        else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+             auto& lights = ctx.scene.lights;
+             auto it = std::find(lights.begin(), lights.end(), sel.selected.light);
+             if (it != lights.end()) {
+                 lights.erase(it);
+                 deleted = true;
+                  // Update GPU
+                 if (ctx.optix_gpu_ptr) {
+                    ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                    ctx.optix_gpu_ptr->resetAccumulation();
+                }
+             }
+        }
+        
+        if (deleted) {
+            sel.clearSelection();
+            // SCENE_LOG_INFO("Selection deleted.");  // Too verbose
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Toolbar
+    // ─────────────────────────────────────────────────────────────────────────
+    ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Transform Mode:");
+    ImGui::SameLine();
+    
+    // Transform mode buttons
+    bool is_translate = (sel.transform_mode == TransformMode::Translate);
+    bool is_rotate = (sel.transform_mode == TransformMode::Rotate);
+    bool is_scale = (sel.transform_mode == TransformMode::Scale);
+    
+    if (is_translate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 1.0f));
+    if (ImGui::Button("Move (W)")) sel.transform_mode = TransformMode::Translate;
+    if (is_translate) ImGui::PopStyleColor();
+    
+    ImGui::SameLine();
+    if (is_rotate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 1.0f));
+    if (ImGui::Button("Rotate (E)")) sel.transform_mode = TransformMode::Rotate;
+    if (is_rotate) ImGui::PopStyleColor();
+    
+    ImGui::SameLine();
+    if (is_scale) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 1.0f));
+    if (ImGui::Button("Scale (R)")) sel.transform_mode = TransformMode::Scale;
+    if (is_scale) ImGui::PopStyleColor();
+    
+    ImGui::Separator();
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Scene Tree
+    // ─────────────────────────────────────────────────────────────────────────
+    float available_h = ImGui::GetContentRegionAvail().y;
+    // Split: 45% for Tree, Rest for Properties
+    ImGui::BeginChild("HierarchyTree", ImVec2(0, available_h * 0.45f), true);
+    
+    // CAMERA
+    if (ctx.scene.camera) {
+        bool is_selected = (sel.selected.type == SelectableType::Camera);
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        if (is_selected) flags |= ImGuiTreeNodeFlags_Selected;
+        
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
+        ImGui::TreeNodeEx("[CAM] Camera", flags);
+        ImGui::PopStyleColor();
+        
+        if (ImGui::IsItemClicked()) {
+            sel.selectCamera(ctx.scene.camera);
+        }
+    }
+    
+    // LIGHTS
+    if (!ctx.scene.lights.empty()) {
+        if (ImGui::TreeNode("Lights")) {
+            for (size_t i = 0; i < ctx.scene.lights.size(); i++) {
+                ImGui::PushID((int)i);  // Unique ID for each light
+                
+                auto& light = ctx.scene.lights[i];
+                bool is_selected = (sel.selected.type == SelectableType::Light && 
+                                   sel.selected.light_index == (int)i);
+                
+                ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                if (is_selected) flags |= ImGuiTreeNodeFlags_Selected;
+                
+                // Icon based on light type
+                const char* icon = "[*]";  // Point light default
+                ImVec4 color = ImVec4(1.0f, 0.9f, 0.4f, 1.0f);  // Yellow for lights
+                
+                std::string light_type = "Light";
+                switch (light->type()) {
+                    case LightType::Point: icon = "[*]"; light_type = "Point"; break;
+                    case LightType::Directional: icon = "[>]"; light_type = "Directional"; color = ImVec4(1.0f, 0.7f, 0.3f, 1.0f); break;
+                    case LightType::Spot: icon = "[V]"; light_type = "Spot"; break;
+                    case LightType::Area: icon = "[#]"; light_type = "Area"; break;
+                }
+                
+                std::string label = std::string(icon) + " " + light_type + " " + std::to_string(i + 1);
+                
+                ImGui::PushStyleColor(ImGuiCol_Text, color);
+                ImGui::TreeNodeEx(label.c_str(), flags);
+                ImGui::PopStyleColor();
+                
+                if (ImGui::IsItemClicked()) {
+                    sel.selectLight(light, (int)i, label);
+                }
+                
+                ImGui::PopID();  // End unique ID
+            }
+            ImGui::TreePop();
+        }
+    }
+    // Check for scene changes to invalidate cache
+    static size_t last_obj_count = 0;
+    if (ctx.scene.world.objects.size() != last_obj_count) {
+        mesh_cache_valid = false;
+        last_obj_count = ctx.scene.world.objects.size();
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // OBJECTS LIST (HIERARCHY)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (ImGui::TreeNode("Objects")) {
+        
+        // Ensure cache is valid
+        if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+        static ImGuiTextFilter filter;
+        filter.Draw("Filter##objects");
+
+        ImGuiListClipper clipper;
+        clipper.Begin((int)mesh_ui_cache.size());
+        
+        while (clipper.Step()) {
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++) {
+                if (i >= mesh_ui_cache.size()) break; 
+
+                auto& kv = mesh_ui_cache[i];
+                const std::string& name = kv.first;
+                
+                // Simple filter check
+                if (filter.IsActive() && !filter.PassFilter(name.c_str())) continue;
+
+                bool is_selected = (sel.selected.type == SelectableType::Object && 
+                                    sel.selected.object && 
+                                    sel.selected.object->nodeName == name);
+                
+                ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
+                if (!is_selected) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                if (is_selected) flags |= ImGuiTreeNodeFlags_Selected | ImGuiTreeNodeFlags_DefaultOpen;
+
+                ImGui::PushID(i);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.85f, 1.0f));
+                std::string displayName = name.empty() ? "Unnamed Object" : name;
+                
+                bool node_open = false;
+                if (is_selected) {
+                    node_open = ImGui::TreeNodeEx(displayName.c_str(), flags);
+                } else {
+                    ImGui::TreeNodeEx(displayName.c_str(), flags); // Leaf, no push
+                }
+                ImGui::PopStyleColor();
+
+                if (ImGui::IsItemClicked()) {
+                     if (!kv.second.empty()) {
+                         auto& first_pair = kv.second[0]; 
+                         sel.selectObject(first_pair.second, first_pair.first, name);
+                     }
+                }
+
+                if (node_open && is_selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                    ImGui::Indent();
+                    
+                    // --- In-Tree Properties ---
+                    Vec3 pos = sel.selected.position;
+                    // Position Control
+                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (ImGui::DragFloat3("##Pos", &pos.x, 0.1f)) {
+                         Vec3 delta = pos - sel.selected.position;
+                         sel.selected.position = pos;
+                         if (!kv.second.empty()) {
+                             auto tri = kv.second[0].second;
+                             auto t_handle = tri->getTransformHandle();
+                             if (t_handle) {
+                                  t_handle->base.m[0][3] = pos.x;
+                                  t_handle->base.m[1][3] = pos.y;
+                                  t_handle->base.m[2][3] = pos.z;
+                             }
+                             // Sync Updates
+                             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                             ctx.renderer.resetCPUAccumulation();
+                             if (ctx.optix_gpu_ptr) {
+                                ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                             }
+                             sel.selected.has_cached_aabb = false;
+                         }
+                    }
+                    ImGui::PopItemWidth();
+
+                    if (!kv.second.empty()) {
+                        int matID = kv.second[0].second->getMaterialID();
+                        ImGui::PushItemWidth(100);
+                        if (ImGui::InputInt("Mat ID", &matID)) {
+                             for(auto& pair : kv.second) pair.second->setMaterialID(matID);
+                             if (ctx.optix_gpu_ptr) {
+                                ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                             }
+                             ctx.renderer.resetCPUAccumulation();
+                        }
+                        ImGui::PopItemWidth();
+                    }
+
+                    ImGui::Unindent();
+                    ImGui::PopStyleColor();
+                    ImGui::TreePop(); 
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::TreePop();
+    }
+    // (Redundant internal property block removed)
+    
+    ImGui::EndChild();
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Selection Properties Panel (Bottom Half)
+    // ─────────────────────────────────────────────────────────────────────────
+    ImGui::BeginChild("PropertiesPanel", ImVec2(0, 0), true); // Fill remaining space
+
+    if (sel.hasSelection()) {
+        // Header with type and name
+        const char* typeIcon = "[?]";
+        ImVec4 typeColor = ImVec4(1, 1, 1, 1);
+        
+        switch (sel.selected.type) {
+            case SelectableType::Camera: 
+                typeIcon = "[CAM]"; 
+                typeColor = ImVec4(0.4f, 0.8f, 1.0f, 1.0f);
+                break;
+            case SelectableType::Light: 
+                typeIcon = "[*]"; 
+                typeColor = ImVec4(1.0f, 0.9f, 0.4f, 1.0f);
+                break;
+            case SelectableType::Object: 
+                typeIcon = "[M]"; 
+                typeColor = ImVec4(0.7f, 0.8f, 0.9f, 1.0f);
+                break;
+            default: break;
+        }
+        
+        ImGui::TextColored(typeColor, "%s %s", typeIcon, sel.selected.name.c_str());
+        
+        // Gizmo toggle and delete button on same line
+        ImGui::Checkbox("Gizmo", &sel.show_gizmo);
+        ImGui::SameLine(ImGui::GetWindowWidth() - 55);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
+        if (ImGui::SmallButton("Del")) {
+            sel.clearSelection();
+        }
+        ImGui::PopStyleColor();
+        
+        ImGui::Separator();
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // CAMERA PROPERTIES
+        // ═══════════════════════════════════════════════════════════════════
+        if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
+            auto& cam = *sel.selected.camera;
+            
+            // Position
+            Vec3 pos = cam.lookfrom;
+            if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) {
+                Vec3 delta = pos - cam.lookfrom;
+                cam.lookfrom = pos;
+                cam.lookat = cam.lookat + delta;
+                cam.update_camera_vectors();
+                sel.selected.position = pos;
+                
+                if (ctx.optix_gpu_ptr && g_hasOptix) {
+                    ctx.optix_gpu_ptr->setCameraParams(cam);
+                    ctx.optix_gpu_ptr->resetAccumulation();
+                }
+            }
+            
+            // Target
+            Vec3 target = cam.lookat;
+            if (ImGui::DragFloat3("Target", &target.x, 0.1f)) {
+                cam.lookat = target;
+                cam.update_camera_vectors();
+            }
+            
+            // FOV
+            float fov = (float)cam.vfov;
+            if (ImGui::SliderFloat("FOV", &fov, 10.0f, 120.0f)) {
+                cam.vfov = fov;
+                cam.fov = fov;
+                cam.update_camera_vectors();
+            }
+            
+            // Depth of Field
+            if (ImGui::CollapsingHeader("Depth of Field")) {
+                ImGui::SliderFloat("Aperture", &cam.aperture, 0.0f, 5.0f);
+                ImGui::DragFloat("Focus Dist", &cam.focus_dist, 0.1f, 0.01f, 100.0f);
+                cam.lens_radius = cam.aperture * 0.5f;
+                ImGui::SliderInt("Blades", &cam.blade_count, 3, 12);
+            }
+            
+            // Reset button
+            if (ImGui::Button("Reset Camera", ImVec2(-1, 0))) {
+                cam.reset();
+                sel.selected.position = cam.lookfrom;
+            }
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // LIGHT PROPERTIES
+        // ═══════════════════════════════════════════════════════════════════
+        else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+            auto& light = *sel.selected.light;
+            bool light_changed = false;
+            
+            // Light type display
+            const char* lightTypes[] = {"Point", "Directional", "Spot", "Area"};
+            int typeIdx = (int)light.type();
+            if (typeIdx >= 0 && typeIdx < 4) {
+                ImGui::TextDisabled("Type: %s", lightTypes[typeIdx]);
+            }
+            
+            // Position
+            if (ImGui::DragFloat3("Position", &light.position.x, 0.1f)) {
+                sel.selected.position = light.position;
+                light_changed = true;
+            }
+            
+            // Direction (for directional/spot)
+            if (light.type() == LightType::Directional || light.type() == LightType::Spot) {
+                if (ImGui::DragFloat3("Direction", &light.direction.x, 0.01f)) {
+                    light_changed = true;
+                }
+            }
+            
+            // Color
+            if (ImGui::ColorEdit3("Color", &light.color.x)) {
+                light_changed = true;
+            }
+            
+            // Intensity
+            if (ImGui::DragFloat("Intensity", &light.intensity, 0.5f, 0.0f, 1000.0f)) {
+                light_changed = true;
+            }
+            
+            // Radius
+            if (light.type() == LightType::Point || 
+                light.type() == LightType::Area || 
+                light.type() == LightType::Directional) {
+                if (ImGui::DragFloat("Radius", &light.radius, 0.01f, 0.01f, 100.0f)) {
+                    light_changed = true;
+                }
+            }
+            
+            // Update GPU
+            if (light_changed && ctx.optix_gpu_ptr && g_hasOptix) {
+                ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // OBJECT/MESH PROPERTIES
+        // ═══════════════════════════════════════════════════════════════════
+        else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            // Show mesh info
+            std::string meshName = sel.selected.object->nodeName;
+            if (meshName.empty()) meshName = "Unnamed";
+            
+            ImGui::TextDisabled("Mesh: %s", meshName.c_str());
+            
+            // Count triangles with same name
+            // FAST COUNT USING CACHE
+            int tri_count = 0;
+            if (mesh_cache_valid) {
+                 auto it = mesh_cache.find(sel.selected.object->nodeName);
+                 if (it != mesh_cache.end()) tri_count = (int)it->second.size();
+            } else {
+                 // Fallback or leave as 0
+            }
+            ImGui::TextDisabled("Triangles: %d", tri_count);
+            
+            // Position (read-only for now)
+            Vec3 pos = sel.selected.position;
+            ImGui::BeginDisabled();
+            ImGui::DragFloat3("Position", &pos.x, 0.1f);
+            ImGui::EndDisabled();
+            
+            // Material info
+            auto mat = sel.selected.object->getMaterial();
+            if (mat) {
+                ImGui::TextDisabled("Material ID: %d", sel.selected.object->getMaterialID());
+            }
+        }
+        
+    } else {
+        ImGui::TextDisabled("Select an item to view properties");
+    }
+    ImGui::EndChild(); // End PropertiesPanel
+
+    
+    
+    
+    // Window end removed as we are in a tab
+    
+    // Light Gizmos moved to main draw loop for selection priority
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Draw Selection Bounding Box (2D Overlay)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (sel.hasSelection() && sel.show_gizmo && ctx.scene.camera) {
+        drawSelectionBoundingBox(ctx);
+        drawTransformGizmo(ctx);  // ImGuizmo gizmo
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SELECTION BOUNDING BOX DRAWING
+// ═══════════════════════════════════════════════════════════════════════════════
+void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
+    SceneSelection& sel = ctx.selection;
+    if (!sel.hasSelection() || !ctx.scene.camera) return;
+    
+    // Get bounding box corners based on selection type
+    Vec3 bb_min, bb_max;
+    bool has_bounds = false;
+    
+    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        
+        // Use cached bounds if available
+        if (sel.selected.has_cached_aabb) {
+            bb_min = sel.selected.cached_aabb.min;
+            bb_max = sel.selected.cached_aabb.max;
+            has_bounds = true;
+        } else {
+            // NEEDED: Compute from all triangles with same nodeName
+            std::string selectedName = sel.selected.object->nodeName;
+            if (selectedName.empty()) selectedName = "Unnamed";
+
+            bb_min = Vec3(1e10f, 1e10f, 1e10f);
+            bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+            bool found_any = false;
+            
+            // OPTIMIZATION: Use mesh_cache instead of scanning all world objects
+            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+            
+            auto it = mesh_cache.find(selectedName);
+            if (it != mesh_cache.end()) {
+                 for (auto& pair : it->second) {
+                    auto& tri = pair.second;
+                    // No need for dynamic_cast check, cache stores Triangles
+                    
+                    // Get triangle vertices
+                    Vec3 v0 = tri->getV0();
+                    Vec3 v1 = tri->getV1();
+                    Vec3 v2 = tri->getV2();
+                    
+                    // Use fminf/fmaxf to avoid Windows min/max macro conflict
+                    bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                    bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                    bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                    bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                    bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                    bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+                    found_any = true;
+                 }
+            }
+            
+            if (found_any) {
+                has_bounds = true;
+                sel.selected.cached_aabb.min = bb_min;
+                sel.selected.cached_aabb.max = bb_max;
+                sel.selected.has_cached_aabb = true;
+            }
+        }
+    }
+    else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+        // Small box around light position
+        Vec3 lightPos = sel.selected.light->position;
+        float boxSize = 0.5f;
+        bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
+        bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
+        has_bounds = true;
+    }
+    else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
+        // Small box around camera position
+        Vec3 camPos = sel.selected.camera->lookfrom;
+        float boxSize = 0.5f;
+        bb_min = Vec3(camPos.x - boxSize, camPos.y - boxSize, camPos.z - boxSize);
+        bb_max = Vec3(camPos.x + boxSize, camPos.y + boxSize, camPos.z + boxSize);
+        has_bounds = true;
+    }
+    
+    if (!has_bounds) return;
+    
+    // 8 corners of bounding box
+    Vec3 corners[8] = {
+        Vec3(bb_min.x, bb_min.y, bb_min.z),
+        Vec3(bb_max.x, bb_min.y, bb_min.z),
+        Vec3(bb_max.x, bb_max.y, bb_min.z),
+        Vec3(bb_min.x, bb_max.y, bb_min.z),
+        Vec3(bb_min.x, bb_min.y, bb_max.z),
+        Vec3(bb_max.x, bb_min.y, bb_max.z),
+        Vec3(bb_max.x, bb_max.y, bb_max.z),
+        Vec3(bb_min.x, bb_max.y, bb_max.z),
+    };
+    
+    // Project corners to screen space
+    Camera& cam = *ctx.scene.camera;
+    ImGuiIO& io = ImGui::GetIO();
+    float screen_w = io.DisplaySize.x;
+    float screen_h = io.DisplaySize.y;
+    
+    // Camera basis vectors
+    Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+    Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+    
+    // FOV calculations
+    float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
+    float tan_half_fov = tanf(fov_rad * 0.5f);
+    
+    ImVec2 screen_pts[8];
+    bool all_visible = true;
+    
+    for (int i = 0; i < 8; i++) {
+        // Vector from camera to corner
+        Vec3 to_corner = corners[i] - cam.lookfrom;
+        
+        // Distance along camera forward axis
+        float depth = to_corner.dot(cam_forward);
+        
+        // Check if behind camera
+        if (depth <= 0.01f) {
+            all_visible = false;
+            break;
+        }
+        
+        // Project onto camera's local X and Y axes
+        float local_x = to_corner.dot(cam_right);
+        float local_y = to_corner.dot(cam_up);
+        
+        // Perspective divide
+        float half_height = depth * tan_half_fov;
+        float half_width = half_height * aspect_ratio;
+        
+        // Normalized device coordinates (-1 to 1)
+        float ndc_x = local_x / half_width;
+        float ndc_y = local_y / half_height;
+        
+        // To screen coordinates
+        screen_pts[i].x = (ndc_x * 0.5f + 0.5f) * screen_w;
+        screen_pts[i].y = (0.5f - ndc_y * 0.5f) * screen_h;  // Y is inverted
+    }
+    
+    if (!all_visible) return;
+    
+    // Draw wireframe using ImGui DrawList
+    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+    ImU32 color = IM_COL32(0, 255, 128, 255);  // Green
+    float thickness = 2.0f;
+    
+    // 12 edges of the box
+    // Bottom face
+    draw_list->AddLine(screen_pts[0], screen_pts[1], color, thickness);
+    draw_list->AddLine(screen_pts[1], screen_pts[2], color, thickness);
+    draw_list->AddLine(screen_pts[2], screen_pts[3], color, thickness);
+    draw_list->AddLine(screen_pts[3], screen_pts[0], color, thickness);
+    
+    // Top face
+    draw_list->AddLine(screen_pts[4], screen_pts[5], color, thickness);
+    draw_list->AddLine(screen_pts[5], screen_pts[6], color, thickness);
+    draw_list->AddLine(screen_pts[6], screen_pts[7], color, thickness);
+    draw_list->AddLine(screen_pts[7], screen_pts[4], color, thickness);
+    
+    // Vertical edges
+    draw_list->AddLine(screen_pts[0], screen_pts[4], color, thickness);
+    draw_list->AddLine(screen_pts[1], screen_pts[5], color, thickness);
+    draw_list->AddLine(screen_pts[2], screen_pts[6], color, thickness);
+    draw_list->AddLine(screen_pts[3], screen_pts[7], color, thickness);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// IMGUIZMO TRANSFORM GIZMO
+// ═══════════════════════════════════════════════════════════════════════════════
+void SceneUI::drawTransformGizmo(UIContext& ctx) {
+    SceneSelection& sel = ctx.selection;
+    if (!sel.hasSelection() || !sel.show_gizmo || !ctx.scene.camera) return;
+    
+    Camera& cam = *ctx.scene.camera;
+    ImGuiIO& io = ImGui::GetIO();
+    
+    // Setup ImGuizmo
+    ImGuizmo::BeginFrame();
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Build View Matrix (LookAt)
+    // ─────────────────────────────────────────────────────────────────────────
+    Vec3 eye = cam.lookfrom;
+    Vec3 target = cam.lookat;
+    Vec3 up = cam.vup;
+    
+    Vec3 f = (target - eye).normalize();  // Forward
+    Vec3 r = f.cross(up).normalize();     // Right
+    Vec3 u = r.cross(f);                   // Up
+    
+    float viewMatrix[16] = {
+        r.x,  u.x, -f.x, 0.0f,
+        r.y,  u.y, -f.y, 0.0f,
+        r.z,  u.z, -f.z, 0.0f,
+        -r.dot(eye), -u.dot(eye), f.dot(eye), 1.0f
+    };
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Build Projection Matrix (Perspective)
+    // ─────────────────────────────────────────────────────────────────────────
+    float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
+    float near_plane = 0.1f;
+    float far_plane = 10000.0f;
+    float tan_half_fov = tanf(fov_rad * 0.5f);
+    
+    float projMatrix[16] = {0};
+    projMatrix[0] = 1.0f / (aspect_ratio * tan_half_fov);
+    projMatrix[5] = 1.0f / tan_half_fov;
+    projMatrix[10] = -(far_plane + near_plane) / (far_plane - near_plane);
+    projMatrix[11] = -1.0f;
+    projMatrix[14] = -(2.0f * far_plane * near_plane) / (far_plane - near_plane);
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Get Object Matrix
+    // ─────────────────────────────────────────────────────────────────────────
+    float objectMatrix[16];
+    Vec3 pos = sel.selected.position;
+    
+    // Initialize as identity with position
+    Matrix4x4 startMat = Matrix4x4::identity();
+    startMat.m[0][3] = pos.x;
+    startMat.m[1][3] = pos.y;
+    startMat.m[2][3] = pos.z;
+
+    // Handle Light Rotation (Directional/Spot)
+    if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+        Vec3 dir(0, 0, 0);
+        bool hasDir = false;
+        
+        if (auto dl = std::dynamic_pointer_cast<DirectionalLight>(sel.selected.light)) {
+             // DirectionalLight: getDirection returns vector TO Light (inverse of direction)
+             // We want the light direction for visualization
+             dir = dl->getDirection(Vec3(0)).normalize() * -1.0f; 
+             hasDir = true;
+        } 
+        else if (auto sl = std::dynamic_pointer_cast<SpotLight>(sel.selected.light)) {
+             dir = sl->getDirection(Vec3(0)).normalize() * -1.0f;
+             hasDir = true;
+        }
+
+        if (hasDir) {
+            // Align Gizmo -Z with Light Direction
+            Vec3 Z = -dir;
+            Vec3 Y(0, 1, 0);
+            if (abs(Vec3::dot(Z, Y)) > 0.99f) Y = Vec3(1, 0, 0); // Lock prevention
+            Vec3 X = Vec3::cross(Y, Z).normalize();
+            Y = Vec3::cross(Z, X).normalize();
+            
+            startMat.m[0][0] = X.x; startMat.m[0][1] = Y.x; startMat.m[0][2] = Z.x; 
+            startMat.m[1][0] = X.y; startMat.m[1][1] = Y.y; startMat.m[1][2] = Z.y; 
+            startMat.m[2][0] = X.z; startMat.m[2][1] = Y.z; startMat.m[2][2] = Z.z; 
+        }
+    }
+
+    objectMatrix[0] = startMat.m[0][0]; objectMatrix[1] = startMat.m[1][0]; objectMatrix[2] = startMat.m[2][0]; objectMatrix[3] = startMat.m[3][0];
+    objectMatrix[4] = startMat.m[0][1]; objectMatrix[5] = startMat.m[1][1]; objectMatrix[6] = startMat.m[2][1]; objectMatrix[7] = startMat.m[3][1];
+    objectMatrix[8] = startMat.m[0][2]; objectMatrix[9] = startMat.m[1][2]; objectMatrix[10] = startMat.m[2][2]; objectMatrix[11] = startMat.m[3][2];
+    objectMatrix[12] = startMat.m[0][3]; objectMatrix[13] = startMat.m[1][3]; objectMatrix[14] = startMat.m[2][3]; objectMatrix[15] = startMat.m[3][3];
+
+    // If object has transform, use it
+    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        auto transform = sel.selected.object->getTransformHandle();
+        if (transform) {
+            Matrix4x4 mat = transform->base;
+            objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
+            objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
+            objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
+            objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Keyboard Shortcuts for Transform Mode
+    // ─────────────────────────────────────────────────────────────────────────
+    // Only process when viewport has focus (not UI panels)
+    if (sel.hasSelection() && !ImGui::GetIO().WantCaptureKeyboard) {
+        if (ImGui::IsKeyPressed(ImGuiKey_G)) {
+            sel.transform_mode = TransformMode::Translate;
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_R)) {
+            sel.transform_mode = TransformMode::Rotate;
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_S) && !ImGui::GetIO().KeyShift) {
+            // S alone = Scale, Shift+S would trigger duplication so check
+            sel.transform_mode = TransformMode::Scale;
+        }
+        else if (ImGui::IsKeyPressed(ImGuiKey_W)) {
+            // Cycle through modes
+            switch (sel.transform_mode) {
+                case TransformMode::Translate: sel.transform_mode = TransformMode::Rotate; break;
+                case TransformMode::Rotate: sel.transform_mode = TransformMode::Scale; break;
+                case TransformMode::Scale: sel.transform_mode = TransformMode::Translate; break;
+            }
+        }
+        
+        // Shift + D = Duplicate Object
+        if (ImGui::IsKeyPressed(ImGuiKey_D) && ImGui::GetIO().KeyShift) {
+            if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+                std::string targetName = sel.selected.object->nodeName;
+                if (targetName.empty()) targetName = "Unnamed";
+                
+                // Unique name generation
+                std::string baseName = targetName;
+                size_t lastUnderscore = baseName.rfind('_');
+                if (lastUnderscore != std::string::npos) {
+                    std::string suffix = baseName.substr(lastUnderscore + 1);
+                    if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
+                        baseName = baseName.substr(0, lastUnderscore);
+                    }
+                }
+                
+                int counter = 1;
+                std::string newName;
+                bool nameExists = true;
+                while (nameExists) {
+                    newName = baseName + "_" + std::to_string(counter);
+                    nameExists = false;
+                    for (const auto& obj : ctx.scene.world.objects) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                        if (tri && tri->nodeName == newName) {
+                            nameExists = true;
+                            break;
+                        }
+                    }
+                    counter++;
+                }
+                
+                // Create duplicates
+                std::vector<std::shared_ptr<Hittable>> newTriangles;
+                std::shared_ptr<Triangle> firstNewTri = nullptr;
+                auto it = mesh_cache.find(targetName);
+                if (it != mesh_cache.end()) {
+                    for (auto& pair : it->second) {
+                        auto& oldTri = pair.second;
+                        auto newTri = std::make_shared<Triangle>(*oldTri);
+                        newTri->setNodeName(newName);
+                        newTriangles.push_back(newTri);
+                        if (!firstNewTri) firstNewTri = newTri;
+                    }
+                }
+                
+                // Add to scene
+                if (!newTriangles.empty()) {
+                    ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), newTriangles.begin(), newTriangles.end());
+                    sel.selectObject(firstNewTri, -1, newName);
+                    rebuildMeshCache(ctx.scene.world.objects);
+                    
+                    // Record undo command
+                    std::vector<std::shared_ptr<Triangle>> new_tri_vec;
+                    for (auto& ht : newTriangles) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(ht);
+                        if (tri) new_tri_vec.push_back(tri);
+                    }
+                    auto command = std::make_unique<DuplicateObjectCommand>(targetName, newName, new_tri_vec);
+                    history.record(std::move(command));
+                    
+                    // Full rebuild for duplication
+                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.optix_gpu_ptr) {
+                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                    }
+                    is_bvh_dirty = false;
+                    SCENE_LOG_INFO("Duplicated object: " + targetName + " -> " + newName);
+                }
+            }
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Determine Gizmo Operation
+    // ─────────────────────────────────────────────────────────────────────────
+    ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
+    switch (sel.transform_mode) {
+        case TransformMode::Translate: operation = ImGuizmo::TRANSLATE; break;
+        case TransformMode::Rotate: operation = ImGuizmo::ROTATE; break;
+        case TransformMode::Scale: operation = ImGuizmo::SCALE; break;
+    }
+    
+    ImGuizmo::MODE mode = (sel.transform_space == TransformSpace::Local) ? 
+        ImGuizmo::LOCAL : ImGuizmo::WORLD;
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // Shift + Drag Duplication Logic
+    // ─────────────────────────────────────────────────────────────────────────
+    static bool was_using_gizmo = false;
+    bool is_using = ImGuizmo::IsUsing();
+
+    if (is_using && !was_using_gizmo) {
+        // Manipülasyon yeni başladı
+        if (ImGui::GetIO().KeyShift && sel.selected.type == SelectableType::Object && sel.selected.object) {
+            
+            std::string targetName = sel.selected.object->nodeName;
+            if (targetName.empty()) targetName = "Unnamed";
+            
+            // Unique name generation
+            std::string baseName = targetName;
+            size_t lastUnderscore = baseName.rfind('_');
+            if (lastUnderscore != std::string::npos) {
+                std::string suffix = baseName.substr(lastUnderscore + 1);
+                if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
+                    baseName = baseName.substr(0, lastUnderscore);
+                }
+            }
+            int copyNum = 1;
+            std::string newName;
+            do { newName = baseName + "_" + std::to_string(copyNum++); } while (mesh_cache.find(newName) != mesh_cache.end());
+
+            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+            // Create Unique Transform
+            std::shared_ptr<Transform> newTransform = std::make_shared<Transform>();
+            if (sel.selected.object->getTransformHandle()) {
+                *newTransform = *sel.selected.object->getTransformHandle();
+            }
+
+            // Duplicate Triangles
+            std::vector<std::shared_ptr<Hittable>> newTriangles;
+            std::shared_ptr<Triangle> firstNewTri = nullptr;
+            auto it = mesh_cache.find(targetName);
+            if (it != mesh_cache.end()) {
+                for (auto& pair : it->second) {
+                    auto& oldTri = pair.second;
+                    auto newTri = std::make_shared<Triangle>(*oldTri); 
+                    newTri->setTransformHandle(newTransform);
+                    newTri->setNodeName(newName);
+                    newTriangles.push_back(newTri);
+                    if (!firstNewTri) firstNewTri = newTri;
+                }
+            }
+
+            // Add to Scene
+            if (!newTriangles.empty()) {
+                ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), newTriangles.begin(), newTriangles.end());
+                sel.selectObject(firstNewTri, -1, newName); // Select New
+                rebuildMeshCache(ctx.scene.world.objects);
+                
+                // CRITICAL: Duplication adds new triangles - requires full rebuild
+                // Material index buffer must be regenerated (same as deletion)
+                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.optix_gpu_ptr) {
+                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                }
+                is_bvh_dirty = false;
+                SCENE_LOG_INFO("Duplicated object: " + targetName + " -> " + newName);
+            }
+        }
+        else if (ImGui::GetIO().KeyShift && sel.selected.type == SelectableType::Light && sel.selected.light) {
+             std::shared_ptr<Light> newLight = nullptr;
+             auto l = sel.selected.light;
+             if (std::dynamic_pointer_cast<PointLight>(l)) newLight = std::make_shared<PointLight>(*(PointLight*)l.get());
+             else if (std::dynamic_pointer_cast<DirectionalLight>(l)) newLight = std::make_shared<DirectionalLight>(*(DirectionalLight*)l.get());
+             else if (std::dynamic_pointer_cast<SpotLight>(l)) newLight = std::make_shared<SpotLight>(*(SpotLight*)l.get());
+             else if (std::dynamic_pointer_cast<AreaLight>(l)) newLight = std::make_shared<AreaLight>(*(AreaLight*)l.get());
+             
+             if (newLight) {
+                 ctx.scene.lights.push_back(newLight);
+                 sel.selectLight(newLight);
+                 if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
+             }
+        }
+        else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+             // START TRANSFORM RECORDING (Normal drag without Shift)
+             auto transform = sel.selected.object->getTransformHandle();
+             if (transform) {
+                 drag_start_state.matrix = transform->base;
+                 drag_object_name = sel.selected.object->nodeName;
+             }
+        }
+    }
+    
+    // END DRAG (Release)
+    if (!is_using && was_using_gizmo && sel.selected.type == SelectableType::Object && sel.selected.object) {
+         // END TRANSFORM RECORDING
+         auto t = sel.selected.object->getTransformHandle();
+         if (t) {
+             TransformState final_state;
+             final_state.matrix = t->base;
+             
+             // Check delta
+             bool changed = false;
+             for(int i=0; i<4; ++i) 
+                 for(int j=0; j<4; ++j) 
+                     if (std::abs(final_state.matrix.m[i][j] - drag_start_state.matrix.m[i][j]) > 0.0001f) 
+                         changed = true;
+                          
+             if (changed) {
+                 history.record(std::make_unique<TransformCommand>(drag_object_name, drag_start_state, final_state));
+             }
+         }
+    }
+    
+    was_using_gizmo = is_using;
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Render and Manipulate Gizmo
+    // ─────────────────────────────────────────────────────────────────────────
+    bool manipulated = ImGuizmo::Manipulate(viewMatrix, projMatrix, operation, mode, objectMatrix);
+    
+    if (manipulated) {
+        Vec3 newPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
+        sel.selected.position = newPos; // Update gizmo/bbox center
+
+        if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+            sel.selected.light->position = newPos;
+            Vec3 zAxis(objectMatrix[8], objectMatrix[9], objectMatrix[10]);
+            Vec3 newDir = -zAxis.normalize(); // Gizmo -Z aligned
+            
+            if (auto dl = std::dynamic_pointer_cast<DirectionalLight>(sel.selected.light)) dl->setDirection(newDir);
+            else if (auto sl = std::dynamic_pointer_cast<SpotLight>(sel.selected.light)) {} // sl->setDirection(newDir);
+            
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+        }
+        else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
+            Vec3 delta = newPos - sel.selected.camera->lookfrom;
+            sel.selected.camera->lookfrom = newPos;
+            sel.selected.camera->lookat = sel.selected.camera->lookat + delta;
+            sel.selected.camera->update_camera_vectors();
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->setCameraParams(*sel.selected.camera);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+        }
+        else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            Matrix4x4 newMat;
+            newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
+            newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
+            newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
+            newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+
+            std::string targetName = sel.selected.object->nodeName;
+            if (targetName.empty()) targetName = "Unnamed";
+            
+            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+            auto it = mesh_cache.find(targetName);
+            if (it != mesh_cache.end()) {
+                for (auto& pair : it->second) {
+                    auto& tri = pair.second;
+                    auto t_handle = tri->getTransformHandle();
+                    if (t_handle) t_handle->setBase(newMat);
+                    tri->updateTransformedVertices();
+                }
+            }
+            sel.selected.has_cached_aabb = false;
+
+            // IMMEDIATE UPDATE
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            else {
+                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                ctx.renderer.resetCPUAccumulation();
+                is_bvh_dirty = false;
+            }
+        }
+    }
+}
+
+void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    mesh_cache.clear();
+    mesh_ui_cache.clear();
+    
+    for (size_t i = 0; i < objects.size(); ++i) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
+        if (tri) {
+            std::string name = tri->nodeName.empty() ? "Unnamed" : tri->nodeName;
+            mesh_cache[name].push_back({(int)i, tri});
+        }
+    }
+    
+    // Transfer to sequential vector for ImGui Clipper
+    mesh_ui_cache.reserve(mesh_cache.size());
+    for (auto& kv : mesh_cache) {
+        mesh_ui_cache.push_back(kv);
+    }
+    
+    mesh_cache_valid = true;
+}
+
+void SceneUI::handleMouseSelection(UIContext& ctx) {
+    // Only select if not interacting with UI or Gizmo
+    if (ImGui::IsMouseClicked(0)) {
+        
+        // Debugging: Confirm click detection
+        SCENE_LOG_INFO("Mouse Left Click Detected");
+
+        // Ignore click if over UI elements or Gizmo
+        if (ImGui::IsAnyItemHovered() || ImGuizmo::IsOver()) {
+            SCENE_LOG_INFO("Selection Skipped: Mouse over UI or Gizmo");
+            return;
+        }
+
+        int x, y;
+        SDL_GetMouseState(&x, &y);
+        
+        float win_w = ImGui::GetIO().DisplaySize.x;
+        float win_h = ImGui::GetIO().DisplaySize.y;
+        
+        float u = (float)x / win_w;
+        float v = (float)y / win_h; 
+        v = 1.0f - v; 
+
+        if (ctx.scene.camera) {
+            Ray r = ctx.scene.camera->get_ray(u, v);
+            
+            
+            // Perform Linear Selection (Bypasses BVH for accuracy and avoids rebuilds)
+            
+            HitRecord rec;
+            bool hit = false;
+            float closest_so_far = 1e9f;
+            HitRecord temp_rec;
+
+            for (const auto& obj : ctx.scene.world.objects) {
+                if (obj->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                    hit = true;
+                    closest_so_far = temp_rec.t;
+                    rec = temp_rec;
+                }
+            }
+
+            if (hit && rec.triangle) {
+                // Log selection info
+                // SCENE_LOG_INFO("Selected: " + (rec.triangle->nodeName.empty() ? "Object" : rec.triangle->nodeName));
+
+                std::shared_ptr<Triangle> found_tri = nullptr;
+                int index = -1;
+                
+                // Ensure cache is valid
+                if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+                
+                bool found = false;
+                for (auto& [name, list] : mesh_cache) {
+                    for (auto& pair : list) {
+                        if (pair.second.get() == rec.triangle) {
+                            found_tri = pair.second;
+                            index = pair.first;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+
+                if (found_tri) {
+                    ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+                } else {
+                     // Fallback if not in cache (should typically not happen)
+                     SCENE_LOG_WARN("Selection: Object found but not in cache.");
+                }
+            } else {
+                // Clicked on empty space
+                ctx.selection.clearSelection();
+            }
+        }
+    }
+}
+
+// Global flag for Render Window visibility
+bool show_render_window = false;
+
+void DrawRenderWindow(UIContext& ctx) {
+    if (!show_render_window) return;
+
+    ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
+    
+    // Auto-Stop Logic
+    int current_samples = ctx.renderer.getCPUAccumulatedSamples();
+    int target_samples = ctx.render_settings.final_render_samples;
+
+    if (ctx.render_settings.is_final_render_mode && current_samples >= target_samples) {
+        ctx.render_settings.is_final_render_mode = false; // Finish
+        extern std::atomic<bool> rendering_stopped_cpu;
+        rendering_stopped_cpu = true; 
+    }
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f)); // Opaque Background
+    if (ImGui::Begin("Render Result", &show_render_window, ImGuiWindowFlags_NoCollapse)) {
+        
+        // Progress Info
+        float progress = (float)current_samples / (float)target_samples;
+        if (progress > 1.0f) progress = 1.0f;
+
+        // Header
+        ImGui::Text("Final Render Status");
+        ImGui::SameLine();
+        if (current_samples >= target_samples) {
+            ImGui::TextColored(ImVec4(0,1,0,1), "[FINISHED]");
+        } else if (ctx.render_settings.is_final_render_mode) {
+             ImGui::TextColored(ImVec4(1,1,0,1), "[RENDERING...]");
+        } else {
+             ImGui::TextColored(ImVec4(0.7f,0.7f,0.7f,1), "[IDLE]");
+        }
+
+        // Progress Bar
+        char buf[32];
+        sprintf(buf, "%d / %d Samples", current_samples, target_samples);
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), buf);
+        
+        ImGui::Separator();
+
+        // Control Toolbar
+        if (ImGui::Button("Save Image")) {
+             std::string filename = "Render_" + std::to_string(time(0)) + ".png";
+             ctx.render_settings.save_image_requested = true;
+        }
+        
+        ImGui::SameLine();
+        
+        if (ctx.render_settings.is_final_render_mode) {
+            if (ImGui::Button("Stop / Cancel")) {
+                ctx.render_settings.is_final_render_mode = false;
+            }
+        } else {
+            if (ImGui::Button("Start Render (F12)")) {
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                ctx.render_settings.is_final_render_mode = true;
+                ctx.start_render = true; 
+            }
+        }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        
+        // ZOOM CONTROLS
+        static float zoom = 1.0f;
+        if (ImGui::Button("1:1")) zoom = 1.0f;
+        ImGui::SameLine();
+        if (ImGui::Button("Fit")) {
+             extern int image_width, image_height;
+             ImVec2 avail = ImGui::GetContentRegionAvail();
+             if (image_width > 0 && image_height > 0) {
+                 float rX = avail.x / image_width;
+                 float rY = avail.y / image_height;
+                 zoom = (rX < rY) ? rX : rY;
+             }
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(100);
+        ImGui::SliderFloat("Zoom", &zoom, 0.1f, 5.0f, "%.1fx");
+
+        ImGui::Separator();
+        
+        // Render Output Display (Scrollable & Zoomable)
+        ImGui::BeginChild("RenderView", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoMove);
+        
+        extern SDL_Texture* raytrace_texture; // Global texture from Main.cpp
+        extern int image_width, image_height;
+        
+        if (raytrace_texture && image_width > 0 && image_height > 0) {
+             
+             ImGuiIO& io = ImGui::GetIO();
+             
+             // Mouse Wheel Zoom
+             if (ImGui::IsWindowHovered()) {
+                 if (io.MouseWheel != 0.0f) {
+                     float old_zoom = zoom;
+                     zoom += io.MouseWheel * 0.1f * zoom; // Logarithmic-ish zoom
+                     if (zoom < 0.1f) zoom = 0.1f;
+                     if (zoom > 10.0f) zoom = 10.0f;
+                     
+                     // Center zoom (optional, simplified for now)
+                 }
+                 
+                 // Middle Mouse Pan
+                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                     ImVec2 delta = io.MouseDelta;
+                     ImGui::SetScrollX(ImGui::GetScrollX() - delta.x);
+                     ImGui::SetScrollY(ImGui::GetScrollY() - delta.y);
+                 }
+             }
+
+             // Calculate Scaled Size
+             float w = (float)image_width * zoom;
+             float h = (float)image_height * zoom;
+             
+             // Center Image if smaller than window
+             ImVec2 avail = ImGui::GetContentRegionAvail();
+             float offX = (avail.x > w) ? (avail.x - w) * 0.5f : 0.0f;
+             float offY = (avail.y > h) ? (avail.y - h) * 0.5f : 0.0f;
+             
+             if (offX > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offX);
+             if (offY > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offY);
+
+             ImGui::Image((ImTextureID)raytrace_texture, ImVec2(w, h));
+             
+             // Tooltip for resolution
+             if (ImGui::IsItemHovered()) {
+                 ImGui::SetTooltip("Resolution: %dx%d | Zoom: %.1f%%", image_width, image_height, zoom * 100.0f);
+             }
+
+        } else {
+             ImGui::TextColored(ImVec4(1,0,0,1), "Render Texture not available.");
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    
+    // Safety: If window is closed, ensure we exit final render mode
+    if (!show_render_window && ctx.render_settings.is_final_render_mode) {
+        ctx.render_settings.is_final_render_mode = false;
+    }
+    
+    // Sync F12 trigger from main loop
+    if (show_render_window && ctx.start_render && !ctx.render_settings.is_final_render_mode && current_samples < 5) {
+         // Detect if F12 just opened this
+         ctx.render_settings.is_final_render_mode = true;
+    }
+}
+    
+

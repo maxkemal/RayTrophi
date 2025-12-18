@@ -223,7 +223,7 @@ public:
     const Vec3& n0_cref() const { return vertices[0].normal; }
     const Vec3& n1_cref() const { return vertices[1].normal; }
     const Vec3& n2_cref() const { return vertices[2].normal; }
-
+    std::string nodeName;
 private:
     // ========================================================================
     // Optimized Data Members
@@ -234,7 +234,7 @@ private:
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
     std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
     
-    std::string nodeName;                      // 32 bytes avg
+                     // 32 bytes avg
     int faceIndex = -1;                        // 4 bytes
     std::array<unsigned int, 3> assimpVertexIndices; // 12 bytes
 

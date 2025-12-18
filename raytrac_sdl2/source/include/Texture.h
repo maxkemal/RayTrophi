@@ -242,6 +242,7 @@ public:
         m_is_loaded = false;
         is_gpu_uploaded = false;
         is_hdr = false;
+        this->name = name; // Store name
         std::string texture_name = name.empty() ? "unnamed_texture" : name;
 
         // Cache kontrol et - SADECE embedded texture için (name boş değilse)
@@ -288,6 +289,8 @@ public:
         m_is_loaded = false;
         is_gpu_uploaded = false;
         is_hdr = false;
+        this->name = filename; // Store filename
+        
         
         // Detect HDR/EXR formats
         std::string ext = filename.substr(filename.find_last_of(".") + 1);
@@ -781,6 +784,7 @@ public:
     std::vector<CompactVec4> pixels;
     std::vector<float4> float_pixels; // For HDR
     bool is_hdr = false;
+    std::string name; // Texture name/path
 private:
     // ===== decode_raw() OPTIMIZED - SIMD + Paralel =====
     void decode_raw(const aiTexture* tex) {

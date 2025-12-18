@@ -33,7 +33,8 @@ struct RenderSettings {
     float variance_threshold = 0.1f;
 
     // Denoiser
-    bool use_denoiser = false;
+    bool use_denoiser = false;        // Viewport Denoiser
+    bool render_use_denoiser = true;  // Final Render Denoiser
     float denoiser_blend_factor = 1.0f;
 
     // Backend
@@ -57,9 +58,13 @@ struct RenderSettings {
     // Render progress tracking (for UI display)
     int render_current_samples = 0;
     int render_target_samples = 256;
+    int final_render_samples = 128;
+    int final_render_width = 1920;
+    int final_render_height = 1080; // Specific for F12 Output
     float render_progress = 0.0f;
     bool is_rendering_active = false;
     bool is_render_paused = false;
+    bool is_final_render_mode = false;
     
     // Render time estimation
     float render_elapsed_seconds = 0.0f;

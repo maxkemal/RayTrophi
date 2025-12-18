@@ -118,6 +118,8 @@ private:
     //  Texture CUDA array tracking (memory leak fix)
     std::vector<cudaArray_t> texture_arrays;
     
+
+    
     CUstream stream = nullptr;
       int Image_width;
     int Image_height;

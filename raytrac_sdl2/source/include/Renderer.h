@@ -56,6 +56,7 @@
 #include "AnimatedObject.h"
 #include <ColorProcessingParams.h>
 #include <scene_data.h>
+#include <functional>
 
 
 enum class BVHType {
@@ -119,7 +120,11 @@ public:
 
     void rebuildBVH(SceneData& scene, bool use_embree);
 
-    void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path);
+    void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
+        std::function<void(int progress, const std::string& stage)> progress_callback = nullptr);
+
+    // Rebuild OptiX geometry after scene modifications (deletion/addition)
+    void rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr);
 
    
     void initializeBuffers(int image_width, int image_height);

@@ -5,6 +5,7 @@
 #include <unordered_map> // Gereken başlık
 #include <algorithm>    // std::min ve std::max için
 #include <cstring>      // memcpy for camera hash
+
 #include <SpotLight.h>
 #include <filesystem>
 #include <imgui.h>
@@ -240,6 +241,8 @@ bool OptixWrapper::isCudaAvailable() {
 
 // OIDN methods removed - all denoising now handled by Renderer::applyOIDNDenoising
 // This eliminates code duplication and ensures consistent behavior
+
+
 
 void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
     if (data.materials.empty()) {
@@ -1184,21 +1187,38 @@ bool OptixWrapper::SaveSurface(SDL_Surface* surface, const char* filename) {
 
 void OptixWrapper::resetBuffers(int width, int height) {
     if (prev_width != width || prev_height != height) {
-        if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
-        if (d_variance_buffer) cudaFree(d_variance_buffer);
-        if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
+        if (d_accumulation_buffer) { cudaFree(d_accumulation_buffer); d_accumulation_buffer = nullptr; }
+        if (d_variance_buffer) { cudaFree(d_variance_buffer); d_variance_buffer = nullptr; }
+        if (d_sample_count_buffer) { cudaFree(d_sample_count_buffer); d_sample_count_buffer = nullptr; }
+        
+        // Critical Fix: Also free float4 accumulation buffer to prevent crash on resize
+        if (d_accumulation_float4) { cudaFree(d_accumulation_float4); d_accumulation_float4 = nullptr; }
+        
+        // Also invalidate framebuffer so launch functions re-allocate
+        if (d_framebuffer) { cudaFree(d_framebuffer); d_framebuffer = nullptr; }
 
         cudaMalloc(&d_accumulation_buffer, sizeof(float) * width * height * 3);
         cudaMalloc(&d_variance_buffer, sizeof(float) * width * height);
         cudaMalloc(&d_sample_count_buffer, sizeof(int) * width * height);
+        
+        // Re-allocate float4 accumulation buffer used by progressive renderer
+        cudaMalloc(&d_accumulation_float4, sizeof(float4) * width * height);
 
         prev_width = width;
         prev_height = height;
+        
+        accumulated_samples = 0;
+        accumulation_valid = false;
     }
 
     cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
     cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
     cudaMemset(d_sample_count_buffer, 0, sizeof(int) * width * height);
+    
+    if (d_accumulation_float4) {
+        cudaMemset(d_accumulation_float4, 0, sizeof(float4) * width * height);
+    }
+    
     frame_counter = 1;
 }
 
@@ -1217,6 +1237,24 @@ void OptixWrapper::resetAccumulation() {
     accumulation_valid = true;
 }
 
+// ============================================================================
+// CRITICAL: updateGeometry() Limitations
+// ============================================================================
+// This function ONLY updates vertex positions and normals.
+// It does NOT update material indices buffer (d_material_indices).
+// 
+// USE FOR:
+//   ✅ Object transformation (position/rotation/scale changes)
+//   ✅ Animation playback (vertex deformation)
+//
+// DO NOT USE FOR:
+//   ❌ Object deletion (material indices become misaligned)
+//   ❌ Object addition (material indices need regeneration)
+//   ❌ Material changes (SBT needs rebuild)
+//
+// For deletion/addition, use Renderer::rebuildOptiXGeometry() instead.
+// See OPTIX_MATERIAL_FIX.md for detailed explanation.
+// ============================================================================
 void OptixWrapper::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
     if (objects.empty()) return;
 
@@ -1272,9 +1310,7 @@ void OptixWrapper::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& 
     // Update SBT Logic? 
     // Currently, SBT stores pointers to d_vertices. If d_vertices changed address, SBT is stale!
     // FIX: We must update SBT if we reallocated OR if we switched from Indexed to Soup (pointers change logic).
-    // For now, let's assume SBT has pointer to d_vertices. If d_vertices changed, we need to update it.
-    // However, updating SBT on the fly is complex here. 
-    // Assuming the pointer `d_vertices` is what SBT uses, we need to refresh it.
+    // For now, let's assume SBT has pointer to d_vertices. If d_vertices changed, we need to refresh it.
     // Ideally, we should implement a `updateSBT()` method. 
     // But since this is a quick fix, if we realloc, we are in danger.
     // LUCKILY, cuMemcpy to EXISTING d_vertices (if size fits) works fine.
@@ -1389,6 +1425,8 @@ void OptixWrapper::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& 
         0                   
     ));
     
+    
     cudaDeviceSynchronize();
-}
 
+    last_vertex_count = vertices.size(); // Update tracking for next frame
+}

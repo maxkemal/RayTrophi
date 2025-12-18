@@ -235,6 +235,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
+    <ClInclude Include="source\include\ImGuizmo.h" />
+    <ClInclude Include="source\include\SceneCommand.h" />
+    <ClInclude Include="source\include\SceneHistory.h" />
+    <ClInclude Include="source\include\SceneSelection.h" />
     <ClInclude Include="source\include\tinyexr.h" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
@@ -317,6 +321,7 @@
     <ClCompile Include="source\src\EmbreeBVH.cpp" />
     <ClCompile Include="source\src\globals.cpp" />
     <ClCompile Include="source\src\HittableList.cpp" />
+    <ClCompile Include="source\src\ImGuizmo.cpp" />
     <ClCompile Include="source\src\Light.cpp" />
     <ClCompile Include="source\src\Main.cpp" />
     <ClCompile Include="source\src\Material.cpp" />
@@ -327,6 +332,9 @@
     <ClCompile Include="source\src\PointLight.cpp" />
     <ClCompile Include="source\src\PrincipledBSDF.cpp" />
     <ClCompile Include="source\src\Renderer.cpp" />
+    <ClCompile Include="source\src\SceneCommand.cpp" />
+    <ClCompile Include="source\src\SceneHistory.cpp" />
+    <ClCompile Include="source\src\SceneSelection.cpp" />
     <ClCompile Include="source\src\scene_ui.cpp" />
     <ClCompile Include="source\src\SpotLight.cpp" />
     <ClCompile Include="source\src\Texture.cpp" />

@@ -22,6 +22,8 @@ x64/
 *.log
 *.txt
 !README.txt
+!CMakeLists.txt
+
 
 # Log files from app
 SceneLog.txt
