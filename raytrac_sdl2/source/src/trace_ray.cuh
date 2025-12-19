@@ -5,7 +5,7 @@
 #include "params.h"
 #include "ray.h"
 
-__device__ void trace_ray(const Ray& ray, OptixHitResult* result) {
+__device__ void trace_ray(const Ray& ray, OptixHitResult* result, float tmin = 0.01f, float tmax = 1e16f) {
     unsigned int p0, p1;
     packPayload(result, p0, p1);
 
@@ -13,7 +13,7 @@ __device__ void trace_ray(const Ray& ray, OptixHitResult* result) {
         optixLaunchParams.handle,
         ray.origin,
         ray.direction,
-        0.01f, 1e16f, 0.0f,
+        tmin, tmax, 0.0f,
         OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_DISABLE_ANYHIT,
         0, // ← ray_type = 0 (primary / bounce ray)

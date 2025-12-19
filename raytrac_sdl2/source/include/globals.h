@@ -70,6 +70,12 @@ struct RenderSettings {
     float render_elapsed_seconds = 0.0f;
     float render_estimated_remaining = 0.0f;
     float avg_sample_time_ms = 0.0f;
+    
+    // Viewport Grid Settings
+    bool grid_enabled = true;
+    float grid_fade_distance = 50.0f;  // Units where grid fades out completely
+    float viewport_near_clip = 0.1f;   // Objects closer than this won't be seen
+    float viewport_far_clip = 5000.0f; // Objects further than this won't be seen
 };
 enum class LogLevel { Info, Warning, Error };
 

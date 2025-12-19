@@ -60,6 +60,7 @@ class OptixWrapper {
 public:
     OptixWrapper();
     void partialCleanup();
+    void clearScene(); // Clears traversable handle for empty scenes
     ~OptixWrapper();
 
     void resizeBuffers(int w, int h);

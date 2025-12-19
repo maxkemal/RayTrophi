@@ -7,6 +7,7 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "AABB.h"
+#include <algorithm>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE SELECTION IMPLEMENTATION
@@ -28,9 +29,16 @@ void SceneSelection::updatePositionFromSelection() {
         case SelectableType::Camera:
             if (selected.camera) {
                 selected.position = selected.camera->lookfrom;
-                // Could extract rotation from lookfrom/lookat/vup
                 selected.rotation = Vec3(0, 0, 0);
                 selected.scale = Vec3(1, 1, 1);
+            }
+            break;
+
+        case SelectableType::CameraTarget:
+            if (selected.camera) {
+                selected.position = selected.camera->lookat;
+                selected.rotation = Vec3(0, 0, 0);
+                selected.scale = Vec3(0.5f, 0.5f, 0.5f); 
             }
             break;
             
@@ -45,7 +53,6 @@ void SceneSelection::updatePositionFromSelection() {
                 // Get transform from TransformHandle if available
                 auto transform = selected.object->getTransformHandle();
                 if (transform) {
-                    // Access base directly (not getter method)
                     Matrix4x4 mat = transform->base;
                     selected.position = Vec3(mat.m[0][3], mat.m[1][3], mat.m[2][3]);
                 }
@@ -57,38 +64,55 @@ void SceneSelection::updatePositionFromSelection() {
     }
 }
 
-void SceneSelection::applyTransformToSelection(const Matrix4x4& delta_transform) {
-    if (!selected.is_valid()) return;
-    
-    switch (selected.type) {
+// Helper to apply transform to a single item
+static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_transform) {
+    if (!item.is_valid()) return;
+
+    switch (item.type) {
         case SelectableType::Light:
-            if (selected.light) {
-                // Extract translation from matrix
+            if (item.light) {
                 Vec3 translation(delta_transform.m[0][3], delta_transform.m[1][3], delta_transform.m[2][3]);
-                selected.light->position = selected.light->position + translation;
-                selected.position = selected.light->position;
+                item.light->position = item.light->position + translation;
+                item.position = item.light->position;
             }
             break;
             
         case SelectableType::Camera:
-            if (selected.camera) {
+            if (item.camera) {
                 Vec3 translation(delta_transform.m[0][3], delta_transform.m[1][3], delta_transform.m[2][3]);
-                selected.camera->lookfrom = selected.camera->lookfrom + translation;
-                selected.camera->lookat = selected.camera->lookat + translation;
-                selected.camera->update_camera_vectors();
-                selected.position = selected.camera->lookfrom;
+                item.camera->lookfrom = item.camera->lookfrom + translation;
+                item.camera->lookat = item.camera->lookat + translation;
+                item.camera->update_camera_vectors();
+                item.position = item.camera->lookfrom;
+            }
+            break;
+
+        case SelectableType::CameraTarget:
+            if (item.camera) {
+                Vec3 translation(delta_transform.m[0][3], delta_transform.m[1][3], delta_transform.m[2][3]);
+                item.camera->lookat = item.camera->lookat + translation;
+                item.camera->update_camera_vectors();
+                item.position = item.camera->lookat;
             }
             break;
             
         case SelectableType::Object:
-            if (selected.object) {
-                auto transform = selected.object->getTransformHandle();
+            if (item.object) {
+                auto transform = item.object->getTransformHandle();
                 if (transform) {
-                    Matrix4x4 current = transform->base;  // Access base directly
+                    // Apply Delta to current transform
+                    Matrix4x4 current = transform->base; 
+                    // Note: This applies delta in World Space relative to object
+                    // For proper multi-model rotation around a pivot, logic is complex.
+                    // This creates "Individual Origins" behavior for rotation/scale usually.
+                    // For translation, it is correct (all move same amount).
                     Matrix4x4 new_transform = delta_transform * current;
                     transform->setBase(new_transform);
-                    selected.object->updateTransformedVertices();
-                    updatePositionFromSelection();
+                    item.object->updateTransformedVertices();
+                    
+                    // Update item position cache
+                    Matrix4x4 mat = new_transform;
+                    item.position = Vec3(mat.m[0][3], mat.m[1][3], mat.m[2][3]);
                 }
             }
             break;
@@ -98,11 +122,23 @@ void SceneSelection::applyTransformToSelection(const Matrix4x4& delta_transform)
     }
 }
 
+void SceneSelection::applyTransformToSelection(const Matrix4x4& delta_transform) {
+    if (multi_selection.empty()) return;
+
+    for (auto& item : multi_selection) {
+        ApplyTransformToItem(item, delta_transform);
+    }
+    
+    // Update primary selection position for Gizmo
+    updatePositionFromSelection();
+}
+
 Matrix4x4 SceneSelection::getSelectionMatrix() const {
     Matrix4x4 result = Matrix4x4::identity();
     
     if (!selected.is_valid()) return result;
     
+    // Gizmo is placed at PRIMARY/Active selection
     switch (selected.type) {
         case SelectableType::Light:
             if (selected.light) {
@@ -119,12 +155,20 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
                 result.m[2][3] = selected.camera->lookfrom.z;
             }
             break;
+
+        case SelectableType::CameraTarget:
+            if (selected.camera) {
+                result.m[0][3] = selected.camera->lookat.x;
+                result.m[1][3] = selected.camera->lookat.y;
+                result.m[2][3] = selected.camera->lookat.z;
+            }
+            break;
             
         case SelectableType::Object:
             if (selected.object) {
                 auto transform = selected.object->getTransformHandle();
                 if (transform) {
-                    result = transform->base;  // Access base directly
+                    result = transform->base;
                 }
             }
             break;
@@ -137,14 +181,101 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
 }
 
 bool SceneSelection::deleteSelected() {
-    if (!selected.is_valid()) return false;
-    
-    // Note: Actual deletion from scene arrays must be done by the caller
-    // This just marks the intent and clears selection
-    // The caller should check selected.type and index before calling this
-    
-    bool had_selection = selected.is_valid();
+    if (multi_selection.empty()) return false;
+    clearSelection();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// New Multi-Selection Operations
+// ─────────────────────────────────────────────────────────────────────────
+
+void SceneSelection::clearSelection() {
+    multi_selection.clear();
     selected.clear();
+}
+
+bool SceneSelection::hasSelection() const {
+    return !multi_selection.empty();
+}
+
+bool SceneSelection::isSelected(const SelectableItem& item) const {
+    for (const auto& s : multi_selection) {
+        if (s == item) return true;
+    }
+    return false;
+}
+
+void SceneSelection::addToSelection(const SelectableItem& item) {
+    if (!item.is_valid()) return;
+
+    // Check if already selected
+    if (!isSelected(item)) {
+        multi_selection.push_back(item);
+    }
     
-    return had_selection;
+    // Make this the active/primary selection
+    selected = item;
+    updatePositionFromSelection();
+}
+
+void SceneSelection::removeFromSelection(const SelectableItem& item) {
+    auto it = std::remove(multi_selection.begin(), multi_selection.end(), item);
+    if (it != multi_selection.end()) {
+        multi_selection.erase(it, multi_selection.end());
+    }
+    
+    syncPrimarySelection();
+}
+
+void SceneSelection::syncPrimarySelection() {
+    if (multi_selection.empty()) {
+        selected.clear();
+    } else {
+        // Active item is the last selected one
+        selected = multi_selection.back();
+        updatePositionFromSelection();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Legacy Wrappers using Multi-Selection
+// ─────────────────────────────────────────────────────────────────────────
+
+void SceneSelection::selectObject(std::shared_ptr<Triangle> obj, int index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::Object;
+    item.object = obj;
+    item.object_index = index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectLight(std::shared_ptr<Light> light, int index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::Light;
+    item.light = light;
+    item.light_index = index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectCamera(std::shared_ptr<Camera> camera) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::Camera;
+    item.camera = camera;
+    item.name = "Camera";
+    addToSelection(item);
+}
+
+void SceneSelection::selectCameraTarget(std::shared_ptr<Camera> camera) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::CameraTarget;
+    item.camera = camera;
+    item.name = "Camera Target";
+    addToSelection(item);
 }

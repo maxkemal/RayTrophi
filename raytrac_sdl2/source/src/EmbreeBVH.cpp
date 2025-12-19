@@ -361,7 +361,7 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
             gpuMat.ior = material->getIOR();
             gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
             gpuMat.subsurface = 0.0f;
-            gpuMat.artistic_albedo_response = 1.0f;
+          
         }
         else {
             // Fallback pink material - properly initialize all fields
@@ -375,7 +375,7 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
             gpuMat.ior = 1.5f;
             gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
             gpuMat.subsurface = 0.0f;
-            gpuMat.artistic_albedo_response = 1.0f;
+           
         }
 
         // Benzersiz materyal kontrolu (basit ekle, hash'e gerek yok burada)

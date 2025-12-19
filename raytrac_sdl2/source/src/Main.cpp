@@ -12,6 +12,7 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // Değiştirildi: sdlrenderer2
 #include <scene_ui.h>
+#include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
 #include <filesystem>
 #include <windows.h>
@@ -440,7 +441,9 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDLRenderer2_Init(renderer);
    // ImGui::StyleColorsDark();
 
-	init_RayTrophi_Pro_Dark_Thema();// Özel tema uygula 
+    // Initialize Theme using ThemeManager (prevents style overriding issues)
+    ThemeManager::instance().setTheme("RayTrophi Pro Dark");
+    ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
 	
 
 
@@ -454,6 +457,17 @@ int main(int argc, char* argv[]) {
     }
 
     
+    // Create Default Scene if empty
+    createDefaultScene(scene, ray_renderer, g_hasOptix ? &optix_gpu : nullptr);
+    ui.invalidateCache(); // Ensure procedural objects are listed/selectable
+    // Build initial BVH and OptiX structures
+    ray_renderer.rebuildBVH(scene, UI_use_embree);
+    if (g_hasOptix) {
+        ray_renderer.rebuildOptiXGeometry(scene, &optix_gpu);
+    }
+    // Update initial camera vectors
+    if (scene.camera) scene.camera->update_camera_vectors();
+
     SDL_Event e;
     while (!quit) {
 
@@ -563,6 +577,10 @@ int main(int argc, char* argv[]) {
         else if (ui.scene_loading_done.load()) {
             ui.scene_loading_done = false;
             // Scene loaded, popup will auto-close
+            
+            // Refresh UI cache and start render
+            ui.invalidateCache();
+            ui_ctx.start_render = true;
         }
         
         ui.draw(ui_ctx);
@@ -715,6 +733,10 @@ int main(int argc, char* argv[]) {
                             direction.z = sinf(rad_yaw) * cosf(rad_pitch);
 
                             direction = direction.normalize();
+                            
+                            // Prevent unwanted roll by locking Up vector
+                            scene.camera->vup = Vec3(0.0f, 1.0f, 0.0f);
+                            
                             scene.camera->setLookDirection(direction);
                         }
                     }

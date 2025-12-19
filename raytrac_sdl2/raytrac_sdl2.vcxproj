@@ -239,6 +239,7 @@
     <ClInclude Include="source\include\SceneCommand.h" />
     <ClInclude Include="source\include\SceneHistory.h" />
     <ClInclude Include="source\include\SceneSelection.h" />
+    <ClInclude Include="source\include\SceneSerializer.h" />
     <ClInclude Include="source\include\tinyexr.h" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
@@ -331,10 +332,12 @@
     <ClCompile Include="source\src\ParallelBVHNode.cpp" />
     <ClCompile Include="source\src\PointLight.cpp" />
     <ClCompile Include="source\src\PrincipledBSDF.cpp" />
+    <ClCompile Include="source\src\ProjectManager.cpp" />
     <ClCompile Include="source\src\Renderer.cpp" />
     <ClCompile Include="source\src\SceneCommand.cpp" />
     <ClCompile Include="source\src\SceneHistory.cpp" />
     <ClCompile Include="source\src\SceneSelection.cpp" />
+    <ClCompile Include="source\src\SceneSerializer.cpp" />
     <ClCompile Include="source\src\scene_ui.cpp" />
     <ClCompile Include="source\src\SpotLight.cpp" />
     <ClCompile Include="source\src\Texture.cpp" />

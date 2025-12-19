@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Versiyon](https://img.shields.io/badge/versiyon-1.1-blue.svg)
+![Versiyon](https://img.shields.io/badge/versiyon-1.2-blue.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -63,12 +63,18 @@
   - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
   - ✅ Ton haritalama & post-processing
   - ✅ **Gelişmiş Animasyon**: Kemik (bone) animasyonu, quaternion interpolasyonu ve timeline kontrolü
-  - ✅ **Gelişmiş Bulut Aydınlatma Kontrolleri** (YENİ):
+  - ✅ **Gelişmiş Bulut Aydınlatma Kontrolleri**:
     - Işık Adımları (Light Steps): Volumetrik bulut kalitesi için
     - Gölge Yoğunluğu (Shadow Strength): Gerçekçi bulut gölgeleri
     - Ortam Aydınlatması (Ambient Strength): Bulut taban aydınlatması
     - Gümüş Yoğunluğu (Silver Intensity): Güneş kenarı efektleri
     - Bulut Absorpsiyonu (Absorption): Işık geçirgenlik kontrolü
+  - ✅ **Tam Undo/Redo Sistemi** (YENİ v1.2):
+    - Obje dönüştürmeleri (taşıma, döndürme, ölçekleme)
+    - Obje silme ve kopyalama
+    - **Işık dönüştürmeleri** (taşıma, döndürme, ölçekleme)
+    - **Işık ekleme/silme/kopyalama**
+    - Klavye kısayolları: Ctrl+Z (Geri Al), Ctrl+Y (Yinele)
 
 ### 🚀 Performans & Optimizasyon
 

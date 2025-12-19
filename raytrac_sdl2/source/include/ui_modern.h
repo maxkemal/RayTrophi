@@ -70,7 +70,7 @@ public:
 private:
     ThemeManager() { registerDefaultThemes(); }
     std::vector<Theme> themes_;
-    int currentIndex_ = 0;
+    int currentIndex_ = 4;
 };
 
 // ============================================================================

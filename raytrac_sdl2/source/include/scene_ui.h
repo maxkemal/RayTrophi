@@ -60,8 +60,15 @@ public:
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
      void drawSelectionBoundingBox(UIContext& ctx);  // Draw bounding box for selected object
      void drawTransformGizmo(UIContext& ctx);  // ImGuizmo transform gizmo   
+     void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
      void draw(UIContext& ctx);
      void handleMouseSelection(UIContext& ctx); // Publicly accessible for Main loop call
+     void invalidateCache() { mesh_cache_valid = false; }
+     
+     // Project System Helpers
+     void updateProjectFromScene(UIContext& ctx);  // Sync scene state to project data
+     void addProceduralPlane(UIContext& ctx);      // Add a procedural plane mesh
+     void addProceduralCube(UIContext& ctx);       // Add a procedural cube mesh
      float panel_alpha = 0.5f; // varsayılan
      
      // Scene loading state (public for Main.cpp popup access)
@@ -100,7 +107,8 @@ private:
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
     // Sequential cache for ImGui Clipper (Visualization)
     std::vector<std::pair<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>>> mesh_ui_cache;
-    
+
+
     bool mesh_cache_valid = false;
     void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);    
     // Interaction State

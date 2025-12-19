@@ -424,7 +424,7 @@ __device__ bool scatter_material(
     float NdotL = max(dot(N, L), 0.01f);
     float3 wo = -normalize(ray_in.direction);
     float3 wi = normalize(scattered->direction);
-    float lift = lerp(1.0f / M_PIf, 1.0f, material.artistic_albedo_response);
+ 
     float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
 
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);

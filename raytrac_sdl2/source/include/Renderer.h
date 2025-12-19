@@ -121,7 +121,8 @@ public:
     void rebuildBVH(SceneData& scene, bool use_embree);
 
     void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
-        std::function<void(int progress, const std::string& stage)> progress_callback = nullptr);
+        std::function<void(int progress, const std::string& stage)> progress_callback = nullptr,
+        bool append = false);  // If true, don't clear scene before loading
 
     // Rebuild OptiX geometry after scene modifications (deletion/addition)
     void rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr);

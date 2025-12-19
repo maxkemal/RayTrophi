@@ -35,6 +35,7 @@ struct __align__(16) HitGroupData
     int has_normals;
     int has_uvs;
     int has_tangents;
+    int pad2; // Alignment helper (ensures next block starts at 8-byte boundary)
 
     // Texture objects (OptiX bunları seviyor)
     cudaTextureObject_t albedo_tex;
