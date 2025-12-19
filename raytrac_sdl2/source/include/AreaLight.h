@@ -1,4 +1,4 @@
-#ifndef AREA_LIGHT_H
+ï»¿#ifndef AREA_LIGHT_H
 #define AREA_LIGHT_H
 
 #include "Light.h"
@@ -12,7 +12,7 @@ public:
         width = w;
         height = h;
 
-        // Yeni yapý: rengi normalize et, gücü ayrý sakla
+        // Yeni yapÄ±: rengi normalize et, gÃ¼cÃ¼ ayrÄ± sakla
         float power = input_intensity.length();
         color = (power > 0.0f) ? input_intensity / power : Vec3(1.0f);
         intensity = power;
@@ -71,13 +71,11 @@ public:
     Vec3 getV() const { return v; }
     float getWidth() const { return width; }
     float getHeight() const { return height; }
-
-private:
-    Vec3 u, v;
     float width = 1.0f;
     float height = 1.0f;
     float area = 1.0f;
-
+    Vec3 u, v;
+private:
     mutable Vec3 last_sampled_point;
 
     void updateArea() {

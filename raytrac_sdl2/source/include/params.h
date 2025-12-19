@@ -67,6 +67,11 @@ struct RayGenParams {
     int tile_x, tile_y;
     int tile_width, tile_height;
     int current_pass;
+    int is_final_render; // 1 = Final render, 0 = Viewport
+    int grid_enabled;    // 1 = Grid visible, 0 = Hidden
+    float grid_fade_distance; // Distance where grid fades out
+    float clip_near;
+    float clip_far;
     //float4* accumulation_buffer launch_tile_based_progressive için gerektiğinde;
    
 };

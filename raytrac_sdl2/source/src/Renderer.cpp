@@ -861,7 +861,8 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
 
 
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
-    std::function<void(int progress, const std::string& stage)> progress_callback) {
+    std::function<void(int progress, const std::string& stage)> progress_callback,
+    bool append) {
 
     // Helper lambda for progress updates
     auto update_progress = [&](int progress, const std::string& stage) {
@@ -870,46 +871,53 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         }
     };
 
-    update_progress(0, "Cleaning previous scene...");
-    SCENE_LOG_INFO("========================================");
-    SCENE_LOG_INFO("SCENE CLEANUP: Starting comprehensive cleanup...");
-    SCENE_LOG_INFO("========================================");
+    // Only clear scene if not appending
+    if (!append) {
+        update_progress(0, "Cleaning previous scene...");
+        SCENE_LOG_INFO("========================================");
+        SCENE_LOG_INFO("SCENE CLEANUP: Starting comprehensive cleanup...");
+        SCENE_LOG_INFO("========================================");
 
-    // ---- 1. Sahne verilerini sıfırla ----
-    scene.world.clear();
-    scene.lights.clear();
-    scene.animatedObjects.clear();
-    scene.animationDataList.clear();
-    scene.camera = nullptr;
-    scene.bvh = nullptr;
-    scene.initialized = false;
-    SCENE_LOG_INFO("[SCENE CLEANUP] Scene data structures cleaned.");
+        // ---- 1. Sahne verilerini sıfırla ----
+        scene.world.clear();
+        scene.lights.clear();
+        scene.animatedObjects.clear();
+        scene.animationDataList.clear();
+        scene.camera = nullptr;
+        scene.bvh = nullptr;
+        scene.initialized = false;
+        SCENE_LOG_INFO("[SCENE CLEANUP] Scene data structures cleaned.");
 
-    update_progress(5, "Clearing materials...");
+        update_progress(5, "Clearing materials...");
 
-    // ---- 2. MaterialManager'ı temizle ----
-    size_t material_count_before = MaterialManager::getInstance().getMaterialCount();
-    MaterialManager::getInstance().clear();
-    SCENE_LOG_INFO("[MATERIAL CLEANUP] MaterialManager cleared: " + std::to_string(material_count_before) + " materials removed.");
+        // ---- 2. MaterialManager'ı temizle ----
+        size_t material_count_before = MaterialManager::getInstance().getMaterialCount();
+        MaterialManager::getInstance().clear();
+        SCENE_LOG_INFO("[MATERIAL CLEANUP] MaterialManager cleared: " + std::to_string(material_count_before) + " materials removed.");
 
-    // ---- 3. CPU Texture Cache'leri temizle ----
-    assimpLoader.clearTextureCache();
+        // ---- 3. CPU Texture Cache'leri temizle ----
+        assimpLoader.clearTextureCache();
 
-    // ---- 4. GPU OptiX Texture'larını temizle ----
-    if (g_hasOptix && optix_gpu_ptr) {
-        try {
-            optix_gpu_ptr->destroyTextureObjects();
-            SCENE_LOG_INFO("[GPU CLEANUP] OptiX texture objects destroyed.");
+        // ---- 4. GPU OptiX Texture'larını temizle ----
+        if (g_hasOptix && optix_gpu_ptr) {
+            try {
+                optix_gpu_ptr->destroyTextureObjects();
+                SCENE_LOG_INFO("[GPU CLEANUP] OptiX texture objects destroyed.");
+            }
+            catch (std::exception& e) {
+                SCENE_LOG_WARN("[GPU CLEANUP] Exception during texture cleanup: " + std::string(e.what()));
+            }
         }
-        catch (std::exception& e) {
-            SCENE_LOG_WARN("[GPU CLEANUP] Exception during texture cleanup: " + std::string(e.what()));
-        }
+
+        SCENE_LOG_INFO("========================================");
+        SCENE_LOG_INFO("SCENE CLEANUP: Completed successfully!");
+        SCENE_LOG_INFO("========================================");
+    } else {
+        update_progress(0, "Appending to scene...");
+        SCENE_LOG_INFO("Appending model to existing scene (no cleanup)");
     }
 
     update_progress(10, "Loading model file...");
-    SCENE_LOG_INFO("========================================");
-    SCENE_LOG_INFO("SCENE CLEANUP: Completed successfully!");
-    SCENE_LOG_INFO("========================================");
     SCENE_LOG_INFO("Starting scene creation from: " + model_path);
 
     std::filesystem::path path(model_path);
@@ -949,18 +957,67 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     // ---- 2. Kamera ve ışık verisi ----
     update_progress(55, "Loading camera & lights...");
     SCENE_LOG_INFO("Loading camera and lighting data...");
-    scene.lights = assimpLoader.getLights();
-    scene.camera = assimpLoader.getDefaultCamera();
-
-    if (scene.camera) {
-        scene.camera->save_initial_state(); // Save loaded state as initial for reset
-        SCENE_LOG_INFO("Camera loaded successfully.");
+    
+    // Get new cameras and lights from loaded model
+    auto new_lights = assimpLoader.getLights();
+    auto new_cameras = assimpLoader.getCameras();  // Get ALL cameras
+    
+    // Handle cameras: Add all to the list
+    if (append) {
+        // Append mode: Add new cameras but keep active camera
+        for (auto& cam : new_cameras) {
+            if (cam) {
+                cam->update_camera_vectors();
+                scene.cameras.push_back(cam);
+                SCENE_LOG_INFO("Append mode: Added camera (total: " + std::to_string(scene.cameras.size()) + ")");
+            }
+        }
+        // If no camera was set before, set the first one as active
+        if (!scene.camera && !scene.cameras.empty()) {
+            scene.setActiveCamera(0);
+        }
+    } else {
+        // New scene: Replace camera list
+        scene.cameras.clear();
+        for (auto& cam : new_cameras) {
+            if (cam) {
+                cam->save_initial_state();
+                cam->update_camera_vectors();
+                scene.cameras.push_back(cam);
+            }
+        }
+        
+        // If no cameras from model, create default
+        if (scene.cameras.empty()) {
+            auto new_camera = assimpLoader.getDefaultCamera();
+            if (new_camera) {
+                new_camera->save_initial_state();
+                new_camera->update_camera_vectors();
+                scene.cameras.push_back(new_camera);
+            }
+        }
+        
+        // Set first camera as active
+        if (!scene.cameras.empty()) {
+            scene.setActiveCamera(0);
+            SCENE_LOG_INFO("Loaded " + std::to_string(scene.cameras.size()) + " camera(s). Active: Camera #0");
+        } else {
+            SCENE_LOG_WARN("No camera found in model.");
+        }
     }
-    else {
-        SCENE_LOG_WARN("No default camera found in model.");
+    
+    // Handle lights: In append mode, merge with existing lights
+    if (append) {
+        // Append new lights to existing ones
+        for (auto& light : new_lights) {
+            scene.lights.push_back(light);
+        }
+        SCENE_LOG_INFO("Append mode: Added " + std::to_string(new_lights.size()) + " new lights (total: " + std::to_string(scene.lights.size()) + ")");
+    } else {
+        // Replace lights
+        scene.lights = new_lights;
+        SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
     }
-
-    SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
 
     //  Selectable BVH (Embree or in-house BVH)
     update_progress(60, "Building BVH structure...");
@@ -1825,11 +1882,53 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         HitRecord rec;
 
         if (!bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), rec)) {
+            // --- Infinite Grid Logic (Floor Plane Y=0) ---
+            Vec3f final_bg_color = toVec3f(world.evaluate(current_ray.direction));
+            
+            // Only draw grid if looking down (dir.y < 0) AND NOT in final render mode AND grid enabled
+            if (render_settings.grid_enabled && !render_settings.is_final_render_mode && current_ray.direction.y < -0.0001f) {
+                float t = -current_ray.origin.y / current_ray.direction.y;
+                if (t > 0.0f) {
+                     Vec3 p = current_ray.origin + current_ray.direction * t;
+                     
+                     // Grid shader params
+                     float scale_major = 1.0f; 
+                     float line_width = 0.02f;
+                     
+                     float x_mod = abs(fmod(p.x, scale_major));
+                     float z_mod = abs(fmod(p.z, scale_major));
+                     
+                     // Line checks (0..1 range usually, handle negative by abs above)
+                     bool x_line = x_mod < line_width || x_mod > (scale_major - line_width);
+                     bool z_line = z_mod < line_width || z_mod > (scale_major - line_width);
+                     
+                     // Axis checks (Origin lines)
+                     bool x_axis = abs(p.z) < line_width * 2.0f;
+                     bool z_axis = abs(p.x) < line_width * 2.0f;
+                     
+                     Vec3f grid_color(0.0f); 
+                     bool hit_grid = false;
+
+                     if (x_axis) { grid_color = Vec3f(0.8f, 0.2f, 0.2f); hit_grid = true; }      // Red X
+                     else if (z_axis) { grid_color = Vec3f(0.2f, 0.8f, 0.2f); hit_grid = true; } // Green Z
+                     else if (x_line || z_line) { grid_color = Vec3f(0.4f); hit_grid = true; }   // Grey Grid
+                     
+                     if (hit_grid) {
+                         // Distance fading (Infinite horizon feel)
+                         float dist = t;
+                         float fade_start = 5.0f;
+                         float fade_end = render_settings.grid_fade_distance;
+                         float alpha = 1.0f - std::clamp((dist - fade_start) / (fade_end - fade_start), 0.0f, 1.0f);
+                         
+                         // Mix Grid with Background
+                         final_bg_color = final_bg_color * (1.0f - alpha) + grid_color * alpha;
+                     }
+                }
+            }
+
             // --- Background contribution (matching GPU exactly) ---
-            // GPU: float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
             float bg_factor = background_factor(bounce);
-            Vec3 eval_bg = world.evaluate(current_ray.direction);
-            Vec3f bg_contribution = toVec3f(eval_bg) * bg_factor;
+            Vec3f bg_contribution = final_bg_color * bg_factor;
             color += throughput * bg_contribution;
             break;
         }
@@ -1899,7 +1998,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // --- Scatter ray ---
         Vec3 attenuation;
         Ray scattered;
-        if (!rec.material->scatter(current_ray, rec, attenuation, scattered)) {
+        if (!rec.material || !rec.material->scatter(current_ray, rec, attenuation, scattered)) {
             break;
         }
 
@@ -2187,6 +2286,16 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     
     // Multi-threaded rendering with accumulation
     unsigned int num_threads = std::thread::hardware_concurrency();
+    
+    // UI/OS Responsiveness Optimization:
+    // Leave 2 threads free if we have plenty (e.g., > 4 cores)
+    // Leave 1 thread free if we have few (e.g., <= 4 cores)
+    if (num_threads > 4) num_threads -= 2; 
+    else if (num_threads > 1) num_threads -= 1;
+    
+    // Safety cap
+    if (num_threads > 32) num_threads = 32;
+
     std::vector<std::thread> threads;
     
     // Build pixel list
@@ -2248,7 +2357,40 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 // But we access scene.bvh.get() directly.
                 // However, check if scene.bvh is valid.
                 if (!scene.bvh) {
-                    color_sum += scene.background_color;
+                    // Empty scene: Draw Sky + Grid (matches ray_color logic)
+                    Vec3 bg_color = world.evaluate(ray.direction); // Access Renderer::world
+                    
+                    if (!render_settings.is_final_render_mode && ray.direction.y < -0.0001f) {
+                        float t = -ray.origin.y / ray.direction.y;
+                        if (t > 0.0f) {
+                             Vec3 p = ray.origin + ray.direction * t;
+                             
+                             float scale_major = 1.0f; 
+                             float line_width = 0.02f;
+                             float x_mod = std::abs(std::fmod(p.x, scale_major));
+                             float z_mod = std::abs(std::fmod(p.z, scale_major));
+                             bool x_line = x_mod < line_width || x_mod > (scale_major - line_width);
+                             bool z_line = z_mod < line_width || z_mod > (scale_major - line_width);
+                             bool x_axis = std::abs(p.z) < line_width * 2.0f;
+                             bool z_axis = std::abs(p.x) < line_width * 2.0f;
+                             
+                             Vec3 grid_color(0.4f); // Brighter grey lines to be visible against background
+                             bool hit_grid = false;
+                             
+                             if (x_axis) { grid_color = Vec3(0.8f, 0.2f, 0.2f); hit_grid = true; } 
+                             else if (z_axis) { grid_color = Vec3(0.2f, 0.8f, 0.2f); hit_grid = true; } 
+                             else if (x_line || z_line) { grid_color = Vec3(0.4f); hit_grid = true; } // Explicit check
+                             
+                             float dist = t;
+                             float alpha = std::clamp((dist - 10.0f) / 30.0f, 0.0f, 1.0f); // 10-40 fade
+                             
+                             if (hit_grid) {
+                                  bg_color = grid_color * (1.0f - alpha) + bg_color * alpha;
+                             }
+                        }
+                    }
+                    
+                    color_sum += bg_color;
                     continue;
                 }
 
@@ -2357,9 +2499,11 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
         return;
     }
     
-    // Handle empty scene - just skip (user shouldn't delete everything anyway!)
+    // Handle empty scene
     if (scene.world.objects.empty()) {
-        SCENE_LOG_INFO("[OptiX] Scene is empty, skipping rebuild");
+        SCENE_LOG_INFO("[OptiX] Scene is empty, clearing GPU scene");
+        optix_gpu_ptr->clearScene(); 
+        optix_gpu_ptr->resetAccumulation();
         return;
     }
     
@@ -2377,14 +2521,23 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
         
         if (triangles.empty()) {
             SCENE_LOG_WARN("[OptiX] No triangles found in scene");
+            optix_gpu_ptr->clearScene();
+            optix_gpu_ptr->resetAccumulation();
             return;
         }
         
         // Convert to OptiX format using internal assimpLoader
         OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
         
+        // CRITICAL: Validate material indices before build to prevent crash
+        optix_gpu_ptr->validateMaterialIndices(optix_data);
+        
         // Full rebuild with updated material indices
         optix_gpu_ptr->buildFromData(optix_data);
+        
+        // Sync GPU before continuing (prevents race conditions)
+        cudaDeviceSynchronize();
+        
         optix_gpu_ptr->resetAccumulation();
         
         // Only log on larger rebuilds to avoid spam
@@ -2394,5 +2547,12 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
     }
     catch (std::exception& e) {
         SCENE_LOG_ERROR("[OptiX] Rebuild failed: " + std::string(e.what()));
+        // Try to recover by clearing the scene
+        try {
+            optix_gpu_ptr->clearScene();
+            optix_gpu_ptr->resetAccumulation();
+        } catch (...) {
+            SCENE_LOG_ERROR("[OptiX] Recovery failed - GPU state may be corrupted");
+        }
     }
 }

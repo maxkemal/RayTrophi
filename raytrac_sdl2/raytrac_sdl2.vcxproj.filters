@@ -219,6 +219,9 @@
     <ClInclude Include="source\include\SceneCommand.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\SceneSerializer.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -350,6 +353,12 @@
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\src\SceneCommand.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\SceneSerializer.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\ProjectManager.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
   </ItemGroup>

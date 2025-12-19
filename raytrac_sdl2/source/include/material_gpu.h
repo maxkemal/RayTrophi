@@ -35,8 +35,7 @@ struct alignas(16) GpuMaterial {
     float3 subsurface_color;          // 12 bytes
     float subsurface;                 // 4 bytes
     
-    // Block 5: Additional properties (8 bytes + 8 padding)
-    float artistic_albedo_response;   // 4 bytes
+    // Block 5: Additional properties (8 bytes + 8 padding)   
     float anisotropic;                // 4 bytes (new - for future use)
     float sheen;                      // 4 bytes (new - for future use)  
     float sheen_tint;                 // 4 bytes (new - for future use)
@@ -50,17 +49,16 @@ inline bool float3_equal(float3 a, float3 b, float epsilon = FLOAT_COMPARE_EPSIL
 }  
 
 inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {  
-    return float3_equal(a.albedo, b.albedo) &&  
+    return float3_equal(a.albedo, b.albedo) &&
         fabsf(a.opacity - b.opacity) < FLOAT_COMPARE_EPSILON &&
-        fabsf(a.roughness - b.roughness) < FLOAT_COMPARE_EPSILON &&  
-        fabsf(a.metallic - b.metallic) < FLOAT_COMPARE_EPSILON &&  
+        fabsf(a.roughness - b.roughness) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.metallic - b.metallic) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.clearcoat - b.clearcoat) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.transmission - b.transmission) < FLOAT_COMPARE_EPSILON &&
-        float3_equal(a.emission, b.emission) &&  
-        fabsf(a.ior - b.ior) < FLOAT_COMPARE_EPSILON &&  
-        float3_equal(a.subsurface_color, b.subsurface_color) &&
-        fabsf(a.subsurface - b.subsurface) < FLOAT_COMPARE_EPSILON &&
-        fabsf(a.artistic_albedo_response - b.artistic_albedo_response) < FLOAT_COMPARE_EPSILON;
+        float3_equal(a.emission, b.emission) &&
+        fabsf(a.ior - b.ior) < FLOAT_COMPARE_EPSILON;
+
+
 }  
 
 namespace std {  
@@ -91,14 +89,6 @@ namespace std {
             hash_combine(h, m.emission.z);  
             hash_combine(h, m.ior);  
 
-            // Subsurface block
-            hash_combine(h, m.subsurface_color.x);  
-            hash_combine(h, m.subsurface_color.y);  
-            hash_combine(h, m.subsurface_color.z);  
-            hash_combine(h, m.subsurface);  
-
-            // Additional
-            hash_combine(h, m.artistic_albedo_response);
 
             return h;  
         }  
@@ -116,14 +106,14 @@ struct GpuMaterialWithTextures {
     size_t subsurfaceTexID = 0;  
 
     bool operator==(const GpuMaterialWithTextures& other) const {  
-        return material == other.material &&  
-            albedoTexID == other.albedoTexID &&  
-            normalTexID == other.normalTexID &&  
-            roughnessTexID == other.roughnessTexID &&  
-            metallicTexID == other.metallicTexID &&  
-            opacityTexID == other.opacityTexID &&  
-            emissionTexID == other.emissionTexID &&  
-            subsurfaceTexID == other.subsurfaceTexID;  
+        return material == other.material &&
+            albedoTexID == other.albedoTexID &&
+            normalTexID == other.normalTexID &&
+            roughnessTexID == other.roughnessTexID &&
+            metallicTexID == other.metallicTexID &&
+            opacityTexID == other.opacityTexID &&
+            emissionTexID == other.emissionTexID;
+
     }  
 };  
 
@@ -143,7 +133,7 @@ namespace std {
             hash_combine(h, x.metallicTexID);  
             hash_combine(h, x.opacityTexID);  
             hash_combine(h, x.emissionTexID);  
-            hash_combine(h, x.subsurfaceTexID);  
+
 
             return h;  
         }  

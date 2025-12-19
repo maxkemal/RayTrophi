@@ -887,11 +887,52 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
     for (int bounce = 0; bounce < max_depth; ++bounce) {
 
         OptixHitResult payload = {};
-        trace_ray(ray, &payload);
+        
+        // Use Viewport Clipping for primary rays
+        float t_min = (bounce == 0) ? optixLaunchParams.clip_near : 0.001f;
+        float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
+        
+        trace_ray(ray, &payload, t_min, t_max);
 
         if (!payload.hit) {
             // --- Arka plan rengi ---
             float3 bg_color = evaluate_background(optixLaunchParams.world, ray.direction);
+
+            // --- Infinite Grid Logic (GPU) ---
+            if (optixLaunchParams.grid_enabled && optixLaunchParams.is_final_render == 0 && ray.direction.y < -0.0001f) {
+                 float t = -ray.origin.y / ray.direction.y;
+                 if (t > 0.0f) {
+                     float3 p = ray.origin + ray.direction * t;
+                     
+                     float scale_major = 1.0f;
+                     float line_width = 0.02f;
+                     
+                     float x_mod = fabsf(fmodf(p.x, scale_major));
+                     float z_mod = fabsf(fmodf(p.z, scale_major));
+                     
+                     bool x_line = x_mod < line_width || x_mod > (scale_major - line_width);
+                     bool z_line = z_mod < line_width || z_mod > (scale_major - line_width);
+                     
+                     bool x_axis = fabsf(p.z) < line_width * 2.0f;
+                     bool z_axis = fabsf(p.x) < line_width * 2.0f;
+                     
+                     float3 grid_color = make_float3(0.0f, 0.0f, 0.0f);
+                     bool hit_grid = false;
+                     
+                     if (x_axis) { grid_color = make_float3(0.8f, 0.2f, 0.2f); hit_grid = true; }
+                     else if (z_axis) { grid_color = make_float3(0.2f, 0.8f, 0.2f); hit_grid = true; }
+                     else if (x_line || z_line) { grid_color = make_float3(0.4f, 0.4f, 0.4f); hit_grid = true; }
+                     
+                     if (hit_grid) {
+                         float dist = t;
+                         float fade_start = 5.0f;
+                         float fade_end = optixLaunchParams.grid_fade_distance;
+                         float alpha = 1.0f - fminf(fmaxf((dist - fade_start) / (fade_end - fade_start), 0.0f), 1.0f);
+                         
+                         bg_color = bg_color * (1.0f - alpha) + grid_color * alpha;
+                     }
+                 }
+            }
            
             // Bounce bazlı arka plan azaltma - ilk bounce tam, sonrakiler azaltılmış
             // Bu, yansımalarda arka plan renginin yüzeyleri boyamasını önler

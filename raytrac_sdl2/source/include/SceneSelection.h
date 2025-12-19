@@ -22,7 +22,8 @@ enum class SelectableType {
     None,
     Object,     // Mesh/Triangle
     Light,      // Any light type
-    Camera      // Scene camera
+    Camera,     // Scene camera (Position/Origin)
+    CameraTarget // Scene camera target (LookAt)
 };
 
 enum class TransformMode {
@@ -62,6 +63,15 @@ struct SelectableItem {
     bool has_cached_aabb = false;
     
     bool is_valid() const { return type != SelectableType::None; }
+
+    bool operator==(const SelectableItem& other) const {
+        if (type != other.type) return false;
+        if (type == SelectableType::Object) return object == other.object;
+        if (type == SelectableType::Light) return light == other.light;
+        if (type == SelectableType::Camera) return camera == other.camera;
+        if (type == SelectableType::CameraTarget) return camera == other.camera; // Same camera for target
+        return false;
+    }
     
     void clear() {
         type = SelectableType::None;
@@ -72,7 +82,6 @@ struct SelectableItem {
         light_index = -1;
         has_cached_aabb = false;
     }
-    
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -80,9 +89,13 @@ struct SelectableItem {
 // ───────────────────────────────────────────────────────────────────────────────
 class SceneSelection {
 public:
-    // Current selection state
+    // Current PRIMARY selection (for gizmo placement)
     SelectableItem selected;
     
+    // Multi-selection list (contains all selected items, including primary)
+    std::vector<SelectableItem> multi_selection;
+    bool multi_select_enabled = true; // Always enabled now
+
     // Transform mode settings
     TransformMode transform_mode = TransformMode::Translate;
     TransformSpace transform_space = TransformSpace::World;
@@ -91,47 +104,23 @@ public:
     bool show_gizmo = true;
     float gizmo_size = 1.0f;
     
-    // Multi-selection (for future use)
-    std::vector<SelectableItem> multi_selection;
-    bool multi_select_enabled = false;
     
     // ─────────────────────────────────────────────────────────────────────────
     // Selection Methods
     // ─────────────────────────────────────────────────────────────────────────
+    void selectObject(std::shared_ptr<Triangle> obj, int index, const std::string& name = "Object");
+    void selectLight(std::shared_ptr<Light> light, int index = -1, const std::string& name = "Light");
+    void selectCamera(std::shared_ptr<Camera> camera);
+    void selectCameraTarget(std::shared_ptr<Camera> camera);
+    void clearSelection();
     
-    void selectLight(std::shared_ptr<Light> light, int index = -1, const std::string& name = "Light") {
-        selected.clear();
-        selected.type = SelectableType::Light;
-        selected.light = light;
-        selected.light_index = index;
-        selected.name = name;
-        updatePositionFromSelection();
-    }
-    
-    void selectCamera(std::shared_ptr<Camera> cam) {
-        selected.clear();
-        selected.type = SelectableType::Camera;
-        selected.camera = cam;
-        selected.name = "Camera";
-        updatePositionFromSelection();
-    }
-    
-    void selectObject(std::shared_ptr<Triangle> obj, int index, const std::string& name = "Object") {
-        selected.clear();
-        selected.type = SelectableType::Object;
-        selected.object = obj;
-        selected.object_index = index;
-        selected.name = name;
-        updatePositionFromSelection();
-    }
-    
-    void clearSelection() {
-        selected.clear();
-    }
-    
-    bool hasSelection() const {
-        return selected.is_valid();
-    }
+    // Multi-Selection Helpers
+    void addToSelection(const SelectableItem& item);
+    void removeFromSelection(const SelectableItem& item);
+    bool isSelected(const SelectableItem& item) const;
+    void syncPrimarySelection(); // Updates 'selected' from multi_selection list
+
+    bool hasSelection() const;
     
     // ─────────────────────────────────────────────────────────────────────────
     // Transform Helpers

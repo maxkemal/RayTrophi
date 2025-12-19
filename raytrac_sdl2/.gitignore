@@ -21,8 +21,10 @@ x64/
 *.tmp
 *.log
 *.txt
+*.bin
 !README.txt
 !CMakeLists.txt
+
 
 
 # Log files from app

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.1-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2-blue.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -69,12 +69,18 @@
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
   - ✅ **Advanced Animation**: Bone animation, quaternion interpolation, and timeline control
-  - ✅ **Advanced Cloud Lighting Controls** (NEW):
+  - ✅ **Advanced Cloud Lighting Controls**:
     - Light Steps control for volumetric cloud quality
     - Shadow Strength for realistic cloud shadows
     - Ambient Strength for cloud base illumination
     - Silver Intensity (Silver Lining) for sun-edge effects
     - Cloud Absorption for light penetration control
+  - ✅ **Full Undo/Redo System** (NEW v1.2):
+    - Object transforms (move, rotate, scale)
+    - Object deletion and duplication
+    - **Light transforms** (move, rotate, scale)
+    - **Light add/delete/duplicate**
+    - Keyboard shortcuts: Ctrl+Z (Undo), Ctrl+Y (Redo)
 
 ### 🚀 Performance & Optimization
 

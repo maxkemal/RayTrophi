@@ -194,6 +194,7 @@ inline Matrix4x4 convert(const aiMatrix4x4& m) {
 }
 class AssimpLoader {
 public:
+    std::string currentImportName; // Added for unique material naming to prevent collisions
     std::set<std::string> lightNodeNames;
     std::set<std::string> cameraNodeNames;
     std::vector<std::shared_ptr<Light>> lights;
@@ -267,6 +268,11 @@ public:
     // Hem Triangle hem de AnimationData döndüren metod
     std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>, BoneData>
         loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr) {
+        
+        // Generate unique prefix from filename (ParentDir_Filename) to prevent material name collisions between imports
+        std::filesystem::path p(filename);
+        this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
+
         SCENE_LOG_INFO("Starting model loading: " + filename);
 
         BoneData boneData;
@@ -930,10 +936,15 @@ private:
         // Get or create material ID - saves 70+ bytes per triangle!
         uint16_t materialID = MaterialManager::INVALID_MATERIAL_ID;
         if (material) {
-            std::string matName = material->materialName.empty() 
+            std::string baseMatName = material->materialName.empty() 
                 ? "Material_" + nodeName + "_" + std::to_string(mesh->mMaterialIndex)
                 : material->materialName;
-            materialID = MaterialManager::getInstance().getOrCreateMaterialID(matName, material);
+            
+            // Prepend import name to ensure uniqueness across different imports
+            // This prevents "Mesh B" from using "Mesh A" textures just because they both have "Material.001"
+            std::string uniqueMatName = currentImportName.empty() ? baseMatName : (currentImportName + "_" + baseMatName);
+
+            materialID = MaterialManager::getInstance().getOrCreateMaterialID(uniqueMatName, material);
         }
 
         // Create shared transform for all triangles in this mesh - saves 248 bytes per triangle!
@@ -1371,8 +1382,10 @@ private:
 
                 if (emb) {
                     // Embedded texture için unique cache key oluştur
-                    // Format: "embedded_<pointer_address>_<type>"
+                    // Format: "embedded_<ImportName>_<pointer_address>_<type>"
+                    // Adding currentImportName is CRITICAL to prevent collisions if memory addresses are reused across imports (ABA Problem)
                     std::string embeddedKey = "embedded_" + 
+                        currentImportName + "_" +
                         std::to_string(reinterpret_cast<uintptr_t>(emb)) + 
                         "_" + std::to_string(static_cast<int>(ttype));
 
@@ -1686,20 +1699,22 @@ private:
     }
     std::shared_ptr<Texture> loadTextureWithCache(const std::string& name, TextureType type)
     {
-        // Include type in cache key to prevent reusing Diffuse texture for Opacity etc.
-        std::string cacheKey = name + "_" + std::to_string(static_cast<int>(type));
+        // Calculate Full Path FIRST to ensure uniqueness in cache across different imports
+        std::filesystem::path texPath(name);
+        if (!texPath.is_absolute())
+            texPath = std::filesystem::path(baseDirectory) / texPath;
+        texPath = texPath.lexically_normal();
+        
+        // Use Full Path in Cache Key
+        // This fixes the issue where 'wood.jpg' in Model1 uses the texture from Model2 by mistake
+        std::string cacheKey = texPath.string() + "_" + std::to_string(static_cast<int>(type));
 
         auto it = textureCache.find(cacheKey);
         if (it != textureCache.end())
             return it->second;
 
-        std::filesystem::path texPath(name);
-        if (!texPath.is_absolute())
-            texPath = std::filesystem::path(baseDirectory) / texPath;
-        texPath = texPath.lexically_normal();
-
-       // SCENE_LOG_INFO("Final texture path: " + texPath.string()); 
-      //  SCENE_LOG_INFO("Path exists: " + std::to_string(std::filesystem::exists(texPath)));  
+        // SCENE_LOG_INFO("Final texture path: " + texPath.string()); 
+        // SCENE_LOG_INFO("Path exists: " + std::to_string(std::filesystem::exists(texPath)));  
 
         auto tex = std::make_shared<Texture>(texPath.string(), type);
 

@@ -121,3 +121,138 @@ private:
     // Helper to apply state to objects
     void applyState(UIContext& ctx, const TransformState& state);
 };
+
+// ============================================================================
+// LIGHT COMMANDS
+// ============================================================================
+#include "Light.h"
+#include "DirectionalLight.h"
+#include "SpotLight.h"
+#include "AreaLight.h"
+#include "PointLight.h"
+
+struct LightState {
+    Vec3 position;
+    Vec3 direction;
+    Vec3 u, v;
+    float width = 0, height = 0;
+    float radius = 0;
+    float angle = 0;
+    float falloff = 0;
+    
+    static LightState capture(const Light& light) {
+        LightState s;
+        s.position = light.position;
+        
+        switch (light.type()) {
+            case LightType::Directional: {
+                auto& l = (const DirectionalLight&)light;
+                s.direction = l.direction;
+                s.radius = l.radius;
+                break;
+            }
+            case LightType::Spot: {
+                auto& l = (const SpotLight&)light;
+                s.direction = l.direction;
+                s.radius = l.radius; // Range
+                s.angle = l.getAngleDegrees();
+                s.falloff = l.getFalloff();
+                break;
+            }
+            case LightType::Area: {
+                auto& l = (const AreaLight&)light;
+                s.u = l.u;
+                s.v = l.v;
+                s.width = l.width;
+                s.height = l.height;
+                break;
+            }
+            case LightType::Point: {
+                auto& l = (const PointLight&)light;
+                s.radius = l.radius;
+                break;
+            }
+        }
+        return s;
+    }
+    
+    void apply(Light& light) const {
+        light.position = position;
+        
+        switch (light.type()) {
+            case LightType::Directional: {
+                auto& l = (DirectionalLight&)light;
+                l.setDirection(direction);
+                l.radius = radius;
+                break;
+            }
+            case LightType::Spot: {
+                auto& l = (SpotLight&)light;
+                l.direction = direction;
+                l.radius = radius;
+                l.setAngleDegrees(angle);
+                l.setFalloff(falloff);
+                break;
+            }
+            case LightType::Area: {
+                auto& l = (AreaLight&)light;
+                l.u = u;
+                l.v = v;
+                l.width = width;
+                l.height = height;
+                break;
+            }
+            case LightType::Point: {
+                auto& l = (PointLight&)light;
+                l.radius = radius;
+                break;
+            }
+        }
+    }
+};
+
+class TransformLightCommand : public SceneCommand {
+public:
+    TransformLightCommand(std::shared_ptr<Light> light,
+                         const LightState& old_state,
+                         const LightState& new_state)
+        : light_(light)
+        , old_state_(old_state)
+        , new_state_(new_state) {}
+    
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Transform; }
+    std::string getDescription() const override { return "Transform Light"; }
+    
+private:
+    std::shared_ptr<Light> light_;
+    LightState old_state_;
+    LightState new_state_;
+};
+
+class DeleteLightCommand : public SceneCommand {
+public:
+    DeleteLightCommand(std::shared_ptr<Light> light) : light_(light) {}
+    
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Heavy; }
+    std::string getDescription() const override { return "Delete Light"; }
+    
+private:
+    std::shared_ptr<Light> light_;
+};
+
+class AddLightCommand : public SceneCommand {
+public:
+    AddLightCommand(std::shared_ptr<Light> light) : light_(light) {}
+    
+    void execute(UIContext& ctx) override;
+    void undo(UIContext& ctx) override;
+    Type getType() const override { return Type::Heavy; }
+    std::string getDescription() const override { return "Add Light"; }
+    
+private:
+    std::shared_ptr<Light> light_;
+};

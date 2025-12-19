@@ -33,6 +33,19 @@
         }                                                                       \
     } while (0)
 
+// Dosyanın başına ekleyin (OptiX için OPTIX_CHECK zaten var, CUDA için eklenmeli)
+#define CUDA_CHECK(call)                                                        \
+    do {                                                                        \
+        cudaError_t err = call;                                                 \
+        if (err != cudaSuccess) {                                               \
+            SCENE_LOG_ERROR(                                                    \
+                std::string("CUDA error: ") + cudaGetErrorString(err) +         \
+                " (" + std::to_string(static_cast<int>(err)) + ")" +            \
+                " at " + std::string(__FILE__) + ":" + std::to_string(__LINE__) \
+            );                                                                  \
+            std::terminate();                                                   \
+        }                                                                       \
+    } while (0)
 
 OptixWrapper::OptixWrapper()
     : Image_width(image_width), Image_height(image_height), color_processor(image_width, image_height) //  işte burada!
@@ -148,6 +161,23 @@ void OptixWrapper::partialCleanup() {
 
     // Senkronizasyon: zorunlu değil ama debug için güvenli
     cudaDeviceSynchronize();
+}
+
+void OptixWrapper::clearScene() {
+    traversable_handle = 0;
+    params.handle = 0;
+    
+    if (d_bvh_output) {
+        cudaFree(reinterpret_cast<void*>(d_bvh_output)); 
+        d_bvh_output = 0;
+    }
+    if (d_vertices) { cudaFree(reinterpret_cast<void*>(d_vertices)); d_vertices = 0; }
+    if (d_indices) { cudaFree(reinterpret_cast<void*>(d_indices)); d_indices = 0; }
+    
+    if (d_params) {
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice));
+    }
+    SCENE_LOG_INFO("[OptiX] Scene cleared (Handle=0)");
 }
 
 void OptixWrapper::cleanup() {
@@ -974,6 +1004,11 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // Frame number is the accumulated sample count (for random seed variation)
     params.frame_number = accumulated_samples + 1;
     params.current_pass = accumulated_samples;
+    params.is_final_render = render_settings.is_final_render_mode ? 1 : 0;
+    params.grid_enabled = render_settings.grid_enabled ? 1 : 0;
+    params.grid_fade_distance = render_settings.grid_fade_distance;
+    params.clip_near = render_settings.viewport_near_clip;
+    params.clip_far = render_settings.viewport_far_clip;
     params.temporal_blend = 0.0f; // We handle blending manually via accumulation buffer
 
     // Full image tiles

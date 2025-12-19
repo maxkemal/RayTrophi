@@ -17,9 +17,12 @@ public:
     void setAngleDegrees(float deg) { angle_degrees = deg; }
     float getAngleDegrees() const { return angle_degrees; }
 
+    void setFalloff(float f) { falloff = f; }
+    float getFalloff() const { return falloff; }
+
 private:
     float angle_degrees;
-   
+    float falloff = 0.1f;
 };
 
 #endif // SPOTLIGHT_H
