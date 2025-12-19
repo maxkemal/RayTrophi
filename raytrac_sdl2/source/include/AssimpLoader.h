@@ -579,22 +579,39 @@ public:
             key.metallicTexID = static_cast<size_t>(tri->textureBundle.metallic_tex);
             key.opacityTexID = static_cast<size_t>(tri->textureBundle.opacity_tex);
             key.emissionTexID = static_cast<size_t>(tri->textureBundle.emission_tex);
+            
+            // CRITICAL: Use material name hash to distinguish between imports with similar materials
+            // This prevents PolyHaven ORM texture collisions where roughness/metallic share same texture
+            key.materialNameHash = std::hash<std::string>{}(material->materialName);
 
             int gpuIndex = -1;
             auto it = materialMap.find(key);
             if (it != materialMap.end()) {
                 gpuIndex = it->second;
+                SCENE_LOG_INFO("[MAT-DEDUP] Triangle reusing material #" + std::to_string(gpuIndex) + 
+                              " | MatName: " + material->materialName);
             }
             else {
                 gpuIndex = static_cast<int>(gpuMaterials.size());
                 gpuMaterials.push_back(key.material);
                 data.textures.push_back(tri->textureBundle);
                 materialMap[key] = gpuIndex;
+                
+                // Debug: Log new material creation
+                SCENE_LOG_INFO("[MAT-NEW] Creating material #" + std::to_string(gpuIndex) + 
+                              " | Name: " + material->materialName +
+                              " | AlbedoTex: " + std::to_string(key.albedoTexID) +
+                              " | RoughTex: " + std::to_string(key.roughnessTexID) +
+                              " | MetalTex: " + std::to_string(key.metallicTexID) +
+                              " | NameHash: " + std::to_string(key.materialNameHash));
             }
 
             data.material_indices.push_back(gpuIndex);
         }
 
+        SCENE_LOG_INFO("[MAT-SUMMARY] Total unique materials: " + std::to_string(gpuMaterials.size()) + 
+                      " | Total triangles: " + std::to_string(data.indices.size()));
+        
         data.materials = std::move(gpuMaterials);
         return data;
     }

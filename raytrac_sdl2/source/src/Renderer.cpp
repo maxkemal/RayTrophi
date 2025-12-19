@@ -1036,7 +1036,12 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     update_progress(75, "Setting up GPU rendering...");
 
     // ---- 3. GPU OptiX setup ----
-    if (g_hasOptix && optix_gpu_ptr)
+    // CRITICAL: In append mode, SKIP GPU build here!
+    // The caller (ProjectManager::importModel) will call rebuildOptiXGeometry() 
+    // which properly builds from ALL triangles in the scene.
+    // If we build here with only loaded_triangles, we destroy the existing 
+    // materials' texture handles, causing the second object to use first object's textures!
+    if (g_hasOptix && optix_gpu_ptr && !append)
     {
         try
         {

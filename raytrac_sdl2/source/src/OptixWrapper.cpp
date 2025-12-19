@@ -478,7 +478,19 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         SCENE_LOG_ERROR(" Geometry data is empty!");
         return;
     }
-    destroyTextureObjects();      
+    
+    // CRITICAL FIX: Do NOT destroy texture objects here!
+    // Texture handles stored in Triangle::textureBundle must remain valid.
+    // destroyTextureObjects() should only be called when completely clearing the scene
+    // (in create_scene with append=false), not during rebuilds.
+    // The old code was destroying textures here, which invalidated the handles
+    // stored in triangles, causing the second object to use garbage texture pointers.
+    
+    // destroyTextureObjects();  // REMOVED - causes texture corruption on rebuild!
+    
+    // Only clear the hitgroup records (SBT data), not the actual texture memory
+    hitgroup_records.clear();
+    
     partialCleanup();            // << Ardından tüm CUDA buffer'larını temizle  
 
     // 1. Tüm geometri verilerini GPU'ya gönder

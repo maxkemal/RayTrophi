@@ -3,6 +3,7 @@
 #include <functional>
 #include <cmath>
 #include <type_traits>
+#include <string>
 
 // Float comparison epsilon
 constexpr float FLOAT_COMPARE_EPSILON = 1e-4f;  
@@ -104,6 +105,13 @@ struct GpuMaterialWithTextures {
     size_t opacityTexID = 0;  
     size_t emissionTexID = 0;  
     size_t subsurfaceTexID = 0;  
+    
+    // CRITICAL: Unique material identifier to prevent hash collisions between imports
+    // Without this, materials from different imports with same texture pointers and 
+    // similar scalar values (roughness, metallic) would incorrectly match.
+    // This is especially common with PolyHaven ORM textures where metallic and roughness
+    // share the same texture file (different channels).
+    size_t materialNameHash = 0;
 
     bool operator==(const GpuMaterialWithTextures& other) const {  
         return material == other.material &&
@@ -112,8 +120,8 @@ struct GpuMaterialWithTextures {
             roughnessTexID == other.roughnessTexID &&
             metallicTexID == other.metallicTexID &&
             opacityTexID == other.opacityTexID &&
-            emissionTexID == other.emissionTexID;
-
+            emissionTexID == other.emissionTexID &&
+            materialNameHash == other.materialNameHash;
     }  
 };  
 
@@ -133,9 +141,10 @@ namespace std {
             hash_combine(h, x.metallicTexID);  
             hash_combine(h, x.opacityTexID);  
             hash_combine(h, x.emissionTexID);  
-
+            hash_combine(h, x.materialNameHash);
 
             return h;  
         }  
     };  
 }
+
