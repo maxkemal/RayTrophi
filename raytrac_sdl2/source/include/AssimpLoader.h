@@ -356,10 +356,11 @@ public:
                     const aiNodeAnim* channel = animation->mChannels[j];
                     std::string nodeName = channel->mNodeName.C_Str();
 
-                    SCENE_LOG_INFO("  [Channel " + std::to_string(j + 1) + "] Node: " + nodeName +
-                        ", Pos Keys: " + std::to_string(channel->mNumPositionKeys) +
-                        ", Rot Keys: " + std::to_string(channel->mNumRotationKeys) +
-                        ", Scale Keys: " + std::to_string(channel->mNumScalingKeys));
+                    // [VERBOSE] Animation channel details - disabled to reduce log size
+                    // SCENE_LOG_INFO("  [Channel " + std::to_string(j + 1) + "] Node: " + nodeName +
+                    //     ", Pos Keys: " + std::to_string(channel->mNumPositionKeys) +
+                    //     ", Rot Keys: " + std::to_string(channel->mNumRotationKeys) +
+                    //     ", Scale Keys: " + std::to_string(channel->mNumScalingKeys));
 
                     for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k) {
                         animData.positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
@@ -588,8 +589,8 @@ public:
             auto it = materialMap.find(key);
             if (it != materialMap.end()) {
                 gpuIndex = it->second;
-                SCENE_LOG_INFO("[MAT-DEDUP] Triangle reusing material #" + std::to_string(gpuIndex) + 
-                              " | MatName: " + material->materialName);
+                // [VERBOSE] SCENE_LOG_INFO("[MAT-DEDUP] Triangle reusing material #" + std::to_string(gpuIndex) + 
+                //               " | MatName: " + material->materialName);
             }
             else {
                 gpuIndex = static_cast<int>(gpuMaterials.size());
@@ -597,13 +598,13 @@ public:
                 data.textures.push_back(tri->textureBundle);
                 materialMap[key] = gpuIndex;
                 
-                // Debug: Log new material creation
-                SCENE_LOG_INFO("[MAT-NEW] Creating material #" + std::to_string(gpuIndex) + 
-                              " | Name: " + material->materialName +
-                              " | AlbedoTex: " + std::to_string(key.albedoTexID) +
-                              " | RoughTex: " + std::to_string(key.roughnessTexID) +
-                              " | MetalTex: " + std::to_string(key.metallicTexID) +
-                              " | NameHash: " + std::to_string(key.materialNameHash));
+                // [VERBOSE] Debug: Log new material creation - disabled to reduce log size
+                // SCENE_LOG_INFO("[MAT-NEW] Creating material #" + std::to_string(gpuIndex) + 
+                //               " | Name: " + material->materialName +
+                //               " | AlbedoTex: " + std::to_string(key.albedoTexID) +
+                //               " | RoughTex: " + std::to_string(key.roughnessTexID) +
+                //               " | MetalTex: " + std::to_string(key.metallicTexID) +
+                //               " | NameHash: " + std::to_string(key.materialNameHash));
             }
 
             data.material_indices.push_back(gpuIndex);
@@ -1142,7 +1143,7 @@ private:
                 std::string name = aiLgt->mName.C_Str();
                 std::string typeStr = LightTypeToString(aiLgt->mType);
 
-                SCENE_LOG_INFO("Processing light: " + name + " (" + typeStr + ")");
+                // [VERBOSE] SCENE_LOG_INFO("Processing light: " + name + " (" + typeStr + ")"); // Per-light log
 
                 lightNodeNames.insert(name);
 
@@ -1291,7 +1292,7 @@ private:
       aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_AMBIENT_OCCLUSION
        };
 	   material->materialName = materialNameStr;
-       SCENE_LOG_INFO("Process Material: " + materialNameStr);
+       // [VERBOSE] SCENE_LOG_INFO("Process Material: " + materialNameStr); // Disabled - high volume
        for (auto type : textureTypes) {
 
            // Ensure texture count is greater than 0
@@ -1299,8 +1300,8 @@ private:
                aiString str;
                int count = aiMat->GetTextureCount(type);
                if (count > 0) {
-                   SCENE_LOG_INFO("Material has texture: type=" + std::to_string(type) +
-                       " count=" + std::to_string(count));
+                   // [VERBOSE] SCENE_LOG_INFO("Material has texture: type=" + std::to_string(type) +
+                   //     " count=" + std::to_string(count)); // Per-texture log
                }
                // Retrieve the texture, check for success and ensure the texture path is valid
                if (AI_SUCCESS == aiMat->GetTexture(type, 0, &str) && str.length > 0) {
@@ -1410,12 +1411,12 @@ private:
                     auto cacheIt = textureCache.find(embeddedKey);
                     if (cacheIt != textureCache.end()) {
                         texture = cacheIt->second;
-                        SCENE_LOG_INFO("[EMBEDDED CACHE HIT] Reusing texture: " + path + " | Key: " + embeddedKey);
+                        // [VERBOSE] SCENE_LOG_INFO("[EMBEDDED CACHE HIT] Reusing texture: " + path + " | Key: " + embeddedKey);
                     } else {
                         // Cache'de yok, yeni oluştur ve cache'e ekle
                         texture = std::make_shared<Texture>(emb, ttype, embeddedKey);
                         textureCache[embeddedKey] = texture;
-                        SCENE_LOG_INFO("[EMBEDDED CACHE MISS] Created new texture: " + path + " | Key: " + embeddedKey);
+                        // [VERBOSE] SCENE_LOG_INFO("[EMBEDDED CACHE MISS] Created new texture: " + path + " | Key: " + embeddedKey);
                     }
                 }
                 else

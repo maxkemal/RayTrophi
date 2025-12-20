@@ -63,6 +63,7 @@ public:
      void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
      void draw(UIContext& ctx);
      void handleMouseSelection(UIContext& ctx); // Publicly accessible for Main loop call
+     void triggerDelete(UIContext& ctx); // Trigger delete operation (for Menu and Key)
      void invalidateCache() { mesh_cache_valid = false; }
      
      // Project System Helpers
@@ -124,6 +125,11 @@ private:
     struct TransformState drag_start_state;
     std::string drag_object_name;
 
-
+    // Marquee (Box) Selection State
+    bool is_marquee_selecting = false;
+    ImVec2 marquee_start;
+    ImVec2 marquee_end;
+    void handleMarqueeSelection(UIContext& ctx);  // Box selection implementation
+    void drawMarqueeRect();  // Draw the selection rectangle
    
 };

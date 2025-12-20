@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.2-blue.svg)
+![Version](https://img.shields.io/badge/version-1.3-blue.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -75,12 +75,22 @@
     - Ambient Strength for cloud base illumination
     - Silver Intensity (Silver Lining) for sun-edge effects
     - Cloud Absorption for light penetration control
-  - ✅ **Full Undo/Redo System** (NEW v1.2):
+  - ✅ **Full Undo/Redo System** (v1.2):
     - Object transforms (move, rotate, scale)
     - Object deletion and duplication
     - **Light transforms** (move, rotate, scale)
     - **Light add/delete/duplicate**
     - Keyboard shortcuts: Ctrl+Z (Undo), Ctrl+Y (Redo)
+  - ✅ **Advanced Selection System** (NEW v1.3):
+    - **Box Selection**: Right-click drag to select multiple objects
+    - **Mixed Selection**: Select lights + objects together
+    - **Ctrl+Click**: Add/remove from selection
+    - **Select All/None buttons**: Quick selection in Scene panel
+    - Multi-object transform: Move multiple selected items at once
+  - ✅ **Idle Preview** (NEW v1.3):
+    - During gizmo manipulation, pause mouse for 0.3s to preview position
+    - See render result before releasing - adjust if needed
+    - Blender-like UX for precise positioning
 
 ### 🚀 Performance & Optimization
 
@@ -96,6 +106,8 @@
   - **Memory Optimization**: Triangular footprint reduced from 612 to 146 bytes (75% reduction)
   - **Robust Texture System**: Crash-proof loader for Unicode paths and corrupted formats
   - Cached Texture Management (Optimized Hit/Miss logic)
+  - **Deferred BVH Update** (NEW v1.3): Gizmo manipulation doesn't block - BVH updates only when needed
+  - **O(n) Multi-Delete** (NEW v1.3): Delete 100+ objects instantly (was O(n²))
 
 ### 🖥️ User Interface
 
@@ -105,6 +117,8 @@
 - Dynamic Resolution Scaling
 - Scene hierarchy viewer and Material editor
 - Performance metrics (FPS, rays/s, memory usage)
+- **Box Selection** (NEW v1.3): Right-click drag for multi-selection
+- **Transform Gizmo Idle Preview** (NEW v1.3): Pause during drag to preview position
 
 ---
 

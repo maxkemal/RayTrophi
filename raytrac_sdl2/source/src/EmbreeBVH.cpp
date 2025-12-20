@@ -19,7 +19,7 @@ EmbreeBVH::~EmbreeBVH() {
 
 void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     auto build_start = std::chrono::high_resolution_clock::now();
-    SCENE_LOG_INFO("[EmbreeBVH::build] Build started");
+    // [VERBOSE] SCENE_LOG_INFO("[EmbreeBVH::build] Build started"); // Runs on every manipulation
 
     // First pass: Count triangles
     size_t tri_count = 0;
@@ -34,7 +34,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
         return;
     }
 
-    SCENE_LOG_INFO("[EmbreeBVH::build] Triangle count = " + std::to_string(tri_count));
+    // [VERBOSE] SCENE_LOG_INFO("[EmbreeBVH::build] Triangle count = " + std::to_string(tri_count));
 
     // Pre-allocate all vectors to avoid reallocation overhead
     triangle_data.clear();
@@ -99,15 +99,15 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
 
     auto data_prep_end = std::chrono::high_resolution_clock::now();
     auto data_prep_ms = std::chrono::duration_cast<std::chrono::milliseconds>(data_prep_end - build_start).count();
-    SCENE_LOG_INFO("[EmbreeBVH::build] Data preparation took " + std::to_string(data_prep_ms) + " ms");
+    // [VERBOSE] SCENE_LOG_INFO("[EmbreeBVH::build] Data preparation took " + std::to_string(data_prep_ms) + " ms");
 
     // Commit geometry
     rtcCommitGeometry(geom);
-    SCENE_LOG_INFO("[EmbreeBVH::build] Geometry committed");
+    // [VERBOSE] SCENE_LOG_INFO("[EmbreeBVH::build] Geometry committed");
 
     unsigned geomID = rtcAttachGeometry(scene, geom);
     rtcReleaseGeometry(geom);
-    SCENE_LOG_INFO("[EmbreeBVH::build] Geometry attached with ID = " + std::to_string(geomID));
+    // [VERBOSE] SCENE_LOG_INFO("[EmbreeBVH::build] Geometry attached with ID = " + std::to_string(geomID));
 
     // Commit scene (this is where BVH construction happens)
     auto bvh_start = std::chrono::high_resolution_clock::now();
@@ -117,9 +117,10 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     auto bvh_build_ms = std::chrono::duration_cast<std::chrono::milliseconds>(bvh_end - bvh_start).count();
     auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(bvh_end - build_start).count();
     
-    SCENE_LOG_INFO("[EmbreeBVH::build] BVH construction took " + std::to_string(bvh_build_ms) + " ms");
-    SCENE_LOG_INFO("[EmbreeBVH::build] Total build time: " + std::to_string(total_ms) + " ms");
-    SCENE_LOG_INFO("[EmbreeBVH::build] BVH build completed");
+    // [VERBOSE] Build timing logs - disabled to reduce log volume during manipulation
+    // SCENE_LOG_INFO("[EmbreeBVH::build] BVH construction took " + std::to_string(bvh_build_ms) + " ms");
+    // SCENE_LOG_INFO("[EmbreeBVH::build] Total build time: " + std::to_string(total_ms) + " ms");
+    // SCENE_LOG_INFO("[EmbreeBVH::build] BVH build completed");
 }
 
 

@@ -17,6 +17,7 @@
 #include "SceneSerializer.h"
 #include "ProjectManager.h"  // Project system
 #include <map>  // For mesh grouping
+#include <unordered_set>  // For fast deletion lookup
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>  // SHBrowseForFolder için
@@ -69,7 +70,7 @@ std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0") {
     ofn.lpstrFilter = filter;
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     ofn.lpstrTitle = L"Select a file";
     ofn.hwndOwner = GetActiveWindow();
     if (GetOpenFileNameW(&ofn)) {
@@ -90,7 +91,7 @@ std::string saveFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const w
     ofn.lpstrFilter = filter;
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH; // Initialize buffer with 0
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     ofn.lpstrDefExt = defExt;
     
     if (GetSaveFileNameW(&ofn)) {
@@ -2133,6 +2134,7 @@ void SceneUI::draw(UIContext& ctx)
     // Scene Interaction (Picking) - works on ALL tabs
     if (ctx.scene.initialized && !gizmo_hit) {
         handleMouseSelection(ctx);
+        handleMarqueeSelection(ctx);  // Box selection with right-click drag
     }
 
     ImGui::PopStyleColor();
@@ -2148,10 +2150,15 @@ void SceneUI::draw(UIContext& ctx)
     }
     
     // Lazy BVH / Scene Update (Fixes CPU Ghosting after Delete)
-    if (is_bvh_dirty) {
+    // NOTE: Skip this if gizmo is being used - let drawTransformGizmo handle deferred update
+    if (is_bvh_dirty && !ImGuizmo::IsUsing()) {
          // SCENE_LOG_INFO("Updating Scene BVH (Dirty Flag)...");
          ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
          ctx.renderer.resetCPUAccumulation();
+         if (ctx.optix_gpu_ptr) {
+             ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+             ctx.optix_gpu_ptr->resetAccumulation();
+         }
          is_bvh_dirty = false;
     }
     
@@ -2166,8 +2173,7 @@ void SceneUI::draw(UIContext& ctx)
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
         if (history.canUndo()) {
             history.undo(ctx);
-            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache
-            mesh_cache_valid = false;
+            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache (sets valid=true)
             ctx.selection.updatePositionFromSelection(); // Sync Gizmo center
             ctx.selection.selected.has_cached_aabb = false; // Force bounding box rebuild
         }
@@ -2176,8 +2182,7 @@ void SceneUI::draw(UIContext& ctx)
         (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift)) {
         if (history.canRedo()) {
             history.redo(ctx);
-            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache
-            mesh_cache_valid = false;
+            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache (sets valid=true)
             ctx.selection.updatePositionFromSelection(); // Sync Gizmo center
             ctx.selection.selected.has_cached_aabb = false; // Force bounding box rebuild
         }
@@ -2290,77 +2295,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // Only process when viewport has focus (not UI panels)
     if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && 
         sel.hasSelection() && !ImGui::GetIO().WantCaptureKeyboard) {
-        bool deleted = false;
-        if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-            auto& objs = ctx.scene.world.objects;
-            // Remove all triangles with the same node name (Group deletion)
-             std::string targetName = sel.selected.object->nodeName;
-             
-             // STEP 1: Collect objects to delete (for undo)
-             std::vector<std::shared_ptr<Triangle>> deleted_triangles;
-             for (const auto& h : objs) {
-                 auto t = std::dynamic_pointer_cast<Triangle>(h);
-                 if (t && t->nodeName == targetName) {
-                     deleted_triangles.push_back(t);
-                 }
-             }
-             
-             // STEP 2: Remove from scene
-             auto new_end = std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& h){
-                 auto t = std::dynamic_pointer_cast<Triangle>(h);
-                 return t && t->nodeName == targetName;
-             });
-             
-             if (new_end != objs.end()) {
-                 size_t before_count = objs.size();
-                 objs.erase(new_end, objs.end());
-                 size_t after_count = objs.size();
-                 deleted = true;
-                 
-                 // SCENE_LOG_INFO("Deleted " + std::to_string(before_count - after_count) + 
-                 //               " triangles. Scene now has " + std::to_string(after_count) + " objects.");  // Verbose
-                 
-                 // STEP 3: Record undo command
-                 auto command = std::make_unique<DeleteObjectCommand>(targetName, deleted_triangles);
-                 history.record(std::move(command));
-                 
-                 // STEP 4: Rebuild GPU structures
-                 // CRITICAL: Material index buffer MUST be regenerated
-                 // When triangles are deleted, the index buffer shrinks
-                 // If we don't rebuild, index buffer size != triangle count
-                 // This causes material shifting and rendering artifacts
-                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                 ctx.renderer.resetCPUAccumulation();
-                 if (ctx.optix_gpu_ptr) {
-                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                 }
-                 
-                 // STEP 5: Refresh UI cache
-                 rebuildMeshCache(ctx.scene.world.objects);
-                 mesh_cache_valid = false;
-                 
-                 // STEP 6: Trigger render restart
-                 ctx.start_render = true;
-             }
-        }
-        else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
-             auto& lights = ctx.scene.lights;
-             auto it = std::find(lights.begin(), lights.end(), sel.selected.light);
-             if (it != lights.end()) {
-                 lights.erase(it);
-                 deleted = true;
-                  // Update GPU
-                 if (ctx.optix_gpu_ptr) {
-                    ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                    ctx.optix_gpu_ptr->resetAccumulation();
-                }
-             }
-        }
-        
-        if (deleted) {
-            sel.clearSelection();
-            // SCENE_LOG_INFO("Selection deleted.");  // Too verbose
-        }
+        triggerDelete(ctx);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2464,6 +2399,26 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // LIGHTS
     if (!ctx.scene.lights.empty()) {
         if (ImGui::TreeNode("Lights")) {
+            // SELECT ALL / SELECT NONE buttons
+            if (ImGui::Button("Select All##lights")) {
+                ctx.selection.clearSelection();
+                for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
+                    auto& light = ctx.scene.lights[i];
+                    SelectableItem item;
+                    item.type = SelectableType::Light;
+                    item.light = light;
+                    item.light_index = (int)i;
+                    item.name = "Light_" + std::to_string(i);
+                    ctx.selection.addToSelection(item);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Select None##lights")) {
+                ctx.selection.clearSelection();
+            }
+            ImGui::SameLine();
+            ImGui::Text("(%d lights)", (int)ctx.scene.lights.size());
+            
             for (size_t i = 0; i < ctx.scene.lights.size(); i++) {
                 ImGui::PushID((int)i);  // Unique ID for each light
                 
@@ -2515,6 +2470,37 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         
         // Ensure cache is valid
         if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+        // SELECT ALL / SELECT NONE buttons
+        if (ImGui::Button("Select All##obj")) {
+            ctx.selection.clearSelection();
+            for (auto& [name, triangles] : mesh_cache) {
+                if (triangles.empty()) continue;
+                
+                // Check if all triangles share same transform (skip procedurals)
+                auto firstHandle = triangles[0].second->getTransformHandle();
+                bool all_same = true;
+                for (size_t i = 1; i < triangles.size() && all_same; ++i) {
+                    auto h = triangles[i].second->getTransformHandle();
+                    if (h.get() != firstHandle.get()) all_same = false;
+                }
+                
+                if (all_same) {
+                    SelectableItem item;
+                    item.type = SelectableType::Object;
+                    item.object = triangles[0].second;
+                    item.object_index = triangles[0].first;
+                    item.name = name;
+                    ctx.selection.addToSelection(item);
+                }
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Select None##obj")) {
+            ctx.selection.clearSelection();
+        }
+        ImGui::SameLine();
+        ImGui::Text("(%d objects)", (int)mesh_ui_cache.size());
 
         static ImGuiTextFilter filter;
         filter.Draw("Filter##objects");
@@ -2878,98 +2864,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // Light Gizmos and Transform Gizmos moved to main draw() loop for all tabs
 }
 
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// SELECTION BOUNDING BOX DRAWING
+// SELECTION BOUNDING BOX DRAWING (Multi-selection support)
 // ═══════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     if (!sel.hasSelection() || !ctx.scene.camera) return;
     
-    // Get bounding box corners based on selection type
-    Vec3 bb_min, bb_max;
-    bool has_bounds = false;
-    
-    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-        
-        // Use cached bounds if available
-        if (sel.selected.has_cached_aabb) {
-            bb_min = sel.selected.cached_aabb.min;
-            bb_max = sel.selected.cached_aabb.max;
-            has_bounds = true;
-        } else {
-            // NEEDED: Compute from all triangles with same nodeName
-            std::string selectedName = sel.selected.object->nodeName;
-            if (selectedName.empty()) selectedName = "Unnamed";
-
-            bb_min = Vec3(1e10f, 1e10f, 1e10f);
-            bb_max = Vec3(-1e10f, -1e10f, -1e10f);
-            bool found_any = false;
-            
-            // OPTIMIZATION: Use mesh_cache instead of scanning all world objects
-            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
-            
-            auto it = mesh_cache.find(selectedName);
-            if (it != mesh_cache.end()) {
-                 for (auto& pair : it->second) {
-                    auto& tri = pair.second;
-                    // No need for dynamic_cast check, cache stores Triangles
-                    
-                    // Get triangle vertices
-                    Vec3 v0 = tri->getV0();
-                    Vec3 v1 = tri->getV1();
-                    Vec3 v2 = tri->getV2();
-                    
-                    // Use fminf/fmaxf to avoid Windows min/max macro conflict
-                    bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
-                    bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
-                    bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
-                    bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
-                    bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
-                    bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
-                    found_any = true;
-                 }
-            }
-            
-            if (found_any) {
-                has_bounds = true;
-                sel.selected.cached_aabb.min = bb_min;
-                sel.selected.cached_aabb.max = bb_max;
-                sel.selected.has_cached_aabb = true;
-            }
-        }
-    }
-    else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
-        // Small box around light position
-        Vec3 lightPos = sel.selected.light->position;
-        float boxSize = 0.5f;
-        bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
-        bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
-        has_bounds = true;
-    }
-    else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
-        // Small box around camera position
-        Vec3 camPos = sel.selected.camera->lookfrom;
-        float boxSize = 0.5f;
-        bb_min = Vec3(camPos.x - boxSize, camPos.y - boxSize, camPos.z - boxSize);
-        bb_max = Vec3(camPos.x + boxSize, camPos.y + boxSize, camPos.z + boxSize);
-        has_bounds = true;
-    }
-    
-    if (!has_bounds) return;
-    
-    // 8 corners of bounding box
-    Vec3 corners[8] = {
-        Vec3(bb_min.x, bb_min.y, bb_min.z),
-        Vec3(bb_max.x, bb_min.y, bb_min.z),
-        Vec3(bb_max.x, bb_max.y, bb_min.z),
-        Vec3(bb_min.x, bb_max.y, bb_min.z),
-        Vec3(bb_min.x, bb_min.y, bb_max.z),
-        Vec3(bb_max.x, bb_min.y, bb_max.z),
-        Vec3(bb_max.x, bb_max.y, bb_max.z),
-        Vec3(bb_min.x, bb_max.y, bb_max.z),
-    };
-    
-    // Project corners to screen space
     Camera& cam = *ctx.scene.camera;
     ImGuiIO& io = ImGui::GetIO();
     float screen_w = io.DisplaySize.x;
@@ -2984,64 +2886,127 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
     
-    ImVec2 screen_pts[8];
-    bool all_visible = true;
-    
-    for (int i = 0; i < 8; i++) {
-        // Vector from camera to corner
-        Vec3 to_corner = corners[i] - cam.lookfrom;
+    // Helper lambda to draw a bounding box
+    auto DrawBoundingBox = [&](Vec3 bb_min, Vec3 bb_max, ImU32 color, float thickness) {
+        Vec3 corners[8] = {
+            Vec3(bb_min.x, bb_min.y, bb_min.z),
+            Vec3(bb_max.x, bb_min.y, bb_min.z),
+            Vec3(bb_max.x, bb_max.y, bb_min.z),
+            Vec3(bb_min.x, bb_max.y, bb_min.z),
+            Vec3(bb_min.x, bb_min.y, bb_max.z),
+            Vec3(bb_max.x, bb_min.y, bb_max.z),
+            Vec3(bb_max.x, bb_max.y, bb_max.z),
+            Vec3(bb_min.x, bb_max.y, bb_max.z),
+        };
         
-        // Distance along camera forward axis
-        float depth = to_corner.dot(cam_forward);
+        ImVec2 screen_pts[8];
+        bool all_visible = true;
         
-        // Check if behind camera
-        if (depth <= 0.01f) {
-            all_visible = false;
-            break;
+        for (int i = 0; i < 8; i++) {
+            Vec3 to_corner = corners[i] - cam.lookfrom;
+            float depth = to_corner.dot(cam_forward);
+            
+            if (depth <= 0.01f) {
+                all_visible = false;
+                break;
+            }
+            
+            float local_x = to_corner.dot(cam_right);
+            float local_y = to_corner.dot(cam_up);
+            
+            float half_height = depth * tan_half_fov;
+            float half_width = half_height * aspect_ratio;
+            
+            float ndc_x = local_x / half_width;
+            float ndc_y = local_y / half_height;
+            
+            screen_pts[i].x = (ndc_x * 0.5f + 0.5f) * screen_w;
+            screen_pts[i].y = (0.5f - ndc_y * 0.5f) * screen_h;
         }
         
-        // Project onto camera's local X and Y axes
-        float local_x = to_corner.dot(cam_right);
-        float local_y = to_corner.dot(cam_up);
+        if (!all_visible) return;
         
-        // Perspective divide
-        float half_height = depth * tan_half_fov;
-        float half_width = half_height * aspect_ratio;
+        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();  // Draw behind UI panels
         
-        // Normalized device coordinates (-1 to 1)
-        float ndc_x = local_x / half_width;
-        float ndc_y = local_y / half_height;
+        draw_list->AddLine(screen_pts[0], screen_pts[1], color, thickness);
+        draw_list->AddLine(screen_pts[1], screen_pts[2], color, thickness);
+        draw_list->AddLine(screen_pts[2], screen_pts[3], color, thickness);
+        draw_list->AddLine(screen_pts[3], screen_pts[0], color, thickness);
         
-        // To screen coordinates
-        screen_pts[i].x = (ndc_x * 0.5f + 0.5f) * screen_w;
-        screen_pts[i].y = (0.5f - ndc_y * 0.5f) * screen_h;  // Y is inverted
+        draw_list->AddLine(screen_pts[4], screen_pts[5], color, thickness);
+        draw_list->AddLine(screen_pts[5], screen_pts[6], color, thickness);
+        draw_list->AddLine(screen_pts[6], screen_pts[7], color, thickness);
+        draw_list->AddLine(screen_pts[7], screen_pts[4], color, thickness);
+        
+        draw_list->AddLine(screen_pts[0], screen_pts[4], color, thickness);
+        draw_list->AddLine(screen_pts[1], screen_pts[5], color, thickness);
+        draw_list->AddLine(screen_pts[2], screen_pts[6], color, thickness);
+        draw_list->AddLine(screen_pts[3], screen_pts[7], color, thickness);
+    };
+    
+    // Draw bounding box for each selected item (multi-selection support)
+    for (size_t idx = 0; idx < sel.multi_selection.size(); ++idx) {
+        auto& item = sel.multi_selection[idx];
+        
+        // Primary selection (last one) gets a brighter color
+        bool is_primary = (idx == sel.multi_selection.size() - 1);
+        ImU32 color = is_primary ? IM_COL32(0, 255, 128, 255) : IM_COL32(0, 200, 100, 180);
+        float thickness = is_primary ? 2.0f : 1.5f;
+        
+        Vec3 bb_min, bb_max;
+        bool has_bounds = false;
+        
+        if (item.type == SelectableType::Object && item.object) {
+            std::string selectedName = item.object->nodeName;
+            if (selectedName.empty()) selectedName = "Unnamed";
+            
+            bb_min = Vec3(1e10f, 1e10f, 1e10f);
+            bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+            bool found_any = false;
+            
+            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+            
+            auto it = mesh_cache.find(selectedName);
+            if (it != mesh_cache.end()) {
+                for (auto& pair : it->second) {
+                    auto& tri = pair.second;
+                    Vec3 v0 = tri->getV0();
+                    Vec3 v1 = tri->getV1();
+                    Vec3 v2 = tri->getV2();
+                    
+                    bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                    bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                    bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                    bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                    bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                    bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+                    found_any = true;
+                }
+            }
+            
+            if (found_any) has_bounds = true;
+        }
+        else if (item.type == SelectableType::Light && item.light) {
+            Vec3 lightPos = item.light->position;
+            float boxSize = 0.5f;
+            bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
+            bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
+            has_bounds = true;
+            color = is_primary ? IM_COL32(255, 255, 100, 255) : IM_COL32(200, 200, 80, 180);
+        }
+        else if (item.type == SelectableType::Camera && item.camera) {
+            Vec3 camPos = item.camera->lookfrom;
+            float boxSize = 0.5f;
+            bb_min = Vec3(camPos.x - boxSize, camPos.y - boxSize, camPos.z - boxSize);
+            bb_max = Vec3(camPos.x + boxSize, camPos.y + boxSize, camPos.z + boxSize);
+            has_bounds = true;
+            color = is_primary ? IM_COL32(100, 200, 255, 255) : IM_COL32(80, 160, 200, 180);
+        }
+        
+        if (has_bounds) {
+            DrawBoundingBox(bb_min, bb_max, color, thickness);
+        }
     }
-    
-    if (!all_visible) return;
-    
-    // Draw wireframe using ImGui DrawList
-    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
-    ImU32 color = IM_COL32(0, 255, 128, 255);  // Green
-    float thickness = 2.0f;
-    
-    // 12 edges of the box
-    // Bottom face
-    draw_list->AddLine(screen_pts[0], screen_pts[1], color, thickness);
-    draw_list->AddLine(screen_pts[1], screen_pts[2], color, thickness);
-    draw_list->AddLine(screen_pts[2], screen_pts[3], color, thickness);
-    draw_list->AddLine(screen_pts[3], screen_pts[0], color, thickness);
-    
-    // Top face
-    draw_list->AddLine(screen_pts[4], screen_pts[5], color, thickness);
-    draw_list->AddLine(screen_pts[5], screen_pts[6], color, thickness);
-    draw_list->AddLine(screen_pts[6], screen_pts[7], color, thickness);
-    draw_list->AddLine(screen_pts[7], screen_pts[4], color, thickness);
-    
-    // Vertical edges
-    draw_list->AddLine(screen_pts[0], screen_pts[4], color, thickness);
-    draw_list->AddLine(screen_pts[1], screen_pts[5], color, thickness);
-    draw_list->AddLine(screen_pts[2], screen_pts[6], color, thickness);
-    draw_list->AddLine(screen_pts[3], screen_pts[7], color, thickness);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3302,17 +3267,22 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 
                 int counter = 1;
                 std::string newName;
+             // BUILD OPTIMIZATION MAP: Name (View) -> Find Triangle
+    // Using string_view avoids allocating a copy of the name for every map node (Huge RAM/Time saver for 700k objs)
+    std::unordered_map<std::string_view, std::shared_ptr<Triangle>> scene_obj_map;
+    scene_obj_map.reserve(ctx.scene.world.objects.size());
+    
+    for (const auto& obj : ctx.scene.world.objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (tri) {
+            // Safe because tri->nodeName (std::string) lives in the scene which outlives this function map
+            scene_obj_map[tri->nodeName] = tri;
+        }
+    }        
                 bool nameExists = true;
                 while (nameExists) {
                     newName = baseName + "_" + std::to_string(counter);
-                    nameExists = false;
-                    for (const auto& obj : ctx.scene.world.objects) {
-                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                        if (tri && tri->nodeName == newName) {
-                            nameExists = true;
-                            break;
-                        }
-                    }
+                    nameExists = scene_obj_map.count(newName) > 0;
                     counter++;
                 }
                 
@@ -3372,12 +3342,53 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         ImGuizmo::LOCAL : ImGuizmo::WORLD;
     
     // ─────────────────────────────────────────────────────────────────────────
-    // Shift + Drag Duplication Logic
+    // Shift + Drag Duplication Logic + IDLE PREVIEW
     // ─────────────────────────────────────────────────────────────────────────
     static bool was_using_gizmo = false;
     static LightState drag_start_light_state;
     static std::shared_ptr<Light> drag_light = nullptr;
     bool is_using = ImGuizmo::IsUsing();
+    
+    // IDLE PREVIEW: Track when mouse stops moving during drag
+    static ImVec2 last_mouse_pos = ImVec2(0, 0);
+    static float idle_time = 0.0f;
+    static bool preview_updated = false;
+    const float IDLE_THRESHOLD = 0.3f;  // 0.3 seconds before preview update
+    
+   
+    if (is_using && is_bvh_dirty) {
+        ImVec2 current_mouse = io.MousePos;
+        float mouse_delta = sqrtf(powf(current_mouse.x - last_mouse_pos.x, 2) + 
+                                  powf(current_mouse.y - last_mouse_pos.y, 2));
+        
+        if (mouse_delta < 1.0f) {  // Mouse essentially stationary
+            idle_time += io.DeltaTime;
+            
+            // If idle for threshold and not yet updated, do preview update
+            if (idle_time >= IDLE_THRESHOLD && !preview_updated) {
+                // SCENE_LOG_INFO("[GIZMO] Idle preview - updating BVH");
+                if (ctx.optix_gpu_ptr) {
+                    ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                    ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                    ctx.optix_gpu_ptr->resetAccumulation();
+                }
+                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                ctx.renderer.resetCPUAccumulation();
+                preview_updated = true;
+                // Note: Don't set is_bvh_dirty = false, so final update still happens
+            }
+        } else {
+            // Mouse moved - reset idle tracking
+            idle_time = 0.0f;
+            preview_updated = false;  // Allow another preview after next pause
+        }
+        last_mouse_pos = current_mouse;
+    } else {
+        // Not using gizmo - reset tracking
+        idle_time = 0.0f;
+        preview_updated = false;
+        last_mouse_pos = io.MousePos;
+    }
 
     if (is_using && !was_using_gizmo) {
         // Manipülasyon yeni başladı
@@ -3506,18 +3517,80 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
          drag_light = nullptr;
     }
     
-    was_using_gizmo = is_using;
+    // NOTE: was_using_gizmo update moved to END of function (after is_bvh_dirty is set)
 
     // ─────────────────────────────────────────────────────────────────────────
     // Render and Manipulate Gizmo
     // ─────────────────────────────────────────────────────────────────────────
+    // Save old position BEFORE manipulation for delta calculation (multi-selection)
+    Vec3 oldGizmoPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
+    
     bool manipulated = ImGuizmo::Manipulate(viewMatrix, projMatrix, operation, mode, objectMatrix);
     
     if (manipulated) {
         Vec3 newPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
+        Vec3 deltaPos = newPos - oldGizmoPos;  // Calculate delta from BEFORE manipulation
         sel.selected.position = newPos; // Update gizmo/bbox center
 
-        if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+        // Check if this is multi-selection (handle mixed types: lights + objects together)
+        bool is_multi_select = sel.multi_selection.size() > 1;
+        
+        if (is_multi_select && operation == ImGuizmo::TRANSLATE) {
+            // MULTI-SELECTION: Apply delta to ALL selected items (mixed types)
+            float deltaMagnitude = sqrtf(deltaPos.x*deltaPos.x + deltaPos.y*deltaPos.y + deltaPos.z*deltaPos.z);
+            
+            if (deltaMagnitude >= 0.0001f) {
+                if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+                
+                for (auto& item : sel.multi_selection) {
+                    if (item.type == SelectableType::Object && item.object) {
+                        std::string targetName = item.object->nodeName;
+                        if (targetName.empty()) targetName = "Unnamed";
+                        
+                        auto it = mesh_cache.find(targetName);
+                        if (it != mesh_cache.end() && !it->second.empty()) {
+                            auto& firstTri = it->second[0].second;
+                            auto t_handle = firstTri->getTransformHandle();
+                            
+                            // Safety check for mixed transforms
+                            bool all_same_transform = true;
+                            for (size_t i = 1; i < it->second.size() && all_same_transform; ++i) {
+                                auto h = it->second[i].second->getTransformHandle();
+                                if (h.get() != t_handle.get()) all_same_transform = false;
+                            }
+                            
+                            if (all_same_transform && t_handle) {
+                                Matrix4x4 currentMat = t_handle->base;
+                                currentMat.m[0][3] += deltaPos.x;
+                                currentMat.m[1][3] += deltaPos.y;
+                                currentMat.m[2][3] += deltaPos.z;
+                                t_handle->setBase(currentMat);
+                                
+                                for (auto& pair : it->second) {
+                                    pair.second->updateTransformedVertices();
+                                }
+                            }
+                        }
+                        item.has_cached_aabb = false;
+                    }
+                    else if (item.type == SelectableType::Light && item.light) {
+                        item.light->position = item.light->position + deltaPos;
+                    }
+                    else if (item.type == SelectableType::Camera && item.camera) {
+                        item.camera->lookfrom = item.camera->lookfrom + deltaPos;
+                        item.camera->lookat = item.camera->lookat + deltaPos;
+                        item.camera->update_camera_vectors();
+                    }
+                }
+                
+                sel.selected.has_cached_aabb = false;
+                
+                // DEFERRED UPDATE: Only mark dirty during drag
+                // Lights don't need BVH but geometry does
+                is_bvh_dirty = true;
+            }
+        }
+        else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
             sel.selected.light->position = newPos;
             Vec3 zAxis(objectMatrix[8], objectMatrix[9], objectMatrix[10]);
             Vec3 newDir = -zAxis.normalize(); // Gizmo -Z aligned
@@ -3578,40 +3651,72 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
             }
         }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            // SINGLE SELECTION or Rotate/Scale operations
+            // (Multi-select TRANSLATE is handled above)
+            
             Matrix4x4 newMat;
             newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
             newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
             newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
             newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
 
-            std::string targetName = sel.selected.object->nodeName;
-            if (targetName.empty()) targetName = "Unnamed";
+            float deltaMagnitude = sqrtf(deltaPos.x*deltaPos.x + deltaPos.y*deltaPos.y + deltaPos.z*deltaPos.z);
+            
+            // Only apply transform if there's significant movement or it's rotate/scale
+            if (deltaMagnitude >= 0.0001f || operation != ImGuizmo::TRANSLATE) {
+                if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
-            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
-
-            auto it = mesh_cache.find(targetName);
-            if (it != mesh_cache.end()) {
-                for (auto& pair : it->second) {
-                    auto& tri = pair.second;
-                    auto t_handle = tri->getTransformHandle();
-                    if (t_handle) t_handle->setBase(newMat);
-                    tri->updateTransformedVertices();
+                std::string targetName = sel.selected.object->nodeName;
+                if (targetName.empty()) targetName = "Unnamed";
+                
+                auto it = mesh_cache.find(targetName);
+                if (it != mesh_cache.end() && !it->second.empty()) {
+                    auto& firstTri = it->second[0].second;
+                    auto t_handle = firstTri->getTransformHandle();
+                    
+                    // Safety check for mixed transforms
+                    bool all_same_transform = true;
+                    for (size_t i = 1; i < it->second.size() && all_same_transform; ++i) {
+                        auto h = it->second[i].second->getTransformHandle();
+                        if (h.get() != t_handle.get()) all_same_transform = false;
+                    }
+                    
+                    if (all_same_transform && t_handle) {
+                        // Apply full matrix from gizmo (supports translate, rotate, scale)
+                        t_handle->setBase(newMat);
+                        
+                        for (auto& pair : it->second) {
+                            pair.second->updateTransformedVertices();
+                        }
+                    }
                 }
-            }
-            sel.selected.has_cached_aabb = false;
+                
+                sel.selected.has_cached_aabb = false;
 
-            // IMMEDIATE UPDATE - SYNCHRONIZE BOTH
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                ctx.optix_gpu_ptr->resetAccumulation();
+                // DEFERRED UPDATE: Only mark dirty, don't rebuild during drag
+                // BVH rebuild will happen when gizmo is released (see below)
+                is_bvh_dirty = true;
             }
-
-            // Always update CPU BVH as well to keep them in sync
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            ctx.renderer.resetCPUAccumulation();
-            is_bvh_dirty = false;
         }
     }
+    
+    // DEFERRED BVH UPDATE: Rebuild when gizmo drag ends (not during)
+    // This check is at the END so is_bvh_dirty has been set above
+    if (!is_using && was_using_gizmo && is_bvh_dirty) {
+        SCENE_LOG_INFO("[GIZMO] Released - Triggering BVH update");
+        if (ctx.optix_gpu_ptr) {
+            ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+            if (ctx.scene.camera) ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+            ctx.optix_gpu_ptr->resetAccumulation();
+        }
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        ctx.renderer.resetCPUAccumulation();
+        is_bvh_dirty = false;
+    }
+    
+    // Update gizmo state tracking at the END of the function
+    was_using_gizmo = is_using;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3621,7 +3726,7 @@ void SceneUI::drawCameraGizmos(UIContext& ctx) {
     if (!ctx.scene.camera || ctx.scene.cameras.size() <= 1) return;
     
     Camera& activeCam = *ctx.scene.camera;
-    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+    ImDrawList* draw_list = ImGui::GetBackgroundDrawList();  // Changed from ForegroundDrawList to render behind UI panels
     ImGuiIO& io = ImGui::GetIO();
     float screen_w = io.DisplaySize.x;
     float screen_h = io.DisplaySize.y;
@@ -3734,15 +3839,14 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
 void SceneUI::handleMouseSelection(UIContext& ctx) {
     // Only select if not interacting with UI or Gizmo
     if (ImGui::IsMouseClicked(0)) {
-        
-        // Debugging: Confirm click detection
-        SCENE_LOG_INFO("Mouse Left Click Detected");
 
         // Ignore click if over UI elements or Gizmo
         if (ImGui::IsAnyItemHovered() || ImGuizmo::IsOver()) {
-            SCENE_LOG_INFO("Selection Skipped: Mouse over UI or Gizmo");
             return;
         }
+
+        // Check if Ctrl is held for multi-selection
+        bool ctrl_held = ImGui::GetIO().KeyCtrl;
 
         int x, y;
         SDL_GetMouseState(&x, &y);
@@ -3760,8 +3864,10 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             // Check for Light Selection first (Bounding Sphere Intersection)
             std::shared_ptr<Light> closest_light = nullptr;
             float closest_t = 1e9f;
+            int closest_light_index = -1;
             
-            for (auto& light : ctx.scene.lights) {
+            for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
+                auto& light = ctx.scene.lights[i];
                 if (!light) continue;
                 
                 // Proxy Sphere at light position - smaller radius for precise selection
@@ -3778,11 +3884,13 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     if (temp < closest_t && temp > 0.001f) {
                         closest_t = temp;
                         closest_light = light;
+                        closest_light_index = (int)i;
                     }
                     temp = (-half_b + root) / a;
                     if (temp < closest_t && temp > 0.001f) {
                         closest_t = temp;
                         closest_light = light;
+                        closest_light_index = (int)i;
                     }
                 }
             }
@@ -3836,9 +3944,6 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             }
 
             if (hit && rec.triangle && (rec.t < closest_t)) {
-                // Log selection info
-                // SCENE_LOG_INFO("Selected: " + (rec.triangle->nodeName.empty() ? "Object" : rec.triangle->nodeName));
-
                 std::shared_ptr<Triangle> found_tri = nullptr;
                 int index = -1;
                 
@@ -3859,24 +3964,68 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
 
                 if (found_tri) {
-                    ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+                    if (ctrl_held) {
+                        // Multi-selection: Toggle object in selection list
+                        SelectableItem item;
+                        item.type = SelectableType::Object;
+                        item.object = found_tri;
+                        item.object_index = index;
+                        item.name = found_tri->nodeName;
+                        
+                        if (ctx.selection.isSelected(item)) {
+                            ctx.selection.removeFromSelection(item);
+                            SCENE_LOG_INFO("Multi-select: Removed '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
+                        } else {
+                            ctx.selection.addToSelection(item);
+                            SCENE_LOG_INFO("Multi-select: Added '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
+                        }
+                    } else {
+                        // Single selection: Replace selection
+                        ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+                    }
                 } else {
-                     // Fallback if not in cache (should typically not happen)
                      SCENE_LOG_WARN("Selection: Object found but not in cache.");
                 }
             } 
             else if (closest_camera && closest_camera_t < closest_t) {
                  // Camera is closer than light
-                 ctx.selection.selectCamera(closest_camera);
-                 SCENE_LOG_INFO("Selected Camera");
+                 if (ctrl_held) {
+                     SelectableItem item;
+                     item.type = SelectableType::Camera;
+                     item.camera = closest_camera;
+                     item.name = "Camera";
+                     
+                     if (ctx.selection.isSelected(item)) {
+                         ctx.selection.removeFromSelection(item);
+                     } else {
+                         ctx.selection.addToSelection(item);
+                     }
+                 } else {
+                     ctx.selection.selectCamera(closest_camera);
+                 }
             }
             else if (closest_light) {
-                 ctx.selection.selectLight(closest_light);
-                 SCENE_LOG_INFO("Selected Light");
+                 if (ctrl_held) {
+                     SelectableItem item;
+                     item.type = SelectableType::Light;
+                     item.light = closest_light;
+                     item.light_index = closest_light_index;
+                     item.name = "Light";
+                     
+                     if (ctx.selection.isSelected(item)) {
+                         ctx.selection.removeFromSelection(item);
+                     } else {
+                         ctx.selection.addToSelection(item);
+                     }
+                 } else {
+                     ctx.selection.selectLight(closest_light);
+                 }
             }
             else {
-                // Clicked on empty space
-                ctx.selection.clearSelection();
+                // Clicked on empty space - clear selection only if Ctrl is not held
+                if (!ctrl_held) {
+                    ctx.selection.clearSelection();
+                }
             }
         }
     }
@@ -4038,3 +4187,328 @@ void DrawRenderWindow(UIContext& ctx) {
 }
     
 
+// ============================================================================
+// Delete Operation (Shared by Menu and Key Shortcut)
+// ============================================================================
+// OPTIMIZED VERSION - O(n) instead of O(n²)
+void SceneUI::triggerDelete(UIContext& ctx) {
+    if (!ctx.selection.hasSelection()) return;
+
+    // Collect all items to delete (supports multi-selection)
+    std::vector<SelectableItem> items_to_delete = ctx.selection.multi_selection;
+    
+    // Build mesh cache once if needed
+    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+    
+    // OPTIMIZATION: Collect ALL triangles to delete into a single set for O(1) lookup
+    std::unordered_set<Triangle*> triangles_to_delete;
+    std::vector<std::string> deleted_names;
+    std::vector<std::pair<std::string, std::vector<std::shared_ptr<Triangle>>>> undo_data;
+    
+    // First pass: Collect all triangles to delete
+    for (const auto& item : items_to_delete) {
+        if (item.type == SelectableType::Object && item.object) {
+            std::string deleted_name = item.name;
+            
+            auto cache_it = mesh_cache.find(deleted_name);
+            if (cache_it != mesh_cache.end()) {
+                std::vector<std::shared_ptr<Triangle>> tris_for_undo;
+                for (auto& pair : cache_it->second) {
+                    triangles_to_delete.insert(pair.second.get());
+                    tris_for_undo.push_back(pair.second);
+                }
+                
+                if (!tris_for_undo.empty()) {
+                    deleted_names.push_back(deleted_name);
+                    undo_data.push_back({deleted_name, std::move(tris_for_undo)});
+                }
+            }
+        }
+    }
+    
+    // OPTIMIZATION: Single remove_if pass for ALL objects - O(n) instead of O(n²)
+    if (!triangles_to_delete.empty()) {
+        auto& objs = ctx.scene.world.objects;
+        objs.erase(
+            std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& h){
+                auto t = std::dynamic_pointer_cast<Triangle>(h);
+                return t && triangles_to_delete.count(t.get()) > 0;
+            }),
+            objs.end()
+        );
+    }
+    
+    // Track deletions in ProjectManager (batch update)
+    auto& proj_data = g_ProjectManager.getProjectData();
+    for (const auto& deleted_name : deleted_names) {
+        // Check Imported Models
+        bool found = false;
+        for (auto& model : proj_data.imported_models) {
+            std::string prefix = std::to_string(model.id) + "_";
+            if (deleted_name.find(prefix) == 0) {
+                model.deleted_objects.push_back(deleted_name);
+                found = true;
+                break;
+            }
+            for (const auto& obj_inst : model.objects) {
+                if (obj_inst.node_name == deleted_name) {
+                    model.deleted_objects.push_back(deleted_name);
+                    found = true;
+                    break;
+                }
+            }
+            if (found) break;
+        }
+        
+        // Check Procedural Objects
+        if (!found) {
+            auto it = std::remove_if(proj_data.procedural_objects.begin(), proj_data.procedural_objects.end(),
+                [&](const ProceduralObjectData& p) { return p.display_name == deleted_name; });
+            proj_data.procedural_objects.erase(it, proj_data.procedural_objects.end());
+        }
+    }
+    
+    // Record undo commands
+    for (auto& [name, tris] : undo_data) {
+        history.record(std::make_unique<DeleteObjectCommand>(name, tris));
+    }
+    
+    // Handle light deletions
+    int deleted_lights = 0;
+    for (const auto& item : items_to_delete) {
+        if (item.type == SelectableType::Light && item.light) {
+            auto& lights = ctx.scene.lights;
+            auto it = std::find(lights.begin(), lights.end(), item.light);
+            if (it != lights.end()) {
+                history.record(std::make_unique<DeleteLightCommand>(item.light));
+                lights.erase(it);
+                deleted_lights++;
+            }
+        }
+    }
+    
+    // Only rebuild once after all deletions are done
+    int deleted_objects = static_cast<int>(deleted_names.size());
+    if (deleted_objects > 0 || deleted_lights > 0) {
+        ctx.selection.clearSelection();
+        g_ProjectManager.markModified();
+        
+        // Force UI cache update (rebuild sets mesh_cache_valid = true internally)
+        rebuildMeshCache(ctx.scene.world.objects);
+        // mesh_cache_valid is now TRUE after rebuild - don't set to false!
+        
+        // Single rebuild for all deleted objects
+        if (deleted_objects > 0) {
+            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.optix_gpu_ptr) {
+                 ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                 ctx.optix_gpu_ptr->resetAccumulation();
+            }
+        }
+        
+        // Update lights if any were deleted
+        if (deleted_lights > 0 && ctx.optix_gpu_ptr) {
+            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+            ctx.optix_gpu_ptr->resetAccumulation();
+        }
+        
+        ctx.start_render = true;
+        
+        // [VERBOSE] SCENE_LOG_INFO("Deleted " + std::to_string(deleted_objects) + " objects, " + 
+        //                std::to_string(deleted_lights) + " lights");
+    }
+}
+
+// ============================================================================
+// MARQUEE (BOX) SELECTION
+// ============================================================================
+void SceneUI::drawMarqueeRect() {
+    if (!is_marquee_selecting) return;
+    
+    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+    
+    // Normalize rectangle (handle dragging in any direction)
+    float x1 = fminf(marquee_start.x, marquee_end.x);
+    float y1 = fminf(marquee_start.y, marquee_end.y);
+    float x2 = fmaxf(marquee_start.x, marquee_end.x);
+    float y2 = fmaxf(marquee_start.y, marquee_end.y);
+    
+    // Draw filled rect with transparency
+    draw_list->AddRectFilled(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(100, 150, 255, 40));
+    // Draw border
+    draw_list->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(100, 150, 255, 200), 0.0f, 0, 2.0f);
+}
+
+void SceneUI::handleMarqueeSelection(UIContext& ctx) {
+    ImGuiIO& io = ImGui::GetIO();
+    
+    // Only handle when not interacting with UI windows and not using gizmo
+    // WantCaptureMouse is true when mouse is over an interactive UI element (button, slider, etc.)
+    // This is less restrictive than IsAnyItemHovered which blocks even when hovering inactive areas
+    if (io.WantCaptureMouse || ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
+        return;
+    }
+    
+    // Start marquee on right mouse button down (or B key + left click for Blender style)
+    bool start_marquee = ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !io.KeyCtrl && !io.KeyShift;
+    
+    if (start_marquee && !is_marquee_selecting) {
+        is_marquee_selecting = true;
+        marquee_start = io.MousePos;
+        marquee_end = io.MousePos;
+    }
+    
+    // Update marquee while dragging
+    if (is_marquee_selecting && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        marquee_end = io.MousePos;
+    }
+    
+    // Complete marquee on mouse release
+    if (is_marquee_selecting && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+        is_marquee_selecting = false;
+        
+        // Normalize rectangle
+        float x1 = fminf(marquee_start.x, marquee_end.x);
+        float y1 = fminf(marquee_start.y, marquee_end.y);
+        float x2 = fmaxf(marquee_start.x, marquee_end.x);
+        float y2 = fmaxf(marquee_start.y, marquee_end.y);
+        
+        // Minimum size to prevent accidental selections
+        if ((x2 - x1) < 10 || (y2 - y1) < 10) {
+            return;
+        }
+        
+        // Clear current selection if Ctrl is not held
+        if (!io.KeyCtrl) {
+            ctx.selection.clearSelection();
+        }
+        
+        if (!ctx.scene.camera) return;
+        
+        Camera& cam = *ctx.scene.camera;
+        float screen_w = io.DisplaySize.x;
+        float screen_h = io.DisplaySize.y;
+        
+        // Camera basis vectors for projection
+        Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+        Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+        Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+        float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
+        float tan_half_fov = tanf(fov_rad * 0.5f);
+        
+        // Lambda to project 3D point to screen
+        auto ProjectToScreen = [&](const Vec3& p) -> ImVec2 {
+            Vec3 to_point = p - cam.lookfrom;
+            float depth = to_point.dot(cam_forward);
+            if (depth <= 0.01f) return ImVec2(-10000, -10000);
+            
+            float local_x = to_point.dot(cam_right);
+            float local_y = to_point.dot(cam_up);
+            
+            float half_height = depth * tan_half_fov;
+            float half_width = half_height * aspect_ratio;
+            
+            float ndc_x = local_x / half_width;
+            float ndc_y = local_y / half_height;
+            
+            return ImVec2(
+                (ndc_x * 0.5f + 0.5f) * screen_w,
+                (0.5f - ndc_y * 0.5f) * screen_h
+            );
+        };
+        
+        // Check which objects are inside the marquee
+        if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+        
+        int skipped_procedural = 0;
+        
+        for (auto& [name, triangles] : mesh_cache) {
+            if (triangles.empty()) continue;
+            
+            // IMPORTANT: Check if all triangles share the same TransformHandle
+            // Procedural objects may have separate transforms per triangle
+            auto firstHandle = triangles[0].second->getTransformHandle();
+            bool all_same_transform = true;
+            
+            for (size_t i = 1; i < triangles.size() && all_same_transform; ++i) {
+                auto handle = triangles[i].second->getTransformHandle();
+                if (handle.get() != firstHandle.get()) {
+                    all_same_transform = false;
+                }
+            }
+            
+            if (!all_same_transform) {
+                // This object has mixed transforms - skip it
+                // (would break if selected because transform would only affect some triangles)
+                skipped_procedural++;
+                continue;
+            }
+            
+            // Calculate bounding box center for quick check
+            Vec3 bb_min(1e10f, 1e10f, 1e10f);
+            Vec3 bb_max(-1e10f, -1e10f, -1e10f);
+            
+            for (auto& pair : triangles) {
+                auto& tri = pair.second;
+                Vec3 v0 = tri->getV0();
+                Vec3 v1 = tri->getV1();
+                Vec3 v2 = tri->getV2();
+                
+                bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+            }
+            
+            Vec3 center = (bb_min + bb_max) * 0.5f;
+            ImVec2 screenPos = ProjectToScreen(center);
+            
+            // Check if center is inside marquee
+            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
+                SelectableItem item;
+                item.type = SelectableType::Object;
+                item.object = triangles[0].second;
+                item.object_index = triangles[0].first;
+                item.name = name;
+                
+                if (!ctx.selection.isSelected(item)) {
+                    ctx.selection.addToSelection(item);
+                }
+            }
+        }
+        
+        if (skipped_procedural > 0) {
+            SCENE_LOG_WARN("Skipped " + std::to_string(skipped_procedural) + " objects with mixed transforms (use Ctrl+Click)");
+        }
+        
+        // Also check lights
+        for (size_t i = 0; i < ctx.scene.lights.size(); ++i) {
+            auto& light = ctx.scene.lights[i];
+            if (!light) continue;
+            
+            ImVec2 screenPos = ProjectToScreen(light->position);
+            
+            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
+                SelectableItem item;
+                item.type = SelectableType::Light;
+                item.light = light;
+                item.light_index = (int)i;
+                item.name = "Light_" + std::to_string(i);
+                
+                if (!ctx.selection.isSelected(item)) {
+                    ctx.selection.addToSelection(item);
+                }
+            }
+        }
+        
+        if (ctx.selection.multi_selection.size() > 0) {
+            // [VERBOSE] SCENE_LOG_INFO("Marquee selected " + std::to_string(ctx.selection.multi_selection.size()) + " items");
+        }
+    }
+    
+    // Draw the marquee rectangle while selecting
+    drawMarqueeRect();
+}
