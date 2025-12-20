@@ -446,7 +446,6 @@ int main(int argc, char* argv[]) {
     ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
 	
 
-
     if (initializeOptixIfAvailable(optix_gpu)) {
         SCENE_LOG_INFO("OptiX is ready!");
         render_settings.use_optix = true;
@@ -529,21 +528,12 @@ int main(int argc, char* argv[]) {
         ui_ctx.ray_texture = raytrace_texture;
         
         // ═══════════════════════════════════════════════════════════════════
-        // CLOUD NOISE GENERATION POPUP
-        // ═══════════════════════════════════════════════════════════════════
-        // ═══════════════════════════════════════════════════════════════════
-        // CLOUD NOISE GENERATION POPUP (REMOVED)
-        // ═══════════════════════════════════════════════════════════════════
-        /*
-        Code for manual cloud texture generation removed as per request.
-        The system now uses high-quality procedural generation by default.
-        */
-        
-        // ═══════════════════════════════════════════════════════════════════
         // SCENE LOADING POPUP
         // ═══════════════════════════════════════════════════════════════════
         if (ui.scene_loading.load()) {
-            ImGui::OpenPopup("Loading Scene...");
+            if (!ImGui::IsPopupOpen("Loading Scene...")) {
+                 ImGui::OpenPopup("Loading Scene...");
+            }
             
             ImVec2 center = ImGui::GetMainViewport()->GetCenter();
             ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -553,7 +543,7 @@ int main(int argc, char* argv[]) {
                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
                 
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Loading 3D Model...");
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Loading / Saving...");
                 ImGui::Spacing();
                 
                 // Real progress from loading thread
@@ -580,11 +570,22 @@ int main(int argc, char* argv[]) {
             
             // Refresh UI cache and start render
             ui.invalidateCache();
+            
+            // REBUILD ON MAIN THREAD (Crash Update)
+            ui_ctx.renderer.rebuildBVH(ui_ctx.scene, ui_ctx.render_settings.UI_use_embree);
+            ui_ctx.renderer.resetCPUAccumulation();
+            if (ui_ctx.optix_gpu_ptr) {
+                ui_ctx.renderer.rebuildOptiXGeometry(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
+                ui_ctx.optix_gpu_ptr->setLightParams(ui_ctx.scene.lights);
+                if (ui_ctx.scene.camera) ui_ctx.optix_gpu_ptr->setCameraParams(*ui_ctx.scene.camera);
+                ui_ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            
             ui_ctx.start_render = true;
         }
         
         ui.draw(ui_ctx);
-        ui.handleMouseSelection(ui_ctx); // Process mouse selection events
+        // NOTE: handleMouseSelection is now called inside ui.draw() - removed duplicate call here
         
         // Scene Hierarchy panel now called inside ui.draw()
         
@@ -641,6 +642,14 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_KEYDOWN) {
                 if (e.key.keysym.sym == SDLK_s && (e.key.keysym.mod & KMOD_CTRL)) {
                      ui_ctx.render_settings.save_image_requested = true;
+                }
+                
+                // DELETE OBJECT SHORTCUT
+                if (e.key.keysym.sym == SDLK_DELETE) {
+                    // Only invoke if not typing in an Input field (ImGui check)
+                    if (!ImGui::GetIO().WantCaptureKeyboard) {
+                        ui.triggerDelete(ui_ctx);
+                    }
                 }
             }
 

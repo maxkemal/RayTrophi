@@ -20,8 +20,13 @@ file(GLOB SOURCES_CPP "source/src/*.cpp")
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
 file(GLOB HEADERS "source/include/*.h" "source/external/imgui/*.h")
 
+# miniz compression library (Public Domain)
+set(MINIZ_SOURCES
+    "source/external/miniz.c"
+)
+
 # Gather all sources
-set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${HEADERS})
+set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${HEADERS})
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
@@ -66,6 +71,7 @@ add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUT})
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/external/imgui"
     "${OPTIX_ROOT}/include"
     "${SDL2_ROOT}/include"

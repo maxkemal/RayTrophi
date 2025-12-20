@@ -32,15 +32,21 @@ public:
     
     // Save current project to .rtp file
     // Returns true on success
-    bool saveProject(const std::string& filepath);
+    // Save current project to .rtp file
+    // Returns true on success
+    bool saveProject(const std::string& filepath, std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // Save without dialog if path already known
-    bool saveProject();
+    bool saveProject(std::function<void(int, const std::string&)> progress_callback = nullptr);
+    
+    // Synchronize ProjectData with live SceneData (Captures moves, deletes, etc.)
+    void syncProjectToScene(SceneData& scene);
     
     // Load project from .rtp file
     // Clears current scene and loads everything from package
     bool openProject(const std::string& filepath, SceneData& scene, 
-                     RenderSettings& settings, Renderer& renderer, OptixWrapper* optix_gpu);
+                     RenderSettings& settings, Renderer& renderer, OptixWrapper* optix_gpu,
+                     std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // ========================================================================
     // Asset Import (adds to current project, doesn't clear scene)
@@ -50,7 +56,8 @@ public:
     // Copies file to package, loads geometry, adds to scene
     bool importModel(const std::string& filepath, SceneData& scene,
                      Renderer& renderer, OptixWrapper* optix_gpu,
-                     std::function<void(int, const std::string&)> progress_callback = nullptr);
+                     std::function<void(int, const std::string&)> progress_callback = nullptr,
+                     bool rebuild = true);
     
     // Import a texture file into the project
     bool importTexture(const std::string& filepath);

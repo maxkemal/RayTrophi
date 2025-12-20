@@ -30,15 +30,15 @@ public:
         static SRGBToLinearLUT lut;
         return lut;
     }
-    
+
     // sRGB byte (0-255) → Linear byte (0-255)
     uint8_t operator[](uint8_t srgb) const {
         return table[srgb];
     }
-    
+
 private:
     uint8_t table[256];
-    
+
     SRGBToLinearLUT() {
         for (int i = 0; i < 256; ++i) {
             float f = i / 255.0f;
@@ -88,10 +88,10 @@ struct CompactVec4 {
 // Bu yüzden doğrudan memcpy yerine Uint32 → RGBA dönüşümü yapıyoruz
 // Hala SDL_GetRGBA kadar yavaş değil çünkü format lookup'ı atlanıyor
 inline void fast_copy_rgba32_pixels(
-    const uint8_t* src_data, 
+    const uint8_t* src_data,
     int src_pitch,
     std::vector<CompactVec4>& dest_pixels,
-    int width, 
+    int width,
     int height,
     bool& out_has_alpha,
     bool& out_is_grayscale
@@ -99,39 +99,39 @@ inline void fast_copy_rgba32_pixels(
     dest_pixels.resize(width * height);
     bool has_alpha_local = false;
     bool is_gray_local = true;
-    
+
     // SDL_PIXELFORMAT_RGBA32 tanımı:
     // "RGBA" order when read as bytes: R at lowest address
     // Bu demek oluyor ki: memory[0]=R, memory[1]=G, memory[2]=B, memory[3]=A
     // Yani CompactVec4 ile AYNI sırada! Ama endianness kontrol etmeliyiz.
-    
+
     // SDL'nin RGBA32 tanımını kullan - bu her platformda doğru
     // RGBA32 = SDL_DEFINE_PIXELFORMAT(SDL_PIXELTYPE_PACKED32, SDL_PACKEDORDER_RGBA, ...)
     // Little endian'da byte sırası: R G B A (düşük adresten yükseğe)
-    
+
     for (int y = 0; y < height; ++y) {
         const uint8_t* row = src_data + y * src_pitch;
         CompactVec4* dest_row = dest_pixels.data() + y * width;
-        
+
         for (int x = 0; x < width; ++x) {
             // SDL_PIXELFORMAT_RGBA32 için byte erişimi:
             // Her pixel 4 byte: [R][G][B][A] sırasıyla (SDL tanımına göre)
             const uint8_t* pixel = row + x * 4;
-            
+
             // RGBA32 byte order SDL tarafından garanti ediliyor:
             // index 0 = R, index 1 = G, index 2 = B, index 3 = A
             dest_row[x].r = pixel[0];
             dest_row[x].g = pixel[1];
             dest_row[x].b = pixel[2];
             dest_row[x].a = pixel[3];
-            
+
             if (pixel[3] != 255) has_alpha_local = true;
             if (is_gray_local && (pixel[0] != pixel[1] || pixel[0] != pixel[2])) {
                 is_gray_local = false;
             }
         }
     }
-    
+
     out_has_alpha = has_alpha_local;
     out_is_grayscale = is_gray_local;
 }
@@ -262,12 +262,12 @@ public:
 
         // RAW embedded (RGBA)
         if (tex->mHeight != 0) {
-           // SCENE_LOG_INFO("[DECODE] Starting RAW texture decode for: " + texture_name);
+            // SCENE_LOG_INFO("[DECODE] Starting RAW texture decode for: " + texture_name);
             decode_raw(tex);
 
             if (!name.empty()) {
                 TextureCache::instance().put(name, { width, height, has_alpha, is_gray_scale });
-              //  SCENE_LOG_INFO("[CACHE STORE] Cached metadata for: " + name);
+                //  SCENE_LOG_INFO("[CACHE STORE] Cached metadata for: " + name);
             }
             return;
         }
@@ -278,7 +278,7 @@ public:
 
         if (!name.empty()) {
             TextureCache::instance().put(name, { width, height, has_alpha, is_gray_scale });
-           // SCENE_LOG_INFO("[CACHE STORE] Cached metadata for: " + name);
+            // SCENE_LOG_INFO("[CACHE STORE] Cached metadata for: " + name);
         }
     }
 
@@ -290,44 +290,45 @@ public:
         is_gpu_uploaded = false;
         is_hdr = false;
         this->name = filename; // Store filename
-        
-        
+
+
         // Detect HDR/EXR formats
         std::string ext = filename.substr(filename.find_last_of(".") + 1);
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        
+
         // Handle EXR files with TinyEXR
         if (ext == "exr") {
             float* rgba = nullptr;
             int w, h;
             const char* err = nullptr;
-            
+
             int ret = LoadEXR(&rgba, &w, &h, filename.c_str(), &err);
             if (ret == TINYEXR_SUCCESS && rgba) {
                 width = w;
                 height = h;
                 is_hdr = true;
                 float_pixels.resize(width * height);
-                
+
                 // Copy RGBA float data to float4 vector
-                for(int i = 0; i < width * height; ++i) {
-                    float_pixels[i] = make_float4(rgba[i*4], rgba[i*4+1], rgba[i*4+2], rgba[i*4+3]);
+                for (int i = 0; i < width * height; ++i) {
+                    float_pixels[i] = make_float4(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]);
                 }
-                
+
                 free(rgba);
                 m_is_loaded = true;
-                
-                SCENE_LOG_INFO("[EXR LOAD] Loaded EXR texture: " + filename + " | " + 
+
+                SCENE_LOG_INFO("[EXR LOAD] Loaded EXR texture: " + filename + " | " +
                     std::to_string(width) + "x" + std::to_string(height));
                 return;
-            } else {
+            }
+            else {
                 std::string errMsg = err ? err : "Unknown error";
                 SCENE_LOG_ERROR("Failed to load EXR texture: " + filename + " | Error: " + errMsg);
                 if (err) FreeEXRErrorMessage(err);
                 // Fall through to try other loaders
             }
         }
-        
+
         // Handle HDR files with stb_image
         if (ext == "hdr") {
             int w, h, c;
@@ -337,19 +338,20 @@ public:
                 height = h;
                 is_hdr = true;
                 float_pixels.resize(width * height);
-                
+
                 // Copy to float4 vector
-                for(int i = 0; i < width * height; ++i) {
-                    float_pixels[i] = make_float4(data[i*4], data[i*4+1], data[i*4+2], data[i*4+3]);
+                for (int i = 0; i < width * height; ++i) {
+                    float_pixels[i] = make_float4(data[i * 4], data[i * 4 + 1], data[i * 4 + 2], data[i * 4 + 3]);
                 }
-                
+
                 stbi_image_free(data);
                 m_is_loaded = true;
-                
+
                 SCENE_LOG_INFO("[HDR LOAD] Loaded HDR texture: " + filename + " | " +
                     std::to_string(width) + "x" + std::to_string(height));
                 return;
-            } else {
+            }
+            else {
                 SCENE_LOG_ERROR("Failed to load HDR texture: " + filename + " | STB Error: " + stbi_failure_reason());
                 // Fall through to try SDL_image
             }
@@ -381,15 +383,15 @@ public:
                 SDL_FreeSurface(surface);
 
                 if (!converted_surface) {
-                     SCENE_LOG_ERROR("Failed to convert surface format (cache hit) for: " + filename);
-                     return;
+                    SCENE_LOG_ERROR("Failed to convert surface format (cache hit) for: " + filename);
+                    return;
                 }
                 surface = converted_surface;
-                
+
                 if (SDL_LockSurface(surface) != 0) {
-                     SCENE_LOG_ERROR("Failed to lock converted surface (cache hit) for: " + filename);
-                     SDL_FreeSurface(surface);
-                     return;
+                    SCENE_LOG_ERROR("Failed to lock converted surface (cache hit) for: " + filename);
+                    SDL_FreeSurface(surface);
+                    return;
                 }
 
                 SDL_PixelFormat* fmt = surface->format;
@@ -403,11 +405,11 @@ public:
 
                 int pitch = surface->pitch;
                 int bpp = fmt->BytesPerPixel;
-                if(bpp != 4) {
-                     SCENE_LOG_ERROR("Converted surface (cache hit) BPP != 4");
-                     SDL_UnlockSurface(surface);
-                     SDL_FreeSurface(surface);
-                     return;
+                if (bpp != 4) {
+                    SCENE_LOG_ERROR("Converted surface (cache hit) BPP != 4");
+                    SDL_UnlockSurface(surface);
+                    SDL_FreeSurface(surface);
+                    return;
                 }
 
                 // Hızlı pixel kopyalama kullan (SDL_GetRGBA'dan ~5x hızlı)
@@ -459,7 +461,7 @@ public:
         if (SDL_LockSurface(surface) != 0) {
             SCENE_LOG_ERROR("Failed to lock surface for: " + filename + " | Error: " + std::string(SDL_GetError()));
             SDL_FreeSurface(surface);
-             return;
+            return;
         }
 
         // Convert to RGBA32 to ensure consistent memory layout and avoid format issues
@@ -475,32 +477,32 @@ public:
         surface = converted_surface; // Use converted one
         width = surface->w;
         height = surface->h;
-        
+
         if (SDL_LockSurface(surface) != 0) {
-             SCENE_LOG_ERROR("Failed to lock converted surface for: " + filename);
-             SDL_FreeSurface(surface);
-             return;
+            SCENE_LOG_ERROR("Failed to lock converted surface for: " + filename);
+            SDL_FreeSurface(surface);
+            return;
         }
 
         SDL_PixelFormat* fmt = surface->format;
         uint8_t* data = static_cast<uint8_t*>(surface->pixels);
         if (!data) {
-             SCENE_LOG_ERROR("Converted surface pixels are null for: " + filename);
-             SDL_UnlockSurface(surface);
-             SDL_FreeSurface(surface);
-             return;
+            SCENE_LOG_ERROR("Converted surface pixels are null for: " + filename);
+            SDL_UnlockSurface(surface);
+            SDL_FreeSurface(surface);
+            return;
         }
-        
+
         int pitch = surface->pitch;
         int bpp = fmt->BytesPerPixel;
         has_alpha = SDL_ISPIXELFORMAT_ALPHA(fmt->format);
 
         // Paranoid check
         if (bpp != 4) {
-             SCENE_LOG_ERROR("Converted surface BPP is not 4! It is: " + std::to_string(bpp));
-             SDL_UnlockSurface(surface);
-             SDL_FreeSurface(surface);
-             return;
+            SCENE_LOG_ERROR("Converted surface BPP is not 4! It is: " + std::to_string(bpp));
+            SDL_UnlockSurface(surface);
+            SDL_FreeSurface(surface);
+            return;
         }
 
         // Hızlı pixel kopyalama kullan (SDL_GetRGBA'dan ~5x hızlı)
@@ -545,10 +547,10 @@ public:
         int y = static_cast<int>((1.0 - v) * (height - 1));
         x = std::clamp(x, 0, width - 1);
         y = std::clamp(y, 0, height - 1);
-        
+
         if (is_hdr && !float_pixels.empty()) {
-             float4 p = float_pixels[y * width + x];
-             return Vec3(p.x, p.y, p.z);
+            float4 p = float_pixels[y * width + x];
+            return Vec3(p.x, p.y, p.z);
         }
 
         if (pixels.empty()) return Vec3(0);
@@ -590,25 +592,26 @@ public:
         cudaError_t err;
 
         if (is_hdr) {
-             // Float4 Texture Upload
-             cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
-             err = cudaMallocArray(&cuda_array, &desc, width, height);
-             if (err != cudaSuccess) {
-                 SCENE_LOG_ERROR("cudaMallocArray (float) failed: " + std::string(cudaGetErrorString(err)));
-                 return false;
-             }
-             err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
-                 width * sizeof(float4),
-                 width * sizeof(float4), height,
-                 cudaMemcpyHostToDevice);
-             if (err != cudaSuccess) {
-                 SCENE_LOG_ERROR("cudaMemcpy2DToArray (float) failed: " + std::string(cudaGetErrorString(err)));
-                 return false;
-             }
-        } else {
+            // Float4 Texture Upload
+            cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
+            err = cudaMallocArray(&cuda_array, &desc, width, height);
+            if (err != cudaSuccess) {
+                SCENE_LOG_ERROR("cudaMallocArray (float) failed: " + std::string(cudaGetErrorString(err)));
+                return false;
+            }
+            err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
+                width * sizeof(float4),
+                width * sizeof(float4), height,
+                cudaMemcpyHostToDevice);
+            if (err != cudaSuccess) {
+                SCENE_LOG_ERROR("cudaMemcpy2DToArray (float) failed: " + std::string(cudaGetErrorString(err)));
+                return false;
+            }
+        }
+        else {
             // Pixel verilerini uchar4'e dönüştür
             std::vector<uchar4> cuda_data(pixels.size());
-            
+
             if (needs_srgb_conversion) {
                 // sRGB → Linear dönüşümü LUT ile HIZLI yap
                 const auto& lut = SRGBToLinearLUT::instance();
@@ -621,7 +624,8 @@ public:
                         p.a  // Alpha kanalı linear kalır
                     );
                 }
-            } else {
+            }
+            else {
                 // Linear data texture'ları - dönüşüm yok
                 for (size_t i = 0; i < pixels.size(); ++i) {
                     auto& p = pixels[i];
@@ -669,21 +673,21 @@ public:
         }
 
         is_gpu_uploaded = true;
-        
+
         // Texture türünü string'e çevir
         const char* type_str = "Unknown";
-        switch(type) {
-            case TextureType::Albedo: type_str = "Albedo"; break;
-            case TextureType::Normal: type_str = "Normal"; break;
-            case TextureType::Roughness: type_str = "Roughness"; break;
-            case TextureType::Metallic: type_str = "Metallic"; break;
-            case TextureType::Emission: type_str = "Emission"; break;
-            case TextureType::AO: type_str = "AO"; break;
-            case TextureType::Transmission: type_str = "Transmission"; break;
-            case TextureType::Opacity: type_str = "Opacity"; break;
-            default: break;
+        switch (type) {
+        case TextureType::Albedo: type_str = "Albedo"; break;
+        case TextureType::Normal: type_str = "Normal"; break;
+        case TextureType::Roughness: type_str = "Roughness"; break;
+        case TextureType::Metallic: type_str = "Metallic"; break;
+        case TextureType::Emission: type_str = "Emission"; break;
+        case TextureType::AO: type_str = "AO"; break;
+        case TextureType::Transmission: type_str = "Transmission"; break;
+        case TextureType::Opacity: type_str = "Opacity"; break;
+        default: break;
         }
-        
+
         SCENE_LOG_INFO("Texture uploaded to GPU | " +
             std::to_string(width) + "x" + std::to_string(height) +
             " | Type: " + std::string(type_str) +
@@ -716,7 +720,7 @@ public:
         }
 
         if (surface->w != width || surface->h != height) {
-            SCENE_LOG_ERROR("Opacity map dimensions do not match the main texture.") ;
+            SCENE_LOG_ERROR("Opacity map dimensions do not match the main texture.");
             SDL_FreeSurface(surface);
             return;
         }
@@ -926,11 +930,11 @@ private:
         int bpp = fmt->BytesPerPixel;
         has_alpha = SDL_ISPIXELFORMAT_ALPHA(fmt->format);
 
-        if(bpp != 4) {
-             SCENE_LOG_ERROR("[DECODE ERROR] Converted BPP != 4");
-             SDL_UnlockSurface(surface);
-             SDL_FreeSurface(surface);
-             return;
+        if (bpp != 4) {
+            SCENE_LOG_ERROR("[DECODE ERROR] Converted BPP != 4");
+            SDL_UnlockSurface(surface);
+            SDL_FreeSurface(surface);
+            return;
         }
 
         // Hızlı pixel kopyalama kullan (SDL_GetRGBA'dan ~5x hızlı)
@@ -954,7 +958,7 @@ private:
             std::to_string(duration.count()) + "ms");
     }
 
-   
+
     std::vector<uint8_t> alphas;  // float yerine 1 byte kullanıyoruz
 
     TextureType type = TextureType::Unknown;

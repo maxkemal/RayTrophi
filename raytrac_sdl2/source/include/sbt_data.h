@@ -22,7 +22,7 @@ struct __align__(16) HitGroupData
     int pad0; // fill-up to keep next part aligned
 
     float3 emission;
-    int pad1; // float3 -> next 16-byte boundary
+    int pad1; // float3 -> next 16-byte boundaryc
 
     // Geometry buffers (only device pointers!)
     const float3* vertices;

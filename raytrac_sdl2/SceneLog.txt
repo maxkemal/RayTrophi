@@ -28,18 +28,16 @@
 [INFO] Node map built with 4 nodes.
 [INFO] Processing cameras...
 [INFO] ---- Camera Loaded: Camera
-[INFO] Pos: (-19,591166, 10,318293, 20,228945) | LookAt: (-18,934324, 10,001431, 19,544724) | Up: (0,219434, 0,948472, -0,228581) | Aspect:1,777778 | FOV:22,895195
+[INFO] Pos: (20,010599, 14,644615, 19,330935) | LookAt: (19,359041, 14,199344, 18,716764) | Up: (-0,324013, 0,895396, -0,305421) | Aspect:1,777778 | FOV:22,895195
 [INFO] Cameras processed: 1 camera(s) found.
 [INFO] Processing lights...
 [INFO] Total lights in scene: 1
-[INFO] Processing light: Light (Point)
 [INFO] Light created: Light | Type: Point | Pos: (4,076245, 5,903862, -1,005454) | Dir: (0,000000, 0,000000, 0,000000) | Color: (1,000000, 1,000000, 1,000000) | Intensity: 54,351414
 [INFO] Lights processed: 1 light(s) found.
 [INFO] Building Bone Data...
 [INFO] [buildBoneData] Starting bone map generation...
 [INFO] [buildBoneData] Completed. Total unique bones: 0
 [INFO] Processing nodes to extract triangles...
-[INFO] Process Material: 
 [INFO] Triangle extraction completed: 2 triangles processed.
 [INFO] Processing animations...
 [INFO] No animations found in file: assets/default.glb
@@ -52,21 +50,13 @@
 [INFO] Loaded 1 camera(s). Active: Camera #0
 [INFO] Loaded lights: 1
 [INFO] Building BVH structure...
-[INFO] [EmbreeBVH::build] Build started
-[INFO] [EmbreeBVH::build] Triangle count = 2
-[INFO] [EmbreeBVH::build] Data preparation took 0 ms
-[INFO] [EmbreeBVH::build] Geometry committed
-[INFO] [EmbreeBVH::build] Geometry attached with ID = 0
-[INFO] [EmbreeBVH::build] BVH construction took 2 ms
-[INFO] [EmbreeBVH::build] Total build time: 2 ms
-[INFO] [EmbreeBVH::build] BVH build completed
 [INFO] [Embree] BVH structure built successfully.
 [INFO] OptiX GPU detected. Creating OptiX geometry data...
+[INFO] [MAT-SUMMARY] Total unique materials: 1 | Total triangles: 2
 [INFO] Converting 2 triangles to OptiX format.
 [INFO] Material indices verified (2 triangles checked)
 [INFO] Material indices validated.
 [INFO]  OptiX buildFromData is starting...
-[INFO] [GPU CLEANUP] Destroyed 0 texture objects and 0 CUDA arrays.
 [INFO] OptiX buildFromData completed successfully! 1 SBT record(s) created for material.
 [INFO] OptiX BVH and acceleration structures built.
 [INFO] Setting up OptiX camera parameters...
@@ -77,52 +67,7 @@
 [INFO] Scene creation completed successfully.
 [INFO] Scene info - Triangles: 2, Lights: 1, Animations: 0
 [INFO] Scene initialization flag set to true.
-[INFO] [EmbreeBVH::build] Build started
-[INFO] [EmbreeBVH::build] Triangle count = 2
-[INFO] [EmbreeBVH::build] Data preparation took 0 ms
-[INFO] [EmbreeBVH::build] Geometry committed
-[INFO] [EmbreeBVH::build] Geometry attached with ID = 0
-[INFO] [EmbreeBVH::build] BVH construction took 0 ms
-[INFO] [EmbreeBVH::build] Total build time: 0 ms
-[INFO] [EmbreeBVH::build] BVH build completed
+[INFO] [MAT-SUMMARY] Total unique materials: 1 | Total triangles: 2
 [INFO] Material indices verified (2 triangles checked)
 [INFO]  OptiX buildFromData is starting...
-[INFO] [GPU CLEANUP] Destroyed 0 texture objects and 0 CUDA arrays.
 [INFO] OptiX buildFromData completed successfully! 1 SBT record(s) created for material.
-[INFO] Mouse Left Click Detected
-[INFO] Mouse Left Click Detected
-[INFO] Scene is empty, BVH cleared.
-[INFO] [OptiX] Scene is empty, clearing GPU scene
-[INFO] [OptiX] Scene cleared (Handle=0)
-[INFO] Deleted: Plane (2 triangles)
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Deleted Light
-[INFO] History: Undo - Delete Light
-[INFO] Undo: Restored Light
-[INFO] Mouse Left Click Detected
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Duplicated Light (Shift+Drag)
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo
-[INFO] Mouse Left Click Detected
-[INFO] Selection Skipped: Mouse over UI or Gizmo

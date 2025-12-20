@@ -7,6 +7,8 @@
 #include <fstream>
 #include <iostream>
 #include "json.hpp"
+#include <filesystem>
+
 using json = nlohmann::json;
 
 // Helper to convert Vec3 to JSON array
@@ -19,17 +21,6 @@ Vec3 jsonToVec3(const json& j) {
     if (j.is_array() && j.size() >= 3)
         return Vec3(j[0], j[1], j[2]);
     return Vec3(0, 0, 0);
-}
-
-// Helper for float3 to JSON
-json float3ToJson(const float3& v) {
-    return { v.x, v.y, v.z };
-}
-
-float3 jsonToFloat3(const json& j) {
-    if (j.is_array() && j.size() >= 3)
-        return make_float3(j[0], j[1], j[2]);
-    return make_float3(0, 0, 0);
 }
 
 // Helper for Matrix4x4 serialization
@@ -53,117 +44,141 @@ Matrix4x4 jsonToMat4(const json& j) {
 }
 
 void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& settings, const std::string& filepath) {
-    json root;
+    // 1. Prepare Safe Save paths
+    std::string temp_path = filepath + ".tmp";
+    
+    // 2. Open Stream (Streaming Write)
+    std::ofstream out(temp_path);
+    if (!out.is_open()) {
+        SCENE_LOG_ERROR("Failed to create temporary save file: " + temp_path);
+        return;
+    }
 
-    // 1. Scene Info (Model Path)
+    // Direct streaming to file - Eliminates massive single-core CPU spike for JSON construction
+    out << "{\n";
+
+    // 1. Scene Info
     extern std::string active_model_path;
-    root["model_path"] = active_model_path;
+    out << "  \"model_path\": " << json(active_model_path) << ",\n";
 
     // 2. Camera
     if (scene.camera) {
-        json camJson;
-        camJson["lookfrom"] = vec3ToJson(scene.camera->lookfrom);
-        camJson["lookat"] = vec3ToJson(scene.camera->lookat);
-        camJson["vup"] = vec3ToJson(scene.camera->vup);
-        camJson["vfov"] = scene.camera->vfov;
-        camJson["aperture"] = scene.camera->aperture;
-        camJson["focus_dist"] = scene.camera->focus_dist;
-        root["camera"] = camJson;
+        out << "  \"camera\": {\n";
+        out << "    \"lookfrom\": " << vec3ToJson(scene.camera->lookfrom) << ",\n";
+        out << "    \"lookat\": " << vec3ToJson(scene.camera->lookat) << ",\n";
+        out << "    \"vup\": " << vec3ToJson(scene.camera->vup) << ",\n";
+        out << "    \"vfov\": " << scene.camera->vfov << ",\n";
+        out << "    \"aperture\": " << scene.camera->aperture << ",\n";
+        out << "    \"focus_dist\": " << scene.camera->focus_dist << "\n";
+        out << "  },\n";
     }
 
     // 3. Lights
-    json lightsJson = json::array();
-    for (const auto& light : scene.lights) {
-        json l;
-        l["type"] = (int)light->type();
-        l["position"] = vec3ToJson(light->position);
-        l["color"] = vec3ToJson(light->color);
-        l["intensity"] = light->intensity;
+    out << "  \"lights\": [\n";
+    for (size_t i = 0; i < scene.lights.size(); ++i) {
+        const auto& light = scene.lights[i];
+        out << "    {\n";
+        out << "      \"type\": " << (int)light->type() << ",\n";
+        out << "      \"position\": " << vec3ToJson(light->position) << ",\n";
+        out << "      \"color\": " << vec3ToJson(light->color) << ",\n";
+        out << "      \"intensity\": " << light->intensity;
         
         if (auto dl = std::dynamic_pointer_cast<DirectionalLight>(light)) {
-            l["direction"] = vec3ToJson(dl->direction);
-            l["radius"] = dl->radius;
+            out << ",\n      \"direction\": " << vec3ToJson(dl->direction) << ",\n";
+            out << "      \"radius\": " << dl->radius;
         }
         else if (auto pl = std::dynamic_pointer_cast<PointLight>(light)) {
-            l["radius"] = pl->radius;
+            out << ",\n      \"radius\": " << pl->radius;
         }
         else if (auto sl = std::dynamic_pointer_cast<SpotLight>(light)) {
-            l["direction"] = vec3ToJson(sl->direction);
-            l["radius"] = sl->radius;
-            l["angle"] = sl->getAngleDegrees();
-            l["falloff"] = sl->getFalloff();
+            out << ",\n      \"direction\": " << vec3ToJson(sl->direction) << ",\n";
+            out << "      \"radius\": " << sl->radius << ",\n";
+            out << "      \"angle\": " << sl->getAngleDegrees() << ",\n";
+            out << "      \"falloff\": " << sl->getFalloff();
         }
         else if (auto al = std::dynamic_pointer_cast<AreaLight>(light)) {
-            l["u"] = vec3ToJson(al->u);
-            l["v"] = vec3ToJson(al->v);
-            l["width"] = al->width;
-            l["height"] = al->height;
+            out << ",\n      \"u\": " << vec3ToJson(al->u) << ",\n";
+            out << "      \"v\": " << vec3ToJson(al->v) << ",\n";
+            out << "      \"width\": " << al->width << ",\n";
+            out << "      \"height\": " << al->height;
         }
-        lightsJson.push_back(l);
+        out << "\n    }";
+        if (i < scene.lights.size() - 1) out << ",";
+        out << "\n";
     }
-    root["lights"] = lightsJson;
+    out << "  ],\n";
 
-    // 4. Object Transforms (By Name) - Also save mesh_type for procedural recreation
-    json objectsJson = json::array();
+    // 4. Object Transforms (Streamed!)
+    out << "  \"objects\": [\n";
+    bool first_obj = true;
     for (const auto& obj : scene.world.objects) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (tri && !tri->nodeName.empty()) {
-            json o;
-            o["name"] = tri->nodeName;
-            // Determine mesh type: "Cube", "Plane", or "Model" (imported)
+            if (!first_obj) out << ",\n";
+            
+            out << "    {";
+            out << "\"name\":" << json(tri->nodeName) << ",";
+            
             std::string meshType = "Model";
             if (tri->nodeName == "Cube") meshType = "Cube";
             else if (tri->nodeName == "Plane") meshType = "Plane";
-            o["mesh_type"] = meshType;
-            
+            out << "\"mesh_type\":\"" << meshType << "\",";
+
             auto th = tri->getTransformHandle();
             if (th) {
-                o["transform"] = mat4ToJson(th->base);
+                out << "\"transform\":[";
+                const auto& m = th->base;
+                for(int r=0; r<4; ++r) for(int c=0; c<4; ++c) {
+                    out << m.m[r][c] << ((r==3 && c==3) ? "" : ",");
+                }
+                out << "],";
             }
-            o["material_id"] = tri->getMaterialID();
-            objectsJson.push_back(o);
+            out << "\"material_id\":" << tri->getMaterialID();
+            out << "}";
+            
+            first_obj = false;
         }
     }
-    root["objects"] = objectsJson;
+    out << "\n  ],\n";
 
     // 5. Render Settings
-    json setJson;
-    setJson["quality_preset"] = (int)settings.quality_preset;
-    setJson["samples_per_pixel"] = settings.samples_per_pixel;
-    setJson["max_bounces"] = settings.max_bounces;
-    setJson["use_adaptive"] = settings.use_adaptive_sampling;
-    setJson["use_denoiser"] = settings.use_denoiser;
-    setJson["use_optix"] = settings.use_optix;
-    root["settings"] = setJson;
+    out << "  \"settings\": {\n";
+    out << "    \"quality_preset\": " << (int)settings.quality_preset << ",\n";
+    out << "    \"samples_per_pixel\": " << settings.samples_per_pixel << ",\n";
+    out << "    \"max_bounces\": " << settings.max_bounces << ",\n";
+    out << "    \"use_adaptive\": " << (settings.use_adaptive_sampling ? "true" : "false") << ",\n";
+    out << "    \"use_denoiser\": " << (settings.use_denoiser ? "true" : "false") << ",\n";
+    out << "    \"use_optix\": " << (settings.use_optix ? "true" : "false") << "\n";
+    out << "  },\n";
 
-    // 6. PostFX (Color Processing)
-    json postfxJson;
+    // 6. PostFX
     const auto& pp = scene.color_processor.params;
-    postfxJson["exposure"] = pp.global_exposure;
-    postfxJson["gamma"] = pp.global_gamma;
-    postfxJson["saturation"] = pp.saturation;
-    postfxJson["color_temperature"] = pp.color_temperature;
-    postfxJson["tone_mapping"] = (int)pp.tone_mapping_type;
-    postfxJson["vignette_enabled"] = pp.enable_vignette;
-    postfxJson["vignette_strength"] = pp.vignette_strength;
-    root["postfx"] = postfxJson;
+    out << "  \"postfx\": {\n";
+    out << "    \"exposure\": " << pp.global_exposure << ",\n";
+    out << "    \"gamma\": " << pp.global_gamma << ",\n";
+    out << "    \"saturation\": " << pp.saturation << ",\n";
+    out << "    \"color_temperature\": " << pp.color_temperature << ",\n";
+    out << "    \"tone_mapping\": " << (int)pp.tone_mapping_type << ",\n";
+    out << "    \"vignette_enabled\": " << (pp.enable_vignette ? "true" : "false") << ",\n";
+    out << "    \"vignette_strength\": " << pp.vignette_strength << "\n";
+    out << "  },\n";
 
-    // 7. World/Environment (from Renderer - we need to get this via extern or parameter)
-    // For now we'll save basic background color from scene
-    json worldJson;
-    worldJson["background_color"] = vec3ToJson(scene.background_color);
-    // Note: Full World (HDRI, Nishita Sky) data requires access to Renderer.world
-    // This can be extended when Renderer& is passed to Serialize
-    root["world"] = worldJson;
+    // 7. World
+    out << "  \"world\": {\n";
+    out << "    \"background_color\": " << vec3ToJson(scene.background_color) << "\n";
+    out << "  }\n";
 
-    // Write file
-    std::ofstream out(filepath);
-    if (out.is_open()) {
-        out << root.dump(4);
-        out.close();
+    out << "}";
+    out.flush();
+    out.close();
+
+    // 3. Atomic Commit
+    try {
+        if (std::filesystem::exists(filepath)) std::filesystem::remove(filepath);
+        std::filesystem::rename(temp_path, filepath);
         SCENE_LOG_INFO("Scene saved to: " + filepath);
-    } else {
-        SCENE_LOG_ERROR("Failed to save scene: " + filepath);
+    } catch (const std::exception& e) {
+        SCENE_LOG_ERROR("Failed to rename save file: " + std::string(e.what()));
     }
 }
 
