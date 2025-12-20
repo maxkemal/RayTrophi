@@ -1,6 +1,7 @@
 #include "SceneCommand.h"
 #include "scene_ui.h"
 #include "Renderer.h"
+#include "ProjectManager.h"
 #include "globals.h"  // For SCENE_LOG_INFO
 #include <algorithm>
 
@@ -13,11 +14,7 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
     auto& objs = ctx.scene.world.objects;
     bool needs_update = false;
     
-    // Efficiently remove all triangles in the deleted list
-    // Note: We need to match by pointer or name. Pointers are preserved in deleted_triangles_
-    // but the scene might have new pointers if we are not careful? 
-    // Actually, Undo puts the SAME shared_ptrs back. So equality check works.
-    
+    // 1. Remove from Scene
     auto new_end = std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& h){
         auto t = std::dynamic_pointer_cast<Triangle>(h);
         if (!t) return false;
@@ -33,30 +30,58 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
         needs_update = true;
     }
     
+    // 2. Sync with ProjectManager (Persistence)
+    // Find which model this object belongs to and add to its deleted_objects list
+    auto& proj = ProjectManager::getInstance().getProjectData();
+    for (auto& model : proj.imported_models) {
+        // Check if the deleted object is part of this model
+        // We assume object_name_ is unique enough or we check if the name matches a known object in the model
+        // Since we are deleting by name/group, we add the name to the list.
+        bool belongs_to_model = false;
+        for(const auto& inst : model.objects) {
+            if(inst.node_name == object_name_) {
+                belongs_to_model = true;
+                break;
+            }
+        }
+        
+        if (belongs_to_model) {
+            // Add to allow-list (deleted names) if not present
+            if (std::find(model.deleted_objects.begin(), model.deleted_objects.end(), object_name_) 
+                == model.deleted_objects.end()) {
+                model.deleted_objects.push_back(object_name_);
+            }
+        }
+    }
+    
     if (needs_update) {
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
         ctx.renderer.resetCPUAccumulation();
         if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
         
-        // Rebuild UI cache since objects are gone
-        // We can't easily call rebuildMeshCache since it is static/member of SceneUI. 
-        // But ctx has no access to SceneUI methods directly unless we pass SceneUI... 
-        // Wait, SceneUI::draw calls this. But SceneUI isn't passed here.
-        // We usually rely on the check `if (ctx.scene.world.objects.size() != last_obj_count)` in drawSceneHierarchy
-        // to rebuild the cache. So we just need to ensure size changes.
-        
         ctx.start_render = true;
+        ProjectManager::getInstance().markModified();
         SCENE_LOG_INFO("Redo: Deleted " + object_name_);
     }
 }
 
 void DeleteObjectCommand::undo(UIContext& ctx) {
-    // Restore deleted objects
+    // 1. Restore objects to Scene
     ctx.scene.world.objects.insert(
         ctx.scene.world.objects.end(),
         deleted_triangles_.begin(),
         deleted_triangles_.end()
     );
+    
+    // 2. Sync with ProjectManager (Persistence)
+    // Remove from deleted_objects list so it reappears on save/load
+    auto& proj = ProjectManager::getInstance().getProjectData();
+    for (auto& model : proj.imported_models) {
+        auto it = std::find(model.deleted_objects.begin(), model.deleted_objects.end(), object_name_);
+        if (it != model.deleted_objects.end()) {
+            model.deleted_objects.erase(it);
+        }
+    }
     
     // Rebuild GPU structures
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
@@ -64,8 +89,10 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
     
     if (ctx.optix_gpu_ptr) {
         ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+        ctx.optix_gpu_ptr->resetAccumulation(); // Also reset accumulation
     }
     
+    ProjectManager::getInstance().markModified();
     SCENE_LOG_INFO("Undo: Restored " + object_name_);
     ctx.start_render = true;
 }

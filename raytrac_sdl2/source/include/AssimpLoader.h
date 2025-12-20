@@ -1316,7 +1316,8 @@ private:
 
        aiColor3D color(0.0f, 0.0f, 0.0f);
        aiMat->Get(AI_MATKEY_COLOR_DIFFUSE, color);
-       material->albedoProperty = MaterialProperty(Vec3(color.r, color.g, color.b), 1.0f);
+       // Convert sRGB to Linear for CPU material property
+       material->albedoProperty = MaterialProperty(Vec3(powf(color.r, 2.2f), powf(color.g, 2.2f), powf(color.b, 2.2f)), 1.0f);
       
        // Roughness
        float roughness = 0.0f;
@@ -1604,11 +1605,15 @@ private:
            }
            auto gpu = std::make_shared<GpuMaterial>();
 
-           // Texture varsa dummy, yoksa gerçek değer atıyoruz:
-           if (hit_data && hit_data->has_albedo_tex)
+           // Texture varsa dummy (1.0), yoksa gerçek değer (Linear Space'e çevirerek) atıyoruz:
+           if (hit_data && hit_data->has_albedo_tex) {
                gpu->albedo = make_float3(1.0f, 1.0f, 1.0f);
-           else
-               gpu->albedo = make_float3(color.r, color.g, color.b);
+           }
+           else {
+               // FIX: Convert scalar Albedo from sRGB to Linear to match lighting pipeline
+               // Prevents "washed out" look for untextured materials
+               gpu->albedo = make_float3(powf(color.r, 2.2f), powf(color.g, 2.2f), powf(color.b, 2.2f));
+           }
 
            if (hit_data && hit_data->has_roughness_tex)
                gpu->roughness = 1.0f;
@@ -1631,7 +1636,7 @@ private:
                gpu->transmission = transmission;
 
            if (hit_data && hit_data->has_opacity_tex)
-               gpu->opacity = 0.0f;
+               gpu->opacity = 1.0f; // FIX: Was 0.0f! Must be 1.0f to allow texture modulation.
            else
                gpu->opacity = opacity;
 

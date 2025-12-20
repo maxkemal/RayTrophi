@@ -889,7 +889,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         OptixHitResult payload = {};
         
         // Use Viewport Clipping for primary rays
-        float t_min = (bounce == 0) ? optixLaunchParams.clip_near : 0.001f;
+        float t_min = (bounce == 0) ? optixLaunchParams.clip_near : 0.01f;
         float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
         
         trace_ray(ray, &payload, t_min, t_max);

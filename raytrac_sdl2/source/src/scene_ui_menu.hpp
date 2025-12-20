@@ -58,22 +58,41 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                     rendering_stopped_cpu = true;
                     rendering_stopped_gpu = true;
                     
-                    // Use new ProjectManager for .rtp files, fallback to old serializer for .rts
-                    std::string ext = filepath.substr(filepath.find_last_of('.'));
-                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    scene_loading = true;
+                    scene_loading_done = false;
+                    scene_loading_progress = 0;
+                    scene_loading_stage = "Opening project...";
                     
-                    if (ext == ".rtp") {
-                        g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr);
-                    } else {
-                        // Legacy .rts format
-                        SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr, filepath);
-                    }
+                    std::thread loader_thread([this, filepath, &ctx]() {
+                        // Wait for render threads to pause
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                        
+                        // Use new ProjectManager for .rtp files, fallback to old serializer for .rts
+                        std::string ext = filepath.substr(filepath.find_last_of('.'));
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                        
+                        if (ext == ".rtp") {
+                            g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr,
+                                [this](int p, const std::string& s) {
+                                    scene_loading_progress = p;
+                                    scene_loading_stage = s;
+                                });
+                        } else {
+                            // Legacy .rts format
+                            SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr, filepath);
+                        }
+                        
+                        invalidateCache();
+                        active_model_path = g_ProjectManager.getProjectName();
+                        
+                        if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
+                        
+                        scene_loading = false;
+                        scene_loading_done = true;
+                    });
+                    loader_thread.detach();
                     
-                    invalidateCache();
-                    active_model_path = g_ProjectManager.getProjectName();
-                    ctx.start_render = true;
-                    
-                    SCENE_LOG_INFO("Project opened: " + filepath);
+                    SCENE_LOG_INFO("Opening project: " + filepath);
                 }
             }
             
@@ -82,19 +101,59 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             // ================================================================
             if (ImGui::MenuItem("Save Project", "Ctrl+S")) {
                  std::string current_path = g_ProjectManager.getCurrentFilePath();
+                 
+                 // Sync on MAIN thread
+                 updateProjectFromScene(ctx);
+                 
+                 // Pause rendering
+                 rendering_stopped_cpu = true;
+                 rendering_stopped_gpu = true;
+
                  if (!current_path.empty()) {
-                     // Save to existing path
-                     g_ProjectManager.saveProject();
-                     // Also update scene data in the save
-                     updateProjectFromScene(ctx);
-                     g_ProjectManager.saveProject();
+                     scene_loading = true;
+                     scene_loading_done = false;
+                     scene_loading_progress = 0;
+                     scene_loading_stage = "Saving project...";
+                     
+                     SCENE_LOG_INFO("Starting background save...");
+                     
+                     std::thread save_thread([this, current_path]() {
+                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                         g_ProjectManager.saveProject(current_path,
+                            [this](int p, const std::string& s) {
+                                scene_loading_progress = p;
+                                scene_loading_stage = s;
+                            });
+                         scene_loading = false;
+                         scene_loading_done = true;
+                     });
+                     save_thread.detach();
                  } else {
                      // No path yet, prompt Save As
                      std::string filepath = saveFileDialogW(L"RayTrophi Project (.rtp)\0*.rtp\0", L"rtp");
                      if (!filepath.empty()) {
-                         updateProjectFromScene(ctx);
-                         g_ProjectManager.saveProject(filepath);
+                         scene_loading = true;
+                         scene_loading_done = false;
+                         scene_loading_progress = 0;
+                         scene_loading_stage = "Saving project...";
+                         
+                         SCENE_LOG_INFO("Starting background save...");
+                         
+                         std::thread save_thread([this, filepath]() {
+                             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                             g_ProjectManager.saveProject(filepath,
+                                [this](int p, const std::string& s) {
+                                    scene_loading_progress = p;
+                                    scene_loading_stage = s;
+                                });
+                             scene_loading = false;
+                             scene_loading_done = true;
+                         });
+                         save_thread.detach();
                          SCENE_LOG_INFO("Project saved: " + filepath);
+                     } else {
+                         rendering_stopped_cpu = false;
+                         rendering_stopped_gpu = false;
                      }
                  }
             }
@@ -103,7 +162,28 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  std::string filepath = saveFileDialogW(L"RayTrophi Project (.rtp)\0*.rtp\0", L"rtp");
                  if (!filepath.empty()) {
                      updateProjectFromScene(ctx);
-                     g_ProjectManager.saveProject(filepath);
+                     
+                     rendering_stopped_cpu = true;
+                     rendering_stopped_gpu = true;
+
+                     scene_loading = true;
+                     scene_loading_done = false;
+                     scene_loading_progress = 0;
+                     scene_loading_stage = "Saving project...";
+                     
+                     SCENE_LOG_INFO("Starting background save...");
+                     
+                     std::thread save_thread([this, filepath]() {
+                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                         g_ProjectManager.saveProject(filepath,
+                            [this](int p, const std::string& s) {
+                                scene_loading_progress = p;
+                                scene_loading_stage = s;
+                            });
+                         scene_loading = false;
+                         scene_loading_done = true;
+                     });
+                     save_thread.detach();
                      SCENE_LOG_INFO("Project saved: " + filepath);
                  }
             }
@@ -137,7 +217,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                              [this](int p, const std::string& s) {
                                  scene_loading_progress = p; 
                                  scene_loading_stage = s;
-                             });
+                             }, false); // false = DO NOT REBUILD in thread (Crash fix)
                          
                          if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
                          
@@ -204,61 +284,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             ImGui::Separator();
             
             if (ImGui::MenuItem("Delete Selected", "Del/X", false, ctx.selection.hasSelection())) {
-                // Trigger delete via key simulation (reuse the same code path)
-                // Or directly call delete logic here
-                std::string deleted_name = ctx.selection.selected.name;
-                
-                auto& objects = ctx.scene.world.objects;
-                size_t removed_count = 0;
-                
-                objects.erase(
-                    std::remove_if(objects.begin(), objects.end(),
-                        [&deleted_name, &removed_count](const std::shared_ptr<Hittable>& obj) {
-                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                            if (tri && tri->nodeName == deleted_name) {
-                                removed_count++;
-                                return true;
-                            }
-                            return false;
-                        }),
-                    objects.end());
-                
-                if (removed_count > 0) {
-                    auto& proj = g_ProjectManager.getProjectData();
-                    
-                    for (auto& model : proj.imported_models) {
-                        for (const auto& inst : model.objects) {
-                            if (inst.node_name == deleted_name) {
-                                if (std::find(model.deleted_objects.begin(), model.deleted_objects.end(), deleted_name) 
-                                    == model.deleted_objects.end()) {
-                                    model.deleted_objects.push_back(deleted_name);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    
-                    auto& procs = proj.procedural_objects;
-                    procs.erase(
-                        std::remove_if(procs.begin(), procs.end(),
-                            [&deleted_name](const ProceduralObjectData& p) {
-                                return p.display_name == deleted_name;
-                            }),
-                        procs.end());
-                    
-                    ctx.selection.clearSelection();
-                    g_ProjectManager.markModified();
-                    
-                    rebuildMeshCache(ctx.scene.world.objects);
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                    ctx.renderer.resetCPUAccumulation();
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
-                    
-                    SCENE_LOG_INFO("Deleted: " + deleted_name);
-                }
+                triggerDelete(ctx);
             }
             ImGui::EndMenu();
         }
@@ -353,40 +379,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 
 // Update project data from current scene state (for saving)
 void SceneUI::updateProjectFromScene(UIContext& ctx) {
-    auto& proj = g_ProjectManager.getProjectData();
-    
-    // Update object transforms in project data
-    for (auto& model : proj.imported_models) {
-        for (auto& inst : model.objects) {
-            // Find matching scene object and update transform
-            for (const auto& obj : ctx.scene.world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (tri && tri->nodeName == inst.node_name) {
-                    auto th = tri->getTransformHandle();
-                    if (th) {
-                        inst.transform = th->base;
-                    }
-                    inst.material_id = tri->getMaterialID();
-                    break;
-                }
-            }
-        }
-    }
-    
-    // Update procedural objects
-    for (auto& proc : proj.procedural_objects) {
-        for (const auto& obj : ctx.scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->nodeName == proc.display_name) {
-                auto th = tri->getTransformHandle();
-                if (th) {
-                    proc.transform = th->base;
-                }
-                proc.material_id = tri->getMaterialID();
-                break;
-            }
-        }
-    }
+    // Delegate to ProjectManager for robust sync (Deletions, Transforms, Procedurals)
+    g_ProjectManager.syncProjectToScene(ctx.scene);
 }
 
 // Add a procedural plane to the scene

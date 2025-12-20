@@ -111,7 +111,7 @@
     <LibraryPath>E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external;$(IncludePath)</IncludePath>
     <LibraryPath>E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\lib;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -235,6 +235,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
+    <ClInclude Include="source\external\miniz.h" />
     <ClInclude Include="source\include\ImGuizmo.h" />
     <ClInclude Include="source\include\SceneCommand.h" />
     <ClInclude Include="source\include\SceneHistory.h" />
@@ -313,6 +314,9 @@
     <ResourceCompile Include="raytracing_render_code.rc" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="source\external\miniz.c" />
+    <ClCompile Include="source\external\miniz_tdef.c" />
+    <ClCompile Include="source\external\miniz_tinfl.c" />
     <ClCompile Include="source\src\AABB.cpp" />
     <ClCompile Include="source\src\AreaLight.cpp" />
     <ClCompile Include="source\src\AssimpLoader.cpp" />

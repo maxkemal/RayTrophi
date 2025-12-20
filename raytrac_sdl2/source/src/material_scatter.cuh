@@ -44,19 +44,28 @@ __device__ float3 float3_min(const float3& a, const float3& b) {
 }
 __device__ float get_alpha_gpu(const OptixHitResult& payload, const float2& uv)
 {
-    // Öncelikle opacity texture varsa kullan
+    // 1. Explicit Opacity Map (Priority)
+    // Assume standard Grayscale map (White=Opaque, Black=Transparent).
+    // We use Red channel (tex.x) because texture loaders usually put grayscale into RGB.
+    // We do NOT check tex.w (Alpha) here because many opacity maps are JPG/PNG with full Alpha (1.0).
     if (payload.opacity_tex) {
         float4 tex = tex2D<float4>(payload.opacity_tex, uv.x, uv.y);
-        return tex.w > 0.0f ? tex.w : (tex.x + tex.y + tex.z) / 3.0f;
+        // Use average of RGB for robustness against colored masks, or just X. 
+        // Let's use average to be safe if it's not pure grayscale.
+        return (tex.x + tex.y + tex.z) / 3.0f; 
     }
 
-    // Opacity yoksa albedo'yu kontrol et
+    // 2. Albedo Map Alpha Channel (Fallback)
+    // If no explicit opacity map, check if Albedo has alpha transparency.
     if (payload.albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
-        return tex.w > 0.0f ? tex.w : (tex.x + tex.y + tex.z) / 3.0f;
+        // Trust the Alpha channel. 
+        // If loaded as RGB (no alpha), texture loader usually sets W=1.0.
+        // If loaded as RGBA, W is the alpha.
+        return tex.w; 
     }
 
-    // Ne opacity ne de albedo varsa → tamamen opak
+    // 3. Default (Opaque)
     return 1.0f;
 }
 
@@ -87,7 +96,8 @@ __device__ float3 evaluate_brdf(
             make_float3(tex.x, tex.x, tex.x) :
             make_float3(tex.x, tex.y, tex.z);
     }
-	albedo = clamp(albedo, 0.01f, 1.0f); // Albedo değerini 0-1 aralığına sıkıştır
+	// albedo = clamp(albedo, 0.01f, 1.0f); // REMOVED: Clamping prevents true black and reduces contrast
+
    
 
     float roughness = material.roughness;

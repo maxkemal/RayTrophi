@@ -35,6 +35,9 @@ static bool loadFeedback = false; // geçici hata geri bildirimi
 static float feedbackTimer = 0.0f;
 bool show_animation_panel = false; // Default closed as requested
 
+// Pivot Mode State: 0=Median Point (Group), 1=Individual Origins
+static int pivot_mode = 0; 
+
 // Not: ScaleColor ve HelpMarker artık UIWidgets namespace'inde tanımlı
 
 struct ResolutionPreset {
@@ -2226,6 +2229,14 @@ void SceneUI::drawControlsContent()
      ImGui::TextDisabled("  * Changes apply immediately to selected object");
      
      ImGui::Spacing();
+     UIWidgets::ColoredHeader("Selection Controls", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
+     UIWidgets::Divider();
+     ImGui::BulletText("Select Object: Left Click");
+     ImGui::BulletText("Multi-Select: Shift + Left Click");
+     ImGui::BulletText("Box Selection: Right Mouse Drag");
+     ImGui::BulletText("Duplicate Selection: Shift + D");
+
+     ImGui::Spacing();
      UIWidgets::ColoredHeader("Interface Guide", ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
      UIWidgets::Divider();
      
@@ -2261,6 +2272,15 @@ void SceneUI::drawControlsContent()
          ImGui::BulletText("Lists all light sources in the scene.");
          ImGui::BulletText("Allows adjusting Intensity (Brightness) and Color.");
          ImGui::BulletText("Supports Point, Directional, Area, and Spot lights.");
+     }
+     
+     if (ImGui::CollapsingHeader("World Panel")) {
+         ImGui::BulletText("Sky Model: Switch between Solid Color, HDRI, or Nishita Sky.");
+         ImGui::BulletText("Nishita Sky: Realistic day/night cycle with Sun & Moon controls.");
+         ImGui::BulletText("Atmosphere: Adjust Air, Dust, and Ozone density for realistic scattering.");
+         ImGui::BulletText("Volumetric Clouds: Enable 3D clouds with various weather presets.");
+         ImGui::BulletText("HDRI: Load external HDR enviromaps for realistic reflections.");
+         ImGui::BulletText("Light Sync: Sync Sun position with the main directional light.");
      }
      
      if (ImGui::CollapsingHeader("Post-FX Panel")) {
@@ -2323,6 +2343,15 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     if (ImGui::Button("Scale (R)")) sel.transform_mode = TransformMode::Scale;
     if (is_scale) ImGui::PopStyleColor();
     
+    // Pivot Point Selection
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140);
+    const char* pivot_opts[] = { "Median Point", "Individual Origins" };
+    if (ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, IM_ARRAYSIZE(pivot_opts))) {
+        // Mode switch logic if needed (state is just reading pivot_mode)
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rotation/Scale Pivot: Group Center vs Individual Objects");
+
     ImGui::Separator();
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -3214,7 +3243,55 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     objectMatrix[12] = startMat.m[0][3]; objectMatrix[13] = startMat.m[1][3]; objectMatrix[14] = startMat.m[2][3]; objectMatrix[15] = startMat.m[3][3];
 
     // If object has transform, use it
-    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+    // If object has transform, use it - BUT ONLY if not a Mixed Group
+    // Mixed groups use the Centroid pivot (startMat) to avoid fighting/resets
+    bool is_mixed_group = false;
+    if (sel.multi_selection.size() > 1) {
+        is_mixed_group = true;
+    } else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        std::string name = sel.selected.object->nodeName; 
+        if (name.empty()) name = "Unnamed";
+        auto it = mesh_cache.find(name);
+        if (it != mesh_cache.end()) {
+             Transform* firstT = nullptr;
+             for(auto& p : it->second) {
+                 auto th = p.second->getTransformHandle().get();
+                 if (!firstT) firstT = th;
+                 else if (th != firstT) {
+                     is_mixed_group = true;
+                     break;
+                 }
+             }
+        }
+    }
+
+    static Matrix4x4 mixed_gizmo_matrix;
+    static bool was_using_mixed = false;
+    
+    // Check global drag state
+    bool is_using_gizmo_now = ImGuizmo::IsUsing();
+
+    if (is_mixed_group) {
+        // PERISISTENT GIZMO STATE for Mixed Groups
+        // Prevents Gizmo from snapping back to Identity Rotation every frame which causes explosion
+        
+        if (!is_using_gizmo_now) {
+             // Not dragging: Reset to Centroid Position + Identity Rotation
+             // (Or we could average rotations, but Identity is safer for a group pivot)
+             mixed_gizmo_matrix = Matrix4x4::identity();
+             mixed_gizmo_matrix.m[0][3] = sel.selected.position.x;
+             mixed_gizmo_matrix.m[1][3] = sel.selected.position.y;
+             mixed_gizmo_matrix.m[2][3] = sel.selected.position.z;
+        }
+        
+        // Use the persistent matrix
+        objectMatrix[0] = mixed_gizmo_matrix.m[0][0]; objectMatrix[1] = mixed_gizmo_matrix.m[1][0]; objectMatrix[2] = mixed_gizmo_matrix.m[2][0]; objectMatrix[3] = mixed_gizmo_matrix.m[3][0];
+        objectMatrix[4] = mixed_gizmo_matrix.m[0][1]; objectMatrix[5] = mixed_gizmo_matrix.m[1][1]; objectMatrix[6] = mixed_gizmo_matrix.m[2][1]; objectMatrix[7] = mixed_gizmo_matrix.m[3][1];
+        objectMatrix[8] = mixed_gizmo_matrix.m[0][2]; objectMatrix[9] = mixed_gizmo_matrix.m[1][2]; objectMatrix[10] = mixed_gizmo_matrix.m[2][2]; objectMatrix[11] = mixed_gizmo_matrix.m[3][2];
+        objectMatrix[12] = mixed_gizmo_matrix.m[0][3]; objectMatrix[13] = mixed_gizmo_matrix.m[1][3]; objectMatrix[14] = mixed_gizmo_matrix.m[2][3]; objectMatrix[15] = mixed_gizmo_matrix.m[3][3];
+    }
+    else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+        // Single Object (or Homogeneous Group) - Lock to Object Transform
         auto transform = sel.selected.object->getTransformHandle();
         if (transform) {
             Matrix4x4 mat = transform->base;
@@ -3337,6 +3414,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         case TransformMode::Rotate: operation = ImGuizmo::ROTATE; break;
         case TransformMode::Scale: operation = ImGuizmo::SCALE; break;
     }
+    
+    // Restriction Removed: Fallback logic now handles Rot/Scale for mixed groups
+
     
     ImGuizmo::MODE mode = (sel.transform_space == TransformSpace::Local) ? 
         ImGuizmo::LOCAL : ImGuizmo::WORLD;
@@ -3523,9 +3603,24 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // Render and Manipulate Gizmo
     // ─────────────────────────────────────────────────────────────────────────
     // Save old position BEFORE manipulation for delta calculation (multi-selection)
+    // Save old position & MATRIX BEFORE manipulation for delta calculation
     Vec3 oldGizmoPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
     
+    Matrix4x4 oldMat;
+    oldMat.m[0][0] = objectMatrix[0]; oldMat.m[1][0] = objectMatrix[1]; oldMat.m[2][0] = objectMatrix[2]; oldMat.m[3][0] = objectMatrix[3];
+    oldMat.m[0][1] = objectMatrix[4]; oldMat.m[1][1] = objectMatrix[5]; oldMat.m[2][1] = objectMatrix[6]; oldMat.m[3][1] = objectMatrix[7];
+    oldMat.m[0][2] = objectMatrix[8]; oldMat.m[1][2] = objectMatrix[9]; oldMat.m[2][2] = objectMatrix[10]; oldMat.m[3][2] = objectMatrix[11];
+    oldMat.m[0][3] = objectMatrix[12]; oldMat.m[1][3] = objectMatrix[13]; oldMat.m[2][3] = objectMatrix[14]; oldMat.m[3][3] = objectMatrix[15];
+    
     bool manipulated = ImGuizmo::Manipulate(viewMatrix, projMatrix, operation, mode, objectMatrix);
+
+    if (manipulated && is_mixed_group) {
+        // Update persistent matrix for next frame interaction
+        mixed_gizmo_matrix.m[0][0] = objectMatrix[0]; mixed_gizmo_matrix.m[1][0] = objectMatrix[1]; mixed_gizmo_matrix.m[2][0] = objectMatrix[2]; mixed_gizmo_matrix.m[3][0] = objectMatrix[3];
+        mixed_gizmo_matrix.m[0][1] = objectMatrix[4]; mixed_gizmo_matrix.m[1][1] = objectMatrix[5]; mixed_gizmo_matrix.m[2][1] = objectMatrix[6]; mixed_gizmo_matrix.m[3][1] = objectMatrix[7];
+        mixed_gizmo_matrix.m[0][2] = objectMatrix[8]; mixed_gizmo_matrix.m[1][2] = objectMatrix[9]; mixed_gizmo_matrix.m[2][2] = objectMatrix[10]; mixed_gizmo_matrix.m[3][2] = objectMatrix[11];
+        mixed_gizmo_matrix.m[0][3] = objectMatrix[12]; mixed_gizmo_matrix.m[1][3] = objectMatrix[13]; mixed_gizmo_matrix.m[2][3] = objectMatrix[14]; mixed_gizmo_matrix.m[3][3] = objectMatrix[15];
+    }
     
     if (manipulated) {
         Vec3 newPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
@@ -3535,13 +3630,28 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         // Check if this is multi-selection (handle mixed types: lights + objects together)
         bool is_multi_select = sel.multi_selection.size() > 1;
         
-        if (is_multi_select && operation == ImGuizmo::TRANSLATE) {
+        if (is_multi_select) {
             // MULTI-SELECTION: Apply delta to ALL selected items (mixed types)
             float deltaMagnitude = sqrtf(deltaPos.x*deltaPos.x + deltaPos.y*deltaPos.y + deltaPos.z*deltaPos.z);
             
-            if (deltaMagnitude >= 0.0001f) {
+            // For Rotation/Scale, deltaPos might be zero, so we check operation too
+            if (deltaMagnitude >= 0.0001f || operation != ImGuizmo::TRANSLATE) {
                 if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
                 
+                // Calculate Delta Matrix for Rotation/Scale
+                Matrix4x4 newMat;
+                newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
+                newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
+                newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
+                newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+                
+                Matrix4x4 deltaMat = newMat * oldMat.inverse();
+                
+                // Decompose
+                Vec3 deltaTranslation(deltaMat.m[0][3], deltaMat.m[1][3], deltaMat.m[2][3]);
+                Matrix4x4 deltaRotScale = deltaMat;
+                deltaRotScale.m[0][3] = 0; deltaRotScale.m[1][3] = 0; deltaRotScale.m[2][3] = 0;
+
                 for (auto& item : sel.multi_selection) {
                     if (item.type == SelectableType::Object && item.object) {
                         std::string targetName = item.object->nodeName;
@@ -3549,26 +3659,29 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         
                         auto it = mesh_cache.find(targetName);
                         if (it != mesh_cache.end() && !it->second.empty()) {
-                            auto& firstTri = it->second[0].second;
-                            auto t_handle = firstTri->getTransformHandle();
                             
-                            // Safety check for mixed transforms
-                            bool all_same_transform = true;
-                            for (size_t i = 1; i < it->second.size() && all_same_transform; ++i) {
-                                auto h = it->second[i].second->getTransformHandle();
-                                if (h.get() != t_handle.get()) all_same_transform = false;
-                            }
-                            
-                            if (all_same_transform && t_handle) {
-                                Matrix4x4 currentMat = t_handle->base;
-                                currentMat.m[0][3] += deltaPos.x;
-                                currentMat.m[1][3] += deltaPos.y;
-                                currentMat.m[2][3] += deltaPos.z;
-                                t_handle->setBase(currentMat);
+                            // Apply to unique transforms in this name-group
+                            std::unordered_set<Transform*> processed_transforms;
+                            for (auto& pair : it->second) {
+                                auto tri = pair.second;
+                                auto th = tri->getTransformHandle();
                                 
-                                for (auto& pair : it->second) {
-                                    pair.second->updateTransformedVertices();
+                                if (th && processed_transforms.find(th.get()) == processed_transforms.end()) {
+                                    if (pivot_mode == 1) { 
+                                        // Individual Origins
+                                        Vec3 pos(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
+                                        th->base.m[0][3] = 0; th->base.m[1][3] = 0; th->base.m[2][3] = 0;
+                                        th->setBase(deltaRotScale * th->base);
+                                        th->base.m[0][3] = pos.x + deltaTranslation.x;
+                                        th->base.m[1][3] = pos.y + deltaTranslation.y;
+                                        th->base.m[2][3] = pos.z + deltaTranslation.z;
+                                    } else {
+                                        // Median Point
+                                        th->setBase(deltaMat * th->base); 
+                                    }
+                                    processed_transforms.insert(th.get());
                                 }
+                                tri->updateTransformedVertices();
                             }
                         }
                         item.has_cached_aabb = false;
@@ -3581,7 +3694,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         item.camera->lookat = item.camera->lookat + deltaPos;
                         item.camera->update_camera_vectors();
                     }
-                }
+                } // End of multi_selection loop
                 
                 sel.selected.has_cached_aabb = false;
                 
@@ -3687,6 +3800,42 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         
                         for (auto& pair : it->second) {
                             pair.second->updateTransformedVertices();
+                        }
+                    } else {
+                        // Fallback: Mixed transforms, apply delta MATRIX to each unique transform (Supports all ops)
+                        Matrix4x4 newMat;
+                        newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
+                        newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
+                        newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
+                        newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+                        
+                        Matrix4x4 deltaMat = newMat * oldMat.inverse();
+
+                        // Decompose for Individual Origins logic
+                        Vec3 deltaTranslation(deltaMat.m[0][3], deltaMat.m[1][3], deltaMat.m[2][3]);
+                        Matrix4x4 deltaRotScale = deltaMat;
+                        deltaRotScale.m[0][3] = 0; deltaRotScale.m[1][3] = 0; deltaRotScale.m[2][3] = 0;
+
+                        std::unordered_set<Transform*> processed_transforms;
+                        for (auto& pair : it->second) {
+                            auto tri = pair.second;
+                            auto th = tri->getTransformHandle();
+                            if (th && processed_transforms.find(th.get()) == processed_transforms.end()) {
+                                if (pivot_mode == 1) { 
+                                     // Individual Origins
+                                    Vec3 pos(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
+                                    th->base.m[0][3] = 0; th->base.m[1][3] = 0; th->base.m[2][3] = 0;
+                                    th->setBase(deltaRotScale * th->base);
+                                    th->base.m[0][3] = pos.x + deltaTranslation.x;
+                                    th->base.m[1][3] = pos.y + deltaTranslation.y;
+                                    th->base.m[2][3] = pos.z + deltaTranslation.z;
+                                } else {
+                                     // Median Point
+                                    th->setBase(deltaMat * th->base);
+                                } 
+                                processed_transforms.insert(th.get());
+                            }
+                            tri->updateTransformedVertices();
                         }
                     }
                 }

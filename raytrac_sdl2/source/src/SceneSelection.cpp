@@ -201,7 +201,20 @@ bool SceneSelection::hasSelection() const {
 
 bool SceneSelection::isSelected(const SelectableItem& item) const {
     for (const auto& s : multi_selection) {
-        if (s == item) return true;
+        if (s.type != item.type) continue;
+        
+        // For objects, compare by name (since same object may have different triangle pointers)
+        if (s.type == SelectableType::Object) {
+            if (!s.name.empty() && s.name == item.name) return true;
+            // Fallback to pointer comparison if names are empty
+            if (s.object == item.object) return true;
+        }
+        else if (s.type == SelectableType::Light) {
+            if (s.light == item.light) return true;
+        }
+        else if (s.type == SelectableType::Camera || s.type == SelectableType::CameraTarget) {
+            if (s.camera == item.camera) return true;
+        }
     }
     return false;
 }
@@ -220,7 +233,25 @@ void SceneSelection::addToSelection(const SelectableItem& item) {
 }
 
 void SceneSelection::removeFromSelection(const SelectableItem& item) {
-    auto it = std::remove(multi_selection.begin(), multi_selection.end(), item);
+    // Custom removal with name-based comparison for objects
+    auto it = std::remove_if(multi_selection.begin(), multi_selection.end(), 
+        [&item](const SelectableItem& s) {
+            if (s.type != item.type) return false;
+            
+            if (s.type == SelectableType::Object) {
+                // Compare by name for objects
+                if (!s.name.empty() && s.name == item.name) return true;
+                return s.object == item.object;
+            }
+            else if (s.type == SelectableType::Light) {
+                return s.light == item.light;
+            }
+            else if (s.type == SelectableType::Camera || s.type == SelectableType::CameraTarget) {
+                return s.camera == item.camera;
+            }
+            return false;
+        });
+    
     if (it != multi_selection.end()) {
         multi_selection.erase(it, multi_selection.end());
     }
