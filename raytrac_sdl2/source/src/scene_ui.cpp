@@ -3,6 +3,9 @@
 #include "imgui.h"
 #include "ImGuizmo.h"  // Transform gizmo
 #include <string>
+#include <memory>  // For std::make_unique
+#include "KeyframeSystem.h"   // For keyframe animation
+#include "TimelineWidget.h"   // Custom timeline widget
 #include "scene_data.h"
 #include "ParallelBVHNode.h"
 #include "Triangle.h"  // For object hierarchy
@@ -11,18 +14,18 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "PrincipledBSDF.h" // For material editing
+#include "Volumetric.h"     // For volumetric material
 #include "AssimpLoader.h"  // For scene rebuild after object changes
 #include "SceneCommand.h"  // For undo/redo
 #include "default_scene_creator.hpp"
 #include "SceneSerializer.h"
 #include "ProjectManager.h"  // Project system
+#include "MaterialManager.h"  // For material editing
 #include <map>  // For mesh grouping
 #include <unordered_set>  // For fast deletion lookup
 #include <windows.h>
 #include <commdlg.h>
 #include <shlobj.h>  // SHBrowseForFolder için
-#include <string>
-
 #include <chrono>  // Playback timing için
 #include <filesystem>  // Frame dosyalarını kontrol için
 
@@ -65,8 +68,20 @@ static int preset_index = 0;
 
 
 
-std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0") {
+std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "") {
     wchar_t filename[MAX_PATH] = L"";
+    wchar_t initialDirW[MAX_PATH] = L"";
+    
+    // Convert initial directory to wide string if provided
+    if (!initialDir.empty()) {
+        MultiByteToWideChar(CP_UTF8, 0, initialDir.c_str(), -1, initialDirW, MAX_PATH);
+    }
+
+    // Convert default filename to wide string if provided
+    if (!defaultFilename.empty()) {
+        MultiByteToWideChar(CP_UTF8, 0, defaultFilename.c_str(), -1, filename, MAX_PATH);
+    }
+    
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = nullptr;
@@ -76,6 +91,8 @@ std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0") {
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     ofn.lpstrTitle = L"Select a file";
     ofn.hwndOwner = GetActiveWindow();
+    ofn.lpstrInitialDir = initialDir.empty() ? nullptr : initialDirW;
+    
     if (GetOpenFileNameW(&ofn)) {
         int size_needed = WideCharToMultiByte(CP_UTF8, 0, filename, -1, nullptr, 0, nullptr, nullptr);
         std::string utf8_path(size_needed, 0);
@@ -151,18 +168,33 @@ void SceneUI::ClampWindowToDisplay()
     }
 }
 
-// Timeline Panel - Embedded Content
+// Timeline Panel - Blender-style Custom Timeline Widget
 void SceneUI::drawTimelineContent(UIContext& ctx)
 {
-    static int start_frame = 0;
-    static int end_frame = 100;
+    // Use the new modular TimelineWidget
+    static TimelineWidget timeline;
+    timeline.draw(ctx);
+}
+
+// ========== OLD TIMELINE CODE REMOVED - NOW IN TimelineWidget.cpp ==========
+// The following code is kept temporarily for reference but is no longer active
+#if 0
+    // Static variables for timeline state
+    static int currentFrame = 0;
+    static bool expanded = true;
+    static int selectedEntry = -1;
+    static int firstFrame = 0;
     static bool frame_range_initialized = false;
     static bool is_playing = false;
-    static int playback_frame = 0;
     static auto last_frame_time = std::chrono::steady_clock::now();
     
-    // NOT: Window creation code moved out to allow embedding
-
+    // Determine frame range from animation data or timeline
+    static int start_frame = 0;     // Static to persist across frames
+    static int end_frame = 250;     // Blender-like default 
+  
+    static int playback_frame = 0;
+   
+    // Determine frame range from animation data or use default
     if (!ctx.scene.animationDataList.empty()) {
         auto& anim = ctx.scene.animationDataList[0];
         
@@ -176,7 +208,7 @@ void SceneUI::drawTimelineContent(UIContext& ctx)
             cached_source_end = anim.endFrame;
         }
 
-        // Initialize defaults
+        // Initialize from animation data
         if (!frame_range_initialized) {
             start_frame = anim.startFrame;
             end_frame = anim.endFrame;
@@ -185,105 +217,516 @@ void SceneUI::drawTimelineContent(UIContext& ctx)
             ctx.render_settings.animation_end_frame = end_frame;
             frame_range_initialized = true;
         }
-        
-        int total_frames = end_frame - start_frame + 1;
-        bool is_rendering = rendering_in_progress;
-        
-        // --- ÜST SATIR: Frame Range ve Ayarlar ---
-        ImGui::PushItemWidth(150);
-        if (ImGui::SliderInt("Start", &start_frame, anim.startFrame, anim.endFrame)) {
-            ctx.render_settings.animation_start_frame = start_frame;
-            if (playback_frame < start_frame) playback_frame = start_frame;
-        }
-        ImGui::SameLine();
-        if (ImGui::SliderInt("End", &end_frame, anim.startFrame, anim.endFrame)) {
-            ctx.render_settings.animation_end_frame = end_frame;
-            if (playback_frame > end_frame) playback_frame = end_frame;
-        }
-        ImGui::PopItemWidth();
-        
-        if (start_frame > end_frame) {
-            end_frame = start_frame;
-            ctx.render_settings.animation_end_frame = end_frame;
-        }
-        
-        // Settings Group
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-        
-        ImGui::PushItemWidth(100);
-        ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);
-        ImGui::PopItemWidth();
-        
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%d frames)", total_frames);
-        
-        // --- ORTA SATIR: Playback Controls ---
-        ImGui::Spacing();
-        
-        // Play/Pause
-        if (UIWidgets::SecondaryButton(is_playing ? "||" : "|>", ImVec2(40, 24))) {
-            is_playing = !is_playing;
-            if (is_playing) {
-                last_frame_time = std::chrono::steady_clock::now();
-            }
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(is_playing ? "Pause" : "Play");
-        
-        ImGui::SameLine();
-        // Stop
-        if (UIWidgets::SecondaryButton("[]", ImVec2(40, 24))) {
-            is_playing = false;
-            playback_frame = start_frame;
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop & Reset");
-        
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-        
-        // Scrubbing / Current Frame
-        ImGui::AlignTextToFramePadding();
-        ImGui::Text("Frame:");
-        ImGui::SameLine();
-        
-        ImGui::PushItemWidth(80);
-        if (ImGui::InputInt("##CurrentFrame", &playback_frame, 0, 0)) {
-            playback_frame = std::clamp(playback_frame, start_frame, end_frame);
-        }
-        ImGui::PopItemWidth();
-        
-        // Timeline Slider (Scrubber)
-        ImGui::SameLine();
-        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 10);
-        if (ImGui::SliderInt("##Scrubber", &playback_frame, start_frame, end_frame, "")) {
-             // Just scrubber
-        }
-        ImGui::PopItemWidth();
-        
-        // Logic Update
-        if (is_playing && !is_rendering) {
-            auto now = std::chrono::steady_clock::now();
-            float elapsed = std::chrono::duration<float>(now - last_frame_time).count();
-            float frame_duration = 1.0f / (float)ctx.render_settings.animation_fps;
-            
-            if (elapsed >= frame_duration) {
-                playback_frame++;
-                if (playback_frame > end_frame) playback_frame = start_frame;
-                last_frame_time = now;
-            }
-        }
-        
-        // Store user state
-        ctx.render_settings.animation_is_playing = is_playing;
-        ctx.render_settings.animation_playback_frame = playback_frame;
-        ctx.render_settings.animation_current_frame = playback_frame; // For renderer preview
-        
     } else {
-        ImGui::TextColored(ImVec4(1,1,0,1), "No animation data found in scene.");
+        // No animation data - use Blender-like default (0-250)
+        if (!frame_range_initialized) {
+            start_frame = 0;
+            end_frame = 250;
+            playback_frame = 0;
+            ctx.render_settings.animation_start_frame = start_frame;
+            ctx.render_settings.animation_end_frame = end_frame;
+            frame_range_initialized = true;
+        }
     }
+    
+    int total_frames = end_frame - start_frame + 1;
+    bool is_rendering = rendering_in_progress;
+    
+    // --- TOP ROW: Frame Range & Settings ---
+    ImGui::PushItemWidth(150);
+    if (ImGui::SliderInt("Start", &start_frame, 0, 1000)) {
+        ctx.render_settings.animation_start_frame = start_frame;
+        if (playback_frame < start_frame) playback_frame = start_frame;
+    }
+    ImGui::SameLine();
+    if (ImGui::SliderInt("End", &end_frame, 0, 1000)) {
+        ctx.render_settings.animation_end_frame = end_frame;
+        if (playback_frame > end_frame) playback_frame = end_frame;
+    }
+    ImGui::PopItemWidth();
+    
+    if (start_frame > end_frame) {
+        end_frame = start_frame;
+        ctx.render_settings.animation_end_frame = end_frame;
+    }
+    
+    // Settings Group
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    
+    ImGui::PushItemWidth(100);
+    ImGui::SliderInt("FPS", &ctx.render_settings.animation_fps, 1, 60);
+    ImGui::PopItemWidth();
+    
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%d frames)", total_frames);
+    
+    // --- MIDDLE ROW: Playback Controls ---
+    ImGui::Spacing();
+    
+    // Play/Pause
+    if (UIWidgets::SecondaryButton(is_playing ? "||" : "|>", ImVec2(40, 24))) {
+        is_playing = !is_playing;
+        if (is_playing) {
+            last_frame_time = std::chrono::steady_clock::now();
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip(is_playing ? "Pause" : "Play");
+    
+    ImGui::SameLine();
+    // Stop
+    if (UIWidgets::SecondaryButton("[]", ImVec2(40, 24))) {
+        is_playing = false;
+        playback_frame = start_frame;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop & Reset");
+    
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    
+    // Show which object's keyframes are displayed
+    bool has_selection = ctx.selection.hasSelection() && 
+                        (ctx.selection.selected.type == SelectableType::Object ||
+                         ctx.selection.selected.type == SelectableType::Light ||
+                         ctx.selection.selected.type == SelectableType::Camera);
+    
+    if (has_selection) {
+        std::string entity_name;
+        std::string entity_type_str;
+        
+        if (ctx.selection.selected.type == SelectableType::Object) {
+            auto& obj = ctx.selection.selected.object;
+            entity_name = obj->nodeName.empty() ? 
+                "Object_" + std::to_string(ctx.selection.selected.object_index) : 
+                obj->nodeName;
+            entity_type_str = "Object";
+        } else if (ctx.selection.selected.type == SelectableType::Light) {
+            entity_name = ctx.selection.selected.light->nodeName;
+            entity_type_str = "Light";
+        } else if (ctx.selection.selected.type == SelectableType::Camera) {
+            entity_name = ctx.selection.selected.camera->nodeName;
+            entity_type_str = "Camera";
+        }
+        
+        int kf_count = 0;
+        if (ctx.scene.timeline.tracks.find(entity_name) != ctx.scene.timeline.tracks.end()) {
+            kf_count = ctx.scene.timeline.tracks[entity_name].keyframes.size();
+        }
+        
+        ImGui::Text("Editing:");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.4f, 1.0f), "%s", entity_name.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s, %d keyframes)", entity_type_str.c_str(), kf_count);
+    } else {
+        ImGui::TextDisabled("No entity selected");
+    }
+    
+    // Keyframe Insertion Button
+    if (!has_selection) ImGui::BeginDisabled();
+    
+    if (UIWidgets::PrimaryButton("Insert Keyframe (I)", ImVec2(140, 24))) {
+        if (has_selection) {
+            // Open popup menu (Blender-style)
+            ImGui::OpenPopup("KeyframePropertyPopup");
+        }
+    }
+    
+    if (!has_selection) ImGui::EndDisabled();
+    
+    ImGui::SameLine();
+    
+    
+    // Popup Menu for Keyframe Property Selection (Blender-style)
+    if (ImGui::BeginPopup("KeyframePropertyPopup")) {
+        Keyframe kf(playback_frame);
+        std::string entity_name;
+        std::string props_desc;
+        bool should_insert = false;
+        
+        // OBJECT: Show transform options
+        if (ctx.selection.selected.type == SelectableType::Object) {
+            auto& obj = ctx.selection.selected.object;
+            entity_name = obj->nodeName.empty() ? 
+                "Object_" + std::to_string(ctx.selection.selected.object_index) : 
+                obj->nodeName;
+            
+            ImGui::TextDisabled("Transform:");
+            ImGui::Separator();
+            
+            if (ImGui::MenuItem("Location")) {
+                kf.has_transform = true;
+                // ALWAYS capture ALL transform properties to preserve un-keyframed ones
+                kf.transform.position = ctx.selection.selected.position;
+                kf.transform.rotation = ctx.selection.selected.rotation;
+                kf.transform.scale = ctx.selection.selected.scale;
+                props_desc = "Location";
+                should_insert = true;
+            }
+            if (ImGui::MenuItem("Rotation")) {
+                kf.has_transform = true;
+                // ALWAYS capture ALL transform properties
+                kf.transform.position = ctx.selection.selected.position;
+                kf.transform.rotation = ctx.selection.selected.rotation;
+                kf.transform.scale = ctx.selection.selected.scale;
+                props_desc = "Rotation";
+                should_insert = true;
+            }
+            if (ImGui::MenuItem("Scale")) {
+                kf.has_transform = true;
+                // ALWAYS capture ALL transform properties
+                kf.transform.position = ctx.selection.selected.position;
+                kf.transform.rotation = ctx.selection.selected.rotation;
+                kf.transform.scale = ctx.selection.selected.scale;
+                props_desc = "Scale";
+                should_insert = true;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Location & Rotation")) {
+                kf.has_transform = true;
+                kf.transform.position = ctx.selection.selected.position;
+                kf.transform.rotation = ctx.selection.selected.rotation;
+                kf.transform.scale = ctx.selection.selected.scale;
+                props_desc = "Location+Rotation";
+                should_insert = true;
+            }
+            if (ImGui::MenuItem("Location & Rotation & Scale")) {
+                kf.has_transform = true;
+                kf.transform.position = ctx.selection.selected.position;
+                kf.transform.rotation = ctx.selection.selected.rotation;
+                kf.transform.scale = ctx.selection.selected.scale;
+                props_desc = "Location+Rotation+Scale";
+                should_insert = true;
+            }
+        }
+        // LIGHT: Auto-capture all properties
+        else if (ctx.selection.selected.type == SelectableType::Light) {
+            auto& light = ctx.selection.selected.light;
+            entity_name = light->nodeName;
+            
+            ImGui::TextDisabled("Light Properties:");
+            ImGui::Separator();
+            
+            if (ImGui::MenuItem("All Light Properties")) {
+                kf.has_light = true;
+                kf.light.position = light->position;
+                kf.light.color = light->color;
+                kf.light.intensity = light->intensity;
+                kf.light.direction = light->direction;
+                props_desc = "Position+Color+Intensity+Direction";
+                should_insert = true;
+            }
+        }
+        // CAMERA: Auto-capture all properties
+        else if (ctx.selection.selected.type == SelectableType::Camera) {
+            auto& camera = ctx.selection.selected.camera;
+            entity_name = camera->nodeName;
+            
+            ImGui::TextDisabled("Camera Properties:");
+            ImGui::Separator();
+            
+            if (ImGui::MenuItem("All Camera Properties")) {
+                kf.has_camera = true;
+                kf.camera.position = camera->lookfrom;
+                kf.camera.target = camera->lookat;
+                kf.camera.fov = camera->vfov;
+                kf.camera.focus_distance = camera->focus_dist;
+                kf.camera.lens_radius = camera->lens_radius;
+                props_desc = "Position+Target+FOV+DOF";
+                should_insert = true;
+            }
+        }
+        
+        // Insert if user selected an option
+        if (should_insert) {
+            ctx.scene.timeline.insertKeyframe(entity_name, kf);
+            
+            // DEBUG: Log transform values for debugging
+            if (kf.has_transform) {
+                SCENE_LOG_INFO(">>> Transform Debug: Pos(" + 
+                    std::to_string(kf.transform.position.x) + "," + 
+                    std::to_string(kf.transform.position.y) + "," + 
+                    std::to_string(kf.transform.position.z) + ") Rot(" +
+                    std::to_string(kf.transform.rotation.x) + "," + 
+                    std::to_string(kf.transform.rotation.y) + "," + 
+                    std::to_string(kf.transform.rotation.z) + ") Scale(" +
+                    std::to_string(kf.transform.scale.x) + "," + 
+                    std::to_string(kf.transform.scale.y) + "," + 
+                    std::to_string(kf.transform.scale.z) + ")");
+            }
+            
+            SCENE_LOG_INFO("Keyframe [" + props_desc + "] inserted for '" + entity_name + 
+                          "' at frame " + std::to_string(playback_frame));
+            ImGui::CloseCurrentPopup();
+        }
+        
+        ImGui::EndPopup();
+    }
+    
+    // Delete Keyframe button
+    bool has_keyframe_at_current = false;
+    std::string entity_name_for_delete;
+    
+    if (has_selection) {
+        // Get entity name based on type (avoid null pointer for Light/Camera)
+        if (ctx.selection.selected.type == SelectableType::Object) {
+            auto& obj = ctx.selection.selected.object;
+            entity_name_for_delete = obj->nodeName.empty() ? 
+                "Object_" + std::to_string(ctx.selection.selected.object_index) : 
+                obj->nodeName;
+        } else if (ctx.selection.selected.type == SelectableType::Light) {
+            entity_name_for_delete = ctx.selection.selected.light->nodeName;
+        } else if (ctx.selection.selected.type == SelectableType::Camera) {
+            entity_name_for_delete = ctx.selection.selected.camera->nodeName;
+        }
+        
+        auto& track = ctx.scene.timeline.getTrack(entity_name_for_delete);
+        has_keyframe_at_current = (track.getKeyframeAt(playback_frame) != nullptr);
+    }
+    
+    if (!has_keyframe_at_current) ImGui::BeginDisabled();
+    if (UIWidgets::DangerButton("Delete Keyframe", ImVec2(120, 24))) {
+        ctx.scene.timeline.removeKeyframe(entity_name_for_delete, playback_frame);
+        SCENE_LOG_INFO("Keyframe deleted for '" + entity_name_for_delete + "' at frame " + 
+                      std::to_string(playback_frame));
+    }
+    if (!has_keyframe_at_current) ImGui::EndDisabled();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip(has_keyframe_at_current ? 
+            "Delete keyframe at current frame" : 
+            "No keyframe at current frame");
+    }
+    
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    
+    // Current Frame Display
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Frame:");
+    ImGui::SameLine();
+    
+    ImGui::PushItemWidth(80);
+    if (ImGui::InputInt("##CurrentFrame", &playback_frame, 0, 0)) {
+        playback_frame = std::clamp(playback_frame, start_frame, end_frame);
+    }
+    ImGui::PopItemWidth();
+    
+    // --- ALWAYS SHOW TIMELINE SCRUBBER (for navigation) ---
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Timeline:");
+    
+    // Main scrubber slider - ALWAYS visible for frame navigation
+    float slider_width = ImGui::GetContentRegionAvail().x - 10;
+    ImVec2 slider_pos = ImGui::GetCursorScreenPos();
+    
+    ImGui::PushItemWidth(slider_width);
+    if (ImGui::SliderInt("##Scrubber", &playback_frame, start_frame, end_frame, "Frame %d")) {
+        // Scrubber moved - will be handled by frame change logic below
+    }
+    ImGui::PopItemWidth();
+    
+    // Draw keyframe markers on top of slider (for selected entity)
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    if (has_selection) {
+        std::string selected_entity_name;
+        
+        if (ctx.selection.selected.type == SelectableType::Object) {
+            auto& obj = ctx.selection.selected.object;
+            selected_entity_name = obj->nodeName.empty() ? 
+                "Object_" + std::to_string(ctx.selection.selected.object_index) : 
+                obj->nodeName;
+        } else if (ctx.selection.selected.type == SelectableType::Light) {
+            selected_entity_name = ctx.selection.selected.light->nodeName;
+        } else if (ctx.selection.selected.type == SelectableType::Camera) {
+            selected_entity_name = ctx.selection.selected.camera->nodeName;
+        }
+        
+        auto track_it = ctx.scene.timeline.tracks.find(selected_entity_name);
+        if (track_it != ctx.scene.timeline.tracks.end()) {
+            auto& track = track_it->second;
+            
+            for (auto& kf : track.keyframes) {
+                if (kf.frame >= start_frame && kf.frame <= end_frame) {
+                    float t = (float)(kf.frame - start_frame) / (float)(end_frame - start_frame);
+                    float marker_x = slider_pos.x + t * slider_width;
+                    float marker_y = slider_pos.y + 10;
+                    
+                    ImVec2 p1(marker_x, marker_y - 6);
+                    ImVec2 p2(marker_x + 4, marker_y);
+                    ImVec2 p3(marker_x, marker_y + 6);
+                    ImVec2 p4(marker_x - 4, marker_y);
+                    
+                    ImU32 color;
+                    if (kf.has_transform && kf.has_material) {
+                        color = IM_COL32(255, 200, 50, 255);
+                    } else if (kf.has_transform) {
+                        color = IM_COL32(100, 200, 255, 255);
+                    } else if (kf.has_light) {
+                        color = IM_COL32(255, 150, 100, 255);
+                    } else if (kf.has_camera) {
+                        color = IM_COL32(150, 100, 255, 255);
+                    } else {
+                        color = IM_COL32(255, 100, 150, 255);
+                    }
+                    
+                    draw_list->AddQuadFilled(p1, p2, p3, p4, color);
+                    draw_list->AddQuad(p1, p2, p3, p4, IM_COL32(0, 0, 0, 255), 1.5f);
+                }
+            }
+        }
+    }
+    
+    // Keyframe legend
+    ImGui::Spacing();
+    ImGui::TextDisabled("Keyframes:");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "◆");
+    ImGui::SameLine();
+    ImGui::Text("Transform");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "◆");
+    ImGui::SameLine();
+    ImGui::Text("Light");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.6f, 0.4f, 1.0f, 1.0f), "◆");
+    ImGui::SameLine();
+    ImGui::Text("Camera");
+    
+    // Show track count info
+    size_t track_count = ctx.scene.timeline.tracks.size();
+    if (track_count > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("| %zu tracks", track_count);
+    }
+    
+    // Playback Logic Update
+    static int last_evaluated_frame = -1;
+    bool frame_changed = false;
+    
+    if (is_playing && !is_rendering) {
+        auto now = std::chrono::steady_clock::now();
+        float elapsed = std::chrono::duration<float>(now - last_frame_time).count();
+        float frame_duration = 1.0f / (float)ctx.render_settings.animation_fps;
+        
+        if (elapsed >= frame_duration) {
+            playback_frame++;
+            if (playback_frame > end_frame) playback_frame = start_frame;
+            last_frame_time = now;
+            frame_changed = true;
+        }
+    }
+    
+    // Check if frame changed manually (scrubbing)
+    if (playback_frame != last_evaluated_frame) {
+        frame_changed = true;
+        last_evaluated_frame = playback_frame;
+    }
+    
+    // Apply keyframe transforms when frame changes
+    if (frame_changed && !ctx.scene.timeline.tracks.empty()) {
+        bool scene_modified = false;
+        
+        // Evaluate and apply keyframes for all objects
+        for (auto& [obj_name, track] : ctx.scene.timeline.tracks) {
+            if (track.keyframes.empty()) continue;
+            
+            // Evaluate keyframe at current frame
+            Keyframe kf = track.evaluate(playback_frame);
+            
+            // DEBUG: Log what we're looking for
+            static bool first_log = true;
+            if (first_log) {
+                SCENE_LOG_INFO(">>> Playback Debug: Looking for object '" + obj_name + "'");
+                first_log = false;
+            }
+            
+            // Find the object in the scene by name
+            bool obj_found = false;
+            for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
+                if (!tri) continue;
+                
+                // DEBUG: Log each object we check
+                if (first_log) {
+                    SCENE_LOG_INFO(">>> Checking object: nodeName='" + tri->nodeName + "'");
+                }
+                
+                if (tri->nodeName == obj_name) {
+                    obj_found = true;
+                    // Apply transform keyframe
+                    if (kf.has_transform) {
+                        // Get current transform matrix to preserve un-keyframed properties
+                        Matrix4x4 current_transform = tri->getTransformMatrix();
+                        
+                        // Decompose or use keyframe values directly
+                        Vec3 position = kf.transform.position;
+                        Vec3 rotation = kf.transform.rotation;
+                        Vec3 scale = kf.transform.scale;
+                        
+                        // Build transform matrix from keyframe
+                        Matrix4x4 translation = Matrix4x4::translation(position);
+                        
+                        // Convert Euler angles to rotation matrix (deg to rad)
+                        float rx = rotation.x * (3.14159265f / 180.0f);
+                        float ry = rotation.y * (3.14159265f / 180.0f);
+                        float rz = rotation.z * (3.14159265f / 180.0f);
+                        
+                        Matrix4x4 rot = Matrix4x4::rotationZ(rz) * 
+                                       Matrix4x4::rotationY(ry) * 
+                                       Matrix4x4::rotationX(rx);
+                        
+                        Matrix4x4 scl = Matrix4x4::scaling(scale);
+                        
+                        // Combine: T * R * S
+                        Matrix4x4 final_transform = translation * rot * scl;
+                        
+                        // Apply to triangle
+                        tri->set_transform(final_transform);
+                        
+                        // IMPORTANT: Update SelectableItem if this is the current selection
+                        // This keeps gizmo and bounding box in sync
+                        if (ctx.selection.hasSelection() && 
+                            ctx.selection.selected.type == SelectableType::Object &&
+                            ctx.selection.selected.object == tri) {
+                            ctx.selection.selected.position = position;
+                            ctx.selection.selected.rotation = rotation;
+                            ctx.selection.selected.scale = scale;
+                            ctx.selection.selected.has_cached_aabb = false;  // Invalidate cache
+                        }
+                        
+                        scene_modified = true;
+                    }
+                    
+                    // TODO: Apply material keyframe when material system is integrated
+                    break;
+                }
+            }
+        }
+        
+        // Trigger scene rebuild if modified
+        if (scene_modified) {
+            // For transform-only changes, we only need BVH rebuild
+            // OptiX geometry rebuild is NOT needed (geometry unchanged, only transforms)
+            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+            ctx.renderer.resetCPUAccumulation();
+            
+            // NOTE: OptiX rebuild skipped for performance during keyframe playback
+            // Geometry hasn't changed, only transforms. BVH handles this.
+            // If we add material keyframes later, we'll need conditional OptiX rebuild
+        }
+    }
+    
+    // Store user state
+    ctx.render_settings.animation_is_playing = is_playing;
+    ctx.render_settings.animation_playback_frame = playback_frame;
+    ctx.render_settings.animation_current_frame = playback_frame;
+    ctx.scene.timeline.current_frame = playback_frame;
 }
+#endif
 
 // Wrapper for compatibility (if needed) but essentially deprecated as a window creator
 void SceneUI::drawTimelinePanel(UIContext& ctx, float screen_y) {
@@ -443,7 +886,7 @@ void SceneUI::drawResolutionPanel()
 }
 
 
-void SceneUI::drawToneMapContent(UIContext& ctx) {
+static void DrawRenderWindowToneMapControls(UIContext& ctx) {
     UIWidgets::ColoredHeader("Post-Processing Controls", ImVec4(1.0f, 0.65f, 0.6f, 1.0f));
     UIWidgets::Divider();
 
@@ -648,8 +1091,18 @@ void SceneUI::drawCameraContent(UIContext& ctx)
 
             ImGui::SliderInt("Blade Count", &ctx.scene.camera->blade_count, 3, 12);
             UIWidgets::HelpMarker("Number of aperture blades - affects bokeh shape");
+            
+            // Mouse Sensitivity (for camera navigation)
+            ImGui::Spacing();
+            UIWidgets::SliderWithHelp("Mouse Sensitivity", &ctx.mouse_sensitivity, 0.01f, 5.0f,
+                                       "Camera rotation/panning speed", "%.3f");
         } else {
             ImGui::TextDisabled("DOF disabled (Aperture = 0)");
+            
+            // Mouse Sensitivity visible even when DOF disabled
+            ImGui::Spacing();
+            UIWidgets::SliderWithHelp("Mouse Sensitivity", &ctx.mouse_sensitivity, 0.01f, 5.0f,
+                                       "Camera rotation/panning speed", "%.3f");
         }
         
         UIWidgets::EndSection();
@@ -689,11 +1142,62 @@ void SceneUI::drawLightsContent(UIContext& ctx)
 
         if (ImGui::TreeNode(label.c_str())) {
             const char* names[] = { "Point", "Directional", "Spot", "Area" };
-            int index = (int)light->type();
-            if (index >= 0 && index < 4)
-                ImGui::Text("Type: %s", names[index]);
-            else
-                ImGui::Text("Type: Unknown");
+            int current_type = (int)light->type();
+            int new_type = current_type;
+
+            if (ImGui::Combo("Type", &new_type, names, IM_ARRAYSIZE(names))) {
+                if (new_type != current_type) {
+                    // Prepare common data
+                    Vec3 pos = light->position;
+                    Vec3 col = light->color;
+                    float inten = light->intensity;
+                    std::string name = light->nodeName;
+                    Vec3 dir = light->direction;
+                    // Default direction if switching from Point (which might have 0,0,0 dir)
+                    if (dir.length_squared() < 0.001f) dir = Vec3(0, -1, 0); 
+                    
+                    std::shared_ptr<Light> new_light = nullptr;
+
+                    switch (new_type) {
+                        case 0: // Point
+                            new_light = std::make_shared<PointLight>(pos, col, inten);
+                            new_light->radius = light->radius; 
+                            break;
+                        case 1: // Directional
+                            new_light = std::make_shared<DirectionalLight>(dir, col, inten);
+                            new_light->radius = light->radius; // Preserves soft shadow size if applicable
+                            break;
+                        case 2: // Spot
+                            // Use reasonable defaults for Angle/Falloff
+                            new_light = std::make_shared<SpotLight>(pos, dir, col, 45.0f, 10.0f);
+                            new_light->intensity = inten;
+                            break;
+                        case 3: // Area
+                            // Default 2x2 area facing +Z initially, will be overridden by logic potentially
+                            new_light = std::make_shared<AreaLight>(pos, Vec3(2,0,0), Vec3(0,0,2), 2.0f, 2.0f, col);
+                            // AreaLight constructor sig: pos, u, v, w, h, color
+                            // Logic inside AreaLight usually sets internal u/v based on w/h.
+                            new_light->intensity = inten;
+                            break;
+                    }
+
+                    if (new_light) {
+                        new_light->nodeName = name;
+                        
+                        // Update Scene List
+                        ctx.scene.lights[i] = new_light;
+                        
+                        // Update Selection if necessary
+                        if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light == light) {
+                             ctx.selection.selected.light = new_light;
+                             // No need to reset index, it's the same i
+                        }
+                        
+                        light = new_light; // Update local pointer for rest of this frame's UI
+                        changed = true;
+                    }
+                }
+            }
 
             if (ImGui::DragFloat3("Position", &light->position.x, 0.1f)) changed = true;
 
@@ -743,642 +1247,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
         }
     }
 }
-void SceneUI::drawWorldContent(UIContext& ctx) {
-    World& world = ctx.renderer.world;
-    WorldMode current_mode = world.getMode();
-    
-    UIWidgets::ColoredHeader("Environment Settings", ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
-    UIWidgets::Divider();
-    
-    bool changed = false;
-    
-    // ═══════════════════════════════════════════════════════════
-    // Sky Model Selection
-    // ═══════════════════════════════════════════════════════════
-    if (UIWidgets::BeginSection("Sky Model", ImVec4(0.4f, 0.6f, 0.9f, 1.0f))) {
-        const char* modes[] = { "Solid Color", "HDRI Environment", "Nishita Sky" };
-        int mode_idx = static_cast<int>(current_mode);
-        
-        ImGui::PushItemWidth(-1);
-        if (ImGui::Combo("##SkyModel", &mode_idx, modes, IM_ARRAYSIZE(modes))) {
-            world.setMode(static_cast<WorldMode>(mode_idx));
-            changed = true;
-        }
-        ImGui::PopItemWidth();
-        UIWidgets::EndSection();
-    }
-    
-    ImGui::Spacing();
-    
-    // ═══════════════════════════════════════════════════════════
-    // Solid Color Mode
-    // ═══════════════════════════════════════════════════════════
-    if (current_mode == WORLD_MODE_COLOR) {
-        if (UIWidgets::BeginSection("Background", ImVec4(0.6f, 0.4f, 0.8f, 1.0f))) {
-            Vec3 color = world.getColor();
-            if (ImGui::ColorEdit3("Color", &color.x)) {
-                world.setColor(color);
-                ctx.scene.background_color = color;
-                changed = true;
-            }
-            
-            float intensity = world.getColorIntensity();
-            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f)) {
-                world.setColorIntensity(intensity);
-                changed = true;
-            }
-            UIWidgets::EndSection();
-        }
-    }
-    // ═══════════════════════════════════════════════════════════
-    // HDRI Environment Mode
-    // ═══════════════════════════════════════════════════════════
-    else if (current_mode == WORLD_MODE_HDRI) {
-        if (UIWidgets::BeginSection("HDRI Map", ImVec4(0.2f, 0.7f, 0.5f, 1.0f))) {
-            // Load Button
-            if (UIWidgets::PrimaryButton("Load Environment", ImVec2(-1, 0))) {
-#ifdef _WIN32
-                std::string file = openFileDialogW(L"Environment Maps\0*.hdr;*.exr;*.jpg;*.jpeg;*.png\0HDR/EXR\0*.hdr;*.exr\0All Files\0*.*\0");
-                if (!file.empty()) {
-                    world.setHDRI(file);
-                    changed = true;
-                }
-#endif
-            }
-            
-            // Current file display
-            std::string path = world.getHDRIPath();
-            if (!path.empty()) {
-                size_t lastSlash = path.find_last_of("/\\");
-                std::string filename = (lastSlash != std::string::npos) ? path.substr(lastSlash + 1) : path;
-                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "%s", filename.c_str());
-            } else {
-                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "(No HDRI loaded)");
-            }
-            UIWidgets::EndSection();
-        }
-        
-        if (UIWidgets::BeginSection("Transform", ImVec4(0.5f, 0.6f, 0.8f, 1.0f))) {
-            // Rotation - Use SliderFloat for better 360 control
-            float rotation = world.getHDRIRotation();
-            if (ImGui::SliderFloat("Rotation", &rotation, 0.0f, 360.0f, "%.1f deg")) {
-                world.setHDRIRotation(rotation);
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Rotate the environment map around Y axis (0-360 degrees)");
-            
-            // Intensity
-            float intensity = world.getHDRIIntensity();
-            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f, "%.2f")) {
-                world.setHDRIIntensity(intensity);
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Brightness multiplier for the environment");
-            UIWidgets::EndSection();
-        }
-    }
-    // ═══════════════════════════════════════════════════════════
-    // Nishita Sky Mode
-    // ═══════════════════════════════════════════════════════════
-    else if (current_mode == WORLD_MODE_NISHITA) {
-        NishitaSkyParams params = world.getNishitaParams();
-        static bool syncWithDirectionalLight = false;
-        
-        // Sync with Directional Light Section
-        if (UIWidgets::BeginSection("Light Sync", ImVec4(0.6f, 0.8f, 1.0f, 1.0f))) {
-            if (ImGui::Checkbox("Sync with Scene Light", &syncWithDirectionalLight)) {
-                // Checkbox toggled
-            }
-            UIWidgets::HelpMarker("Automatically sync sun direction with the first directional light in the scene");
-            
-            if (syncWithDirectionalLight) {
-                // Find first directional light
-                bool foundDirLight = false;
-                for (const auto& light : ctx.scene.lights) {
-                    if (light && light->type() == LightType::Directional) {
-                        // Convert light direction to sun direction
-                        // Note: light->direction is the direction light TRAVELS (sun to ground)
-                        // We need direction TO the sun, so negate it
-                        Vec3 dir = -(light->direction.normalize());
-                        
-                        // Elevation: angle from horizon (Y component)
-                        float elevation = asinf(dir.y) * 180.0f / M_PI;
-                        
-                        // Azimuth: horizontal angle (XZ plane)
-                        float azimuth = atan2f(dir.x, dir.z) * 180.0f / M_PI;
-                        if (azimuth < 0) azimuth += 360.0f;
-                        
-                        // Update params if different
-                        if (fabsf(params.sun_elevation - elevation) > 0.1f || 
-                            fabsf(params.sun_azimuth - azimuth) > 0.1f) {
-                            params.sun_elevation = elevation;
-                            params.sun_azimuth = azimuth;
-                            changed = true;
-                        }
-                        
-                        foundDirLight = true;
-                        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Synced with Directional Light");
-                        break;
-                    }
-                }
-                
-                if (!foundDirLight) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "No directional light found");
-                }
-            }
-            UIWidgets::EndSection();
-        }
-        
-        // Sun Position Section (controls both sun and directional light when synced)
-        const char* sunPosTitle = syncWithDirectionalLight ? "Sun/Light Position" : "Sun Position";
-        if (UIWidgets::BeginSection(sunPosTitle, ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
-            if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker(syncWithDirectionalLight ? 
-                "Sun/Light height above horizon - controls both sky sun and directional light" :
-                "Sun height above horizon (0 = horizon, 90 = zenith)");
-            
-            if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker(syncWithDirectionalLight ?
-                "Sun/Light horizontal rotation - controls both sky sun and directional light" :
-                "Sun horizontal rotation (compass direction)");
-            UIWidgets::EndSection();
-        }
-        
-        // Sun Appearance Section
-        if (UIWidgets::BeginSection("Sun", ImVec4(1.0f, 0.5f, 0.3f, 1.0f))) {
-            if (ImGui::SliderFloat("Intensity", &params.sun_intensity, 0.0f, 100.0f, "%.1f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Brightness of the sun");
-            
-            // Calculate automatic sun size based on elevation (atmospheric magnification)
-            // Sun appears larger near horizon due to refraction
-            float autoSunSize = params.sun_size;
-            float elevationFactor = 1.0f;
-            if (params.sun_elevation < 15.0f) {
-                // Below 15 degrees, sun starts appearing larger
-                // At 0 degrees, size is ~1.5x, at -5 degrees, ~2x
-                elevationFactor = 1.0f + (15.0f - fmaxf(params.sun_elevation, -10.0f)) * 0.04f;
-            }
-            float displaySize = params.sun_size * elevationFactor;
-            
-            if (ImGui::SliderFloat("Size", &params.sun_size, 0.1f, 5.0f, "%.3f deg")) {
-                changed = true;
-            }
-            if (elevationFactor > 1.01f) {
-                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "Effective: %.3f deg (horizon boost)", displaySize);
-            }
-            UIWidgets::HelpMarker("Angular diameter of the sun disc (real sun = 0.545°). Automatically increases near horizon.");
-            UIWidgets::EndSection();
-        }
-        
-        // Atmosphere Section (Blender-style parameters)
-        if (UIWidgets::BeginSection("Atmosphere", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
-            if (ImGui::SliderFloat("Air", &params.air_density, 0.0f, 10.0f, "%.2f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Density of air molecules (Rayleigh scattering). Higher = denser atmosphere, more color shift at horizon");
-            
-            if (ImGui::SliderFloat("Dust", &params.dust_density, 0.0f, 10.0f, "%.2f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Density of dust/aerosols (Mie scattering). Higher = more haze and sun glow");
-            
-            if (ImGui::SliderFloat("Ozone", &params.ozone_density, 0.0f, 10.0f, "%.2f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Ozone layer density. Higher = bluer sky, affects color saturation");
-            
-            // Altitude in UI is shown in km, but stored in meters
-            float altitudeKm = params.altitude / 1000.0f;
-            if (ImGui::SliderFloat("Altitude", &altitudeKm, 0.0f, 60.0f, "%.1f km")) {
-                params.altitude = altitudeKm * 1000.0f;  // Convert back to meters
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Camera altitude above sea level. 0 = beach, 10 = airplane, 60 = edge of atmosphere");
-            UIWidgets::EndSection();
-        }
-        
-        // Advanced Physics (Collapsible)
-        if (ImGui::CollapsingHeader("Advanced Physics")) {
-            ImGui::Indent();
-            
-            if (ImGui::SliderFloat("Mie Anisotropy", &params.mie_anisotropy, 0.0f, 0.99f, "%.2f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Sun glow directionality (0 = uniform, 0.8+ = strong forward scatter)");
-            
-            ImGui::Unindent();
-        }
-        
-        // Night Sky Section (Stars)
-        if (UIWidgets::BeginSection("Night Sky", ImVec4(0.3f, 0.3f, 0.7f, 1.0f))) {
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f), "Stars (visible when sun is low)");
-            
-            if (ImGui::SliderFloat("Stars Intensity", &params.stars_intensity, 0.0f, 5.0f, "%.2f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Brightness of stars. Set to 0 to disable.");
-            
-            if (ImGui::SliderFloat("Stars Density", &params.stars_density, 0.0f, 1.0f, "%.2f")) {
-                changed = true;
-            }
-            UIWidgets::HelpMarker("How many stars appear (0 = few, 1 = many)");
-            UIWidgets::EndSection();
-        }
-        
-        // Moon Section
-        if (UIWidgets::BeginSection("Moon", ImVec4(0.8f, 0.8f, 0.5f, 1.0f))) {
-            bool moonEnabled = params.moon_enabled != 0;
-            if (ImGui::Checkbox("Show Moon", &moonEnabled)) {
-                params.moon_enabled = moonEnabled ? 1 : 0;
-                changed = true;
-            }
-            
-            if (params.moon_enabled) {
-                if (ImGui::SliderFloat("Moon Elevation", &params.moon_elevation, -10.0f, 90.0f, "%.1f deg")) {
-                    changed = true;
-                }
-                
-                if (ImGui::SliderFloat("Moon Azimuth", &params.moon_azimuth, 0.0f, 360.0f, "%.1f deg")) {
-                    changed = true;
-                }
-                
-                if (ImGui::SliderFloat("Moon Intensity", &params.moon_intensity, 0.0f, 5.0f, "%.2f")) {
-                    changed = true;
-                }
-                
-                if (ImGui::SliderFloat("Moon Size", &params.moon_size, 0.1f, 3.0f, "%.2f deg")) {
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Real moon = 0.52 degrees");
-                
-                if (ImGui::SliderFloat("Moon Phase", &params.moon_phase, 0.0f, 1.0f, "%.2f")) {
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("0 = New Moon, 0.5 = Full Moon, 1 = New Moon");
-            }
-            UIWidgets::EndSection();
-        }
-
-
-        
-        // Update sun direction from elevation/azimuth
-        if (changed) {
-            float elevationRad = params.sun_elevation * M_PI / 180.0f;
-            float azimuthRad = params.sun_azimuth * M_PI / 180.0f;
-            params.sun_direction = make_float3(
-                cosf(elevationRad) * sinf(azimuthRad),
-                sinf(elevationRad),
-                cosf(elevationRad) * cosf(azimuthRad)
-            );
-            world.setNishitaParams(params);
-            
-            // If sync is enabled, also update the directional light
-            if (syncWithDirectionalLight) {
-                for (auto& light : ctx.scene.lights) {
-                    if (light && light->type() == LightType::Directional) {
-                        // Light direction is opposite of sun direction (sun to ground)
-                        light->direction = Vec3(
-                            -params.sun_direction.x,
-                            -params.sun_direction.y,
-                            -params.sun_direction.z
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    
-    // ═══════════════════════════════════════════════════════════
-    // Global Atmosphere (Clouds)
-    // ═══════════════════════════════════════════════════════════
-    ImGui::Spacing();
-    if (UIWidgets::BeginSection("Global Atmosphere (Clouds)", ImVec4(0.5f, 0.6f, 0.7f, 1.0f))) {
-        NishitaSkyParams cloudParams = world.getNishitaParams();
-        bool cloudParamsChanged = false;
-
-        bool cloudsEnabled = cloudParams.clouds_enabled != 0;
-        if (ImGui::Checkbox("Enable Volumetric Clouds", &cloudsEnabled)) {
-            cloudParams.clouds_enabled = cloudsEnabled ? 1 : 0;
-            cloudParamsChanged = true;
-        }
-        UIWidgets::HelpMarker("Render volumetric clouds over any sky model.\nNote: High Performance Cost!");
-
-        if (cloudParams.clouds_enabled) {
-            ImGui::Spacing();
-            
-            // === CLOUD QUALITY (Performance) ===
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Quality:");
-            static int quality_preset = 0; // Normal
-            const char* quality_presets[] = { "Fast Preview", "Low", "Normal", "High", "Ultra" };
-            float quality_values[] = { 0.25f, 0.5f, 1.0f, 1.5f, 2.5f };
-            
-            ImGui::PushItemWidth(120);
-            if (ImGui::Combo("##CloudQuality", &quality_preset, quality_presets, IM_ARRAYSIZE(quality_presets))) {
-                cloudParams.cloud_quality = quality_values[quality_preset];
-                cloudParamsChanged = true;
-            }
-            ImGui::PopItemWidth();
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f-%.0f steps)", 
-                48.0f * cloudParams.cloud_quality, 
-                96.0f * cloudParams.cloud_quality);
-            UIWidgets::HelpMarker("Lower quality = faster render\nHigher quality = better details");
-            
-            ImGui::Spacing();
-            
-            // === WEATHER PRESETS (Combo Box) ===
-            static int weather_preset_index = 7; // Default to Custom
-            const char* weather_presets[] = { 
-                "Clear Sky", 
-                "Cirrus (Wispy)",
-                "Cumulus (Puffy)",
-                "Stratocumulus",
-                "Overcast", 
-                "Cumulonimbus (Storm)",
-                "Fog/Low Clouds",
-                "Custom" 
-            };
-            
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Weather Type:");
-            ImGui::PushItemWidth(-1);
-            if (ImGui::Combo("##WeatherType", &weather_preset_index, weather_presets, IM_ARRAYSIZE(weather_presets))) {
-                switch (weather_preset_index) {
-                    case 0: // Clear Sky
-                        cloudParams.clouds_enabled = 0;
-                        cloudParamsChanged = true;
-                        break;
-                    case 1: // Cirrus (Wispy high clouds) - VERY THIN layer
-                        cloudParams.cloud_height_min = 8000.0f;   // 8km - high altitude
-                        cloudParams.cloud_height_max = 8500.0f;   // Only 500m thick!
-                        cloudParams.cloud_scale = 15.0f;          // Very stretched/wispy
-                        cloudParams.cloud_coverage = 0.35f;       // Sparse
-                        cloudParams.cloud_density = 0.15f;        // Very transparent
-                        cloudParamsChanged = true;
-                        break;
-                    case 2: // Cumulus (Classic puffy clouds)
-                        cloudParams.cloud_height_min = 1000.0f;
-                        cloudParams.cloud_height_max = 3000.0f;
-                        cloudParams.cloud_scale = 3.0f;
-                        cloudParams.cloud_coverage = 0.4f;
-                        cloudParams.cloud_density = 1.5f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 3: // Stratocumulus (Layered puffy)
-                        cloudParams.cloud_height_min = 500.0f;
-                        cloudParams.cloud_height_max = 2000.0f;
-                        cloudParams.cloud_scale = 2.0f;
-                        cloudParams.cloud_coverage = 0.88f;
-                        cloudParams.cloud_density = 1.2f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 4: // Overcast (Stratus)
-                        cloudParams.cloud_height_min = 200.0f;
-                        cloudParams.cloud_height_max = 600.0f;
-                        cloudParams.cloud_scale = 0.5f;
-                        cloudParams.cloud_coverage = 0.9f;
-                        cloudParams.cloud_density = 2.5f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 5: // Cumulonimbus (Storm/Rain clouds)
-                        cloudParams.cloud_height_min = 500.0f;
-                        cloudParams.cloud_height_max = 10000.0f;
-                        cloudParams.cloud_scale = 5.0f;
-                        cloudParams.cloud_coverage = 0.9f;
-                        cloudParams.cloud_density = 4.0f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 6: // Fog/Low Clouds
-                        cloudParams.cloud_height_min = 0.0f;
-                        cloudParams.cloud_height_max = 200.0f;
-                        cloudParams.cloud_scale = 0.3f;
-                        cloudParams.cloud_coverage = 0.9f;
-                        cloudParams.cloud_density = 3.0f;
-                        cloudParamsChanged = true;
-                        break;
-                    case 7: // Custom
-                        break;
-                }
-            }
-            ImGui::PopItemWidth();
-            UIWidgets::HelpMarker("Cloud type presets:\n"
-                "- Cirrus: High wispy clouds\n"
-                "- Cumulus: Classic puffy clouds\n"
-                "- Stratocumulus: Layered clouds\n"
-                "- Overcast: Gray flat sky\n"
-                "- Cumulonimbus: Towering storm clouds\n"
-                "- Fog: Ground-level clouds");
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            
-            // Show detailed controls in a collapsible section or when Custom is selected
-            bool show_details = (weather_preset_index == 7); // Custom mode
-            
-            if (show_details || ImGui::CollapsingHeader("Cloud Details")) {
-                // Coverage
-                if (ImGui::SliderFloat("Coverage", &cloudParams.cloud_coverage, 0.0f, 1.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7; // Switch to Custom when manually editing
-                }
-                UIWidgets::HelpMarker("Cloud coverage (0 = clear sky, 1 = overcast)");
-
-                // Density
-                if (ImGui::DragFloat("Density", &cloudParams.cloud_density, 0.05f, 0.0f, 10.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                UIWidgets::HelpMarker("Cloud opacity multiplier (higher = more opaque clouds)");
-                
-                // Scale
-                if (ImGui::DragFloat("Scale", &cloudParams.cloud_scale, 0.1f, 0.1f, 100.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    weather_preset_index = 7;
-                }
-                UIWidgets::HelpMarker("Cloud size.\nHigher = Larger clouds\nLower = Smaller, detailed clouds");
-
-                // Wind / Seed Offsets
-                if (ImGui::DragFloat("Offset X (Wind)", &cloudParams.cloud_offset_x, 10.0f, -100000.0f, 100000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                }
-                if (ImGui::DragFloat("Offset Z (Wind)", &cloudParams.cloud_offset_z, 10.0f, -100000.0f, 100000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Shift cloud pattern for variety or wind animation");
-            }
-            
-            // ═══════════════════════════════════════════════════════════
-            // CLOUD LIGHTING SETTINGS
-            // ═══════════════════════════════════════════════════════════
-            if (ImGui::CollapsingHeader("Cloud Lighting")) {
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Self-Shadowing:");
-                
-                // Light Steps (0 = disabled for performance)
-                if (ImGui::SliderInt("Light Steps", &cloudParams.cloud_light_steps, 0, 12)) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Number of light marching steps.\n0 = Disabled (fast)\n4-6 = Normal\n8-12 = High quality");
-                
-                // Shadow Strength
-                if (ImGui::SliderFloat("Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 2.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Cloud self-shadowing intensity.\n0 = No shadows\n1 = Normal\n2 = Dark, dramatic shadows");
-                
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Lighting Effects:");
-                
-                // Silver Lining
-                if (ImGui::SliderFloat("Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 3.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Bright rim effect when backlit by sun.\n0 = Off\n1 = Normal\n2+ = Strong glow");
-                
-                // Ambient Strength
-                if (ImGui::SliderFloat("Ambient Light", &cloudParams.cloud_ambient_strength, 0.0f, 2.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Sky ambient light contribution.\nLower = Darker shadows\nHigher = Softer look");
-                
-                // Absorption
-                if (ImGui::SliderFloat("Absorption", &cloudParams.cloud_absorption, 0.2f, 3.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                }
-                UIWidgets::HelpMarker("Light absorption rate.\n0.5 = Thin, transparent\n1.0 = Normal\n2.0 = Thick, opaque");
-            }
-
-            // === LAYER 1 ALTITUDE ===
-            if (ImGui::TreeNode("Layer 1 Altitude")) {
-                ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "Layer 1: %.0f - %.0f m (%.0f m thick)", 
-                    cloudParams.cloud_height_min, cloudParams.cloud_height_max,
-                    cloudParams.cloud_height_max - cloudParams.cloud_height_min);
-                
-                if (ImGui::DragFloat("Min Height##L1", &cloudParams.cloud_height_min, 10.0f, 0.0f, 20000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                }
-                if (ImGui::DragFloat("Max Height##L1", &cloudParams.cloud_height_max, 10.0f, 0.0f, 20000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                }
-                ImGui::TreePop();
-            }
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            
-            // ==================================================================
-            // CLOUD LAYER 2 (Secondary/High Altitude)
-            // ==================================================================
-            bool layer2Enabled = cloudParams.cloud_layer2_enabled != 0;
-            if (ImGui::Checkbox("Enable Cloud Layer 2", &layer2Enabled)) {
-                cloudParams.cloud_layer2_enabled = layer2Enabled ? 1 : 0;
-                cloudParamsChanged = true;
-            }
-            UIWidgets::HelpMarker("Enable a second cloud layer.\nUseful for high cirrus above low cumulus.");
-            
-            if (cloudParams.cloud_layer2_enabled) {
-                ImGui::Indent();
-                ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2 Settings:");
-                
-                // Layer 2 presets
-                static int layer2_preset = 0;
-                const char* layer2_presets[] = { "Custom", "High Cirrus", "Mid Stratus", "Low Fog" };
-                if (ImGui::Combo("Layer 2 Preset", &layer2_preset, layer2_presets, IM_ARRAYSIZE(layer2_presets))) {
-                    switch (layer2_preset) {
-                        case 1: // High Cirrus
-                            cloudParams.cloud2_height_min = 8000.0f;
-                            cloudParams.cloud2_height_max = 9000.0f;
-                            cloudParams.cloud2_scale = 12.0f;
-                            cloudParams.cloud2_coverage = 0.25f;
-                            cloudParams.cloud2_density = 0.2f;
-                            cloudParamsChanged = true;
-                            break;
-                        case 2: // Mid Stratus
-                            cloudParams.cloud2_height_min = 2500.0f;
-                            cloudParams.cloud2_height_max = 3500.0f;
-                            cloudParams.cloud2_scale = 3.0f;
-                            cloudParams.cloud2_coverage = 0.5f;
-                            cloudParams.cloud2_density = 0.8f;
-                            cloudParamsChanged = true;
-                            break;
-                        case 3: // Low Fog
-                            cloudParams.cloud2_height_min = 0.0f;
-                            cloudParams.cloud2_height_max = 150.0f;
-                            cloudParams.cloud2_scale = 0.5f;
-                            cloudParams.cloud2_coverage = 0.7f;
-                            cloudParams.cloud2_density = 2.0f;
-                            cloudParamsChanged = true;
-                            break;
-                    }
-                }
-                
-                if (ImGui::SliderFloat("Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 1.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                if (ImGui::DragFloat("Density##L2", &cloudParams.cloud2_density, 0.05f, 0.0f, 5.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                if (ImGui::DragFloat("Scale##L2", &cloudParams.cloud2_scale, 0.1f, 0.1f, 50.0f, "%.2f")) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                
-                ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2: %.0f - %.0f m", 
-                    cloudParams.cloud2_height_min, cloudParams.cloud2_height_max);
-                if (ImGui::DragFloat("Min Height##L2", &cloudParams.cloud2_height_min, 50.0f, 0.0f, 20000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                if (ImGui::DragFloat("Max Height##L2", &cloudParams.cloud2_height_max, 50.0f, 0.0f, 20000.0f, "%.0f m")) {
-                    cloudParamsChanged = true;
-                    layer2_preset = 0;
-                }
-                
-                ImGui::Unindent();
-            }
-            
-            ImGui::Spacing();
-            
-            // Camera altitude info
-            if (ImGui::TreeNode("Camera Altitude Info")) {
-                ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.5f, 1.0f), "Camera Y: %.0f m", cloudParams.altitude);
-                
-                if (cloudParams.altitude >= cloudParams.cloud_height_min && 
-                    cloudParams.altitude <= cloudParams.cloud_height_max) {
-                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Camera is INSIDE Layer 1!");
-                }
-              
-                
-                ImGui::TreePop();
-            }
-        }
-        UIWidgets::EndSection();
-
-        if (cloudParamsChanged) {
-            world.setNishitaParams(cloudParams);
-            changed = true;
-        }
-    }
-
-    // ═══════════════════════════════════════════════════════════
-    // Apply Changes
-    // ═══════════════════════════════════════════════════════════
-    if (changed) {
-        ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setWorld(world.getGPUData());
-            ctx.optix_gpu_ptr->resetAccumulation();
-        }
-    }
-}
-
+// drawWorldContent moved to scene_ui_world.cpp
 
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 {
@@ -1408,6 +1277,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
     // Remove NoResize flag
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    // Add frame styling
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
 
     if (ImGui::Begin("Properties", nullptr, flags))
     {
@@ -1658,20 +1531,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             // -------------------------------------------------------------
             if (ImGui::BeginTabItem("World")) {
                 drawWorldContent(ctx);
-                ImGui::Separator();
-                drawLightsContent(ctx);
+
                 ImGui::EndTabItem();
             }
 
-            // -------------------------------------------------------------
-            // TAB: CAMERA (Camera params, PostFX)
-            // -------------------------------------------------------------
-            if (ImGui::BeginTabItem("Camera")) {
-                drawCameraContent(ctx);
-                ImGui::Spacing();
-                drawToneMapContent(ctx);
-                ImGui::EndTabItem();
-            }
+            // NOTE: Camera tab removed - camera settings now in Scene Edit > Selection Properties
 
             // -------------------------------------------------------------
             // TAB: SCENE (Hierarchy)
@@ -1683,6 +1547,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             }
             if (ImGui::BeginTabItem("Scene Edit", nullptr, tab_flags)) {
                 drawSceneHierarchy(ctx);
+                // Material Editor is now drawn inside drawSceneHierarchy
                 ImGui::EndTabItem();
             }
 
@@ -1706,6 +1571,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         }
     }
     ImGui::End();
+    ImGui::PopStyleColor(); // Border
+    ImGui::PopStyleVar();   // BorderSize
 }
 
 // Main Menu Bar implementation moved to separate file: scene_ui_menu.hpp check end of file
@@ -1714,436 +1581,556 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
 void SceneUI::draw(UIContext& ctx)
 {
-    // 1. Draw Main Menu Bar (Top)
-    drawMainMenuBar(ctx);
+    ImGuiIO& io = ImGui::GetIO();
+    float screen_x = io.DisplaySize.x;
+    float screen_y = io.DisplaySize.y;
 
+    drawMainMenuBar(ctx);
+    handleEditorShortcuts(ctx);
+
+    float left_offset = 0.0f;
+    drawPanels(ctx);
+    left_offset = showSidePanel ? side_panel_width : 0.0f;
+
+    drawStatusAndBottom(ctx, screen_x, screen_y, left_offset);
+
+    bool gizmo_hit = drawOverlays(ctx);
+    drawSelectionGizmos(ctx);
+
+    handleSceneInteraction(ctx, gizmo_hit);
+    processDeferredSceneUpdates(ctx);
+    drawAuxWindows(ctx);
+
+    extern void DrawRenderWindow(UIContext & ctx);
+    DrawRenderWindow(ctx);
+}
+void SceneUI::handleEditorShortcuts(UIContext& ctx)
+{
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (!io.WantCaptureKeyboard && ctx.selection.hasSelection()) {
+        handleDeleteShortcut(ctx);
+    }
+
+    // F12 Render
+    if (ImGui::IsKeyPressed(ImGuiKey_F12)) {
+        extern bool show_render_window;
+        show_render_window = !show_render_window;
+        if (show_render_window) ctx.start_render = true;
+    }
+
+    // Undo / Redo
+    if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift) {
+        if (history.canUndo()) {
+            history.undo(ctx);
+            rebuildMeshCache(ctx.scene.world.objects);
+            ctx.selection.updatePositionFromSelection();
+            ctx.selection.selected.has_cached_aabb = false;
+        }
+    }
+
+    if ((ImGui::IsKeyPressed(ImGuiKey_Y) && io.KeyCtrl) ||
+        (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && io.KeyShift)) {
+        if (history.canRedo()) {
+            history.redo(ctx);
+            rebuildMeshCache(ctx.scene.world.objects);
+            ctx.selection.updatePositionFromSelection();
+            ctx.selection.selected.has_cached_aabb = false;
+        }
+    }
+}
+void SceneUI::drawPanels(UIContext& ctx)
+{
     ImGuiIO& io = ImGui::GetIO();
     float screen_y = io.DisplaySize.y;
-    float screen_x = io.DisplaySize.x;
-    
-    // =========================================================================
-    // INPUT HANDLING - Delete Selected Object/Light (Del or X key)
-    // =========================================================================
-    if (!io.WantCaptureKeyboard && ctx.selection.hasSelection()) {
-        bool delete_pressed = ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X);
-        
-        if (delete_pressed) {
-            bool deleted = false;
-            
-            // Handle Light deletion
-            if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light) {
-                auto light_to_delete = ctx.selection.selected.light;
-                auto& lights = ctx.scene.lights;
-                auto it = std::find(lights.begin(), lights.end(), light_to_delete);
-                if (it != lights.end()) {
-                    history.record(std::make_unique<DeleteLightCommand>(light_to_delete));
-                    lights.erase(it);
-                    deleted = true;
-                    
-                    // Update GPU
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
-                    ctx.renderer.resetCPUAccumulation();
-                    
-                    SCENE_LOG_INFO("Deleted Light");
-                }
-            }
-            // Handle Object deletion
-            else if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
-                std::string deleted_name = ctx.selection.selected.name;
-                
-                // Find and remove the object(s) from scene
-                auto& objects = ctx.scene.world.objects;
-                size_t removed_count = 0;
-                
-                objects.erase(
-                    std::remove_if(objects.begin(), objects.end(),
-                        [&deleted_name, &removed_count](const std::shared_ptr<Hittable>& obj) {
-                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                            if (tri && tri->nodeName == deleted_name) {
-                                removed_count++;
-                                return true;
-                            }
-                            return false;
-                        }),
-                    objects.end());
-                
-                if (removed_count > 0) {
-                    deleted = true;
-                    
-                    // Track deletion in project data
-                    auto& proj = g_ProjectManager.getProjectData();
-                    
-                    // Find which imported model this object belongs to
-                    for (auto& model : proj.imported_models) {
-                        for (const auto& inst : model.objects) {
-                            if (inst.node_name == deleted_name) {
-                                // Add to deleted list if not already there
-                                if (std::find(model.deleted_objects.begin(), model.deleted_objects.end(), deleted_name) 
-                                    == model.deleted_objects.end()) {
-                                    model.deleted_objects.push_back(deleted_name);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // Remove from procedural objects if applicable
-                    auto& procs = proj.procedural_objects;
-                    procs.erase(
-                        std::remove_if(procs.begin(), procs.end(),
-                            [&deleted_name](const ProceduralObjectData& p) {
-                                return p.display_name == deleted_name;
-                            }),
-                        procs.end());
-                    
-                    // Mark project as modified
-                    g_ProjectManager.markModified();
-                    
-                    // Rebuild caches and acceleration structures
-                    rebuildMeshCache(ctx.scene.world.objects);
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                    ctx.renderer.resetCPUAccumulation();
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
-                    
-                    SCENE_LOG_INFO("Deleted: " + deleted_name + " (" + std::to_string(removed_count) + " triangles)");
-                }
-            }
-            
-            if (deleted) {
-                ctx.selection.clearSelection();
-            }
-        }
-    }
-    
-    // Style adjustments for panels
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.13f, panel_alpha));
 
-    // 2. Draw Side Panel (LEFT)
-    float layout_left_offset = 0.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+        ImVec4(0.1f, 0.1f, 0.13f, panel_alpha));
+
     if (showSidePanel) {
         drawRenderSettingsPanel(ctx, screen_y);
-        layout_left_offset = side_panel_width; // Updated by resize in drawRenderSettingsPanel
-    }
-
-    // ---------------------------------------------------------
-    // STATUS BAR (Bottom Strip)
-    // ---------------------------------------------------------
-    float status_bar_height = 24.0f;
-    
-    ImGui::SetNextWindowPos(ImVec2(0, screen_y - status_bar_height));
-    ImGui::SetNextWindowSize(ImVec2(screen_x, status_bar_height));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 2));
-    
-    if (ImGui::Begin("StatusBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoBringToFrontOnFocus)) {
-        
-        // Toggle Buttons
-        extern bool show_animation_panel;
-        
-        // Timeline Toggle
-        bool anim_active = show_animation_panel;
-        if (UIWidgets::StateButton(anim_active ? "[Timeline]" : "Timeline", anim_active, 
-            ImVec4(0.3f, 0.6f, 1.0f, 1.0f), ImVec4(0.2f, 0.2f, 0.2f, 1.0f), ImVec2(80, 20))) {
-            show_animation_panel = !show_animation_panel;
-            // Auto switch tab if opening
-            if (show_animation_panel) show_scene_log = false; // Optional: Single mode? Or just focus tab logic implies we might want logic.
-            // Let's keep them separate but maybe auto-hide log if timeline opens? 
-            // User requested "Minimize to Icon", so they toggle validity.
-        }
-        
-        ImGui::SameLine();
-        
-        // Console Toggle
-        bool log_active = show_scene_log;
-        if (UIWidgets::StateButton(log_active ? "[Console]" : "Console", log_active, 
-            ImVec4(0.3f, 0.6f, 1.0f, 1.0f), ImVec4(0.2f, 0.2f, 0.2f, 1.0f), ImVec2(80, 20))) {
-            show_scene_log = !show_scene_log;
-            if (show_scene_log) show_animation_panel = false; // Toggle behavior (one at a time preferable for bottom panel)
-        }
-        
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-        
-        // Status Text
-        if (ctx.scene.initialized) {
-            ImGui::Text("Scene: %d Objects, %d Lights", (int)ctx.scene.world.objects.size(), (int)ctx.scene.lights.size());
-        } else {
-            ImGui::Text("Ready");
-        }
-        
-        // Right side: Progress
-        if (rendering_in_progress) {
-             float p = ctx.render_settings.render_progress * 100.0f;
-             std::string prog = "Rendering: " + std::to_string((int)p) + "%";
-             float w = ImGui::CalcTextSize(prog.c_str()).x;
-             ImGui::SameLine(screen_x - w - 20);
-             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", prog.c_str());
-        }
-
-    }
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar(2);
-
-    // ---------------------------------------------------------
-    // BOTTOM PANEL (Timeline / Console)
-    // ---------------------------------------------------------
-    // Render ONLY if visible
-    extern bool show_animation_panel;
-    bool show_bottom = (show_animation_panel || show_scene_log);
-    float bottom_height = 120.0f;
-    
-    // Safety: If both are false, show_bottom is false, no panel drawn.
-    // If one is true, panel drawn above status bar.
-    
-    if (show_bottom) {
-        ImGui::SetNextWindowPos(ImVec2(layout_left_offset, screen_y - bottom_height - status_bar_height), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(screen_x - layout_left_offset, bottom_height), ImGuiCond_Always);
-        
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f)); // Slightly opaque
-        if (ImGui::Begin("BottomPanel", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) {
-            
-            if (ImGui::BeginTabBar("BottomTabs")) {
-                
-                // Tab 1: Timeline
-                // Only show tab if enabled (or always show logic? "Toggle" usually implies visibility)
-                // If we want "One Bottom Panel" that has tabs, and buttons toggle the PANEL, then we show tabs.
-                // But the user buttons were "Timeline" and "Console".
-                // If I click "Timeline", I expect Timeline tab to be active.
-                
-                // Logic: If show_animation_panel is TRUE, we show the tab.
-                // NOTE: We forced single-toggle in the status bar (clicking one closes other).
-                // So effectively this is a context switcher.
-                
-                if (show_animation_panel) {
-                     if (ImGui::BeginTabItem("Timeline", &show_animation_panel)) { 
-                        drawTimelineContent(ctx);
-                        ImGui::EndTabItem();
-                    }
-                }
-                
-                if (show_scene_log) {
-                    if (ImGui::BeginTabItem("Console", &show_scene_log)) {
-                        drawLogPanelEmbedded();
-                        ImGui::EndTabItem();
-                    }
-                }
-                
-                ImGui::EndTabBar();
-            }
-        }
-        ImGui::End();
-        ImGui::PopStyleColor();
-    }
-    
-    // Grid Drawing removed (Moved to Renderer for true 3D depth)
-
-
-    // Light Gizmos & Selection (Drawn here to handle selection priority)
-    bool gizmo_hit = false;
-    if (ctx.scene.camera && ctx.selection.show_gizmo) {
-        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
-        ImGuiIO& io = ImGui::GetIO();
-        Camera& cam = *ctx.scene.camera;
-        
-        // Camera Projection Setup
-        Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
-        Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
-        Vec3 cam_up = cam_right.cross(cam_forward).normalize();
-        float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
-        float tan_half_fov = tanf(fov_rad * 0.5f);
-        float aspect = io.DisplaySize.x / io.DisplaySize.y; 
-
-        auto Project = [&](const Vec3& p) -> ImVec2 {
-            Vec3 to_point = p - cam.lookfrom;
-            float depth = to_point.dot(cam_forward);
-            if (depth <= 0.1f) return ImVec2(-10000, -10000); 
-
-            float local_x = to_point.dot(cam_right);
-            float local_y = to_point.dot(cam_up);
-            float half_height = depth * tan_half_fov;
-            float half_width = half_height * aspect;
-            
-            return ImVec2(
-                ((local_x / half_width) * 0.5f + 0.5f) * io.DisplaySize.x,
-                (0.5f - (local_y / half_height) * 0.5f) * io.DisplaySize.y
-            );
-        };
-        
-        auto IsOnScreen = [](const ImVec2& v) { return v.x > -5000; };
-
-        for (auto& light : ctx.scene.lights) {
-            bool is_selected = (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light == light);
-            ImU32 col = IM_COL32(255, 255, 100, 180);
-            if (is_selected) col = IM_COL32(255, 100, 50, 255); 
-
-            Vec3 pos = light->position;
-            ImVec2 center = Project(pos);
-            bool visible = IsOnScreen(center);
-            
-            if (visible) {
-                 // Mouse Interaction (Priority Selection)
-                 // Radius increased to 20px for easier selection
-                 float d = sqrtf(powf(io.MousePos.x - center.x, 2) + powf(io.MousePos.y - center.y, 2));
-                 
-                 // Note: We check WantCaptureMouse usually to avoid clicking through UI windows, 
-                 // but since Gizmos are overlays, we want to click them. 
-                 // Typically if hovering a button, WantCaptureMouse is true.
-                 // We only want to select if NOT hovering other interactive ImGui elements.
-                 
-                 if (d < 20.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver()) {
-                      ctx.selection.selectLight(light);
-                      gizmo_hit = true;
-                 }
-                 
-                 // Draw Name if Selected
-                 if (is_selected) {
-                     std::string label = light->nodeName.empty() ? "Light" : light->nodeName;
-                     draw_list->AddText(ImVec2(center.x + 12, center.y - 12), col, label.c_str());
-                 }
-            }
-
-            if (light->type() == LightType::Point) {
-                // Point: Smaller Diamond + Emissive Core
-                float r = 0.2f; // Smaller radius
-                Vec3 pts[6] = {
-                    pos + Vec3(0, r, 0), pos + Vec3(0, -r, 0),
-                    pos + Vec3(r, 0, 0), pos + Vec3(-r, 0, 0),
-                    pos + Vec3(0, 0, r), pos + Vec3(0, 0, -r)
-                };
-                ImVec2 s_pts[6];
-                for(int i=0; i<6; ++i) s_pts[i] = Project(pts[i]);
-
-                if (visible) {
-                    draw_list->AddCircleFilled(center, 4.0f, IM_COL32(255, 255, 200, 200)); // Emissive Core
-                    // Wireframe
-                    draw_list->AddLine(s_pts[2], s_pts[4], col); draw_list->AddLine(s_pts[4], s_pts[3], col);
-                    draw_list->AddLine(s_pts[3], s_pts[5], col); draw_list->AddLine(s_pts[5], s_pts[2], col);
-                    draw_list->AddLine(s_pts[0], s_pts[2], col); draw_list->AddLine(s_pts[0], s_pts[3], col);
-                    draw_list->AddLine(s_pts[0], s_pts[4], col); draw_list->AddLine(s_pts[0], s_pts[5], col);
-                    draw_list->AddLine(s_pts[1], s_pts[2], col); draw_list->AddLine(s_pts[1], s_pts[3], col);
-                    draw_list->AddLine(s_pts[1], s_pts[4], col); draw_list->AddLine(s_pts[1], s_pts[5], col);
-                }
-            }
-            else if (light->type() == LightType::Directional) {
-                // Directional: Sun symbol + Arrow
-                if (visible) {
-                    draw_list->AddCircle(center, 8.0f, col, 0, 2.0f); // Sun Body
-                    // Rays
-                    for(int i=0; i<8; ++i) {
-                         float angle = i * (6.28f/8.0f);
-                         ImVec2 dir(cosf(angle), sinf(angle));
-                         draw_list->AddLine(
-                            ImVec2(center.x + dir.x*12, center.y + dir.y*12),
-                            ImVec2(center.x + dir.x*18, center.y + dir.y*18),
-                            col
-                         );
-                    }
-                    // Direction Arrow
-                    auto dl = std::dynamic_pointer_cast<DirectionalLight>(light);
-                    if (dl) {
-                         Vec3 end3d = pos + dl->direction.normalize() * 3.0f; // Long arrow
-                         ImVec2 end = Project(end3d);
-                         if (IsOnScreen(end)) {
-                            draw_list->AddLine(center, end, col, 2.0f);
-                            draw_list->AddCircleFilled(end, 3.0f, col); // Arrow tip
-                         }
-                    }
-                }
-            }
-            // Keep Area/Spot simple or similar to before, strictly projection for now
-            else if (light->type() == LightType::Area && visible) {
-                 // Area: Rectangle Wireframe
-                 auto al = std::dynamic_pointer_cast<AreaLight>(light);
-                 if (al) {
-                     Vec3 u = al->getU();
-                     Vec3 v = al->getV();
-                     // 4 corners
-                     Vec3 c1 = pos;
-                     Vec3 c2 = pos + u;
-                     Vec3 c3 = pos + u + v;
-                     Vec3 c4 = pos + v;
-                     
-                     ImVec2 sc1 = Project(c1);
-                     ImVec2 sc2 = Project(c2);
-                     ImVec2 sc3 = Project(c3);
-                     ImVec2 sc4 = Project(c4);
-                     
-                     draw_list->AddLine(sc1, sc2, col);
-                     draw_list->AddLine(sc2, sc3, col);
-                     draw_list->AddLine(sc3, sc4, col);
-                     draw_list->AddLine(sc4, sc1, col);
-                     // Diagonal for visibility
-                     draw_list->AddLine(sc1, sc3, col, 1.0f);
-                 } else {
-                     draw_list->AddText(center, col, "[#]");
-                 }
-            }
-            else if (light->type() == LightType::Spot && visible) {
-                 // Spot: Cone Wireframe
-                 auto sl = std::dynamic_pointer_cast<SpotLight>(light);
-                 if (sl) {
-                     Vec3 dir = sl->direction.normalize();
-                     float len = 3.0f; // Cone length
-                     float radius = len * tanf(sl->getAngleDegrees() * 3.14159f / 360.0f); // Half angle in radians
-                     
-                     // Base center
-                     Vec3 base_center = pos + dir * len;
-                     
-                     // Create basis for base circle
-                     Vec3 right = (std::abs(dir.y) > 0.9f) ? Vec3(1,0,0) : dir.cross(Vec3(0,1,0)).normalize();
-                     Vec3 up = right.cross(dir).normalize();
-                     
-                     // Draw circle base + lines to tip
-                     const int segs = 12;
-                     ImVec2 last_p;
-                     for (int i=0; i<=segs; ++i) {
-                         float ang = i * (6.28f / segs);
-                         Vec3 p = base_center + right * (cosf(ang) * radius) + up * (sinf(ang) * radius);
-                         ImVec2 sp = Project(p);
-                         
-                         // Line to tip
-                         if (i < segs && IsOnScreen(sp)) draw_list->AddLine(center, sp, col);
-                         
-                         // Circle edge
-                         if (i > 0 && IsOnScreen(sp) && IsOnScreen(last_p)) draw_list->AddLine(last_p, sp, col);
-                         last_p = sp;
-                     }
-                 } else {
-                     draw_list->AddText(center, col, "\\/");
-                 }
-            }
-        }
-    }
-
-    // Draw Camera Gizmos (for multi-camera scenes)
-    drawCameraGizmos(ctx);
-
-    // Draw Selection Bounding Box and Transform Gizmo (works on ALL tabs now)
-    if (ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera) {
-        drawSelectionBoundingBox(ctx);
-        drawTransformGizmo(ctx);
-    }
-
-    // Scene Interaction (Picking) - works on ALL tabs
-    if (ctx.scene.initialized && !gizmo_hit) {
-        handleMouseSelection(ctx);
-        handleMarqueeSelection(ctx);  // Box selection with right-click drag
     }
 
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
+}
+void SceneUI::drawStatusAndBottom(UIContext& ctx,
+    float screen_x,
+    float screen_y,
+    float left_offset)
+{
+    // ---------------- STATUS BAR ----------------
+    float status_bar_height = 24.0f;
 
-    // Help / Controls Window
+    ImGui::SetNextWindowPos(ImVec2(0, screen_y - status_bar_height));
+    ImGui::SetNextWindowSize(ImVec2(screen_x, status_bar_height));
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 2));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg,
+        ImVec4(0.08f, 0.08f, 0.08f, 1.0f));
+
+    if (ImGui::Begin("StatusBar", nullptr,
+        ImGuiWindowFlags_NoDecoration |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoBringToFrontOnFocus))
+    {
+        extern bool show_animation_panel;
+        bool anim_active = show_animation_panel;
+
+        if (UIWidgets::StateButton(
+            anim_active ? "[Timeline]" : "Timeline",
+            anim_active,
+            ImVec4(0.3f, 0.6f, 1.0f, 1.0f),
+            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
+            ImVec2(80, 20)))
+        {
+            show_animation_panel = !show_animation_panel;
+            if (show_animation_panel) show_scene_log = false;
+        }
+
+        ImGui::SameLine();
+
+        bool log_active = show_scene_log;
+        if (UIWidgets::StateButton(
+            log_active ? "[Console]" : "Console",
+            log_active,
+            ImVec4(0.3f, 0.6f, 1.0f, 1.0f),
+            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
+            ImVec2(80, 20)))
+        {
+            show_scene_log = !show_scene_log;
+            if (show_scene_log) show_animation_panel = false;
+        }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+
+        if (ctx.scene.initialized) {
+            ImGui::Text("Scene: %d Objects, %d Lights",
+                (int)ctx.scene.world.objects.size(),
+                (int)ctx.scene.lights.size());
+        }
+        else {
+            ImGui::Text("Ready");
+        }
+
+        if (rendering_in_progress) {
+            float p = ctx.render_settings.render_progress * 100.0f;
+            std::string prog = "Rendering: " + std::to_string((int)p) + "%";
+            float w = ImGui::CalcTextSize(prog.c_str()).x;
+            ImGui::SameLine(screen_x - w - 20);
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", prog.c_str());
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+
+    // ---------------- BOTTOM PANEL (Resizable) ----------------
+    extern bool show_animation_panel;
+    bool show_bottom = (show_animation_panel || show_scene_log);
+    if (!show_bottom) return;
+
+    // Static height that persists across frames (user can resize)
+    static float bottom_height = 280.0f;
+    const float min_height = 100.0f;
+    const float max_height = screen_y * 0.6f;  // Max 60% of screen
+    const float resize_handle_height = 6.0f;
+    
+    // Clamp height to valid range
+    bottom_height = std::clamp(bottom_height, min_height, max_height);
+
+    // Calculate panel position
+    float panel_top = screen_y - bottom_height - status_bar_height;
+    
+    // --- RESIZE HANDLE (invisible button at top edge) ---
+    ImGui::SetNextWindowPos(ImVec2(0, panel_top - resize_handle_height / 2), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(screen_x, resize_handle_height), ImGuiCond_Always);
+    
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));  // Transparent
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    
+    if (ImGui::Begin("##BottomPanelResizer", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoSavedSettings))
+    {
+        // Draw a subtle resize indicator line
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        ImVec2 p1(0, panel_top);
+        ImVec2 p2(screen_x, panel_top);
+        draw_list->AddLine(p1, p2, IM_COL32(100, 100, 100, 180), 2.0f);
+        
+        // Handle resize dragging
+        ImGui::InvisibleButton("##ResizeHandle", ImVec2(screen_x, resize_handle_height));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        }
+        if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            bottom_height -= ImGui::GetIO().MouseDelta.y;
+            bottom_height = std::clamp(bottom_height, min_height, max_height);
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+
+    // --- MAIN BOTTOM PANEL ---
+    ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(screen_x, bottom_height), ImGuiCond_Always);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+
+    if (ImGui::Begin("BottomPanel", nullptr,
+        ImGuiWindowFlags_NoTitleBar |
+        ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoCollapse))
+    {
+        if (ImGui::BeginTabBar("BottomTabs")) {
+
+            if (show_animation_panel) {
+                if (ImGui::BeginTabItem("Timeline", &show_animation_panel)) {
+                    drawTimelineContent(ctx);
+                    ImGui::EndTabItem();
+                }
+            }
+
+            if (show_scene_log) {
+                if (ImGui::BeginTabItem("Console", &show_scene_log)) {
+                    drawLogPanelEmbedded();
+                    ImGui::EndTabItem();
+                }
+            }
+
+            ImGui::EndTabBar();
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+bool SceneUI::drawOverlays(UIContext& ctx)
+{
+    bool gizmo_hit = false;
+
+    if (ctx.scene.camera && ctx.selection.show_gizmo) {
+        drawLightGizmos(ctx, gizmo_hit);
+    }
+
+    return gizmo_hit;
+}
+void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
+{
+    ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+    ImGuiIO& io = ImGui::GetIO();
+    Camera& cam = *ctx.scene.camera;
+
+    Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+    Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+
+    float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
+    float tan_half_fov = tanf(fov_rad * 0.5f);
+    float aspect = io.DisplaySize.x / io.DisplaySize.y;
+
+    auto Project = [&](const Vec3& p) -> ImVec2 {
+        Vec3 to_point = p - cam.lookfrom;
+        float depth = to_point.dot(cam_forward);
+        if (depth <= 0.1f) return ImVec2(-10000, -10000);
+
+        float local_x = to_point.dot(cam_right);
+        float local_y = to_point.dot(cam_up);
+
+        float half_h = depth * tan_half_fov;
+        float half_w = half_h * aspect;
+
+        return ImVec2(
+            ((local_x / half_w) * 0.5f + 0.5f) * io.DisplaySize.x,
+            (0.5f - (local_y / half_h) * 0.5f) * io.DisplaySize.y
+        );
+        };
+
+    auto IsOnScreen = [](const ImVec2& v) { return v.x > -5000; };
+
+    for (auto& light : ctx.scene.lights) {
+
+        bool selected =
+            (ctx.selection.selected.type == SelectableType::Light &&
+                ctx.selection.selected.light == light);
+
+        ImU32 col = selected
+            ? IM_COL32(255, 100, 50, 255)
+            : IM_COL32(255, 255, 100, 180);
+
+        Vec3 pos = light->position;
+        ImVec2 center = Project(pos);
+        bool visible = IsOnScreen(center);
+
+        if (!visible) continue;
+
+        // -------- PICKING --------
+        float dx = io.MousePos.x - center.x;
+        float dy = io.MousePos.y - center.y;
+        float d = sqrtf(dx * dx + dy * dy);
+
+        if (d < 20.0f && ImGui::IsMouseClicked(0) && !ImGuizmo::IsOver()) {
+            ctx.selection.selectLight(light);
+            gizmo_hit = true;
+        }
+
+        if (selected) {
+            std::string label = light->nodeName.empty() ? "Light" : light->nodeName;
+            draw_list->AddText(ImVec2(center.x + 12, center.y - 12), col, label.c_str());
+        }
+
+        // ================== DRAW BY TYPE ==================
+
+        // ---- POINT (Diamond) ----
+        if (light->type() == LightType::Point) {
+            float r = 0.2f;
+            Vec3 pts[6] = {
+                pos + Vec3(0, r, 0), pos + Vec3(0, -r, 0),
+                pos + Vec3(r, 0, 0), pos + Vec3(-r, 0, 0),
+                pos + Vec3(0, 0, r), pos + Vec3(0, 0, -r)
+            };
+
+            ImVec2 s[6];
+            for (int i = 0; i < 6; ++i) s[i] = Project(pts[i]);
+
+            draw_list->AddCircleFilled(center, 4.0f,
+                IM_COL32(255, 255, 200, 200));
+
+            draw_list->AddLine(s[2], s[4], col); draw_list->AddLine(s[4], s[3], col);
+            draw_list->AddLine(s[3], s[5], col); draw_list->AddLine(s[5], s[2], col);
+            draw_list->AddLine(s[0], s[2], col); draw_list->AddLine(s[0], s[3], col);
+            draw_list->AddLine(s[0], s[4], col); draw_list->AddLine(s[0], s[5], col);
+            draw_list->AddLine(s[1], s[2], col); draw_list->AddLine(s[1], s[3], col);
+            draw_list->AddLine(s[1], s[4], col); draw_list->AddLine(s[1], s[5], col);
+        }
+
+        // ---- DIRECTIONAL (Sun + Arrow) ----
+        else if (light->type() == LightType::Directional) {
+            draw_list->AddCircle(center, 8.0f, col, 0, 2.0f);
+
+            for (int i = 0; i < 8; ++i) {
+                float a = i * (6.28f / 8.0f);
+                ImVec2 dir(cosf(a), sinf(a));
+                draw_list->AddLine(
+                    ImVec2(center.x + dir.x * 12, center.y + dir.y * 12),
+                    ImVec2(center.x + dir.x * 18, center.y + dir.y * 18),
+                    col);
+            }
+
+            auto dl = std::dynamic_pointer_cast<DirectionalLight>(light);
+            if (dl) {
+                Vec3 end3d = pos + dl->direction.normalize() * 3.0f;
+                ImVec2 end = Project(end3d);
+                if (IsOnScreen(end)) {
+                    draw_list->AddLine(center, end, col, 2.0f);
+                    draw_list->AddCircleFilled(end, 3.0f, col);
+                }
+            }
+        }
+
+        // ---- AREA (Rectangle) ----
+        else if (light->type() == LightType::Area) {
+            auto al = std::dynamic_pointer_cast<AreaLight>(light);
+            if (!al) continue;
+
+            Vec3 u = al->getU();
+            Vec3 v = al->getV();
+
+            ImVec2 c1 = Project(pos);
+            ImVec2 c2 = Project(pos + u);
+            ImVec2 c3 = Project(pos + u + v);
+            ImVec2 c4 = Project(pos + v);
+
+            draw_list->AddLine(c1, c2, col);
+            draw_list->AddLine(c2, c3, col);
+            draw_list->AddLine(c3, c4, col);
+            draw_list->AddLine(c4, c1, col);
+            draw_list->AddLine(c1, c3, col, 1.0f);
+        }
+
+        // ---- SPOT (Cone) ----
+        else if (light->type() == LightType::Spot) {
+            auto sl = std::dynamic_pointer_cast<SpotLight>(light);
+            if (!sl) continue;
+
+            Vec3 dir = sl->direction.normalize();
+            float len = 3.0f;
+            float radius = len * tanf(sl->getAngleDegrees() * 3.14159f / 360.0f);
+
+            Vec3 base = pos + dir * len;
+            Vec3 right = (fabs(dir.y) > 0.9f) ? Vec3(1, 0, 0)
+                : dir.cross(Vec3(0, 1, 0)).normalize();
+            Vec3 up = right.cross(dir).normalize();
+
+            const int segs = 12;
+            ImVec2 last;
+            for (int i = 0; i <= segs; ++i) {
+                float a = i * (6.28f / segs);
+                Vec3 p = base + right * (cosf(a) * radius)
+                    + up * (sinf(a) * radius);
+
+                ImVec2 sp = Project(p);
+                if (i > 0 && IsOnScreen(sp) && IsOnScreen(last))
+                    draw_list->AddLine(last, sp, col);
+                if (i < segs && IsOnScreen(sp))
+                    draw_list->AddLine(center, sp, col);
+
+                last = sp;
+            }
+        }
+    }
+}
+
+
+bool SceneUI::deleteSelectedLight(UIContext& ctx)
+{
+    auto light = ctx.selection.selected.light;
+    if (!light) return false;
+
+    auto& lights = ctx.scene.lights;
+    auto it = std::find(lights.begin(), lights.end(), light);
+    if (it == lights.end()) return false;
+
+    history.record(std::make_unique<DeleteLightCommand>(light));
+    lights.erase(it);
+
+    // GPU + CPU reset
+    if (ctx.optix_gpu_ptr) {
+        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+        ctx.optix_gpu_ptr->resetAccumulation();
+    }
+    ctx.renderer.resetCPUAccumulation();
+
+    SCENE_LOG_INFO("Deleted Light");
+    return true;
+}
+bool SceneUI::deleteSelectedObject(UIContext& ctx)
+{
+    std::string deleted_name = ctx.selection.selected.name;
+    if (deleted_name.empty()) return false;
+
+    auto& objects = ctx.scene.world.objects;
+    size_t removed_count = 0;
+
+    objects.erase(
+        std::remove_if(objects.begin(), objects.end(),
+            [&deleted_name, &removed_count](const std::shared_ptr<Hittable>& obj)
+            {
+                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                if (tri && tri->nodeName == deleted_name) {
+                    removed_count++;
+                    return true;
+                }
+                return false;
+            }),
+        objects.end()
+    );
+
+    if (removed_count == 0) return false;
+
+    // --- Project data bookkeeping ---
+    auto& proj = g_ProjectManager.getProjectData();
+
+    for (auto& model : proj.imported_models) {
+        for (const auto& inst : model.objects) {
+            if (inst.node_name == deleted_name) {
+                if (std::find(model.deleted_objects.begin(),
+                    model.deleted_objects.end(),
+                    deleted_name) == model.deleted_objects.end()) {
+                    model.deleted_objects.push_back(deleted_name);
+                }
+                break;
+            }
+        }
+    }
+
+    // Remove procedural objects
+    auto& procs = proj.procedural_objects;
+    procs.erase(
+        std::remove_if(procs.begin(), procs.end(),
+            [&deleted_name](const ProceduralObjectData& p) {
+                return p.display_name == deleted_name;
+            }),
+        procs.end()
+    );
+
+    g_ProjectManager.markModified();
+
+    // --- Rebuild caches & acceleration ---
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+
+    if (ctx.optix_gpu_ptr) {
+        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+        ctx.optix_gpu_ptr->resetAccumulation();
+    }
+
+    SCENE_LOG_INFO(
+        "Deleted: " + deleted_name + " (" +
+        std::to_string(removed_count) + " triangles)"
+    );
+
+    return true;
+}
+
+void SceneUI::handleDeleteShortcut(UIContext& ctx)
+{
+    if (!ImGui::IsKeyPressed(ImGuiKey_Delete) &&
+        !ImGui::IsKeyPressed(ImGuiKey_X)) return;
+
+    bool deleted = false;
+
+    if (ctx.selection.selected.type == SelectableType::Light) {
+        deleted = deleteSelectedLight(ctx);
+    }
+    else if (ctx.selection.selected.type == SelectableType::Object) {
+        deleted = deleteSelectedObject(ctx);
+    }
+
+    if (deleted) {
+        ctx.selection.clearSelection();
+    }
+}
+void SceneUI::drawSelectionGizmos(UIContext& ctx)
+{
+    if (ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera) {
+        drawSelectionBoundingBox(ctx);
+        drawTransformGizmo(ctx);
+    }
+}
+void SceneUI::handleSceneInteraction(UIContext& ctx, bool gizmo_hit)
+{
+    if (ctx.scene.initialized && !gizmo_hit) {
+        handleMouseSelection(ctx);
+        handleMarqueeSelection(ctx);
+    }
+}
+void SceneUI::processDeferredSceneUpdates(UIContext& ctx)
+{
+    if (is_bvh_dirty && !ImGuizmo::IsUsing()) {
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.optix_gpu_ptr) {
+            ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+            ctx.optix_gpu_ptr->resetAccumulation();
+        }
+        is_bvh_dirty = false;
+    }
+}
+void SceneUI::drawAuxWindows(UIContext& ctx)
+{
     if (show_controls_window) {
         ImGui::SetNextWindowSize(ImVec2(500, 600), ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Controls & Help", &show_controls_window)) {
@@ -2151,49 +2138,6 @@ void SceneUI::draw(UIContext& ctx)
         }
         ImGui::End();
     }
-    
-    // Lazy BVH / Scene Update (Fixes CPU Ghosting after Delete)
-    // NOTE: Skip this if gizmo is being used - let drawTransformGizmo handle deferred update
-    if (is_bvh_dirty && !ImGuizmo::IsUsing()) {
-         // SCENE_LOG_INFO("Updating Scene BVH (Dirty Flag)...");
-         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-         ctx.renderer.resetCPUAccumulation();
-         if (ctx.optix_gpu_ptr) {
-             ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-             ctx.optix_gpu_ptr->resetAccumulation();
-         }
-         is_bvh_dirty = false;
-    }
-    
-    // F12 Global Shortcut for Render
-    if (ImGui::IsKeyPressed(ImGuiKey_F12)) {
-         extern bool show_render_window;
-         show_render_window = !show_render_window;
-         if (show_render_window) ctx.start_render = true;
-    }
-    
-    // Ctrl+Z / Ctrl+Y - Undo/Redo
-    if (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
-        if (history.canUndo()) {
-            history.undo(ctx);
-            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache (sets valid=true)
-            ctx.selection.updatePositionFromSelection(); // Sync Gizmo center
-            ctx.selection.selected.has_cached_aabb = false; // Force bounding box rebuild
-        }
-    }
-    if ((ImGui::IsKeyPressed(ImGuiKey_Y) && ImGui::GetIO().KeyCtrl) ||
-        (ImGui::IsKeyPressed(ImGuiKey_Z) && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyShift)) {
-        if (history.canRedo()) {
-            history.redo(ctx);
-            rebuildMeshCache(ctx.scene.world.objects);  // Refresh UI cache (sets valid=true)
-            ctx.selection.updatePositionFromSelection(); // Sync Gizmo center
-            ctx.selection.selected.has_cached_aabb = false; // Force bounding box rebuild
-        }
-    }
-    
-    // Draw Final Render Window
-    extern void DrawRenderWindow(UIContext& ctx);
-    DrawRenderWindow(ctx);
 }
 
 void SceneUI::drawControlsContent()
@@ -2275,8 +2219,8 @@ void SceneUI::drawControlsContent()
      }
      
      if (ImGui::CollapsingHeader("World Panel")) {
-         ImGui::BulletText("Sky Model: Switch between Solid Color, HDRI, or Nishita Sky.");
-         ImGui::BulletText("Nishita Sky: Realistic day/night cycle with Sun & Moon controls.");
+         ImGui::BulletText("Sky Model: Switch between Solid Color, HDRI, or “Raytrophi Spectral Sky.");
+         ImGui::BulletText("Raytrophi Spectral Sky: Realistic day/night cycle with Sun & Moon controls.");
          ImGui::BulletText("Atmosphere: Adjust Air, Dust, and Ozone density for realistic scattering.");
          ImGui::BulletText("Volumetric Clouds: Enable 3D clouds with various weather presets.");
          ImGui::BulletText("HDRI: Load external HDR enviromaps for realistic reflections.");
@@ -2358,8 +2302,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // Scene Tree
     // ─────────────────────────────────────────────────────────────────────────
     float available_h = ImGui::GetContentRegionAvail().y;
-    // Split: 45% for Tree, Rest for Properties
-    ImGui::BeginChild("HierarchyTree", ImVec2(0, available_h * 0.45f), true);
+    // Split: 35% for Tree, Rest for Material Editor
+    ImGui::BeginChild("HierarchyTree", ImVec2(0, available_h * 0.35f), true);
     
     // CAMERAS (Multi-camera support)
     if (!ctx.scene.cameras.empty()) {
@@ -2628,269 +2572,893 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         }
         ImGui::TreePop();
     }
-    // (Redundant internal property block removed)
     
-    ImGui::EndChild();
+    ImGui::EndChild(); // End HierarchyTree
     
     // ─────────────────────────────────────────────────────────────────────────
-    // Selection Properties Panel (Bottom Half)
+    // Selection Properties (Compact - Camera/Light only)
     // ─────────────────────────────────────────────────────────────────────────
-    ImGui::BeginChild("PropertiesPanel", ImVec2(0, 0), true); // Fill remaining space
-
     if (sel.hasSelection()) {
-        // Header with type and name
-        const char* typeIcon = "[?]";
-        ImVec4 typeColor = ImVec4(1, 1, 1, 1);
-        
-        switch (sel.selected.type) {
-            case SelectableType::Camera: 
-                typeIcon = "[CAM]"; 
-                typeColor = ImVec4(0.4f, 0.8f, 1.0f, 1.0f);
-                break;
-            case SelectableType::Light: 
-                typeIcon = "[*]"; 
-                typeColor = ImVec4(1.0f, 0.9f, 0.4f, 1.0f);
-                break;
-            case SelectableType::Object: 
-                typeIcon = "[M]"; 
-                typeColor = ImVec4(0.7f, 0.8f, 0.9f, 1.0f);
-                break;
-            default: break;
-        }
-        
-        ImGui::TextColored(typeColor, "%s %s", typeIcon, sel.selected.name.c_str());
-        
-        // Gizmo toggle and delete button on same line
-        ImGui::Checkbox("Gizmo", &sel.show_gizmo);
-        ImGui::SameLine(ImGui::GetWindowWidth() - 55);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
-        if (ImGui::SmallButton("Del")) {
-            bool deleted = false;
-            if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-                // Delete all triangles belonging to this mesh (by NodeName)
-                std::string targetName = sel.selected.object->nodeName;
-                auto& objs = ctx.scene.world.objects;
-                
-                auto new_end = std::remove_if(objs.begin(), objs.end(), 
-                     [&](const std::shared_ptr<Hittable>& obj){
-                         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                         return tri && tri->nodeName == targetName;
-                     });
-                     
-                if (new_end != objs.end()) {
-                    objs.erase(new_end, objs.end());
-                    deleted = true;
+        if (ImGui::CollapsingHeader("Selection Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+            
+            // Header with type and name + delete button
+            const char* typeIcon = "[?]";
+            ImVec4 typeColor = ImVec4(1, 1, 1, 1);
+            switch (sel.selected.type) {
+                case SelectableType::Camera: typeIcon = "[CAM]"; typeColor = ImVec4(0.4f, 0.8f, 1.0f, 1.0f); break;
+                case SelectableType::Light: typeIcon = "[*]"; typeColor = ImVec4(1.0f, 0.9f, 0.4f, 1.0f); break;
+                case SelectableType::Object: typeIcon = "[M]"; typeColor = ImVec4(0.7f, 0.8f, 0.9f, 1.0f); break;
+                default: break;
+            }
+            ImGui::TextColored(typeColor, "%s %s", typeIcon, sel.selected.name.c_str());
+            
+            ImGui::Checkbox("Gizmo", &sel.show_gizmo);
+            ImGui::SameLine(ImGui::GetWindowWidth() - 55);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
+            if (ImGui::SmallButton("Del")) {
+                bool deleted = false;
+                if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+                    std::string targetName = sel.selected.object->nodeName;
+                    auto& objs = ctx.scene.world.objects;
+                    auto new_end = std::remove_if(objs.begin(), objs.end(), 
+                         [&](const std::shared_ptr<Hittable>& obj){
+                             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                             return tri && tri->nodeName == targetName;
+                         });
+                    if (new_end != objs.end()) {
+                        objs.erase(new_end, objs.end());
+                        deleted = true;
+                    }
+                }
+                else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+                    auto light_to_delete = sel.selected.light;
+                    auto& lights = ctx.scene.lights;
+                    auto it = std::find(lights.begin(), lights.end(), light_to_delete);
+                    if (it != lights.end()) {
+                        history.record(std::make_unique<DeleteLightCommand>(light_to_delete));
+                        lights.erase(it);
+                        deleted = true;
+                    }
+                }
+                if (deleted) {
+                    sel.clearSelection();
+                    invalidateCache();
+                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.optix_gpu_ptr) {
+                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                    }
+                    is_bvh_dirty = false;
+                } else {
+                    sel.clearSelection();
                 }
             }
-            else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
-                // Delete Light with undo support
-                auto light_to_delete = sel.selected.light;
-                auto& lights = ctx.scene.lights;
-                auto it = std::find(lights.begin(), lights.end(), light_to_delete);
-                if (it != lights.end()) {
-                    history.record(std::make_unique<DeleteLightCommand>(light_to_delete));
-                    lights.erase(it);
-                    deleted = true;
+            ImGui::PopStyleColor();
+            
+            // CAMERA PROPERTIES
+            if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
+                auto& cam = *sel.selected.camera;
+                ImGui::Separator();
+                
+                Vec3 pos = cam.lookfrom;
+                if (ImGui::DragFloat3("Position##cam", &pos.x, 0.1f)) {
+                    Vec3 delta = pos - cam.lookfrom;
+                    cam.lookfrom = pos;
+                    cam.lookat = cam.lookat + delta;
+                    cam.update_camera_vectors();
+                    sel.selected.position = pos;
+                    if (ctx.optix_gpu_ptr && g_hasOptix) {
+                        ctx.optix_gpu_ptr->setCameraParams(cam);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                    }
+                }
+                
+                Vec3 target = cam.lookat;
+                if (ImGui::DragFloat3("Target", &target.x, 0.1f)) {
+                    cam.lookat = target;
+                    cam.update_camera_vectors();
+                }
+                
+                float fov = (float)cam.vfov;
+                if (ImGui::SliderFloat("FOV", &fov, 10.0f, 120.0f)) {
+                    cam.vfov = fov;
+                    cam.fov = fov;
+                    cam.update_camera_vectors();
+                }
+                
+                // DOF Settings
+                ImGui::SliderFloat("Aperture", &cam.aperture, 0.0f, 5.0f);
+                
+                // Focus Distance with Pick Focus button
+                ImGui::DragFloat("Focus Dist", &cam.focus_dist, 0.1f, 0.01f, 100.0f);
+                // Pick Focus mode - sets focus to clicked object distance
+                if (is_picking_focus) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.4f, 0.1f, 1.0f));
+                }
+                if (ImGui::Button(is_picking_focus ? "Picking..." : "Pick")) {
+                    is_picking_focus = !is_picking_focus;
+                }
+                if (is_picking_focus) {
+                    ImGui::PopStyleColor();
+                }
+                if (ImGui::IsItemHovered()) {
+                     ImGui::SetTooltip("Click on an object in viewport to set focus distance (ignores selection)");
+                }
+                
+
+                
+                cam.lens_radius = cam.aperture * 0.5f;
+                
+                ImGui::SliderInt("Blades", &cam.blade_count, 3, 12);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Aperture blade count (affects bokeh shape)");
+                
+                // Mouse Sensitivity
+                ImGui::Spacing();
+                if (ImGui::SliderFloat("Mouse Sensitivity", &ctx.mouse_sensitivity, 0.01f, 5.0f, "%.3f")) {
+                    // Value updated directly via reference
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera rotation/panning speed");
+                
+                // Set as Active Camera button
+                bool is_active = (ctx.scene.camera.get() == &cam);
+                if (!is_active) {
+                    if (ImGui::Button("Set as Active Camera")) {
+                        // Find camera index
+                        for (size_t i = 0; i < ctx.scene.cameras.size(); ++i) {
+                            if (ctx.scene.cameras[i].get() == &cam) {
+                                ctx.scene.setActiveCamera(i);
+                                if (ctx.optix_gpu_ptr) {
+                                    ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                }
+                                ctx.renderer.resetCPUAccumulation();
+                                break;
+                            }
+                        }
+                    }
+                    ImGui::SameLine();
+                } else {
+                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "[Active]");
+                    ImGui::SameLine();
+                }
+                
+                // Reset Camera button
+                if (ImGui::Button("Reset Camera")) {
+                    cam.reset();
+                    sel.selected.position = cam.lookfrom;
+                    if (ctx.optix_gpu_ptr && g_hasOptix) {
+                        ctx.optix_gpu_ptr->setCameraParams(cam);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                    }
+                    ctx.renderer.resetCPUAccumulation();
+                    ctx.start_render = true;
                 }
             }
             
-            if (deleted) {
-                sel.clearSelection();
-                invalidateCache();
+            // LIGHT PROPERTIES
+            else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
+                auto& light = *sel.selected.light;
+                bool light_changed = false;
+                ImGui::Separator();
                 
-                // SYNC RENDERERS
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.resetCPUAccumulation();
+                const char* lightTypes[] = {"Point", "Directional", "Spot", "Area"};
+                int typeIdx = (int)light.type();
+                if (typeIdx >= 0 && typeIdx < 4) ImGui::TextDisabled("Type: %s", lightTypes[typeIdx]);
                 
-                if (ctx.optix_gpu_ptr) {
-                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                if (ImGui::DragFloat3("Position##light", &light.position.x, 0.1f)) {
+                    sel.selected.position = light.position;
+                    light_changed = true;
+                }
+                
+                if (light.type() == LightType::Directional || light.type() == LightType::Spot) {
+                    if (ImGui::DragFloat3("Direction", &light.direction.x, 0.01f)) light_changed = true;
+                }
+                
+                if (ImGui::ColorEdit3("Color", &light.color.x)) light_changed = true;
+                if (ImGui::DragFloat("Intensity", &light.intensity, 0.5f, 0.0f, 1000.0f)) light_changed = true;
+                
+                if (light.type() == LightType::Point || light.type() == LightType::Directional) {
+                    if (ImGui::DragFloat("Radius", &light.radius, 0.01f, 0.01f, 100.0f)) light_changed = true;
+                }
+                
+                if (auto sl = dynamic_cast<SpotLight*>(&light)) {
+                    float angle = sl->getAngleDegrees();
+                    if (ImGui::DragFloat("Cone Angle", &angle, 0.5f, 1.0f, 89.0f)) {
+                        sl->setAngleDegrees(angle);
+                        light_changed = true;
+                    }
+                }
+                else if (auto al = dynamic_cast<AreaLight*>(&light)) {
+                    if (ImGui::DragFloat("Width", &al->width, 0.05f, 0.01f, 100.0f)) {
+                        al->u = al->u.normalize() * al->width;
+                        light_changed = true;
+                    }
+                    if (ImGui::DragFloat("Height", &al->height, 0.05f, 0.01f, 100.0f)) {
+                        al->v = al->v.normalize() * al->height;
+                        light_changed = true;
+                    }
+                }
+                
+                if (light_changed && ctx.optix_gpu_ptr && g_hasOptix) {
                     ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
                     ctx.optix_gpu_ptr->resetAccumulation();
                 }
-                is_bvh_dirty = false;
+            }
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // MATERIAL EDITOR (Takes remaining space)
+    // ─────────────────────────────────────────────────────────────────────────
+    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Material Editor", ImGuiTreeNodeFlags_DefaultOpen)) {
+        drawMaterialPanel(ctx);
+    }
+    
+    // Light Gizmos and Transform Gizmos moved to main draw() loop for all tabs
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATERIAL & TEXTURE EDITOR PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+void SceneUI::drawMaterialPanel(UIContext& ctx) {
+    SceneSelection& sel = ctx.selection;
+
+    // Only show for selected objects
+    if (sel.selected.type != SelectableType::Object || !sel.selected.object) {
+        ImGui::TextDisabled("Select an object to edit materials");
+        return;
+    }
+
+    std::string obj_name = sel.selected.name;
+    if (obj_name.empty()) {
+        ImGui::TextDisabled("Unnamed Object");
+        return;
+    }
+
+    // Ensure mesh cache is valid to find all triangles of this object
+    if (!mesh_cache_valid) {
+        rebuildMeshCache(ctx.scene.world.objects);
+    }
+
+    auto cache_it = mesh_cache.find(obj_name);
+    if (cache_it == mesh_cache.end()) {
+        ImGui::TextColored(ImVec4(1, 0, 0, 1), "Object mesh data not found in cache.");
+        return;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 1. SCAN FOR USED MATERIALS (SLOTS)
+    // ─────────────────────────────────────────────────────────────────────────
+    // We need to know which unique material IDs are used by this object's triangles.
+    // We'll store them in a list preserving order if possible (or just sorted/unique).
+    std::vector<uint16_t> used_material_ids;
+    
+    // Simple scan: Iterate all triangles in the cache for this object
+    // Note: For very high-poly objects, this might be slow every frame. 
+    // Optimization: Cache this list in SceneSelection or similar if needed.
+    for (const auto& pair : cache_it->second) {
+        std::shared_ptr<Triangle> tri = pair.second;
+        if (tri) {
+            uint16_t mid = tri->getMaterialID();
+            bool found = false;
+            for (uint16_t existing_id : used_material_ids) {
+                if (existing_id == mid) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                used_material_ids.push_back(mid);
+            }
+        }
+    }
+
+    // Sort for consistent display order
+    // std::sort(used_material_ids.begin(), used_material_ids.end()); 
+    // (Optional: Sorting might re-order slots unexpectedly if ids change, but keeps it stable)
+
+    if (used_material_ids.empty()) {
+        ImGui::TextDisabled("No geometry/materials found.");
+        return;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 2. SLOT SELECTION UI
+    // ─────────────────────────────────────────────────────────────────────────
+    static int active_slot_index = 0;
+    
+    // Safety: Reset slot index if out of bounds (e.g. material removed or selection changed)
+    if (active_slot_index >= (int)used_material_ids.size()) {
+        active_slot_index = 0;
+    }
+    
+    // Reset slot index when selection changes (rudimentary check by name change)
+    static std::string last_selected_obj_name = "";
+    if (last_selected_obj_name != obj_name) {
+        active_slot_index = 0;
+        last_selected_obj_name = obj_name;
+    }
+
+    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Material Slots");
+    
+    // Draw the Slot List
+    if (ImGui::BeginListBox("##MaterialSlots", ImVec2(-FLT_MIN, 5 * ImGui::GetTextLineHeightWithSpacing()))) {
+        for (int i = 0; i < (int)used_material_ids.size(); i++) {
+            uint16_t mat_id = used_material_ids[i];
+            Material* mat = MaterialManager::getInstance().getMaterial(mat_id);
+            
+            std::string slot_label;
+            if (mat) {
+                slot_label = std::string("Slot ") + std::to_string(i) + ": " + mat->materialName;
             } else {
-                sel.clearSelection();
+                 slot_label = std::string("Slot ") + std::to_string(i) + ": [Null]";
+            }
+
+            const bool is_selected = (active_slot_index == i);
+            if (ImGui::Selectable(slot_label.c_str(), is_selected)) {
+                active_slot_index = i;
+            }
+
+            // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
+            if (is_selected) {
+                ImGui::SetItemDefaultFocus();
             }
         }
-        ImGui::PopStyleColor();
+        ImGui::EndListBox();
+    }
+
+    // Current pointer to the active material
+    uint16_t active_mat_id = used_material_ids[active_slot_index];
+    Material* active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
+    std::string current_mat_name = active_mat_ptr ? active_mat_ptr->materialName : "None";
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 3. ASSIGN MATERIAL TO ACTIVE SLOT
+    // ─────────────────────────────────────────────────────────────────────────
+    ImGui::Separator();
+    ImGui::Text("Active Slot Assignment:");
+    
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 110); // Space for +New buttons (adjusted for +S and +V)
+    if (ImGui::BeginCombo("##SlotAssignment", current_mat_name.c_str())) {
+        auto& mgr = MaterialManager::getInstance();
+        const auto& all_materials = mgr.getAllMaterials();
         
+        for (size_t i = 0; i < all_materials.size(); i++) {
+            if (!all_materials[i]) continue;
+            
+            bool is_selected = ((uint16_t)i == active_mat_id);
+            std::string label = all_materials[i]->materialName;
+            if (label.empty()) label = "Mat #" + std::to_string(i);
+
+            if (ImGui::Selectable(label.c_str(), is_selected)) {
+                if ((uint16_t)i != active_mat_id) {
+                    // REPLACE MATERIAL LOGIC:
+                    // Find all triangles that WERE using 'active_mat_id' (the old material for this slot)
+                    // and update them to use 'i' (the new material).
+                    // This preserves other slots.
+                    
+                    int count_replaced = 0;
+                    for (auto& pair : cache_it->second) {
+                         if (pair.second->getMaterialID() == active_mat_id) {
+                             pair.second->setMaterialID((uint16_t)i);
+                             count_replaced++;
+                         }
+                    }
+                    
+                    SCENE_LOG_INFO("Replaced material in Slot " + std::to_string(active_slot_index) + 
+                                   " (ID: " + std::to_string(active_mat_id) + " -> " + std::to_string(i) + 
+                                   "). Triangles updated: " + std::to_string(count_replaced));
+
+                    // Trigger Rebuilds
+                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.optix_gpu_ptr) {
+                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                    }
+                    g_ProjectManager.markModified();
+                }
+            }
+            if (is_selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::PopItemWidth();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SHORTCUTS (New Surface / Volume) - affecting Active Slot
+    // ─────────────────────────────────────────────────────────────────────────
+    ImGui::SameLine();
+    if (ImGui::Button("+S", ImVec2(40,0))) {
+         ImGui::OpenPopup("NewSurfPopup");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create New Surface Material");
+
+    ImGui::SameLine();
+    if (ImGui::Button("+V", ImVec2(40,0))) {
+         ImGui::OpenPopup("NewVolPopup");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create New Volumetric Material");
+
+    if (ImGui::BeginPopup("NewSurfPopup")) {
+        ImGui::Text("Create New Surface");
+        if (ImGui::Selectable("Create & Assign")) {
+            auto& mgr = MaterialManager::getInstance();
+            auto new_mat = std::make_shared<PrincipledBSDF>(Vec3(0.8f), 0.5f, 0.0f);
+            std::string name = "Surface_" + std::to_string(mgr.getMaterialCount());
+            new_mat->materialName = name;
+            uint16_t new_id = mgr.addMaterial(name, new_mat);
+            
+            // Assign to current slot triangles
+            for (auto& pair : cache_it->second) {
+                if (pair.second->getMaterialID() == active_mat_id) {
+                    pair.second->setMaterialID(new_id);
+                }
+            }
+            // Trigger updates
+            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.optix_gpu_ptr) {
+                 ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                 ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            g_ProjectManager.markModified();
+        }
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopup("NewVolPopup")) {
+        ImGui::Text("Create New Volumetric");
+        if (ImGui::Selectable("Create & Assign")) {
+            auto& mgr = MaterialManager::getInstance();
+            auto perlin = std::make_shared<Perlin>();
+            auto new_mat = std::make_shared<Volumetric>(
+                Vec3(0.8f),     // albedo
+                1.0,            // density
+                0.1,            // absorption
+                0.5,            // scattering
+                Vec3(0.0f),     // emission
+                perlin          // noise
+            );
+            std::string name = "Volume_" + std::to_string(mgr.getMaterialCount());
+            new_mat->materialName = name;
+            uint16_t new_id = mgr.addMaterial(name, new_mat);
+            
+            // Assign to current slot triangles
+            for (auto& pair : cache_it->second) {
+                if (pair.second->getMaterialID() == active_mat_id) {
+                    pair.second->setMaterialID(new_id);
+                }
+            }
+            // Trigger updates
+            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.optix_gpu_ptr) {
+                 ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                 ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            g_ProjectManager.markModified();
+        }
+        ImGui::EndPopup();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // MATERIAL EDITOR (Context-Aware for Active Slot)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Re-fetch active material in case it changed
+    active_mat_id = used_material_ids[active_slot_index];
+    // NOTE: If we just replaced the material, the used_material_ids list is somewhat stale 
+    // until next frame, but since we updated the triangles, the 'active_mat_id' locally 
+    // typically refers to the old ID unless found again. 
+    // Ideally we should update the 'used_material_ids' vector immediately, but for now 
+    // we can re-query the triangles or just wait for next frame UI refresh. 
+    // To be safe, let's just use the pointer from the manager for the *assigned* ID.
+    // However, we just changed the ID in the triangles. The 'used_material_ids' array 
+    // still holds the OLD ID at index 'active_slot_index'.
+    // We should fix this visual glitch by simply returning if we made a heavy change, 
+    // or by updating the local array.
+    
+    // Let's rely on the frame refresh for perfect consistency, but try to show 
+    // the potentially new material if we can.
+    
+    active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
+    if (!active_mat_ptr) return;
+
+    // Check material type
+    Volumetric* vol_mat = dynamic_cast<Volumetric*>(active_mat_ptr);
+    PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(active_mat_ptr);
+
+    ImGui::Separator();
+    
+    if (vol_mat) {
+        ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "[Volumetric Properties]");
+        
+        bool changed = false;
+        
+        // --- Reuse Volumetric UI Logic ---
+        Vec3 alb = vol_mat->getAlbedo();
+        if (ImGui::ColorEdit3("Scattering Color", &alb.x)) { vol_mat->setAlbedo(alb); changed = true; }
+        
+        float dens = (float)vol_mat->getDensity();
+        if (ImGui::SliderFloat("Density", &dens, 0.0f, 10.0f)) { vol_mat->setDensity(dens); changed = true; }
+        
+        float scatt = (float)vol_mat->getScattering();
+        if (ImGui::SliderFloat("Scattering", &scatt, 0.0f, 5.0f)) { vol_mat->setScattering(scatt); changed = true; }
+        
+        float abs = (float)vol_mat->getAbsorption();
+        if (ImGui::SliderFloat("Absorption", &abs, 0.0f, 2.0f)) { vol_mat->setAbsorption(abs); changed = true; }
+        
+        float g = (float)vol_mat->getG();
+        if (ImGui::SliderFloat("Anisotropy", &g, -0.99f, 0.99f)) { vol_mat->setG(g); changed = true; }
+
+        // Emission Color with Strength Control                
+        Vec3 emis = vol_mat->getEmissionColor();
+        // Emissive Strength Logic (Infer max component as strength)
+        float max_e = emis.x;
+        if (emis.y > max_e) max_e = emis.y;
+        if (emis.z > max_e) max_e = emis.z;
+        float strength = (max_e > 1.0f) ? max_e : 1.0f;
+        if (max_e < 0.001f) strength = 1.0f; // Default for black
+
+        Vec3 normalized_emis = (max_e > 0.001f) ? emis * (1.0f / strength) : emis;
+
+        if (ImGui::ColorEdit3("Emission Color", &normalized_emis.x)) {
+             vol_mat->setEmissionColor(normalized_emis * strength);
+             changed = true;
+        }
+        if (ImGui::DragFloat("Emission Strength", &strength, 0.1f, 0.0f, 1000.0f)) {
+             vol_mat->setEmissionColor(normalized_emis * strength);
+             changed = true;
+        }
+        
+        float n_scale = vol_mat->getNoiseScale();
+        if (ImGui::DragFloat("Noise Scale", &n_scale, 0.01f, 0.01f, 100.0f)) { 
+            vol_mat->setNoiseScale(n_scale); 
+            changed = true; 
+        }
+
+        float void_t = vol_mat->getVoidThreshold();
+        if (ImGui::SliderFloat("Void Threshold", &void_t, 0.0f, 1.0f)) {
+             vol_mat->setVoidThreshold(void_t);
+             changed = true;
+        }
+        UIWidgets::HelpMarker("Controls empty space amount (Higher = More Voids)");
+
+        // Ray Marching Quality Settings
+        float step_size = vol_mat->getStepSize();
+        if (ImGui::DragFloat("Step Size (Quality)", &step_size, 0.001f, 0.001f, 1.0f, "%.4f")) {
+             vol_mat->setStepSize(step_size);
+             changed = true;
+        }
+        UIWidgets::HelpMarker("Smaller values = Higher Quality (Slower)");
+
+        int max_steps = vol_mat->getMaxSteps();
+        if (ImGui::DragInt("Max Steps", &max_steps, 1, 1, 1000)) {
+             vol_mat->setMaxSteps(max_steps);
+             changed = true;
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // MULTI-SCATTERING CONTROLS (NEW)
+        // ═══════════════════════════════════════════════════════════════════
         ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Multi-Scattering");
         
-        // ═══════════════════════════════════════════════════════════════════
-        // CAMERA PROPERTIES
-        // ═══════════════════════════════════════════════════════════════════
-        if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
-            auto& cam = *sel.selected.camera;
-            
-            // Position
-            Vec3 pos = cam.lookfrom;
-            if (ImGui::DragFloat3("Position", &pos.x, 0.1f)) {
-                Vec3 delta = pos - cam.lookfrom;
-                cam.lookfrom = pos;
-                cam.lookat = cam.lookat + delta;
-                cam.update_camera_vectors();
-                sel.selected.position = pos;
-                
-                if (ctx.optix_gpu_ptr && g_hasOptix) {
-                    ctx.optix_gpu_ptr->setCameraParams(cam);
-                    ctx.optix_gpu_ptr->resetAccumulation();
-                }
-            }
-            
-            // Target
-            Vec3 target = cam.lookat;
-            if (ImGui::DragFloat3("Target", &target.x, 0.1f)) {
-                cam.lookat = target;
-                cam.update_camera_vectors();
-            }
-            
-            // FOV
-            float fov = (float)cam.vfov;
-            if (ImGui::SliderFloat("FOV", &fov, 10.0f, 120.0f)) {
-                cam.vfov = fov;
-                cam.fov = fov;
-                cam.update_camera_vectors();
-            }
-            
-            // Depth of Field
-            if (ImGui::CollapsingHeader("Depth of Field")) {
-                ImGui::SliderFloat("Aperture", &cam.aperture, 0.0f, 5.0f);
-                ImGui::DragFloat("Focus Dist", &cam.focus_dist, 0.1f, 0.01f, 100.0f);
-                cam.lens_radius = cam.aperture * 0.5f;
-                ImGui::SliderInt("Blades", &cam.blade_count, 3, 12);
-            }
-            
-            // Reset button
-            if (ImGui::Button("Reset Camera", ImVec2(-1, 0))) {
-                cam.reset();
-                sel.selected.position = cam.lookfrom;
-            }
+        float multi_scatter = vol_mat->getMultiScatter();
+        if (ImGui::SliderFloat("Multi-Scatter##vol", &multi_scatter, 0.0f, 1.0f)) {
+            vol_mat->setMultiScatter(multi_scatter);
+            changed = true;
         }
+        UIWidgets::HelpMarker("Controls multi-scattering brightness (0=single scatter, 1=full multi-scatter)");
         
-        // ═══════════════════════════════════════════════════════════════════
-        // LIGHT PROPERTIES
-        // ═══════════════════════════════════════════════════════════════════
-        else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
-            auto& light = *sel.selected.light;
-            bool light_changed = false;
-            
-            // Light type display
-            const char* lightTypes[] = {"Point", "Directional", "Spot", "Area"};
-            int typeIdx = (int)light.type();
-            if (typeIdx >= 0 && typeIdx < 4) {
-                ImGui::TextDisabled("Type: %s", lightTypes[typeIdx]);
-            }
-            
-            // Position
-            if (ImGui::DragFloat3("Position", &light.position.x, 0.1f)) {
-                sel.selected.position = light.position;
-                light_changed = true;
-            }
-            
-            // Direction (for directional/spot)
-            if (light.type() == LightType::Directional || light.type() == LightType::Spot) {
-                if (ImGui::DragFloat3("Direction", &light.direction.x, 0.01f)) {
-                    light_changed = true;
-                }
-            }
-            
-            // Color
-            if (ImGui::ColorEdit3("Color", &light.color.x)) {
-                light_changed = true;
-            }
-            
-            // Intensity
-            if (ImGui::DragFloat("Intensity", &light.intensity, 0.5f, 0.0f, 1000.0f)) {
-                light_changed = true;
-            }
-            
-            // Radius (Point/Directional)
-            if (light.type() == LightType::Point || light.type() == LightType::Directional) {
-                if (ImGui::DragFloat("Radius", &light.radius, 0.01f, 0.01f, 100.0f)) {
-                    light_changed = true;
-                }
-            }
+        float g_back = vol_mat->getGBack();
+        if (ImGui::SliderFloat("Backward G##vol", &g_back, -0.99f, 0.0f)) {
+            vol_mat->setGBack(g_back);
+            changed = true;
+        }
+        UIWidgets::HelpMarker("Backward scattering anisotropy for silver lining effect");
+        
+        float lobe_mix = vol_mat->getLobeMix();
+        if (ImGui::SliderFloat("Lobe Mix##vol", &lobe_mix, 0.0f, 1.0f)) {
+            vol_mat->setLobeMix(lobe_mix);
+            changed = true;
+        }
+        UIWidgets::HelpMarker("Forward/Backward lobe blend (1.0=all forward, 0.0=all backward)");
+        
+        int light_steps = vol_mat->getLightSteps();
+        if (ImGui::SliderInt("Shadow Steps##vol", &light_steps, 0, 8)) {
+            vol_mat->setLightSteps(light_steps);
+            changed = true;
+        }
+        UIWidgets::HelpMarker("Light march steps for self-shadowing (0=disabled, 4-8 recommended)");
+        
+        float shadow_str = vol_mat->getShadowStrength();
+        if (ImGui::SliderFloat("Shadow Strength##vol", &shadow_str, 0.0f, 1.0f)) {
+            vol_mat->setShadowStrength(shadow_str);
+            changed = true;
+        }
+        UIWidgets::HelpMarker("Self-shadow intensity (0=no shadows, 1=full shadows)");
 
-            // Spot Controls
-            if (auto sl = dynamic_cast<SpotLight*>(&light)) {
-                if (ImGui::DragFloat("Range", &sl->radius, 0.1f, 0.1f, 1000.0f)) light_changed = true;
-
-                float angle = sl->getAngleDegrees();
-                if (ImGui::DragFloat("Cone Angle", &angle, 0.5f, 1.0f, 89.0f)) {
-                    sl->setAngleDegrees(angle);
-                    light_changed = true;
-                }
-                float falloff = sl->getFalloff();
-                if (ImGui::SliderFloat("Falloff", &falloff, 0.0f, 1.0f)) {
-                    sl->setFalloff(falloff);
-                    light_changed = true;
-                }
-            }
-            // Area Controls
-            else if (auto al = dynamic_cast<AreaLight*>(&light)) {
-                 if (ImGui::DragFloat("Width", &al->width, 0.05f, 0.01f, 100.0f)) {
-                     al->u = al->u.normalize() * al->width;
-                     light_changed = true;
-                 }
-                 if (ImGui::DragFloat("Height", &al->height, 0.05f, 0.01f, 100.0f)) {
-                     al->v = al->v.normalize() * al->height;
-                     light_changed = true;
-                 }
-            }
-            
-            // Update GPU
-            if (light_changed && ctx.optix_gpu_ptr && g_hasOptix) {
-                ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+        if (changed) {
+            // OPTIMIZED: Material property change - No geometry rebuild needed!
+            // Only reset accumulation and update GPU material buffers
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.optix_gpu_ptr) {
+                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
         }
+
+    } else if (pbsdf) {
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "[Surface Properties]");
         
-        // ═══════════════════════════════════════════════════════════════════
-        // OBJECT/MESH PROPERTIES
-        // ═══════════════════════════════════════════════════════════════════
-        else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-            // Show mesh info
-            std::string meshName = sel.selected.object->nodeName;
-            if (meshName.empty()) meshName = "Unnamed";
+        bool changed = false;
+        bool texture_changed = false;
+
+        // ─────────────────────────────────────────────────────────────────────
+        // HELPER LAMBDAS (Re-introduced for Texture Editing)
+        // ─────────────────────────────────────────────────────────────────────
+        
+        // 1. Sync GPU Material
+        auto SyncGpuMaterial = [](PrincipledBSDF* mat) {
+            if (!mat->gpuMaterial) mat->gpuMaterial = std::make_shared<GpuMaterial>();
             
-            ImGui::TextDisabled("Mesh: %s", meshName.c_str());
+            Vec3 alb = mat->albedoProperty.color;
+            mat->gpuMaterial->albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+            mat->gpuMaterial->roughness = (float)mat->roughnessProperty.color.x;
+            mat->gpuMaterial->metallic = (float)mat->metallicProperty.intensity;
             
-            // Count triangles with same name
-            // FAST COUNT USING CACHE
-            int tri_count = 0;
-            if (mesh_cache_valid) {
-                 auto it = mesh_cache.find(sel.selected.object->nodeName);
-                 if (it != mesh_cache.end()) tri_count = (int)it->second.size();
-            } else {
-                 // Fallback or leave as 0
+            Vec3 em = mat->emissionProperty.color;
+            float emStr = mat->emissionProperty.intensity;
+            mat->gpuMaterial->emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+            
+            mat->gpuMaterial->ior = mat->ior;
+            mat->gpuMaterial->transmission = mat->transmission;
+            mat->gpuMaterial->opacity = mat->opacityProperty.alpha;
+        };
+
+        // 2. Update Texture Bundle for a Triangle
+        auto UpdateTriangleTextureBundle = [&](std::shared_ptr<Triangle> target_tri, PrincipledBSDF* mat) {
+            OptixGeometryData::TextureBundle bundle = {};
+            
+            auto SetupTex = [&](std::shared_ptr<Texture>& tex, cudaTextureObject_t& out_tex, int& out_has) {
+                 if (tex && tex->is_loaded()) {
+                     tex->upload_to_gpu();
+                     out_tex = tex->get_cuda_texture();
+                     out_has = 1;
+                 } else {
+                     out_tex = 0;
+                     out_has = 0;
+                 }
+            };
+
+            SetupTex(mat->albedoProperty.texture, bundle.albedo_tex, bundle.has_albedo_tex);
+            SetupTex(mat->normalProperty.texture, bundle.normal_tex, bundle.has_normal_tex);
+            SetupTex(mat->roughnessProperty.texture, bundle.roughness_tex, bundle.has_roughness_tex);
+            SetupTex(mat->metallicProperty.texture, bundle.metallic_tex, bundle.has_metallic_tex);
+            SetupTex(mat->emissionProperty.texture, bundle.emission_tex, bundle.has_emission_tex);
+            SetupTex(mat->opacityProperty.texture, bundle.opacity_tex, bundle.has_opacity_tex);
+
+            target_tri->textureBundle = bundle;
+        };
+
+        // 3. Trigger Update
+        auto TriggerMaterialUpdate = [&](bool needs_texture_update) {
+            SyncGpuMaterial(pbsdf);
+            
+            if (needs_texture_update) {
+                 // Update all triangles using this material ID
+                 // We don't have the scan readily available unless we re-scan or pass used_material_ids
+                 // But we can iterate all objects effectively.
+                 for (auto& obj : ctx.scene.world.objects) {
+                     auto t = std::dynamic_pointer_cast<Triangle>(obj);
+                     if (t && t->getMaterialID() == active_mat_id) {
+                         UpdateTriangleTextureBundle(t, pbsdf);
+                     }
+                 }
             }
-            ImGui::TextDisabled("Triangles: %d", tri_count);
-            
-            // Position (read-only for now)
-            Vec3 pos = sel.selected.position;
-            ImGui::BeginDisabled();
-            ImGui::DragFloat3("Position", &pos.x, 0.1f);
-            ImGui::EndDisabled();
-            
-            // Material info
-            auto mat = sel.selected.object->getMaterial();
-            if (mat) {
-                ImGui::TextDisabled("Material ID: %d", sel.selected.object->getMaterialID());
+
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.optix_gpu_ptr) {
+                // OPTIMIZED: Material property change - use fast update path
+                // Full rebuild only needed for texture changes (needs_texture_update=true)
+                if (needs_texture_update) {
+                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                } else {
+                    ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                }
+                ctx.optix_gpu_ptr->resetAccumulation();
             }
+        };
+
+        // 4. Load Texture Dialog
+        auto LoadTextureFromDialog = [&](TextureType type, const std::string& initialDir = "", const std::string& defaultFile = "") -> std::shared_ptr<Texture> {
+            
+            std::string path = openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0", initialDir, defaultFile);
+            if (path.empty()) return nullptr;
+            
+            auto tex = std::make_shared<Texture>(path, type);
+            if (tex && tex->is_loaded()) {
+                tex->upload_to_gpu();
+                SCENE_LOG_INFO("Loaded texture: " + path);
+                return tex;
+            }
+            SCENE_LOG_WARN("Failed to load texture: " + path);
+            return nullptr;
+        };
+
+        // ─── PROPERTIES UI ───────────────────────────────────────────────────
+        
+        // Base Color (Albedo)
+        Vec3 albedo = pbsdf->albedoProperty.color;
+        float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
+        if (ImGui::ColorEdit3("Base Color", albedo_arr)) {
+            pbsdf->albedoProperty.color = Vec3(albedo_arr[0], albedo_arr[1], albedo_arr[2]);
+            changed = true;
         }
         
-    } else {
-        ImGui::TextDisabled("Select an item to view properties");
-    }
-    ImGui::EndChild(); // End PropertiesPanel
+        // Metallic
+        float metallic = pbsdf->metallicProperty.intensity;
+        if (ImGui::SliderFloat("Metallic", &metallic, 0.0f, 1.0f, "%.3f")) {
+            pbsdf->metallicProperty.intensity = metallic;
+            changed = true;
+        }
+        
+        // Roughness
+        float roughness = (float)pbsdf->roughnessProperty.color.x;
+        if (ImGui::SliderFloat("Roughness", &roughness, 0.0f, 1.0f, "%.3f")) {
+            pbsdf->roughnessProperty.color = Vec3(roughness);
+            changed = true;
+        }
 
-    
-    
-    
-    // Window end removed as we are in a tab
-    
-    
-    // Light Gizmos and Transform Gizmos moved to main draw() loop for all tabs
+        // IOR
+        float ior = pbsdf->ior;
+        if (ImGui::SliderFloat("IOR", &ior, 1.0f, 3.0f, "%.3f")) {
+            pbsdf->ior = ior;
+            changed = true;
+        }
+
+        // Transmission
+        float transmission = pbsdf->transmission;
+        if (ImGui::SliderFloat("Transmission", &transmission, 0.0f, 1.0f, "%.3f")) {
+            pbsdf->setTransmission(transmission, pbsdf->ior);
+            changed = true;
+        }
+
+        // Specular
+        float specular = pbsdf->specularProperty.intensity;
+        if (ImGui::SliderFloat("Specular", &specular, 0.0f, 1.0f, "%.3f")) {
+            pbsdf->specularProperty.intensity = specular;
+            changed = true;
+        }
+        // Opacity
+        float opacity = pbsdf->opacityProperty.alpha;
+        if (ImGui::SliderFloat("Opacity", &opacity, 0.0f, 1.0f, "%.3f")) {
+            pbsdf->opacityProperty.alpha = opacity;
+            changed = true;
+        }
+
+        
+        // Emission
+        Vec3 emission = pbsdf->emissionProperty.color;
+        float emission_arr[3] = { (float)emission.x, (float)emission.y, (float)emission.z };
+        if (ImGui::ColorEdit3("Emission", emission_arr)) {
+            pbsdf->emissionProperty.color = Vec3(emission_arr[0], emission_arr[1], emission_arr[2]);
+            changed = true;
+        }
+        
+        float emissionStr = pbsdf->emissionProperty.intensity;
+        if (ImGui::DragFloat("Emission Strength", &emissionStr, 0.1f, 0.0f, 1000.0f)) {
+            pbsdf->emissionProperty.intensity = emissionStr;
+            changed = true;
+        }
+
+        // ─── TEXTURES UI ─────────────────────────────────────────────────────
+        if (ImGui::TreeNodeEx("Texture Maps", ImGuiTreeNodeFlags_DefaultOpen)) {
+            
+            // Texture Clipboard (Static to persist across frames/slots)
+            static std::shared_ptr<Texture> texture_clipboard = nullptr;
+
+            auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type) {
+                ImGui::PushID(label);
+                
+                ImGui::Text("%s:", label);
+                ImGui::SameLine(100);
+                
+                if (tex_ref && tex_ref->is_loaded()) {
+                    // Show texture info
+                    std::string name = tex_ref->name;
+                    std::string shortName = name;
+                    size_t lastSlash = name.find_last_of("/\\");
+                    if (lastSlash != std::string::npos) shortName = name.substr(lastSlash + 1);
+                    if (shortName.length() > 20) shortName = "..." + shortName.substr(shortName.length() - 17);
+
+                    ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", shortName.c_str());
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
+
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%dx%d)", tex_ref->width, tex_ref->height);
+                    
+                    // Clear button
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("X##Clear")) {
+                        tex_ref = nullptr;
+                        texture_changed = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove Texture");
+                    
+                    // Copy Button
+                    ImGui::SameLine();
+                    if (ImGui::Button("C##Copy")) {
+                        texture_clipboard = tex_ref;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy Texture to Clipboard");
+
+                } else {
+                    ImGui::TextDisabled("[None]");
+                    
+                    // Paste Button (Only if clipboard has content)
+                    if (texture_clipboard) {
+                        ImGui::SameLine();
+                        if (ImGui::Button("P##Paste")) {
+                            tex_ref = texture_clipboard;
+                            texture_changed = true;
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste Texture from Clipboard");
+                    }
+                }
+                
+                // Load button
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Load...")) {
+                    std::string initialDir = "";
+                    std::string defaultFile = "";
+                    
+                    if (tex_ref && !tex_ref->name.empty()) {
+                         std::string fullPath = tex_ref->name;
+                         size_t lastSlash = fullPath.find_last_of("/\\");
+                         if (lastSlash != std::string::npos) {
+                             initialDir = fullPath.substr(0, lastSlash);
+                             defaultFile = fullPath.substr(lastSlash + 1);
+                         }
+                    } else if (texture_clipboard && !texture_clipboard->name.empty()) {
+                        // Optional: Start from clipboard's location if slot is empty
+                         std::string fullPath = texture_clipboard->name;
+                         size_t lastSlash = fullPath.find_last_of("/\\");
+                         if (lastSlash != std::string::npos) {
+                             initialDir = fullPath.substr(0, lastSlash);
+                         }
+                    }
+
+                    auto new_tex = LoadTextureFromDialog(type, initialDir, defaultFile);
+                    if (new_tex) {
+                        tex_ref = new_tex;
+                        texture_changed = true;
+                    }
+                }
+                ImGui::PopID();
+            };
+
+            DrawTextureSlot("Albedo", pbsdf->albedoProperty.texture, TextureType::Albedo);
+            DrawTextureSlot("Normal", pbsdf->normalProperty.texture, TextureType::Normal);
+            DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness);
+            DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic);
+            DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission);
+            DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity);
+            
+            ImGui::TreePop();
+        }
+
+        if (changed || texture_changed) {
+             TriggerMaterialUpdate(texture_changed);
+             g_ProjectManager.markModified();
+        }
+    } else {
+        ImGui::TextDisabled("Unknown material type.");
+    }
 }
 
 
@@ -3626,6 +4194,41 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         Vec3 newPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
         Vec3 deltaPos = newPos - oldGizmoPos;  // Calculate delta from BEFORE manipulation
         sel.selected.position = newPos; // Update gizmo/bbox center
+        
+        // CRITICAL FIX: Update rotation and scale from object's transform matrix
+        // This ensures keyframes capture correct rotation/scale values
+        if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            auto transformHandle = sel.selected.object->getTransformHandle();
+            if (transformHandle) {
+                Matrix4x4 objTransform = transformHandle->getFinal();
+                
+                // Extract rotation (Euler angles in degrees)
+                // Assuming rotation order: Z * Y * X
+                float sy = sqrtf(objTransform.m[0][0] * objTransform.m[0][0] + objTransform.m[1][0] * objTransform.m[1][0]);
+                bool singular = sy < 1e-6f;
+                
+                if (!singular) {
+                    sel.selected.rotation.x = atan2f(objTransform.m[2][1], objTransform.m[2][2]) * (180.0f / 3.14159265f);
+                    sel.selected.rotation.y = atan2f(-objTransform.m[2][0], sy) * (180.0f / 3.14159265f);
+                    sel.selected.rotation.z = atan2f(objTransform.m[1][0], objTransform.m[0][0]) * (180.0f / 3.14159265f);
+                } else {
+                    sel.selected.rotation.x = atan2f(-objTransform.m[1][2], objTransform.m[1][1]) * (180.0f / 3.14159265f);
+                    sel.selected.rotation.y = atan2f(-objTransform.m[2][0], sy) * (180.0f / 3.14159265f);
+                    sel.selected.rotation.z = 0.0f;
+                }
+                
+                // Extract scale
+                sel.selected.scale.x = sqrtf(objTransform.m[0][0]*objTransform.m[0][0] + 
+                                             objTransform.m[1][0]*objTransform.m[1][0] + 
+                                             objTransform.m[2][0]*objTransform.m[2][0]);
+                sel.selected.scale.y = sqrtf(objTransform.m[0][1]*objTransform.m[0][1] + 
+                                             objTransform.m[1][1]*objTransform.m[1][1] + 
+                                             objTransform.m[2][1]*objTransform.m[2][1]);
+                sel.selected.scale.z = sqrtf(objTransform.m[0][2]*objTransform.m[0][2] + 
+                                             objTransform.m[1][2]*objTransform.m[1][2] + 
+                                             objTransform.m[2][2]*objTransform.m[2][2]);
+            }
+        }
 
         // Check if this is multi-selection (handle mixed types: lights + objects together)
         bool is_multi_select = sel.multi_selection.size() > 1;
@@ -3989,8 +4592,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
     // Only select if not interacting with UI or Gizmo
     if (ImGui::IsMouseClicked(0)) {
 
-        // Ignore click if over UI elements or Gizmo
-        if (ImGui::IsAnyItemHovered() || ImGuizmo::IsOver()) {
+        // Ignore click if over UI elements (Window/Panel) or Gizmo
+        // WantCaptureMouse is true if mouse is over any ImGui window or interacting with it
+        if (ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsOver()) {
+             // Exception: If we are dragging a gizmo, we might be 'over' it but not 'using' it yet?
+             // Actually ImGuizmo::IsOver() handles gizmo hover.
+             // But if we are just over an empty window background, WantCaptureMouse is true.
             return;
         }
 
@@ -4008,6 +4615,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         v = 1.0f - v; 
 
         if (ctx.scene.camera) {
+            
             Ray r = ctx.scene.camera->get_ray(u, v);
             
             // Check for Light Selection first (Bounding Sphere Intersection)
@@ -4090,6 +4698,45 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     closest_so_far = temp_rec.t;
                     rec = temp_rec;
                 }
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // APPLY PICK FOCUS (Using Found Hits)
+            // ═══════════════════════════════════════════════════════════
+            if (is_picking_focus) {
+                 float min_dist = 1e9f;
+                 bool found_hit = false;
+
+                 // Check Object Hit
+                 if (hit && rec.t < min_dist) { 
+                     min_dist = rec.t; 
+                     found_hit = true; 
+                 }
+                 // Check Light Hit
+                 if (closest_light && closest_t < min_dist) { 
+                     min_dist = closest_t; 
+                     found_hit = true; 
+                 }
+                 // Check Camera Hit
+                 if (closest_camera && closest_camera_t < min_dist) { 
+                     min_dist = closest_camera_t; 
+                     found_hit = true; 
+                 }
+
+                 if (found_hit) {
+                     ctx.scene.camera->focus_dist = min_dist;
+                     ctx.scene.camera->update_camera_vectors();
+                     if (ctx.optix_gpu_ptr) {
+                         ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+                         ctx.optix_gpu_ptr->resetAccumulation();
+                     }
+                     ctx.renderer.resetCPUAccumulation();
+                     SCENE_LOG_INFO(std::string("Pick Focus set to: ") + std::to_string(min_dist) + "m");
+                 }
+
+                 is_picking_focus = false;
+                 ctx.start_render = true;
+                 return;
             }
 
             if (hit && rec.triangle && (rec.t < closest_t)) {
@@ -4199,14 +4846,21 @@ void DrawRenderWindow(UIContext& ctx) {
     }
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.08f, 1.0f)); // Opaque Background
-    if (ImGui::Begin("Render Result", &show_render_window, ImGuiWindowFlags_NoCollapse)) {
+    
+    // Enable Resize and Collapse/Maximize (removed NoCollapse)
+    ImGuiWindowFlags win_flags = ImGuiWindowFlags_None; 
+    
+    if (ImGui::Begin("Render Result", &show_render_window, win_flags)) {
         
+        static bool show_sidebar = true;
+
         // Progress Info
         float progress = (float)current_samples / (float)target_samples;
         if (progress > 1.0f) progress = 1.0f;
 
-        // Header
-        ImGui::Text("Final Render Status");
+        // Header and Toolbar
+        // ---------------------------------------------------------
+        ImGui::Text("Status:");
         ImGui::SameLine();
         if (current_samples >= target_samples) {
             ImGui::TextColored(ImVec4(0,1,0,1), "[FINISHED]");
@@ -4217,26 +4871,28 @@ void DrawRenderWindow(UIContext& ctx) {
         }
 
         // Progress Bar
+        ImGui::SameLine();
         char buf[32];
-        sprintf(buf, "%d / %d Samples", current_samples, target_samples);
-        ImGui::ProgressBar(progress, ImVec2(-1, 0), buf);
-        
-        ImGui::Separator();
+        sprintf(buf, "%d / %d", current_samples, target_samples);
+        ImGui::ProgressBar(progress, ImVec2(200, 0), buf);
 
-        // Control Toolbar
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+
+        // Toolbar Buttons
         if (ImGui::Button("Save Image")) {
              std::string filename = "Render_" + std::to_string(time(0)) + ".png";
              ctx.render_settings.save_image_requested = true;
         }
         
         ImGui::SameLine();
-        
         if (ctx.render_settings.is_final_render_mode) {
-            if (ImGui::Button("Stop / Cancel")) {
+            if (UIWidgets::DangerButton("Stop", ImVec2(60, 0))) {
                 ctx.render_settings.is_final_render_mode = false;
             }
         } else {
-            if (ImGui::Button("Start Render (F12)")) {
+             if (UIWidgets::PrimaryButton("Render", ImVec2(60, 0))) {
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                 ctx.render_settings.is_final_render_mode = true;
@@ -4247,78 +4903,106 @@ void DrawRenderWindow(UIContext& ctx) {
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
-        
-        // ZOOM CONTROLS
+
+        // Zoom & Fit
         static float zoom = 1.0f;
-        if (ImGui::Button("1:1")) zoom = 1.0f;
-        ImGui::SameLine();
         if (ImGui::Button("Fit")) {
              extern int image_width, image_height;
              ImVec2 avail = ImGui::GetContentRegionAvail();
+             // Account for sidebar if visible
+             float avail_w = avail.x - (show_sidebar ? 305.0f : 0.0f);
+             
              if (image_width > 0 && image_height > 0) {
-                 float rX = avail.x / image_width;
+                 float rX = avail_w / image_width;
                  float rY = avail.y / image_height;
                  zoom = (rX < rY) ? rX : rY;
              }
         }
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(100);
+        ImGui::SetNextItemWidth(80);
         ImGui::SliderFloat("Zoom", &zoom, 0.1f, 5.0f, "%.1fx");
 
+        // Sidebar Toggle
+        ImGui::SameLine();
+        float avail_width_right = ImGui::GetContentRegionAvail().x;
+        // Align to right
+        ImGui::SameLine(ImGui::GetWindowWidth() - 110.0f);
+        if (UIWidgets::SecondaryButton(show_sidebar ? "Hide Panel >>" : "<< Options", ImVec2(90, 0))) {
+            show_sidebar = !show_sidebar;
+        }
+
         ImGui::Separator();
-        
-        // Render Output Display (Scrollable & Zoomable)
-        ImGui::BeginChild("RenderView", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoMove);
-        
-        extern SDL_Texture* raytrace_texture; // Global texture from Main.cpp
-        extern int image_width, image_height;
-        
-        if (raytrace_texture && image_width > 0 && image_height > 0) {
-             
-             ImGuiIO& io = ImGui::GetIO();
-             
-             // Mouse Wheel Zoom
-             if (ImGui::IsWindowHovered()) {
-                 if (io.MouseWheel != 0.0f) {
-                     float old_zoom = zoom;
-                     zoom += io.MouseWheel * 0.1f * zoom; // Logarithmic-ish zoom
-                     if (zoom < 0.1f) zoom = 0.1f;
-                     if (zoom > 10.0f) zoom = 10.0f;
-                     
-                     // Center zoom (optional, simplified for now)
-                 }
+
+        // Layout: Left (Image) | Right (Settings)
+        // ---------------------------------------------------------
+        float sidebar_width = 300.0f;
+        float content_w = ImGui::GetContentRegionAvail().x;
+        float image_view_w = show_sidebar ? (content_w - sidebar_width - 8.0f) : content_w;
+
+        // 1. Image Viewer (Left)
+        ImGui::BeginChild("RenderView", ImVec2(image_view_w, 0), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoMove);
+        {
+            extern SDL_Texture* raytrace_texture; 
+            extern int image_width, image_height;
+            
+            if (raytrace_texture && image_width > 0 && image_height > 0) {
+                 ImGuiIO& io = ImGui::GetIO();
                  
-                 // Middle Mouse Pan
-                 if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-                     ImVec2 delta = io.MouseDelta;
-                     ImGui::SetScrollX(ImGui::GetScrollX() - delta.x);
-                     ImGui::SetScrollY(ImGui::GetScrollY() - delta.y);
+                 // Handle Zoom/Pan if hovered
+                 if (ImGui::IsWindowHovered()) {
+                     if (io.MouseWheel != 0.0f) {
+                         zoom += io.MouseWheel * 0.1f * zoom;
+                         if (zoom < 0.1f) zoom = 0.1f;
+                         if (zoom > 10.0f) zoom = 10.0f;
+                     }
+                     if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                         ImVec2 delta = io.MouseDelta;
+                         ImGui::SetScrollX(ImGui::GetScrollX() - delta.x);
+                         ImGui::SetScrollY(ImGui::GetScrollY() - delta.y);
+                     }
                  }
-             }
 
-             // Calculate Scaled Size
-             float w = (float)image_width * zoom;
-             float h = (float)image_height * zoom;
-             
-             // Center Image if smaller than window
-             ImVec2 avail = ImGui::GetContentRegionAvail();
-             float offX = (avail.x > w) ? (avail.x - w) * 0.5f : 0.0f;
-             float offY = (avail.y > h) ? (avail.y - h) * 0.5f : 0.0f;
-             
-             if (offX > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offX);
-             if (offY > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offY);
+                 float w = (float)image_width * zoom;
+                 float h = (float)image_height * zoom;
+                 
+                 // Center logic
+                 ImVec2 avail = ImGui::GetContentRegionAvail();
+                 float offX = (avail.x > w) ? (avail.x - w) * 0.5f : 0.0f;
+                 float offY = (avail.y > h) ? (avail.y - h) * 0.5f : 0.0f;
+                 
+                 if (offX > 0) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offX);
+                 if (offY > 0) ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offY);
 
-             ImGui::Image((ImTextureID)raytrace_texture, ImVec2(w, h));
-             
-             // Tooltip for resolution
-             if (ImGui::IsItemHovered()) {
-                 ImGui::SetTooltip("Resolution: %dx%d | Zoom: %.1f%%", image_width, image_height, zoom * 100.0f);
-             }
-
-        } else {
-             ImGui::TextColored(ImVec4(1,0,0,1), "Render Texture not available.");
+                 ImGui::Image((ImTextureID)raytrace_texture, ImVec2(w, h));
+                 
+                 if (ImGui::IsItemHovered()) {
+                     ImGui::SetTooltip("Res: %dx%d | Zoom: %.1f%%", image_width, image_height, zoom * 100.0f);
+                 }
+            } else {
+                 ImGui::TextColored(ImVec4(1,0,0,1), "No Render Output Available");
+            }
         }
         ImGui::EndChild();
+
+        // 2. Sidebar (Right)
+        if (show_sidebar) {
+            ImGui::SameLine();
+            ImGui::BeginChild("RenderSettingsSidebar", ImVec2(sidebar_width, 0), true);
+            
+            ImGui::TextDisabled("Render Adjustment");
+            ImGui::Separator();
+            
+            // Draw controls
+            DrawRenderWindowToneMapControls(ctx);
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextDisabled("Stats:");
+            ImGui::Text("Samples: %d", current_samples);
+            ImGui::Text("Resolution: %dx%d", ctx.render_settings.final_render_width, ctx.render_settings.final_render_height);
+            
+            ImGui::EndChild();
+        }
     }
     ImGui::End();
     ImGui::PopStyleColor();

@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.3-blue.svg)
+![Version](https://img.shields.io/badge/version-1.4-blue.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -112,7 +112,15 @@
 ### 🖥️ User Interface
 
 - Modern ImGui-based Dark UI with Docking
-- **Animation Timeline Panel**: Play/Pause, Scrubbing, Frame skipping
+- **Blender-Style Animation Timeline** (NEW v1.4):
+  - Multi-track visualization with group hierarchy (Objects/Lights/Cameras/World)
+  - **Per-Channel Keyframing**: Separate Location/Rotation/Scale keyframes
+  - **Expandable L/R/S Rows**: Click arrow to see individual channel keyframes
+  - **Color-Coded Channels**: Red=Location, Green=Rotation, Blue=Scale
+  - **Context Menu**: Right-click for insert/delete/duplicate operations
+  - **Toolbar Buttons**: +K (Insert), -K (Delete), Dup (Duplicate), ? (Help)
+  - **Drag-to-Move**: Click and drag keyframes to reposition
+  - Zoom (Mouse Wheel), Pan (Middle Mouse), Scrub (Click header)
 - Render Quality Presets (Low, Medium, High, Ultra)
 - Dynamic Resolution Scaling
 - Scene hierarchy viewer and Material editor
