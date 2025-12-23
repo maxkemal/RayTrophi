@@ -2,6 +2,7 @@
 #include <HittableList.h>
 #include <AssimpLoader.h>
 #include <AnimatedObject.h>
+#include "KeyframeSystem.h"
 
 struct SceneData {
     HittableList world;
@@ -21,6 +22,9 @@ struct SceneData {
     bool initialized = false;
     BoneData boneData;
     ColorProcessor color_processor;
+    
+    // Keyframe animation system
+    TimelineManager timeline;
     
     // Get active camera (safely)
     std::shared_ptr<Camera> getActiveCamera() const {
@@ -52,6 +56,7 @@ struct SceneData {
         cameras.clear();
         animatedObjects.clear();
         animationDataList.clear();
+        timeline.clear();  // Clear keyframes
         camera = nullptr;
         active_camera_index = 0;
         bvh = nullptr;
