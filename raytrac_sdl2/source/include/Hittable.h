@@ -27,6 +27,9 @@ struct HitRecord {
     float v;
     bool front_face;
   
+    // Add reference to the hit object itself (for accessing AABB etc.)
+    // const Hittable* obj = nullptr; // REMOVED: potentially circular and redundant (we use triangle ptr)
+    
     const Triangle* triangle = nullptr;
     Vec3 tangent;
     Vec3 bitangent;

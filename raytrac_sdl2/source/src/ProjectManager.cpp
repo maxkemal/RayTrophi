@@ -774,6 +774,22 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
     g_project.imported_models.push_back(model);
     g_project.is_modified = true;
     
+    // AUTO-ACTIVATE CAMERA: If imported model has cameras, set first new one as active
+    if (!scene.cameras.empty()) {
+        // Find if we have new cameras (cameras added during this import)
+        // Simple approach: if active camera is default and we have imported cameras, activate first imported
+        // Better: check if camera count increased
+        size_t camera_count = scene.cameras.size();
+        if (camera_count > 1 && scene.active_camera_index == 0) {
+            // Switch to the newly imported camera (likely the last one)
+            scene.setActiveCamera(camera_count - 1);
+            SCENE_LOG_INFO("Auto-activated imported camera: Camera #" + std::to_string(camera_count - 1));
+        } else if (camera_count == 1 && scene.camera) {
+            // Only one camera exists, ensure it's active
+            scene.setActiveCamera(0);
+        }
+    }
+    
     if (rebuild) {
         if (progress_callback) progress_callback(90, "Rebuilding BVH...");
         extern RenderSettings render_settings;  // From globals or Main.cpp

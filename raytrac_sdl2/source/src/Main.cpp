@@ -12,11 +12,13 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // Değiştirildi: sdlrenderer2
 #include <scene_ui.h>
+#include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
 #include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
+#include "SplashScreen.h"  // Splash screen support
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -186,7 +188,10 @@ void reset_render_resolution(int w, int h)
     // ------------------------------------------------------------------
     // 1. SDL Pencere Boyutunu Güncelle
     // ------------------------------------------------------------------
-    SDL_SetWindowSize(window, w, h);
+    // ------------------------------------------------------------------
+    // 1. SDL Pencere Boyutunu Güncelle - IPTAL (Kullanıcı pencere boyutu değişsin istemiyor)
+    // ------------------------------------------------------------------
+    // SDL_SetWindowSize(window, w, h);
     
     // ------------------------------------------------------------------
     // 2. SDL kaynaklarını sıfırla (DESTROY)
@@ -394,13 +399,30 @@ int main(int argc, char* argv[]) {
         SCENE_LOG_ERROR(std::string("SDL_Init Error: ") + SDL_GetError());
         return 1;
     }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SPLASH SCREEN - Frameless startup screen with loading status
+    // ═══════════════════════════════════════════════════════════════════════════
+    SplashScreen splash;
+    bool splashOk = splash.init("RayTrophi_image.png", 900, 700);
+    if (splashOk) {
+        splash.setStatus("Initializing...");
+        splash.render();
+    }
+    
+    // Detect GPU Hardware
+    if (splashOk) { splash.setStatus("Detecting CUDA/OptiX hardware..."); splash.render(); }
+    g_sceneLog.clear();
+    detectOptixHardware();
 
+     // Create main window
+    if (splashOk) { splash.setStatus("Creating main window..."); splash.render(); }
      window = SDL_CreateWindow("RayTrophi",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         image_width,
         image_height,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
 
      renderer =
         SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
@@ -414,38 +436,23 @@ int main(int argc, char* argv[]) {
      original_surface =
         SDL_ConvertSurface(surface, surface->format, 0);
 
-    // Artık pencere var, maximize edebilirsin
-    SDL_MaximizeWindow(window);
-    g_sceneLog.clear();
-    detectOptixHardware();
-    // SDL başlatıldıktan hemen sonra, render döngüsünden önce ekle
-    SDL_Surface* splash = IMG_Load("RayTrophi_image.png");
-    if (splash) {
-        SDL_BlitScaled(splash, nullptr, surface, nullptr); // splash'ı surface'a bas
-        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch); // texture güncelle
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-        SDL_RenderPresent(renderer);
-        SDL_FreeSurface(splash); // işimiz bitti
-    }
-    else {
-        SCENE_LOG_ERROR(std::string("Splash görseli yüklenemedi: ") + IMG_GetError());
-    }
-
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
+    
+    // Initialize ImGui
+    if (splashOk) { splash.setStatus("Initializing ImGui..."); splash.render(); }
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
-   // ImGui::StyleColorsDark();
 
     // Initialize Theme using ThemeManager (prevents style overriding issues)
     ThemeManager::instance().setTheme("RayTrophi Pro Dark");
     ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
 	
-
+    // Initialize OptiX
+    if (splashOk) { splash.setStatus("Initializing OptiX pipeline..."); splash.render(); }
     if (initializeOptixIfAvailable(optix_gpu)) {
         SCENE_LOG_INFO("OptiX is ready!");
         render_settings.use_optix = true;
@@ -455,17 +462,31 @@ int main(int argc, char* argv[]) {
         SCENE_LOG_WARN("Falling back to CPU rendering.");
     }
 
-    
-    // Create Default Scene if empty
+    // Create Default Scene
+    if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
     createDefaultScene(scene, ray_renderer, g_hasOptix ? &optix_gpu : nullptr);
     ui.invalidateCache(); // Ensure procedural objects are listed/selectable
+    
     // Build initial BVH and OptiX structures
+    if (splashOk) { splash.setStatus("Building BVH structures..."); splash.render(); }
     ray_renderer.rebuildBVH(scene, UI_use_embree);
     if (g_hasOptix) {
         ray_renderer.rebuildOptiXGeometry(scene, &optix_gpu);
     }
     // Update initial camera vectors
     if (scene.camera) scene.camera->update_camera_vectors();
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SPLASH COMPLETE - Wait for user click to continue
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (splashOk) {
+        splash.waitForClick();
+        splash.close();
+    }
+    
+    // Show main window now that loading is complete
+    SDL_ShowWindow(window);
+    SDL_MaximizeWindow(window);
 
     SDL_Event e;
     while (!quit) {
@@ -520,6 +541,31 @@ int main(int argc, char* argv[]) {
                 SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
                 SDL_UnlockSurface(surface);
                 last_tex_update = now;
+            }
+            
+            // --- ANIMATION PREVIEW UPDATE ---
+            if (ui_ctx.animation_preview_ready) {
+                std::lock_guard<std::mutex> lock(ui_ctx.animation_preview_mutex);
+                int w = ui_ctx.animation_preview_width;
+                int h = ui_ctx.animation_preview_height;
+                
+                if (w > 0 && h > 0) {
+                    // Check if texture needs (re)creation
+                    int tw = 0, th = 0;
+                    if (ui_ctx.animation_preview_texture) {
+                        SDL_QueryTexture(ui_ctx.animation_preview_texture, nullptr, nullptr, &tw, &th);
+                    }
+                    
+                    if (!ui_ctx.animation_preview_texture || tw != w || th != h) {
+                        if (ui_ctx.animation_preview_texture) SDL_DestroyTexture(ui_ctx.animation_preview_texture);
+                        ui_ctx.animation_preview_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, w, h);
+                    }
+                    
+                    if (ui_ctx.animation_preview_texture) {
+                        SDL_UpdateTexture(ui_ctx.animation_preview_texture, nullptr, ui_ctx.animation_preview_buffer.data(), w * sizeof(uint32_t));
+                    }
+                }
+                ui_ctx.animation_preview_ready = false;
             }
         }
         ImGui_ImplSDLRenderer2_NewFrame();
@@ -588,6 +634,35 @@ int main(int argc, char* argv[]) {
         // NOTE: handleMouseSelection is now called inside ui.draw() - removed duplicate call here
         
         // Scene Hierarchy panel now called inside ui.draw()
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // VIEWPORT GUIDES - Draw safe areas, letterbox, grids on viewport
+        // ═══════════════════════════════════════════════════════════════════════════
+        {
+            // Get viewport bounds (full window for now)
+            int win_w, win_h;
+            SDL_GetWindowSize(window, &win_w, &win_h);
+            
+            ImVec2 viewport_min(0, 0);
+            ImVec2 viewport_max((float)win_w, (float)win_h);
+            
+            // Convert GuideSettings to ViewportGuides format
+            ViewportGuides::GuideSettings vg_settings;
+            vg_settings.show_safe_areas = ui.guide_settings.show_safe_areas;
+            vg_settings.safe_area_type = ui.guide_settings.safe_area_type;
+            vg_settings.title_safe_percent = ui.guide_settings.title_safe_percent;
+            vg_settings.action_safe_percent = ui.guide_settings.action_safe_percent;
+            vg_settings.show_letterbox = ui.guide_settings.show_letterbox;
+            vg_settings.aspect_ratio_index = ui.guide_settings.aspect_ratio_index;
+            vg_settings.letterbox_opacity = ui.guide_settings.letterbox_opacity;
+            vg_settings.show_grid = ui.guide_settings.show_grid;
+            vg_settings.grid_type = ui.guide_settings.grid_type;
+            vg_settings.show_center = ui.guide_settings.show_center;
+            
+            // Draw guides on background draw list (behind UI, on top of viewport texture)
+            ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+            ViewportGuides::drawAllGuides(draw_list, viewport_min, viewport_max, vg_settings);
+        }
         
         // Handle resolution change - SKIP RENDERING THIS FRAME
         if (pending_resolution_change) {
@@ -668,13 +743,16 @@ int main(int argc, char* argv[]) {
             }
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
                 if (!ImGui::GetIO().WantCaptureMouse) {
+                    int win_w, win_h;
+                    SDL_GetWindowSize(window, &win_w, &win_h);
+
                     rayhit = true;
                     mx = e.button.x;
-                    my = e.button.y;
-                    my = image_height - my;
-                    u = (mx + 0.5f) / image_width;
-                    v = (my + 0.5f) / image_height;
+                    // my'yi window height'a göre ters çevir (global my değişkenini kullanarak)
+                    my = win_h - e.button.y; 
 
+                    u = (mx + 0.5f) / (float)win_w;
+                    v = (my + 0.5f) / (float)win_h;
                 }
             }
             if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_MIDDLE) {
@@ -863,32 +941,42 @@ int main(int argc, char* argv[]) {
                     render_settings.start_animation_render = false;
                     rendering_in_progress = true; // Set block flag immediately
                     
+                    // Reset stop flags for new render
+                    rendering_stopped_cpu = false;
+                    rendering_stopped_gpu = false;
+                    
                     start_render = false; // Cancel any pending interactive render
                     
                     SCENE_LOG_INFO("Starting animation render...");
-                    std::string output_folder = "render_animation";
+                    std::string output_folder = ui_ctx.render_settings.animation_output_folder;
+                    if (output_folder.empty()) output_folder = "render_animation";
                     SCENE_LOG_INFO("Output folder set to: " + output_folder);
 
                     // Capture local copies of settings to avoid thread race
-                    int anim_sample_count = sample_count;
+                    int anim_sample_count = ui_ctx.render_settings.final_render_samples; // Use intended target, NOT viewport accum count
                     int anim_sample_per_pass = sample_per_pass;
                     int anim_fps = ui_ctx.render_settings.animation_fps;
                     float anim_duration = ui_ctx.render_settings.animation_duration;
                     bool anim_use_denoiser = ui_ctx.render_settings.use_denoiser;
                     float anim_denoiser_blend = ui_ctx.render_settings.denoiser_blend_factor;
                     bool anim_use_optix = ui_ctx.render_settings.use_optix;
+                    int anim_start_frame = ui_ctx.render_settings.animation_start_frame;
+                    int anim_end_frame = ui_ctx.render_settings.animation_end_frame;
                     
+                    SCENE_LOG_INFO("DEBUG: Main starting animation thread. UI frames: " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame));
+
                     // Detach thread
                     std::thread anim_thread([=]() {
                         ray_renderer.render_Animation(surface, window, raytrace_texture, renderer,
                             anim_sample_count, anim_sample_per_pass,
-                            anim_fps, anim_duration,
+                            anim_fps, anim_duration, anim_start_frame, anim_end_frame,
                             scene,
                             output_folder,
                             anim_use_denoiser,
                             anim_denoiser_blend,
                             &optix_gpu,
-                            anim_use_optix);
+                            anim_use_optix,
+                            &ui_ctx);
                             
                          SCENE_LOG_INFO("Animation render completed.");
                     });
@@ -1087,6 +1175,10 @@ int main(int argc, char* argv[]) {
                     optix_gpu.updateGeometry(scene.world.objects);
                     if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
                     optix_gpu.setLightParams(scene.lights);
+                    
+                    // Update GPU materials for material keyframe animation
+                    ray_renderer.updateOptiXMaterialsOnly(scene, &optix_gpu);
+                    
                     // Reset accumulation for new frame
                     optix_gpu.resetAccumulation();
                 } else {

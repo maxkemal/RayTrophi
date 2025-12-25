@@ -2,6 +2,35 @@
 #include <vector_types.h>
 #include <material_gpu.h>
 #include "World.h"
+
+#ifndef START_PARAMS_H_OVERRIDES
+#define START_PARAMS_H_OVERRIDES
+#ifndef __CUDACC__
+// If not CUDA compiler, define macros empty if missing (though likely defined by cuda_runtime)
+#ifndef __host__
+#define __host__
+#endif
+#ifndef __device__
+#define __device__
+#endif
+#endif
+
+inline __host__ __device__ float3 make_float3(float s) {
+    return make_float3(s, s, s);
+}
+
+inline __host__ __device__ float3 operator-(const float3& a, const float3& b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+inline __host__ __device__ float3 operator+(const float3& a, const float3& b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+inline __host__ __device__ float3 operator*(const float3& a, float s) {
+    return make_float3(a.x * s, a.y * s, a.z * s);
+}
+#endif
 struct gpuCamera {
     float3 origin;
     float3 lower_left_corner;
@@ -13,6 +42,15 @@ struct gpuCamera {
     float focus_dist;
     int blade_count;
 	float aperture;  // lens aperture
+    float exposure_factor; // Calculated exposure multiplier
+    
+    // Motion Blur Parameters
+    float shutter_open_time; // In seconds (derived from shutter speed)
+    float3 vel_origin;       // Change in origin per shutter interval
+    float3 vel_corner;       // Change in lower_left_corner
+    float3 vel_horizontal;   // Change in horizontal vector
+    float3 vel_vertical;     // Change in vertical vector
+    int motion_blur_enabled; // 0=Off, 1=On
 };
 struct LightGPU {
     float3 position;

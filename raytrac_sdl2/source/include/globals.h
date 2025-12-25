@@ -17,6 +17,13 @@ enum class QualityPreset {
     Cinematic = 2     // Highest quality, slowest
 };
 
+// Resolution source for final render
+enum class ResolutionSource {
+    Native = 0,       // Use current window/viewport size
+    Custom = 1,       // Manual width x height
+    FromAspect = 2    // Calculate from aspect ratio + base height
+};
+
 struct RenderSettings {
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
@@ -59,8 +66,14 @@ struct RenderSettings {
     int render_current_samples = 0;
     int render_target_samples = 256;
     int final_render_samples = 128;
-    int final_render_width = 1920;
-    int final_render_height = 1080; // Specific for F12 Output
+    int final_render_width = 1280;
+    int final_render_height = 720; // Specific for F12 Output
+    
+    // Resolution Source (Native/Custom/FromAspect)
+    ResolutionSource resolution_source = ResolutionSource::Custom;
+    int aspect_base_height = 1080;        // Base height for aspect ratio calculation
+    int aspect_ratio_index = 0;           // Index into CameraPresets::ASPECT_RATIOS
+    
     float render_progress = 0.0f;
     bool is_rendering_active = false;
     bool is_render_paused = false;
@@ -72,9 +85,9 @@ struct RenderSettings {
     float avg_sample_time_ms = 0.0f;
     
     // Viewport Grid Settings
-    bool grid_enabled = true;
-    float grid_fade_distance = 50.0f;  // Units where grid fades out completely
-    float viewport_near_clip = 0.1f;   // Objects closer than this won't be seen
+    bool grid_enabled = false;
+    float grid_fade_distance = 500.0f;  // Units where grid fades out completely
+    float viewport_near_clip = 0.01f;   // Objects closer than this won't be seen
     float viewport_far_clip = 5000.0f; // Objects further than this won't be seen
 };
 enum class LogLevel { Info, Warning, Error };

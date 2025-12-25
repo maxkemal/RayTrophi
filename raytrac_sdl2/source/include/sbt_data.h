@@ -5,44 +5,67 @@
 struct __align__(16) HitGroupData
 {
     // Per-triangle interpolated attributes
-    float3 n0, n1, n2;     // Vertex normals
-    float2 uv0, uv1, uv2;  // UVs
-    float3 t0, t1, t2;     // Tangents
+    float3 n0 = {0,0,0}, n1 = {0,0,0}, n2 = {0,0,0};     // Vertex normals
+    float2 uv0 = {0,0}, uv1 = {0,0}, uv2 = {0,0};        // UVs
+    float3 t0 = {0,0,0}, t1 = {0,0,0}, t2 = {0,0,0};     // Tangents
 
     // Material info (4-byte align)
-    int material_id;
+    int material_id = -1;
 
-    int has_albedo_tex;
-    int has_roughness_tex;
-    int has_normal_tex;
-    int has_metallic_tex;
-    int has_transmission_tex;
-    int has_opacity_tex;
-    int has_emission_tex;
-    int pad0; // fill-up to keep next part aligned
+    int has_albedo_tex = 0;
+    int has_roughness_tex = 0;
+    int has_normal_tex = 0;
+    int has_metallic_tex = 0;
+    int has_transmission_tex = 0;
+    int has_opacity_tex = 0;
+    int has_emission_tex = 0;
+    int pad0 = 0; // fill-up to keep next part aligned
 
-    float3 emission;
-    int pad1; // float3 -> next 16-byte boundaryc
+    float3 emission = {0,0,0};
+    int pad1 = 0; // float3 -> next 16-byte boundaryc
 
     // Geometry buffers (only device pointers!)
-    const float3* vertices;
-    const uint3* indices;
-    const float3* normals;
-    const float3* tangents;
-    const float2* uvs;
+    const float3* vertices = nullptr;
+    const uint3* indices = nullptr;
+    const float3* normals = nullptr;
+    const float3* tangents = nullptr;
+    const float2* uvs = nullptr;
 
     // Existence flags (bool kırıldı, int ile sabitiz)
-    int has_normals;
-    int has_uvs;
-    int has_tangents;
-    int pad2; // Alignment helper (ensures next block starts at 8-byte boundary)
+    int has_normals = 0;
+    int has_uvs = 0;
+    int has_tangents = 0;
+    int pad2 = 0; // Alignment helper (ensures next block starts at 8-byte boundary)
 
     // Texture objects (OptiX bunları seviyor)
-    cudaTextureObject_t albedo_tex;
-    cudaTextureObject_t roughness_tex;
-    cudaTextureObject_t normal_tex;
-    cudaTextureObject_t metallic_tex;
-    cudaTextureObject_t transmission_tex;
-    cudaTextureObject_t opacity_tex;
-    cudaTextureObject_t emission_tex;
+    cudaTextureObject_t albedo_tex = 0;
+    cudaTextureObject_t roughness_tex = 0;
+    cudaTextureObject_t normal_tex = 0;
+    cudaTextureObject_t metallic_tex = 0;
+    cudaTextureObject_t transmission_tex = 0;
+    cudaTextureObject_t opacity_tex = 0;
+    cudaTextureObject_t emission_tex = 0;
+    
+    // Volumetric material support
+    int is_volumetric = 0;        // 1 = volumetric material, 0 = surface
+    float vol_density = 0.0f;     // Base density
+    float vol_absorption = 0.0f;  // Absorption coefficient
+    float vol_scattering = 0.0f;  // Scattering coefficient
+    float3 vol_albedo = {1,1,1};  // Scattering color
+    float3 vol_emission = {0,0,0}; // Volume emission
+    float vol_g = 0.0f;           // Phase anisotropy (forward)
+    float vol_step_size = 0.1f;   // Ray march step size
+    int vol_max_steps = 100;      // Max ray march steps
+    float vol_noise_scale = 1.0f; // Noise frequency multiplier
+    
+    // Multi-Scattering Parameters (NEW)
+    float vol_multi_scatter = 0.3f;   // Multi-scatter contribution (0-1)
+    float vol_g_back = -0.3f;         // Backward scattering anisotropy
+    float vol_lobe_mix = 0.7f;        // Forward/backward lobe mix
+    int vol_light_steps = 4;          // Light march steps (0=disabled)
+    float vol_shadow_strength = 0.8f; // Self-shadow intensity
+    
+    // Object AABB bounds (for volumetric ray marching)
+    float3 aabb_min = {0,0,0};    // Bounding box minimum
+    float3 aabb_max = {0,0,0};    // Bounding box maximum
 };

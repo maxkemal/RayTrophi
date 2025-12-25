@@ -66,6 +66,7 @@ enum class BVHType {
 };
 
 class OptixWrapper;
+struct UIContext;
 
 class Renderer {
 public:
@@ -110,9 +111,9 @@ public:
     Matrix4x4 calculateAnimationTransform(const AnimationData& animation, float currentTime);
    // void updateBVHForAnimatedObjects(ParallelBVHNode& bvh, const std::vector<std::shared_ptr<Hittable>>& animatedObjects);
     void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, 
-        const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, SceneData& scene,
+        const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
         const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
-        OptixWrapper* optix_gpu = nullptr, bool use_optix = false);
+        OptixWrapper* optix_gpu = nullptr, bool use_optix = false, UIContext* ui_ctx = nullptr);
     bool updateAnimationState(SceneData& scene, float time);
    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
@@ -126,6 +127,10 @@ public:
 
     // Rebuild OptiX geometry after scene modifications (deletion/addition)
     void rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+    
+    // Update OptiX materials only (fast path - no geometry rebuild)
+    // Use when only material properties change (color, roughness, volumetric params, etc.)
+    void updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gpu_ptr);
 
    
     void initializeBuffers(int image_width, int image_height);
@@ -261,7 +266,7 @@ public:
     bool cpu_accumulation_valid = false;
     
     // Progressive render functions
-    void render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass = 1);
+    void render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass = 1, int override_target_samples = 0);
     void resetCPUAccumulation();
     bool isCPUAccumulationComplete() const;
     int getCPUAccumulatedSamples() const { return cpu_accumulated_samples; }

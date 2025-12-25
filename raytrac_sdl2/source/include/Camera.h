@@ -1,4 +1,4 @@
-#ifndef CAMERA_H
+﻿#ifndef CAMERA_H
 #define CAMERA_H
 
 #include <vector>
@@ -69,6 +69,51 @@ public:
     Vec3 horizontal;
     Vec3 vertical;
     float lens_radius;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PROFESSIONAL EXPOSURE SETTINGS
+    // ═══════════════════════════════════════════════════════════════════════════
+    int iso = 100;                     // Current ISO value
+    float shutter_speed = 250.0f;      // Shutter speed as 1/x (e.g., 250 = 1/250s)
+    int iso_preset_index = 1;          // Default: ISO 100
+    int shutter_preset_index = 1;      // Default: 1/4000s
+    int fstop_preset_index = 4;        // Default: f/2.8
+    bool auto_exposure = true;         // Default to manual to use above settings
+    float ev_compensation = 0.0f;      // EV compensation (-2 to +2)
+    float calculated_ev = 0.0f;        // Calculated exposure value (output)
+    
+    // Aspect Ratio for Output (syncs with final render)
+    int output_aspect_index = 2;       // Default: 16:9 (index into CameraPresets::ASPECT_RATIOS)
+
+    // PHYSICAL LENS SETTINGS
+    // ═══════════════════════════════════════════════════════════════════════════
+    bool use_physical_lens = false;    // Toggle between basic FOV and Physical Lens
+    float focal_length_mm = 50.0f;     // Focal length in mm (e.g. 24, 35, 50, 85)
+    float sensor_width_mm = 36.0f;     // Sensor width (Full Frame = 36mm)
+    float sensor_height_mm = 24.0f;    // Sensor height (Full Frame = 24mm)
+    bool enable_motion_blur = false;   // Enable Camera Motion Blur (requires velocity calculation)
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CAMERA RIG SYSTEM (Dolly, Crane, Orbit)
+    // ═══════════════════════════════════════════════════════════════════════════
+    enum class RigMode { Static, Dolly, Crane, Orbit };
+    RigMode rig_mode = RigMode::Static;
+    
+    // Dolly - Linear track movement
+    float dolly_position = 0.0f;       // Position along track (units)
+    float dolly_speed = 1.0f;          // Movement speed multiplier
+    Vec3 dolly_start_pos;              // Initial position when dolly started
+    
+    // Crane - Arm with boom
+    float crane_arm = 5.0f;            // Arm length
+    float crane_height = 2.0f;         // Base height
+    float crane_boom = 0.0f;           // Boom angle (-45 to +45)
+    
+    // Orbit - Around target
+    float orbit_angle = 0.0f;          // Current angle
+    float orbit_radius = 5.0f;         // Distance from target
+    Vec3 orbit_target;                 // Point to orbit around
+    
 private:
     // Initial state for reset
     Vec3 init_lookfrom;
@@ -81,9 +126,10 @@ private:
 
     Vec3 getViewDirection() const;
 
-    // Frustum culling i�in ek alanlar
+    // Frustum culling i�in ek alanlar
 
     Plane frustum_planes[6];
 };
 
 #endif // CAMERA_H
+

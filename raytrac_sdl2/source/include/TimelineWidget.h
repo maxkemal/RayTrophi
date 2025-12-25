@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "KeyframeSystem.h"
@@ -33,7 +33,8 @@ enum class ChannelType {
     None = 0,       // Main entity track
     Location,       // Position sub-channel
     Rotation,       // Rotation sub-channel
-    Scale           // Scale sub-channel
+    Scale,          // Scale sub-channel
+    Material        // Material sub-channel
 };
 
 // Visual representation of a track in the timeline
@@ -65,7 +66,7 @@ public:
     int getCurrentFrame() const { return current_frame; }
     void setCurrentFrame(int frame) { current_frame = frame; }
     bool isPlaying() const { return is_playing; }
-    
+    std::string selected_track;
 private:
     // ===== DRAWING FUNCTIONS =====
     void drawPlaybackControls(UIContext& ctx);
@@ -108,14 +109,14 @@ private:
     // Layout
     float track_height = 24.0f;
     float legend_width = 180.0f;
-    float header_height = 28.0f;
+    float header_height = 20.0f;  // Reduced for compact timeline
     
     // Track data
     std::vector<TimelineTrack> tracks;
     bool tracks_dirty = true;
     
     // Selection & Interaction
-    std::string selected_track;
+ 
     int selected_keyframe_frame = -1;
     bool is_dragging_keyframe = false;
     int drag_start_frame = -1;

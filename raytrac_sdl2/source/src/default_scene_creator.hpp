@@ -2,16 +2,20 @@
 #define DEFAULT_SCENE_CREATOR_HPP
 
 #include "scene_data.h"
-#include "MaterialManager.h"
-#include "PrincipledBSDF.h"
-#include "Texture.h"
 #include "Triangle.h" 
+#include "Vec2.h"
 #include "PointLight.h"
 #include "Camera.h"
-#include "Transform.h"
 #include "Renderer.h"
+#include "World.h"
+#include "MaterialManager.h"
+#include "Material.h"
+#include "PrincipledBSDF.h"
+#include "material_gpu.h"
+#include <vector_types.h> // For make_float3
 #include <filesystem>
 #include <string>
+
 
 // Helper function to create a default Blender-like startup scene
 inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrapper* optix_gpu) {
@@ -52,45 +56,140 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrappe
              scene.camera = std::make_shared<Camera>(lookfrom, lookat, vup, 40.0f, ar, 0.0f, dist_to_focus, 0);
         }
         
-        // If no lights, add a default point light
-        if (scene.lights.empty()) {
-             auto light = std::make_shared<PointLight>(Vec3(4.0f, 4.0f, 4.0f), Vec3(50.0f, 50.0f, 50.0f), 0.2f);
-             scene.lights.push_back(light);
+        // SYNC NISHITA WITH SCENE SUN (Directional Light)
+        for (const auto& light : scene.lights) {
+            if (light->type() == LightType::Directional) {
+                SCENE_LOG_INFO("Found Directional Light in default asset. Syncing Nishita Sun...");
+                
+                Vec3 lightDir = light->direction.normalize();
+                Vec3 sunDir = -lightDir; 
+                
+                float elevRad = asinf(sunDir.y);
+                float elevDeg = elevRad * 180.0f / 3.14159265f;
+                
+                float azimRad = atan2f(sunDir.x, sunDir.z); 
+                float azimDeg = azimRad * 180.0f / 3.14159265f;
+                if (azimDeg < 0.0f) azimDeg += 360.0f;
+                
+                NishitaSkyParams nishita = renderer.world.getNishitaParams();
+                nishita.sun_elevation = elevDeg;
+                nishita.sun_azimuth = azimDeg;
+                nishita.sun_direction = make_float3(sunDir.x, sunDir.y, sunDir.z); // Positive Z logic
+                
+                renderer.world.setNishitaParams(nishita);
+                break;
+            }
         }
         
         scene.initialized = true;
         return;
     }
-
-    // Fallback: Create Cube programmatically if file not found
-    // Fallback: Default scene with NO OBJECTS (Empty), just light and camera
-    SCENE_LOG_INFO("Default asset not found. Creating Empty Scene (Light + Camera only).");
-
-    // 2. Create Light (Point Light)
-    // PointLight(pos, intensity, radius)
-    auto light = std::make_shared<PointLight>(Vec3(4.0f, 4.0f, 4.0f), Vec3(50.0f, 50.0f, 50.0f), 0.2f);
-    scene.lights.push_back(light);
     
-    // 3. Setup Camera (if not already set)
+
+    // Fallback: Create Professional Empty Scene - Ground Plane + Nishita Sky
+    SCENE_LOG_INFO("Default asset not found. Creating Professional Empty Scene.");
+    
+    // 0. Setup World Environment (Nishita Sky)
+    renderer.world.setMode(WORLD_MODE_NISHITA);
+    
+    NishitaSkyParams nishita = renderer.world.getNishitaParams();
+    nishita.sun_elevation = 15.0f; // Golden hour
+    nishita.sun_azimuth = 170.0f;   // Matches camera angle
+    nishita.sun_intensity = 10.0f;
+    
+    // CRITICAL: Must update sun_direction vector manually as it's used by renderers
+    // Convert Elevation/Azimuth (Degrees) to Direction Vector (Y-up)
+    float elevRad = nishita.sun_elevation * 3.14159265f / 180.0f;
+    float azimRad = nishita.sun_azimuth * 3.14159265f / 180.0f;
+    
+    // Assuming Y-up, +Z forward (or standard math convention)
+    // x = cos(elev) * sin(azim)
+    // y = sin(elev)
+    // z = -cos(elev) * cos(azim)
+    float cosElev = cosf(elevRad);
+    float sinElev = sinf(elevRad);
+    float sinAzim = sinf(azimRad);
+    float cosAzim = cosf(azimRad);
+    
+    // Adjust signs based on coordinate system if needed (Standard sky vector)
+    // MATCHING UI LOGIC: Z is POSITIVE (cos * cos)
+    Vec3 sunDir(
+        cosElev * sinAzim,
+        sinElev,
+        cosElev * cosAzim
+    );
+    // Normalize just in case
+    sunDir = sunDir.normalize();
+    
+    nishita.sun_direction = make_float3(sunDir.x, sunDir.y, sunDir.z);
+
+    renderer.world.setNishitaParams(nishita);
+    
+    // 1. Create Ground Material (Needed for OptiX) - Use PrincipledBSDF
+    auto ground_mat = std::make_shared<PrincipledBSDF>();
+    ground_mat->gpuMaterial = std::make_shared<GpuMaterial>();
+    // Set default values manually to match GpuMaterial layout
+    ground_mat->gpuMaterial->albedo = make_float3(0.3f, 0.3f, 0.32f); // Neutral gray
+    ground_mat->gpuMaterial->roughness = 0.8f;
+    ground_mat->gpuMaterial->metallic = 0.0f;
+    ground_mat->gpuMaterial->opacity = 1.0f;
+    ground_mat->gpuMaterial->emission = make_float3(0.0f, 0.0f, 0.0f);
+    ground_mat->gpuMaterial->transmission = 0.0f;
+    ground_mat->gpuMaterial->ior = 1.45f;
+    
+    // Add to MaterialManager
+    uint16_t groundMatId = MaterialManager::getInstance().addMaterial("Ground", ground_mat);
+
+    // 2. Create Ground Plane (large flat surface)
+    float planeSize = 50.0f;
+    Vec3 p0(-planeSize, 0.0f, -planeSize);
+    Vec3 p1( planeSize, 0.0f, -planeSize);
+    Vec3 p2( planeSize, 0.0f,  planeSize);
+    Vec3 p3(-planeSize, 0.0f,  planeSize);
+    Vec3 normal(0.0f, 1.0f, 0.0f);
+    
+    // UV coordinates for ground plane
+    Vec2 uv0(0.0f, 0.0f);
+    Vec2 uv1(1.0f, 0.0f);
+    Vec2 uv2(1.0f, 1.0f);
+    Vec2 uv3(0.0f, 1.0f);
+    
+    // Use groundMatId
+    auto tri1 = std::make_shared<Triangle>(p0, p1, p2, normal, normal, normal, uv0, uv1, uv2, groundMatId);
+    auto tri2 = std::make_shared<Triangle>(p0, p2, p3, normal, normal, normal, uv0, uv2, uv3, groundMatId);
+    tri1->nodeName = "Ground";
+    tri2->nodeName = "Ground";
+    scene.world.objects.push_back(tri1);
+    scene.world.objects.push_back(tri2);
+    
+    // 2. Enable Nishita Sky with dramatic sun angle (use renderer.world, not scene.world)
+    renderer.world.setMode(WORLD_MODE_NISHITA);
+    NishitaSkyParams nishitaParams = renderer.world.getNishitaParams();
+    nishitaParams.sun_elevation = 15.0f;   // Low sun for dramatic shadows
+    nishitaParams.sun_azimuth = 170.0f;     // Sun at 45 degrees
+    nishitaParams.sun_intensity = 22.0f;   // Bright sun
+    renderer.world.setNishitaParams(nishitaParams);
+    
+    // Set fallback background color
+    scene.background_color = Vec3(0.4f, 0.6f, 0.9f);
+    
+    // 3. Setup Camera - Looking towards sun and horizon (Landscape view)
     if (!scene.camera) {
-        Vec3 lookfrom(7.0f, 5.0f, 7.0f); // Isometric-ish view
-        Vec3 lookat(0.0f, 0.0f, 0.0f);
+        // Sun is at Azimuth 45, Elevation 15.
+        // Position camera "behind" the origin to look towards the sun (+X, +Z direction)
+        Vec3 lookfrom(-12.0f, 3.0f, -12.0f); 
+        Vec3 lookat(0.0f, 4.0f, 0.0f);     // Look slightly up/horizon
         Vec3 vup(0.0f, 1.0f, 0.0f);
         float dist_to_focus = (lookfrom - lookat).length();
         float aperture = 0.0f;
-        float vfov = 40.0f;
-        
-        // Ensure aspect_ratio global is available or passed. 
-        // Main.cpp defines aspect_ratio global. We might need extern or pass it.
-        // Assuming extern declaration in globals.h or similar if included via scene_data.h helpers.
-        // If not, use generic 16:9
+        float vfov = 50.0f;  // Wide FOV for landscape
         float ar = 16.0f/9.0f;
         
         scene.camera = std::make_shared<Camera>(lookfrom, lookat, vup, vfov, ar, aperture, dist_to_focus, 0);
     }
 
     scene.initialized = true;
-    SCENE_LOG_INFO("Created Default Empty Scene (Light + Camera)");
+    SCENE_LOG_INFO("Created Professional Default Scene (Ground Plane + Nishita Sky)");
 }
 
 #endif

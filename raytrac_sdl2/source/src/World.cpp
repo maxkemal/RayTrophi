@@ -157,8 +157,8 @@ public:
 };
 
 World::World() {
-    data.mode = WORLD_MODE_COLOR;
-    data.color = make_float3(0.05f, 0.05f, 0.05f); // Dark grey default
+    data.mode = WORLD_MODE_NISHITA; // Default to Nishita Sky
+    data.color = make_float3(0.05f, 0.05f, 0.05f); 
     data.color_intensity = 1.0f;
     data.env_texture = 0;
     data.env_rotation = 0.0f;
@@ -167,11 +167,22 @@ World::World() {
     data.env_height = 0;
 
     // Nishita Defaults (Blender-compatible Earth-like atmosphere)
-    data.nishita.sun_elevation = 45.0f;
-    data.nishita.sun_azimuth = 180.0f;
-    data.nishita.sun_direction = normalize(make_float3(0.0f, 0.707f, -0.707f));
-    data.nishita.sun_intensity = 20.0f;
-    data.nishita.sun_size = 1.0f;        // Real sun angular size in degrees
+    data.nishita.sun_elevation = 15.0f; // Golden hour default
+    data.nishita.sun_azimuth = 170.0f;   // Matches typical camera setup
+    
+    // Calculate initial direction for 15/45 degrees
+    float elevRad = data.nishita.sun_elevation * 3.14159265f / 180.0f;
+    float azimRad = data.nishita.sun_azimuth * 3.14159265f / 180.0f;
+    
+    // Standard conversion (Y-up, assuming +Z is South/Forward)
+    // Adjust signs to match Renderer coordinate system (Match UI Logic: Positive Z)
+    data.nishita.sun_direction = normalize(make_float3(
+        cosf(elevRad) * sinf(azimRad), 
+        sinf(elevRad), 
+        cosf(elevRad) * cosf(azimRad)
+    ));
+    data.nishita.sun_intensity = 10.0f;
+    data.nishita.sun_size = 0.545f;        // Real sun angular size in degrees
     
     // Blender-style atmosphere multipliers (default 1.0)
     data.nishita.air_density = 1.0f;       // Air (Rayleigh) multiplier
@@ -232,6 +243,41 @@ World::World() {
     data.nishita.rayleigh_density = 8000.0f;     // Scale height H_R in meters
     data.nishita.mie_density = 1200.0f;          // Scale height H_M in meters
     
+    // ═══════════════════════════════════════════════════════════
+    // ATMOSPHERIC FOG DEFAULTS
+    // ═══════════════════════════════════════════════════════════
+    data.nishita.fog_enabled = 0;                // Disabled by default
+    data.nishita.fog_density = 0.01f;            // Light fog
+    data.nishita.fog_height = 500.0f;            // Fog concentrated below 500m
+    data.nishita.fog_falloff = 0.003f;           // Gradual falloff
+    data.nishita.fog_distance = 10000.0f;        // 10km max distance
+    data.nishita.fog_color = make_float3(0.7f, 0.8f, 0.9f);  // Bluish-white
+    data.nishita.fog_sun_scatter = 0.5f;         // Medium sun scattering
+    
+    // ═══════════════════════════════════════════════════════════
+    // VOLUMETRIC LIGHT RAYS (GOD RAYS) DEFAULTS
+    // ═══════════════════════════════════════════════════════════
+    data.nishita.godrays_enabled = 0;            // Disabled by default
+    data.nishita.godrays_intensity = 0.5f;       // Medium intensity
+    data.nishita.godrays_density = 0.1f;         // Light density
+    data.nishita.godrays_samples = 16;           // Balanced quality
+    data.nishita.godrays_decay = 0.95f;          // Slow decay
+    
+    // ═══════════════════════════════════════════════════════════
+    // MULTI-SCATTERING DEFAULTS
+    // ═══════════════════════════════════════════════════════════
+    data.nishita.multi_scatter_enabled = 0;      // Disabled by default
+    data.nishita.multi_scatter_factor = 0.3f;    // Moderate contribution
+    
+    // ═══════════════════════════════════════════════════════════
+    // ENVIRONMENT TEXTURE OVERLAY DEFAULTS
+    // ═══════════════════════════════════════════════════════════
+    data.nishita.env_overlay_enabled = 0;        // Disabled by default
+    data.nishita.env_overlay_tex = 0;            // No texture
+    data.nishita.env_overlay_intensity = 1.0f;   // Full intensity
+    data.nishita.env_overlay_rotation = 0.0f;    // No rotation
+    data.nishita.env_overlay_blend_mode = 0;     // Add mode
+    
     // Future volume params
     data.volume_density = 0.0f;
     data.volume_anisotropy = 0.0f;
@@ -261,8 +307,15 @@ std::string World::getHDRIPath() const {
 }
 
 void World::setNishitaParams(const NishitaSkyParams& params) {
+    // Preserve the loaded env overlay texture - it's set by setNishitaEnvOverlay
+    cudaTextureObject_t savedTex = data.nishita.env_overlay_tex;
+    
     data.nishita = params;
-    // Potentially re-upload if needed, primarily handled at getGPUData time
+    
+    // Restore the texture handle (UI params don't have the valid texture)
+    if (savedTex != 0) {
+        data.nishita.env_overlay_tex = savedTex;
+    }
 }
 
 void World::setColor(const Vec3& color) {
@@ -333,6 +386,41 @@ float World::getHDRIIntensity() const {
 
 bool World::hasHDRI() const {
     return hdri_texture != nullptr && hdri_texture->is_loaded();
+}
+
+void World::setNishitaEnvOverlay(const std::string& path) {
+    if (env_overlay_texture) {
+        delete env_overlay_texture;
+        env_overlay_texture = nullptr;
+    }
+
+    env_overlay_path = path;
+    env_overlay_texture = new Texture(path, TextureType::Emission);
+    
+    if (env_overlay_texture->is_loaded()) {
+        SCENE_LOG_INFO("Nishita Env Overlay loaded: " + path + " | is_hdr=" + (env_overlay_texture->is_hdr ? "TRUE" : "FALSE"));
+        
+        bool uploaded = env_overlay_texture->upload_to_gpu();
+        if (uploaded) {
+            data.nishita.env_overlay_tex = env_overlay_texture->get_cuda_texture();
+            data.nishita.env_overlay_enabled = 1;
+            SCENE_LOG_INFO("Env Overlay uploaded: " + std::to_string(env_overlay_texture->width) + "x" + std::to_string(env_overlay_texture->height));
+        } else {
+            SCENE_LOG_ERROR("Failed to upload Env Overlay to GPU");
+            data.nishita.env_overlay_tex = 0;
+            data.nishita.env_overlay_enabled = 0;
+        }
+    } else {
+        SCENE_LOG_ERROR("Failed to load Env Overlay texture: " + path);
+        delete env_overlay_texture;
+        env_overlay_texture = nullptr;
+        data.nishita.env_overlay_tex = 0;
+        data.nishita.env_overlay_enabled = 0;
+    }
+}
+
+std::string World::getNishitaEnvOverlayPath() const {
+    return env_overlay_path;
 }
 
 void World::setSunDirection(const Vec3& direction) {
@@ -532,7 +620,10 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
     }
     sunSizeDeg *= elevationFactor;
     
-    float sun_radius = sunSizeDeg * (M_PI / 180.0f) * 0.5f; // Half angle in radians
+    sunSizeDeg *= elevationFactor;
+    
+    // MATCH GPU EXACTLY: Use explicit float PI
+    float sun_radius = sunSizeDeg * (3.14159265f / 180.0f) * 0.5f; // Half angle in radians
     if (dot(dir, sunDir) > cosf(sun_radius)) {
          float3 tau = rayleighScatter * opticalDepthRayleigh + 
                       mieScatter * 1.1f * opticalDepthMie;

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <Vec3.h>
 // Perlin.h
 class Perlin {

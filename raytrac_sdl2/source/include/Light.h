@@ -1,4 +1,4 @@
-#ifndef LIGHT_H
+ï»¿#ifndef LIGHT_H
 #define LIGHT_H
 
 #include "Vec3.h"
@@ -17,10 +17,10 @@ public:
     Vec3 direction;
     Vec3 initialDirection;
 
-    Vec3 color = Vec3(1.0f);    // normalize edilmiþ renk (0–1 arasý)
-    float intensity = 1.0f;     // toplam enerji (lümen ya da key-value olarak)
+    Vec3 color = Vec3(1.0f);    // normalize edilmiÅŸ renk (0â€“1 arasÄ±)
+    float intensity = 1.0f;     // toplam enerji (lÃ¼men ya da key-value olarak)
     float radius = 0.0f;
-    // Alan ýþýðý için
+    // Alan Ä±ÅŸÄ±ÄŸÄ± iÃ§in
     Vec3 u, v;
     double width = 1.0, height = 1.0;
   
@@ -28,9 +28,9 @@ public:
     virtual float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const = 0;
     virtual Vec3 getDirection(const Vec3& point) const = 0;
 
-    // Iþýk yoðunluðunu hesaplayan fonksiyon
+    // IÅŸÄ±k yoÄŸunluÄŸunu hesaplayan fonksiyon
     virtual Vec3 getIntensity(const Vec3& point, const Vec3& light_sample_point) const {
-        return color * intensity; // varsayýlan davranýþ: sabit ýþýk
+        return color * intensity; // varsayÄ±lan davranÄ±ÅŸ: sabit Ä±ÅŸÄ±k
     }
     void setRadius(float rad) { radius = rad; }
     float getRadius() const { return radius; }
