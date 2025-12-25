@@ -1,15 +1,16 @@
-#ifndef MATRIX4X4_H
+ï»¿#ifndef MATRIX4X4_H
 #define MATRIX4X4_H
 
-#include "Vec3.h"  // Vec3 sınıfı için gerekli başlık dosyası
+#include "Vec3.h"  // Vec3 sÄ±nÄ±fÄ± iÃ§in gerekli baÅŸlÄ±k dosyasÄ±
 #include "Vec3SIMD.h"
+#include <cmath>
 #include <immintrin.h> // AVX header
 
 class Mat3x3 {
 public:
     float m[3][3];
    
-    // Varsayılan yapılandırıcı (birim matris oluşturur)  
+    // VarsayÄ±lan yapÄ±landÄ±rÄ±cÄ± (birim matris oluÅŸturur)  
     Mat3x3() {
         for (int i = 0; i < 3; ++i)
             for (int j = 0; j < 3; ++j)
@@ -19,14 +20,14 @@ public:
   
     
 
-    // Vec3 kullanan yapılandırıcı  
+    // Vec3 kullanan yapÄ±landÄ±rÄ±cÄ±  
     Mat3x3(Vec3 tangent, Vec3 bitangent, Vec3 normal) {
         m[0][0] = tangent.x; m[0][1] = bitangent.x; m[0][2] = normal.x;
         m[1][0] = tangent.y; m[1][1] = bitangent.y; m[1][2] = normal.y;
         m[2][0] = tangent.z; m[2][1] = bitangent.z; m[2][2] = normal.z;
     }
 
-    // 9 float alan yapılandırıcı  
+    // 9 float alan yapÄ±landÄ±rÄ±cÄ±  
     Mat3x3(float m00, float m01, float m02,
         float m10, float m11, float m12,
         float m20, float m21, float m22) {
@@ -38,7 +39,7 @@ public:
         Mat3x3 result;
         for (int i = 0; i < 3; i++) {
             for (int j = 0; j < 3; j++) {
-                result.m[i][j] = m[j][i]; // Satır ve sütunları değiştir  
+                result.m[i][j] = m[j][i]; // SatÄ±r ve sÃ¼tunlarÄ± deÄŸiÅŸtir  
             }
         }
         return result;
@@ -49,7 +50,7 @@ public:
             m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
             m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
     }
-    // Vec3 ile çarpma işlemi  
+    // Vec3 ile Ã§arpma iÅŸlemi  
     Vec3 operator*(const Vec3& vec) const {
         return Vec3(
             m[0][0] * vec.x + m[0][1] * vec.y + m[0][2] * vec.z,
@@ -58,7 +59,7 @@ public:
         );
     }
 
-    // Vec3 vektörünü dönüştürmek için transform_vector metodu  
+    // Vec3 vektÃ¶rÃ¼nÃ¼ dÃ¶nÃ¼ÅŸtÃ¼rmek iÃ§in transform_vector metodu  
     Vec3 transform_vector(const Vec3& vec) const {
         return (*this) * vec;
     }
@@ -110,8 +111,8 @@ public:
 
 
     Matrix4x4(Vec3 tangent, Vec3 bitangent, Vec3 normal);
-    // Matrix4x4(); // Varsayılan yapıcı
-     // Vec3 ile Matrix4x4 çarpma operatörünü arkadaş fonksiyon olarak tanımlayın
+    // Matrix4x4(); // VarsayÄ±lan yapÄ±cÄ±
+     // Vec3 ile Matrix4x4 Ã§arpma operatÃ¶rÃ¼nÃ¼ arkadaÅŸ fonksiyon olarak tanÄ±mlayÄ±n
     void setRow(int row, const Vec4& v) {
         m[row][0] = v.x;
         m[row][1] = v.y;
@@ -131,7 +132,7 @@ public:
         }
         return result;
     }
-    // SIMD optimizasyonu için
+    // SIMD optimizasyonu iÃ§in
 #ifdef __SSE__
     __m128 getRowSIMD(int row) const {
         return _mm_load_ps(&m[row][0]);
@@ -159,11 +160,11 @@ public:
 
 
     Matrix4x4 inverse() const;
-    // Matris çarpımı operatörü
+    // Matris Ã§arpÄ±mÄ± operatÃ¶rÃ¼
     Matrix4x4 operator*(const Matrix4x4& other) const;
 
-    Vec3 transform_point(const Vec3& p) const; // Nokta dönüşümü
-    Vec3 transform_vector(const Vec3& v) const; // Vektör dönüşümü
+    Vec3 transform_point(const Vec3& p) const; // Nokta dÃ¶nÃ¼ÅŸÃ¼mÃ¼
+    Vec3 transform_vector(const Vec3& v) const; // VektÃ¶r dÃ¶nÃ¼ÅŸÃ¼mÃ¼
     Matrix4x4 multiply(const Matrix4x4& other) const {
         Matrix4x4 result;
         for (int row = 0; row < 4; row++) {
@@ -177,17 +178,60 @@ public:
         return result;
     }
 
-    // Statik matris oluşturucuları
+    // Statik matris oluÅŸturucularÄ±
     static Matrix4x4 translation(const Vec3& t);
     static Matrix4x4 scaling(const Vec3& s);
     static Matrix4x4 rotation_x(double angle);
-    // Y ve Z eksenleri için benzer rotasyon fonksiyonları eklenebilir
+    // Y ve Z eksenleri iÃ§in benzer rotasyon fonksiyonlarÄ± eklenebilir
     static Matrix4x4 translation(double x, double y, double z);
     static Matrix4x4 scaling(double x, double y, double z);
     static Matrix4x4 rotationX(double angle);
     static Matrix4x4 rotationY(double angle);
     static Matrix4x4 rotationZ(double angle);
+    
+    // Decompose matrix into position, rotation (Euler XYZ degrees), and scale
+    void decompose(Vec3& position, Vec3& rotation, Vec3& scale) const {
+        // Extract position from translation column
+        position = Vec3(m[0][3], m[1][3], m[2][3]);
+        
+        // Extract scale from column lengths
+        float sx = std::sqrt(m[0][0]*m[0][0] + m[1][0]*m[1][0] + m[2][0]*m[2][0]);
+        float sy = std::sqrt(m[0][1]*m[0][1] + m[1][1]*m[1][1] + m[2][1]*m[2][1]);
+        float sz = std::sqrt(m[0][2]*m[0][2] + m[1][2]*m[1][2] + m[2][2]*m[2][2]);
+        scale = Vec3(sx, sy, sz);
+        
+        // Avoid division by zero
+        if (sx < 0.0001f) sx = 0.0001f;
+        if (sy < 0.0001f) sy = 0.0001f;
+        if (sz < 0.0001f) sz = 0.0001f;
+        
+        // Extract rotation matrix (remove scale)
+        float r00 = m[0][0] / sx, r01 = m[0][1] / sy, r02 = m[0][2] / sz;
+        float r10 = m[1][0] / sx, r11 = m[1][1] / sy, r12 = m[1][2] / sz;
+        float r20 = m[2][0] / sx, r21 = m[2][1] / sy, r22 = m[2][2] / sz;
+        
+        // Convert rotation matrix to Euler angles (XYZ order)
+        float sy_angle = std::sqrt(r00*r00 + r10*r10);
+        bool singular = sy_angle < 1e-6f;
+        
+        float rx, ry, rz;
+        if (!singular) {
+            rx = std::atan2(r21, r22);
+            ry = std::atan2(-r20, sy_angle);
+            rz = std::atan2(r10, r00);
+        } else {
+            rx = std::atan2(-r12, r11);
+            ry = std::atan2(-r20, sy_angle);
+            rz = 0.0f;
+        }
+        
+        // Convert to degrees
+        const float rad2deg = 180.0f / 3.14159265358979f;
+        rotation = Vec3(rx * rad2deg, ry * rad2deg, rz * rad2deg);
+    }
 };
 
 #endif // MATRIX4X4_H
+
+
 

@@ -7,6 +7,7 @@
 #include "material_gpu.h"
 #include "params.h"
 #include "payload.h"
+#include "sky_model.cuh"
 #include "vec3_utils.cuh"
 #include "ray_color.cuh"
 #include "ray.h"              // ← varsa Ray struct burada
@@ -114,6 +115,11 @@ extern "C" __global__ void __raygen__rg() {
     // Average this pass's samples
     float3 new_color = color_sum / float(samples_this_pass);
 
+    // Apply Camera Exposure (Must happen before accumulation if we want burned-in exposure)
+    // Alternatively, apply after accumulation for post-process exposure (requires separation).
+    // Current architecture resets accumulation on cam param change, so burning in is fine.
+    new_color *= optixLaunchParams.camera.exposure_factor;
+
     // ============ ACCUMULATION LOGIC (Cycles-style) ============
     // accumulation_buffer is float4*: RGB = accumulated color * weight, W = total sample count
     float4* accum_buffer = reinterpret_cast<float4*>(optixLaunchParams.accumulation_buffer);
@@ -146,8 +152,80 @@ extern "C" __global__ void __raygen__rg() {
 extern "C" __global__ void __miss__ms() {
     unsigned int p0 = optixGetPayload_0();
     unsigned int p1 = optixGetPayload_1();
-    OptixHitResult* outColor = unpackPayload<OptixHitResult>(p0, p1);   
-    outColor->emission = optixLaunchParams.background_color;
+    OptixHitResult* outColor = unpackPayload<OptixHitResult>(p0, p1);
+    
+    // Default to background color (or updated by Sky)
+    float3 current_bg = optixLaunchParams.background_color;
+
+    if (optixLaunchParams.world.mode == 2) { // WORLD_MODE_NISHITA
+         float3 ray_dir = optixGetWorldRayDirection();
+         current_bg = calculate_nishita_sky_gpu(ray_dir, optixLaunchParams.world.nishita);
+    } 
+    
+    outColor->emission = current_bg;
+
+    // --- INFINITE GRID SHADER (GPU Port) ---
+    float3 ray_dir = optixGetWorldRayDirection();
+    float3 ray_origin = optixGetWorldRayOrigin();
+
+    // Only if enabled AND ray is looking down
+    if (optixLaunchParams.grid_enabled && ray_dir.y < -1e-4f) {
+        
+        // Plane Intersection (Y=0)
+        float t = -ray_origin.y / ray_dir.y;
+        
+        if (t > 0.0f) {
+             float3 p = ray_origin + ray_dir * t;
+             
+             // 1. Distance Fading
+             float fade_start = 100.0f;
+             float fade_end = optixLaunchParams.grid_fade_distance;
+             if (fade_end < fade_start) fade_end = fade_start + 100.0f;
+             
+             float dist = t;
+             float alpha_fade = 1.0f - fminf(fmaxf((dist - fade_start) / (fade_end - fade_start), 0.0f), 1.0f);
+             
+             if (alpha_fade > 0.0f) {
+                 // 2. Grid Structure
+                 float scale_primary = 10.0f;
+                 float scale_secondary = 1.0f;
+                 
+                 float line_width_base = 0.02f;
+                 float line_width = line_width_base * (1.0f + dist * 0.02f);
+                 
+                 // Modulo
+                 float x_mod_p = fabsf(fmodf(p.x, scale_primary));
+                 float z_mod_p = fabsf(fmodf(p.z, scale_primary));
+                 float x_mod_s = fabsf(fmodf(p.x, scale_secondary));
+                 float z_mod_s = fabsf(fmodf(p.z, scale_secondary));
+                 
+                 // Line Checks (Inline)
+                 bool x_line_p = x_mod_p < line_width || x_mod_p > (scale_primary - line_width);
+                 bool z_line_p = z_mod_p < line_width || z_mod_p > (scale_primary - line_width);
+                 bool x_line_s = x_mod_s < line_width || x_mod_s > (scale_secondary - line_width);
+                 bool z_line_s = z_mod_s < line_width || z_mod_s > (scale_secondary - line_width);
+                 
+                 // Axis
+                 bool x_axis = fabsf(p.z) < line_width * 2.5f;
+                 bool z_axis = fabsf(p.x) < line_width * 2.5f;
+                 
+                 float3 grid_col = make_float3(0.0f, 0.0f, 0.0f);
+                 float grid_alpha = 0.0f;
+                 
+                 if (x_axis) { grid_col = make_float3(0.8f, 0.2f, 0.2f); grid_alpha = 0.9f; }
+                 else if (z_axis) { grid_col = make_float3(0.2f, 0.8f, 0.2f); grid_alpha = 0.9f; }
+                 else if (x_line_p || z_line_p) { grid_col = make_float3(0.40f, 0.40f, 0.40f); grid_alpha = 0.5f; }
+                 else if (x_line_s || z_line_s) { grid_col = make_float3(0.25f, 0.25f, 0.25f); grid_alpha = 0.2f; }
+                 
+                 if (grid_alpha > 0.0f) {
+                     float final_alpha = grid_alpha * alpha_fade;
+                     // Blend
+                     outColor->emission = current_bg * (1.0f - final_alpha) + grid_col * final_alpha;
+                 }
+             }
+        }
+    }
+
     outColor->hit = 0;
 }
 
@@ -157,7 +235,11 @@ extern "C" __global__ void __closesthit__ch() {
     unsigned int p1 = optixGetPayload_1();
     OptixHitResult* payload = unpackPayload<OptixHitResult>(p0, p1);
 
+    const HitGroupData* hgd = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+    
+    // Restore missing t definition
     float t = optixGetRayTmax();
+
     float3 rayOrigin = optixGetWorldRayOrigin();
     float3 rayDir = optixGetWorldRayDirection();
     float3 hitPoint = rayOrigin + t * rayDir;
@@ -167,7 +249,6 @@ extern "C" __global__ void __closesthit__ch() {
     float v = bary.y;
     float w = 1.0f - u - v;
 	
-    const HitGroupData* hgd = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     const unsigned int primIdx = optixGetPrimitiveIndex();
     const uint3 tri = hgd->indices[primIdx];
 
@@ -296,11 +377,81 @@ extern "C" __global__ void __closesthit__ch() {
     payload->has_opacity_tex = hgd->has_opacity_tex;
 	payload->emission_tex = hgd->emission_tex;
     payload->has_emission_tex = hgd->has_emission_tex;
+    
+    // Volumetric material info
+    payload->is_volumetric = hgd->is_volumetric;
+    payload->vol_density = hgd->vol_density;
+    payload->vol_absorption = hgd->vol_absorption;
+    payload->vol_scattering = hgd->vol_scattering;
+    payload->vol_albedo = hgd->vol_albedo;
+    payload->vol_emission = hgd->vol_emission;
+    payload->vol_g = hgd->vol_g;
+    payload->vol_step_size = hgd->vol_step_size;
+    payload->vol_max_steps = hgd->vol_max_steps;
+    payload->vol_noise_scale = hgd->vol_noise_scale;
+    payload->aabb_min = hgd->aabb_min;
+    payload->aabb_max = hgd->aabb_max;
+    
+    // Multi-Scattering parameters (NEW)
+    payload->vol_multi_scatter = hgd->vol_multi_scatter;
+    payload->vol_g_back = hgd->vol_g_back;
+    payload->vol_lobe_mix = hgd->vol_lobe_mix;
+    payload->vol_light_steps = hgd->vol_light_steps;
+    payload->vol_shadow_strength = hgd->vol_shadow_strength;
 }
+
+extern "C" __global__ void __anyhit__ah() {
+    const HitGroupData* hgd = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
+
+    float alpha = 1.0f;
+
+    // 1. Get scalar opacity from global material buffer
+    if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+        alpha = optixLaunchParams.materials[hgd->material_id].opacity;
+    }
+
+    // 2. Multiply with opacity map if it exists
+    if (hgd->has_opacity_tex) {
+        const unsigned int primIdx = optixGetPrimitiveIndex();
+        const uint3 tri = hgd->indices[primIdx];
+        
+        float2 bary = optixGetTriangleBarycentrics();
+        float u = bary.x;
+        float v = bary.y;
+        float w = 1.0f - u - v;
+
+        float2 uv;
+        if (hgd->has_uvs) {
+            const float2 uv0 = hgd->uvs[tri.x];
+            const float2 uv1 = hgd->uvs[tri.y];
+            const float2 uv2 = hgd->uvs[tri.z];
+            uv = w * uv0 + u * uv1 + v * uv2;
+            uv.y = 1.0f - uv.y;
+             // UV fract correction
+            uv.x = uv.x - floorf(uv.x);
+            uv.y = uv.y - floorf(uv.y);
+        } else {
+             uv = make_float2(u, v);
+        }
+
+        // Opacity texture sample (single channel from float4)
+        // Usually opacity is in the alpha channel or single channel (r). 
+        // AssimpLoader puts it in 'opacity' float or texture.
+        float4 opacity_val = tex2D<float4>(hgd->opacity_tex, uv.x, uv.y);
+        alpha *= opacity_val.x; 
+    }
+
+    // Transparent Shadow Logic
+    // If opacity is less than 0.9, do not block the shadow ray.
+    if (alpha < 0.9f) {
+        optixIgnoreIntersection();
+    }
+}
+
 
 extern "C" __global__ void __miss__shadow() {
     unsigned int p0 = optixGetPayload_0();
     unsigned int p1 = optixGetPayload_1();
-    OptixHitResult* shadow_payload = unpackPayload<OptixHitResult>(p0, p1);
-    shadow_payload->hit = 0;
+    OptixHitResult* payload = unpackPayload<OptixHitResult>(p0, p1);
+    payload->hit = 0; // Miss = No occlusion (Lit)
 }

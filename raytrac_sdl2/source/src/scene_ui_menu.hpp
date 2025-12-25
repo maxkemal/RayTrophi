@@ -305,7 +305,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
              if (ImGui::BeginMenu("Light")) {
                  if (ImGui::MenuItem("Point Light")) {
                      auto l = std::make_shared<PointLight>(Vec3(0,5,0), Vec3(10,10,10), 0.1f);
+                     l->nodeName = "Point_" + std::to_string(ctx.scene.lights.size() + 1);
                      ctx.scene.lights.push_back(l);
+                     int new_index = (int)ctx.scene.lights.size() - 1;
+                     ctx.selection.selectLight(l, new_index, l->nodeName);
                      history.record(std::make_unique<AddLightCommand>(l));
                      ctx.renderer.resetCPUAccumulation();
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
@@ -314,7 +317,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  }
                  if (ImGui::MenuItem("Directional Light")) {
                      auto l = std::make_shared<DirectionalLight>(Vec3(-1,-1,-0.5), Vec3(5,5,5), 0.1f);
+                     l->nodeName = "Directional_" + std::to_string(ctx.scene.lights.size() + 1);
                      ctx.scene.lights.push_back(l);
+                     int new_index = (int)ctx.scene.lights.size() - 1;
+                     ctx.selection.selectLight(l, new_index, l->nodeName);
                      history.record(std::make_unique<AddLightCommand>(l));
                      ctx.renderer.resetCPUAccumulation();
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
@@ -323,7 +329,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  }
                  if (ImGui::MenuItem("Spot Light")) {
                      auto l = std::make_shared<SpotLight>(Vec3(0,5,0), Vec3(0,-1,0), Vec3(10,10,10), 45.0f, 60.0f);
+                     l->nodeName = "Spot_" + std::to_string(ctx.scene.lights.size() + 1);
                      ctx.scene.lights.push_back(l);
+                     int new_index = (int)ctx.scene.lights.size() - 1;
+                     ctx.selection.selectLight(l, new_index, l->nodeName);
                      history.record(std::make_unique<AddLightCommand>(l));
                      ctx.renderer.resetCPUAccumulation();
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
@@ -332,7 +341,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  }
                  if (ImGui::MenuItem("Area Light")) {
                      auto l = std::make_shared<AreaLight>(Vec3(0,5,0), Vec3(1,0,0), Vec3(0,0,1), 2.0f, 2.0f, Vec3(10,10,10));
+                     l->nodeName = "Area_" + std::to_string(ctx.scene.lights.size() + 1);
                      ctx.scene.lights.push_back(l);
+                     int new_index = (int)ctx.scene.lights.size() - 1;
+                     ctx.selection.selectLight(l, new_index, l->nodeName);
                      history.record(std::make_unique<AddLightCommand>(l));
                      ctx.renderer.resetCPUAccumulation();
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
@@ -346,9 +358,16 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 
         if (ImGui::BeginMenu("Render")) {
              if (ImGui::MenuItem("Render Image", "F12")) {
+                 // Same behavior as Start Final Render button
                  extern bool show_render_window;
                  show_render_window = true;
+                 ctx.render_settings.is_final_render_mode = true;
+                 ctx.render_settings.render_current_samples = 0;
+                 ctx.render_settings.render_progress = 0.0f;
+                 ctx.render_settings.is_rendering_active = true;
+                 ctx.render_settings.is_render_paused = false;
                  ctx.start_render = true;
+                 SCENE_LOG_INFO("Starting Final Render via Menu (F12)");
              }
              ImGui::EndMenu();
         }
@@ -356,7 +375,6 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         if (ImGui::BeginMenu("View"))
         {
             ImGui::MenuItem("Properties Panel", nullptr, &showSidePanel);
-            extern bool show_animation_panel;
             ImGui::MenuItem("Bottom Panel", nullptr, &show_animation_panel);
             ImGui::MenuItem("Log Window", nullptr, &show_scene_log);
             ImGui::EndMenu();

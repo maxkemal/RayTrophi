@@ -50,6 +50,37 @@ struct SceneData {
         }
     }
     
+    // Remove a camera from the scene (returns true if successful)
+    // SAFETY: Cannot delete the active camera or the last remaining camera
+    bool removeCamera(std::shared_ptr<Camera> cam) {
+        if (!cam) return false;
+        if (cameras.size() <= 1) return false;  // Cannot delete last camera
+        
+        // Find camera index
+        auto it = std::find(cameras.begin(), cameras.end(), cam);
+        if (it == cameras.end()) return false;  // Camera not found
+        
+        size_t index = std::distance(cameras.begin(), it);
+        
+        // Cannot delete active camera
+        if (index == active_camera_index) return false;
+        
+        // Remove camera
+        cameras.erase(it);
+        
+        // Adjust active_camera_index if needed
+        if (active_camera_index > index) {
+            active_camera_index--;
+        }
+        
+        // Update camera pointer
+        if (!cameras.empty()) {
+            camera = cameras[active_camera_index];
+        }
+        
+        return true;
+    }
+    
     void clear() {
         world.clear();
         lights.clear();

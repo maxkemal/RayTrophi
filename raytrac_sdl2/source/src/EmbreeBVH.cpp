@@ -123,7 +123,19 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
     // SCENE_LOG_INFO("[EmbreeBVH::build] BVH build completed");
 }
 
-
+// ═══════════════════════════════════════════════════════════════════════════
+// Clear all geometry from the scene (for full rebuild)
+// ═══════════════════════════════════════════════════════════════════════════
+void EmbreeBVH::clearGeometry() {
+    // Release the current scene and create a new empty one
+    if (scene) {
+        rtcReleaseScene(scene);
+        scene = rtcNewScene(device);
+        rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM);
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC);
+    }
+    triangle_data.clear();
+}
 
 void EmbreeBVH::updateGeometryFromTriangles() {
     // Tek geometry'li yapıdaysak geometry ID sabittir (örneğin 0)
@@ -141,15 +153,29 @@ void EmbreeBVH::updateGeometryFromTriangles() {
     rtcCommitGeometry(geom);
     rtcCommitScene(scene);
 }
-// Bu her karede çağrılır
+// Bu her karede çağrılır - OPTIMIZE WITH REFIT
 void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    if (objects.empty() || triangle_data.empty()) return;
+    
     RTCGeometry geom = rtcGetGeometry(scene, 0); // 0 → geometry ID
+    if (!geom) return;
 
     Vec3* vertex_buffer = (Vec3*)rtcGetGeometryBufferData(
         geom, RTC_BUFFER_TYPE_VERTEX, 0 // 0 → buffer slot
     );
+    if (!vertex_buffer) return;
 
-    for (size_t i = 0; i < objects.size(); ++i) {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OPTIMIZATION: Use REFIT quality for faster BVH updates during animation
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RTC_BUILD_QUALITY_REFIT tells Embree to update the existing BVH structure
+    // instead of rebuilding from scratch. This is 2-5x faster for animations
+    // where only vertex positions change but topology remains the same.
+    rtcSetGeometryBuildQuality(geom, RTC_BUILD_QUALITY_REFIT);
+
+    size_t updateCount = std::min(objects.size(), triangle_data.size());
+    
+    for (size_t i = 0; i < updateCount; ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
         if (!tri) continue;
 
@@ -162,6 +188,7 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
         triangle_data[i].v1 = tri->getVertexPosition(1);
         triangle_data[i].v2 = tri->getVertexPosition(2);
 
+        // Normal updates (only if normals were originally set)
         if (triangle_data[i].n0 != Vec3()) {
             triangle_data[i].n0 = tri->getVertexNormal(0);
             triangle_data[i].n1 = tri->getVertexNormal(1);

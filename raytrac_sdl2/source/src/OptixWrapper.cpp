@@ -11,6 +11,7 @@
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
 #include "Triangle.h"  
+#include "CameraPresets.h"
 
 #define OPTIX_CHECK(call)                                                       \
     do {                                                                        \
@@ -47,6 +48,13 @@
         }                                                                       \
     } while (0)
 
+__host__ __device__ inline float optix_length(const float3& v) {
+    return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+__host__ __device__ inline float3 operator*(float s, const float3& v) {
+    return make_float3(v.x * s, v.y * s, v.z * s);
+}
 OptixWrapper::OptixWrapper()
     : Image_width(image_width), Image_height(image_height), color_processor(image_width, image_height) //  işte burada!
 {
@@ -64,6 +72,13 @@ OptixWrapper::OptixWrapper()
     sbt.missRecordBase = 0;
     sbt.hitgroupRecordBase = 0;
     traversable_handle = 0;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PERSISTENT BUFFER INITIALIZATION (Animation Performance Optimization)
+    // ═══════════════════════════════════════════════════════════════════════════
+    d_params_persistent = 0;
+    d_lights_persistent = 0;
+    d_lights_capacity = 0;
    // initialize();
 }
 void OptixWrapper::partialCleanup() {
@@ -212,6 +227,19 @@ void OptixWrapper::cleanup() {
     if (d_accumulation_float4) cudaFree(d_accumulation_float4);
     d_accumulation_float4 = nullptr;
     traversable_handle = 0;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PERSISTENT BUFFER CLEANUP (Animation Performance Optimization)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (d_params_persistent) {
+        cudaFree(reinterpret_cast<void*>(d_params_persistent));
+        d_params_persistent = 0;
+    }
+    if (d_lights_persistent) {
+        cudaFree(reinterpret_cast<void*>(d_lights_persistent));
+        d_lights_persistent = 0;
+        d_lights_capacity = 0;
+    }
 }
 
 OptixWrapper::~OptixWrapper() {
@@ -369,6 +397,8 @@ void OptixWrapper::setupPipeline(const char* raygen_ptx) {
     hit_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hit_desc.hitgroup.moduleCH = module;
     hit_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
+    hit_desc.hitgroup.moduleAH = module;
+    hit_desc.hitgroup.entryFunctionNameAH = "__anyhit__ah";
 
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(
@@ -410,6 +440,7 @@ void OptixWrapper::setupPipeline(const char* raygen_ptx) {
     cudaMemcpy(reinterpret_cast<void*>(sbt.hitgroupRecordBase), &hit_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
     sbt.hitgroupRecordStrideInBytes = sizeof(EmptySbtRecord);
     sbt.hitgroupRecordCount = 1;
+
 }
 void OptixWrapper::destroyTextureObjects() {
     int texture_obj_count = 0;
@@ -530,8 +561,8 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     else {
         material_indices_ptr = data.material_indices.data();
     }
-
-   
+ 
+    
     size_t mi_size = data.indices.size() * sizeof(int);
     cudaMalloc(reinterpret_cast<void**>(&d_material_indices), mi_size);
     cudaMemcpy(reinterpret_cast<void*>(d_material_indices), material_indices_ptr, mi_size, cudaMemcpyHostToDevice);
@@ -552,49 +583,92 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     }
 
     // 2. Her materyal için bir SBT kaydı oluştur
-    int ray_type_count = 1; // primary, shadow
-   
-   
-    for (int ray_type = 0; ray_type < ray_type_count; ++ray_type) {
-        for (size_t mat_index = 0; mat_index < data.materials.size(); ++mat_index) {
-            SbtRecord<HitGroupData> rec = {};
+ 
+    for (size_t mat_index = 0; mat_index < data.materials.size(); ++mat_index) {
+        SbtRecord<HitGroupData> rec = {};
 
-            if (mat_index < data.textures.size()) {
-                const auto& tex = data.textures[mat_index];
-                rec.data.albedo_tex = tex.albedo_tex;
-                rec.data.roughness_tex = tex.roughness_tex;
-                rec.data.normal_tex = tex.normal_tex;
-                rec.data.metallic_tex = tex.metallic_tex;
-                rec.data.transmission_tex = tex.transmission_tex;
-                rec.data.opacity_tex = tex.opacity_tex;
-                rec.data.emission_tex = tex.emission_tex;
+        if (mat_index < data.textures.size()) {
+            const auto& tex = data.textures[mat_index];
+            rec.data.albedo_tex = tex.albedo_tex;
+            rec.data.roughness_tex = tex.roughness_tex;
+            rec.data.normal_tex = tex.normal_tex;
+            rec.data.metallic_tex = tex.metallic_tex;
+            rec.data.transmission_tex = tex.transmission_tex;
+            rec.data.opacity_tex = tex.opacity_tex;
+            rec.data.emission_tex = tex.emission_tex;
 
-                rec.data.has_emission_tex = tex.has_emission_tex;
-                rec.data.has_albedo_tex = tex.has_albedo_tex;
-                rec.data.has_roughness_tex = tex.has_roughness_tex;
-                rec.data.has_normal_tex = tex.has_normal_tex;
-                rec.data.has_metallic_tex = tex.has_metallic_tex;
-                rec.data.has_transmission_tex = tex.has_transmission_tex;
-                rec.data.has_opacity_tex = tex.has_opacity_tex;
-               
-            }
-            else {
-                SCENE_LOG_WARN("[SBT-WARN] Mat #" + std::to_string(mat_index) + " has no texture!");
-            }
-            rec.data.material_id = static_cast<int>(mat_index);
-            rec.data.vertices = reinterpret_cast<float3*>(d_vertices);
-            rec.data.indices = reinterpret_cast<uint3*>(d_indices);
-            rec.data.normals = reinterpret_cast<float3*>(d_normals);
-            rec.data.uvs = reinterpret_cast<float2*>(d_uvs);
-            rec.data.has_normals = !data.normals.empty();
-            rec.data.has_uvs = !data.uvs.empty();
-            rec.data.tangents = reinterpret_cast<float3*>(d_tangents);
-            rec.data.has_tangents = !data.tangents.empty();
-            rec.data.emission = data.materials[mat_index].emission;
-
-            OPTIX_CHECK(optixSbtRecordPackHeader(hit_pg, &rec));
-            hitgroup_records.push_back(rec);
+            rec.data.has_emission_tex = tex.has_emission_tex;
+            rec.data.has_albedo_tex = tex.has_albedo_tex;
+            rec.data.has_roughness_tex = tex.has_roughness_tex;
+            rec.data.has_normal_tex = tex.has_normal_tex;
+            rec.data.has_metallic_tex = tex.has_metallic_tex;
+            rec.data.has_transmission_tex = tex.has_transmission_tex;
+            rec.data.has_opacity_tex = tex.has_opacity_tex;
+           
         }
+        else {
+            SCENE_LOG_WARN("[SBT-WARN] Mat #" + std::to_string(mat_index) + " has no texture!");
+        }
+        rec.data.material_id = static_cast<int>(mat_index);
+        rec.data.vertices = reinterpret_cast<float3*>(d_vertices);
+        rec.data.indices = reinterpret_cast<uint3*>(d_indices);
+        rec.data.normals = reinterpret_cast<float3*>(d_normals);
+        rec.data.uvs = reinterpret_cast<float2*>(d_uvs);
+        rec.data.has_normals = !data.normals.empty();
+        rec.data.has_uvs = !data.uvs.empty();
+        rec.data.tangents = reinterpret_cast<float3*>(d_tangents);
+        rec.data.has_tangents = !data.tangents.empty();
+        rec.data.emission = data.materials[mat_index].emission;
+
+        // Initialize volumetric fields from data if available
+        if (mat_index < data.volumetric_info.size()) {
+            const auto& vol = data.volumetric_info[mat_index];
+            rec.data.is_volumetric = vol.is_volumetric;
+            rec.data.vol_density = vol.density;
+            rec.data.vol_absorption = vol.absorption;
+            rec.data.vol_scattering = vol.scattering;
+            rec.data.vol_albedo = vol.albedo;
+            rec.data.vol_emission = vol.emission;
+            rec.data.vol_g = vol.g;
+            rec.data.vol_step_size = vol.step_size;
+            rec.data.vol_max_steps = vol.max_steps;
+            rec.data.vol_noise_scale = vol.noise_scale;
+            
+            // Multi-Scattering Parameters (NEW)
+            rec.data.vol_multi_scatter = vol.multi_scatter;
+            rec.data.vol_g_back = vol.g_back;
+            rec.data.vol_lobe_mix = vol.lobe_mix;
+            rec.data.vol_light_steps = vol.light_steps;
+            rec.data.vol_shadow_strength = vol.shadow_strength;
+            
+            rec.data.aabb_min = vol.aabb_min;
+            rec.data.aabb_max = vol.aabb_max;
+        } else {
+            // Default: surface material
+            rec.data.is_volumetric = 0;
+            rec.data.vol_density = 0.0f;
+            rec.data.vol_absorption = 0.0f;
+            rec.data.vol_scattering = 0.0f;
+            rec.data.vol_albedo = make_float3(1.0f, 1.0f, 1.0f);
+            rec.data.vol_emission = make_float3(0.0f, 0.0f, 0.0f);
+            rec.data.vol_g = 0.0f;
+            rec.data.vol_step_size = 0.1f;
+            rec.data.vol_max_steps = 100;
+            rec.data.vol_noise_scale = 1.0f;
+            
+            // Multi-Scattering defaults
+            rec.data.vol_multi_scatter = 0.3f;
+            rec.data.vol_g_back = -0.3f;
+            rec.data.vol_lobe_mix = 0.7f;
+            rec.data.vol_light_steps = 4;
+            rec.data.vol_shadow_strength = 0.8f;
+            
+            rec.data.aabb_min = make_float3(0.0f, 0.0f, 0.0f);
+            rec.data.aabb_max = make_float3(1.0f, 1.0f, 1.0f);
+        }
+
+        OPTIX_CHECK(optixSbtRecordPackHeader(hit_pg, &rec));
+        hitgroup_records.push_back(rec);
     }
 
 
@@ -673,230 +747,12 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
     d_bvh_output = d_output_buffer;
 
     cudaStreamSynchronize(stream);
-    SCENE_LOG_INFO(
+   /* SCENE_LOG_INFO(
         "OptiX buildFromData completed successfully! " +
         std::to_string(data.materials.size()) +
         " SBT record(s) created for material."
-    );
+    );*/
 }
-/*
-void OptixWrapper::launch_tile_based_progressive(
-    SDL_Surface* surface, SDL_Window* window, int width, int height,
-    std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture
-) {
-    cudaGetDeviceProperties(&props, 0);
-
-    constexpr int TILE_SIZE = 256;
-    constexpr int MAX_PASSES = 4;
-
-    // Buffers
-    uchar4* d_framebuffer = nullptr;
-    float4* d_accumulation = nullptr;
-
-    cudaMalloc(&d_framebuffer, width * height * sizeof(uchar4));
-    cudaMemset(d_framebuffer, 0, width * height * sizeof(uchar4));
-
-    cudaMalloc(&d_accumulation, width * height * sizeof(float4));
-    cudaMemset(d_accumulation, 0, width * height * sizeof(float4));
-
-    // Streams
-    cudaStream_t render_stream, copy_stream;
-    cudaStreamCreate(&render_stream);
-    cudaStreamCreate(&copy_stream);
-
-    // Host buffers
-    std::vector<uchar4> tile_buffer(TILE_SIZE * TILE_SIZE);
-    framebuffer.resize(width * height, make_uchar4(0, 0, 0, 255));
-
-    Uint32* pixels = (Uint32*)surface->pixels;
-    int row_stride = surface->pitch / 4;
-
-    // Tile generation
-    std::vector<Tile> tiles;
-    for (int y = 0; y < height; y += TILE_SIZE) {
-        for (int x = 0; x < width; x += TILE_SIZE) {
-            Tile tile;
-            tile.x = x;
-            tile.y = y;
-            tile.width = std::min(TILE_SIZE, width - x);
-            tile.height = std::min(TILE_SIZE, height - y);
-            tile.samples = 0;
-            tile.variance = 1.0f;
-            tile.completed = false;
-            tiles.push_back(tile);
-        }
-    }
-
-    static std::mt19937 rng(12345);
-    std::shuffle(tiles.begin(), tiles.end(), rng);
-
-    std::cout << "Tiles: " << tiles.size() << " (" << TILE_SIZE << "x" << TILE_SIZE << ")\n";
-
-    // Params setup (sabit değerler)
-    params.image_width = width;
-    params.image_height = height;
-    params.handle = traversable_handle;
-    params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
-    params.max_depth = render_settings.max_bounces;
-    params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
-    params.variance_threshold = render_settings.variance_threshold;
-    params.framebuffer = d_framebuffer;
-    params.accumulation_buffer = d_accumulation;
-
-    // Atmosphere
-    params.atmosphere.sigma_s = 0.01f;
-    params.atmosphere.sigma_a = 0.01f;
-    params.atmosphere.g = 0.0f;
-    params.atmosphere.base_density = 0.001f;
-    params.atmosphere.temperature = 300.0f;
-    params.atmosphere.active = false;
-
-    RayGenParams* d_params = nullptr;
-    cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
-
-    auto start_time = std::chrono::high_resolution_clock::now();
-    int frame_counter = 0;
-
-    // Multi-pass progressive loop
-    for (int pass = 0; pass < MAX_PASSES; pass++) {
-        int samples_this_pass = 1 << pass;
-
-        std::cout << "\n=== Pass " << (pass + 1) << "/" << MAX_PASSES
-            << " | Samples: " << samples_this_pass << " ===\n";
-
-        if (pass > 0 && render_settings.use_adaptive_sampling) {
-            std::sort(tiles.begin(), tiles.end(),
-                [](const Tile& a, const Tile& b) { return a.variance > b.variance; });
-        }
-
-        int tiles_rendered = 0;
-        int tiles_skipped = 0;
-
-        for (auto& tile : tiles) {
-            if (tile.completed && tile.variance < render_settings.variance_threshold) {
-                tiles_skipped++;
-                continue;
-            }
-
-            // Params güncelle
-            params.tile_x = tile.x;
-            params.tile_y = tile.y;
-            params.tile_width = tile.width;
-            params.tile_height = tile.height;
-            params.samples_per_pixel = samples_this_pass;
-            params.current_pass = pass;
-            params.frame_number = frame_counter++;
-
-            // Sync copy sonra launch (önceki işlemin bitmesini bekle)
-            cudaStreamSynchronize(render_stream);
-
-            cudaMemcpyAsync(d_params, &params, sizeof(RayGenParams),
-                cudaMemcpyHostToDevice, render_stream);
-
-            OptixResult result = optixLaunch(
-                pipeline,
-                render_stream,
-                reinterpret_cast<CUdeviceptr>(d_params),
-                sizeof(RayGenParams),
-                &sbt,
-                tile.width,   // Launch width = tile width
-                tile.height,  // Launch height = tile height
-                1             // Depth = 1
-            );
-
-            if (result != OPTIX_SUCCESS) {
-                std::cerr << "OptiX launch failed: " << result << std::endl;
-                std::cerr << "Tile: " << tile.x << "," << tile.y
-                    << " Size: " << tile.width << "x" << tile.height << std::endl;
-                continue;
-            }
-
-            // Tile'ı kopyala
-            size_t src_offset = tile.y * width + tile.x;
-            uchar4* src_ptr = d_framebuffer + src_offset;
-
-            cudaMemcpy2DAsync(
-                tile_buffer.data(),
-                tile.width * sizeof(uchar4),
-                src_ptr,
-                width * sizeof(uchar4),
-                tile.width * sizeof(uchar4),
-                tile.height,
-                cudaMemcpyDeviceToHost,
-                copy_stream
-            );
-
-            cudaStreamSynchronize(copy_stream);
-
-            // Host framebuffer güncelle
-            for (int ty = 0; ty < tile.height; ty++) {
-                int dst_y = tile.y + ty;
-                int src_idx = ty * tile.width;
-                int dst_idx = dst_y * width + tile.x;
-                std::memcpy(&framebuffer[dst_idx], &tile_buffer[src_idx],
-                    tile.width * sizeof(uchar4));
-            }
-
-            // Display güncelle
-            for (int ty = 0; ty < tile.height; ty++) {
-                for (int tx = 0; tx < tile.width; tx++) {
-                    int px = tile.x + tx;
-                    int py = tile.y + ty;
-                    int fb_index = py * width + px;
-
-                    const uchar4& c = framebuffer[fb_index];
-                    Vec3 raw_color(c.x / 255.0f, c.y / 255.0f, c.z / 255.0f);
-                    Vec3 final_color = color_processor.processColor(raw_color, px, py);
-
-                    Uint8 r = static_cast<Uint8>(std::min(255.0f * final_color.x, 255.0f));
-                    Uint8 g = static_cast<Uint8>(std::min(255.0f * final_color.y, 255.0f));
-                    Uint8 b = static_cast<Uint8>(std::min(255.0f * final_color.z, 255.0f));
-
-                    int screen_index = (height - 1 - py) * row_stride + px;
-                    pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
-                }
-            }
-
-            tiles_rendered++;
-            tile.samples += samples_this_pass;
-
-            if (tiles_rendered % 16 == 0 || tiles_rendered == static_cast<int>(tiles.size() - tiles_skipped)) {
-                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-                SDL_UpdateWindowSurface(window);
-
-                float progress = 100.0f * tiles_rendered / (tiles.size() - tiles_skipped);
-                auto now = std::chrono::high_resolution_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
-
-                std::cout << "\rProgress: " << std::fixed << std::setprecision(1)
-                    << progress << "% | "
-                    << tiles_rendered << "/" << (tiles.size() - tiles_skipped)
-                    << " tiles | " << elapsed << "s     " << std::flush;
-            }
-        }
-
-        std::cout << "\n";
-
-        // Variance calculation...
-        // (mevcut kodun aynısı)
-    }
-
-    // Final update
-    SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-    SDL_UpdateWindowSurface(window);
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time).count();
-    std::cout << "\n✓ Render completed in " << duration << "s\n";
-
-    // Cleanup
-    cudaFree(d_framebuffer);
-    cudaFree(d_accumulation);
-    cudaFree(d_params);
-    cudaStreamDestroy(render_stream);
-    cudaStreamDestroy(copy_stream);
-}
-*/
 
 // ------------------------------------------------------------------
 // CYCLES-STYLE ACCUMULATIVE RENDERING - Progressive refinement
@@ -1029,16 +885,20 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.tile_width = width;
     params.tile_height = height;
 
-    // ------------------ UPLOAD PARAMS -----------------------
-    cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams));
-    cudaMemcpyAsync(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice, stream);
+    // ------------------ UPLOAD PARAMS (PERSISTENT BUFFER) -----------------------
+    // OPTIMIZATION: Use persistent d_params buffer to avoid per-sample cudaMalloc/cudaFree
+    // This eliminates ~25,000 GPU memory operations during a 100-sample, 250-frame animation
+    if (!d_params_persistent) {
+        cudaMalloc(reinterpret_cast<void**>(&d_params_persistent), sizeof(RayGenParams));
+    }
+    cudaMemcpyAsync(reinterpret_cast<void*>(d_params_persistent), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice, stream);
 
     // ------------------ LAUNCH RENDER -----------------------
     auto pass_start = high_resolution_clock::now();
 
     OPTIX_CHECK(optixLaunch(
         pipeline, stream,
-        d_params, sizeof(RayGenParams),
+        d_params_persistent, sizeof(RayGenParams),
         &sbt,
         width, height, 1
     ));
@@ -1066,11 +926,19 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     Uint32* pixels = (Uint32*)surface->pixels;
     int row_stride = surface->pitch / 4;
 
-    for (int j = 0; j < height; ++j) {
-        for (int i = 0; i < width; ++i) {
+    // Safety checks to prevent crash if Surface size != Render size
+    int safe_w = std::min(width, surface->w);
+    int safe_h = std::min(height, surface->h);
+
+    for (int j = 0; j < safe_h; ++j) {
+        for (int i = 0; i < safe_w; ++i) {
             int fb_index = j * width + i;
             const uchar4& c = partial_framebuffer[fb_index];
-            int screen_index = (height - 1 - j) * row_stride + i;
+            
+            // Flip Y for screen (using surface height)
+            int screen_y = surface->h - 1 - j;
+            int screen_index = screen_y * row_stride + i;
+            
             pixels[screen_index] = SDL_MapRGB(surface->format, c.x, c.y, c.z);
         }
     }
@@ -1081,11 +949,13 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         "/" + std::to_string(target_max_samples) +
         " (" + std::to_string(int(progress)) + "%) - " +
         std::to_string(int(pass_ms)) + "ms/sample";
-    SDL_SetWindowTitle(window, title.c_str());
+    
+    if (window) {
+        SDL_SetWindowTitle(window, title.c_str());
+    }
 
-    // Cleanup temporary params
-    cudaFree(reinterpret_cast<void*>(d_params));
-    d_params = 0;
+    // NOTE: Removed per-call cudaFree - d_params_persistent is now reused across calls
+    // and cleaned up only in destructor/cleanup()
     
     rendering_in_progress = false;
 }
@@ -1109,9 +979,80 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.focus_dist = static_cast<float>(cpuCamera.focus_dist);
 	params.camera.aperture = static_cast<float>(cpuCamera.aperture);
     params.camera.blade_count = cpuCamera.blade_count;
-}
-__host__ __device__ inline float optix_length(const float3& v) {
-    return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    
+    // Calculate Exposure Factor for GPU
+    float exposure_factor = 1.0f;
+    if (cpuCamera.auto_exposure) {
+        exposure_factor = std::pow(2.0f, cpuCamera.ev_compensation);
+    } else {
+        float iso_mult = CameraPresets::ISO_PRESETS[cpuCamera.iso_preset_index].exposure_multiplier;
+        float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
+        
+        // Use F-Stop Number (e.g., 16.0)
+        float f_number = 16.0f;
+        if (cpuCamera.fstop_preset_index > 0) {
+            f_number = CameraPresets::FSTOP_PRESETS[cpuCamera.fstop_preset_index].f_number;
+        } else {
+             // Custom Mode fallback
+             if (cpuCamera.aperture > 0.001f)
+                 f_number = 0.8f / cpuCamera.aperture;
+             else 
+                 f_number = 16.0f;
+        }
+        float aperture_sq = f_number * f_number; // e.g., 16*16 = 256
+        
+        float ev_comp = std::pow(2.0f, cpuCamera.ev_compensation);
+        
+        float current_val = (iso_mult * shutter_time) / (aperture_sq + 0.0001f);
+        
+        // Baseline: Sunny 16 Rule (ISO 100, f/16, 1/125s) with Radiance=1.0 assumption?
+        // Val = (1.0 * 0.008) / 256 = 0.00003125
+        // If scene radiance is ~1.0, this small value makes image dark.
+        // We want factor=1.0 at baseline.
+        float baseline_val = 0.00003125f; 
+        
+        exposure_factor = (current_val / baseline_val) * ev_comp;
+    }
+    // MOTION BLUR VELOCITY CALCULATION
+    if (first_frame_camera) {
+        params.camera.vel_origin = make_float3(0.0f);
+        params.camera.vel_corner = make_float3(0.0f);
+        params.camera.vel_horizontal = make_float3(0.0f);
+        params.camera.vel_vertical = make_float3(0.0f);
+        first_frame_camera = false;
+    } else {
+        // Assume 24 FPS baseline (0.0416s per frame)
+        // If shutter speed is 1/50s (0.02s), blur should cover ~50% of frame movement
+        float frame_dt = 1.0f / 24.0f; 
+        float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
+        
+        // Scale factor: How much of the inter-frame movement occurs during shutter open time?
+        // Movement = (Current - Prev) is assumed to happen over 'frame_dt'.
+        // Blur Motion = Movement * (shutter_time / frame_dt).
+        float scale = shutter_time / frame_dt;
+        
+        // Clamp scale for stability (max 2 frames blur?)
+        if (scale > 2.0f) scale = 2.0f;
+
+        float3 curr_origin = optix_to_float3(cpuCamera.origin);
+        float3 prev_origin = optix_to_float3(prev_camera.origin);
+        
+        // Teleport check (if moved too far, disable blur for this frame)
+        if (optix_length(curr_origin - prev_origin) > 100.0f) {
+            scale = 0.0f;
+        }
+
+        params.camera.vel_origin = (curr_origin - prev_origin) * scale;
+        params.camera.vel_corner = (optix_to_float3(cpuCamera.lower_left_corner) - optix_to_float3(prev_camera.lower_left_corner)) * scale;
+        params.camera.vel_horizontal = (optix_to_float3(cpuCamera.horizontal) - optix_to_float3(prev_camera.horizontal)) * scale;
+        params.camera.vel_vertical = (optix_to_float3(cpuCamera.vertical) - optix_to_float3(prev_camera.vertical)) * scale;
+    }
+    prev_camera = cpuCamera;
+    
+    params.camera.shutter_open_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
+    params.camera.motion_blur_enabled = cpuCamera.enable_motion_blur ? 1 : 0;
+    
+    params.camera.exposure_factor = exposure_factor;
 }
 
 
@@ -1190,13 +1131,32 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
         gpuLights.push_back(l);
     }
 
-    // GPU'ya kopyala
-    CUdeviceptr d_lights;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU UPLOAD (PERSISTENT BUFFER - Memory Leak Fix)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OPTIMIZATION: Reuse d_lights_persistent to avoid memory leak and per-frame malloc
+    // Old code: Allocated new buffer every frame without freeing = cumulative leak!
+    
     size_t byteSize = gpuLights.size() * sizeof(LightGPU);
-    cudaMalloc(reinterpret_cast<void**>(&d_lights), byteSize);
-    cudaMemcpy(reinterpret_cast<void*>(d_lights), gpuLights.data(), byteSize, cudaMemcpyHostToDevice);
+    
+    // Only reallocate if we need more space
+    if (byteSize > d_lights_capacity) {
+        // Free old buffer if exists
+        if (d_lights_persistent) {
+            cudaFree(reinterpret_cast<void*>(d_lights_persistent));
+        }
+        // Allocate new buffer with some extra capacity for future growth
+        size_t newCapacity = byteSize + (4 * sizeof(LightGPU)); // Room for 4 more lights
+        cudaMalloc(reinterpret_cast<void**>(&d_lights_persistent), newCapacity);
+        d_lights_capacity = newCapacity;
+    }
+    
+    // Copy light data to GPU
+    if (d_lights_persistent && !gpuLights.empty()) {
+        cudaMemcpy(reinterpret_cast<void*>(d_lights_persistent), gpuLights.data(), byteSize, cudaMemcpyHostToDevice);
+    }
 
-    params.lights = reinterpret_cast<LightGPU*>(d_lights);
+    params.lights = reinterpret_cast<LightGPU*>(d_lights_persistent);
     params.light_count = static_cast<int>(gpuLights.size());
 }
 
@@ -1476,4 +1436,118 @@ void OptixWrapper::updateGeometry(const std::vector<std::shared_ptr<Hittable>>& 
     cudaDeviceSynchronize();
 
     last_vertex_count = vertices.size(); // Update tracking for next frame
+}
+
+// ============================================================================
+// OPTIMIZED MATERIAL UPDATES - No Geometry/GAS Rebuild Required
+// ============================================================================
+// These methods provide fast material property updates without triggering
+// expensive geometry acceleration structure (GAS) rebuilds.
+//
+// Performance comparison:
+//   rebuildOptiXGeometry(): ~200-500ms (full GAS rebuild)
+//   updateMaterialBuffer(): ~1-5ms (buffer copy only)
+//   updateSBTMaterialBindings(): ~1-5ms (buffer copy only)
+//   updateSBTVolumetricData(): ~5-20ms (SBT records update)
+// ============================================================================
+
+void OptixWrapper::updateMaterialBuffer(const std::vector<GpuMaterial>& materials) {
+    if (materials.empty()) {
+        SCENE_LOG_WARN("[OptiX] updateMaterialBuffer: Empty materials vector");
+        return;
+    }
+    
+    if (!d_materials) {
+        SCENE_LOG_WARN("[OptiX] updateMaterialBuffer: d_materials not allocated");
+        return;
+    }
+    
+    size_t mat_size = materials.size() * sizeof(GpuMaterial);
+    cudaError_t err = cudaMemcpy(d_materials, materials.data(), mat_size, cudaMemcpyHostToDevice);
+    
+    if (err != cudaSuccess) {
+        SCENE_LOG_ERROR("[OptiX] updateMaterialBuffer failed: " + std::string(cudaGetErrorString(err)));
+        return;
+    }
+    
+   // SCENE_LOG_INFO("[OptiX] Material buffer updated: " + std::to_string(materials.size()) + " materials");
+}
+
+void OptixWrapper::updateSBTMaterialBindings(const std::vector<int>& material_indices) {
+    if (material_indices.empty()) {
+        SCENE_LOG_WARN("[OptiX] updateSBTMaterialBindings: Empty material_indices vector");
+        return;
+    }
+    
+    if (!d_material_indices) {
+        SCENE_LOG_WARN("[OptiX] updateSBTMaterialBindings: d_material_indices not allocated");
+        return;
+    }
+    
+    size_t mi_size = material_indices.size() * sizeof(int);
+    cudaError_t err = cudaMemcpy(reinterpret_cast<void*>(d_material_indices), 
+                                  material_indices.data(), mi_size, cudaMemcpyHostToDevice);
+    
+    if (err != cudaSuccess) {
+        SCENE_LOG_ERROR("[OptiX] updateSBTMaterialBindings failed: " + std::string(cudaGetErrorString(err)));
+        return;
+    }
+    
+  //  SCENE_LOG_INFO("[OptiX] SBT material bindings updated: " + std::to_string(material_indices.size()) + " triangles");
+}
+
+void OptixWrapper::updateSBTVolumetricData(const std::vector<OptixGeometryData::VolumetricInfo>& volumetric_info) {
+    if (volumetric_info.empty()) {
+        return; // Silently return - not all materials are volumetric
+    }
+    
+    if (hitgroup_records.empty()) {
+        SCENE_LOG_WARN("[OptiX] updateSBTVolumetricData: No SBT records to update");
+        return;
+    }
+    
+    bool updated = false;
+    
+    // Update each hitgroup record with volumetric info
+    for (size_t mat_index = 0; mat_index < volumetric_info.size() && mat_index < hitgroup_records.size(); ++mat_index) {
+        const auto& vol = volumetric_info[mat_index];
+        auto& rec = hitgroup_records[mat_index];
+        
+        rec.data.is_volumetric = vol.is_volumetric;
+        rec.data.vol_density = vol.density;
+        rec.data.vol_absorption = vol.absorption;
+        rec.data.vol_scattering = vol.scattering;
+        rec.data.vol_albedo = vol.albedo;
+        rec.data.vol_emission = vol.emission;
+        rec.data.vol_g = vol.g;
+        rec.data.vol_step_size = vol.step_size;
+        rec.data.vol_max_steps = vol.max_steps;
+        rec.data.vol_noise_scale = vol.noise_scale;
+        
+        // Multi-Scattering Parameters
+        rec.data.vol_multi_scatter = vol.multi_scatter;
+        rec.data.vol_g_back = vol.g_back;
+        rec.data.vol_lobe_mix = vol.lobe_mix;
+        rec.data.vol_light_steps = vol.light_steps;
+        rec.data.vol_shadow_strength = vol.shadow_strength;
+        
+        rec.data.aabb_min = vol.aabb_min;
+        rec.data.aabb_max = vol.aabb_max;
+        
+        updated = true;
+    }
+    
+    if (updated && sbt.hitgroupRecordBase) {
+        // Upload updated SBT records to GPU
+        size_t sbt_size = hitgroup_records.size() * sizeof(SbtRecord<HitGroupData>);
+        cudaError_t err = cudaMemcpy(reinterpret_cast<void*>(sbt.hitgroupRecordBase), 
+                                      hitgroup_records.data(), sbt_size, cudaMemcpyHostToDevice);
+        
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("[OptiX] updateSBTVolumetricData failed: " + std::string(cudaGetErrorString(err)));
+            return;
+        }
+        
+       // SCENE_LOG_INFO("[OptiX] SBT volumetric data updated: " + std::to_string(volumetric_info.size()) + " materials");
+    }
 }

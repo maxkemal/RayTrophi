@@ -73,6 +73,41 @@ struct NishitaSkyParams {
     float mie_anisotropy;    // g factor (0.8 = forward scattering)
     float rayleigh_density;  // Scale height for Rayleigh
     float mie_density;       // Scale height for Mie
+    
+    // ═══════════════════════════════════════════════════════════════
+    // ATMOSPHERIC FOG (Height-based + Distance-based)
+    // ═══════════════════════════════════════════════════════════════
+    int fog_enabled;               // 1 = show fog
+    float fog_density;             // Base fog density (0.0 - 0.1)
+    float fog_height;              // Fog falloff height (meters, 0 = ground level)
+    float fog_falloff;             // Exponential falloff rate (0.001 - 0.01)
+    float fog_distance;            // Max fog distance (meters)
+    float3 fog_color;              // Fog color (usually bluish-white)
+    float fog_sun_scatter;         // How much fog scatters sunlight toward camera
+    
+    // ═══════════════════════════════════════════════════════════════
+    // VOLUMETRIC LIGHT RAYS (God Rays / Light Shafts)
+    // ═══════════════════════════════════════════════════════════════
+    int godrays_enabled;           // 1 = show god rays
+    float godrays_intensity;       // God ray brightness (0.0 - 2.0)
+    float godrays_density;         // God ray density/thickness
+    int godrays_samples;           // Quality (8-32 recommended)
+    float godrays_decay;           // Light decay over distance
+    
+    // ═══════════════════════════════════════════════════════════════
+    // MULTI-SCATTERING (Improved atmosphere realism)
+    // ═══════════════════════════════════════════════════════════════
+    int multi_scatter_enabled;     // 1 = enable multi-scattering
+    float multi_scatter_factor;    // Multi-scatter intensity (0.0 - 1.0)
+    
+    // ═══════════════════════════════════════════════════════════════
+    // ENVIRONMENT TEXTURE OVERLAY (HDR/EXR blending with procedural)
+    // ═══════════════════════════════════════════════════════════════
+    int env_overlay_enabled;       // 1 = blend environment texture with Nishita
+    cudaTextureObject_t env_overlay_tex;  // HDR/EXR environment texture
+    float env_overlay_intensity;   // Texture contribution (0.0 - 2.0)
+    float env_overlay_rotation;    // Rotation in degrees (0 - 360)
+    int env_overlay_blend_mode;    // 0 = Add, 1 = Multiply, 2 = Screen, 3 = Replace
 };
 
 struct WorldData {
@@ -147,6 +182,10 @@ public:
     
     NishitaSkyParams getNishitaParams() const;
     
+    // Environment Texture Overlay for Nishita
+    void setNishitaEnvOverlay(const std::string& path);
+    std::string getNishitaEnvOverlayPath() const;
+    
     // Camera position for volumetric clouds
     void setCameraY(float y) { data.camera_y = y; }
     float getCameraY() const { return data.camera_y; }
@@ -157,7 +196,9 @@ public:
 private:
    WorldData data;
    std::string hdri_path; // Store path for getter
+   std::string env_overlay_path; // Store env overlay path
    Texture* hdri_texture = nullptr;
+   Texture* env_overlay_texture = nullptr;
    
    // Internal helper for Nishita
    Vec3 calculateNishitaSky(const Vec3& ray_dir);

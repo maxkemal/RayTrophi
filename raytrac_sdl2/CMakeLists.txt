@@ -16,7 +16,59 @@ set(OIDN_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/oidn-2.3.0.x64.windows" CA
 set(ASSIMP_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/Assimp" CACHE PATH "Path to Assimp root")
 
 # --- SOURCE FILES ---
-file(GLOB SOURCES_CPP "source/src/*.cpp")
+set(SOURCES_CPP
+    "source/src/AABB.cpp"
+    "source/src/AreaLight.cpp"
+    "source/src/AssimpLoader.cpp"
+    "source/src/Camera.cpp"
+    "source/src/Dielectric.cpp"
+    "source/src/DirectionalLight.cpp"
+    "source/src/EmbreeBVH.cpp"
+    "source/src/HittableList.cpp"
+    "source/src/ImGuizmo.cpp"
+    "source/src/Light.cpp"
+    "source/src/Main.cpp"
+    "source/src/Material.cpp"
+    "source/src/MaterialManager.cpp"
+    "source/src/Matrix4x4.cpp"
+    "source/src/Mesh.cpp"
+    "source/src/OptixWrapper.cpp"
+    "source/src/ParallelBVHNode.cpp"
+    "source/src/ParallelBVHNode_optimized.cpp"
+    "source/src/PointLight.cpp"
+    "source/src/PrincipledBSDF.cpp"
+    "source/src/ProjectManager.cpp"
+    "source/src/Renderer.cpp"
+    "source/src/SceneCommand.cpp"
+    "source/src/SceneCommand_Transform.cpp"
+    "source/src/SceneHistory.cpp"
+    "source/src/SceneSelection.cpp"
+    "source/src/SceneSerializer.cpp"
+    "source/src/SequencerAdapter.cpp"
+    "source/src/SplashScreen.cpp"
+    "source/src/SpotLight.cpp"
+    "source/src/Texture.cpp"
+    "source/src/ThreadLocalRNG.cpp"
+    "source/src/TimelineWidget.cpp"
+    "source/src/Triangle.cpp"
+    "source/src/Vec2.cpp"
+    "source/src/Vec3.cpp"
+    "source/src/Vec3SIMD.cpp"
+    "source/src/Volumetric.cpp"
+    "source/src/World.cpp"
+    "source/src/globals.cpp"
+    "source/src/scene_ui.cpp"
+    "source/src/scene_ui_camera.cpp"
+    "source/src/scene_ui_gizmos.cpp"
+    "source/src/scene_ui_hierarchy.cpp"
+    "source/src/scene_ui_lights.cpp"
+    "source/src/scene_ui_materials.cpp"
+    "source/src/scene_ui_selection.cpp"
+    "source/src/scene_ui_viewport.cpp"
+    "source/src/scene_ui_world.cpp"
+    "source/src/ui_modern.cpp"
+    "source/src/unified_converters.cpp"
+)
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
 file(GLOB HEADERS "source/include/*.h" "source/external/imgui/*.h")
 
@@ -25,8 +77,13 @@ set(MINIZ_SOURCES
     "source/external/miniz.c"
 )
 
+# ImSequencer (from ImGuizmo repository)
+set(IMSEQUENCER_SOURCES
+    "source/external/ImSequencer.cpp"
+)
+
 # Gather all sources
-set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${HEADERS})
+set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${IMSEQUENCER_SOURCES} ${HEADERS})
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)

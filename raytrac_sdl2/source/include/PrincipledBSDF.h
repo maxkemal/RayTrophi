@@ -33,7 +33,7 @@ public:
      // Existing constructors
     PrincipledBSDF(
         const Vec3& albedo = Vec3(1, 1, 1),
-        float roughness = 0.001f,
+        float roughness = 0.5f,
         float metallic = 0.0f,
         const std::shared_ptr<Texture>& albedoTexture = nullptr,
         const std::shared_ptr<Texture>& roughnessTexture = nullptr,
@@ -45,13 +45,13 @@ public:
         const Vec3& subsurfaceColor = Vec3(0.0, 0.0, 0.0),
         float subsurfaceRadius = 0.0f,
         float clearcoat = 0.0f,
-        float transmission = 0.0f,  // 💡 yeni parametre
+        float transmission = 0.0f,  //  yeni parametre
         float clearcoatRoughness = 0.0f
     ) : albedoProperty(albedo, 1.0f, albedoTexture),
         roughnessProperty(Vec3(roughness), 1.0f, roughnessTexture),
-        metallicProperty(Vec3(metallic), 1.0f, metallicTexture),
+        metallicProperty(Vec3(metallic), metallic, metallicTexture),
         normalProperty(Vec3(0.5f, 0.5f, 1.0f), 1.0f, normalTexture),
-        opacityProperty(Vec3(1.0f), 1.0f, opacityTexture, opacityAlpha)        ,
+        opacityProperty(Vec3(1.0f), 1.0f, opacityTexture, 1.0f),
         emissionProperty(emission, 0.0f),
         subsurfaceColor(subsurfaceColor),
         subsurfaceRadius(subsurfaceRadius),
@@ -135,7 +135,6 @@ public:
     Vec3 fresnelSchlick(float cosTheta, const Vec3& F0) const;
 
     Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
-private:
     float normalStrength = 1.0f;
     Vec3 subsurfaceRadius = 0.0f;
     float clearcoat = 1.0f;
@@ -145,6 +144,8 @@ private:
     Vec3 anisotropicDirection;
     Vec3 subsurfaceColor;
     float opacityAlpha = 1.0f;
+private:
+  
 
     // Helper methods
     float max(float a, float b) const { return a > b ? a : b; }

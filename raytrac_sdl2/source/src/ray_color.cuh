@@ -108,34 +108,44 @@ __device__ float3 render_cloud_layer(
                 float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.01f, sunDirection.y) / (float)lightSteps;
                 lightStepSize = fminf(lightStepSize, 500.0f);
                 
-                for (int j = 1; j <= lightSteps; ++j) {
-                    float3 lightPos = pos + sunDirection * (lightStepSize * (float)j);
-                    
-                    if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
-                    
-                    float3 lightOffsetPos = lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
-                    
-                    // Use texture LOD for light marching
-                    // Use faster procedural noise for shadows to save performance
-                    // Shadows don't need the micro-details of the main shape
-                    float3 lightNoisePos = lightOffsetPos * scale;
-                    float lightDensity = fast_cloud_shape(lightNoisePos, coverage);
+                // ═══════════════════════════════════════════════════════════
+                    // DUAL SCATTERING LIGHT MARCHING
+                    // ═══════════════════════════════════════════════════════════
+                    float lightDensitySum = 0.0f;
 
+                    for (int j = 1; j <= lightSteps; ++j) {
+                        float3 lightPos = pos + sunDirection * (lightStepSize * (float)j);
+                        
+                        if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
+                        
+                        float3 lightOffsetPos = lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
+                        
+                        float3 lightNoisePos = lightOffsetPos * scale;
+                        // Use fast_cloud_shape for performance in shadow rays
+                        float lightDensity = fast_cloud_shape(lightNoisePos, coverage);
 
+                        float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
+                        float lightHeightGrad = 4.0f * lh * (1.0f - lh);
+                        lightDensity *= lightHeightGrad * localDensityMult;
+                        
+                        lightDensitySum += lightDensity * lightStepSize;
+                        
+                        if (lightDensitySum > 10.0f) break; 
+                    }
+
+                    // Beer's Law (Primary Absorption)
+                    float beersLaw = expf(-lightDensitySum * 0.015f * world.nishita.cloud_absorption);
                     
-                    float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                    float lightHeightGrad = 4.0f * lh * (1.0f - lh);
-                    lightDensity *= lightHeightGrad * localDensityMult;
+                    // Secondary Absorption (Softer, simulates scattered light) - Dual Scattering
+                    float beersLaw2 = expf(-lightDensitySum * 0.015f * world.nishita.cloud_absorption * 0.25f);
                     
-                    // Use absorption parameter
-                    lightTransmittance *= expf(-lightDensity * lightStepSize * 0.015f * world.nishita.cloud_absorption);
+                    // Combine Terms
+                    lightTransmittance = beersLaw * 0.3f + beersLaw2 * 0.7f * world.nishita.cloud_silver_intensity;
                     
-                    if (lightTransmittance < 0.05f) break;
+                    // Shadow stength from UI
+                    lightTransmittance = lerp(1.0f, lightTransmittance, world.nishita.cloud_shadow_strength);
                 }
-            }
             
-            // Apply shadow strength (UI controlled)
-            lightTransmittance = 1.0f - (1.0f - lightTransmittance) * world.nishita.cloud_shadow_strength;
             
             // ═══════════════════════════════════════════════════════════
             // ADVANCED COLOR CALCULATION
@@ -262,6 +272,212 @@ __device__ float3 render_clouds(const WorldData& world, const float3& rayDir, fl
     // Final blend with background
     // No artificial minimum - clouds should be fully transparent where there's no density
     return bg_color * transmittance + cloudColor;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATMOSPHERIC FOG - Height-based exponential fog with sun scattering
+// ═══════════════════════════════════════════════════════════════════════════
+__device__ float calculate_height_fog_factor(
+    float3 rayOrigin, 
+    float3 rayDir, 
+    float distance,
+    float fogDensity, 
+    float fogHeight, 
+    float fogFalloff
+) {
+    // Exponential height fog - denser at ground level
+    // Based on: https://iquilezles.org/articles/fog/
+    float a = fogDensity * expf(-fogFalloff * rayOrigin.y);
+    float b = fogFalloff * rayDir.y;
+    
+    // Avoid division by zero for horizontal rays
+    if (fabsf(b) < 1e-5f) {
+        return 1.0f - expf(-a * distance);
+    }
+    
+    // Analytical integral of exponential height fog
+    float fogAmount = a * (1.0f - expf(-b * distance)) / b;
+    return 1.0f - expf(-fogAmount);
+}
+
+__device__ float3 apply_atmospheric_fog(
+    const WorldData& world,
+    float3 sceneColor,
+    float3 rayDir,
+    float distance
+) {
+    if (!world.nishita.fog_enabled || world.nishita.fog_density <= 0.0f) {
+        return sceneColor;
+    }
+    
+    // Camera position (at altitude)
+    float3 rayOrigin = make_float3(0.0f, world.nishita.altitude, 0.0f);
+    
+    // Clamp distance to fog range
+    distance = fminf(distance, world.nishita.fog_distance);
+    
+    // Calculate fog factor with height falloff
+    float fogFactor = calculate_height_fog_factor(
+        rayOrigin, rayDir, distance,
+        world.nishita.fog_density,
+        world.nishita.fog_height,
+        world.nishita.fog_falloff
+    );
+    
+    // Base fog color
+    float3 fogColor = world.nishita.fog_color;
+    
+    // Sun scattering in fog (makes fog glow towards sun)
+    float3 sunDir = normalize(world.nishita.sun_direction);
+    float sunDot = fmaxf(0.0f, dot(rayDir, sunDir));
+    float sunScatter = powf(sunDot, 8.0f) * world.nishita.fog_sun_scatter;
+    
+    // Add sun color to fog when looking towards sun
+    float3 sunColor = make_float3(1.0f, 0.9f, 0.7f) * world.nishita.sun_intensity * 0.1f;
+    fogColor = fogColor + sunColor * sunScatter;
+    
+    // Blend scene with fog
+    return lerp(sceneColor, fogColor, fogFactor);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VOLUMETRIC GOD RAYS - Ray-marched light shafts with proper occlusion
+// Objects will block god rays creating shadows in the volumetric effect
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Forward declaration for shadow test
+// Forward declaration for shadow test
+__device__ bool trace_shadow_test(float3 origin, float3 direction, float maxDist);
+
+__device__ float3 calculate_volumetric_god_rays(
+    const WorldData& world,
+    float3 rayOrigin,
+    float3 rayDir,
+    float maxDistance,  // Distance to first hit (or far distance for miss)
+    curandState* rng
+) {
+    if (!world.nishita.godrays_enabled || world.nishita.godrays_intensity <= 0.0f) {
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
+    
+    float3 sunDir = normalize(world.nishita.sun_direction);
+    float sunDot = dot(rayDir, sunDir);
+    
+    // Early exit if not looking somewhat towards sun
+    if (sunDot < 0.3f) {
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
+    
+    // Ray march parameters from world settings
+    int numSteps = world.nishita.godrays_samples;
+    numSteps = max(4, min(numSteps, 64)); // Clamp between 4-64
+    
+    // Limit march distance for performance
+    float marchDistance = fminf(maxDistance, world.nishita.fog_distance * 0.5f);
+    float stepSize = marchDistance / (float)numSteps;
+    
+    float3 godRayColor = make_float3(0.0f, 0.0f, 0.0f);
+    float transmittance = 1.0f;
+    
+    // Sun color based on elevation
+    float sunElevation = sunDir.y;
+    float3 sunColor;
+    if (sunElevation < 0.1f) {
+        sunColor = make_float3(1.0f, 0.5f, 0.2f); // Orange at sunset
+    } else if (sunElevation < 0.3f) {
+        sunColor = make_float3(1.0f, 0.8f, 0.5f); // Golden
+    } else {
+        sunColor = make_float3(1.0f, 0.95f, 0.9f); // Warm white
+    }
+    
+    // Phase function (Henyey-Greenstein for forward scattering)
+    float g = 0.85f;
+    float g2 = g * g;
+    float phase = (1.0f - g2) / (4.0f * M_PIf * powf(1.0f + g2 - 2.0f * g * sunDot, 1.5f));
+    
+    // Elevation factor (stronger at low sun angles)
+    float elevationFactor = 1.0f - fminf(1.0f, fmaxf(0.0f, sunElevation * 3.0f));
+    elevationFactor = fmaxf(0.1f, elevationFactor);
+    
+    // Media density
+    float mediaDensity = world.nishita.godrays_density * 0.01f;
+    
+    // Jitter start position to reduce banding
+    float jitter = 0.0f;
+    if (rng) {
+        jitter = curand_uniform(rng) * stepSize;
+    }
+    
+    for (int i = 0; i < numSteps; ++i) {
+        float t = jitter + stepSize * (float)i + stepSize * 0.5f;
+        if (t > marchDistance) break;
+        
+        float3 samplePos = rayOrigin + rayDir * t;
+        
+        // Height-based density falloff
+        float height = samplePos.y;
+        float heightFactor = expf(-fmaxf(0.0f, height) * 0.0005f); // Fog denser near ground
+        
+        // Check if this point is lit by the sun (not in shadow)
+        bool inSunlight = !trace_shadow_test(samplePos, sunDir, 10000.0f);
+        
+        if (inSunlight) {
+            // Accumulate god ray contribution
+            float localDensity = mediaDensity * heightFactor;
+            float scattering = localDensity * phase * world.nishita.godrays_intensity;
+            
+            // Distance-based decay
+            float decay = powf(world.nishita.godrays_decay, t * 0.01f);
+            
+            // Add contribution
+            godRayColor += sunColor * scattering * transmittance * decay * stepSize * elevationFactor;
+        }
+        
+        // Absorption through the medium
+        transmittance *= expf(-mediaDensity * heightFactor * stepSize * 0.5f);
+        
+        // Early exit if fully absorbed
+        if (transmittance < 0.01f) break;
+    }
+    
+    // Final intensity scaling
+    return godRayColor * world.nishita.sun_intensity * 0.5f;
+}
+
+// Shadow test for god rays
+__device__ bool trace_shadow_test(float3 origin, float3 direction, float maxDist) {
+    Ray shadow_ray(origin, direction);
+    
+    OptixHitResult shadow_payload = {};
+    trace_shadow_ray(shadow_ray, &shadow_payload, 0.1f, maxDist);
+    
+    return shadow_payload.hit;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MULTI-SCATTERING - Improved atmosphere realism (Frostbite-style)
+// ═══════════════════════════════════════════════════════════════════════════
+__device__ float3 apply_multi_scattering(
+    float3 singleScatter,
+    float opticalDepth,
+    float3 scatteringAlbedo,
+    float multiFactor
+) {
+    // Multi-scattering approximation:
+    // Each bounce adds dimmer contribution of scattered light
+    // This brightens the horizon and makes sky more uniform
+    
+    float3 ms = singleScatter;
+    
+    // Second order scattering
+    float3 secondOrder = singleScatter * scatteringAlbedo * 0.5f * expf(-opticalDepth * 0.3f);
+    ms = ms + secondOrder * multiFactor;
+    
+    // Third order (very subtle)
+    float3 thirdOrder = secondOrder * scatteringAlbedo * 0.25f * expf(-opticalDepth * 0.1f);
+    ms = ms + thirdOrder * multiFactor * 0.5f;
+    
+    return ms;
 }
 
 __device__ float3 evaluate_background(const WorldData& world, const float3& dir) {
@@ -403,105 +619,125 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& dir)
         }
         
         // ═══════════════════════════════════════════════════════════
-        // Night Sky: Stars and Moon (visible when sun is low)
+        // REALISTIC NIGHT SKY with TWILIGHT GRADIENT
         // ═══════════════════════════════════════════════════════════
         float nightVal = (world.nishita.sun_elevation + 5.0f) / 20.0f;
         float nightFactor = 1.0f - fminf(1.0f, fmaxf(0.0f, nightVal));
         
-        if (nightFactor > 0.01f && world.nishita.stars_intensity > 0.0f) {
-            // Procedural stars using hash
-            float3 starDir = rayDir;
-            // Grid-based star positions
-            float starScale = 1000.0f;
-            float3 gridPos = make_float3(
-                floorf(starDir.x * starScale),
-                floorf(starDir.y * starScale),
-                floorf(starDir.z * starScale)
+        // ════════════════════════════════════════════════════════════════
+        // TWILIGHT HORIZON GRADIENT (Blue-Orange-Purple)
+        // Civil twilight: -6°, Nautical: -12°, Astronomical: -18°
+        // ════════════════════════════════════════════════════════════════
+        if (world.nishita.sun_elevation < 5.0f && world.nishita.sun_elevation > -18.0f) {
+            float twilightPhase = (-world.nishita.sun_elevation + 5.0f) / 23.0f; // 0 at sunset, 1 at -18°
+            twilightPhase = fminf(1.0f, fmaxf(0.0f, twilightPhase));
+            
+            float3 sunDir = normalize(world.nishita.sun_direction);
+            float sunAngle = dot(rayDir, sunDir);
+            float horizonFade = expf(-fabsf(rayDir.y) * 4.0f); // Strong at horizon
+            float sunProximity = fmaxf(0.0f, sunAngle);
+            
+            // Twilight colors based on phase
+            float3 horizonColor;
+            if (twilightPhase < 0.3f) {
+                // Civil twilight - Orange/Red at sun, Blue away
+                float3 sunSideColor = make_float3(1.0f, 0.5f, 0.2f);  // Orange
+                float3 awaySideColor = make_float3(0.3f, 0.4f, 0.7f); // Deep blue
+                horizonColor = lerp(awaySideColor, sunSideColor, powf(sunProximity, 2.0f));
+            } else if (twilightPhase < 0.6f) {
+                // Nautical twilight - Purple/Deep blue gradient
+                float3 sunSideColor = make_float3(0.6f, 0.3f, 0.4f);  // Purple-red
+                float3 awaySideColor = make_float3(0.15f, 0.2f, 0.5f); // Navy blue
+                horizonColor = lerp(awaySideColor, sunSideColor, powf(sunProximity, 3.0f));
+            } else {
+                // Astronomical twilight - Dark blue with hint of purple
+                float3 sunSideColor = make_float3(0.2f, 0.15f, 0.35f);  // Dark purple
+                float3 awaySideColor = make_float3(0.05f, 0.08f, 0.2f); // Near-black blue
+                horizonColor = lerp(awaySideColor, sunSideColor, powf(sunProximity, 4.0f));
+            }
+            
+            // Blend intensity based on twilight depth
+            float twilightIntensity = (1.0f - twilightPhase) * 0.4f;
+            L += horizonColor * horizonFade * twilightIntensity;
+        }
+        
+        // ════════════════════════════════════════════════════════════════
+        // ENVIRONMENT TEXTURE OVERLAY (HDR/EXR blending with procedural)
+        // ════════════════════════════════════════════════════════════════
+        if (world.nishita.env_overlay_enabled && world.nishita.env_overlay_tex != 0) {
+            float3 starDir = normalize(rayDir);
+            
+            // Apply rotation to UV calculation
+            float rotation = world.nishita.env_overlay_rotation * M_PIf / 180.0f;
+            float sinR = sinf(rotation);
+            float cosR = cosf(rotation);
+            
+            // Rotated direction
+            float3 rotatedDir = make_float3(
+                starDir.x * cosR - starDir.z * sinR,
+                starDir.y,
+                starDir.x * sinR + starDir.z * cosR
             );
             
-            // Simple hash function for star placement
-            float hash = fmodf(sinf(gridPos.x * 12.9898f + gridPos.y * 78.233f + gridPos.z * 45.164f) * 43758.5453f, 1.0f);
-            if (hash < 0.0f) hash = -hash;
+            // Convert direction to equirectangular UV
+            float u = 0.5f + atan2f(rotatedDir.z, rotatedDir.x) / (2.0f * M_PIf);
+            float v = 0.5f - asinf(fmaxf(-1.0f, fminf(1.0f, rotatedDir.y))) / M_PIf;
             
-            // Only some cells have stars
-            float starThreshold = 1.0f - world.nishita.stars_density * 0.1f;
-            if (hash > starThreshold && rayDir.y > 0.0f) {
-                // Star color (slightly varied)
-                float colorVar = fmodf(hash * 7.0f, 1.0f);
-                float3 starColor;
-                if (colorVar < 0.3f) {
-                    starColor = make_float3(1.0f, 0.9f, 0.8f); // Warm white
-                } else if (colorVar < 0.6f) {
-                    starColor = make_float3(0.9f, 0.95f, 1.0f); // Cool white
-                } else if (colorVar < 0.8f) {
-                    starColor = make_float3(1.0f, 0.7f, 0.5f); // Orange
-                } else {
-                    starColor = make_float3(0.7f, 0.8f, 1.0f); // Blue
-                }
-                
-                // Twinkle effect based on hash
-                float twinkle = 0.5f + 0.5f * sinf(hash * 100.0f);
-                float starBrightness = (hash - starThreshold) / (1.0f - starThreshold);
-                starBrightness = powf(starBrightness, 2.0f) * twinkle;
-                
-                L += starColor * starBrightness * world.nishita.stars_intensity * nightFactor * 0.1f;
+            // Sample environment texture
+            float4 envSample = tex2D<float4>(world.nishita.env_overlay_tex, u, v);
+            float3 envColor = make_float3(envSample.x, envSample.y, envSample.z);
+            envColor = envColor * world.nishita.env_overlay_intensity;
+            
+            // Blend mode application
+            int blendMode = world.nishita.env_overlay_blend_mode;
+            float blendFactor = fminf(1.0f, world.nishita.env_overlay_intensity);
+            
+            if (blendMode == 0) {
+                // Mix - lerp between Nishita and texture
+                L = L * (1.0f - blendFactor) + envColor;
+            } else if (blendMode == 1) {
+                // Multiply - use env as multiplier (normalized around 1.0)
+                float3 normalizedEnv = envColor / fmaxf(0.001f, world.nishita.env_overlay_intensity);
+                L = L * (normalizedEnv * 0.5f + make_float3(0.5f, 0.5f, 0.5f));
+            } else if (blendMode == 2) {
+                // Screen - brightens without washing out
+                L = make_float3(1.0f, 1.0f, 1.0f) - (make_float3(1.0f, 1.0f, 1.0f) - L) * (make_float3(1.0f, 1.0f, 1.0f) - envColor);
+            } else if (blendMode == 3) {
+                // Replace - environment texture ONLY (ignore Nishita completely)
+                L = envColor;
             }
         }
         
-        // Moon rendering
-        if (world.nishita.moon_enabled && nightFactor > 0.01f && world.nishita.moon_intensity > 0.0f) {
-            float moonElevRad = world.nishita.moon_elevation * M_PIf / 180.0f;
-            float moonAzimRad = world.nishita.moon_azimuth * M_PIf / 180.0f;
-            float3 moonDir = make_float3(
-                cosf(moonElevRad) * sinf(moonAzimRad),
-                sinf(moonElevRad),
-                cosf(moonElevRad) * cosf(moonAzimRad)
-            );
+        // ════════════════════════════════════════════════════════════════
+        // NIGHT SKY AMBIENT (when dark, no texture overlay)
+        // ════════════════════════════════════════════════════════════════
+        if (nightFactor > 0.3f && !world.nishita.env_overlay_enabled) {
+            // Deep blue night sky base (never pure black)
+            float3 nightSkyBase = make_float3(0.01f, 0.015f, 0.04f);
+            L += nightSkyBase * nightFactor;
             
-            // Horizon magnification effect (like sun)
-            float moonSizeDeg = world.nishita.moon_size;
-            float moonElevFactor = 1.0f;
-            if (world.nishita.moon_elevation < 15.0f) {
-                moonElevFactor = 1.0f + (15.0f - fmaxf(world.nishita.moon_elevation, -10.0f)) * 0.04f;
-            }
-            moonSizeDeg *= moonElevFactor;
-            
-            float moon_radius = moonSizeDeg * (M_PIf / 180.0f) * 0.5f;
-            float moonDot = dot(rayDir, moonDir);
-            
-            if (moonDot > cosf(moon_radius)) {
-                // Base moon color (slightly blue-white)
-                float3 moonColor = make_float3(0.9f, 0.9f, 0.95f);
-                
-                // Horizon color shift (orange/red when low)
-                if (world.nishita.moon_elevation < 20.0f) {
-                    float horizonBlend = (20.0f - fmaxf(world.nishita.moon_elevation, -5.0f)) / 25.0f;
-                    horizonBlend = fminf(1.0f, fmaxf(0.0f, horizonBlend));
-                    // Shift to warm orange color
-                    float3 horizonColor = make_float3(1.0f, 0.7f, 0.4f);
-                    moonColor.x = moonColor.x * (1.0f - horizonBlend) + horizonColor.x * horizonBlend;
-                    moonColor.y = moonColor.y * (1.0f - horizonBlend) + horizonColor.y * horizonBlend;
-                    moonColor.z = moonColor.z * (1.0f - horizonBlend) + horizonColor.z * horizonBlend;
-                }
-                
-                // Atmospheric dimming near horizon
-                float atmosphericDim = 1.0f;
-                if (world.nishita.moon_elevation < 10.0f) {
-                    atmosphericDim = 0.3f + 0.7f * fmaxf(0.0f, world.nishita.moon_elevation / 10.0f);
-                }
-                
-                // Phase shading (0 = new moon, 0.5 = full, 1 = new)
-                float phase = world.nishita.moon_phase;
-                float phaseFactor = fabsf(phase - 0.5f) * 2.0f;
-                float brightness = 1.0f - phaseFactor * 0.9f;
-                
-                L += moonColor * brightness * atmosphericDim * world.nishita.moon_intensity * nightFactor * 10.0f;
-            }
+            // Light pollution gradient at horizon
+            float lightPollution = expf(-fabsf(rayDir.y) * 6.0f);
+            L += make_float3(0.02f, 0.015f, 0.01f) * lightPollution * nightFactor * 0.3f;
         }
+        
+        // ═══════════════════════════════════════════════════════════════
+        // MULTI-SCATTERING - Brightens horizon and makes sky more uniform
+        // ═══════════════════════════════════════════════════════════════
+        if (world.nishita.multi_scatter_enabled && world.nishita.multi_scatter_factor > 0.0f) {
+            // Use average optical depth for multi-scatter calculation
+            float avgOpticalDepth = (opticalDepthRayleigh + opticalDepthMie) * 0.5f;
+            
+            // Scattering albedo (how much light is scattered vs absorbed)
+            float3 scatterAlbedo = make_float3(0.8f, 0.85f, 0.9f);
+            
+            L = apply_multi_scattering(L, avgOpticalDepth, scatterAlbedo, world.nishita.multi_scatter_factor);
+        }
+        
+        // NOTE: Volumetric god rays are now handled in ray_color() with proper occlusion
+        // They need access to scene geometry for shadow testing
         
         // Global volumetric clouds handled by return statement below
-
-        
         return render_clouds(world, dir, L);
     }
     return make_float3(0.0f, 0.0f, 0.0f);
@@ -669,6 +905,7 @@ __device__ float3 calculate_light_contribution(
     float3 origin = payload.position + payload.normal * shadow_bias;
     Ray shadow_ray(origin, wi);
     OptixHitResult shadow_payload = {};
+    
     trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
     if (shadow_payload.hit) return make_float3(0.0f, 0.0f, 0.0f);
 
@@ -874,6 +1111,265 @@ __device__ float3 calculate_brdf_mis(
     return result;
 }
 
+// =============================================================================
+// VOLUMETRIC OBJECT RAY MARCHING - WITH MULTI-SCATTERING
+// Renders volumetric materials inside object bounds using ray marching
+// Features: Dual-lobe phase, light marching, multi-scatter transmittance
+// =============================================================================
+
+// GPU helper: Dual-lobe Henyey-Greenstein phase function
+__device__ float gpu_phase_dual_hg(float cos_theta, float g_forward, float g_back, float lobe_mix) {
+    // Forward lobe
+    float g2_fwd = g_forward * g_forward;
+    float phase_fwd = (1.0f - g2_fwd) / (4.0f * 3.14159f * powf(1.0f + g2_fwd - 2.0f * g_forward * cos_theta, 1.5f));
+    
+    // Backward lobe
+    float g2_back = g_back * g_back;
+    float phase_back = (1.0f - g2_back) / (4.0f * 3.14159f * powf(1.0f + g2_back - 2.0f * g_back * cos_theta, 1.5f));
+    
+    return lobe_mix * phase_fwd + (1.0f - lobe_mix) * phase_back;
+}
+
+// GPU helper: Multi-scatter transmittance approximation
+__device__ float gpu_multiscatter_transmittance(float sigma_t, float distance, float multi_scatter, float albedo_avg) {
+    float T_single = expf(-sigma_t * distance);
+    float T_multi = expf(-sigma_t * distance * 0.25f);
+    float blend = multi_scatter * albedo_avg;
+    return T_single * (1.0f - blend) + T_multi * blend;
+}
+
+// GPU helper: Powder effect for volume
+__device__ float gpu_powder_effect(float density, float cos_theta) {
+    float powder = 1.0f - expf(-density * 2.0f);
+    float forward_bias = 0.5f + 0.5f * fmaxf(0.0f, cos_theta);
+    return powder * forward_bias;
+}
+
+__device__ float3 raymarch_volumetric_object(
+    const float3& ray_origin,
+    const float3& ray_dir,
+    const float3& aabb_min,
+    const float3& aabb_max,
+    float vol_density,
+    float vol_absorption,
+    float vol_scattering,
+    const float3& vol_albedo,
+    const float3& vol_emission,
+    float vol_g,
+    float step_size,
+    int max_steps,
+    float noise_scale,
+    // Multi-scattering parameters (NEW)
+    float multi_scatter,
+    float g_back,
+    float lobe_mix,
+    int light_steps,
+    float shadow_strength,
+    float& out_transmittance,
+    curandState* rng
+) {
+    // Ray-AABB intersection
+    float3 inv_dir = make_float3(
+        fabsf(ray_dir.x) > 1e-6f ? 1.0f / ray_dir.x : 1e6f,
+        fabsf(ray_dir.y) > 1e-6f ? 1.0f / ray_dir.y : 1e6f,
+        fabsf(ray_dir.z) > 1e-6f ? 1.0f / ray_dir.z : 1e6f
+    );
+    
+    float3 t0 = (aabb_min - ray_origin) * inv_dir;
+    float3 t1 = (aabb_max - ray_origin) * inv_dir;
+    
+    float3 tmin_v = make_float3(fminf(t0.x, t1.x), fminf(t0.y, t1.y), fminf(t0.z, t1.z));
+    float3 tmax_v = make_float3(fmaxf(t0.x, t1.x), fmaxf(t0.y, t1.y), fmaxf(t0.z, t1.z));
+    
+    float t_enter = fmaxf(fmaxf(tmin_v.x, tmin_v.y), tmin_v.z);
+    float t_exit = fminf(fminf(tmax_v.x, tmax_v.y), tmax_v.z);
+    
+    // No intersection
+    if (t_exit < t_enter || t_exit < 0.0f) {
+        out_transmittance = 1.0f;
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
+    
+    // Clamp entry point
+    if (t_enter < 0.0f) t_enter = 0.0f;
+    
+    // Initialize
+    float3 accumulated_color = make_float3(0.0f, 0.0f, 0.0f);
+    float transmittance = 1.0f;
+    
+    // Adaptive step size based on volume size
+    float volume_size = length(aabb_max - aabb_min);
+    float actual_step_size = fmaxf(step_size, volume_size / (float)max_steps);
+    
+    // Temporal jitter to reduce banding
+    float jitter = random_float(rng) * actual_step_size;
+    float t = t_enter + jitter;
+    int steps = 0;
+    
+    // Get sun direction for lighting
+    float3 sun_dir = normalize(optixLaunchParams.world.nishita.sun_direction);
+    float sun_intensity = optixLaunchParams.world.nishita.sun_intensity;
+    
+    // Precompute light march step size
+    float light_step_size = volume_size / fmaxf((float)light_steps, 1.0f);
+    
+    while (t < t_exit && steps < max_steps && transmittance > 0.01f) {
+        float3 pos = ray_origin + ray_dir * t;
+        
+        // Density at this point - start with base density
+        float local_density = vol_density;
+        
+        // Apply procedural noise modulation if enabled
+        if (noise_scale > 0.01f) {
+            float3 aabb_size = aabb_max - aabb_min;
+            float3 local_pos = (pos - aabb_min) / fmaxf(fmaxf(aabb_size.x, aabb_size.y), fmaxf(aabb_size.z, 0.001f));
+            float3 noise_pos = local_pos * noise_scale;
+            
+            // Simple FBM-like noise with 3 octaves
+            float noise_val = 0.0f;
+            float amplitude = 0.5f;
+            float frequency = 1.0f;
+            for (int i = 0; i < 3; i++) {
+                float3 p = noise_pos * frequency;
+                float3 pi = make_float3(floorf(p.x), floorf(p.y), floorf(p.z));
+                float3 pf = make_float3(p.x - pi.x, p.y - pi.y, p.z - pi.z);
+                float3 pf2 = pf * pf * (make_float3(3.0f, 3.0f, 3.0f) - 2.0f * pf);
+                
+                float n = pi.x + pi.y * 57.0f + pi.z * 113.0f;
+                float v1 = fmodf(sinf(n) * 43758.5453f, 1.0f);
+                float v2 = fmodf(sinf(n + 1.0f) * 43758.5453f, 1.0f);
+                float v3 = fmodf(sinf(n + 57.0f) * 43758.5453f, 1.0f);
+                float v4 = fmodf(sinf(n + 58.0f) * 43758.5453f, 1.0f);
+                float v5 = fmodf(sinf(n + 113.0f) * 43758.5453f, 1.0f);
+                float v6 = fmodf(sinf(n + 114.0f) * 43758.5453f, 1.0f);
+                float v7 = fmodf(sinf(n + 170.0f) * 43758.5453f, 1.0f);
+                float v8 = fmodf(sinf(n + 171.0f) * 43758.5453f, 1.0f);
+                
+                v1 = v1 + (v2 - v1) * pf2.x;
+                v3 = v3 + (v4 - v3) * pf2.x;
+                v5 = v5 + (v6 - v5) * pf2.x;
+                v7 = v7 + (v8 - v7) * pf2.x;
+                v1 = v1 + (v3 - v1) * pf2.y;
+                v5 = v5 + (v7 - v5) * pf2.y;
+                v1 = v1 + (v5 - v1) * pf2.z;
+                
+                noise_val += v1 * amplitude;
+                amplitude *= 0.5f;
+                frequency *= 2.0f;
+            }
+            
+            // Simple density modulation: noise_val ~0.3-0.7, scale to 0.0-1.0 range
+            // This creates variations without cutting content
+            local_density *= noise_val;
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // EDGE FALLOFF - Smooth transition at AABB boundaries
+        // ═══════════════════════════════════════════════════════════
+        {
+            float3 aabb_size = aabb_max - aabb_min;
+            // Falloff distance as percentage of volume size (10% each side)
+            float falloff_dist = fminf(fminf(aabb_size.x, aabb_size.y), aabb_size.z) * 0.15f;
+            
+            // Distance to each face of the AABB
+            float dx_min = pos.x - aabb_min.x;
+            float dx_max = aabb_max.x - pos.x;
+            float dy_min = pos.y - aabb_min.y;
+            float dy_max = aabb_max.y - pos.y;
+            float dz_min = pos.z - aabb_min.z;
+            float dz_max = aabb_max.z - pos.z;
+            
+            // Combined edge falloff (minimum distance to any face)
+            float d_edge = fminf(fminf(fminf(dx_min, dx_max), fminf(dy_min, dy_max)), fminf(dz_min, dz_max));
+            
+            // Smooth falloff using smoothstep
+            float edge_factor = 1.0f;
+            if (d_edge < falloff_dist && falloff_dist > 0.001f) {
+                float t = d_edge / falloff_dist;
+                // Smoothstep: 3t^2 - 2t^3
+                edge_factor = t * t * (3.0f - 2.0f * t);
+            }
+            
+            local_density *= edge_factor;
+        }
+        
+        if (local_density > 0.001f) {
+            // Compute extinction coefficient
+            float sigma_a = local_density * vol_absorption;
+            float sigma_s = local_density * vol_scattering;
+            float sigma_t = sigma_a + sigma_s;
+            
+            // Albedo average for multi-scatter
+            float albedo_avg = (vol_albedo.x + vol_albedo.y + vol_albedo.z) / 3.0f;
+            
+            // Multi-scatter transmittance
+            float step_transmittance = gpu_multiscatter_transmittance(sigma_t, actual_step_size, multi_scatter, albedo_avg);
+            
+            // ═══════════════════════════════════════════════════════════
+            // LIGHT MARCHING (Self-Shadowing)
+            // ═══════════════════════════════════════════════════════════
+            float light_transmittance = 1.0f;
+            if (light_steps > 0) {
+                float density_accum = 0.0f;
+                for (int j = 1; j <= light_steps; ++j) {
+                    float3 light_pos = pos + sun_dir * (light_step_size * (float)j);
+                    
+                    // Check if still in AABB
+                    if (light_pos.x < aabb_min.x || light_pos.x > aabb_max.x ||
+                        light_pos.y < aabb_min.y || light_pos.y > aabb_max.y ||
+                        light_pos.z < aabb_min.z || light_pos.z > aabb_max.z) {
+                        break;
+                    }
+                    
+                    // Simple density sample (skip noise for performance)
+                    float light_density = vol_density;
+                    density_accum += light_density * vol_absorption * light_step_size;
+                    
+                    if (density_accum > 5.0f) break;
+                }
+                
+                // Beer's Law + multi-scatter
+                float beers = expf(-density_accum);
+                float beers_soft = expf(-density_accum * 0.25f);
+                light_transmittance = beers * (1.0f - multi_scatter * albedo_avg) + 
+                                      beers_soft * multi_scatter * albedo_avg;
+                light_transmittance = 1.0f - shadow_strength * (1.0f - light_transmittance);
+            }
+            
+            // ═══════════════════════════════════════════════════════════
+            // IN-SCATTERING (Dual-lobe phase + powder effect)
+            // ═══════════════════════════════════════════════════════════
+            float cos_theta = dot(ray_dir, sun_dir);
+            
+            // Dual-lobe Henyey-Greenstein phase function
+            float phase = gpu_phase_dual_hg(cos_theta, vol_g, g_back, lobe_mix);
+            
+            // Powder effect
+            float powder = gpu_powder_effect(local_density, cos_theta);
+            
+            // Light contribution with self-shadowing
+            float3 Li = make_float3(sun_intensity, sun_intensity, sun_intensity);
+            float3 inscatter = vol_albedo * Li * phase * sigma_s * light_transmittance;
+            inscatter = inscatter * (1.0f + powder * 0.5f);
+            
+            // Emission
+            float3 emit = vol_emission;
+            
+            // Accumulate
+            float3 step_color = (inscatter + emit) * transmittance * (1.0f - step_transmittance);
+            accumulated_color += step_color;
+            
+            transmittance *= step_transmittance;
+        }
+        
+        t += actual_step_size;
+        steps++;
+    }
+    
+    out_transmittance = transmittance;
+    return accumulated_color;
+}
+
 __device__ float3 ray_color(Ray ray, curandState* rng) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
@@ -893,6 +1389,22 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
         
         trace_ray(ray, &payload, t_min, t_max);
+        
+        // ═══════════════════════════════════════════════════════════
+        // VOLUMETRIC GOD RAYS - Only on primary ray for performance
+        // God rays are accumulated to the point of first hit or infinity
+        // ═══════════════════════════════════════════════════════════
+        if (bounce == 0 && optixLaunchParams.world.nishita.godrays_enabled) {
+            float maxDist = payload.hit ? payload.t : 10000.0f;
+            float3 godRayContribution = calculate_volumetric_god_rays(
+                optixLaunchParams.world,
+                ray.origin,
+                normalize(ray.direction),
+                maxDist,
+                rng
+            );
+            color += godRayContribution;
+        }
 
         if (!payload.hit) {
             // --- Arka plan rengi ---
@@ -957,56 +1469,63 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
        
         throughput *= attenuation;
 
-        // --- GPU VOLUMETRIC RENDERING (SMOKE) ---
-        if (mat.anisotropic > 0.9f) { // Flagged as Volumetric
-            // Ray Marching only if entering the volume
-            if (dot(ray.direction, payload.normal) < 0.0f) {
-                // Find exit point
-                Ray march_ray(payload.position + ray.direction * 0.01f, ray.direction);
-                OptixHitResult exit_payload = {};
-                trace_ray(march_ray, &exit_payload);
-
-                if (exit_payload.hit) {
-                    float dist = length(exit_payload.position - payload.position);
-                    // dist limiting to avoid infinite march
-                    if(dist > 20.0f) dist = 20.0f; 
-
-                    int steps = 12; // Low step count for performance
-                    float step_size = dist / steps;
-                    float3 current_pos = payload.position;
-                    float total_density = 0.0f;
-
-                    for (int i = 0; i < steps; i++) {
-                        current_pos += ray.direction * step_size * (random_float(rng) * 0.5f + 0.75f); // Jittered step
-
-                        // Simple procedural noise for smoke
-                        float3 s = current_pos * 3.5f; 
-                        float noise = fabsf(sinf(s.x) * sinf(s.y + s.z * 0.5f) * cosf(s.z));
-                        float density = fmaxf(0.0f, noise - 0.2f) * 4.0f; // Hardcoded parameters matching "Test Smoke"
-                        
-                        // Fade edges (approximate based on assumptions, hard on pure ray march without SDF)
-                        
-                        total_density += density * step_size;
-                    }
-                    
-                    // Beer's Law (Transmittance)
-                    float3 volume_albedo = make_float3(0.8f, 0.8f, 0.8f); // Grey smoke
-                    float absorption = 0.2f;
-                    float3 transmittance = make_float3(
-                        expf(-total_density * absorption * (1.0f - volume_albedo.x)),
-                        expf(-total_density * absorption * (1.0f - volume_albedo.y)),
-                        expf(-total_density * absorption * (1.0f - volume_albedo.z))
-                    );
-
-                    throughput *= transmittance;
-                    
-                    // Add some scattered light (ambient approximation)
-                    // color += throughput * make_float3(0.05f) * total_density; 
-
-                    // Skip the volume interior by moving ray to exit point
-                    scattered = Ray(exit_payload.position + ray.direction * 0.001f, ray.direction);
-                }
+        // --- GPU VOLUMETRIC RENDERING ---
+        // Check if this is a volumetric material using the proper flag
+        if (payload.is_volumetric) {
+            // Use the new raymarch_volumetric_object function with multi-scattering
+            float vol_transmittance = 1.0f;
+            float3 vol_color = raymarch_volumetric_object(
+                ray.origin,
+                ray.direction,
+                payload.aabb_min,
+                payload.aabb_max,
+                payload.vol_density,
+                payload.vol_absorption,
+                payload.vol_scattering,
+                payload.vol_albedo,
+                payload.vol_emission,
+                payload.vol_g,
+                payload.vol_step_size,
+                payload.vol_max_steps,
+                payload.vol_noise_scale,
+                // Multi-scattering parameters (NEW)
+                payload.vol_multi_scatter,
+                payload.vol_g_back,
+                payload.vol_lobe_mix,
+                payload.vol_light_steps,
+                payload.vol_shadow_strength,
+                vol_transmittance,
+                rng
+            );
+            
+            // Accumulate volumetric contribution
+            color += throughput * vol_color;
+            
+            // Apply transmittance to throughput
+            throughput *= make_float3(vol_transmittance, vol_transmittance, vol_transmittance);
+            
+            // If fully absorbed, stop
+            if (vol_transmittance < 0.01f) {
+                break;
             }
+            
+            // Continue ray beyond the volume
+            // Find exit point and continue
+            Ray exit_ray(payload.position + ray.direction * 0.01f, ray.direction);
+            OptixHitResult exit_payload = {};
+            trace_ray(exit_ray, &exit_payload,t_min,t_max);
+            
+            if (exit_payload.hit) {
+                scattered = Ray(exit_payload.position + ray.direction * 0.01f, ray.direction);
+            } else {
+                // Ray exited scene through volume
+                float3 bg_color = evaluate_background(optixLaunchParams.world, ray.direction);
+                color += throughput * bg_color;
+                break;
+            }
+            
+            ray = scattered;
+            continue; // Skip surface shading
         }
         
         // --- Throughput clamp - aşırı parlak yansımaları önle ---
@@ -1109,6 +1628,41 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         color += throughput * total_contribution;
        
         ray = scattered;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // POST-PROCESS: Atmospheric Fog (applied to final result)
+    // ═══════════════════════════════════════════════════════════
+    // Fog is applied to the accumulated color based on scene depth
+    // This creates depth-based atmospheric perspective
+    const WorldData& world = optixLaunchParams.world;
+    if (world.nishita.fog_enabled && world.nishita.fog_density > 0.0f) {
+        // Use a reasonable default distance for miss rays (far away)
+        // For proper fog, we need first hit distance - approximated here
+        float fogDistance = world.nishita.fog_distance * 0.8f; // Assume far objects
+        
+        // Camera position for fog calculation
+        float3 rayOrigin = make_float3(0.0f, world.nishita.altitude, 0.0f);
+        float3 rayDir = normalize(ray.direction);
+        
+        // Calculate fog factor with height falloff
+        float fogFactor = calculate_height_fog_factor(
+            rayOrigin, rayDir, fogDistance,
+            world.nishita.fog_density,
+            world.nishita.fog_height,
+            world.nishita.fog_falloff
+        );
+        
+        // Get fog color with sun scattering
+        float3 fogColor = world.nishita.fog_color;
+        float3 sunDir = normalize(world.nishita.sun_direction);
+        float sunDot = fmaxf(0.0f, dot(rayDir, sunDir));
+        float sunScatter = powf(sunDot, 8.0f) * world.nishita.fog_sun_scatter;
+        float3 sunColor = make_float3(1.0f, 0.9f, 0.7f) * world.nishita.sun_intensity * 0.05f;
+        fogColor = fogColor + sunColor * sunScatter;
+        
+        // Blend final color with fog
+        color = lerp(color, fogColor, fogFactor * 0.5f); // 50% max fog to preserve detail
     }
 
     // Final clamp - NaN ve Inf kontrolü

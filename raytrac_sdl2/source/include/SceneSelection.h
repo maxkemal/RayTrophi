@@ -23,7 +23,8 @@ enum class SelectableType {
     Object,     // Mesh/Triangle
     Light,      // Any light type
     Camera,     // Scene camera (Position/Origin)
-    CameraTarget // Scene camera target (LookAt)
+    CameraTarget, // Scene camera target (LookAt)
+    World       // World/Environment settings
 };
 
 enum class TransformMode {
@@ -112,6 +113,7 @@ public:
     void selectLight(std::shared_ptr<Light> light, int index = -1, const std::string& name = "Light");
     void selectCamera(std::shared_ptr<Camera> camera);
     void selectCameraTarget(std::shared_ptr<Camera> camera);
+    void selectWorld();  // Select World/Environment
     void clearSelection();
     
     // Multi-Selection Helpers

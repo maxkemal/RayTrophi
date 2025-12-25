@@ -1,4 +1,4 @@
-#include "TimelineWidget.h"
+﻿#include "TimelineWidget.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -7,6 +7,7 @@
 #include <chrono>
 #include <algorithm>
 #include <set>
+#include <cmath>
 
 // ============================================================================
 // MAIN DRAW FUNCTION
@@ -24,7 +25,7 @@ void TimelineWidget::draw(UIContext& ctx) {
     // Get available region
     ImVec2 region = ImGui::GetContentRegionAvail();
     float total_height = region.y;
-    float canvas_height = total_height - header_height - 30.0f; // Reserve space for controls
+    float canvas_height = total_height - header_height - 18.0f; // Reduced spacing for controls
     
     // --- PLAYBACK CONTROLS ---
     drawPlaybackControls(ctx);
@@ -80,7 +81,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     
     // Keyframe buttons
     ImGui::BeginDisabled(!has_selection);
-    if (ImGui::Button("+K", ImVec2(30, 0))) {
+    if (ImGui::Button("+K", ImVec2(30, 20))) {
         insertKeyframeForTrack(ctx, selected_track, current_frame);
         tracks_dirty = true;
     }
@@ -90,7 +91,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     ImGui::BeginDisabled(!has_keyframe_selected);
-    if (ImGui::Button("-K", ImVec2(30, 0))) {
+    if (ImGui::Button("-K", ImVec2(30, 20))) {
         deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
         selected_keyframe_frame = -1;
         tracks_dirty = true;
@@ -99,7 +100,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     
     ImGui::SameLine();
     
-    if (ImGui::Button("Dup", ImVec2(35, 0))) {
+    if (ImGui::Button("Dup", ImVec2(35, 20))) {
         duplicateKeyframe(ctx, selected_track, selected_keyframe_frame, selected_keyframe_frame + 10);
         tracks_dirty = true;
     }
@@ -111,7 +112,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     // --- HELP BUTTON ---
-    if (ImGui::Button("?", ImVec2(25, 0))) {
+    if (ImGui::Button("?", ImVec2(25, 20))) {
         ImGui::OpenPopup("TimelineHelpPopup");
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Help - Keyboard Shortcuts");
@@ -169,7 +170,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     // Play/Pause
-    if (ImGui::Button(is_playing ? "||" : "|>", ImVec2(30, 0))) {
+    if (ImGui::Button(is_playing ? "||" : "|>", ImVec2(30, 20))) {
         is_playing = !is_playing;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip(is_playing ? "Pause" : "Play");
@@ -177,7 +178,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     ImGui::SameLine();
     
     // Stop
-    if (ImGui::Button("[]", ImVec2(30, 0))) {
+    if (ImGui::Button("[]", ImVec2(30, 20))) {
         is_playing = false;
         current_frame = start_frame;
     }
@@ -237,8 +238,8 @@ void TimelineWidget::drawTrackList(UIContext& ctx, float list_width, float canva
                 track.color, 2.0f);
             
             if (node_open) {
-                // Draw sub-tracks (L/R/S)
-                for (size_t j = i + 1; j < tracks.size() && j < i + 4; j++) {
+                // Draw sub-tracks (L/R/S/Material)
+                for (size_t j = i + 1; j < tracks.size() && j < i + 5; j++) {
                     auto& sub = tracks[j];
                     if (sub.parent_entity != track.entity_name) break;
                     if (!sub.is_sub_track) break;
@@ -248,6 +249,7 @@ void TimelineWidget::drawTrackList(UIContext& ctx, float list_width, float canva
                     if (sub.channel == ChannelType::Location) channel_track += ".Location";
                     else if (sub.channel == ChannelType::Rotation) channel_track += ".Rotation";
                     else if (sub.channel == ChannelType::Scale) channel_track += ".Scale";
+                    else if (sub.channel == ChannelType::Material) channel_track += ".Material";
                     
                     bool sub_sel = (selected_track == channel_track);
                     
@@ -269,40 +271,110 @@ void TimelineWidget::drawTrackList(UIContext& ctx, float list_width, float canva
         ImGui::TreePop();
     }
     
-    // Group: Lights
+    // Group: Lights (with sub-tracks like Objects)
     if (ImGui::TreeNodeEx("Lights", ImGuiTreeNodeFlags_DefaultOpen)) {
-        for (auto& track : tracks) {
-            if (track.group != TrackGroup::Lights) continue;
+        for (size_t t = 0; t < tracks.size(); ++t) {
+            auto& track = tracks[t];
+            if (track.group != TrackGroup::Lights || track.is_sub_track) continue;
             
             bool is_selected = (track.entity_name == selected_track);
-            if (ImGui::Selectable(track.name.c_str(), is_selected, 0, ImVec2(list_width - 20, track_height - 4))) {
+            
+            // Main track as TreeNode
+            ImGuiTreeNodeFlags node_flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (is_selected) node_flags |= ImGuiTreeNodeFlags_Selected;
+            if (track.expanded) node_flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            
+            bool node_open = ImGui::TreeNodeEx(track.name.c_str(), node_flags);
+            
+            if (ImGui::IsItemClicked()) {
                 selected_track = track.entity_name;
             }
             
+            // Color indicator
             ImVec2 item_min = ImGui::GetItemRectMin();
             draw_list->AddRectFilled(
                 ImVec2(item_min.x - 12, item_min.y + 2),
                 ImVec2(item_min.x - 4, item_min.y + 16),
                 track.color, 2.0f);
+            
+            if (node_open) {
+                // Find and show sub-tracks for this light
+                for (size_t s = t + 1; s < tracks.size(); ++s) {
+                    auto& sub = tracks[s];
+                    if (sub.group != TrackGroup::Lights || !sub.is_sub_track) break;
+                    if (sub.parent_entity != track.entity_name) break;
+                    
+                    std::string channel_track = track.entity_name + "." + sub.name;
+                    bool sub_sel = (selected_track == channel_track);
+                    
+                    ImGui::Indent(10);
+                    if (ImGui::Selectable(sub.name.c_str(), sub_sel, 0, ImVec2(list_width - 60, 18))) {
+                        selected_track = channel_track;
+                    }
+                    
+                    ImVec2 sub_pos = ImGui::GetItemRectMin();
+                    draw_list->AddRectFilled(
+                        ImVec2(sub_pos.x - 8, sub_pos.y + 2),
+                        ImVec2(sub_pos.x - 2, sub_pos.y + 16),
+                        sub.color, 2.0f);
+                    ImGui::Unindent(10);
+                }
+                ImGui::TreePop();
+            }
         }
         ImGui::TreePop();
     }
     
-    // Group: Cameras
+    // Group: Cameras (with sub-tracks like Objects)
     if (ImGui::TreeNodeEx("Cameras", ImGuiTreeNodeFlags_DefaultOpen)) {
-        for (auto& track : tracks) {
-            if (track.group != TrackGroup::Cameras) continue;
+        for (size_t t = 0; t < tracks.size(); ++t) {
+            auto& track = tracks[t];
+            if (track.group != TrackGroup::Cameras || track.is_sub_track) continue;
             
             bool is_selected = (track.entity_name == selected_track);
-            if (ImGui::Selectable(track.name.c_str(), is_selected, 0, ImVec2(list_width - 20, track_height - 4))) {
+            
+            // Main track as TreeNode
+            ImGuiTreeNodeFlags node_flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+            if (is_selected) node_flags |= ImGuiTreeNodeFlags_Selected;
+            if (track.expanded) node_flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            
+            bool node_open = ImGui::TreeNodeEx(track.name.c_str(), node_flags);
+            
+            if (ImGui::IsItemClicked()) {
                 selected_track = track.entity_name;
             }
             
+            // Color indicator
             ImVec2 item_min = ImGui::GetItemRectMin();
             draw_list->AddRectFilled(
                 ImVec2(item_min.x - 12, item_min.y + 2),
                 ImVec2(item_min.x - 4, item_min.y + 16),
                 track.color, 2.0f);
+            
+            if (node_open) {
+                // Find and show sub-tracks for this camera
+                for (size_t s = t + 1; s < tracks.size(); ++s) {
+                    auto& sub = tracks[s];
+                    if (sub.group != TrackGroup::Cameras || !sub.is_sub_track) break;
+                    if (sub.parent_entity != track.entity_name) break;
+                    
+                    std::string channel_track = track.entity_name + "." + sub.name;
+                    bool sub_sel = (selected_track == channel_track);
+                    
+                    ImGui::Indent(10);
+                    if (ImGui::Selectable(sub.name.c_str(), sub_sel, 0, ImVec2(list_width - 60, 18))) {
+                        selected_track = channel_track;
+                    }
+                    
+                    ImVec2 sub_pos = ImGui::GetItemRectMin();
+                    draw_list->AddRectFilled(
+                        ImVec2(sub_pos.x - 8, sub_pos.y + 2),
+                        ImVec2(sub_pos.x - 2, sub_pos.y + 16),
+                        sub.color, 2.0f);
+                    ImGui::Unindent(10);
+                }
+                ImGui::TreePop();
+            }
         }
         ImGui::TreePop();
     }
@@ -443,6 +515,25 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                                     drag_start_frame = kf.frame;
                                 }
                             }
+                            
+                            // Material row
+                            if (kf.has_material) {
+                                float y_mat = base_y + sub_row_height * 4;
+                                std::string mat_track = track.entity_name + ".Material";
+                                bool is_sel = (mat_track == selected_track && kf.frame == selected_keyframe_frame);
+                                bool is_hov = ImGui::IsMouseHoveringRect(
+                                    ImVec2(x - 5, y_mat - 5), ImVec2(x + 5, y_mat + 5));
+                                
+                                drawKeyframeDiamond(draw_list, x, y_mat,
+                                    is_hov ? IM_COL32(255, 220, 150, 255) : IM_COL32(255, 180, 50, 255), is_sel);
+                                
+                                if (ImGui::IsMouseClicked(0) && is_hov) {
+                                    selected_track = mat_track;
+                                    selected_keyframe_frame = kf.frame;
+                                    is_dragging_keyframe = true;
+                                    drag_start_frame = kf.frame;
+                                }
+                            }
                         } else {
                             // Collapsed: draw combined diamond on main row
                             bool is_selected = (track.entity_name == selected_track && kf.frame == selected_keyframe_frame);
@@ -495,7 +586,7 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
         // Add height for main track + sub-tracks if expanded
         y_offset += track_height;
         if (track.group == TrackGroup::Objects && track.expanded) {
-            y_offset += track_height * 3;  // L/R/S sub-rows
+            y_offset += track_height * 4;  // L/R/S/Material sub-rows
         }
     }
     
@@ -780,6 +871,35 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
     
     std::set<std::string> added_entities;
     
+    // --- BUILD SET OF VALID ENTITY NAMES (currently in scene) ---
+    std::set<std::string> valid_entities;
+    
+    // Add all objects from world
+    for (const auto& obj : ctx.scene.world.objects) {
+        if (auto* tri = dynamic_cast<Triangle*>(obj.get())) {
+            if (!tri->nodeName.empty()) {
+                valid_entities.insert(tri->nodeName);
+            }
+        }
+    }
+    
+    // Add all lights
+    for (const auto& light : ctx.scene.lights) {
+        if (!light->nodeName.empty()) {
+            valid_entities.insert(light->nodeName);
+        }
+    }
+    
+    // Add all cameras
+    for (const auto& cam : ctx.scene.cameras) {
+        if (!cam->nodeName.empty()) {
+            valid_entities.insert(cam->nodeName);
+        }
+    }
+    
+    // World is always valid
+    valid_entities.insert("World");
+    
     // Helper lambda to add Object track with L/R/S sub-tracks
     auto addObjectWithChannels = [&](const std::string& entity_name, const std::string& display_name, 
                                       ImU32 color, bool is_selected, const std::vector<int>& keyframes) {
@@ -835,11 +955,29 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
         scl_track.depth = 1;
         scl_track.keyframe_frames = keyframes;
         tracks.push_back(scl_track);
+        
+        // Material
+        TimelineTrack mat_track;
+        mat_track.entity_name = entity_name;
+        mat_track.parent_entity = entity_name;
+        mat_track.name = "Material";
+        mat_track.group = TrackGroup::Objects;
+        mat_track.channel = ChannelType::Material;
+        mat_track.color = IM_COL32(255, 180, 50, 255);  // Orange/Yellow
+        mat_track.is_sub_track = true;
+        mat_track.depth = 1;
+        mat_track.keyframe_frames = keyframes;
+        tracks.push_back(mat_track);
     };
     
     // --- ADD TRACKS FROM TIMELINE (entities with keyframes) ---
     for (auto& [entity_name, track] : ctx.scene.timeline.tracks) {
         if (track.keyframes.empty()) continue;
+        
+        // Skip entities that no longer exist in the scene (except World)
+        if (entity_name != "World" && valid_entities.find(entity_name) == valid_entities.end()) {
+            continue;  // Entity was deleted from scene, don't show in timeline
+        }
         
         // Determine group based on keyframe types
         bool has_transform = false, has_material = false, has_light = false, has_camera = false, has_world = false;
@@ -863,21 +1001,137 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
             t.keyframe_frames = keyframes;
             tracks.push_back(t);
         } else if (has_camera) {
-            TimelineTrack t;
-            t.entity_name = entity_name;
-            t.name = entity_name;
-            t.group = TrackGroup::Cameras;
-            t.color = COLOR_CAMERA;
-            t.keyframe_frames = keyframes;
-            tracks.push_back(t);
+            // Camera with sub-tracks (Position, Target, FOV, Focus, Aperture)
+            TimelineTrack main_track;
+            main_track.entity_name = entity_name;
+            main_track.name = entity_name;
+            main_track.group = TrackGroup::Cameras;
+            main_track.channel = ChannelType::None;
+            main_track.color = COLOR_CAMERA;
+            main_track.expanded = true;
+            main_track.is_sub_track = false;
+            main_track.depth = 0;
+            main_track.keyframe_frames = keyframes;
+            tracks.push_back(main_track);
+            
+            // Position sub-track
+            TimelineTrack pos_track;
+            pos_track.entity_name = entity_name;
+            pos_track.parent_entity = entity_name;
+            pos_track.name = "Position";
+            pos_track.group = TrackGroup::Cameras;
+            pos_track.channel = ChannelType::Location;
+            pos_track.color = IM_COL32(255, 100, 100, 255);  // Red
+            pos_track.is_sub_track = true;
+            pos_track.depth = 1;
+            pos_track.keyframe_frames = keyframes;
+            tracks.push_back(pos_track);
+            
+            // Target sub-track
+            TimelineTrack target_track;
+            target_track.entity_name = entity_name;
+            target_track.parent_entity = entity_name;
+            target_track.name = "Target";
+            target_track.group = TrackGroup::Cameras;
+            target_track.channel = ChannelType::Rotation;  // Reuse for target
+            target_track.color = IM_COL32(100, 255, 100, 255);  // Green
+            target_track.is_sub_track = true;
+            target_track.depth = 1;
+            target_track.keyframe_frames = keyframes;
+            tracks.push_back(target_track);
+            
+            // FOV sub-track
+            TimelineTrack fov_track;
+            fov_track.entity_name = entity_name;
+            fov_track.parent_entity = entity_name;
+            fov_track.name = "FOV";
+            fov_track.group = TrackGroup::Cameras;
+            fov_track.channel = ChannelType::Scale;  // Reuse for FOV
+            fov_track.color = IM_COL32(100, 100, 255, 255);  // Blue
+            fov_track.is_sub_track = true;
+            fov_track.depth = 1;
+            fov_track.keyframe_frames = keyframes;
+            tracks.push_back(fov_track);
+            
+            // Focus/Aperture sub-track
+            TimelineTrack focus_track;
+            focus_track.entity_name = entity_name;
+            focus_track.parent_entity = entity_name;
+            focus_track.name = "Focus/DOF";
+            focus_track.group = TrackGroup::Cameras;
+            focus_track.channel = ChannelType::Material;  // Reuse for DOF
+            focus_track.color = IM_COL32(200, 150, 255, 255);  // Purple
+            focus_track.is_sub_track = true;
+            focus_track.depth = 1;
+            focus_track.keyframe_frames = keyframes;
+            tracks.push_back(focus_track);
+            
         } else if (has_light) {
-            TimelineTrack t;
-            t.entity_name = entity_name;
-            t.name = entity_name;
-            t.group = TrackGroup::Lights;
-            t.color = COLOR_LIGHT;
-            t.keyframe_frames = keyframes;
-            tracks.push_back(t);
+            // Light with sub-tracks (Position, Color, Intensity, Direction)
+            TimelineTrack main_track;
+            main_track.entity_name = entity_name;
+            main_track.name = entity_name;
+            main_track.group = TrackGroup::Lights;
+            main_track.channel = ChannelType::None;
+            main_track.color = COLOR_LIGHT;
+            main_track.expanded = true;
+            main_track.is_sub_track = false;
+            main_track.depth = 0;
+            main_track.keyframe_frames = keyframes;
+            tracks.push_back(main_track);
+            
+            // Position sub-track
+            TimelineTrack pos_track;
+            pos_track.entity_name = entity_name;
+            pos_track.parent_entity = entity_name;
+            pos_track.name = "Position";
+            pos_track.group = TrackGroup::Lights;
+            pos_track.channel = ChannelType::Location;
+            pos_track.color = IM_COL32(255, 100, 100, 255);  // Red
+            pos_track.is_sub_track = true;
+            pos_track.depth = 1;
+            pos_track.keyframe_frames = keyframes;
+            tracks.push_back(pos_track);
+            
+            // Color sub-track
+            TimelineTrack color_track;
+            color_track.entity_name = entity_name;
+            color_track.parent_entity = entity_name;
+            color_track.name = "Color";
+            color_track.group = TrackGroup::Lights;
+            color_track.channel = ChannelType::Material;  // Reuse for color
+            color_track.color = IM_COL32(255, 200, 100, 255);  // Orange
+            color_track.is_sub_track = true;
+            color_track.depth = 1;
+            color_track.keyframe_frames = keyframes;
+            tracks.push_back(color_track);
+            
+            // Intensity sub-track
+            TimelineTrack intensity_track;
+            intensity_track.entity_name = entity_name;
+            intensity_track.parent_entity = entity_name;
+            intensity_track.name = "Intensity";
+            intensity_track.group = TrackGroup::Lights;
+            intensity_track.channel = ChannelType::Scale;  // Reuse for intensity
+            intensity_track.color = IM_COL32(255, 255, 100, 255);  // Yellow
+            intensity_track.is_sub_track = true;
+            intensity_track.depth = 1;
+            intensity_track.keyframe_frames = keyframes;
+            tracks.push_back(intensity_track);
+            
+            // Direction sub-track
+            TimelineTrack dir_track;
+            dir_track.entity_name = entity_name;
+            dir_track.parent_entity = entity_name;
+            dir_track.name = "Direction";
+            dir_track.group = TrackGroup::Lights;
+            dir_track.channel = ChannelType::Rotation;  // Reuse for direction
+            dir_track.color = IM_COL32(100, 255, 100, 255);  // Green
+            dir_track.is_sub_track = true;
+            dir_track.depth = 1;
+            dir_track.keyframe_frames = keyframes;
+            tracks.push_back(dir_track);
+            
         } else if (has_transform || has_material) {
             // Object with L/R/S sub-tracks
             bool is_selected = (entity_name == selected_entity);
@@ -925,13 +1179,109 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
 // SYNC FROM IMPORTED ANIMATION DATA + KEYBOARD SHORTCUTS
 // ============================================================================
 void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
-    // Update frame range from animation data if available
-    if (!ctx.scene.animationDataList.empty()) {
-        auto& anim = ctx.scene.animationDataList[0];
-        if (anim.startFrame != start_frame || anim.endFrame != end_frame) {
-            start_frame = anim.startFrame;
-            end_frame = anim.endFrame;
+    // --- ONE-TIME: Convert AnimationData to Timeline Keyframes ---
+    static bool animation_imported = false;
+    if (!animation_imported && !ctx.scene.animationDataList.empty()) {
+        animation_imported = true;
+        
+        for (const auto& anim : ctx.scene.animationDataList) {
+            double tps = anim.ticksPerSecond > 0 ? anim.ticksPerSecond : 24.0;
+            
+            // Process Position Keys
+            for (const auto& [nodeName, keys] : anim.positionKeys) {
+                for (const auto& key : keys) {
+                    int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
+                    
+                    // Get or create keyframe at this frame
+                    auto& track = ctx.scene.timeline.tracks[nodeName];
+                    Keyframe* existing = track.getKeyframeAt(frame);
+                    if (existing) {
+                        existing->transform.position = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        existing->transform.has_position = true;
+                        existing->has_transform = true;
+                    } else {
+                        Keyframe kf(frame);
+                        kf.has_transform = true;
+                        kf.transform.position = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        kf.transform.has_position = true;
+                        kf.transform.has_rotation = false;
+                        kf.transform.has_scale = false;
+                        track.addKeyframe(kf);
+                    }
+                }
+            }
+            
+            // Process Rotation Keys (Quaternion -> Euler)
+            for (const auto& [nodeName, keys] : anim.rotationKeys) {
+                for (const auto& key : keys) {
+                    int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
+                    
+                    // Convert quaternion to Euler angles (degrees)
+                    float qx = key.mValue.x, qy = key.mValue.y, qz = key.mValue.z, qw = key.mValue.w;
+                    
+                    float sinr_cosp = 2.0f * (qw * qx + qy * qz);
+                    float cosr_cosp = 1.0f - 2.0f * (qx * qx + qy * qy);
+                    float rx = std::atan2(sinr_cosp, cosr_cosp);
+                    
+                    float sinp = 2.0f * (qw * qy - qz * qx);
+                    float ry = (std::abs(sinp) >= 1.0f) ? std::copysign(3.14159f / 2.0f, sinp) : std::asin(sinp);
+                    
+                    float siny_cosp = 2.0f * (qw * qz + qx * qy);
+                    float cosy_cosp = 1.0f - 2.0f * (qy * qy + qz * qz);
+                    float rz = std::atan2(siny_cosp, cosy_cosp);
+                    
+                    const float rad2deg = 180.0f / 3.14159265f;
+                    Vec3 euler(rx * rad2deg, ry * rad2deg, rz * rad2deg);
+                    
+                    auto& track = ctx.scene.timeline.tracks[nodeName];
+                    Keyframe* existing = track.getKeyframeAt(frame);
+                    if (existing) {
+                        existing->transform.rotation = euler;
+                        existing->transform.has_rotation = true;
+                        existing->has_transform = true;
+                    } else {
+                        Keyframe kf(frame);
+                        kf.has_transform = true;
+                        kf.transform.rotation = euler;
+                        kf.transform.has_rotation = true;
+                        kf.transform.has_position = false;
+                        kf.transform.has_scale = false;
+                        track.addKeyframe(kf);
+                    }
+                }
+            }
+            
+            // Process Scale Keys
+            for (const auto& [nodeName, keys] : anim.scalingKeys) {
+                for (const auto& key : keys) {
+                    int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
+                    
+                    auto& track = ctx.scene.timeline.tracks[nodeName];
+                    Keyframe* existing = track.getKeyframeAt(frame);
+                    if (existing) {
+                        existing->transform.scale = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        existing->transform.has_scale = true;
+                        existing->has_transform = true;
+                    } else {
+                        Keyframe kf(frame);
+                        kf.has_transform = true;
+                        kf.transform.scale = Vec3(key.mValue.x, key.mValue.y, key.mValue.z);
+                        kf.transform.has_scale = true;
+                        kf.transform.has_position = false;
+                        kf.transform.has_rotation = false;
+                        track.addKeyframe(kf);
+                    }
+                }
+            }
+            
+            // Set frame range from first animation (only on first import, user can change later)
+            if (start_frame == 0 && end_frame == 250) {  // Only if default values
+                start_frame = anim.startFrame;
+                end_frame = std::max(anim.endFrame, 1);  // Ensure at least 1 frame
+            }
         }
+        
+        tracks_dirty = true;  // Rebuild track list to show new keyframes
     }
     
     // --- SYNC SELECTION FROM VIEWPORT ---
@@ -956,18 +1306,20 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
     }
     
     // --- KEYBOARD SHORTCUTS ---
+    // Only process when Timeline panel has focus (prevents conflicts with other panels)
+    bool timeline_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
     ImGuiIO& io = ImGui::GetIO();
     
     // I key - Insert keyframe for selected track (viewport selection)
-    if (ImGui::IsKeyPressed(ImGuiKey_I) && !io.WantTextInput) {
+    if (timeline_focused && ImGui::IsKeyPressed(ImGuiKey_I) && !io.WantTextInput) {
         if (!selected_track.empty()) {
             insertKeyframeForTrack(ctx, selected_track, current_frame);
             tracks_dirty = true;
         }
     }
     
-    // Delete/X key - Delete selected keyframe
-    if ((ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && !io.WantTextInput) {
+    // Delete/X key - Delete selected keyframe (ONLY when timeline is focused)
+    if (timeline_focused && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && !io.WantTextInput) {
         if (!selected_track.empty() && selected_keyframe_frame >= 0) {
             deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
             selected_keyframe_frame = -1;
@@ -1029,6 +1381,19 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
             kf.light.position = light->position;
             kf.light.color = light->color;
             kf.light.intensity = light->intensity;
+            kf.light.direction = light->direction;
+            
+            // Set flags so playback system knows to apply these values
+            kf.light.has_position = true;
+            kf.light.has_color = true;
+            kf.light.has_intensity = true;
+            // Only set direction flag for relevant light types
+            if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
+                kf.light.has_direction = true;
+            } else {
+                kf.light.has_direction = false;
+            }
+            
             has_data = true;
         }
     }
@@ -1043,12 +1408,76 @@ void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& t
             kf.camera.fov = cam->vfov;
             kf.camera.focus_distance = cam->focus_dist;
             kf.camera.lens_radius = cam->lens_radius;
+            
+            // Set flags
+            kf.camera.has_position = true;
+            kf.camera.has_target = true;
+            kf.camera.has_fov = true;
+            kf.camera.has_focus = true;
+            kf.camera.has_aperture = true;
+            
             has_data = true;
         }
     }
     else if (track_name == "World") {
         kf.has_world = true;
-        kf.world.background_color = ctx.scene.background_color;
+        WorldKeyframe& wk = kf.world;
+        
+        // Background properties - set each flag individually
+        World& world = ctx.renderer.world;
+        wk.background_color = ctx.scene.background_color;
+        wk.has_background_color = true;
+        
+        wk.background_strength = world.getColorIntensity();
+        wk.has_background_strength = true;
+        
+        wk.hdri_rotation = world.getHDRIRotation();
+        wk.has_hdri_rotation = true;
+        
+        // Sun properties - set each flag individually
+        NishitaSkyParams np = world.getNishitaParams();
+        wk.sun_elevation = np.sun_elevation;
+        wk.has_sun_elevation = true;
+        
+        wk.sun_azimuth = np.sun_azimuth;
+        wk.has_sun_azimuth = true;
+        
+        wk.sun_intensity = np.sun_intensity;
+        wk.has_sun_intensity = true;
+        
+        wk.sun_size = np.sun_size;
+        wk.has_sun_size = true;
+
+        // Atmosphere properties - set each flag individually
+        wk.air_density = np.air_density;
+        wk.has_air_density = true;
+        
+        wk.dust_density = np.dust_density;
+        wk.has_dust_density = true;
+        
+        wk.ozone_density = np.ozone_density;
+        wk.has_ozone_density = true;
+        
+        wk.altitude = np.altitude;
+        wk.has_altitude = true;
+        
+        wk.mie_anisotropy = np.mie_anisotropy;
+        wk.has_mie_anisotropy = true;
+        
+        // Cloud properties - set each flag individually
+        wk.cloud_density = np.cloud_density;
+        wk.has_cloud_density = true;
+        
+        wk.cloud_coverage = np.cloud_coverage;
+        wk.has_cloud_coverage = true;
+        
+        wk.cloud_scale = np.cloud_scale;
+        wk.has_cloud_scale = true;
+        
+        wk.cloud_offset_x = np.cloud_offset_x;
+        wk.cloud_offset_z = np.cloud_offset_z;
+        wk.has_cloud_offset = true;
+
         entity_name = "World";
         has_data = true;
     }

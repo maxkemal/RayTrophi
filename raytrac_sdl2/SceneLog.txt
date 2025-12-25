@@ -28,11 +28,11 @@
 [INFO] Node map built with 4 nodes.
 [INFO] Processing cameras...
 [INFO] ---- Camera Loaded: Camera
-[INFO] Pos: (20,010599, 14,644615, 19,330935) | LookAt: (19,359041, 14,199344, 18,716764) | Up: (-0,324013, 0,895396, -0,305421) | Aspect:1,777778 | FOV:22,895195
+[INFO] Pos: (0,400536, 0,629308, 17,869106) | LookAt: (0,351763, 0,685130, 16,871857) | Up: (0,002727, 0,998441, 0,055755) | Aspect:1,777778 | FOV:32,268805
 [INFO] Cameras processed: 1 camera(s) found.
 [INFO] Processing lights...
 [INFO] Total lights in scene: 1
-[INFO] Light created: Light | Type: Point | Pos: (4,076245, 5,903862, -1,005454) | Dir: (0,000000, 0,000000, 0,000000) | Color: (1,000000, 1,000000, 1,000000) | Intensity: 54,351414
+[INFO] Light created: Point | Type: Directional | Pos: (0,000000, 3,658617, 0,000000) | Dir: (0,001832, -0,335777, 0,941940) | Color: (1,000000, 1,000000, 1,000000) | Intensity: 1,366000
 [INFO] Lights processed: 1 light(s) found.
 [INFO] Building Bone Data...
 [INFO] [buildBoneData] Starting bone map generation...
@@ -52,12 +52,11 @@
 [INFO] Building BVH structure...
 [INFO] [Embree] BVH structure built successfully.
 [INFO] OptiX GPU detected. Creating OptiX geometry data...
-[INFO] [MAT-SUMMARY] Total unique materials: 1 | Total triangles: 2
+[INFO] [MAT-SUMMARY] Global materials: 1 | Triangles: 2
 [INFO] Converting 2 triangles to OptiX format.
 [INFO] Material indices verified (2 triangles checked)
 [INFO] Material indices validated.
 [INFO]  OptiX buildFromData is starting...
-[INFO] OptiX buildFromData completed successfully! 1 SBT record(s) created for material.
 [INFO] OptiX BVH and acceleration structures built.
 [INFO] Setting up OptiX camera parameters...
 [INFO] OptiX camera configured successfully.
@@ -67,7 +66,7 @@
 [INFO] Scene creation completed successfully.
 [INFO] Scene info - Triangles: 2, Lights: 1, Animations: 0
 [INFO] Scene initialization flag set to true.
-[INFO] [MAT-SUMMARY] Total unique materials: 1 | Total triangles: 2
+[INFO] Found Directional Light in default asset. Syncing Nishita Sun...
+[INFO] [MAT-SUMMARY] Global materials: 1 | Triangles: 2
 [INFO] Material indices verified (2 triangles checked)
 [INFO]  OptiX buildFromData is starting...
-[INFO] OptiX buildFromData completed successfully! 1 SBT record(s) created for material.

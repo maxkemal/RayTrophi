@@ -7,9 +7,25 @@
 #include "SceneSelection.h"  // Scene selection system
 #include "SceneHistory.h"  // Undo/Redo system
 #include "SceneCommand.h"  // TransformState struct
+#include "TimelineWidget.h"  // Timeline animation widget
+#include "CameraPresets.h"   // Camera body, lens, ISO, shutter presets
 #include <fstream>
 #include <map>
-#include <vector>
+// ═══════════════════════════════════════════════════════════════════════════════
+// SCENE UI - HEADER
+// ═══════════════════════════════════════════════════════════════════════════════
+// This header defines the main SceneUI class and the UIContext structure.
+//
+// MODULE LOCATIONS (Implementations):
+//   - scene_ui_camera.cpp    : Camera settings (drawCameraContent)
+//   - scene_ui_materials.cpp : Material editor (drawMaterialPanel)
+//   - scene_ui_hierarchy.cpp : Scene tree (drawSceneHierarchy)
+//   - scene_ui_lights.cpp    : Lights panel (drawLightsContent)
+//   - scene_ui_gizmos.cpp    : 3D gizmos & bounding boxes
+//   - scene_ui_viewport.cpp  : Overlays (Focus/Zoom/Exposure/Dolly)
+//   - scene_ui_selection.cpp : Selection logic & Marquee
+//   - scene_ui_world.cpp     : World environment settings
+// ═══════════════════════════════════════════════════════════════════════════════
 
 
 struct UIContext {
@@ -30,6 +46,17 @@ struct UIContext {
 
     bool& mouse_control_enabled;
     float& mouse_sensitivity;
+
+    // Animation Preview Buffer (Thread-Safe)
+    // Moved to end to preserve initializer list compatibility
+    std::vector<uint32_t> animation_preview_buffer;
+    std::atomic<bool> animation_preview_ready{false};
+    std::mutex animation_preview_mutex;
+    int animation_preview_width = 0;
+    int animation_preview_height = 0;
+    SDL_Texture* animation_preview_texture = nullptr;
+    bool show_animation_preview = false;
+    bool is_animation_mode = false; // NEW: For Unified Render Window
     struct SDL_Texture* ray_texture; // Forward decl or void* if header dependency issues, but SDL.h is included in Renderer.h
     
     // Note: SDL_Texture* requires SDL.h. Renderer.h includes it.
@@ -41,12 +68,20 @@ struct UIContext {
 
 class SceneUI {
 public:   
+    // UI State
+    int pivot_mode = 0; // 0=Median Point (Group), 1=Individual Origins
+    bool show_animation_panel = true; // Default open
 
-     void drawHistogramPanel(UIContext& ctx);      
-     void drawLogPanelEmbedded();
-     void drawThemeSelector();
-     void drawResolutionPanel();
-     void drawToneMapContent(UIContext& ctx);
+    // Static Helpers (Shared across modules)
+    static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
+    static std::string saveFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const wchar_t* defExt = L"rts");
+
+
+    void drawHistogramPanel(UIContext& ctx);      
+    void drawLogPanelEmbedded();
+    void drawThemeSelector();
+     void drawResolutionPanel(UIContext& ctx);
+
      void drawCameraContent(UIContext& ctx);
      void drawLightsContent(UIContext& ctx);
      void drawRenderSettingsPanel(UIContext& ctx, float screen_y);
@@ -58,19 +93,30 @@ public:
      void drawControlsContent(); // New method for controls/help tab
      void drawWorldContent(UIContext& ctx);
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
+     void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
      void drawSelectionBoundingBox(UIContext& ctx);  // Draw bounding box for selected object
      void drawTransformGizmo(UIContext& ctx);  // ImGuizmo transform gizmo   
      void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
+     void drawViewportControls(UIContext& ctx); // Blender-style viewport overlay (top-right)
      void draw(UIContext& ctx);
      void handleMouseSelection(UIContext& ctx); // Publicly accessible for Main loop call
      void triggerDelete(UIContext& ctx); // Trigger delete operation (for Menu and Key)
+  
      void invalidateCache() { mesh_cache_valid = false; }
+     
+     // Interaction Flags
+     bool is_picking_focus = false; // Flag for "Pick Focus" mode (hit distance only)
+     
+     // Sun Sync Logic (Global)
+     bool sync_sun_with_light = true;
+     bool world_params_changed_this_frame = false;
+     void processSunSync(UIContext& ctx);
      
      // Project System Helpers
      void updateProjectFromScene(UIContext& ctx);  // Sync scene state to project data
      void addProceduralPlane(UIContext& ctx);      // Add a procedural plane mesh
      void addProceduralCube(UIContext& ctx);       // Add a procedural cube mesh
-     float panel_alpha = 0.5f; // varsayılan
+     float panel_alpha = 0.9f; // Default transparency (0.9 = mostly opaque)
      
      // Scene loading state (public for Main.cpp popup access)
      std::atomic<bool> scene_loading{false};
@@ -78,7 +124,58 @@ public:
      std::atomic<int> scene_loading_progress{0};  // 0-100
      std::string scene_loading_stage = "";        // Current stage description
      
+     // Viewport Display Settings (Blender-style overlay)
+     struct ViewportDisplaySettings {
+         int shading_mode = 1;  // 0=Solid, 1=Material, 2=Rendered
+         bool show_gizmos = true;
+         // Camera HUD (viewport lens controls)
+         bool show_camera_hud = true;      // Master toggle for camera HUD
+         bool show_focus_ring = true;      // Focus ring (DOF control)
+         bool show_zoom_ring = true;       // Zoom ring (FOV control)
+     };
+     ViewportDisplaySettings viewport_settings;
+     
+     // Viewport Guide Settings (Safe areas, letterbox, grids)
+     struct GuideSettings {
+         bool show_safe_areas = false;
+         int safe_area_type = 0;
+         float title_safe_percent = 0.80f;
+         float action_safe_percent = 0.90f;
+         bool show_letterbox = false;
+         int aspect_ratio_index = 0;
+         float letterbox_opacity = 0.7f;
+         bool show_grid = false;
+         int grid_type = 0;
+         bool show_center = false;
+     };
+     GuideSettings guide_settings;
+     
 private:
+    // --- UI Structure ---
+    void drawPanels(UIContext& ctx);
+    void drawStatusAndBottom(UIContext& ctx, float screen_x, float screen_y, float left_offset);
+    void drawAuxWindows(UIContext& ctx);
+
+    // --- Input / Editor ---
+    void handleEditorShortcuts(UIContext& ctx);
+    bool deleteSelectedLight(UIContext& ctx);
+    bool deleteSelectedObject(UIContext& ctx);
+    void handleDeleteShortcut(UIContext& ctx);
+
+    // --- Overlays & Gizmos ---
+    bool drawOverlays(UIContext& ctx);
+    void drawLightGizmos(UIContext& ctx, bool& gizmo_hit);
+    void drawSelectionGizmos(UIContext& ctx);
+    void drawFocusIndicator(UIContext& ctx);  // Split-prism focus aid
+    void drawZoomRing(UIContext& ctx);        // FOV zoom control
+    void drawExposureInfo(UIContext& ctx);    // Cinema camera exposure bar
+    void drawDollyArc(UIContext& ctx);        // Camera dolly track control
+
+    // --- Scene Interaction ---
+    void handleSceneInteraction(UIContext& ctx, bool gizmo_hit);
+
+    // --- Deferred / Maintenance ---
+    void processDeferredSceneUpdates(UIContext& ctx);
     bool showSidePanel = true;
     bool show_controls_window = false; // Controls/Help window visibility
     bool showResolutionPanel = true; // class üyesi
@@ -89,6 +186,7 @@ private:
    
     bool show_scene_log = false; // Default closed
     float side_panel_width = 360.0f; // Resizable Left Panel width
+    float bottom_panel_height = 100.0f; // Default to minimum height
     float last_applied_width = 0.0f;
     float last_applied_height = 0.0f;
     int last_applied_aspect_w = 0;
@@ -131,5 +229,8 @@ private:
     ImVec2 marquee_end;
     void handleMarqueeSelection(UIContext& ctx);  // Box selection implementation
     void drawMarqueeRect();  // Draw the selection rectangle
+    
+    // Timeline Widget
+    class TimelineWidget timeline;  // Timeline animation widget
    
 };

@@ -201,6 +201,7 @@ public:
     std::unordered_map<std::string, std::shared_ptr<Texture>> textureCache;
     std::vector<TextureInfo> textureInfos;
     std::vector<std::shared_ptr<Camera>> cameras; // Kamera listesi
+    bool isFBX = false; // Track if current file is FBX format
 
     Assimp::Importer importer;
     const aiNode* getNodeByName(const std::string& name) const {
@@ -276,14 +277,32 @@ public:
         SCENE_LOG_INFO("Starting model loading: " + filename);
 
         BoneData boneData;
+        
+        // Check if file is FBX format
+        std::string lowerFilename = filename;
+        std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
+        this->isFBX = (lowerFilename.find(".fbx") != std::string::npos);
+        
+        if (isFBX) {
+            SCENE_LOG_INFO("FBX format detected");
+            // Note: Assimp reads unit scale from FBX metadata automatically
+            // We only add aiProcess_GlobalScale to apply it
+        }
 
         SCENE_LOG_INFO("Importing file with Assimp...");
-        this->scene = importer.ReadFile(filename,
+        
+        unsigned int importFlags = 
             aiProcess_GenSmoothNormals |
             aiProcess_JoinIdenticalVertices |
             aiProcess_Triangulate |
-            aiProcess_CalcTangentSpace
-        );
+            aiProcess_CalcTangentSpace;
+        
+        // Add global scale for FBX - Assimp will use the scale from FBX metadata
+        if (isFBX) {
+            importFlags |= aiProcess_GlobalScale;
+        }
+        
+        this->scene = importer.ReadFile(filename, importFlags);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
             SCENE_LOG_ERROR("Assimp import failed: " + std::string(importer.GetErrorString()));
@@ -539,13 +558,134 @@ public:
 
     OptixGeometryData convertTrianglesToOptixData(const std::vector<std::shared_ptr<Triangle>>& triangles) {
         OptixGeometryData data;
-        std::unordered_map<GpuMaterialWithTextures, int> materialMap;
-        std::vector<GpuMaterial> gpuMaterials;
+        
+        // 1. Get Canonical Material List from MaterialManager
+        // This ensures 1:1 mapping with Renderer::updateOptiXMaterialsOnly
+        auto& mgr = MaterialManager::getInstance();
+        const auto& all_materials = mgr.getAllMaterials();
+        
+        // 2. Pre-allocate GPU buffers
+        data.materials.resize(all_materials.size());
+        data.textures.resize(all_materials.size());
+        data.volumetric_info.resize(all_materials.size());
+        
+        // 3. Populate Material Data (O(M)) based on MaterialManager order
+        for (size_t i = 0; i < all_materials.size(); ++i) {
+            const auto& mat = all_materials[i];
+            if (!mat) continue; // Should not happen but safety first
 
+            // A. Populate GpuMaterial
+            GpuMaterial gpuMat = {}; 
+            
+            if (mat->type() == MaterialType::Volumetric) {
+                // Volumetric material defaults (Matches Renderer.cpp)
+                gpuMat.albedo = make_float3(1.0f, 1.0f, 1.0f);
+                gpuMat.roughness = 1.0f;
+                gpuMat.metallic = 0.0f;
+                gpuMat.emission = make_float3(0.0f, 0.0f, 0.0f);
+                gpuMat.ior = 1.0f;
+                gpuMat.transmission = 0.0f;
+                gpuMat.opacity = 1.0f;
+            } else if (mat->gpuMaterial) {
+                gpuMat = *mat->gpuMaterial;
+            } else {
+                // Fallback default material (Matches Renderer.cpp)
+                gpuMat.albedo = make_float3(0.8f, 0.8f, 0.8f);
+                gpuMat.roughness = 0.5f;
+                gpuMat.metallic = 0.0f;
+                gpuMat.emission = make_float3(0.0f, 0.f, 0.f);
+                gpuMat.ior = 1.5f;
+                gpuMat.transmission = 0.0f;
+                gpuMat.opacity = 1.0f;
+            }
+            data.materials[i] = gpuMat;
+
+            // B. Populate TextureBundle
+            OptixGeometryData::TextureBundle texBundle = {};
+            
+            // Helper lambda to get cuda texture safely
+            auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
+                if (tex && tex->is_loaded()) {
+                     if (!tex->is_gpu_uploaded && g_hasOptix) {
+                         tex->upload_to_gpu();
+                     }
+                     return tex->get_cuda_texture();
+                }
+                return 0;
+            };
+
+            // Extract textures from material properties (PrincipledBSDF only)
+            if (mat->type() == MaterialType::PrincipledBSDF) {
+                PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+                
+                if (pbsdf->albedoProperty.texture) {
+                    texBundle.albedo_tex = getCudaTex(pbsdf->albedoProperty.texture);
+                    texBundle.has_albedo_tex = (texBundle.albedo_tex != 0);
+                }
+                if (pbsdf->roughnessProperty.texture) {
+                    texBundle.roughness_tex = getCudaTex(pbsdf->roughnessProperty.texture);
+                    texBundle.has_roughness_tex = (texBundle.roughness_tex != 0);
+                }
+                if (pbsdf->normalProperty.texture) {
+                    texBundle.normal_tex = getCudaTex(pbsdf->normalProperty.texture);
+                    texBundle.has_normal_tex = (texBundle.normal_tex != 0);
+                }
+                if (pbsdf->metallicProperty.texture) {
+                    texBundle.metallic_tex = getCudaTex(pbsdf->metallicProperty.texture);
+                    texBundle.has_metallic_tex = (texBundle.metallic_tex != 0);
+                }
+                if (pbsdf->emissionProperty.texture) {
+                    texBundle.emission_tex = getCudaTex(pbsdf->emissionProperty.texture);
+                    texBundle.has_emission_tex = (texBundle.emission_tex != 0);
+                }
+                if (pbsdf->opacityProperty.texture) {
+                    texBundle.opacity_tex = getCudaTex(pbsdf->opacityProperty.texture);
+                    texBundle.has_opacity_tex = (texBundle.opacity_tex != 0);
+                }
+                if (pbsdf->transmissionProperty.texture) {
+                    texBundle.transmission_tex = getCudaTex(pbsdf->transmissionProperty.texture);
+                    texBundle.has_transmission_tex = (texBundle.transmission_tex != 0);
+                }
+            }
+            data.textures[i] = texBundle;
+
+            // C. Populate VolumetricInfo
+            OptixGeometryData::VolumetricInfo volInfo = {};
+            if (mat->type() == MaterialType::Volumetric) {
+                Volumetric* vol_mat = static_cast<Volumetric*>(mat.get());
+                volInfo.is_volumetric = 1;
+                
+                Vec3 albedo = vol_mat->getAlbedo();
+                Vec3 emission = vol_mat->getEmissionColor();
+                
+                volInfo.density = static_cast<float>(vol_mat->getDensity());
+                volInfo.absorption = static_cast<float>(vol_mat->getAbsorption());
+                volInfo.scattering = static_cast<float>(vol_mat->getScattering());
+                volInfo.albedo = make_float3(albedo.x, albedo.y, albedo.z);
+                volInfo.emission = make_float3(emission.x, emission.y, emission.z);
+                volInfo.g = static_cast<float>(vol_mat->getG());
+                volInfo.step_size = vol_mat->getStepSize();
+                volInfo.max_steps = vol_mat->getMaxSteps();
+                volInfo.noise_scale = vol_mat->getNoiseScale();
+                
+                volInfo.multi_scatter = vol_mat->getMultiScatter();
+                volInfo.g_back = vol_mat->getGBack();
+                volInfo.lobe_mix = vol_mat->getLobeMix();
+                volInfo.light_steps = vol_mat->getLightSteps();
+                volInfo.shadow_strength = vol_mat->getShadowStrength();
+                
+                // Initialize AABB to inverse infinity (will be expanded by triangles)
+                volInfo.aabb_min = make_float3(1e10f, 1e10f, 1e10f);
+                volInfo.aabb_max = make_float3(-1e10f, -1e10f, -1e10f);
+            }
+            data.volumetric_info[i] = volInfo;
+        }
+
+        // 4. Iterate Triangles to populate geometry and indices (O(T))
         for (const auto& tri : triangles) {
             uint3 tri_indices;
 
-            // Use accessor methods for vertex positions and normals
+            // Use accessor methods for vertex data
             Vec3 verts[3] = { tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2) };
             Vec3 norms[3] = { tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2) };
             Vec2 uvs[3] = { tri->t0, tri->t1, tri->t2 };
@@ -567,53 +707,56 @@ public:
 
             data.indices.push_back(tri_indices);
 
-            // Get material using the new accessor (falls back to mat_ptr for compatibility)
-            auto material = tri->getMaterial();
-            if (!material) continue;
-
-            // Unique material + texture key
-            GpuMaterialWithTextures key;
-            key.material = *material->gpuMaterial;
-            key.albedoTexID = static_cast<size_t>(tri->textureBundle.albedo_tex);
-            key.normalTexID = static_cast<size_t>(tri->textureBundle.normal_tex);
-            key.roughnessTexID = static_cast<size_t>(tri->textureBundle.roughness_tex);
-            key.metallicTexID = static_cast<size_t>(tri->textureBundle.metallic_tex);
-            key.opacityTexID = static_cast<size_t>(tri->textureBundle.opacity_tex);
-            key.emissionTexID = static_cast<size_t>(tri->textureBundle.emission_tex);
+            // Get Material ID directly from triangle
+            // This is the CRITICAL fix: Trust `getMaterialID()` which maps to `all_materials` index.
+            // This bypasses local deduplication and ensures global consistency.
+            int gpuIndex = tri->getMaterialID();
             
-            // CRITICAL: Use material name hash to distinguish between imports with similar materials
-            // This prevents PolyHaven ORM texture collisions where roughness/metallic share same texture
-            key.materialNameHash = std::hash<std::string>{}(material->materialName);
-
-            int gpuIndex = -1;
-            auto it = materialMap.find(key);
-            if (it != materialMap.end()) {
-                gpuIndex = it->second;
-                // [VERBOSE] SCENE_LOG_INFO("[MAT-DEDUP] Triangle reusing material #" + std::to_string(gpuIndex) + 
-                //               " | MatName: " + material->materialName);
+            // Safety check
+            if (gpuIndex < 0 || gpuIndex >= static_cast<int>(data.materials.size())) {
+                SCENE_LOG_WARN("[AssimpLoader] Triangle has invalid material ID: " + std::to_string(gpuIndex) + 
+                             ". Using default (0).");
+                gpuIndex = 0;
             }
-            else {
-                gpuIndex = static_cast<int>(gpuMaterials.size());
-                gpuMaterials.push_back(key.material);
-                data.textures.push_back(tri->textureBundle);
-                materialMap[key] = gpuIndex;
-                
-                // [VERBOSE] Debug: Log new material creation - disabled to reduce log size
-                // SCENE_LOG_INFO("[MAT-NEW] Creating material #" + std::to_string(gpuIndex) + 
-                //               " | Name: " + material->materialName +
-                //               " | AlbedoTex: " + std::to_string(key.albedoTexID) +
-                //               " | RoughTex: " + std::to_string(key.roughnessTexID) +
-                //               " | MetalTex: " + std::to_string(key.metallicTexID) +
-                //               " | NameHash: " + std::to_string(key.materialNameHash));
-            }
-
+            
             data.material_indices.push_back(gpuIndex);
+
+            // Accumulate AABB for Volumetric Materials (with bounds check)
+            if (gpuIndex < static_cast<int>(data.volumetric_info.size()) && 
+                data.volumetric_info[gpuIndex].is_volumetric) {
+                auto& vol = data.volumetric_info[gpuIndex];
+                for (int vi = 0; vi < 3; vi++) {
+                     const auto& v = verts[vi];
+                     vol.aabb_min.x = std::min(vol.aabb_min.x, (float)v.x);
+                     vol.aabb_min.y = std::min(vol.aabb_min.y, (float)v.y);
+                     vol.aabb_min.z = std::min(vol.aabb_min.z, (float)v.z);
+                     vol.aabb_max.x = std::max(vol.aabb_max.x, (float)v.x);
+                     vol.aabb_max.y = std::max(vol.aabb_max.y, (float)v.y);
+                     vol.aabb_max.z = std::max(vol.aabb_max.z, (float)v.z);
+                }
+            }
+        }
+        
+        // Finalize Volumetric AABBs (Apply padding)
+        for (auto& vol : data.volumetric_info) {
+            if (vol.is_volumetric) {
+                // If AABB wasn't touched (no triangles), reset or keep as is?
+                // If max < min, it means no triangles used it.
+                if (vol.aabb_max.x < vol.aabb_min.x) {
+                     // No geometry for this volume? Zero it out.
+                     vol.aabb_min = make_float3(0.f, 0.f, 0.f);
+                     vol.aabb_max = make_float3(0.f, 0.f, 0.f);
+                } else {
+                     float padding = 0.001f;
+                     vol.aabb_min.x -= padding; vol.aabb_min.y -= padding; vol.aabb_min.z -= padding;
+                     vol.aabb_max.x += padding; vol.aabb_max.y += padding; vol.aabb_max.z += padding;
+                }
+            }
         }
 
-        SCENE_LOG_INFO("[MAT-SUMMARY] Total unique materials: " + std::to_string(gpuMaterials.size()) + 
-                      " | Total triangles: " + std::to_string(data.indices.size()));
+        SCENE_LOG_INFO("[MAT-SUMMARY] Global materials: " + std::to_string(data.materials.size()) + 
+                      " | Triangles: " + std::to_string(data.indices.size()));
         
-        data.materials = std::move(gpuMaterials);
         return data;
     }
 
@@ -1094,6 +1237,7 @@ private:
                     lookfrom, lookat, vup, (float)vfov, (float)aspect, aperture, focusdistance, 5
                 );
                 camera->nodeName = std::string(aiCam->mName.C_Str());
+                camera->save_initial_state();  // Save initial state for reset functionality
 
                 cameras.push_back(camera);
                 SCENE_LOG_INFO("---- Camera Loaded: " + std::string(aiCam->mName.C_Str()));

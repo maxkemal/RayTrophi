@@ -1,7 +1,8 @@
-#include "SceneSelection.h"
+﻿#include "SceneSelection.h"
 #include "Light.h"
 #include "Camera.h"
 #include "Triangle.h"
+#include "Matrix4x4.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
 #include "SpotLight.h"
@@ -44,17 +45,20 @@ void SceneSelection::updatePositionFromSelection() {
             
         case SelectableType::Object:
             if (selected.object) {
-                // Get center of bounding box as position
-                AABB bounds;
-                if (selected.object->bounding_box(0, 0, bounds)) {
-                    selected.position = (bounds.min + bounds.max) * 0.5f;
-                }
-                
                 // Get transform from TransformHandle if available
                 auto transform = selected.object->getTransformHandle();
                 if (transform) {
                     Matrix4x4 mat = transform->base;
-                    selected.position = Vec3(mat.m[0][3], mat.m[1][3], mat.m[2][3]);
+                    // Use decompose to extract full transform (position, rotation, scale)
+                    mat.decompose(selected.position, selected.rotation, selected.scale);
+                } else {
+                    // Fallback: Get center of bounding box as position
+                    AABB bounds;
+                    if (selected.object->bounding_box(0, 0, bounds)) {
+                        selected.position = (bounds.min + bounds.max) * 0.5f;
+                    }
+                    selected.rotation = Vec3(0, 0, 0);
+                    selected.scale = Vec3(1, 1, 1);
                 }
             }
             break;
@@ -308,5 +312,13 @@ void SceneSelection::selectCameraTarget(std::shared_ptr<Camera> camera) {
     item.type = SelectableType::CameraTarget;
     item.camera = camera;
     item.name = "Camera Target";
+    addToSelection(item);
+}
+
+void SceneSelection::selectWorld() {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::World;
+    item.name = "World";
     addToSelection(item);
 }
