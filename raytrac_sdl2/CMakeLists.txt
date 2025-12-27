@@ -3,7 +3,29 @@ project(RayTrophi VERSION 1.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_ARCHITECTURES 86)
+set(CMAKE_CUDA_ARCHITECTURES 50)  # SM 5.0 for broad GPU support
+
+# --- WINDOWS SETTINGS (Match VS2022 Project) ---
+if(WIN32)
+    add_compile_definitions(
+        WIN32
+        _WINDOWS
+        NOMINMAX           # Prevent Windows min/max macros
+        _CRT_SECURE_NO_WARNINGS
+        UNICODE
+        _UNICODE
+    )
+    
+    # MSVC specific flags
+    if(MSVC)
+        # Match VS2022 Release configuration
+        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
+        
+        # Multi-processor compilation
+        add_compile_options(/MP)
+    endif()
+endif()
 
 # --- USER DEFINED PATHS (Overridable via Cache) ---
 set(SDL2_ROOT "E:/SDL2-2.30.4" CACHE PATH "Path to SDL2 root directory")
