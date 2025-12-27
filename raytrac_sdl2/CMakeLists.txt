@@ -33,8 +33,8 @@ set(SOURCES_CPP
     "source/src/Matrix4x4.cpp"
     "source/src/Mesh.cpp"
     "source/src/OptixWrapper.cpp"
+    "source/src/OptixAccelManager.cpp"
     "source/src/ParallelBVHNode.cpp"
-    "source/src/ParallelBVHNode_optimized.cpp"
     "source/src/PointLight.cpp"
     "source/src/PrincipledBSDF.cpp"
     "source/src/ProjectManager.cpp"
@@ -58,6 +58,7 @@ set(SOURCES_CPP
     "source/src/World.cpp"
     "source/src/globals.cpp"
     "source/src/scene_ui.cpp"
+    "source/src/scene_ui_animation.cpp"
     "source/src/scene_ui_camera.cpp"
     "source/src/scene_ui_gizmos.cpp"
     "source/src/scene_ui_hierarchy.cpp"
@@ -77,13 +78,11 @@ set(MINIZ_SOURCES
     "source/external/miniz.c"
 )
 
-# ImSequencer (from ImGuizmo repository)
-set(IMSEQUENCER_SOURCES
-    "source/external/ImSequencer.cpp"
-)
+
 
 # Gather all sources
-set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${IMSEQUENCER_SOURCES} ${HEADERS})
+# Gather all sources
+set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${HEADERS})
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
@@ -115,7 +114,7 @@ add_custom_command(
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src"
     --use_fast_math
     --maxrregcount=64
-    -gencode=arch=compute_86,code=compute_86
+    -gencode=arch=compute_50,code=compute_50
     -allow-unsupported-compiler
     DEPENDS ${CUDA_SOURCE} ${PTX_HEADER_DEPS}
     COMMENT "Compiling CUDA to PTX: ${CUDA_SOURCE}"
