@@ -3,6 +3,10 @@
 // Part of SceneUI - extracted for maintainability
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
 #include "ui_modern.h"
 #include "imgui.h"
 #include "scene_data.h"
@@ -403,6 +407,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 if (!file.empty()) {
                     world.setHDRI(file);
                     changed = true;
+                    addViewportMessage("HDRI Loaded: " + file.substr(file.find_last_of("/\\") + 1), 3.0f);
                 }
 #endif
             }
@@ -634,6 +639,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         // Load texture and set env_overlay_tex
                         world.setNishitaEnvOverlay(file);
                         changed = true;
+                        addViewportMessage("Atmosphere Overlay Loaded", 3.0f);
                     }
 #endif
                 }
@@ -811,6 +817,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                             -params.sun_direction.y,
                             -params.sun_direction.z
                         );
+                        
+                        // CRITICAL: Mark lights dirty so GPU gets updated light direction
+                        extern bool g_lights_dirty;
+                        g_lights_dirty = true;
                         break;
                     }
                 }
@@ -1162,10 +1172,16 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     if (changed) {
         world_params_changed_this_frame = true;
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
+        
+        // OPTIMIZATION: Only update OptiX when OptiX rendering is enabled
+        if (ctx.render_settings.use_optix && ctx.optix_gpu_ptr) {
             ctx.optix_gpu_ptr->setWorld(world.getGPUData());
             ctx.optix_gpu_ptr->resetAccumulation();
         }
+        
+        // Mark world buffer dirty for main loop (in case direct update is skipped)
+        extern bool g_world_dirty;
+        g_world_dirty = true;
     }
     
     // Pop the global item width set at function start
@@ -1201,6 +1217,10 @@ void SceneUI::processSunSync(UIContext& ctx) {
                  params.sun_azimuth = azimDeg;
                  params.sun_direction = make_float3(sunDir.x, sunDir.y, sunDir.z);
                  world.setNishitaParams(params);
+                 
+                 // Mark world dirty so GPU gets updated sky direction
+                 extern bool g_world_dirty;
+                 g_world_dirty = true;
              }
              break; // Sync with first directional light
         }

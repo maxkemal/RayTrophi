@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-1.4-blue.svg)
+![Version](https://img.shields.io/badge/version-Alpha-orange.svg)
 ![C++](https://img.shields.io/badge/C++-20-00599C.svg?logo=c%2B%2B)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows)
 ![CUDA](https://img.shields.io/badge/CUDA-12.0-76B900.svg?logo=nvidia)
@@ -28,6 +28,45 @@
 - **High Performance**: Optimized BVH construction (<1s for 3.3M triangles), 75% memory-optimized triangle structure
 - **Real-time Preview**: Modern interactive UI with ImGui, animation timeline
 - **Industry Standard**: AssImp loader supports 40+ 3D formats (GLTF, FBX, OBJ, etc.)
+
+---
+
+## 🆕 Recent Updates (Alpha - December 2024)
+
+> **Note**: This project is in **active alpha development**. Features and APIs may change.
+
+### 🎮 Expanded GPU Support (NEW!)
+
+- ✅ **Non-RTX GPU Support**: OptiX now works on GTX series GPUs using compute-based ray tracing
+  - **GTX 9xx (Maxwell)**: SM 5.0+ supported
+  - **GTX 10xx (Pascal)**: Fully supported (GTX 1080 Ti, 1070, 1060, etc.)
+  - **GTX 16xx (Turing)**: Fully supported
+  - **RTX Series**: Full hardware RT core acceleration
+  - **HUD Notification**: GPU mode displayed at startup (RTX vs Compute Mode)
+
+### Animation System Improvements
+
+- ✅ **Material Keyframe Rendering Fix**: Fixed batch animation rendering where material property keyframes (albedo, emission, roughness, etc.) were not being applied during OptiX-based animation output
+  - **Issue**: Viewport playback correctly animated materials, but batch rendering showed only initial material states
+  - **Root Cause**: Missing timeline frame synchronization and GPU material buffer upload in `render_Animation` loop
+  - **Solution**: Added `render_settings.animation_current_frame` sync and `updateOptiXMaterialsOnly` call before each frame render
+  
+- ✅ **Animation Render Cancel Button**: Added functional "Stop Animation" button in UI
+  - **Issue**: No way to cancel ongoing batch animation renders
+  - **Solution**: Wired "Stop Animation" button to set `rendering_stopped_cpu` and `rendering_stopped_gpu` flags that the render loop checks
+  - **Location**: System & Output panel, visible during animation rendering
+
+### Technical Details
+
+**Files Modified**:
+- `Main.cpp`: Added `isOptixCapable()` for SM 5.0+ detection, GPU mode HUD notification
+- `compile_ptx.bat`: Updated to compile for `compute_50` (Maxwell+) compatibility
+- `Renderer.cpp`: Added timeline frame sync and material GPU upload in batch render loop
+- `scene_ui.cpp`: Connected "Stop Animation" button to rendering stop flags
+
+**Known Limitations**:
+- Non-RTX GPUs use compute-based ray tracing (2-3x slower than RTX hardware acceleration)
+- CPU viewport rendering can be slow during intensive scenes (GPU recommended)
 
 ---
 
@@ -68,7 +107,12 @@
   - ✅ Motion Blur
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
-  - ✅ **Advanced Animation**: Bone animation, quaternion interpolation, and timeline control
+  - ✅ **Advanced Animation**: 
+    - Bone animation with quaternion interpolation
+    - Multi-track timeline with keyframe editing (Location/Rotation/Scale/Material)
+    - **Batch Animation Rendering**: Export animation sequences to image files with material keyframe support
+    - Cancellable renders with "Stop Animation" button
+    - Real-time playback preview with scrubbing
   - ✅ **Advanced Cloud Lighting Controls**:
     - Light Steps control for volumetric cloud quality
     - Shadow Strength for realistic cloud shadows
@@ -112,21 +156,18 @@
 ### 🖥️ User Interface
 
 - Modern ImGui-based Dark UI with Docking
-- **Blender-Style Animation Timeline** (NEW v1.4):
+- **Animation Timeline**:
   - Multi-track visualization with group hierarchy (Objects/Lights/Cameras/World)
-  - **Per-Channel Keyframing**: Separate Location/Rotation/Scale keyframes
-  - **Expandable L/R/S Rows**: Click arrow to see individual channel keyframes
-  - **Color-Coded Channels**: Red=Location, Green=Rotation, Blue=Scale
-  - **Context Menu**: Right-click for insert/delete/duplicate operations
-  - **Toolbar Buttons**: +K (Insert), -K (Delete), Dup (Duplicate), ? (Help)
-  - **Drag-to-Move**: Click and drag keyframes to reposition
-  - Zoom (Mouse Wheel), Pan (Middle Mouse), Scrub (Click header)
+  - Per-Channel Keyframing: Separate Location/Rotation/Scale keyframes
+  - Expandable L/R/S sub-channels with color coding
+  - Context menu for insert/delete/duplicate operations
+  - Drag-to-move keyframes, zoom/pan/scrub navigation
 - Render Quality Presets (Low, Medium, High, Ultra)
 - Dynamic Resolution Scaling
 - Scene hierarchy viewer and Material editor
 - Performance metrics (FPS, rays/s, memory usage)
-- **Box Selection** (NEW v1.3): Right-click drag for multi-selection
-- **Transform Gizmo Idle Preview** (NEW v1.3): Pause during drag to preview position
+- Box Selection: Right-click drag for multi-selection
+- Transform Gizmo Idle Preview: Pause during drag to preview position
 
 ---
 
@@ -140,9 +181,19 @@
 - CMake 3.20+ (optional, VS2022 preferred)
 
 **Optional (for GPU rendering):**
-- NVIDIA GPU with RTX support
+- NVIDIA GPU (SM 5.0+): GTX 9xx, 10xx, 16xx, or RTX series
 - CUDA Toolkit 12.0+
 - OptiX 7.x SDK
+
+**GPU Compatibility:**
+| GPU Series | Architecture | Mode | Performance |
+|------------|--------------|------|-------------|
+| RTX 40xx | Ada Lovelace | Hardware RT | ⚡ Fastest |
+| RTX 30xx | Ampere | Hardware RT | ⚡ Very Fast |
+| RTX 20xx | Turing | Hardware RT | ⚡ Fast |
+| GTX 16xx | Turing | Compute | 🔶 Good |
+| GTX 10xx | Pascal | Compute | 🔶 Moderate |
+| GTX 9xx | Maxwell | Compute | 🔶 Slower |
 
 ### 📦 Dependencies
 
@@ -420,9 +471,10 @@ mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metallic
 - DLL dependencies must be in same folder as .exe
 
 ### Rendering
-- OptiX requires NVIDIA RTX GPU
+- OptiX requires NVIDIA GPU with SM 5.0+ (GTX 9xx or newer)
+- RTX GPUs use hardware RT cores; GTX GPUs use compute-based ray tracing (slower)
 - Very large scenes (>10M triangles) may cause memory issues
-- Denoising requires Intel CPU (OIDN) or may be slow
+- Denoising uses Intel OIDN with CUDA acceleration on NVIDIA GPUs
 
 ### Platform
 - Currently Windows-only (SDL2, DirectX dependencies)
