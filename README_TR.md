@@ -113,9 +113,19 @@
 - CMake 3.20+ (opsiyonel, VS2022 tercih edilir)
 
 **Opsiyonel (GPU rendering için):**
-- RTX desteği olan NVIDIA GPU
+- NVIDIA GPU (SM 5.0+): GTX 9xx, 10xx, 16xx veya RTX serisi
 - CUDA Toolkit 12.0+
 - OptiX 7.x SDK
+
+**GPU Uyumluluğu:**
+| GPU Serisi | Mimari | Mod | Performans |
+|------------|--------|-----|------------|
+| RTX 40xx | Ada Lovelace | Donanım RT | ⚡ En Hızlı |
+| RTX 30xx | Ampere | Donanım RT | ⚡ Çok Hızlı |
+| RTX 20xx | Turing | Donanım RT | ⚡ Hızlı |
+| GTX 16xx | Turing | Compute | 🔶 İyi |
+| GTX 10xx | Pascal | Compute | 🔶 Orta |
+| GTX 9xx | Maxwell | Compute | 🔶 Yavaş |
 
 ### 📦 Bağımlılıklar
 
@@ -393,9 +403,10 @@ mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metalik
 - DLL bağımlılıkları .exe ile aynı klasörde olmalı
 
 ### Rendering
-- OptiX, NVIDIA RTX GPU gerektirir
+- OptiX, SM 5.0+ NVIDIA GPU gerektirir (GTX 9xx veya daha yeni)
+- RTX GPU'lar donanım RT core kullanır; GTX GPU'lar compute tabanlı ray tracing kullanır (daha yavaş)
 - Çok büyük sahneler (>10M üçgen) bellek sorunlarına neden olabilir
-- Denoising Intel CPU (OIDN) gerektirir veya yavaş olabilir
+- Denoising Intel OIDN kullanır, NVIDIA GPU'larda CUDA ile hızlandırılır
 
 ### Platform
 - Şu anda sadece Windows (SDL2, DirectX bağımlılıkları)

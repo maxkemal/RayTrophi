@@ -5,6 +5,7 @@
 #include <vector>
 #include <atomic>
 #include <thread>
+#include <future>
 #include <SDL_image.h>
 #include "Renderer.h"
 #include "CPUInfo.h"
@@ -12,9 +13,14 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // Değiştirildi: sdlrenderer2
 #include <scene_ui.h>
+#include "ParallelBVHNode.h"
+#include "EmbreeBVH.h"
 #include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
 #include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
+#include "scene_data.h"       // Added explicit include
+#include "OptixWrapper.h"     // Added explicit include
+#include "SceneSelection.h"   // Added explicit include
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
@@ -120,6 +126,23 @@ int my = 0;
 float u;
 float v;
 bool rayhit = false;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DIRTY FLAGS - Prevents unnecessary GPU buffer updates when data unchanged
+// ═══════════════════════════════════════════════════════════════════════════
+bool g_camera_dirty = true;
+bool g_lights_dirty = true;
+bool g_world_dirty = true;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DEFERRED REBUILD FLAGS - For optimized batched rebuilds
+// Set these instead of calling rebuild immediately, Main loop handles them
+// ═══════════════════════════════════════════════════════════════════════════
+bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
+bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
+bool g_optix_rebuild_pending = false;    // GPU OptiX geometry needs rebuild
+bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
+
 Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float strength = 1.0f) {
     float u = (x / (float)width - 0.5f) * 2.0f;
     float v = (y / (float)height - 0.5f) * 2.0f;
@@ -240,13 +263,27 @@ void reset_render_resolution(int w, int h)
 
     SCENE_LOG_INFO("Render resolution updated: " + std::to_string(w) + "x" + std::to_string(h));
 }
-static bool isRTX(int major, int minor)
+// Check if GPU has RT Cores (hardware ray tracing)
+static bool hasRTCores(int major, int minor)
 {
     // RTX donanımı SM 7.5 ile başladı.
     if (major > 7) return true;            // SM 8.x, 9.x, 10.x → yeni RTX mimarileri
     if (major == 7 && minor >= 5) return true; // SM 7.5 → Turing
     return false;
 }
+
+// Check if GPU can run OptiX (SM 5.0+ required)
+// Non-RTX GPUs will use compute-based BVH traversal (slower but works)
+static bool isOptixCapable(int major, int minor)
+{
+    // OptiX 7.x requires SM 5.0 minimum (Maxwell and newer)
+    // SM 5.0+ = GTX 9xx, GTX 10xx, GTX 16xx, RTX 20xx, RTX 30xx, RTX 40xx
+    return major >= 5;
+}
+
+// Global GPU info for HUD display
+std::string g_gpu_name = "";
+bool g_has_rt_cores = false;
 
 void detectOptixHardware()
 {
@@ -256,11 +293,13 @@ void detectOptixHardware()
     // NVIDIA kart yok / CUDA yok / sürücü yok → OptiX yok.
     if (err != cudaSuccess || deviceCount == 0) {
         g_hasOptix = false;
+        g_gpu_name = "CPU Only";
         SCENE_LOG_WARN("No CUDA-capable devices found. OptiX will be disabled.");
         return;
     }
 
-    bool foundRTX = false;
+    bool foundOptix = false;
+    bool hasRT = false;
 
     for (int i = 0; i < deviceCount; ++i)
     {
@@ -270,16 +309,24 @@ void detectOptixHardware()
         int major = prop.major;
         int minor = prop.minor;
 
-        if (isRTX(major, minor)) {
-            foundRTX = true;
-            SCENE_LOG_INFO("Found RTX-capable device: " + std::string(prop.name) +
-                " (SM " + std::to_string(major) + "." + std::to_string(minor) + ")");
-
+        if (isOptixCapable(major, minor)) {
+            foundOptix = true;
+            hasRT = hasRTCores(major, minor);
+            g_gpu_name = prop.name;
+            g_has_rt_cores = hasRT;
+            
+            if (hasRT) {
+                SCENE_LOG_INFO("Found RTX device: " + std::string(prop.name) +
+                    " (SM " + std::to_string(major) + "." + std::to_string(minor) + ") - Hardware RT Cores");
+            } else {
+                SCENE_LOG_INFO("Found OptiX-compatible device: " + std::string(prop.name) +
+                    " (SM " + std::to_string(major) + "." + std::to_string(minor) + ") - Compute Mode (no RT cores)");
+            }
             break;
         }
     }
 
-    g_hasOptix = foundRTX;
+    g_hasOptix = foundOptix;
 }
 std::string WStringToString(const std::wstring& wstr) {
     if (wstr.empty()) return {};
@@ -455,6 +502,15 @@ int main(int argc, char* argv[]) {
     if (splashOk) { splash.setStatus("Initializing OptiX pipeline..."); splash.render(); }
     if (initializeOptixIfAvailable(optix_gpu)) {
         SCENE_LOG_INFO("OptiX is ready!");
+        
+        // Link OptixAccelManager logs to HUD
+        optix_gpu.setAccelManagerStatusCallback([&](const std::string& msg, int type) {
+            ImVec4 color = ImVec4(1, 1, 1, 1); // Info = White
+            if (type == 1) color = ImVec4(1, 1, 0, 1); // Warn = Yellow
+            if (type == 2) color = ImVec4(1, 0.2f, 0.2f, 1); // Error = Red
+            ui.addViewportMessage(msg, 4.0f, color); // Slightly longer duration for backend msgs
+        });
+        
         render_settings.use_optix = true;
         ui_ctx.render_settings.use_optix = true;
     }
@@ -472,6 +528,10 @@ int main(int argc, char* argv[]) {
     ray_renderer.rebuildBVH(scene, UI_use_embree);
     if (g_hasOptix) {
         ray_renderer.rebuildOptiXGeometry(scene, &optix_gpu);
+        // CRITICAL: Immediately sync GPU buffers so sun direction is correct at startup
+        optix_gpu.setWorld(ray_renderer.world.getGPUData());
+        optix_gpu.setLightParams(scene.lights);
+        if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
     }
     // Update initial camera vectors
     if (scene.camera) scene.camera->update_camera_vectors();
@@ -487,6 +547,20 @@ int main(int argc, char* argv[]) {
     // Show main window now that loading is complete
     SDL_ShowWindow(window);
     SDL_MaximizeWindow(window);
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU MODE HUD NOTIFICATION - Inform user about rendering backend
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (g_hasOptix) {
+        if (g_has_rt_cores) {
+            ui.addViewportMessage("GPU: " + g_gpu_name + " (RTX - Hardware Ray Tracing)", 5.0f, ImVec4(0.3f, 1.0f, 0.5f, 1.0f));
+        } else {
+            ui.addViewportMessage("GPU: " + g_gpu_name + " (Compute Mode - No RT Cores)", 6.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+            ui.addViewportMessage("Performance may be slower than RTX cards", 6.0f, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+        }
+    } else {
+        ui.addViewportMessage("CPU Rendering Mode (No compatible GPU found)", 6.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+    }
 
     SDL_Event e;
     while (!quit) {
@@ -626,6 +700,11 @@ int main(int argc, char* argv[]) {
                 if (ui_ctx.scene.camera) ui_ctx.optix_gpu_ptr->setCameraParams(*ui_ctx.scene.camera);
                 ui_ctx.optix_gpu_ptr->resetAccumulation();
             }
+            
+            // Mark all buffers dirty for fresh scene
+            g_camera_dirty = true;
+            g_lights_dirty = true;
+            g_world_dirty = true;
             
             ui_ctx.start_render = true;
         }
@@ -832,6 +911,7 @@ int main(int argc, char* argv[]) {
                     last_mouse_y = e.motion.y;
                     last_camera_move_time = std::chrono::steady_clock::now();
                     start_render = true;
+                    g_camera_dirty = true;  // Mark camera buffer for GPU update
                 }
             }
 
@@ -848,6 +928,7 @@ int main(int argc, char* argv[]) {
                     last_camera_move_time = std::chrono::steady_clock::now();
                     camera_moved = true;
                     start_render = true;
+                    g_camera_dirty = true;  // Mark camera buffer for GPU update
                 }
             }
 
@@ -894,7 +975,7 @@ int main(int argc, char* argv[]) {
                 scene.camera->update_camera_vectors();
                 last_camera_move_time = std::chrono::steady_clock::now();
                 start_render = true;
-
+                g_camera_dirty = true;  // Mark camera buffer for GPU update
             }
             // hareket durmuşsa foveation seviyesi büyüt
             if (camera_moved_recently &&
@@ -998,9 +1079,7 @@ int main(int argc, char* argv[]) {
 
                      // Reset stop flags for new render
                      rendering_stopped_cpu = false;
-                     rendering_stopped_gpu = false;
-
-                    // --- Animation State Update ---
+                     rendering_stopped_gpu = false;// --- Animation State Update ---
                     float fps = ui_ctx.render_settings.animation_fps;
                     if (fps <= 0.0f) fps = 24.0f;
                     int start_f = ui_ctx.render_settings.animation_start_frame;
@@ -1011,13 +1090,25 @@ int main(int argc, char* argv[]) {
                         // ============ SYNCHRONOUS OPTIX RENDER (No Thread) ============
                         // Each pass is ~10-50ms for 1 sample, fast enough for UI
                         
-                        bool geometry_updated = ray_renderer.updateAnimationState(scene, time);
+                        // OPTIMIZATION: Only update animation state when timeline frame changed
+                        // Skip during camera-only movement to avoid expensive geometry updates
+                        static int last_anim_frame = -1;
+                        bool geometry_updated = false;
+                        if (current_f != last_anim_frame) {
+                            geometry_updated = ray_renderer.updateAnimationState(scene, time);
+                            last_anim_frame = current_f;
+                        }
                         
                         if (geometry_updated) {
                             optix_gpu.updateGeometry(scene.world.objects);
+                            // Geometry change implies all buffers need refresh
+                            g_camera_dirty = true;
+                            g_lights_dirty = true;
+                            g_world_dirty = true;
                         }
                         
-                        if (scene.camera) {
+                        // OPTIMIZATION: Only update GPU buffers when data has changed
+                        if (g_camera_dirty && scene.camera) {
                             optix_gpu.setCameraParams(*scene.camera);
                             Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                             yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
@@ -1025,12 +1116,21 @@ int main(int argc, char* argv[]) {
                             
                             // Set camera Y for volumetric cloud parallax
                             ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
+                            g_camera_dirty = false;
                         }
-                        if (!scene.lights.empty())
+                        if (g_lights_dirty && !scene.lights.empty()) {
                             optix_gpu.setLightParams(scene.lights);
-                        optix_gpu.setWorld(ray_renderer.world.getGPUData());
+                            g_lights_dirty = false;
+                        }
+                        if (g_world_dirty) {
+                            optix_gpu.setWorld(ray_renderer.world.getGPUData());
+                            g_world_dirty = false;
+                        }
 
-                        std::vector<uchar4> framebuffer(image_width * image_height);
+                        static std::vector<uchar4> framebuffer;
+                        if (framebuffer.size() != image_width * image_height) {
+                            framebuffer.resize(image_width * image_height);
+                        }
                         
                         // Single pass render (1 sample) - fast, no UI blocking
                         auto sample_start = std::chrono::high_resolution_clock::now();
@@ -1067,14 +1167,19 @@ int main(int argc, char* argv[]) {
                         // ===== DENOISE LOGIC =====
                         bool effective_denoiser = render_settings.is_final_render_mode ? render_settings.render_use_denoiser : render_settings.use_denoiser;
                         if (effective_denoiser && optix_gpu.getAccumulatedSamples() > 0) {
-                            ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                                ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                            }
                         }
-                    }
                     else {
                         // ============ SYNCHRONOUS CPU RENDER (Like OptiX) ============
                         // Each pass is 1 sample per pixel, accumulates progressively
                         
-                        ray_renderer.updateAnimationState(scene, time);
+                        // OPTIMIZATION: Only update animation state when timeline frame changed
+                        static int last_cpu_anim_frame = -1;
+                        if (current_f != last_cpu_anim_frame) {
+                             ray_renderer.updateAnimationState(scene, time);
+                             last_cpu_anim_frame = current_f;
+                        }
                         
                         // Set camera Y for volumetric cloud parallax
                         if (scene.camera) {
@@ -1112,13 +1217,13 @@ int main(int argc, char* argv[]) {
                         // ===== DENOISE LOGIC =====
                         bool effective_denoiser = render_settings.is_final_render_mode ? render_settings.render_use_denoiser : render_settings.use_denoiser;
                         if (effective_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0) {
-                            ray_renderer.applyOIDNDenoising(surface, 0, true,
-                                ui_ctx.render_settings.denoiser_blend_factor);
+                                 ray_renderer.applyOIDNDenoising(surface, 0, true,
+                                     ui_ctx.render_settings.denoiser_blend_factor);
+                             }
                         }
                     }
                  }
             }
-        }
 
         // Tonemap reset ve apply
         if (!start_render) {
@@ -1170,6 +1275,11 @@ int main(int argc, char* argv[]) {
                 // Update animation state immediately
                 ray_renderer.updateAnimationState(scene, time);
                 
+                // Mark all buffers dirty for animation frame change
+                g_camera_dirty = true;
+                g_lights_dirty = true;
+                g_world_dirty = true;
+                
                 // Update OptiX if needed
                 if (ui_ctx.render_settings.use_optix && g_hasOptix) {
                     optix_gpu.updateGeometry(scene.world.objects);
@@ -1181,6 +1291,11 @@ int main(int argc, char* argv[]) {
                     
                     // Reset accumulation for new frame
                     optix_gpu.resetAccumulation();
+                    
+                    // Clear dirty flags since we just updated manually
+                    g_camera_dirty = false;
+                    g_lights_dirty = false;
+                    g_world_dirty = false;
                 } else {
                     // Reset CPU accumulation for new frame
                     ray_renderer.resetCPUAccumulation();
@@ -1219,16 +1334,169 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-        SDL_FreeSurface(original_surface);
-        original_surface = SDL_ConvertSurface(surface, surface->format, 0);
+        // ═══════════════════════════════════════════════════════════════════════════
+        // TEXTURE UPDATE OPTIMIZATION
+        // Only update texture when there's actual rendering happening
+        // ═══════════════════════════════════════════════════════════════════════════
+        bool accumulation_done_for_display = false;
+        if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+            accumulation_done_for_display = optix_gpu.isAccumulationComplete();
+        } else {
+            accumulation_done_for_display = ray_renderer.isCPUAccumulationComplete();
+        }
+        
+        // Only update texture if rendering is active or UI needs it
+        static bool last_texture_updated = false;
+        bool needs_texture_update = !accumulation_done_for_display || !last_texture_updated || ImGui::GetIO().WantCaptureMouse;
+        
+        if (needs_texture_update) {
+            SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+            last_texture_updated = !accumulation_done_for_display;
+        }
+        
+        // SDL_FreeSurface(original_surface);
+        // original_surface = SDL_ConvertSurface(surface, surface->format, 0);
         ImGui::Render();       
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
-        SDL_Delay(16); // ~60 FPS
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // IDLE OPTIMIZATION: Longer sleep when render is complete
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (accumulation_done_for_display && !camera_moved && !dragging && !start_render && !ImGui::GetIO().WantCaptureMouse) {
+            // Render complete and no user interaction - aggressive sleep
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else if (!ui_ctx.render_settings.is_rendering_active && !camera_moved) {
+            // Not rendering but may have UI interaction - light sleep
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // DEFERRED REBUILD PROCESSING - Batched at frame end for faster UI response
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (g_mesh_cache_dirty) {
+            ui.rebuildMeshCache(scene.world.objects);
+            g_mesh_cache_dirty = false;
+        }
+        
+        // ===========================================================================
+        // ASYNC BVH REBUILD (Non-Blocking)
+        // ===========================================================================
+        if (g_gpu_refit_pending) {
+            ui.addViewportMessage("Updating GPU...", 2.0f);
+            if (g_hasOptix) {
+                // LIGHTWEIGHT UPDATE: Transforms only (fast)
+                // If actual geometry (vertices) changed, use g_optix_rebuild_pending instead.
+                optix_gpu.updateTLASMatricesOnly(scene.world.objects);
+                
+                optix_gpu.setLightParams(scene.lights);
+                if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
+                optix_gpu.resetAccumulation();
+            }
+            g_gpu_refit_pending = false;
+        }
+
+        static std::future<std::shared_ptr<Hittable>> g_bvh_future;
+        
+        if (g_bvh_rebuild_pending) {
+            // Only trigger if not already rebuilding
+            if (!g_bvh_future.valid()) {
+                // Determine if we actually need it (if using OptiX, maybe unnecessary?)
+                // But picking (selection) uses CPU BVH. So we DO need it eventually.
+                // Async allows it to happen without freezing.
+                
+                // Copy list of objects for thread safety (prevents crashes if objects deleted from vector)
+                std::vector<std::shared_ptr<Hittable>> objects_copy = scene.world.objects;
+                bool use_embree = ui_ctx.render_settings.UI_use_embree;
+                
+                ui.addViewportMessage("Rebuilding BVH...", 10.0f); // Show status
+                
+                g_bvh_future = std::async(std::launch::async, [objects_copy, use_embree]() -> std::shared_ptr<Hittable> {
+                     if (use_embree) {
+                         auto bvh = std::make_shared<EmbreeBVH>();
+                         bvh->build(objects_copy);
+                         // EmbreeBVH inherits from Hittable
+                         return bvh;
+                     } else {
+                         return std::make_shared<ParallelBVHNode>(objects_copy, 0, objects_copy.size(), 0.0, 1.0, 0);
+                     }
+                });
+            }
+            g_bvh_rebuild_pending = false; 
+        }
+        
+        // Check Async Result
+        if (g_bvh_future.valid()) {
+            if (g_bvh_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                try {
+                    auto new_bvh = g_bvh_future.get();
+                    if (new_bvh) {
+                        // CRITICAL OPTIMIZATION: Destroy OLD BVH on a background thread!
+                        // Replacing 'scene.bvh' triggers the destructor of the old BVH.
+                        // For large scenes, recursively destroying millions of nodes on the Main Thread 
+                        // causes a massive freeze (blocking GPU commands/UI).
+                        auto old_bvh = scene.bvh;
+                        scene.bvh = new_bvh;
+                        
+                        std::thread([old_bvh]() {
+                            // old_bvh goes out of scope here and is destroyed in background
+                        }).detach();
+                        
+                        ray_renderer.resetCPUAccumulation();
+                        ui.clearViewportMessages(); 
+                        ui.addViewportMessage("Async BVH Rebuild Complete", 2.0f);
+                    }
+                } catch (const std::exception& e) {
+                   SCENE_LOG_WARN(std::string("BVH Rebuild Failed: ") + e.what());
+                }
+            }
+        }
+        
+        // -----------------------------------------------------------------
+        // ASYNC OPTIX REBUILD (Non-blocking)
+        // -----------------------------------------------------------------
+        static std::future<void> g_optix_future;
+        static bool g_optix_rebuilding = false;
+        
+        if (g_optix_rebuild_pending && ui_ctx.render_settings.use_optix && g_hasOptix) {
+            // Only start if not already rebuilding
+            if (!g_optix_rebuilding) {
+                ui.addViewportMessage("Rebuilding OptiX Geometry...", 10.0f);
+                
+                // Capture references for lambda
+                auto& scene_ref = scene;
+                auto optix_ptr = &optix_gpu;
+                auto& renderer_ref = ray_renderer;
+                
+                g_optix_future = std::async(std::launch::async, [&scene_ref, optix_ptr, &renderer_ref]() {
+                    renderer_ref.rebuildOptiXGeometry(scene_ref, optix_ptr);
+                });
+                
+                g_optix_rebuilding = true;
+            }
+            g_optix_rebuild_pending = false;
+        }
+        
+        // Check if async OptiX rebuild is complete
+        if (g_optix_rebuilding && g_optix_future.valid()) {
+            if (g_optix_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                try {
+                    g_optix_future.get();
+                    optix_gpu.resetAccumulation();
+                    ui.clearViewportMessages();
+                    ui.addViewportMessage("OptiX Rebuild Complete", 2.0f);
+                    start_render = true;
+                } catch (const std::exception& e) {
+                    SCENE_LOG_WARN(std::string("OptiX Rebuild Failed: ") + e.what());
+                }
+                g_optix_rebuilding = false;
+            }
+        }
+        
+        SDL_Delay(16); // ~60 FPS cap
 
     }
     
@@ -1244,3 +1512,5 @@ int main(int argc, char* argv[]) {
     g_sceneLog.closeLogFile();
     return 0;
 }
+
+
