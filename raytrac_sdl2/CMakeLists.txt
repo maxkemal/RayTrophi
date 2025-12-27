@@ -40,7 +40,6 @@ set(SOURCES_CPP
     "source/src/ProjectManager.cpp"
     "source/src/Renderer.cpp"
     "source/src/SceneCommand.cpp"
-    "source/src/SceneCommand_Transform.cpp"
     "source/src/SceneHistory.cpp"
     "source/src/SceneSelection.cpp"
     "source/src/SceneSerializer.cpp"
