@@ -7,6 +7,11 @@
 #include <memory>
 #include <mutex>
 #include "Material.h"
+#include "json.hpp"
+
+// Serialization version - increment when format changes
+// v1: Initial material serialization
+static constexpr int MATERIAL_SERIALIZATION_VERSION = 1;
 
 /**
  * @brief Centralized material management for memory optimization.
@@ -84,9 +89,30 @@ public:
     void clear();
 
     /**
+     * @brief Serialize all materials to JSON
+     * @param sceneDir Directory to save material data (for relative texture paths)
+     * @return JSON object containing all materials
+     */
+    nlohmann::json serialize(const std::string& sceneDir) const;
+    
+    /**
+     * @brief Deserialize materials from JSON
+     * @param data JSON object containing material data
+     * @param sceneDir Directory where material data is stored (for resolving texture paths)
+     */
+    void deserialize(const nlohmann::json& data, const std::string& sceneDir);
+    
+    /**
      * @brief Get all materials (for serialization/debugging)
      */
     const std::vector<std::shared_ptr<Material>>& getAllMaterials() const { return materials; }
+    
+    /**
+     * @brief Get material name by ID
+     * @param id Material ID
+     * @return Material name, or empty string if not found
+     */
+    std::string getMaterialName(uint16_t id) const;
 
 private:
     MaterialManager() = default;
