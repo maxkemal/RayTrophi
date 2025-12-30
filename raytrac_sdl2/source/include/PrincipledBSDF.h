@@ -12,14 +12,14 @@ class PrincipledBSDF : public Material {
 public:
     struct TextureTransform {
         Vec2 scale;
-        double rotation_degrees;
+        float rotation_degrees;
         Vec2 translation;
         Vec2 tilingFactor;
         WrapMode wrapMode;
 
         TextureTransform(
             const Vec2& scale = Vec2(1.0, 1.0),
-            double rotation = 0.0,
+            float rotation = 0.0f,
             const Vec2& translation = Vec2(0.0, 0.0),
             const Vec2& tiling = Vec2(1.0, 1.0),
             WrapMode wrap = WrapMode::Repeat
@@ -66,7 +66,7 @@ public:
 
 
     virtual bool hasTexture() const override;
-    virtual double getIndexOfRefraction() const override;
+    virtual float getIndexOfRefraction() const override;
     virtual std::shared_ptr<Texture> getTexture() const override;
     bool useSmartUVProjection = false; // Yeni üye
     MaterialType type() const override {
@@ -74,7 +74,7 @@ public:
     }
 
     bool has_normal_map() const override { return normalProperty.texture != nullptr; }
-    Vec3 get_normal_from_map(double u, double v) const override;
+    Vec3 get_normal_from_map(float u, float v) const override;
     float get_normal_strength() const override { return normalStrength; }
     virtual void set_normal_strength(float norm) override {
         normalStrength = norm;
@@ -92,9 +92,9 @@ public:
     void setAnisotropic(float anisotropic, const Vec3& anisotropicDirection);
     float getTransmission(const Vec2& uv) const;
     void setSubsurfaceScattering(const Vec3& sssColor, Vec3 sssRadius);
-    Vec3 getTextureColor(double u, double v) const;
+    Vec3 getTextureColor(float u, float v) const;
     virtual bool hasOpacityTexture() const override;
-    Vec2 applyTextureTransform(double u, double v) const;
+    Vec2 applyTextureTransform(float u, float v) const override;
     void setMetallic(float metallic, float intensity = 1.0f);
     void setMetallicTexture(const std::shared_ptr<Texture>& tex, float intensity = 1.0f);
     Vec3 evalSpecular(const Vec3& N, const Vec3& V, const Vec3& L, const Vec3& F0, float roughness) const;
@@ -113,13 +113,18 @@ public:
         return 0.01f;
     }
     Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
-        return getPropertyValue(emissionProperty, uv);
+        // GPU uses emission color directly (no intensity multiplication)
+        // For GPU parity, return color directly. For texture, sample and return.
+        if (emissionProperty.texture) {
+            return emissionProperty.texture->get_color(uv.u, uv.v);
+        }
+        return emissionProperty.color;
     }
-    MaterialProperty opacityProperty;
     MaterialProperty albedoProperty;
     MaterialProperty roughnessProperty;
     MaterialProperty metallicProperty;
     MaterialProperty normalProperty;
+    MaterialProperty opacityProperty;
     Vec2 tilingFactor;
     TextureTransform textureTransform;
     MaterialProperty specularProperty;
@@ -149,7 +154,7 @@ private:
 
     // Helper methods
     float max(float a, float b) const { return a > b ? a : b; }
-    UVData transformUV(double u, double v) const;
+    UVData transformUV(float u, float v) const;
     Vec2 applyWrapMode(const UVData& uvData) const;
     Vec2 applyPlanarWrapping(double u, double v) const;
 
@@ -167,9 +172,9 @@ private:
 
     float calculate_sss_absorption(float distance) const;
 
-    Vec3 calculate_sss_attenuation(double distance) const;
+    Vec3 calculate_sss_attenuation(float distance) const;
 
-    Vec3 sample_henyey_greenstein(const Vec3& wi, double g) const;
+    Vec3 sample_henyey_greenstein(const Vec3& wi, float g) const;
    
 
     Vec3 computeScatterDirection(const Vec3& N, const Vec3& T, const Vec3& B, float roughness) const;
@@ -177,7 +182,7 @@ private:
     
 
   
-    Vec2 applyTiling(double u, double v) const;
+    Vec2 applyTiling(float u, float v) const;
     Vec3 importanceSampleGGX(float u1, float u2, float roughness, const Vec3& N) const;
 
   
@@ -194,3 +199,4 @@ private:
 
     static void precomputeLUT(); // LUT'yi başlatan fonksiyon
 };
+

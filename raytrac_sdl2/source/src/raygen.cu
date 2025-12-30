@@ -10,6 +10,7 @@
 #include "sky_model.cuh"
 #include "vec3_utils.cuh"
 #include "ray_color.cuh"
+#include "water_shaders.cuh"
 #include "ray.h"              // ← varsa Ray struct burada
 #include "gpucamera.cuh"         // ← generate_camera_ray burada olabilir
 #include "random_utils.cuh" // random_float() fonksiyonu burada
@@ -44,8 +45,8 @@ extern "C" __global__ void __raygen__rg() {
 
     // Örnekleme döngüsü
     for (int s = 0; s < samples_this_pass; ++s) {
-        float u = (i + curand_uniform(&rng)) / float(optixLaunchParams.image_width);
-        float v = (j + curand_uniform(&rng)) / float(optixLaunchParams.image_height);
+        float u = (i + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_width);
+        float v = (j + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_height);
 
         Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
         float3 sample = ray_color(ray, &rng);
@@ -93,6 +94,14 @@ extern "C" __global__ void __raygen__rg() {
     // Use frame_number (accumulated sample count) for seed variation
     // This ensures each pass gets different random samples
     unsigned int seed = optixLaunchParams.frame_number * 719393 + pixel_index * 13731 + 1337;
+    
+    // PERFORMANCE OPTIMIZATION: Use PCG for jitter, curand for ray tracing
+    // PCG initialization is ~100x faster than curand_init
+    PCGState pcg_rng;
+    pcg_init(&pcg_rng, seed);
+    
+    // curand still needed for ray_color and get_ray_from_camera
+    // But we use simplified init with sequence=0, offset=0 (faster)
     curandState rng;
     curand_init(seed, 0, 0, &rng);
 
@@ -104,8 +113,8 @@ extern "C" __global__ void __raygen__rg() {
     // Sample loop - render requested number of samples for this pass
     for (int s = 0; s < samples_this_pass; ++s) {
         // Jittered sampling for anti-aliasing
-        float u = (i + curand_uniform(&rng)) / float(optixLaunchParams.image_width);
-        float v = (j + curand_uniform(&rng)) / float(optixLaunchParams.image_height);
+        float u = (i + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_width);
+        float v = (j + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_height);
 
         Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
         float3 sample = ray_color(ray, &rng);
@@ -121,7 +130,7 @@ extern "C" __global__ void __raygen__rg() {
     new_color *= optixLaunchParams.camera.exposure_factor;
 
     // ============ ACCUMULATION LOGIC (Cycles-style) ============
-    // accumulation_buffer is float4*: RGB = accumulated color * weight, W = total sample count
+    // accumulation_buffer is float4*: RGB = accumulated color sum, W = total sample count
     float4* accum_buffer = reinterpret_cast<float4*>(optixLaunchParams.accumulation_buffer);
     
     if (accum_buffer != nullptr) {
@@ -230,6 +239,7 @@ extern "C" __global__ void __miss__ms() {
 }
 
 // HIT
+// HIT
 extern "C" __global__ void __closesthit__ch() {
     unsigned int p0 = optixGetPayload_0();
     unsigned int p1 = optixGetPayload_1();
@@ -237,9 +247,8 @@ extern "C" __global__ void __closesthit__ch() {
 
     const HitGroupData* hgd = reinterpret_cast<HitGroupData*>(optixGetSbtDataPointer());
     
-    // Restore missing t definition
+    // 1. Geometric Context
     float t = optixGetRayTmax();
-
     float3 rayOrigin = optixGetWorldRayOrigin();
     float3 rayDir = optixGetWorldRayDirection();
     float3 hitPoint = rayOrigin + t * rayDir;
@@ -248,26 +257,11 @@ extern "C" __global__ void __closesthit__ch() {
     float u = bary.x;
     float v = bary.y;
     float w = 1.0f - u - v;
-	
+    
     const unsigned int primIdx = optixGetPrimitiveIndex();
     const uint3 tri = hgd->indices[primIdx];
 
-    // Interpolated normal
-    float3 normal;
-    if (hgd->has_normals) {
-        const float3 n0 = hgd->normals[tri.x];
-        const float3 n1 = hgd->normals[tri.y];
-        const float3 n2 = hgd->normals[tri.z];
-        normal = normalize(w * n0 + u * n1 + v * n2);
-    }
-    else {
-        const float3 v0 = hgd->vertices[tri.x];
-        const float3 v1 = hgd->vertices[tri.y];
-        const float3 v2 = hgd->vertices[tri.z];
-        normal = normalize(cross(v1 - v0, v2 - v0));
-    }
-
-    // Interpolated UV
+    // 2. Interpolate UV
     float2 uv;
     if (hgd->has_uvs) {
         const float2 uv0 = hgd->uvs[tri.x];
@@ -275,110 +269,250 @@ extern "C" __global__ void __closesthit__ch() {
         const float2 uv2 = hgd->uvs[tri.z];
         uv = w * uv0 + u * uv1 + v * uv2;
         uv.y = 1.0f - uv.y;
-        // UV fract düzeltmesi
         uv.x = uv.x - floorf(uv.x);
         uv.y = uv.y - floorf(uv.y);
-
-    }
-    else {
+    } else {
         uv = make_float2(u, v);
-       
     }
-    float3 tangent = normalize(cross(normal, make_float3(0.0f, 1.0f, 0.0f)));
-    if (length(tangent) < 0.1f)
-        tangent = normalize(cross(normal, make_float3(1.0f, 0.0f, 0.0f)));
+    
+    // 3. Transform Matrix (needed for determinants)
+    float o2w[12];
+    optixGetObjectToWorldTransformMatrix(o2w);
+    float m00 = o2w[0], m01 = o2w[1], m02 = o2w[2];
+    float m10 = o2w[4], m11 = o2w[5], m12 = o2w[6];
+    float m20 = o2w[8], m21 = o2w[9], m22 = o2w[10];
 
-    // Eğer normal map varsa TBN ile dönüştür
-    if (hgd->has_normal_tex) {
-        // Normal interpolate et
+    // 4. Calculate Normals
+    // a) Geometric Normal (Object Space)
+    const float3 vert0 = hgd->vertices[tri.x];
+    const float3 vert1 = hgd->vertices[tri.y];
+    const float3 vert2 = hgd->vertices[tri.z];
+    float3 obj_geo_normal = normalize(cross(vert1 - vert0, vert2 - vert0));
+    float3 world_geo_normal = normalize(optixTransformNormalFromObjectToWorldSpace(obj_geo_normal));
+
+    // b) Shading Normal (Object Space) -> World Space
+    float3 world_normal;
+    if (hgd->has_normals) {
         const float3 n0 = hgd->normals[tri.x];
         const float3 n1 = hgd->normals[tri.y];
         const float3 n2 = hgd->normals[tri.z];
-        float3 interp_normal = normalize(w * n0 + u * n1 + v * n2);
-
-        float3 final_tangent;
-
-        if (hgd->tangents) {
-            // Tangent varsa interpolate et
-            const float3 t0 = hgd->tangents[tri.x];
-            const float3 t1 = hgd->tangents[tri.y];
-            const float3 t2 = hgd->tangents[tri.z];
-            final_tangent = normalize(w * t0 + u * t1 + v * t2);
-        }
-        else {
-            // Yoksa UV'den hesapla (senin metodun)
-            const float3 p0 = hgd->vertices[tri.x];
-            const float3 p1 = hgd->vertices[tri.y];
-            const float3 p2 = hgd->vertices[tri.z];
-
-            const float2 uv0 = hgd->uvs[tri.x];
-            const float2 uv1 = hgd->uvs[tri.y];
-            const float2 uv2 = hgd->uvs[tri.z];
-
-            float3 edge1 = p1 - p0;
-            float3 edge2 = p2 - p0;
-
-            float2 deltaUV1 = uv1 - uv0;
-            float2 deltaUV2 = uv2 - uv0;
-
-            float f = 1.0f / (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y + 1e-6f);
-
-            final_tangent.x = f * (deltaUV2.y * edge1.x - deltaUV1.y * edge2.x);
-            final_tangent.y = f * (deltaUV2.y * edge1.y - deltaUV1.y * edge2.y);
-            final_tangent.z = f * (deltaUV2.y * edge1.z - deltaUV1.y * edge2.z);
-            final_tangent = normalize(final_tangent);
-
-            // Gram-Schmidt
-            final_tangent = normalize(final_tangent - interp_normal * dot(interp_normal, final_tangent));
-        }
-
-        // Bitangent üret
-        float3 bitangent = normalize(cross(interp_normal, final_tangent));
-
-        // Normal map oku
-        float4 tex_normal4 = tex2D<float4>(hgd->normal_tex, uv.x, uv.y);
-        float3 tex_normal = make_float3(tex_normal4.x, tex_normal4.y, tex_normal4.z);
-        tex_normal = tex_normal * 2.0f - make_float3(1.0f, 1.0f, 1.0f);
-        // TBN matrisi ile normal dönüştür
-        normal = normalize(
-            tex_normal.x * final_tangent +
-            tex_normal.y * bitangent +
-            tex_normal.z * interp_normal
-        );
+        float3 obj_normal = normalize(w * n0 + u * n1 + v * n2);
+        world_normal = normalize(optixTransformNormalFromObjectToWorldSpace(obj_normal));
+    } else {
+        world_normal = world_geo_normal;
+        // Also update obj_normal for tangent calc fallback
     }
-   
-    // Payload dolduruluyor
+
+    // c) Faceforward
+    if (dot(world_geo_normal, rayDir) > 0.0f) {
+        world_normal = -world_normal;
+        world_geo_normal = -world_geo_normal; // Ensure TBN consistency
+    }
+
+    // 5. Tangent & Bitangent Setup (Common)
+    float3 world_tangent, world_bitangent;
+    {
+         float3 obj_tangent;
+         float sigma = 1.0f;
+         
+         // Calculate Sigma (Handedness)
+         float det_transform = m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20);
+         float sigma_inst = (det_transform < 0.0f) ? -1.0f : 1.0f;
+         
+         if (hgd->has_uvs) {
+             const float2 uv0 = hgd->uvs[tri.x];
+             const float2 uv1 = hgd->uvs[tri.y];
+             const float2 uv2 = hgd->uvs[tri.z];
+             float2 dUV1 = uv1 - uv0;
+             float2 dUV2 = uv2 - uv0;
+             float det_uv = (dUV1.x * dUV2.y - dUV2.x * dUV1.y);
+             float sigma_uv = (det_uv < 0.0f) ? -1.0f : 1.0f;
+             sigma = sigma_uv * sigma_inst;
+         }
+
+         if (hgd->has_tangents) {
+             const float3 t0 = hgd->tangents[tri.x];
+             const float3 t1 = hgd->tangents[tri.y];
+             const float3 t2 = hgd->tangents[tri.z];
+             obj_tangent = normalize(w * t0 + u * t1 + v * t2);
+         } else {
+             // Fallback geometric tangent
+             // Simplified: assumes Y-up UV map roughly aligns with geometric edges
+              float3 edge1 = vert1 - vert0;
+              float3 edge2 = vert2 - vert0;
+              // Assuming rudimentary mapping if UVs missing
+              obj_tangent = normalize(edge1); 
+         }
+
+         // Transform Tangent (Linear)
+         world_tangent.x = m00 * obj_tangent.x + m01 * obj_tangent.y + m02 * obj_tangent.z;
+         world_tangent.y = m10 * obj_tangent.x + m11 * obj_tangent.y + m12 * obj_tangent.z;
+         world_tangent.z = m20 * obj_tangent.x + m21 * obj_tangent.y + m22 * obj_tangent.z;
+         world_tangent = normalize(world_tangent);
+
+         // Gram-Schmidt Orthogonalization
+         world_tangent = normalize(world_tangent - world_normal * dot(world_normal, world_tangent));
+         
+         // Bitangent
+         world_bitangent = normalize(cross(world_normal, world_tangent)) * sigma;
+    }
+
+    // 6. LOGIC BRANCH: TERRAIN vs STANDARD
+    float3 final_normal = world_normal;
+    payload->use_blended_data = 0;
+
+    if (hgd->is_terrain && hgd->splat_map_tex) {
+        // --- TERRAIN LAYER BLENDING ---
+        // Note: Splat map pixel array is top-down but texture coords are bottom-up, so flip Y
+        float4 mask = tex2D<float4>(hgd->splat_map_tex, uv.x, 1.0f - uv.y);
+        
+        float3 blended_albedo = make_float3(0.0f);
+        float blended_roughness = 0.0f;
+        float3 blended_ts_normal = make_float3(0.0f);
+        float total_weight = 0.0f;
+
+        for (int i = 0; i < 4; ++i) {
+            float weight = (i==0) ? mask.x : (i==1) ? mask.y : (i==2) ? mask.z : mask.w;
+            if (weight < 0.001f) continue;
+
+            float2 layer_uv = uv * hgd->layer_uv_scale[i]; // Apply scale
+
+            // Albedo
+            float3 col = make_float3(1.0f);
+            if (hgd->layer_albedo_tex[i]) {
+                float4 c = tex2D<float4>(hgd->layer_albedo_tex[i], layer_uv.x, layer_uv.y);
+                // Simple linearization (approximation)
+                col = make_float3(c.x*c.x, c.y*c.y, c.z*c.z); 
+            }
+            
+            // Roughness
+            float r = 0.5f;
+            if (hgd->layer_roughness_tex[i]) {
+                r = tex2D<float4>(hgd->layer_roughness_tex[i], layer_uv.x, layer_uv.y).x;
+            }
+
+            // Normal
+            float3 n_ts = make_float3(0,0,1);
+            if (hgd->layer_normal_tex[i]) {
+                float4 n = tex2D<float4>(hgd->layer_normal_tex[i], layer_uv.x, layer_uv.y);
+                n_ts = make_float3(n.x, n.y, n.z) * 2.0f - make_float3(1.0f, 1.0f, 1.0f);
+            }
+            
+            blended_albedo += col * weight;
+            blended_roughness += r * weight;
+            blended_ts_normal += n_ts * weight;
+            total_weight += weight;
+        }
+
+        if (total_weight > 0.0f) {
+            // Normalize blended data? 
+            // Splat map sum usually 1.0, but safety check:
+             blended_albedo /= total_weight;
+             blended_roughness /= total_weight;
+             blended_ts_normal = normalize(blended_ts_normal); // Re-normalize normal vector
+             
+             // Apply TBN to blended tangent-space normal
+             final_normal = normalize(
+                 blended_ts_normal.x * world_tangent +
+                 blended_ts_normal.y * world_bitangent +
+                 blended_ts_normal.z * world_normal
+             );
+             
+             payload->blended_albedo = blended_albedo;
+             payload->blended_roughness = blended_roughness;
+             payload->use_blended_data = 1;
+        }
+    } 
+    else {
+        // --- STANDARD MATERIAL ---
+        // Normal Map
+        if (hgd->has_normal_tex) {
+            float4 n_val = tex2D<float4>(hgd->normal_tex, uv.x, uv.y);
+            float3 ts_normal = make_float3(n_val.x, n_val.y, n_val.z) * 2.0f - make_float3(1.0f, 1.0f, 1.0f);
+            
+            final_normal = normalize(
+                ts_normal.x * world_tangent +
+                ts_normal.y * world_bitangent +
+                ts_normal.z * world_normal
+            );
+        }
+    }
+
+    // 7. Water Wave Perturbation
+    if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+         const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
+         // Sheen hack for water
+         if (mat.sheen > 0.0001f) {
+             float time = optixLaunchParams.time;
+             // evaluateGerstnerWave returns normal and foam
+             WaterResult res = evaluateGerstnerWave(hitPoint, final_normal, time, mat.anisotropic, mat.sheen, mat.sheen_tint);
+             
+             final_normal = res.normal;
+             
+             // Apply Foam
+             // If foam > 0, blend albedo towards white and roughness towards 0.8
+             if (res.foam > 0.01f) {
+                 // Use blended data to override material defaults
+                 float3 waterColor = mat.albedo; 
+                 // If material albedo is black (for physics), use a default deep blue tint for the water base if not overridden?
+                 // Actually, if we want the user to see Blue water, they should set Albedo to Blue.
+                 // But WaterManager sets albedo to Black.
+                 // Let's HARDCODE a nice water color ramp if the base is black.
+                 if (waterColor.x < 0.01f && waterColor.y < 0.01f && waterColor.z < 0.01f) {
+                     waterColor = make_float3(0.02f, 0.05f, 0.1f); // Setup default deep color
+                 }
+                 
+                 float3 foamColor = make_float3(0.9f, 0.95f, 1.0f);
+                 
+                 // Blend
+                 payload->blended_albedo = lerp(waterColor, foamColor, res.foam);
+                 payload->blended_roughness = lerp(mat.roughness, 0.6f, res.foam); // Foam is rougher
+                 payload->use_blended_data = 1;
+             } else {
+                  // If base albedo is black, we might want to force a water color here too?
+                  // Doing so allows the transmission to work while having a 'surface' tint?
+                  // Transmission scatter uses albedo as Tint.
+                  // If albedo is Black, transmission is Clear (absorption = (1-0)*t = high absorption?)
+                  // Wait, Beer's law logic in `material_scatter`:
+                  // float3 absorption = (1 - tint) * thickness.
+                  // If tint is Black (0,0,0), absorption is High (1.0).
+                  // So Black albedo = Dark/Opaque liquid.
+                  // White albedo = Clear liquid.
+                  
+                  // WaterManager sets Albedo to Black (0,0,0). This creates Dark water.
+                  // If we want Clear water, Albedo should be White (1,1,1).
+                  // If we want Blue water, Albedo should be Blue.
+                  // I will NOT override it here for non-foam parts to respect Physics.
+                  // BUT, I will make sure Foam writes to blended_albedo.
+             }
+         }
+    }
+
+    // 8. Pack Payload
     payload->hit = 1;
     payload->position = hitPoint;
-    payload->normal = normal;    
+    payload->normal = final_normal;
     payload->material_id = hgd->material_id;
-    payload->emission = hgd->emission;
-    payload->uv = uv;
-    payload->t = t;
-
-
-    // Texture object'leri
+    payload->uv = uv;  // CRITICAL: Pass UV to shader for texture sampling!
+    
+    // Pass standard textures (Scatter function might still check them if blended_data=0)
     payload->albedo_tex = hgd->albedo_tex;
-    payload->has_albedo_tex = hgd->has_albedo_tex;
-
     payload->roughness_tex = hgd->roughness_tex;
-    payload->has_roughness_tex = hgd->has_roughness_tex;
-
     payload->normal_tex = hgd->normal_tex;
-    payload->has_normal_tex = hgd->has_normal_tex;
-
     payload->metallic_tex = hgd->metallic_tex;
-    payload->has_metallic_tex = hgd->has_metallic_tex;
-
     payload->transmission_tex = hgd->transmission_tex;
-    payload->has_transmission_tex = hgd->has_transmission_tex;
-
     payload->opacity_tex = hgd->opacity_tex;
+    payload->emission_tex = hgd->emission_tex;
+    
+    payload->has_albedo_tex = hgd->has_albedo_tex;
+    payload->has_roughness_tex = hgd->has_roughness_tex;
+    payload->has_normal_tex = hgd->has_normal_tex;
+    payload->has_metallic_tex = hgd->has_metallic_tex;
+    payload->has_transmission_tex = hgd->has_transmission_tex;
     payload->has_opacity_tex = hgd->has_opacity_tex;
-	payload->emission_tex = hgd->emission_tex;
     payload->has_emission_tex = hgd->has_emission_tex;
     
-    // Volumetric material info
+    // Volumetrics
     payload->is_volumetric = hgd->is_volumetric;
     payload->vol_density = hgd->vol_density;
     payload->vol_absorption = hgd->vol_absorption;
@@ -392,7 +526,6 @@ extern "C" __global__ void __closesthit__ch() {
     payload->aabb_min = hgd->aabb_min;
     payload->aabb_max = hgd->aabb_max;
     
-    // Multi-Scattering parameters (NEW)
     payload->vol_multi_scatter = hgd->vol_multi_scatter;
     payload->vol_g_back = hgd->vol_g_back;
     payload->vol_lobe_mix = hgd->vol_lobe_mix;
@@ -441,10 +574,29 @@ extern "C" __global__ void __anyhit__ah() {
         alpha *= opacity_val.x; 
     }
 
-    // Transparent Shadow Logic
-    // If opacity is less than 0.9, do not block the shadow ray.
-    if (alpha < 0.9f) {
-        optixIgnoreIntersection();
+    // ------------------------------------------------------------------
+    // STOCHASTIC TRANSPARENCY (Matches CPU Logic)
+    // ------------------------------------------------------------------
+    if (alpha < 1.0f) {
+        // Generate pseudo-random value for this intersection
+        // We use ray properties and frame index to ensure randomness per sample
+        float3 ray_origin = optixGetWorldRayOrigin();
+        float3 ray_dir = optixGetWorldRayDirection();
+        uint3 launch_idx = optixGetLaunchIndex();
+        
+        // Simple distinct hash components
+        float seed = ray_origin.x * 73.0f + ray_origin.y * 19.0f + ray_origin.z * 43.0f +
+                     ray_dir.x * 37.0f + ray_dir.y * 11.0f + ray_dir.z * 5.0f +
+                     (float)launch_idx.x * 0.1f + (float)launch_idx.y * 0.1f +
+                     (float)optixLaunchParams.frame_number * 13.0f; // Enable temporal variation
+                     
+        // Linear Congruential Generator-like modulation
+        float rnd = fmodf(fabsf(sinf(seed) * 43758.5453f), 1.0f);
+        
+        // Alpha Test: If random value is greater than alpha, the surface is transparent (hole)
+        if (rnd > alpha) {
+            optixIgnoreIntersection();
+        }
     }
 }
 
