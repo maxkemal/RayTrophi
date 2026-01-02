@@ -1,9 +1,15 @@
 ﻿#include "globals.h"
 
+// Include new node system to verify compilation
+#include "NodeSystemV2.h"
+#include "TerrainNodes/TerrainContext.h"
+#include "TerrainNodes/TerrainNodeBase.h"
+#include "TerrainNodes/TerrainNodesV2.h"
+
 std::atomic<int> completed_pixels(0);
-constexpr double min_distance = 0.1;  // Minimum mesafe
-constexpr double max_distance =10000.0;  // Maksimum mesafe
- float aspect_ratio = 16.0 / 9.0; // Sabit olarak float türünde tanımlıyoruz
+constexpr float min_distance = 0.1f;  // Minimum mesafe
+constexpr float max_distance = 10000.0f;  // Maksimum mesafe
+ float aspect_ratio = 16.0f / 9.0f; // Sabit olarak float türünde tanımlıyoruz
  int image_width = 1280*1;
  int image_height = static_cast<int>(image_width / aspect_ratio);
 constexpr float EPSILON = 1e-7f;
@@ -16,7 +22,7 @@ bool atmosferic_effect_enabled = false;
 constexpr float gamma= 1.0f;
 constexpr float exposure= 1.0f;
 constexpr float saturation=1.0f;
-constexpr float aperture = 0.0;
+constexpr float aperture = 0.0f;
 constexpr float focusdistance = 1.573f;
 float light_radius = 0.1f; // Işık kaynağı için yarıçap
 int hitcount=0;
@@ -27,7 +33,7 @@ bool g_hasOptix = false;
 float last_render_time_ms = 0.0f;  // Render süresi buraya yazılacak
 int pending_width = 1280;
 int pending_height = 720;
-float pending_aspect_ratio = 16 / 9;
+float pending_aspect_ratio = 16.0f / 9.0f;
 bool pending_resolution_change=false;
 bool render_finished = false;   
 std::atomic<bool> rendering_in_progress = false;
@@ -40,6 +46,7 @@ std::atomic<bool> rendering_stopped_cpu=false;
 
 RenderSettings render_settings;  // Uses default values from header
 UILogger g_sceneLog; // global logger’ın tanımı burada
+
 
 
 

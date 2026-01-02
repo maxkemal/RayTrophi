@@ -230,7 +230,7 @@ private:
     // ========================================================================
     
     TriangleVertexData vertices[3];           // Consolidated vertex data (144 bytes)
-    uint16_t materialID;                       // Material lookup ID (2 bytes)
+    uint16_t materialID = 0xFFFF;                       // Material lookup ID (2 bytes)
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
     std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
     

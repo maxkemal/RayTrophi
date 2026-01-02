@@ -14,6 +14,11 @@
 // Helper function to render a single cloud layer
 // Returns ONLY the cloud color contribution (not blended with background)
 // Modifies transmittance based on cloud density encountered
+__device__ inline float smoothstep_cloud(float edge0, float edge1, float x) {
+    float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / (edge1 - edge0)));
+    return t * t * (3.0f - 2.0f * t);
+}
+
 __device__ float3 render_cloud_layer(
     const WorldData& world, 
     const float3& rayDir, 
@@ -81,18 +86,26 @@ __device__ float3 render_cloud_layer(
         float3 pos = cloudCamPos + rayDir * (t + stepSize * hash(jitterSeed));
         
         float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-        float heightGradient = 4.0f * heightFraction * (1.0f - heightFraction);
-        heightGradient = fmaxf(0.0f, fminf(1.0f, heightGradient));
+        
+        // CUMULUS PROFILE (Strict Flat Bottom)
+        // 1. Sharp rise at bottom (0% to 5% of height) creates the "cut" look
+        // 2. Round falloff at top (starting at 30% height)
+        // 3. No noise on the floor to ensure it's perfectly flat
+        float heightGradient = smoothstep_cloud(0.0f, 0.05f, heightFraction) * smoothstep_cloud(1.0f, 0.3f, heightFraction);
+        
+        // Boost density at the bottom to make it look "solid" immediately
+        // Gradient power to make the bottom 20% very dense
+        if (heightFraction < 0.2f) {
+           heightGradient = fmaxf(heightGradient, smoothstep_cloud(0.0f, 0.02f, heightFraction));
+        }
         
         float3 offsetPos = pos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
         
         // Use 3D texture if available, otherwise fallback to procedural
         // FORCE CINEMATIC QUALITY (Procedural)
-        // This provides infinite detail and better quality than the 256^3 texture
         float3 noisePos = offsetPos * scale;
         float rawDensity = cloud_shape(noisePos, coverage);
         
-
         float density = rawDensity * heightGradient;
         
         if (density > 0.003f) {
@@ -104,47 +117,53 @@ __device__ float3 render_cloud_layer(
             float lightTransmittance = 1.0f;
             int lightSteps = world.nishita.cloud_light_steps;  // UI controlled
             
-            if (lightSteps > 0 && sunDirection.y > 0.01f) {
-                float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.01f, sunDirection.y) / (float)lightSteps;
-                lightStepSize = fminf(lightStepSize, 500.0f);
+            if (lightSteps > 0 && sunDirection.y > -0.1f) {
+                // Adaptive step size based on density
+                float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.1f, fabsf(sunDirection.y)) / (float)lightSteps;
+                lightStepSize = fminf(lightStepSize, 200.0f); // Clamp max step
                 
                 // ═══════════════════════════════════════════════════════════
-                    // DUAL SCATTERING LIGHT MARCHING
-                    // ═══════════════════════════════════════════════════════════
-                    float lightDensitySum = 0.0f;
+                // DUAL SCATTERING LIGHT MARCHING
+                // ═══════════════════════════════════════════════════════════
+                float lightDensitySum = 0.0f;
 
-                    for (int j = 1; j <= lightSteps; ++j) {
-                        float3 lightPos = pos + sunDirection * (lightStepSize * (float)j);
-                        
-                        if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
-                        
-                        float3 lightOffsetPos = lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
-                        
-                        float3 lightNoisePos = lightOffsetPos * scale;
-                        // Use fast_cloud_shape for performance in shadow rays
-                        float lightDensity = fast_cloud_shape(lightNoisePos, coverage);
+                for (int j = 1; j <= lightSteps; ++j) {
+                    float3 lightPos = pos + sunDirection * (lightStepSize * (float)j);
+                    
+                    if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
+                    
+                    float3 lightOffsetPos = lightPos + make_float3(world.nishita.cloud_offset_x, 0.0f, world.nishita.cloud_offset_z);
+                    
+                    float3 lightNoisePos = lightOffsetPos * scale;
+                    // Use fast_cloud_shape for performance in shadow rays
+                    float lightDensity = fast_cloud_shape(lightNoisePos, coverage);
 
-                        float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                        float lightHeightGrad = 4.0f * lh * (1.0f - lh);
-                        lightDensity *= lightHeightGrad * localDensityMult;
-                        
-                        lightDensitySum += lightDensity * lightStepSize;
-                        
-                        if (lightDensitySum > 10.0f) break; 
+                    float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
+                    // Match the profile used in main loop for consistency (Sharp Cumulus)
+                    float lightHeightGrad = smoothstep_cloud(0.0f, 0.05f, lh) * smoothstep_cloud(1.0f, 0.3f, lh);
+                    if (lh < 0.2f) {
+                       lightHeightGrad = fmaxf(lightHeightGrad, smoothstep_cloud(0.0f, 0.02f, lh));
                     }
-
-                    // Beer's Law (Primary Absorption)
-                    float beersLaw = expf(-lightDensitySum * 0.015f * world.nishita.cloud_absorption);
                     
-                    // Secondary Absorption (Softer, simulates scattered light) - Dual Scattering
-                    float beersLaw2 = expf(-lightDensitySum * 0.015f * world.nishita.cloud_absorption * 0.25f);
+                    lightDensity *= lightHeightGrad * localDensityMult;
                     
-                    // Combine Terms
-                    lightTransmittance = beersLaw * 0.3f + beersLaw2 * 0.7f * world.nishita.cloud_silver_intensity;
+                    lightDensitySum += lightDensity * lightStepSize;
                     
-                    // Shadow stength from UI
-                    lightTransmittance = lerp(1.0f, lightTransmittance, world.nishita.cloud_shadow_strength);
+                    if (lightDensitySum > 10.0f) break; 
                 }
+
+                // Beer's Law (Primary Absorption)
+                float beersLaw = expf(-lightDensitySum * 0.02f * world.nishita.cloud_absorption);
+                
+                // Secondary Absorption (Softer, simulates scattered light) - Dual Scattering
+                float beersLaw2 = expf(-lightDensitySum * 0.02f * world.nishita.cloud_absorption * 0.2f);
+                
+                // Combine Terms with Silver intensity
+                lightTransmittance = beersLaw * 0.3f + beersLaw2 * 0.7f * world.nishita.cloud_silver_intensity;
+                
+                // Shadow stength from UI
+                lightTransmittance = lerp(1.0f, lightTransmittance, world.nishita.cloud_shadow_strength);
+            }
             
             
             // ═══════════════════════════════════════════════════════════
@@ -152,8 +171,16 @@ __device__ float3 render_cloud_layer(
             // ═══════════════════════════════════════════════════════════
             float cosTheta = dot(rayDir, sunDirection);
             
-            // Henyey-Greenstein phase function
-            float phase = (1.0f - g * g) / (4.0f * 3.14159f * powf(1.0f + g * g - 2.0f * g * cosTheta, 1.5f));
+            // Henyey-Greenstein phase function (Dual-Lobe for Back Scattering)
+            // Lobe 1: Forward scattering (strong peak around sun)
+            float phase1 = (1.0f - g * g) / (4.0f * 3.14159f * powf(1.0f + g * g - 2.0f * g * cosTheta, 1.5f));
+            
+            // Lobe 2: Backward scattering (softer peak opposite to sun)
+            float g2 = -0.4f; // Typical back-scatter value for clouds
+            float phase2 = (1.0f - g2 * g2) / (4.0f * 3.14159f * powf(1.0f + g2 * g2 - 2.0f * g2 * cosTheta, 1.5f));
+            
+            // Mix lobes (mostly forward, but some backward to light up the front of clouds)
+            float phase = lerp(phase2, phase1, 0.7f); // 70% forward, 30% backward
             
             // Powder effect
             float powder = powderEffect(density, cosTheta);
@@ -1548,14 +1575,14 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                 throughput *= (MAX_CONTRIBUTION / max_throughput);
             }
         }
-        
+        float3 emission = mat.emission;
+        if (payload.has_emission_tex) {
+            float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
+            emission = make_float3(tex.x, tex.y, tex.z) * mat.emission; // Tint with material emission color
+        }
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
-        if (light_count == 0) {
-            float3 emission = payload.emission;
-            if (payload.has_emission_tex) {
-                float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
-                emission = make_float3(tex.x, tex.y, tex.z) * mat.emission;
-            }
+        if (light_count == 0) {           
+           
             color += throughput * emission;
             ray = scattered;
             continue;
@@ -1614,8 +1641,6 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             }
         }
       
-        float3 emission = payload.emission;
-        
         // --- Toplam katkı ---
         float3 total_contribution = direct + brdf_mis + emission;
         

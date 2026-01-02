@@ -1,10 +1,25 @@
-#pragma once
+﻿#pragma once
 #include <vector>
 #include <map>
 #include <string>
 #include <memory>
 #include "Vec3.h"
 #include "material_gpu.h"  // For GpuMaterial
+#include "json.hpp"
+using json = nlohmann::json;
+
+// Vec3 Serialization
+inline void to_json(json& j, const Vec3& v) {
+    j = json::array({v.x, v.y, v.z});
+}
+
+inline void from_json(const json& j, Vec3& v) {
+    if(j.is_array() && j.size() >= 3) {
+        v.x = j[0]; v.y = j[1]; v.z = j[2];
+    } else {
+        v = Vec3(0,0,0);
+    }
+}
 
 // ============================================================================
 // KEYFRAME SYSTEM - Object-based animation with transform + material props
@@ -596,6 +611,87 @@ struct WorldKeyframe {
 };
 
 // ============================================================================
+// TERRAIN KEYFRAME - Heightmap and Hardness map snapshots
+// ============================================================================
+struct TerrainKeyframe {
+    std::vector<float> heightData;
+    std::vector<float> hardnessData;
+    std::vector<unsigned char> splatData;  // RGBA splat map (4 bytes per pixel)
+    int width = 0;
+    int height = 0;
+    int splat_width = 0;   // Splat map dimensions (may differ from height map)
+    int splat_height = 0;
+    
+    // Flags
+    bool has_data = false;
+    bool has_splat = false;
+    
+    TerrainKeyframe() = default;
+    
+    // Linear Interpolation for Terrain
+    // This could be expensive for large terrains, but necessary for morphing
+    static TerrainKeyframe lerp(const TerrainKeyframe& a, const TerrainKeyframe& b, float t) {
+        TerrainKeyframe result;
+        
+        if (!a.has_data && !b.has_data) return result;
+        
+        // If dimensions mismatch or one is missing, just return the close one (snap)
+        // Or handle simple replacement
+        if (!a.has_data) return b;
+        if (!b.has_data) return a;
+        if (a.width != b.width || a.height != b.height) return (t < 0.5f) ? a : b;
+        
+        result.width = a.width;
+        result.height = a.height;
+        result.has_data = true;
+        
+        size_t size = a.heightData.size();
+        result.heightData.resize(size);
+        bool hasHardness = !a.hardnessData.empty() && !b.hardnessData.empty();
+        if (hasHardness) result.hardnessData.resize(size);
+        
+        // Fast Lerp for height data
+        for (size_t i = 0; i < size; i++) {
+            result.heightData[i] = a.heightData[i] + (b.heightData[i] - a.heightData[i]) * t;
+            if (hasHardness) {
+                result.hardnessData[i] = a.hardnessData[i] + (b.hardnessData[i] - a.hardnessData[i]) * t;
+            }
+        }
+        
+        // Splat map interpolation (if both have splat data)
+        bool hasSplat = a.has_splat && b.has_splat && 
+                        a.splat_width == b.splat_width && 
+                        a.splat_height == b.splat_height &&
+                        !a.splatData.empty() && !b.splatData.empty();
+        if (hasSplat) {
+            result.has_splat = true;
+            result.splat_width = a.splat_width;
+            result.splat_height = a.splat_height;
+            size_t splat_size = a.splatData.size();
+            result.splatData.resize(splat_size);
+            
+            for (size_t i = 0; i < splat_size; i++) {
+                float va = (float)a.splatData[i];
+                float vb = (float)b.splatData[i];
+                result.splatData[i] = (unsigned char)(va + (vb - va) * t);
+            }
+        } else if (a.has_splat) {
+            result.has_splat = true;
+            result.splat_width = a.splat_width;
+            result.splat_height = a.splat_height;
+            result.splatData = a.splatData;
+        } else if (b.has_splat) {
+            result.has_splat = true;
+            result.splat_width = b.splat_width;
+            result.splat_height = b.splat_height;
+            result.splatData = b.splatData;
+        }
+        
+        return result;
+    }
+};
+
+// ============================================================================
 // TRANSFORM KEYFRAME - Position, rotation (Euler), scale
 // ============================================================================
 
@@ -606,59 +702,89 @@ struct TransformKeyframe {
     Vec3 rotation = Vec3(0, 0, 0);  // Euler angles in degrees
     Vec3 scale = Vec3(1, 1, 1);
     
-    // Per-channel keyed flags (for independent L/R/S keyframing)
+    // Per-channel keyed flags (compound)
     bool has_position = true;   // Location keyed
     bool has_rotation = true;   // Rotation keyed
     bool has_scale = true;      // Scale keyed
+
+    // Detailed per-axis flags
+    bool has_pos_x = true; bool has_pos_y = true; bool has_pos_z = true;
+    bool has_rot_x = true; bool has_rot_y = true; bool has_rot_z = true;
+    bool has_scl_x = true; bool has_scl_y = true; bool has_scl_z = true;
     
     TransformKeyframe() = default;
     
     TransformKeyframe(const Vec3& pos, const Vec3& rot, const Vec3& scl)
-        : position(pos), rotation(rot), scale(scl) {}
+        : position(pos), rotation(rot), scale(scl) {
+    };
     
-    // Linear interpolation - respects per-channel flags
+    // Linear interpolation - respects per-axis flags
     static TransformKeyframe lerp(const TransformKeyframe& a, const TransformKeyframe& b, float t) {
         TransformKeyframe result;
         
-        // Only interpolate channels that are keyed in both keyframes
-        if (a.has_position && b.has_position) {
-            result.position = a.position + (b.position - a.position) * t;
-            result.has_position = true;
-        } else if (a.has_position) {
-            result.position = a.position;
-            result.has_position = true;
-        } else if (b.has_position) {
-            result.position = b.position;
-            result.has_position = true;
-        } else {
-            result.has_position = false;
-        }
+        // --- POSITION ---
+        // X
+        if (a.has_pos_x && b.has_pos_x) result.position.x = a.position.x + (b.position.x - a.position.x) * t;
+        else if (a.has_pos_x) result.position.x = a.position.x;
+        else if (b.has_pos_x) result.position.x = b.position.x;
+        result.has_pos_x = a.has_pos_x || b.has_pos_x;
+
+        // Y
+        if (a.has_pos_y && b.has_pos_y) result.position.y = a.position.y + (b.position.y - a.position.y) * t;
+        else if (a.has_pos_y) result.position.y = a.position.y;
+        else if (b.has_pos_y) result.position.y = b.position.y;
+        result.has_pos_y = a.has_pos_y || b.has_pos_y;
+
+        // Z
+        if (a.has_pos_z && b.has_pos_z) result.position.z = a.position.z + (b.position.z - a.position.z) * t;
+        else if (a.has_pos_z) result.position.z = a.position.z;
+        else if (b.has_pos_z) result.position.z = b.position.z;
+        result.has_pos_z = a.has_pos_z || b.has_pos_z;
+
+        // Compound Flag Update
+        result.has_position = result.has_pos_x || result.has_pos_y || result.has_pos_z;
         
-        if (a.has_rotation && b.has_rotation) {
-            result.rotation = a.rotation + (b.rotation - a.rotation) * t;
-            result.has_rotation = true;
-        } else if (a.has_rotation) {
-            result.rotation = a.rotation;
-            result.has_rotation = true;
-        } else if (b.has_rotation) {
-            result.rotation = b.rotation;
-            result.has_rotation = true;
-        } else {
-            result.has_rotation = false;
-        }
+        // --- ROTATION ---
+        // X
+        if (a.has_rot_x && b.has_rot_x) result.rotation.x = a.rotation.x + (b.rotation.x - a.rotation.x) * t;
+        else if (a.has_rot_x) result.rotation.x = a.rotation.x;
+        else if (b.has_rot_x) result.rotation.x = b.rotation.x;
+        result.has_rot_x = a.has_rot_x || b.has_rot_x;
+
+        // Y
+        if (a.has_rot_y && b.has_rot_y) result.rotation.y = a.rotation.y + (b.rotation.y - a.rotation.y) * t;
+        else if (a.has_rot_y) result.rotation.y = a.rotation.y;
+        else if (b.has_rot_y) result.rotation.y = b.rotation.y;
+        result.has_rot_y = a.has_rot_y || b.has_rot_y;
+
+        // Z
+        if (a.has_rot_z && b.has_rot_z) result.rotation.z = a.rotation.z + (b.rotation.z - a.rotation.z) * t;
+        else if (a.has_rot_z) result.rotation.z = a.rotation.z;
+        else if (b.has_rot_z) result.rotation.z = b.rotation.z;
+        result.has_rot_z = a.has_rot_z || b.has_rot_z;
+
+        result.has_rotation = result.has_rot_x || result.has_rot_y || result.has_rot_z;
         
-        if (a.has_scale && b.has_scale) {
-            result.scale = a.scale + (b.scale - a.scale) * t;
-            result.has_scale = true;
-        } else if (a.has_scale) {
-            result.scale = a.scale;
-            result.has_scale = true;
-        } else if (b.has_scale) {
-            result.scale = b.scale;
-            result.has_scale = true;
-        } else {
-            result.has_scale = false;
-        }
+        // --- SCALE ---
+        // X
+        if (a.has_scl_x && b.has_scl_x) result.scale.x = a.scale.x + (b.scale.x - a.scale.x) * t;
+        else if (a.has_scl_x) result.scale.x = a.scale.x;
+        else if (b.has_scl_x) result.scale.x = b.scale.x;
+        result.has_scl_x = a.has_scl_x || b.has_scl_x;
+
+        // Y
+        if (a.has_scl_y && b.has_scl_y) result.scale.y = a.scale.y + (b.scale.y - a.scale.y) * t;
+        else if (a.has_scl_y) result.scale.y = a.scale.y;
+        else if (b.has_scl_y) result.scale.y = b.scale.y;
+        result.has_scl_y = a.has_scl_y || b.has_scl_y;
+
+        // Z
+        if (a.has_scl_z && b.has_scl_z) result.scale.z = a.scale.z + (b.scale.z - a.scale.z) * t;
+        else if (a.has_scl_z) result.scale.z = a.scale.z;
+        else if (b.has_scl_z) result.scale.z = b.scale.z;
+        result.has_scl_z = a.has_scl_z || b.has_scl_z;
+        
+        result.has_scale = result.has_scl_x || result.has_scl_y || result.has_scl_z;
         
         return result;
     }
@@ -678,8 +804,11 @@ struct Keyframe {
     bool has_transform = false;
     bool has_material = false;
     bool has_light = false;
-    bool has_camera = false;
-    bool has_world = false;     // NEW
+    bool has_camera = false;   
+    bool has_world = false;
+    bool has_terrain = false;   // NEW: Terrain morphing support
+    
+    TerrainKeyframe terrain;    // NEW
     
     Keyframe() = default;
     Keyframe(int f) : frame(f) {}
@@ -719,6 +848,10 @@ struct ObjectAnimationTrack {
                 it->world = kf.world;
                 it->has_world = true;
             }
+            if (kf.has_terrain) {
+                it->terrain = kf.terrain;
+                it->has_terrain = true;
+            }
         } else {
             keyframes.insert(it, kf);
         }
@@ -745,109 +878,235 @@ struct ObjectAnimationTrack {
         Keyframe result(current_frame);
         if (keyframes.empty()) return result;
 
-        // Lambda to find previous valid keyframe for a channel
-        auto findPrev = [&](bool (Keyframe::*has_flag)) -> const Keyframe* {
-            // Start from the keyframe occurring at or before current_frame
-            // lower_bound gives first element >= value.
-            // So we want the one before that, or that one if equal?
-            // Let's iterate backwards.
+        // Lambda to find previous valid keyframe matching a predicate
+        auto findPrev = [&](auto predicate) -> const Keyframe* {
             for (auto it = keyframes.rbegin(); it != keyframes.rend(); ++it) {
                 if (it->frame <= current_frame) {
-                    if ((*it).*has_flag) return &(*it);
+                    if (predicate(*it)) return &(*it);
                 }
             }
             return nullptr;
         };
 
-        // Lambda to find next valid keyframe for a channel
-        auto findNext = [&](bool (Keyframe::*has_flag)) -> const Keyframe* {
+        // Lambda to find next valid keyframe matching a predicate 
+        auto findNext = [&](auto predicate) -> const Keyframe* {
              for (auto it = keyframes.begin(); it != keyframes.end(); ++it) {
                 if (it->frame >= current_frame) {
-                    if ((*it).*has_flag) return &(*it);
+                    if (predicate(*it)) return &(*it);
                 }
             }
             return nullptr;
         };
         
-        // --- TRANSFORM CHANNEL ---
-        const Keyframe* prev_trans = findPrev(&Keyframe::has_transform);
-        const Keyframe* next_trans = findNext(&Keyframe::has_transform);
-        
-        if (prev_trans && next_trans) {
-             if (prev_trans == next_trans) {
-                 result.transform = prev_trans->transform;
-             } else {
-                 float t = float(current_frame - prev_trans->frame) / float(next_trans->frame - prev_trans->frame);
-                 result.transform = TransformKeyframe::lerp(prev_trans->transform, next_trans->transform, t);
-             }
-             result.has_transform = true;
-        } else if (prev_trans) {
-            result.transform = prev_trans->transform;
-            result.has_transform = true;
-        } else if (next_trans) {
-            result.transform = next_trans->transform;
-            result.has_transform = true;
-        }
+        // Helper specifically for Transform values (float scalar lerp)
+        auto interpolateScalar = [&](float& result_val, const Keyframe* p, const Keyframe* n, float (TransformKeyframe::*val_ptr), bool (TransformKeyframe::*flag_ptr)) {
+            if (p && n) {
+                if (p == n) result_val = (p->transform.*val_ptr); // Cast if needed for vector components? using member pointers is tricky for Vec3 struct
+                else {
+                    float t = float(current_frame - p->frame) / float(n->frame - p->frame);
+                    // Manually lerp scalars? no, we can't easily use member pointers for Vec3.x
+                    // Let's just do it manually for each axis to be safe and clear.
+                }
+            }
+        };
 
-        // --- MATERIAL CHANNEL ---
-        const Keyframe* prev_mat = findPrev(&Keyframe::has_material);
-        const Keyframe* next_mat = findNext(&Keyframe::has_material);
+        // --- POSITION X ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_pos_x; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.position.x = p->transform.position.x + (n->transform.position.x - p->transform.position.x) * t;
+                 result.transform.has_pos_x = true;
+            } else if (p) { result.transform.position.x = p->transform.position.x; result.transform.has_pos_x = true; }
+            else if (n) { result.transform.position.x = n->transform.position.x; result.transform.has_pos_x = true; }
+        }
+        // --- POSITION Y ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_pos_y; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.position.y = p->transform.position.y + (n->transform.position.y - p->transform.position.y) * t;
+                 result.transform.has_pos_y = true;
+            } else if (p) { result.transform.position.y = p->transform.position.y; result.transform.has_pos_y = true; }
+            else if (n) { result.transform.position.y = n->transform.position.y; result.transform.has_pos_y = true; }
+        }
+        // --- POSITION Z ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_pos_z; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.position.z = p->transform.position.z + (n->transform.position.z - p->transform.position.z) * t;
+                 result.transform.has_pos_z = true;
+            } else if (p) { result.transform.position.z = p->transform.position.z; result.transform.has_pos_z = true; }
+            else if (n) { result.transform.position.z = n->transform.position.z; result.transform.has_pos_z = true; }
+        }
+        result.transform.has_position = result.transform.has_pos_x || result.transform.has_pos_y || result.transform.has_pos_z;
+
+        // --- ROTATION X ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_rot_x; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.rotation.x = p->transform.rotation.x + (n->transform.rotation.x - p->transform.rotation.x) * t;
+                 result.transform.has_rot_x = true;
+            } else if (p) { result.transform.rotation.x = p->transform.rotation.x; result.transform.has_rot_x = true; }
+            else if (n) { result.transform.rotation.x = n->transform.rotation.x; result.transform.has_rot_x = true; }
+        }
+        // --- ROTATION Y ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_rot_y; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.rotation.y = p->transform.rotation.y + (n->transform.rotation.y - p->transform.rotation.y) * t;
+                 result.transform.has_rot_y = true;
+            } else if (p) { result.transform.rotation.y = p->transform.rotation.y; result.transform.has_rot_y = true; }
+            else if (n) { result.transform.rotation.y = n->transform.rotation.y; result.transform.has_rot_y = true; }
+        }
+         // --- ROTATION Z ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_rot_z; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.rotation.z = p->transform.rotation.z + (n->transform.rotation.z - p->transform.rotation.z) * t;
+                 result.transform.has_rot_z = true;
+            } else if (p) { result.transform.rotation.z = p->transform.rotation.z; result.transform.has_rot_z = true; }
+            else if (n) { result.transform.rotation.z = n->transform.rotation.z; result.transform.has_rot_z = true; }
+        }
+        result.transform.has_rotation = result.transform.has_rot_x || result.transform.has_rot_y || result.transform.has_rot_z;
+
+        // --- SCALE X ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_scl_x; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.scale.x = p->transform.scale.x + (n->transform.scale.x - p->transform.scale.x) * t;
+                 result.transform.has_scl_x = true;
+            } else if (p) { result.transform.scale.x = p->transform.scale.x; result.transform.has_scl_x = true; }
+            else if (n) { result.transform.scale.x = n->transform.scale.x; result.transform.has_scl_x = true; }
+        }
+        // --- SCALE Y ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_scl_y; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.scale.y = p->transform.scale.y + (n->transform.scale.y - p->transform.scale.y) * t;
+                 result.transform.has_scl_y = true;
+            } else if (p) { result.transform.scale.y = p->transform.scale.y; result.transform.has_scl_y = true; }
+            else if (n) { result.transform.scale.y = n->transform.scale.y; result.transform.has_scl_y = true; }
+        }
+        // --- SCALE Z ---
+        {
+            auto has = [](const Keyframe& k) { return k.has_transform && k.transform.has_scl_z; };
+            const Keyframe* p = findPrev(has);
+            const Keyframe* n = findNext(has);
+            if (p && n) {
+                 float t = (p == n) ? 0.0f : float(current_frame - p->frame) / float(n->frame - p->frame);
+                 result.transform.scale.z = p->transform.scale.z + (n->transform.scale.z - p->transform.scale.z) * t;
+                 result.transform.has_scl_z = true;
+            } else if (p) { result.transform.scale.z = p->transform.scale.z; result.transform.has_scl_z = true; }
+            else if (n) { result.transform.scale.z = n->transform.scale.z; result.transform.has_scl_z = true; }
+        }
+        result.transform.has_scale = result.transform.has_scl_x || result.transform.has_scl_y || result.transform.has_scl_z;
+        result.has_transform = result.transform.has_position || result.transform.has_rotation || result.transform.has_scale;
         
-        if (prev_mat && next_mat) {
-             if (prev_mat == next_mat) {
-                 result.material = prev_mat->material;
-             } else {
-                 float t = float(current_frame - prev_mat->frame) / float(next_mat->frame - prev_mat->frame);
-                 result.material = MaterialKeyframe::lerp(prev_mat->material, next_mat->material, t);
-             }
-             result.has_material = true;
-        } else if (prev_mat) {
-            result.material = prev_mat->material;
-            result.has_material = true;
-        } else if (next_mat) {
-            result.material = next_mat->material;
-            result.has_material = true;
+        // --- MATERIAL CHANNEL (Simplified block handling for now, can be updated later) ---
+        {
+             auto has = [](const Keyframe& k) { return k.has_material; };
+             const Keyframe* prev_mat = findPrev(has);
+             const Keyframe* next_mat = findNext(has);
+             if (prev_mat && next_mat) {
+                 if (prev_mat == next_mat) result.material = prev_mat->material;
+                 else {
+                     float t = float(current_frame - prev_mat->frame) / float(next_mat->frame - prev_mat->frame);
+                     result.material = MaterialKeyframe::lerp(prev_mat->material, next_mat->material, t);
+                 }
+                 result.has_material = true;
+             } else if (prev_mat) { result.material = prev_mat->material; result.has_material = true; }
+             else if (next_mat) { result.material = next_mat->material; result.has_material = true; }
         }
 
         // --- LIGHT CHANNEL ---
-        const Keyframe* prev_light = findPrev(&Keyframe::has_light);
-        const Keyframe* next_light = findNext(&Keyframe::has_light);
-        if (prev_light && next_light) {
-            if (prev_light == next_light) result.light = prev_light->light;
-            else {
-                float t = float(current_frame - prev_light->frame) / float(next_light->frame - prev_light->frame);
-                result.light = LightKeyframe::lerp(prev_light->light, next_light->light, t);
-            }
-            result.has_light = true;
-        } else if (prev_light) { result.light = prev_light->light; result.has_light = true; }
-        else if (next_light) { result.light = next_light->light; result.has_light = true; }
+        {
+            auto has = [](const Keyframe& k) { return k.has_light; };
+            const Keyframe* prev_light = findPrev(has);
+            const Keyframe* next_light = findNext(has);
+            if (prev_light && next_light) {
+                if (prev_light == next_light) result.light = prev_light->light;
+                else {
+                    float t = float(current_frame - prev_light->frame) / float(next_light->frame - prev_light->frame);
+                    result.light = LightKeyframe::lerp(prev_light->light, next_light->light, t);
+                }
+                result.has_light = true;
+            } else if (prev_light) { result.light = prev_light->light; result.has_light = true; }
+            else if (next_light) { result.light = next_light->light; result.has_light = true; }
+        }
 
         // --- CAMERA CHANNEL ---
-        const Keyframe* prev_cam = findPrev(&Keyframe::has_camera);
-        const Keyframe* next_cam = findNext(&Keyframe::has_camera);
-        if (prev_cam && next_cam) {
-            if (prev_cam == next_cam) result.camera = prev_cam->camera;
-            else {
-                float t = float(current_frame - prev_cam->frame) / float(next_cam->frame - prev_cam->frame);
-                result.camera = CameraKeyframe::lerp(prev_cam->camera, next_cam->camera, t);
-            }
-            result.has_camera = true;
-        } else if (prev_cam) { result.camera = prev_cam->camera; result.has_camera = true; }
-        else if (next_cam) { result.camera = next_cam->camera; result.has_camera = true; }
+        {
+            auto has = [](const Keyframe& k) { return k.has_camera; };
+            const Keyframe* prev_cam = findPrev(has);
+            const Keyframe* next_cam = findNext(has);
+            if (prev_cam && next_cam) {
+                if (prev_cam == next_cam) result.camera = prev_cam->camera;
+                else {
+                    float t = float(current_frame - prev_cam->frame) / float(next_cam->frame - prev_cam->frame);
+                    result.camera = CameraKeyframe::lerp(prev_cam->camera, next_cam->camera, t);
+                }
+                result.has_camera = true;
+            } else if (prev_cam) { result.camera = prev_cam->camera; result.has_camera = true; }
+            else if (next_cam) { result.camera = next_cam->camera; result.has_camera = true; }
+        }
 
         // --- WORLD CHANNEL ---
-        const Keyframe* prev_world = findPrev(&Keyframe::has_world);
-        const Keyframe* next_world = findNext(&Keyframe::has_world);
-        if (prev_world && next_world) {
-            if (prev_world == next_world) result.world = prev_world->world;
-            else {
-                float t = float(current_frame - prev_world->frame) / float(next_world->frame - prev_world->frame);
-                result.world = WorldKeyframe::lerp(prev_world->world, next_world->world, t);
+        {
+            auto has = [](const Keyframe& k) { return k.has_world; };
+            const Keyframe* p_world = findPrev(has);
+            const Keyframe* n_world = findNext(has);
+            if (p_world && n_world) {
+                float range = (float)(n_world->frame - p_world->frame);
+                float t = (range > 0) ? (float)(current_frame - p_world->frame) / range : 0.0f;
+                result.world = WorldKeyframe::lerp(p_world->world, n_world->world, t);
+                result.has_world = true;
+            } else if (p_world) {
+                result.world = p_world->world; result.has_world = true;
+            } else if (n_world) {
+                result.world = n_world->world; result.has_world = true;
             }
-            result.has_world = true;
-        } else if (prev_world) { result.world = prev_world->world; result.has_world = true; }
-        else if (next_world) { result.world = next_world->world; result.has_world = true; }
+        }
 
+        // --- TERRAIN ---
+        const Keyframe* p_terrain = findPrev([](const auto& k){ return k.has_terrain; });
+        const Keyframe* n_terrain = findNext([](const auto& k){ return k.has_terrain; });
+        
+        if (p_terrain && n_terrain) {
+            float range = (float)(n_terrain->frame - p_terrain->frame);
+            float t = (range > 0) ? (float)(current_frame - p_terrain->frame) / range : 0.0f;
+            result.terrain = TerrainKeyframe::lerp(p_terrain->terrain, n_terrain->terrain, t);
+            result.has_terrain = true;
+        } else if (p_terrain) {
+            result.terrain = p_terrain->terrain;
+            result.has_terrain = true;
+        } else if (n_terrain) {
+            result.terrain = n_terrain->terrain;
+            result.has_terrain = true;
+        }
+        
         return result;
     }
 };
@@ -891,4 +1150,277 @@ struct TimelineManager {
         tracks.clear();
         current_frame = 0;
     }
+    
+    // Serialization
+    void serialize(json& j) const;
+    void deserialize(const json& j);
 };
+
+// ============================================================================
+// JSON SERIALIZATION IMPLEMENTATION
+// ============================================================================
+
+// MaterialKeyframe
+inline void to_json(json& j, const MaterialKeyframe& m) {
+    j = json{
+        {"id", m.material_id},
+        {"falb", m.has_albedo}, {"fopa", m.has_opacity}, {"frgh", m.has_roughness},
+        {"fmet", m.has_metallic}, {"fems", m.has_emission}, {"ftrn", m.has_transmission},
+        {"ior", m.has_ior}, {"fclr", m.has_clearcoat}, {"fsub", m.has_subsurface},
+        {"fshe", m.has_sheen}, {"fani", m.has_anisotropic}, {"fspc", m.has_specular},
+        {"fnrm", m.has_normal},
+        {"alb", m.albedo}, {"opa", m.opacity}, {"rgh", m.roughness},
+        {"met", m.metallic}, {"clr", m.clearcoat}, {"trn", m.transmission},
+        {"ems", m.emission}, {"v_ior", m.ior}, 
+        {"sub_c", m.subsurface_color}, {"sub", m.subsurface},
+        {"ani", m.anisotropic}, {"she", m.sheen}, {"she_t", m.sheen_tint},
+        {"spc", m.specular}, {"spc_t", m.specular_tint},
+        {"clr_r", m.clearcoat_roughness}, {"nrm_s", m.normal_strength},
+        {"ems_s", m.emission_strength}
+    };
+}
+
+inline void from_json(const json& j, MaterialKeyframe& m) {
+    m.material_id = j.value("id", (uint16_t)0);
+    m.has_albedo = j.value("falb", false); m.has_opacity = j.value("fopa", false);
+    m.has_roughness = j.value("frgh", false); m.has_metallic = j.value("fmet", false);
+    m.has_emission = j.value("fems", false); m.has_transmission = j.value("ftrn", false);
+    m.has_ior = j.value("ior", false); m.has_clearcoat = j.value("fclr", false);
+    m.has_subsurface = j.value("fsub", false); m.has_sheen = j.value("fshe", false);
+    m.has_anisotropic = j.value("fani", false); m.has_specular = j.value("fspc", false);
+    m.has_normal = j.value("fnrm", false);
+    
+    if(j.contains("alb")) j.at("alb").get_to(m.albedo);
+    m.opacity = j.value("opa", 1.0f);
+    m.roughness = j.value("rgh", 0.5f);
+    m.metallic = j.value("met", 0.0f);
+    m.clearcoat = j.value("clr", 0.0f);
+    m.transmission = j.value("trn", 0.0f);
+    if(j.contains("ems")) j.at("ems").get_to(m.emission);
+    m.ior = j.value("v_ior", 1.45f);
+    if(j.contains("sub_c")) j.at("sub_c").get_to(m.subsurface_color);
+    m.subsurface = j.value("sub", 0.0f);
+    m.anisotropic = j.value("ani", 0.0f);
+    m.sheen = j.value("she", 0.0f);
+    m.sheen_tint = j.value("she_t", 0.0f);
+    m.specular = j.value("spc", 0.5f);
+    m.specular_tint = j.value("spc_t", 0.0f);
+    m.clearcoat_roughness = j.value("clr_r", 0.0f);
+    m.normal_strength = j.value("nrm_s", 1.0f);
+    m.emission_strength = j.value("ems_s", 1.0f);
+}
+
+// LightKeyframe
+// LightKeyframe
+inline void to_json(json& j, const LightKeyframe& l) {
+    j = json{
+        {"fpos", l.has_position}, {"fcol", l.has_color},
+        {"fint", l.has_intensity}, {"fdir", l.has_direction},
+        {"int", l.intensity}
+    };
+    // Manual Vec3 serialization to ensure stability
+    j["pos"] = {l.position.x, l.position.y, l.position.z};
+    j["col"] = {l.color.x, l.color.y, l.color.z};
+    j["dir"] = {l.direction.x, l.direction.y, l.direction.z};
+}
+
+inline void from_json(const json& j, LightKeyframe& l) {
+    // Robust loading: Check explicit flag key first, fallback to data key existence
+    l.has_position = j.value("fpos", j.contains("pos")); 
+    l.has_color = j.value("fcol", j.contains("col"));
+    l.has_intensity = j.value("fint", j.contains("int")); 
+    l.has_direction = j.value("fdir", j.contains("dir"));
+
+    l.intensity = j.value("int", 1.0f);
+
+    // Manual Vec3 extraction
+    if(j.contains("pos") && j["pos"].is_array() && j["pos"].size() >= 3) {
+        l.position.x = j["pos"][0]; l.position.y = j["pos"][1]; l.position.z = j["pos"][2];
+    }
+    if(j.contains("col") && j["col"].is_array() && j["col"].size() >= 3) {
+        l.color.x = j["col"][0]; l.color.y = j["col"][1]; l.color.z = j["col"][2];
+    }
+    if(j.contains("dir") && j["dir"].is_array() && j["dir"].size() >= 3) {
+        l.direction.x = j["dir"][0]; l.direction.y = j["dir"][1]; l.direction.z = j["dir"][2];
+    }
+}
+
+// CameraKeyframe
+inline void to_json(json& j, const CameraKeyframe& c) {
+    j = json{
+        {"fpos", c.has_position}, {"ftgt", c.has_target},
+        {"ffov", c.has_fov}, {"ffoc", c.has_focus}, {"fapt", c.has_aperture},
+        {"pos", c.position}, {"tgt", c.target},
+        {"fov", c.fov}, {"foc", c.focus_distance}, {"apt", c.lens_radius}
+    };
+}
+
+inline void from_json(const json& j, CameraKeyframe& c) {
+    // Robust loading
+    c.has_position = j.value("fpos", j.contains("pos")); 
+    c.has_target = j.value("ftgt", j.contains("tgt"));
+    c.has_fov = j.value("ffov", j.contains("fov")); 
+    c.has_focus = j.value("ffoc", j.contains("foc"));
+    c.has_aperture = j.value("fapt", j.contains("apt"));
+
+    // Safe extraction
+    if(j.contains("pos")) j.at("pos").get_to(c.position);
+    if(j.contains("tgt")) j.at("tgt").get_to(c.target);
+    c.fov = j.value("fov", 40.0f);
+    c.focus_distance = j.value("foc", 10.0f);
+    c.lens_radius = j.value("apt", 0.0f);
+}
+
+// WorldKeyframe
+inline void to_json(json& j, const WorldKeyframe& w) {
+    j = json{
+        {"fbgc", w.has_background_color}, {"fbgs", w.has_background_strength}, {"fhr", w.has_hdri_rotation},
+        {"fse", w.has_sun_elevation}, {"fsa", w.has_sun_azimuth}, {"fsi", w.has_sun_intensity}, {"fss", w.has_sun_size},
+        {"fad", w.has_air_density}, {"fdd", w.has_dust_density}, {"fod", w.has_ozone_density},
+        {"falt", w.has_altitude}, {"fma", w.has_mie_anisotropy},
+        {"fcd", w.has_cloud_density}, {"fcc", w.has_cloud_coverage}, {"fcs", w.has_cloud_scale}, {"fco", w.has_cloud_offset},
+        {"bgc", w.background_color}, {"bgs", w.background_strength}, {"hr", w.hdri_rotation},
+        {"se", w.sun_elevation}, {"sa", w.sun_azimuth}, {"si", w.sun_intensity}, {"ss", w.sun_size},
+        {"ad", w.air_density}, {"dd", w.dust_density}, {"od", w.ozone_density},
+        {"alt", w.altitude}, {"ma", w.mie_anisotropy},
+        {"cd", w.cloud_density}, {"cc", w.cloud_coverage}, {"cs", w.cloud_scale},
+        {"cox", w.cloud_offset_x}, {"coz", w.cloud_offset_z}
+    };
+}
+
+inline void from_json(const json& j, WorldKeyframe& w) {
+    w.has_background_color = j.value("fbgc", false); w.has_background_strength = j.value("fbgs", false);
+    w.has_hdri_rotation = j.value("fhr", false);
+    w.has_sun_elevation = j.value("fse", false); w.has_sun_azimuth = j.value("fsa", false);
+    w.has_sun_intensity = j.value("fsi", false); w.has_sun_size = j.value("fss", false);
+    w.has_air_density = j.value("fad", false); w.has_dust_density = j.value("fdd", false);
+    w.has_ozone_density = j.value("fod", false); w.has_altitude = j.value("falt", false);
+    w.has_mie_anisotropy = j.value("fma", false);
+    w.has_cloud_density = j.value("fcd", false); w.has_cloud_coverage = j.value("fcc", false);
+    w.has_cloud_scale = j.value("fcs", false); w.has_cloud_offset = j.value("fco", false);
+
+    if(j.contains("bgc")) j.at("bgc").get_to(w.background_color);
+    w.background_strength = j.value("bgs", 1.0f); w.hdri_rotation = j.value("hr", 0.0f);
+    w.sun_elevation = j.value("se", 15.0f); w.sun_azimuth = j.value("sa", 0.0f);
+    w.sun_intensity = j.value("si", 1.0f); w.sun_size = j.value("ss", 0.545f);
+    w.air_density = j.value("ad", 1.0f); w.dust_density = j.value("dd", 1.0f);
+    w.ozone_density = j.value("od", 1.0f); w.altitude = j.value("alt", 0.0f);
+    w.mie_anisotropy = j.value("ma", 0.76f);
+    w.cloud_density = j.value("cd", 0.5f); w.cloud_coverage = j.value("cc", 0.5f);
+    w.cloud_scale = j.value("cs", 1.0f);
+    w.cloud_offset_x = j.value("cox", 0.0f); w.cloud_offset_z = j.value("coz", 0.0f);
+}
+
+// TerrainKeyframe
+inline void to_json(json& j, const TerrainKeyframe& t) {
+    j = json{
+        {"has", t.has_data}, {"hsia", t.has_splat},
+        {"w", t.width}, {"h", t.height},
+        {"sw", t.splat_width}, {"sh", t.splat_height},
+        {"hdat", t.heightData}, {"hard", t.hardnessData},
+        {"sdat", t.splatData}
+    };
+}
+
+inline void from_json(const json& j, TerrainKeyframe& t) {
+    t.has_data = j.value("has", false); t.has_splat = j.value("hsia", false);
+    t.width = j.value("w", 0); t.height = j.value("h", 0);
+    t.splat_width = j.value("sw", 0); t.splat_height = j.value("sh", 0);
+    if(j.contains("hdat")) j.at("hdat").get_to(t.heightData);
+    if(j.contains("hard")) j.at("hard").get_to(t.hardnessData);
+    if(j.contains("sdat")) j.at("sdat").get_to(t.splatData);
+}
+
+// TransformKeyframe
+inline void to_json(json& j, const TransformKeyframe& tk) {
+    j = json{
+        {"pos", tk.position}, {"rot", tk.rotation}, {"scl", tk.scale},
+        {"fpos", tk.has_position}, {"frot", tk.has_rotation}, {"fscl", tk.has_scale},
+        {"fpx", tk.has_pos_x}, {"fpy", tk.has_pos_y}, {"fpz", tk.has_pos_z},
+        {"frx", tk.has_rot_x}, {"fry", tk.has_rot_y}, {"frz", tk.has_rot_z},
+        {"fsx", tk.has_scl_x}, {"fsy", tk.has_scl_y}, {"fsz", tk.has_scl_z}
+    };
+}
+
+inline void from_json(const json& j, TransformKeyframe& tk) {
+    if(j.contains("pos")) j.at("pos").get_to(tk.position);
+    if(j.contains("rot")) j.at("rot").get_to(tk.rotation);
+    if(j.contains("scl")) j.at("scl").get_to(tk.scale);
+    
+    tk.has_position = j.value("fpos", true);
+    tk.has_rotation = j.value("frot", true);
+    tk.has_scale = j.value("fscl", true);
+    
+    tk.has_pos_x = j.value("fpx", true); tk.has_pos_y = j.value("fpy", true); tk.has_pos_z = j.value("fpz", true);
+    tk.has_rot_x = j.value("frx", true); tk.has_rot_y = j.value("fry", true); tk.has_rot_z = j.value("frz", true);
+    tk.has_scl_x = j.value("fsx", true); tk.has_scl_y = j.value("fsy", true); tk.has_scl_z = j.value("fsz", true);
+}
+
+// Keyframe
+inline void to_json(json& j, const Keyframe& k) {
+    j = json{
+        {"fr", k.frame},
+        {"ftr", k.has_transform}, {"fmat", k.has_material},
+        {"fli", k.has_light}, {"fcam", k.has_camera},
+        {"fwor", k.has_world}, {"fter", k.has_terrain}
+    };
+    if(k.has_transform) j["tr"] = k.transform;
+    if(k.has_material) j["mat"] = k.material;
+    if(k.has_light) j["li"] = k.light;
+    if(k.has_camera) j["cam"] = k.camera;
+    if(k.has_world) j["wor"] = k.world;
+    if(k.has_terrain) j["ter"] = k.terrain;
+}
+
+inline void from_json(const json& j, Keyframe& k) {
+    k.frame = j.value("fr", 0);
+    
+    // Robust loading: Check explicit flags, fallback to data block existence
+    k.has_transform = j.value("ftr", j.contains("tr"));
+    k.has_material = j.value("fmat", j.contains("mat"));
+    k.has_light = j.value("fli", j.contains("li"));
+    k.has_camera = j.value("fcam", j.contains("cam"));
+    k.has_world = j.value("fwor", j.contains("wor"));
+    k.has_terrain = j.value("fter", j.contains("ter"));
+    
+    if(k.has_transform && j.contains("tr")) j.at("tr").get_to(k.transform);
+    if(k.has_material && j.contains("mat")) j.at("mat").get_to(k.material);
+    if(k.has_light && j.contains("li")) j.at("li").get_to(k.light);
+    if(k.has_camera && j.contains("cam")) j.at("cam").get_to(k.camera);
+    if(k.has_world && j.contains("wor")) j.at("wor").get_to(k.world);
+    if(k.has_terrain && j.contains("ter")) j.at("ter").get_to(k.terrain);
+}
+
+// ObjectAnimationTrack
+inline void to_json(json& j, const ObjectAnimationTrack& t) {
+    j = json{
+        {"name", t.object_name},
+        {"idx", t.object_index},
+        {"kfs", t.keyframes}
+    };
+}
+
+inline void from_json(const json& j, ObjectAnimationTrack& t) {
+    t.object_name = j.value("name", "");
+    t.object_index = j.value("idx", -1);
+    if(j.contains("kfs")) {
+        j.at("kfs").get_to(t.keyframes);
+        // CRITICAL: Ensure keyframes are sorted, otherwise binary search in evaluate() fails
+        std::sort(t.keyframes.begin(), t.keyframes.end(), 
+            [](const Keyframe& a, const Keyframe& b){ return a.frame < b.frame; });
+    }
+}
+
+// TimelineManager Member Implementations
+inline void TimelineManager::serialize(json& j) const {
+    j = json{
+        {"fr", current_frame},
+        {"tracks", tracks}
+    };
+}
+
+inline void TimelineManager::deserialize(const json& j) {
+    current_frame = j.value("fr", 0);
+    if(j.contains("tracks")) j.at("tracks").get_to(tracks);
+}
+

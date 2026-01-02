@@ -15,12 +15,26 @@ if(WIN32)
         UNICODE
         _UNICODE
     )
+
+    # OpenMP Support
+    find_package(OpenMP)
+    if(OpenMP_CXX_FOUND)
+        link_libraries(OpenMP::OpenMP_CXX)
+    endif()
     
     # MSVC specific flags
     if(MSVC)
-        # Match VS2022 Release configuration
+        # Debug configuration
+        set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Od /Zi /RTC1")
+        set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} /DEBUG /SUBSYSTEM:CONSOLE")
+        
+        # Release configuration
         set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /SUBSYSTEM:WINDOWS")
+        set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /SUBSYSTEM:WINDOWS")
+        
+        # RelWithDebInfo (Release with Debug Info - recommended for debugging)
+        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} /O2 /Zi /DNDEBUG")
+        set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG /SUBSYSTEM:CONSOLE")
         
         # Multi-processor compilation
         add_compile_options(/MP)
@@ -88,8 +102,11 @@ set(SOURCES_CPP
     "source/src/scene_ui_selection.cpp"
     "source/src/scene_ui_viewport.cpp"
     "source/src/scene_ui_world.cpp"
+    "source/src/scene_ui_scatter.cpp"
     "source/src/ui_modern.cpp"
     "source/src/unified_converters.cpp"
+    "source/src/InstanceGroup.cpp"
+    "source/src/InstanceManager.cpp"
 )
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
 file(GLOB HEADERS "source/include/*.h" "source/external/imgui/*.h")

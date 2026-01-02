@@ -55,9 +55,19 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
     }
     
     if (needs_update) {
-        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        // Defer BVH rebuild to Main.cpp async handler
+        extern bool g_bvh_rebuild_pending;
+        g_bvh_rebuild_pending = true;
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+        
+        // Incremental GPU update for TLAS mode
+        if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+            ctx.optix_gpu_ptr->hideInstancesByNodeName(object_name_);
+            ctx.optix_gpu_ptr->rebuildTLAS();
+        } else if (ctx.optix_gpu_ptr) {
+            extern bool g_optix_rebuild_pending;
+            g_optix_rebuild_pending = true;
+        }
         
         ctx.start_render = true;
         ProjectManager::getInstance().markModified();
@@ -83,13 +93,17 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
         }
     }
     
-    // Rebuild GPU structures
-    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    // Defer BVH rebuild to Main.cpp async handler
+    extern bool g_bvh_rebuild_pending;
+    g_bvh_rebuild_pending = true;
     ctx.renderer.resetCPUAccumulation();
     
+    // Incremental GPU update for TLAS mode
+    // Note: For undo of delete, we need FULL rebuild since we're adding triangles back
+    // The cloneInstancesByNodeName won't work here because BLAS is gone
     if (ctx.optix_gpu_ptr) {
-        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-        ctx.optix_gpu_ptr->resetAccumulation(); // Also reset accumulation
+        extern bool g_optix_rebuild_pending;
+        g_optix_rebuild_pending = true;
     }
     
     ProjectManager::getInstance().markModified();
@@ -124,9 +138,12 @@ void DuplicateObjectCommand::execute(UIContext& ctx) {
     }
     
     if (needs_update) {
-         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+         // Defer full rebuild to Main.cpp async handler
+         extern bool g_bvh_rebuild_pending;
+         g_bvh_rebuild_pending = true;
+         extern bool g_optix_rebuild_pending;
+         g_optix_rebuild_pending = true;
          ctx.renderer.resetCPUAccumulation();
-         if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
          ctx.start_render = true;
          SCENE_LOG_INFO("Redo: Duplicated " + source_name_ + " -> " + new_name_);
     }
@@ -146,13 +163,12 @@ void DuplicateObjectCommand::undo(UIContext& ctx) {
         objs.erase(new_end, objs.end());
     }
     
-    // Rebuild GPU structures
-    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    // Defer full rebuild to Main.cpp async handler
+    extern bool g_bvh_rebuild_pending;
+    g_bvh_rebuild_pending = true;
+    extern bool g_optix_rebuild_pending;
+    g_optix_rebuild_pending = true;
     ctx.renderer.resetCPUAccumulation();
-    
-    if (ctx.optix_gpu_ptr) {
-        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-    }
     
     SCENE_LOG_INFO("Undo: Removed duplicate " + new_name_);
     ctx.start_render = true;
@@ -177,14 +193,34 @@ void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
     }
     
     if (found) {
-        // Rebuild GPU structures
-        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-        ctx.renderer.resetCPUAccumulation();
-        
-        if (ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects); 
+        // TLAS MODE: Fast instance transform update (no BLAS rebuild!)
+        if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+            // Convert Matrix4x4 to 3x4 row-major float array
+            float t[12];
+            t[0] = state.matrix.m[0][0]; t[1] = state.matrix.m[0][1]; t[2] = state.matrix.m[0][2]; t[3] = state.matrix.m[0][3];
+            t[4] = state.matrix.m[1][0]; t[5] = state.matrix.m[1][1]; t[6] = state.matrix.m[1][2]; t[7] = state.matrix.m[1][3];
+            t[8] = state.matrix.m[2][0]; t[9] = state.matrix.m[2][1]; t[10] = state.matrix.m[2][2]; t[11] = state.matrix.m[2][3];
+            
+            // Update all instances matching this object name
+            std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(object_name_);
+            for (int inst_id : inst_ids) {
+                ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
+            }
+            ctx.optix_gpu_ptr->rebuildTLAS();  // Fast TLAS update
             ctx.optix_gpu_ptr->resetAccumulation();
+            // Mark CPU data as needing sync when switching to CPU mode
+            extern bool g_cpu_sync_pending;
+            g_cpu_sync_pending = true;
+        } else if (ctx.optix_gpu_ptr) {
+            // GAS MODE: Defer to async handler
+            extern bool g_gpu_refit_pending;
+            g_gpu_refit_pending = true;
         }
+        
+        // Defer CPU BVH rebuild to async handler (prevents UI freeze)
+        extern bool g_bvh_rebuild_pending;
+        g_bvh_rebuild_pending = true;
+        ctx.renderer.resetCPUAccumulation();
     }
 }
 

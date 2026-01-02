@@ -22,7 +22,7 @@ public:
     float radius = 0.0f;
     // Alan ışığı için
     Vec3 u, v;
-    double width = 1.0, height = 1.0;
+    float width = 1.0f, height = 1.0f;
   
 
     virtual float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const = 0;
@@ -45,3 +45,4 @@ public:
 
 
 #endif // LIGHT_H
+

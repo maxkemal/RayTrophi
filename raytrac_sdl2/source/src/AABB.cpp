@@ -1,34 +1,34 @@
-#include "AABB.h"
+ï»¿#include "AABB.h"
 #include <globals.h>
 
 AABB surrounding_box(const AABB& box0, const AABB& box1) {
-    // AABB'nin min ve max vektörlerini SIMD'e yükle
+    // AABB'nin min ve max vektÃ¶rlerini SIMD'e yÃ¼kle
     __m128 box0_min = _mm_set_ps(0.0f, box0.min.z, box0.min.y, box0.min.x);
     __m128 box1_min = _mm_set_ps(0.0f, box1.min.z, box1.min.y, box1.min.x);
     __m128 box0_max = _mm_set_ps(0.0f, box0.max.z, box0.max.y, box0.max.x);
     __m128 box1_max = _mm_set_ps(0.0f, box1.max.z, box1.max.y, box1.max.x);
 
-    // Min ve max hesaplamalarý
+    // Min ve max hesaplamalarÄ±
     __m128 small = _mm_min_ps(box0_min, box1_min);
     __m128 big = _mm_max_ps(box0_max, box1_max);
 
-    // SIMD sonuçlarýný bir diziye aktar
+    // SIMD sonuÃ§larÄ±nÄ± bir diziye aktar
     float small_array[4], big_array[4];
     _mm_store_ps(small_array, small);
     _mm_store_ps(big_array, big);
 	
-    // Vec3 nesneleri oluþtur ve döndür
+    // Vec3 nesneleri oluÅŸtur ve dÃ¶ndÃ¼r
     return AABB(
         Vec3(small_array[0], small_array[1], small_array[2]),
         Vec3(big_array[0], big_array[1], big_array[2])
     );
 }
-// AABB sýnýfýndaki bir fonksiyon
+// AABB sÄ±nÄ±fÄ±ndaki bir fonksiyon
 int AABB::max_axis() const {
-    // Diagonal vektörünü al
+    // Diagonal vektÃ¶rÃ¼nÃ¼ al
     Vec3 diagonal_vec = max - min;
 
-    // Bileþenlerin deðerlerini karþýlaþtýrarak en büyüðünü seç
+    // BileÅŸenlerin deÄŸerlerini karÅŸÄ±laÅŸtÄ±rarak en bÃ¼yÃ¼ÄŸÃ¼nÃ¼ seÃ§
     if (diagonal_vec.x > diagonal_vec.y) {
         if (diagonal_vec.x > diagonal_vec.z) {
             return 0; // X ekseni
@@ -47,10 +47,11 @@ int AABB::max_axis() const {
     }
 }
 
-double AABB::surface_area() const {
+float AABB::surface_area() const {
     if (cached_surface_area < 0.0) {
-        const Vec3 d = max - min;  // diagonal() çaðrýsýný atla
+        const Vec3 d = max - min;  // diagonal() Ã§aÄŸrÄ±sÄ±nÄ± atla
         cached_surface_area = 2.0 * (d.x * d.y + d.y * d.z + d.z * d.x);
     }
     return cached_surface_area;
 }
+

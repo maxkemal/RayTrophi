@@ -4,7 +4,7 @@
 #include "HittableList.h"
 #include <globals.h>
 #include <Dielectric.h>
-double PrincipledBSDF::getIndexOfRefraction() const {
+float PrincipledBSDF::getIndexOfRefraction() const {
     // Metaller için genellikle kompleks kırılma indeksi kullanılır,
     // ancak basitlik için sabit bir değer döndürebiliriz.
     return 0.0; // veya başka bir uygun değer
@@ -20,7 +20,7 @@ void PrincipledBSDF::set_normal_map(std::shared_ptr<Texture> normalMap, float no
     normalProperty.texture = normalMap;
     normalProperty.intensity = normalStrength;
 }
-Vec3 PrincipledBSDF::get_normal_from_map(double u, double v) const {
+Vec3 PrincipledBSDF::get_normal_from_map(float u, float v) const {
     if (normalProperty.texture) {
         Vec2 Transform = applyTextureTransform(u, v);
 
@@ -82,7 +82,7 @@ std::shared_ptr<Texture> PrincipledBSDF::getTexture() const {
     return nullptr;
 }
 
-Vec3 PrincipledBSDF::getTextureColor(double u, double v) const {
+Vec3 PrincipledBSDF::getTextureColor(float u, float v) const {
     std::cout << "Original UV: (" << u << ", " << v << ")" << std::endl;
     UVData uvData = transformUV(u, v);
     std::cout << "Transformed UV: (" << uvData.transformed.u << ", " << uvData.transformed.v << ")" << std::endl;
@@ -117,10 +117,11 @@ float PrincipledBSDF::getIOR() const {
     return ior;
 }
 bool PrincipledBSDF::isEmissive() const {
-    return emissionProperty.intensity > 0.0f;
+    // Check if emission color is non-zero (matches getEmission behavior)
+    return emissionProperty.color.length_squared() > 0.0001f || emissionProperty.texture != nullptr;
 }
 bool refract(const Vec3& uv, const Vec3& n, float etai_over_etat, Vec3& refracted) {
-    double cos_theta = std::clamp(-Vec3::dot(uv, n), -1.0f, 1.0f);
+    float cos_theta = std::clamp(-Vec3::dot(uv, n), -1.0f, 1.0f);
     Vec3 r_out_perp = etai_over_etat * (uv + cos_theta * n);
     float k = 1.0f - r_out_perp.length_squared();
 
@@ -135,19 +136,19 @@ bool refract(const Vec3& uv, const Vec3& n, float etai_over_etat, Vec3& refracte
 Vec3 applyDisneyMultiScattering(const Vec3& specular, const Vec3& F0,
     float roughness, float metallic) {
     // 1. Ortalama Fresnel yansımasını hesapla (RGB-aware)
-    Vec3 F_avg = F0 + (Vec3(1.0) - F0) / 21.0;
+    Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0;
 
     // 2. Enerji kaybını roughness'a bağlı olarak tahmin et
-    Vec3 energyLoss = (Vec3(1.0) - F_avg) * (Vec3(1.0) - F_avg) * roughness;
+    Vec3 energyLoss = (Vec3(1.0f) - F_avg) * (Vec3(1.0f) - F_avg) * roughness;
 
     // 3. Metalik malzemelerde tazminatı devre dışı bırak (F0 ≈ 1 olduğu için)
-    Vec3 compensation = Vec3(1.0) + energyLoss * (1.0 - metallic);
+    Vec3 compensation = Vec3(1.0f) + energyLoss * (1.0f - metallic);
 
     // 4. Enerji oranı hesapla (Fresnel bazlı)
     float E = std::max(1.0f - (F0.x * 0.9f), 0.01f);  // Enerji korunumu için  
 
     // 5. Speküler enerjiyi artır ve enerji oranıyla dengele
-    return Vec3::min(specular * compensation / E, specular * 2.0);
+    return Vec3::min(specular * compensation / E, specular * 2.0f);
 }
 
 
@@ -166,14 +167,14 @@ bool PrincipledBSDF::scatter(
     Vec3 albedo = getPropertyValue(albedoProperty, uv);
    // albedo = Vec3::max(albedo, Vec3(0.05f)); // Tam siyahı engelle (Avoid total black)
     float roughness = getPropertyValue(roughnessProperty, uv).y;
-    float metallic = getPropertyValue(metallicProperty, uv).z;
-    Vec3 emission = getPropertyValue(emissionProperty, uv);
+    float metallic = getPropertyValue(metallicProperty, uv).z;   
     float transmissionValue = transmission;
     float opacity = get_opacity(uv);
 	float ior = getIOR();
     Vec3 N = rec.interpolated_normal.normalize(); // Geometri normali
     Vec3 V = -r_in.direction.normalize();         // Gelen ışığın yönü (view vector)
     Vec3 L = scattered.direction;
+    attenuation = Vec3(0.0f);
     // 1. Opaklık kontrolü – ışığın geçip geçmeyeceğine karar ver
     // Opacity check – stochastic transparency
     if (opacity < 1.0f) {
@@ -188,15 +189,8 @@ bool PrincipledBSDF::scatter(
             return true; // Işık geçiyor
         }
     }
-    // 2. Emissive malzeme varsa doğrudan ışık katkısı verir
-   // If material emits light, return its emission
-    if (emission.length() > 0.1f) {
-        attenuation = emission;
-        return true;
-    }
-
-
- 
+  
+     
     // 3. Transmission varsa cam/şeffaf gibi davran
     // Transmission check (e.g. glass-like material)
     if (Vec3::random_float() < transmissionValue) {
@@ -214,7 +208,7 @@ bool PrincipledBSDF::scatter(
 
     // Geçiş katsayısı daha net kontrol edilsin
    
-    Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness*0.1f).normalize();
+    Vec3 diffuse_dir = Vec3::lerp(metal_dir, cosine_dir, roughness).normalize();
     //Vec3 diffuse_dir = cosine_dir.normalize();
     // Fresnel term determines reflectance vs diffuse ratio
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
@@ -244,14 +238,14 @@ bool PrincipledBSDF::scatter(
     if (sampled_dir.near_zero()) {
         sampled_dir = N;
     }	
-    attenuation += (k_d * albedo)+specular;
+    attenuation += (k_d * albedo) / M_PI +specular;
     scattered = Ray(rec.point + N * 0.0001f, sampled_dir);
     return true;
 }
 float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const  {
     float metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
     float roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
-    float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0);
+    float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0f);
 
     // GGX sample: assume isotropic
     // GPU ile uyumlu D terimi
@@ -332,7 +326,7 @@ Vec3 PrincipledBSDF::fresnelSchlickRoughness(float cosTheta, const Vec3& F0, flo
 
 
 Vec3 PrincipledBSDF::fresnelSchlick(float cosTheta, const Vec3& F0) const {
-    return F0 + (Vec3(1.0) - F0) * std::pow(1.0 - cosTheta, 5.0);
+    return F0 + (Vec3(1.0f) - F0) * std::pow(1.0f - cosTheta, 5.0);
 }
 // LUT dizilerinin başlangıçta boş olması gerekiyor.
 float PrincipledBSDF::sqrtTable[256];
@@ -382,15 +376,15 @@ Vec3 PrincipledBSDF::computeFresnel(const Vec3& F0, float cosTheta) const {
     return F0 + (Vec3(1.0f, 1.0f, 1.0f) - F0) * p;
 }
 Vec3 PrincipledBSDF::computeClearcoat(const Vec3& V, const Vec3& L, const Vec3& N) const {
-    Vec3 clearcoatColor = Vec3(1.0);
+    Vec3 clearcoatColor = Vec3(1.0f);
     float clearcoatRough = clearcoatRoughness;
 
     Vec3 H = (V + L).normalize();  // H vektörü yansıyan ışık değil, göz ve ışık yönü olmalı
     float clearcoatNDF = DistributionGGX(N, H, clearcoatRough);
     float clearcoatG = GeometrySmith(N, V, L, clearcoatRough);
-    Vec3 clearcoatF = fresnelSchlick(std::fmax(Vec3::dot(H, V), 0.0), clearcoatColor);
+    Vec3 clearcoatF = fresnelSchlick(std::fmax(Vec3::dot(H, V), 0.0f), clearcoatColor);
 
-    float clearcoatDenom = 4.0f * std::fmax(Vec3::dot(N, V), 0.0) * max(Vec3::dot(N, L), 0.0f) + 0.0001f;
+    float clearcoatDenom = 4.0f * std::fmax(Vec3::dot(N, V), 0.0f) * max(Vec3::dot(N, L), 0.0f) + 0.0001f;
 
     return (clearcoatNDF * clearcoatG * clearcoatF) / clearcoatDenom;
 }
@@ -422,31 +416,31 @@ Vec3 PrincipledBSDF::computeSubsurfaceScattering(const Vec3& N, const Vec3& V, c
 }
 
 
-Vec3 PrincipledBSDF::sample_henyey_greenstein(const Vec3& wi, double g) const {
-    double rand1 = Vec3::random_float();
-    double rand2 = Vec3::random_float();
+Vec3 PrincipledBSDF::sample_henyey_greenstein(const Vec3& wi, float g) const {
+    float rand1 = Vec3::random_float();
+    float rand2 = Vec3::random_float();
 
     // HG (Henyey-Greenstein) phase function için cos(theta) hesapla
-    double cos_theta;
+    float cos_theta;
     if (std::abs(g) < 1e-3) {
-        cos_theta = 1.0 - 2.0 * rand1;  // g  0 için isotropik dağılım
+        cos_theta = 1.0f - 2.0f * rand1;  // g  0 için isotropik dağılım
     }
     else {
-        double square = (1.0 - g * g) / (1.0 + g - 2.0 * g * rand1);
-        cos_theta = (1.0 + g * g - square * square) / (2.0 * g);
+        float square = (1.0f - g * g) / (1.0f + g - 2.0f * g * rand1);
+        cos_theta = (1.0f + g * g - square * square) / (2.0f * g);
     }
 
     // Sin(θ) hesapla
-    double sin_theta = sqrt(std::max(0.0, 1.0 - cos_theta * cos_theta));
+    float sin_theta = sqrt(std::fmax(0.0f, 1.0f - cos_theta * cos_theta));
 
     // (phi) rastgele bir açı seç
-    double phi = 2.0 * M_PI * rand2;
+    float phi = 2.0f * static_cast<float>(M_PI) * rand2;
 
     // Başlangıç vektörü w olarak al
     Vec3 w = wi.normalize();
 
     // w'den ortogonal bir u vektörü oluştur
-    Vec3 u = (fabs(w.x) > 0.9) ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
+    Vec3 u = (fabs(w.x) > 0.9f) ? Vec3(0, 1, 0) : Vec3(1, 0, 0);
     u = (u.cross(w)).normalize();
 
     // v vektörünü hesapla (u ve w'nin çapraz çarpımı)
@@ -469,29 +463,29 @@ Vec3 PrincipledBSDF::getPropertyValue(const MaterialProperty& prop, const Vec2& 
     return prop.color * prop.intensity;
 }
 
-Vec2 PrincipledBSDF::applyTiling(double u, double v) const {
-    return Vec2(fmod(u * tilingFactor.u, 1.0),
-        fmod(v * tilingFactor.v, 1.0));
+Vec2 PrincipledBSDF::applyTiling(float u, float v) const {
+    return Vec2(fmod(u * tilingFactor.u, 1.0f),
+        fmod(v * tilingFactor.v, 1.0f));
 }
 
-Vec2 PrincipledBSDF::applyTextureTransform(double u, double v) const {
-    // Merkezi (0.5, 0.5) olarak kabul edelim
-    u -= 0.5;
-    v -= 0.5;
+Vec2 PrincipledBSDF::applyTextureTransform(float u, float v) const {
+    // Merkezi (0.5, 0.5f) olarak kabul edelim
+    u -= 0.5f;
+    v -= 0.5f;
     // Ölçeklendirme
     u *= textureTransform.scale.u;
     v *= textureTransform.scale.v;
     // Döndürme (dereceyi radyana çevir)
-    double rotation_radians = textureTransform.rotation_degrees * M_PI / 180.0;
-    double cosTheta = std::cos(rotation_radians);
-    double sinTheta = std::sin(rotation_radians);
-    double newU = u * cosTheta - v * sinTheta;
-    double newV = u * sinTheta + v * cosTheta;
+    float rotation_radians = textureTransform.rotation_degrees * M_PI / 180.0f;
+    float cosTheta = std::cos(rotation_radians);
+    float sinTheta = std::sin(rotation_radians);
+    float newU = u * cosTheta - v * sinTheta;
+    float newV = u * sinTheta + v * cosTheta;
     u = newU;
     v = newV;
     // Merkezi geri taşı
-    u += 0.5;
-    v += 0.5;
+    u += 0.5f;
+    v += 0.5f;
     // Öteleme uygula
     u += textureTransform.translation.u;
     v += textureTransform.translation.v;
@@ -503,27 +497,27 @@ Vec2 PrincipledBSDF::applyTextureTransform(double u, double v) const {
     return applyWrapMode(uvData);
 }
 
-UVData PrincipledBSDF::transformUV(double u, double v) const {
+UVData PrincipledBSDF::transformUV(float u, float v) const {
     UVData uvData;
     uvData.original = Vec2(u, v);
 
     // Tüm dönüşümleri uygula
-    u -= 0.5;
-    v -= 0.5;
+    u -= 0.5f;
+    v -= 0.5f;
 
     u *= textureTransform.scale.u;
     v *= textureTransform.scale.v;
 
-    double rotation_radians = textureTransform.rotation_degrees * M_PI / 180.0;
-    double cosTheta = std::cos(rotation_radians);
-    double sinTheta = std::sin(rotation_radians);
-    double newU = u * cosTheta - v * sinTheta;
-    double newV = u * sinTheta + v * cosTheta;
+    float rotation_radians = textureTransform.rotation_degrees * M_PI / 180.0f;
+    float cosTheta = std::cos(rotation_radians);
+    float sinTheta = std::sin(rotation_radians);
+    float newU = u * cosTheta - v * sinTheta;
+    float newV = u * sinTheta + v * cosTheta;
     u = newU;
     v = newV;
 
-    u += 0.5;
-    v += 0.5;
+    u += 0.5f;
+    v += 0.5f;
 
     u += textureTransform.translation.u;
     v += textureTransform.translation.v;
@@ -552,26 +546,26 @@ Vec2 PrincipledBSDF::applyWrapMode(const UVData& uvData) const {
     return uvData.transformed;
 }
 Vec2 PrincipledBSDF::applyRepeatWrapping(const Vec2& uv) const {
-    double u = std::fmod(uv.u, 1.0);
-    double v = std::fmod(uv.v, 1.0);
-    if (u < 0) u += 1.0;
-    if (v < 0) v += 1.0;
+    float u = std::fmod(uv.u, 1.0f);
+    float v = std::fmod(uv.v, 1.0f);
+    if (u < 0) u += 1.0f;
+    if (v < 0) v += 1.0f;
     return Vec2(u, v);
 }
 
 Vec2 PrincipledBSDF::applyMirrorWrapping(const Vec2& uv) const {
-    double u = std::fmod(uv.u, 2.0);
-    double v = std::fmod(uv.v, 2.0);
-    if (u < 0) u += 2.0;
-    if (v < 0) v += 2.0;
-    if (u > 1.0) u = 2.0 - u;
-    if (v > 1.0) v = 2.0 - v;
+    float u = std::fmod(uv.u, 2.0f);
+    float v = std::fmod(uv.v, 2.0f);
+    if (u < 0) u += 2.0f;
+    if (v < 0) v += 2.0f;
+    if (u > 1.0f) u = 2.0f - u;
+    if (v > 1.0f) v = 2.0f - v;
     return Vec2(u, v);
 }
 
 Vec2 PrincipledBSDF::applyClampWrapping(const Vec2& uv) const {
-    double u = (uv.u < 0.0) ? 0.0 : ((uv.u > 1.0) ? 1.0 : uv.u);
-    double v = (uv.v < 0.0) ? 0.0 : ((uv.v > 1.0) ? 1.0 : uv.v);
+    float u = (uv.u < 0.0f) ? 0.0f : ((uv.u > 1.0f) ? 1.0f : uv.u);
+    float v = (uv.v < 0.0f) ? 0.0f : ((uv.v > 1.0f) ? 1.0f : uv.v);
     return Vec2(u, v);
 }
 
@@ -582,28 +576,28 @@ Vec2 PrincipledBSDF::applyPlanarWrapping(const Vec2& uv) const {
 
 Vec2 PrincipledBSDF::applyCubicWrapping(const Vec2& uv) const {
     // UV koordinatlarını 0-3 aralığına genişlet
-    double u_scaled = uv.u * 3.0;
-    double v_scaled = uv.v * 3.0;
+    float u_scaled = uv.u * 3.0f;
+    float v_scaled = uv.v * 3.0f;
 
     // Hangi yüzeyde olduğumuzu belirle
     int face = static_cast<int>(u_scaled) + 3 * static_cast<int>(v_scaled);
 
     // Yüzey içindeki lokal koordinatları hesapla
-    double u_local = std::fmod(u_scaled, 1.0);
-    double v_local = std::fmod(v_scaled, 1.0);
+    float u_local = std::fmod(u_scaled, 1.0f);
+    float v_local = std::fmod(v_scaled, 1.0f);
 
     // Yüzeye göre koordinatları ayarla
     switch (face % 6) {  // 6'ya göre mod alarak taşmaları önlüyoruz
     case 0: // Ön yüz
         return Vec2(u_local, v_local);
     case 1: // Sağ yüz
-        return Vec2(v_local, 1.0 - u_local);
+        return Vec2(v_local, 1.0f - u_local);
     case 2: // Arka yüz
-        return Vec2(1.0 - u_local, v_local);
+        return Vec2(1.0f - u_local, v_local);
     case 3: // Sol yüz
-        return Vec2(1.0 - v_local, 1.0 - u_local);
+        return Vec2(1.0f - v_local, 1.0f - u_local);
     case 4: // Üst yüz
-        return Vec2(u_local, 1.0 - v_local);
+        return Vec2(u_local, 1.0f - v_local);
     case 5: // Alt yüz
         return Vec2(u_local, v_local);
     }
@@ -614,3 +608,7 @@ Vec2 PrincipledBSDF::applyCubicWrapping(const Vec2& uv) const {
 void PrincipledBSDF::setTextureTransform(const TextureTransform& transform) {
     textureTransform = transform;
 }
+
+
+
+

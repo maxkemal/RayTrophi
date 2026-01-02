@@ -5,6 +5,11 @@
 // This file is included by scene_ui.cpp to reduce file size
 
 #include "ProjectManager.h"
+#include "scene_data.h"
+#include "renderer.h"
+#include "SceneSelection.h"
+#include "OptixWrapper.h"
+#include "TerrainManager.h"
 
 void SceneUI::drawMainMenuBar(UIContext& ctx)
 {
@@ -25,6 +30,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  rendering_stopped_gpu = true;
                  
                  // Clear project and scene
+                 
+                 // CLEANUP: Ensure stale terrain objects are removed
+                 TerrainManager::getInstance().removeAllTerrains(ctx.scene);
+
                  g_ProjectManager.newProject();
                  ctx.scene.clear();
                  ctx.renderer.resetCPUAccumulation();
@@ -45,6 +54,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  ctx.start_render = true;
                  
                  SCENE_LOG_INFO("New project created.");
+                 this->addViewportMessage("New Project Created");
             }
 
             ImGui::Separator();
@@ -53,16 +63,21 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             // OPEN PROJECT (.rtp / .rts)
             // ================================================================
             if (ImGui::MenuItem("Open Project...", "Ctrl+O")) {
-                std::string filepath = openFileDialogW(L"RayTrophi Project (.rtp;.rts)\0*.rtp;*.rts\0All Files\0*.*\0");
-                if (!filepath.empty()) {
-                    rendering_stopped_cpu = true;
-                    rendering_stopped_gpu = true;
-                    
-                    scene_loading = true;
-                    scene_loading_done = false;
-                    scene_loading_progress = 0;
-                    scene_loading_stage = "Opening project...";
-                    
+                // SAFETY: Prevent concurrent loads
+                if (g_scene_loading_in_progress.load()) {
+                    SCENE_LOG_WARN("Already loading a project. Please wait...");
+                } else {
+                    std::string filepath = openFileDialogW(L"RayTrophi Project (.rtp;.rts)\0*.rtp;*.rts\0All Files\0*.*\0");
+                    if (!filepath.empty()) {
+                        g_scene_loading_in_progress = true;  // Lock loading
+                        rendering_stopped_cpu = true;
+                        rendering_stopped_gpu = true;
+                        
+                        scene_loading = true;
+                        scene_loading_done = false;
+                        scene_loading_progress = 0;
+                        scene_loading_stage = "Opening project...";
+                        
                     std::thread loader_thread([this, filepath, &ctx]() {
                         // Wait for render threads to pause
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -89,11 +104,17 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                         
                         scene_loading = false;
                         scene_loading_done = true;
+                        g_scene_loading_in_progress = false;  // Unlock loading
+                        
+                        // Resume rendering
+                        rendering_stopped_cpu = false;
+                        rendering_stopped_gpu = false;
                     });
                     loader_thread.detach();
                     
                     SCENE_LOG_INFO("Opening project: " + filepath);
-                }
+                    }
+                } // end else (not already loading)
             }
             
             // ================================================================
@@ -117,15 +138,19 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      
                      SCENE_LOG_INFO("Starting background save...");
                      
-                     std::thread save_thread([this, current_path]() {
+                     std::thread save_thread([this, current_path, &ctx]() {
                          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                         g_ProjectManager.saveProject(current_path,
+                         g_ProjectManager.saveProject(current_path, ctx.scene, ctx.render_settings,
                             [this](int p, const std::string& s) {
                                 scene_loading_progress = p;
                                 scene_loading_stage = s;
                             });
                          scene_loading = false;
                          scene_loading_done = true;
+                         
+                         // Resume rendering
+                         rendering_stopped_cpu = false;
+                         rendering_stopped_gpu = false;
                      });
                      save_thread.detach();
                  } else {
@@ -139,15 +164,19 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          
                          SCENE_LOG_INFO("Starting background save...");
                          
-                         std::thread save_thread([this, filepath]() {
+                         std::thread save_thread([this, filepath, &ctx]() {
                              std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                             g_ProjectManager.saveProject(filepath,
+                             g_ProjectManager.saveProject(filepath, ctx.scene, ctx.render_settings,
                                 [this](int p, const std::string& s) {
                                     scene_loading_progress = p;
                                     scene_loading_stage = s;
                                 });
                              scene_loading = false;
                              scene_loading_done = true;
+                             
+                             // Resume rendering
+                             rendering_stopped_cpu = false;
+                             rendering_stopped_gpu = false;
                          });
                          save_thread.detach();
                          SCENE_LOG_INFO("Project saved: " + filepath);
@@ -173,15 +202,19 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      
                      SCENE_LOG_INFO("Starting background save...");
                      
-                     std::thread save_thread([this, filepath]() {
+                     std::thread save_thread([this, filepath, &ctx]() {
                          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                         g_ProjectManager.saveProject(filepath,
+                         g_ProjectManager.saveProject(filepath, ctx.scene, ctx.render_settings,
                             [this](int p, const std::string& s) {
                                 scene_loading_progress = p;
                                 scene_loading_stage = s;
                             });
                          scene_loading = false;
                          scene_loading_done = true;
+                         
+                         // Resume rendering
+                         rendering_stopped_cpu = false;
+                         rendering_stopped_gpu = false;
                      });
                      save_thread.detach();
                      SCENE_LOG_INFO("Project saved: " + filepath);
@@ -219,6 +252,12 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                  scene_loading_stage = s;
                              }, false); // false = DO NOT REBUILD in thread (Crash fix)
                          
+                         // Set flags to trigger rebuild on MAIN thread
+                         if (success) {
+                             g_needs_geometry_rebuild = true;
+                             g_needs_optix_sync = (ctx.optix_gpu_ptr != nullptr);
+                         }
+
                          if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
                          
                          // Wait for GPU to finish all pending operations
@@ -314,6 +353,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
                      g_ProjectManager.markModified();
                      SCENE_LOG_INFO("Added Point Light");
+                     addViewportMessage("Added Point Light");
                  }
                  if (ImGui::MenuItem("Directional Light")) {
                      auto l = std::make_shared<DirectionalLight>(Vec3(-1,-1,-0.5), Vec3(5,5,5), 0.1f);
@@ -326,6 +366,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
                      g_ProjectManager.markModified();
                      SCENE_LOG_INFO("Added Directional Light");
+                     addViewportMessage("Added Directional Light");
                  }
                  if (ImGui::MenuItem("Spot Light")) {
                      auto l = std::make_shared<SpotLight>(Vec3(0,5,0), Vec3(0,-1,0), Vec3(10,10,10), 45.0f, 60.0f);
@@ -338,6 +379,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
                      g_ProjectManager.markModified();
                      SCENE_LOG_INFO("Added Spot Light");
+                     addViewportMessage("Added Spot Light");
                  }
                  if (ImGui::MenuItem("Area Light")) {
                      auto l = std::make_shared<AreaLight>(Vec3(0,5,0), Vec3(1,0,0), Vec3(0,0,1), 2.0f, 2.0f, Vec3(10,10,10));
@@ -350,6 +392,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
                      g_ProjectManager.markModified();
                      SCENE_LOG_INFO("Added Area Light");
+                     addViewportMessage("Added Area Light");
                  }
                  ImGui::EndMenu();
              }
@@ -368,6 +411,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  ctx.render_settings.is_render_paused = false;
                  ctx.start_render = true;
                  SCENE_LOG_INFO("Starting Final Render via Menu (F12)");
+                 addViewportMessage("Starting Render...");
              }
              ImGui::EndMenu();
         }
@@ -376,7 +420,25 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         {
             ImGui::MenuItem("Properties Panel", nullptr, &showSidePanel);
             ImGui::MenuItem("Bottom Panel", nullptr, &show_animation_panel);
-            ImGui::MenuItem("Log Window", nullptr, &show_scene_log);
+            // Auto open log if check (optional)
+            if (ImGui::MenuItem("Log Window", nullptr, &show_scene_log)) {
+                 if (show_scene_log) show_animation_panel = false;
+            }
+            ImGui::Separator();
+            
+            if (ImGui::MenuItem("Foliage Tab", nullptr, &show_foliage_tab)) { 
+                if (show_foliage_tab) tab_to_focus = "Foliage"; 
+            }
+            if (ImGui::MenuItem("Water Tab", nullptr, &show_water_tab)) { 
+                if (show_water_tab) tab_to_focus = "Water"; 
+            }
+            if (ImGui::MenuItem("Terrain Tab", nullptr, &show_terrain_tab)) { 
+                if (show_terrain_tab) tab_to_focus = "Terrain"; 
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
+                if (show_system_tab) tab_to_focus = "System"; 
+            }
             ImGui::EndMenu();
         }
         
@@ -456,6 +518,7 @@ void SceneUI::addProceduralPlane(UIContext& ctx) {
     if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
     
     SCENE_LOG_INFO("Added Plane: " + name);
+    addViewportMessage("Added Plane: " + name);
 }
 
 // Add a procedural cube to the scene
@@ -521,6 +584,7 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
     if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
     
     SCENE_LOG_INFO("Added Cube: " + name);
+    addViewportMessage("Added Cube: " + name);
 }
 
 #endif

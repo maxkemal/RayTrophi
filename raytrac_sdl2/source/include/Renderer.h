@@ -31,32 +31,38 @@
 #include <chrono>
 #include <iostream>
 #include <iomanip>
-#include "HittableList.h"
-#include "light.h"
 #include "Vec3.h"
-#include "Camera.h"
-#include "PointLight.h"
-#include "DirectionalLight.h"
-#include "AreaLight.h"
-#include "Volumetric.h"
 #include "matrix4x4.h"
-#include "PrincipledBSDF.h"
-#include "Dielectric.h"
-#include "Material.h"
-#include "Triangle.h"
 #include "Vec2.h"
 #include "Vec3SIMD.h"
-#include "Mesh.h"
-#include "AABB.h"
-#include "Ray.h"
-#include "Hittable.h"
 #include "World.h"
-#include "ParallelBVHNode.h"
 #include <OpenImageDenoise/oidn.hpp>
-#include "AnimatedObject.h"
 #include <ColorProcessingParams.h>
-#include <scene_data.h>
 #include <functional>
+#include "AssimpLoader.h"
+
+// Forward Declarations
+class HittableList;
+class Light;
+class Camera;
+class PointLight;
+class DirectionalLight;
+class AreaLight;
+class Volumetric;
+class PrincipledBSDF;
+class Dielectric;
+class Material;
+class Triangle;
+class Mesh;
+class AABB;
+class Ray;
+class Hittable;
+struct HitRecord;
+class ParallelBVHNode;
+class AnimatedObject;
+struct SceneData;
+struct AnimationData;
+
 
 
 enum class BVHType {
@@ -70,10 +76,6 @@ struct UIContext;
 
 class Renderer {
 public:
-
-    void updatePixel(SDL_Surface* surface,int x, int y, const Vec3& c);
-
-    void init(SDL_Surface* surface);
 
     static bool isCudaAvailable();
 
@@ -91,20 +93,10 @@ public:
     Vec3 fresnel_schlick(float cosTheta, Vec3 F0);
    
     static void create_coordinate_system(const Vec3& N, Vec3& T, Vec3& B);
-    float sobol(int index, int dimension);
-    void initialize_sobol_cache();
-    void precompute_sobol(int max_index);
-    float get_sobol_value(int index, int dimension);
-    Vec2 stratified_sobol(int x, int y, int sample_index, int samples_per_pixel);
+   
     void initialize_halton_cache();
-    Vec3 adaptive_sample_pixel(int i, int j, const Camera& cam, const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int max_samples_per_pixel, double variance_threshold, int variance_check_interval);
-     //void render_chunk(int start_row, int end_row, SDL_Surface* surface, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const ParallelBVHNode* bvh, const int samples_per_pass, const int current_sample);
-
-    void update_pixel_color(SDL_Surface* surface, int i, int j, const Vec3 color, int current_sample, int new_samples);
-  
-    void set_window(SDL_Window* win);
-
-    void draw_progress_bar(SDL_Surface* surface, float progress);
+    Vec3 adaptive_sample_pixel(int i, int j, const Camera& cam, const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int max_samples_per_pixel, float variance_threshold, int variance_check_interval);
+   
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
     void render_image(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
         const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene);
@@ -117,10 +109,9 @@ public:
     bool updateAnimationState(SceneData& scene, float time);
    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
-    void create_scenefromMesh(const std::string& filename);
-
     void rebuildBVH(SceneData& scene, bool use_embree);
-
+    void updateBVH(SceneData& scene, bool use_embree);
+   
     void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
         std::function<void(int progress, const std::string& stage)> progress_callback = nullptr,
         bool append = false);  // If true, don't clear scene before loading
@@ -137,33 +128,20 @@ public:
     World world;
     static std::vector<Vec3> normalMapBuffer;
     SDL_PixelFormat* pixelFormat;
-    Uint8 Rshift, Gshift, Bshift;
-    Uint32 Rmask, Gmask, Bmask;
+
 private:
     std::vector<float> variance_buffer;
     static constexpr size_t CACHE_SIZE = 8;
     static constexpr size_t DIMENSION_COUNT = 2;
     AssimpLoader assimpLoader;
-    // Cache yapısı
-    struct SobolCache {
-        std::vector<std::vector<float>> values;
-        std::atomic<size_t> last_computed_index;
 
-        SobolCache() : values(DIMENSION_COUNT), last_computed_index(0) {
-            for (auto& dim : values) {
-                dim.resize(CACHE_SIZE);
-            }
-        }
-    };
-   
-    OptixWrapper* optix_gpu_ptr = nullptr; // Set externally via set_optix()
-    static SobolCache cache;
+    OptixWrapper* optix_gpu_ptr = nullptr; // Set externally via set_optix()   
     std::mutex cache_mutex;  // Header'da tanımlama
     ColorProcessor color_processor;
    
     int image_width;
     int image_height;
-    double aspect_ratio;
+    float aspect_ratio = 1.0f;
     int samples_per_pixel;
     int max_depth;
     std::vector<Vec3> frame_buffer;
@@ -171,13 +149,10 @@ private:
 
     std::atomic<int> next_pixel{ 0 };
     const int total_pixels=0;
-   
     static const int MAX_DIMENSIONS = 2; // Halton dizisi için maksimum boyut
      size_t MAX_SAMPLES_HALTON = 1024;  // 8K için yeterli olacak şekilde
     int max_halton_index ; // Örnek bir değer, ihtiyaca göre ayarlayın
-     const int MAX_SAMPLES_SOBOL = 4;
-   
-    std::vector<std::vector<float>> sobol_cache;
+
     std::unique_ptr<float[]> halton_cache;  // Tek boyutlu array olarak tutacağız
     std::atomic<int> next_row{ 0 };
     std::atomic<bool> rendering_complete{ false };
@@ -193,23 +168,16 @@ private:
     // Adaptive sampling için ekstra bufferlar
     std::vector<Vec3> variance_map;
 
-
     SDL_Renderer* sdlRenderer; // SDL_Renderer pointer'ı ekleyin
     std::shared_ptr<Texture> background_texture;
     Vec3 sample_directional_light(const ParallelBVHNode* bvh, const DirectionalLight* light, const HitRecord& rec, const Vec3& light_contribution);
     Vec3 sample_point_light(const ParallelBVHNode* bvh, const PointLight* light, const HitRecord& rec, const Vec3& light_contribution);
     Vec3 sample_area_light(const ParallelBVHNode* bvh, const AreaLight* light, const HitRecord& rec, const Vec3& light_contribution, int num_samples);
-    void removeFireflies(SDL_Surface* surface);
+   
     Vec3 getColorFromSurface(SDL_Surface* surface, int i, int j);
-    void update_variance_map_from_surface(SDL_Surface* surface);
-    void update_variance_map_hybrid(SDL_Surface* surface);
-   // void render_worker(int image_height, SDL_Surface* surface, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const ParallelBVHNode* bvh, const int samples_per_pass, const int current_sample);
-    
+
     void render_worker(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const   Hittable* bvh, const std::shared_ptr<Camera>& camera, const int samples_per_pass, const int current_sample);
 
-    void update_display(SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Surface* surface, SDL_Renderer* renderer);
-   
-  
     void apply_normal_map( HitRecord& rec);
     void render_chunk_adaptive(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const Hittable* bvh, const std::shared_ptr<Camera>& camera, const int total_samples_per_pixel);
 

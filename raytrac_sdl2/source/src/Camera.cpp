@@ -1,4 +1,4 @@
-#include "Camera.h"
+ï»¿#include "Camera.h"
 #include <cmath>
 #include <stdlib.h>
 #include "Matrix4x4.h"
@@ -8,8 +8,8 @@ Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, f
     blade_count(blade_count), fov(vfov), origin(lookfrom)
 {
     lens_radius = aperture * 0.5f;
-    near_dist = 0.1; // Yakýn mesafe, genellikle 0.1 olarak ayarlanýr
-    far_dist = focus_dist * 2.0; // Uzak mesafe, odak uzaklýðýnýn iki katý olarak ayarlanýr
+    near_dist = 0.1; // YakÄ±n mesafe, genellikle 0.1 olarak ayarlanÄ±r
+    far_dist = focus_dist * 2.0; // Uzak mesafe, odak uzaklÄ±ÄŸÄ±nÄ±n iki katÄ± olarak ayarlanÄ±r
     update_camera_vectors();
 }
 
@@ -37,12 +37,12 @@ void Camera::update_camera_vectors() {
     u = Vec3::cross(vup, w).normalize();
     v = Vec3::cross(w, u).normalize();
 
-    float theta = vfov * M_PI / 180.0;
+    float theta = vfov * static_cast<float>(M_PI) / 180.0;
     float half_height = tan(theta / 2.0);
     float half_width = aspect_ratio * half_height;
 
-    horizontal = 2.0 * half_width * focus_dist * u;
-    vertical = 2.0 * half_height * focus_dist * v;
+    horizontal = 2.0f * half_width * focus_dist * u;
+    vertical = 2.0f * half_height * focus_dist * v;
     lower_left_corner = lookfrom - horizontal * 0.5 - vertical * 0.5 - focus_dist * w;
 
     origin = lookfrom;
@@ -54,7 +54,7 @@ void Camera::moveToTargetLocked(const Vec3& new_position) {
     Vec3 view_dir = lookat - lookfrom;
     lookfrom = new_position;
     origin = new_position;
-    lookat = new_position + view_dir; // yön sabit kalýr
+    lookat = new_position + view_dir; // yÃ¶n sabit kalÄ±r
     update_camera_vectors();
 }
 // Bu metodu da ekleyebilirsin
@@ -64,13 +64,13 @@ void Camera::setLookDirection(const Vec3& direction_normalized) {
 }
 
 Vec3 Camera::random_in_unit_polygon(int sides) const {
-    float step = 2 * M_PI / sides;
+    float step = 2 * static_cast<float>(M_PI) / sides;
 
-    // Rastgele bir kenar seç
+    // Rastgele bir kenar seÃ§
     int edge_index = random_int(0, sides - 1);
     float edge_angle = edge_index * step;
 
-    // Kenar boyunca rastgele bir nokta seç
+    // Kenar boyunca rastgele bir nokta seÃ§
     float t = Vec3::random_float();
     float x1 = cos(edge_angle);
     float y1 = sin(edge_angle);
@@ -82,26 +82,26 @@ Vec3 Camera::random_in_unit_polygon(int sides) const {
     float px = x1 * (1 - t) + x2 * t;
     float py = y1 * (1 - t) + y2 * t;
 
-    // Ýçeri rastgele bir kaydýrma yaparak tam dolu hale getir
-    float shrink_factor = sqrt(Vec3::random_float()); // Ýç içe eþit doluluk için
+    // Ä°Ã§eri rastgele bir kaydÄ±rma yaparak tam dolu hale getir
+    float shrink_factor = sqrt(Vec3::random_float()); // Ä°Ã§ iÃ§e eÅŸit doluluk iÃ§in
     px *= shrink_factor;
     py *= shrink_factor;
 
     return Vec3(px, py, 0);
 }
-// Yeni fonksiyon: Bokeh þiddetini hesapla
+// Yeni fonksiyon: Bokeh ÅŸiddetini hesapla
 float Camera::calculate_bokeh_intensity(const Vec3& point) const {
     float distance = (point - origin).length();
     float focal_plane_distance = focus_dist;
 
-    // Blur faktörünü daha yumuþak bir þekilde hesapla
+    // Blur faktÃ¶rÃ¼nÃ¼ daha yumuÅŸak bir ÅŸekilde hesapla
     float blur_factor = std::abs(distance - focal_plane_distance) / focal_plane_distance;
 
-    // Blur faktörünü daha kontrollü hale getir
-    float scaled_aperture = aperture * 10.0f; // aperture etkisini ölçekle
+    // Blur faktÃ¶rÃ¼nÃ¼ daha kontrollÃ¼ hale getir
+    float scaled_aperture = aperture * 10.0f; // aperture etkisini Ã¶lÃ§ekle
     return std::min(1.0f, blur_factor * scaled_aperture);
 }
-// Iþýk kaynaklarý için özel bokeh þekli oluþtur
+// IÅŸÄ±k kaynaklarÄ± iÃ§in Ã¶zel bokeh ÅŸekli oluÅŸtur
 Vec3 Camera::create_bokeh_shape(const Vec3& color, float intensity) const {
     Vec3 bokeh_color = color * intensity;
     Vec3 shape = random_in_unit_polygon(blade_count);
@@ -118,10 +118,10 @@ bool Camera::isPointInFrustum(const Vec3& point, float size) const {
 }
 
 void Camera::updateFrustumPlanes() {
-    // Frustum düzlemlerini hesapla
+    // Frustum dÃ¼zlemlerini hesapla
     Vec3 fc = origin - w * far_dist;
-    float near_height = 2 * tan(fov * 0.5f * M_PI / 180) * near_dist;
-    float far_height = 2 * tan(fov * 0.5f * M_PI / 180) * far_dist;
+    float near_height = 2 * tan(fov * 0.5f * static_cast<float>(M_PI) / 180) * near_dist;
+    float far_height = 2 * tan(fov * 0.5f * static_cast<float>(M_PI) / 180) * far_dist;
     float near_width = near_height * aspect_ratio;
     float far_width = far_height * aspect_ratio;
 
@@ -138,7 +138,7 @@ void Camera::updateFrustumPlanes() {
     frustum_planes[5] = Plane(-w, fc);                                              // far
 }
 Vec3 Camera::getViewDirection() const {
-    return -w;  // Kameranýn baktýðý yön w vektörünün tersidir
+    return -w;  // KameranÄ±n baktÄ±ÄŸÄ± yÃ¶n w vektÃ¶rÃ¼nÃ¼n tersidir
 }
 
 Matrix4x4 Camera::getRotationMatrix() const {
@@ -152,10 +152,10 @@ Matrix4x4 Camera::getRotationMatrix() const {
 bool Camera::isAABBInFrustum(const AABB& aabb) const {
     for (const auto& plane : frustum_planes) {
         if (plane.distanceToPoint(aabb.getPositiveVertex(plane.normal)) < 0) {
-            return false;  // AABB frustum dýþýnda
+            return false;  // AABB frustum dÄ±ÅŸÄ±nda
         }
     }
-    return true;  // AABB frustum içinde
+    return true;  // AABB frustum iÃ§inde
 }
 void Camera::reset() {
     lookfrom = init_lookfrom;
@@ -183,3 +183,4 @@ std::vector<AABB> Camera::performFrustumCulling(const std::vector<AABB>& objects
     }
     return visibleObjects;
 }
+

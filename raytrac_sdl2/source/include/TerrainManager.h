@@ -58,6 +58,9 @@ public:
     
     // Update mesh vertices based on heightmap (Call after sculpting)
     void updateTerrainMesh(TerrainObject* terrain);
+
+    // Rebuild mesh topology (Call when resolution changes)
+    void rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain);
     
     // Update only dirty sectors (incremental update for performance)
     void updateDirtySectors(TerrainObject* terrain);
@@ -93,11 +96,16 @@ public:
     // ===========================================================================
     // EROSION SYSTEM
     // ===========================================================================
-    void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params);
-    void hydraulicErosionAdvanced(TerrainObject* terrain, const HydraulicErosionParams& params);
-    void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params);
-    void thermalErosion(TerrainObject* terrain, const ThermalErosionParams& params);
-    void windErosion(TerrainObject* terrain, float strength, float direction, int iterations);
+    void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void hydraulicErosionAdvanced(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});
+    void thermalErosionGPU(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {});
+    void thermalErosion(TerrainObject* terrain, const ThermalErosionParams& params, const std::vector<float>& mask = {});
+   
+    void windErosion(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask = {});
+    void windErosionGPU(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask = {});
     
     // Edge preservation helpers (prevents cliffs/walls at terrain boundaries)
     void preserveEdges(TerrainObject* terrain, const std::vector<float>& originalHeights, int fadeWidth);
@@ -111,7 +119,7 @@ public:
     void paintHardness(TerrainObject* terrain, const Vec3& hitPoint, float radius, float strength, float dt, bool increase);
     
     // Combined Wizard Process (Thermal -> Fluvial -> Wind)
-    void applyCombinedErosion(TerrainObject* terrain, int iterations, float strength);
+    void applyCombinedErosion(TerrainObject* terrain, int iterations, float strength, bool useGPU = false);
     
     // Progress callback type for long-running operations
     using ProgressCallback = std::function<void(float progress, const std::string& stage)>;
@@ -155,7 +163,9 @@ public:
     
     // Getters
     std::vector<TerrainObject>& getTerrains() { return terrains; }
+
     TerrainObject* getTerrain(int id);
+    TerrainObject* getTerrainByName(const std::string& name);
     
     // Management
     void removeTerrain(SceneData& scene, int id);
@@ -165,5 +175,25 @@ private:
     TerrainManager() = default;
     
     std::vector<TerrainObject> terrains;
+
     int next_id = 1;
+
+    // CUDA Driver API Handles
+    void* cudaModule = nullptr;
+    void* erosionKernelFunc = nullptr;
+    void* smoothKernelFunc = nullptr;
+    void* thermalKernelFunc = nullptr;
+    // Fluvial Kernels
+    void* fluvRainKernelFunc = nullptr;
+    void* fluvFluxKernelFunc = nullptr;
+    void* fluvWaterKernelFunc = nullptr;
+    void* fluvErodeKernelFunc = nullptr;
+    void* windKernelFunc = nullptr;
+    // Post-processing kernels (for CPU-GPU parity)
+    void* pitFillKernelFunc = nullptr;
+    void* spikeRemovalKernelFunc = nullptr;
+    void* edgePreservationKernelFunc = nullptr;
+    void* thermalWithHardnessKernelFunc = nullptr;
+    bool cudaInitialized = false;
+    void initCuda();
 };

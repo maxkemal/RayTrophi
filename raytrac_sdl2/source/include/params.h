@@ -110,6 +110,7 @@ struct RayGenParams {
     float grid_fade_distance; // Distance where grid fades out
     float clip_near;
     float clip_far;
+    float time;          // Global time for animation (water, etc.)
     //float4* accumulation_buffer launch_tile_based_progressive için gerektiğinde;
    
 };

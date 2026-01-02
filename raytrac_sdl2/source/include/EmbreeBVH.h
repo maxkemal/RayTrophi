@@ -67,7 +67,10 @@ public:
     }
 
 private:
-    RTCDevice device;
+    static RTCDevice device; // Shared device across all BVH instances (persistent)
     RTCScene scene;
     std::vector<TriangleData> triangle_data;
+
+public:
+    static void shutdown(); // Call on app exit to release device
 };

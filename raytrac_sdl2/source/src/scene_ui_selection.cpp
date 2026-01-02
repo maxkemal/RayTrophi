@@ -5,37 +5,20 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
+#include "globals.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include "scene_data.h"
 #include <unordered_set>
 #include <ProjectManager.h>
+#include "WaterSystem.h"
+#include "TerrainManager.h"
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MANUEL TAŞIMA TALİMATI (MANUAL TRANSFER INSTRUCTIONS):
-// ═════════════════════════════════════════════════════════════════════════════
-// Lütfen aşağıdaki fonksiyonları `scene_ui.cpp` dosyasından buraya Kes/Yapıştır yapın:
-// Please Cut/Paste the following functions from `scene_ui.cpp` to here:
-//
-// 1. void SceneUI::handleMouseSelection(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~6626 - 6863)
-//
-// 2. void SceneUI::triggerDelete(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~7108 - 7272)
-//
-// 3. void SceneUI::drawMarqueeRect() 
-//    (Tahmini Satırlar / Approx Lines: ~7274 - 7292)
-//
-// 4. void SceneUI::handleMarqueeSelection(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~7294 - 7465)
-//
-// 5. void SceneUI::deleteSelectedObject(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~3134 - 3202)
-//
-// 6. void SceneUI::handleDeleteShortcut(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~3204 - 3221)
-//
-// ═════════════════════════════════════════════════════════════════════════════
+
 
 void SceneUI::handleMarqueeSelection(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
@@ -179,6 +162,7 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
 
         if (skipped_procedural > 0) {
             SCENE_LOG_WARN("Skipped " + std::to_string(skipped_procedural) + " objects with mixed transforms (use Ctrl+Click)");
+            addViewportMessage("Skipped " + std::to_string(skipped_procedural) + " objects (Mixed Transforms)", 3.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
         }
 
         // Also check lights
@@ -261,14 +245,17 @@ bool SceneUI::deleteSelectedObject(UIContext& ctx)
 
     g_ProjectManager.markModified();
 
-    // --- Rebuild caches & acceleration ---
-    rebuildMeshCache(ctx.scene.world.objects);
-    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-    ctx.renderer.resetCPUAccumulation();
-
-    if (ctx.optix_gpu_ptr) {
-        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-        ctx.optix_gpu_ptr->resetAccumulation();
+    // ═══════════════════════════════════════════════════════════════════════════
+    // DEFERRED REBUILD - Set flags instead of immediate rebuild for faster UI
+    // ═══════════════════════════════════════════════════════════════════════════
+    g_mesh_cache_dirty = true;
+    g_bvh_rebuild_pending = true;
+    g_optix_rebuild_pending = true;
+    
+    // Auto-cleanup timeline tracks for deleted object
+    auto it = ctx.scene.timeline.tracks.find(deleted_name);
+    if (it != ctx.scene.timeline.tracks.end()) {
+        ctx.scene.timeline.tracks.erase(it);
     }
 
     SCENE_LOG_INFO(
@@ -302,12 +289,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
     // Only select if not interacting with UI or Gizmo
     if (ImGui::IsMouseClicked(0)) {
 
-        // Ignore click if over UI elements (Window/Panel) or Gizmo
+        // Ignore click if over UI elements (Window/Panel), Gizmo, or HUD overlay
         // WantCaptureMouse is true if mouse is over any ImGui window or interacting with it
-        if (ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsOver()) {
-            // Exception: If we are dragging a gizmo, we might be 'over' it but not 'using' it yet?
-            // Actually ImGuizmo::IsOver() handles gizmo hover.
-            // But if we are just over an empty window background, WantCaptureMouse is true.
+        // hud_captured_mouse is true if HUD elements (Focus Ring, Zoom, Exposure) captured the click
+        if (ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsOver() || hud_captured_mouse) {
+            // Reset HUD flag for next frame
+            hud_captured_mouse = false;
             return;
         }
 
@@ -367,14 +354,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             float closest_camera_t = closest_t;  // Must be closer than light
 
             for (size_t i = 0; i < ctx.scene.cameras.size(); ++i) {
-                if (i == ctx.scene.active_camera_index) continue;  // Skip active camera
-
-                auto& cam = ctx.scene.cameras[i];
-                if (!cam) continue;
-
                 // Camera selection sphere
+                auto& cam = ctx.scene.cameras[i]; // HATALI cam kullanımı için düzeltme
+                if (!cam) continue;
                 Vec3 oc = r.origin - cam->lookfrom;
-                float radius = 0.4f;  // Reduced from 1.0 to not block nearby objects
+                float radius = 0.6f;  // Increased from 0.4 to make selection easier
                 float a = r.direction.dot(r.direction);
                 float half_b = oc.dot(r.direction);
                 float c = oc.dot(oc) - radius * radius;
@@ -480,16 +464,32 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 
                         if (ctx.selection.isSelected(item)) {
                             ctx.selection.removeFromSelection(item);
-                            SCENE_LOG_INFO("Multi-select: Removed '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
+                            // SCENE_LOG_INFO("Multi-select: Removed '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
                         }
                         else {
                             ctx.selection.addToSelection(item);
-                            SCENE_LOG_INFO("Multi-select: Added '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
+                            // SCENE_LOG_INFO("Multi-select: Added '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
                         }
                     }
                     else {
                         // Single selection: Replace selection
                         ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+                        
+                        // TERRAIN CONNECTION: Check if this is a terrain chunk
+                        std::string tName = found_tri->nodeName;
+                        if (tName.find("Terrain_") == 0) {
+                            size_t chunkPos = tName.find("_Chunk");
+                            if (chunkPos != std::string::npos) {
+                                tName = tName.substr(0, chunkPos);
+                            }
+                            auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                            if (terrain) {
+                                terrain_brush.active_terrain_id = terrain->id;
+                                show_terrain_tab = true;
+                                tab_to_focus = "Terrain";
+                                SCENE_LOG_INFO("Terrain selected via viewport: " + tName);
+                            }
+                        }
                     }
                 }
                 else {
@@ -557,8 +557,9 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     // Build mesh cache once if needed
     if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
-    // OPTIMIZATION: Collect ALL triangles to delete into a single set for O(1) lookup
-    std::unordered_set<Triangle*> triangles_to_delete;
+    // OPTIMIZATION: Collect ALL hittable pointers to delete into a single set for O(1) lookup
+    // Using Hittable* (base class) for type safety
+    std::unordered_set<Hittable*> objects_to_delete;
     std::vector<std::string> deleted_names;
     std::vector<std::pair<std::string, std::vector<std::shared_ptr<Triangle>>>> undo_data;
 
@@ -571,7 +572,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             if (cache_it != mesh_cache.end()) {
                 std::vector<std::shared_ptr<Triangle>> tris_for_undo;
                 for (auto& pair : cache_it->second) {
-                    triangles_to_delete.insert(pair.second.get());
+                    objects_to_delete.insert(pair.second.get());
                     tris_for_undo.push_back(pair.second);
                 }
 
@@ -584,12 +585,15 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     }
 
     // OPTIMIZATION: Single remove_if pass for ALL objects - O(n) instead of O(n²)
-    if (!triangles_to_delete.empty()) {
+    // CRITICAL: Using raw pointer .get() instead of dynamic_pointer_cast for massive speedup
+    // dynamic_pointer_cast does RTTI check on every call = very slow on 4M objects
+    // We already know exact pointers from mesh_cache, so just compare raw pointers
+    if (!objects_to_delete.empty()) {
         auto& objs = ctx.scene.world.objects;
         objs.erase(
             std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& h) {
-                auto t = std::dynamic_pointer_cast<Triangle>(h);
-                return t && triangles_to_delete.count(t.get()) > 0;
+                // Fast O(1) lookup - no RTTI, just pointer comparison with base class
+                return objects_to_delete.count(h.get()) > 0;
                 }),
             objs.end()
         );
@@ -623,7 +627,26 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 [&](const ProceduralObjectData& p) { return p.display_name == deleted_name; });
             proj_data.procedural_objects.erase(it, proj_data.procedural_objects.end());
         }
+        
+        // Check Water Surfaces - remove from WaterManager if name matches
+        auto& water_surfaces = WaterManager::getInstance().getWaterSurfaces();
+        for (auto& surf : water_surfaces) {
+            if (surf.name == deleted_name) {
+                // Don't call removeWaterSurface here - triangles already removed above
+                // Just mark for removal from water_surfaces vector
+                surf.id = -1; // Mark for removal
+                break;
+            }
+        }
     }
+    
+    // Remove marked water surfaces
+    auto& water_surfaces = WaterManager::getInstance().getWaterSurfaces();
+    water_surfaces.erase(
+        std::remove_if(water_surfaces.begin(), water_surfaces.end(),
+            [](const WaterSurface& s) { return s.id == -1; }),
+        water_surfaces.end()
+    );
 
     // Record undo commands
     for (auto& [name, tris] : undo_data) {
@@ -676,18 +699,40 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         ctx.selection.clearSelection();
         g_ProjectManager.markModified();
 
-        // Force UI cache update (rebuild sets mesh_cache_valid = true internally)
-        rebuildMeshCache(ctx.scene.world.objects);
-        // mesh_cache_valid is now TRUE after rebuild - don't set to false!
+        // ═══════════════════════════════════════════════════════════════════════════
+        // OPTIMIZED UPDATE - Manually remove from cache to avoid slow rebuild
+        // ═══════════════════════════════════════════════════════════════════════════
+        for (const auto& name : deleted_names) {
+            // Remove from fast lookup cache
+            mesh_cache.erase(name);
+            
+            // Remove from UI iteration cache
+            auto it = std::remove_if(mesh_ui_cache.begin(), mesh_ui_cache.end(), 
+                [&](const auto& pair){ return pair.first == name; });
+            mesh_ui_cache.erase(it, mesh_ui_cache.end());
+        }
 
-        // Single rebuild for all deleted objects
+        g_mesh_cache_dirty = true;  // Flag for Main.cpp / other systems
+        mesh_cache_valid = true;    // KEEP TRUE: Our local cache is now up-to-date!
+        
         if (deleted_objects > 0) {
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) {
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            // ═══════════════════════════════════════════════════════════════════════
+            // INCREMENTAL GPU UPDATE (TLAS mode) - Instant!
+            // ═══════════════════════════════════════════════════════════════════════
+            if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                // Fast path: Just hide instances by setting visibility_mask = 0
+                for (const auto& name : deleted_names) {
+                    ctx.optix_gpu_ptr->hideInstancesByNodeName(name);
+                }
+                // Single TLAS update after ALL hides complete (batched for efficiency)
+                ctx.optix_gpu_ptr->rebuildTLAS();
+            } else {
+                // GAS mode fallback: Full rebuild required
+                g_optix_rebuild_pending = true;
             }
+            
+            // CPU BVH still needs rebuild for picking (async)
+            g_bvh_rebuild_pending = true;
         }
 
         // Update lights if any were deleted
@@ -700,6 +745,34 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         if (deleted_cameras > 0 && ctx.optix_gpu_ptr && ctx.scene.camera) {
             ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
             ctx.optix_gpu_ptr->resetAccumulation();
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // AUTO-CLEANUP TIMELINE TRACKS FOR DELETED ENTITIES
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Remove timeline tracks for deleted objects/lights/cameras
+        // This prevents orphan keyframes from cluttering the timeline
+        for (const auto& deleted_name : deleted_names) {
+            auto it = ctx.scene.timeline.tracks.find(deleted_name);
+            if (it != ctx.scene.timeline.tracks.end()) {
+                ctx.scene.timeline.tracks.erase(it);
+            }
+        }
+        
+        // Also clean up deleted lights and cameras from timeline
+        for (const auto& item : items_to_delete) {
+            if (item.type == SelectableType::Light && item.light) {
+                auto it = ctx.scene.timeline.tracks.find(item.light->nodeName);
+                if (it != ctx.scene.timeline.tracks.end()) {
+                    ctx.scene.timeline.tracks.erase(it);
+                }
+            }
+            else if (item.type == SelectableType::Camera && item.camera) {
+                auto it = ctx.scene.timeline.tracks.find(item.camera->nodeName);
+                if (it != ctx.scene.timeline.tracks.end()) {
+                    ctx.scene.timeline.tracks.erase(it);
+                }
+            }
         }
 
         ctx.start_render = true;

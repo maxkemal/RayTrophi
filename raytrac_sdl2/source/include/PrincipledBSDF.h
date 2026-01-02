@@ -52,7 +52,7 @@ public:
         metallicProperty(Vec3(metallic), metallic, metallicTexture),
         normalProperty(Vec3(0.5f, 0.5f, 1.0f), 1.0f, normalTexture),
         opacityProperty(Vec3(1.0f), 1.0f, opacityTexture, 1.0f),
-        emissionProperty(emission, 0.0f),
+        // emissionProperty(emission, 0.0f), // REMOVED from init list
         subsurfaceColor(subsurfaceColor),
         subsurfaceRadius(subsurfaceRadius),
         clearcoat(clearcoat),
@@ -60,6 +60,9 @@ public:
         clearcoatRoughness(clearcoatRoughness),
         textureTransform(transform)
     {
+        // Initialize base class emissionProperty
+        emissionProperty = MaterialProperty(emission, 0.0f);
+        
         static std::once_flag flag;
         std::call_once(flag, precomputeLUT);
     }
@@ -128,7 +131,6 @@ public:
     Vec2 tilingFactor;
     TextureTransform textureTransform;
     MaterialProperty specularProperty;
-    MaterialProperty emissionProperty;
     MaterialProperty transmissionProperty;
     Vec3 albedoValue;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const;
@@ -141,13 +143,26 @@ public:
 
     Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
     float normalStrength = 1.0f;
-    Vec3 subsurfaceRadius = 0.0f;
-    float clearcoat = 1.0f;
-    float clearcoatRoughness = 0.0f;
-    float anisotropic = 0;
-    float transmission = 0;
+    
+    // Subsurface Scattering (Random Walk)
+    Vec3 subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);     // SSS tint color
+    Vec3 subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);    // Per-channel scatter distance (skin default: R>G>B)
+    float subsurfaceScale = 0.05f;                      // Global radius multiplier
+    float subsurfaceAnisotropy = 0.0f;                  // Scatter direction bias (-1 to 1)
+    float subsurfaceIOR = 1.4f;                         // Internal SSS IOR
+    float subsurface = 0.0f;                            // SSS amount (0-1)
+    
+    // Clear Coat
+    float clearcoat = 0.0f;                             // Clear coat amount (0-1)
+    float clearcoatRoughness = 0.03f;                   // Clear coat roughness
+    
+    // Translucent (thin surface light pass-through)
+    float translucent = 0.0f;                           // Translucency amount (0-1)
+    
+    // Other properties
+    float anisotropic = 0.0f;                           // Surface anisotropy
+    float transmission = 0.0f;                          // Glass/water transmission
     Vec3 anisotropicDirection;
-    Vec3 subsurfaceColor;
     float opacityAlpha = 1.0f;
 private:
   

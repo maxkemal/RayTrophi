@@ -95,6 +95,9 @@ private:
 // ============================================================================
 struct TransformState {
     Matrix4x4 matrix;
+    Vec3 position;
+    Vec3 rotation;
+    Vec3 scale;
 };
 
 class TransformCommand : public SceneCommand {

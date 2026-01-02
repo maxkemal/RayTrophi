@@ -37,7 +37,7 @@ struct Mesh {
     std::string meshName;
     std::string nodeName;
     Matrix4x4 localTransform;
-    unsigned int originalMeshIndex;
+    unsigned int originalMeshIndex = 0;
     bool hasSkinning = false;
     int materialIndex = -1;
 

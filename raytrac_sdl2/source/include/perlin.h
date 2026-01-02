@@ -26,8 +26,8 @@ private:
         }
     }
 
-    static double trilinear_interp(double c[2][2][2], double u, double v, double w) {
-        double accum = 0.0;
+    static float trilinear_interp(float c[2][2][2], float u, float v, float w) {
+        float accum = 0.0f;
         for (int i = 0; i < 2; i++)
             for (int j = 0; j < 2; j++)
                 for (int k = 0; k < 2; k++)
@@ -37,11 +37,11 @@ private:
         return accum;
     }
 
-    static double perlin_interp(Vec3 c[2][2][2], double u, double v, double w) {
-        auto uu = u * u * (3 - 2 * u);
-        auto vv = v * v * (3 - 2 * v);
-        auto ww = w * w * (3 - 2 * w);
-        auto accum = 0.0;
+    static float perlin_interp(Vec3 c[2][2][2], float u, float v, float w) {
+        float uu = u * u * (3 - 2 * u);
+        float vv = v * v * (3 - 2 * v);
+        float ww = w * w * (3 - 2 * w);
+        float accum = 0.0f;
 
         for (int i = 0; i < 2; i++)
             for (int j = 0; j < 2; j++)
@@ -74,10 +74,10 @@ public:
         delete[] perm_z;
     }
 
-    double noise(const Vec3& p) const {
-        auto u = p.x - floor(p.x);
-        auto v = p.y - floor(p.y);
-        auto w = p.z - floor(p.z);
+    float noise(const Vec3& p) const {
+        float u = p.x - floor(p.x);
+        float v = p.y - floor(p.y);
+        float w = p.z - floor(p.z);
 
         int i = (int)floor(p.x);
         int j = (int)floor(p.y);
@@ -96,10 +96,10 @@ public:
         return perlin_interp(c, u, v, w);
     }
 
-    double turb(const Vec3& p, int depth = 7) const {
-        auto accum = 0.0;
-        auto temp_p = p;
-        auto weight = 1.0;
+    float turb(const Vec3& p, int depth = 7) const {
+        float accum = 0.0f;
+        Vec3 temp_p = p;
+        float weight = 1.0f;
 
         for (int i = 0; i < depth; i++) {
             accum += weight * noise(temp_p);
@@ -110,3 +110,4 @@ public:
         return fabs(accum);
     }
 };
+

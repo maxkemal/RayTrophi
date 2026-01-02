@@ -5,6 +5,7 @@
 #include "Triangle.h" 
 #include "Vec2.h"
 #include "PointLight.h"
+#include "DirectionalLight.h"
 #include "Camera.h"
 #include "Renderer.h"
 #include "World.h"
@@ -162,13 +163,18 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrappe
     scene.world.objects.push_back(tri1);
     scene.world.objects.push_back(tri2);
     
-    // 2. Enable Nishita Sky with dramatic sun angle (use renderer.world, not scene.world)
-    renderer.world.setMode(WORLD_MODE_NISHITA);
-    NishitaSkyParams nishitaParams = renderer.world.getNishitaParams();
-    nishitaParams.sun_elevation = 15.0f;   // Low sun for dramatic shadows
-    nishitaParams.sun_azimuth = 170.0f;     // Sun at 45 degrees
-    nishitaParams.sun_intensity = 22.0f;   // Bright sun
-    renderer.world.setNishitaParams(nishitaParams);
+    // Note: Nishita sky already set up with correct sun_direction above (lines 92-126)
+    // No need to override again here - it would lose the calculated sun_direction
+    
+    // 3. Create Directional Light matching sun direction (for sync to work)
+    auto dirLight = std::make_shared<DirectionalLight>(
+        -sunDir,  // Light direction is opposite of sun direction (light travels FROM sun)
+        Vec3(1.0f, 0.98f, 0.95f),  // Warm white sun color
+        10.0f    // Intensity
+       
+    );
+    dirLight->nodeName = "Sun";
+    scene.lights.push_back(dirLight);
     
     // Set fallback background color
     scene.background_color = Vec3(0.4f, 0.6f, 0.9f);

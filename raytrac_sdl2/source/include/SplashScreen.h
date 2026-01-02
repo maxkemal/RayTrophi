@@ -40,6 +40,11 @@ public:
     // Close and cleanup splash window
     void close();
 
+    // Effects
+    void fadeIn(int durationMs = 500);
+    void fadeOut(int durationMs = 500);
+    void setOpacity(float opacity);
+
 private:
     SDL_Window* m_window = nullptr;
     SDL_Renderer* m_renderer = nullptr;

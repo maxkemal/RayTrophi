@@ -8,35 +8,35 @@
 #include "Triangle.h"
 #include "AABB.h"
 
-Volumetric::Volumetric(const Vec3& a, double d, double ap, double sf, const Vec3& e, std::shared_ptr<Perlin> noiseGen)
+Volumetric::Volumetric(const Vec3& a, float d, float ap, float sf, const Vec3& e, std::shared_ptr<Perlin> noiseGen)
     : albedo(a), density(d), absorption_probability(ap), scattering_factor(sf), emission(e), noise(noiseGen) 
 {
     // Defaults suitable for dynamic volumes
-    max_distance = 10.0;
+    max_distance = 10.0f;
     step_size = 0.05f; 
     max_steps = 128;   
     g = 0.0f; 
 }
 
-double Volumetric::calculate_density(const Vec3& point) const {
+float Volumetric::calculate_density(const Vec3& point) const {
     // Defines shared density logic (procedural noise) for parity
     UnifiedVolumeParams params;
-    params.density_multiplier = (float)density;
+    params.density_multiplier = density;
     params.noise_scale = noise_scale;
     params.void_threshold = void_threshold;
     // Fallback to world space (invalid AABB)
     params.aabb_min = Vec3f(0);
     params.aabb_max = Vec3f(0);
     
-    return (double)calculate_unified_density(toVec3f(point), params);
+    return calculate_unified_density(toVec3f(point), params);
 }
 
 Vec3 Volumetric::march_volume(const Vec3& origin, const Vec3& dir, float& out_transmittance, const Vec3& aabb_min, const Vec3& aabb_max) const {
     // Map class members to unified struct
     UnifiedVolumeParams params;
-    params.density_multiplier = (float)density;
-    params.absorption_prob = (float)absorption_probability;
-    params.scattering_factor = (float)scattering_factor;
+    params.density_multiplier = density;
+    params.absorption_prob = absorption_probability;
+    params.scattering_factor = scattering_factor;
     params.albedo = toVec3f(albedo);
     params.emission_color = toVec3f(emission);
     params.step_size = step_size;
@@ -46,8 +46,8 @@ Vec3 Volumetric::march_volume(const Vec3& origin, const Vec3& dir, float& out_tr
     params.aabb_min = toVec3f(aabb_min);
     params.aabb_max = toVec3f(aabb_max);
     
-    // Multi-Scattering Parameters (NEW)
-    params.g = (float)g;
+    // Multi-Scattering Parameters
+    params.g = g;
     params.multi_scatter = multi_scatter;
     params.g_back = g_back;
     params.lobe_mix = lobe_mix;
@@ -97,7 +97,7 @@ bool Volumetric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
 }
 
 Vec3 Volumetric::getVolumetricEmission(const Vec3& p, const Vec3& dir, const Vec3& aabb_min, const Vec3& aabb_max) const {
-    float dummy_T;
+    float dummy_T = 1.0f;
     return march_volume(p, dir, dummy_T, aabb_min, aabb_max);
 }
 

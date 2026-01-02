@@ -113,9 +113,18 @@ public:
      * @return Material name, or empty string if not found
      */
     std::string getMaterialName(uint16_t id) const;
+    
+    /**
+     * @brief Sync gpuMaterial pointers for all PrincipledBSDF materials
+     * This should be called after deserialize to ensure GPU rendering works correctly.
+     */
+    void syncAllGpuMaterials();
 
 private:
     MaterialManager() = default;
+    
+    // Internal version without lock - called from deserialize which already holds mutex
+    void syncAllGpuMaterials_internal();
 
     std::vector<std::shared_ptr<Material>> materials;
     std::unordered_map<std::string, uint16_t> nameToID;

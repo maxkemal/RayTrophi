@@ -18,9 +18,7 @@ __device__ inline float frac(float x) {
 __device__ inline float3 frac(float3 x) {
     return make_float3(frac(x.x), frac(x.y), frac(x.z));
 }
-__device__ inline float3 floor_float3(float3 x) {
-    return make_float3(floorf(x.x), floorf(x.y), floorf(x.z));
-}
+// floor_float3 removed (in vec3_utils.cuh)
 __device__ inline float lerp_custom(float a, float b, float t) {
     return a + t * (b - a);
 }

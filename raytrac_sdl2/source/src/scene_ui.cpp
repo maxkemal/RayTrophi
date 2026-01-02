@@ -14,6 +14,11 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
+#include "scene_data.h"    // Added explicit include
 #include "ui_modern.h"
 #include "imgui.h"
 #include "ImGuizmo.h"  // Transform gizmo
@@ -23,6 +28,8 @@
 #include "scene_ui_guides.hpp" // Viewport guides (safe areas, letterbox, grids)
 #include "TimelineWidget.h"   // Custom timeline widget
 #include "scene_data.h"
+#include "scene_ui_water.hpp"   // Water panel implementation
+#include "scene_ui_terrain.hpp" // Terrain panel implementation
 #include "ParallelBVHNode.h"
 #include "Triangle.h"  // For object hierarchy
 #include "PointLight.h"
@@ -447,10 +454,25 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (ImGui::BeginTabBar("MainPropertiesTabs"))
         {
             // -------------------------------------------------------------
+            // TAB: SCENE EDIT (Hierarchy) - MOVED TO FIRST
+            // -------------------------------------------------------------
+            ImGuiTabItemFlags scene_flags = 0;
+            if (focus_scene_edit_tab || tab_to_focus == "Scene Edit") {
+                scene_flags = ImGuiTabItemFlags_SetSelected;
+                focus_scene_edit_tab = false;
+                if (tab_to_focus == "Scene Edit") tab_to_focus = "";
+            }
+            if (ImGui::BeginTabItem("Scene Edit", nullptr, scene_flags)) {
+                drawSceneHierarchy(ctx);
+                ImGui::EndTabItem();
+            }
+
+            // -------------------------------------------------------------
             // TAB: RENDER (Render Controls & Settings)
             // -------------------------------------------------------------
-
-            if (ImGui::BeginTabItem("Render")) {
+            ImGuiTabItemFlags render_flags = 0;
+            if (tab_to_focus == "Render") { render_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
+            if (ImGui::BeginTabItem("Render", nullptr, render_flags)) {
                 
                 // Scene Status (File menu handles loading now)
                 UIWidgets::ColoredHeader("Scene Status", ImVec4(1.0f, 0.8f, 0.6f, 1.0f));
@@ -480,6 +502,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     bool optix_available = g_hasOptix;
                     if (!optix_available) ImGui::BeginDisabled();
                     if (ImGui::Checkbox("Use OptiX (GPU)", &ctx.render_settings.use_optix)) {
+                         // Trigger CPU data sync when switching from GPU to CPU
+                         if (!ctx.render_settings.use_optix) {
+                             extern bool g_cpu_sync_pending;
+                             g_cpu_sync_pending = true;
+                         }
                          ctx.start_render = true; // Trigger restart
                     }
                     if (!optix_available) { 
@@ -540,7 +567,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         // Sampling
                         if (ImGui::TreeNodeEx("Viewport Sampling", ImGuiTreeNodeFlags_DefaultOpen)) {
                             ImGui::PushItemWidth(150);
-                            ImGui::SliderInt("Max Samples", &ctx.render_settings.max_samples, 1, 64);
+                            ImGui::SliderInt("Max Samples", &ctx.render_settings.max_samples, 1, 128);
                             ImGui::PopItemWidth();
                             UIWidgets::HelpMarker("Viewport accumulation limit. Set high for continuous refinement.");
                             ImGui::TreePop();
@@ -751,99 +778,66 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     ImGui::TreePop();
                 }
 
-                // ---------------------------------------------------------
-                // CONTROL PANEL (Progress & Action)
-                // ---------------------------------------------------------
+                // NOTE: Progress bar and control buttons removed
+                // Sample count is now shown in Viewport HUD (Blender-style)
+                // Use F12 or "Start Final Render" in Final Render tab for production renders
+                
                 ImGui::Spacing();
-                ImGui::Separator();
-                
-                // Progress Bar with overlay text
-                float progress = ctx.render_settings.render_progress;
-                int current = ctx.render_settings.render_current_samples;
-                int target = ctx.render_settings.render_target_samples;
-                
-                // Colorize progress bar based on state
-                ImVec4 progress_color = ImVec4(0.2f, 0.7f, 0.3f, 1.0f); // Green
-                if (ctx.render_settings.is_render_paused) progress_color = ImVec4(0.8f, 0.6f, 0.2f, 1.0f); // Orange
-                
-                ImGui::PushStyleColor(ImGuiCol_PlotHistogram, progress_color);
-                char overlay[64];
-                snprintf(overlay, sizeof(overlay), "%d / %d Samples (%.1f%%)", current, target, progress * 100.0f);
-                ImGui::ProgressBar(progress, ImVec2(-1, 24), overlay);
-                ImGui::PopStyleColor();
+                ImGui::TextDisabled("Sample progress shown in Viewport HUD");
 
-                ImGui::Spacing();
-                
-                // Control Buttons
-                bool is_active = ctx.render_settings.is_rendering_active;
-                bool is_paused = ctx.render_settings.is_render_paused;
-                
-                float btn_w = ImGui::GetContentRegionAvail().x / 2.0f - 4.0f;
-                
-                // Start/Pause Button
-                if (is_active && !is_paused) {
-                    if (UIWidgets::SecondaryButton("Pause", ImVec2(btn_w, 30))) {
-                         ctx.render_settings.is_render_paused = true;
-                    }
+                ImGui::EndTabItem();
+            }
+
+            // -------------------------------------------------------------
+            // TAB: TERRAIN
+            // -------------------------------------------------------------
+            if (show_terrain_tab) {
+                ImGuiTabItemFlags terrain_flags = 0;
+                if(tab_to_focus == "Terrain") { terrain_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
+                if (ImGui::BeginTabItem("Terrain", &show_terrain_tab, terrain_flags)) {
+                    drawTerrainPanel(ctx);
+                    ImGui::EndTabItem();
+                }
+            }
+
+            // -------------------------------------------------------------
+            // TAB: FOLIAGE (Scatter Brush / Instance Painting)
+            // -------------------------------------------------------------
+            if (show_foliage_tab) {
+                bool foliage_tab_was_active = scatter_brush.enabled;
+                ImGuiTabItemFlags foliage_flags = 0;
+                if(tab_to_focus == "Foliage") { foliage_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
+                if (ImGui::BeginTabItem("Foliage", &show_foliage_tab, foliage_flags)) {
+                    drawScatterBrushPanel(ctx);
+                    ImGui::EndTabItem();
                 } else {
-                    const char* btn_label = is_paused ? "Resume Run" : "Start Render";
-                    if (UIWidgets::PrimaryButton(btn_label, ImVec2(btn_w, 30))) {
-                        ctx.render_settings.is_render_paused = false;
-                        if (!is_active) ctx.start_render = true;
-                    }
+                    if (foliage_tab_was_active) scatter_brush.enabled = false;
                 }
-                
-                ImGui::SameLine();
-                
-                // Stop/Reset Button
-                if (UIWidgets::DangerButton("Stop & Reset", ImVec2(btn_w, 30))) {
-                    rendering_stopped_cpu = true;
-                    rendering_stopped_gpu = true;
-                    ctx.render_settings.render_progress = 0.0f;
-                    ctx.render_settings.render_current_samples = 0;
-                }
-                
-                ImGui::Spacing();
-                if (ImGui::Button("Save Final Image...", ImVec2(-1, 0))) {
-                    ctx.render_settings.save_image_requested = true;
-                }
-
-                ImGui::EndTabItem();
             }
 
             // -------------------------------------------------------------
-            // TAB: WORLD (Environment, Sky, Lights)
+            // TAB: WATER
             // -------------------------------------------------------------
-            if (ImGui::BeginTabItem("World")) {
-                drawWorldContent(ctx);
-
-                ImGui::EndTabItem();
-            }
-
-            // NOTE: Camera tab removed - camera settings now in Scene Edit > Selection Properties
-
-            // -------------------------------------------------------------
-            // TAB: SCENE (Hierarchy)
-            // -------------------------------------------------------------
-            ImGuiTabItemFlags tab_flags = 0;
-            if (focus_scene_edit_tab) {
-                tab_flags = ImGuiTabItemFlags_SetSelected;
-                focus_scene_edit_tab = false;
-            }
-            if (ImGui::BeginTabItem("Scene Edit", nullptr, tab_flags)) {
-                drawSceneHierarchy(ctx);
-                // Material Editor is now drawn inside drawSceneHierarchy
-                ImGui::EndTabItem();
+            if (show_water_tab) {
+                ImGuiTabItemFlags water_flags = 0;
+                if(tab_to_focus == "Water") { water_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
+                if (ImGui::BeginTabItem("Water", &show_water_tab, water_flags)) {
+                    drawWaterPanel(ctx);
+                    ImGui::EndTabItem();
+                }
             }
 
             // -------------------------------------------------------------
             // TAB: SYSTEM (App settings)
             // -------------------------------------------------------------
-            if (ImGui::BeginTabItem("System")) {
-                drawThemeSelector();
-                drawResolutionPanel(ctx);
-                
-                ImGui::EndTabItem();
+            if (show_system_tab) {
+                ImGuiTabItemFlags system_flags = 0;
+                if(tab_to_focus == "System") { system_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
+                if (ImGui::BeginTabItem("System", &show_system_tab, system_flags)) {
+                    drawThemeSelector();
+                    drawResolutionPanel(ctx);
+                    ImGui::EndTabItem();
+                }
             }
 
             ImGui::EndTabBar();
@@ -876,12 +870,24 @@ void SceneUI::draw(UIContext& ctx)
     drawStatusAndBottom(ctx, screen_x, screen_y, left_offset);
 
     bool gizmo_hit = drawOverlays(ctx);
+    
+    // --- ANIMATION UPDATE ---
+    processAnimations(ctx);
+
     drawSelectionGizmos(ctx);
     drawCameraGizmos(ctx);  // Draw camera frustum icons
     drawViewportControls(ctx);  // Blender-style viewport overlay
+    drawViewportMessages(ctx, left_offset); // Messages/HUD (e.g. Async Rebuild)
     drawFocusIndicator(ctx);  // Split-prism focus aid
     drawZoomRing(ctx);  // FOV zoom control
     drawExposureInfo(ctx);  // Cinema camera exposure bar
+    
+    // Scatter Brush System
+    handleScatterBrush(ctx);   // Handle brush painting input
+    drawBrushPreview(ctx);     // Draw brush circle preview
+    
+    // Terrain Sculpting
+    handleTerrainBrush(ctx);
 
     handleSceneInteraction(ctx, gizmo_hit);
     processDeferredSceneUpdates(ctx);
@@ -1040,7 +1046,21 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImVec2(80, 20)))
         {
             show_scene_log = !show_scene_log;
-            if (show_scene_log) show_animation_panel = false;
+            if (show_scene_log) { show_animation_panel = false; show_terrain_graph = false; }
+        }
+
+        ImGui::SameLine();
+        
+        bool graph_active = show_terrain_graph;
+        if (UIWidgets::StateButton(
+            graph_active ? "[Graph]" : "Graph",
+            graph_active,
+            ImVec4(0.5f, 0.8f, 0.5f, 1.0f),  // Green for terrain
+            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
+            ImVec2(60, 20)))
+        {
+            show_terrain_graph = !show_terrain_graph;
+            if (show_terrain_graph) { show_animation_panel = false; show_scene_log = false; }
         }
 
         ImGui::SameLine();
@@ -1092,7 +1112,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::PopStyleVar(2);
 
     // ---------------- BOTTOM PANEL (Resizable) ----------------
-    bool show_bottom = (show_animation_panel || show_scene_log);
+    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph);
     if (!show_bottom) return;
 
     // Use class member for persistent height
@@ -1162,6 +1182,43 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         else if (show_scene_log) {
             drawLogPanelEmbedded();
         }
+        else if (show_terrain_graph) {
+            // Terrain Node Graph Editor
+            TerrainObject* activeTerrain = nullptr;
+            if (terrain_brush.active_terrain_id != -1) {
+                activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
+            }
+            // Auto-create default graph if empty
+            if (activeTerrain && terrainNodeGraph.nodes.empty()) {
+                terrainNodeGraph.createDefaultGraph(activeTerrain);
+            }
+            
+            // Set callback if not set to enable file dialogs
+            if (!terrainNodeEditorUI.onOpenFileDialog) {
+                 terrainNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
+                     return SceneUI::openFileDialogW(filter);
+                 };
+            }
+            if (!terrainNodeEditorUI.onSaveFileDialog) {
+                 terrainNodeEditorUI.onSaveFileDialog = [](const wchar_t* filter, const wchar_t* defName) -> std::string {
+                     // defName string'i saveFileDialogW'ye defExt olarak geçiliyor, 
+                     // ancak SceneUI::saveFileDialogW aslında uzantı bekliyor olabilir mi?
+                     // Bakalım: SceneUI::saveFileDialogW, lpstrDefExt kullanıyor.
+                     // Eğer defName "splat.png" gelirse, lpstrDefExt sadece uzantı ister genelde.
+                     // Ama varsayılan dosya adı (lpstrFile) da ayarlanabilir.
+                     // Mevcut SceneUI::saveFileDialogW implementasyonu lpstrFile'ı temizliyor.
+                     // Orayı da güncellemek gerekebilir ama şimdilik exportPath'i UI tarafında set ediyoruz.
+                     
+                     // Not: SceneUI::saveFileDialogW(filter, defExt) imzası var.
+                     // Bizim lambda (filter, defName) alıyor.
+                     // SplatOutputNode'da "splat_map.png" gönderiyoruz.
+                     // Bu durumda defExt olarak "png" göndermek daha doğru olur.
+                     
+                     return SceneUI::saveFileDialogW(filter, L"png");
+                 };
+            }
+            terrainNodeEditorUI.draw(ctx, terrainNodeGraph, activeTerrain);
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar(); // Pop WindowPadding
@@ -1171,6 +1228,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 bool SceneUI::drawOverlays(UIContext& ctx)
 {
     bool gizmo_hit = false;
+
+    // Draw Viewport HUDs
+    // Render status is now integrated into drawViewportMessages
+
 
     if (ctx.scene.camera && ctx.selection.show_gizmo) {
         drawLightGizmos(ctx, gizmo_hit);
@@ -1193,7 +1254,9 @@ void SceneUI::processDeferredSceneUpdates(UIContext& ctx)
     if (is_bvh_dirty && !ImGuizmo::IsUsing()) {
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
+        
+        // OPTIMIZATION: Only update OptiX geometry when OptiX rendering is enabled
+        if (ctx.render_settings.use_optix && ctx.optix_gpu_ptr) {
             ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
             ctx.optix_gpu_ptr->resetAccumulation();
         }

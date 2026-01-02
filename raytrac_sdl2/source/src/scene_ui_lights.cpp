@@ -5,6 +5,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
 #include "imgui.h"
 #include "scene_data.h"
 #include "PointLight.h"
@@ -12,18 +16,7 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MANUEL TAŞIMA TALİMATI (MANUAL TRANSFER INSTRUCTIONS):
-// ═════════════════════════════════════════════════════════════════════════════
-// Lütfen aşağıdaki fonksiyonları `scene_ui.cpp` dosyasından buraya Kes/Yapıştır yapın:
-// Please Cut/Paste the following functions from `scene_ui.cpp` to here:
-//
-// 1. void SceneUI::drawLightsContent(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~1058 - 1302)
-//
-// 2. bool SceneUI::deleteSelectedLight(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~3112 - 3133)
-//
+
 // ═════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawLightsContent(UIContext& ctx)
 {

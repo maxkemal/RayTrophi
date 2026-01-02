@@ -539,6 +539,89 @@ public:
             " | Cache size now: " + std::to_string(FileTextureCache::instance().size()) +
             " | Total time: " + std::to_string(duration.count()) + "ms");
     }
+
+    // ===== Constructor Memory Buffer - Embedded texture'lar için dosya yazmadan yükleme =====
+    // Bu constructor proje dosyasından embedded texture binary'si okunduğunda kullanılır
+    // Disk I/O yapmadan doğrudan bellekten yükler - daha hızlı ve temp dosya gerektirmez
+    Texture(const std::vector<char>& buffer, TextureType type, const std::string& textureName = "")
+        : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        
+        m_is_loaded = false;
+        is_gpu_uploaded = false;
+        is_hdr = false;
+        name = textureName;
+        
+        if (buffer.empty()) {
+            SCENE_LOG_WARN("[MEMORY LOAD] Empty buffer for texture: " + textureName);
+            return;
+        }
+        
+        auto perf_start = std::chrono::high_resolution_clock::now();
+        
+        // SDL_image kullanarak bellekten yükle
+        SDL_RWops* rw = SDL_RWFromConstMem(buffer.data(), static_cast<int>(buffer.size()));
+        if (!rw) {
+            SCENE_LOG_ERROR("[MEMORY LOAD] Failed SDL_RWFromConstMem for: " + textureName);
+            return;
+        }
+        
+        SDL_Surface* surface = IMG_Load_RW(rw, 1); // 1 = auto-free RWops
+        if (!surface) {
+            SCENE_LOG_ERROR("[MEMORY LOAD] IMG_Load_RW failed for: " + textureName + " | " + std::string(IMG_GetError()));
+            return;
+        }
+        
+        width = surface->w;
+        height = surface->h;
+        pixels.resize(width * height);
+        
+        // RGBA32'ye dönüştür
+        SDL_Surface* converted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_FreeSurface(surface);
+        
+        if (!converted) {
+            SCENE_LOG_ERROR("[MEMORY LOAD] Convert failed for: " + textureName);
+            return;
+        }
+        
+        surface = converted;
+        width = surface->w;
+        height = surface->h;
+        
+        if (SDL_LockSurface(surface) != 0) {
+            SDL_FreeSurface(surface);
+            return;
+        }
+        
+        if (surface->format->BytesPerPixel != 4) {
+            SDL_UnlockSurface(surface);
+            SDL_FreeSurface(surface);
+            SCENE_LOG_ERROR("[MEMORY LOAD] BPP != 4 for: " + textureName);
+            return;
+        }
+        
+        // Hızlı pixel kopyalama
+        bool alpha_detected = false;
+        bool gray_detected = true;
+        fast_copy_rgba32_pixels(
+            static_cast<uint8_t*>(surface->pixels),
+            surface->pitch, pixels, width, height, alpha_detected, gray_detected
+        );
+        has_alpha = alpha_detected;
+        is_gray_scale = gray_detected;
+        m_is_loaded = true;
+        
+        SDL_UnlockSurface(surface);
+        SDL_FreeSurface(surface);
+        
+        auto perf_end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(perf_end - perf_start);
+        
+        SCENE_LOG_INFO("[MEMORY LOAD] Texture loaded from buffer: " + textureName + 
+                       " | " + std::to_string(width) + "x" + std::to_string(height) +
+                       " | " + std::to_string(duration.count()) + "ms");
+    }
+    
     Vec3 get_color(float u, float v) const {
         if (!m_is_loaded) return Vec3(0);
         u = std::clamp(u, 0.0f, 1.0f);
@@ -572,6 +655,13 @@ public:
     inline float srgb_to_linear(uint8_t c) {
         float v = c / 255.0f;
         return (v <= 0.04045f) ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f);
+    }
+
+    // Stamp brush sampling (Luminance)
+    float sampleIntensity(float u, float v) const {
+        if (!m_is_loaded) return 0.0f;
+        Vec3 color = get_color(u, v);
+        return 0.299f * color.x + 0.587f * color.y + 0.114f * color.z; 
     }
 
 
@@ -695,6 +785,47 @@ public:
 
         return true;
     }
+
+    // Efficiently update GPU data from current CPU pixels
+    void updateGPU() {
+        if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return;
+
+        cudaError_t err = cudaSuccess;
+        if (is_hdr) {
+             err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
+                width * sizeof(float4),
+                width * sizeof(float4), height,
+                cudaMemcpyHostToDevice);
+        } else {
+             std::vector<uchar4> cuda_data(pixels.size());
+             // No sRGB conversion for update usually, assuming we write directly linear values or consistent with initial upload
+             // But for safety, replicate logic or assume SplatMap (RGBA8 unorm) which is Linear-ish data for Mask
+             bool needs_srgb_conversion = (type == TextureType::Albedo);
+             
+             if (needs_srgb_conversion) {
+                 const auto& lut = SRGBToLinearLUT::instance();
+                 for (size_t i = 0; i < pixels.size(); ++i) {
+                     cuda_data[i] = make_uchar4(lut[pixels[i].r], lut[pixels[i].g], lut[pixels[i].b], pixels[i].a);
+                 }
+             } else {
+                 for (size_t i = 0; i < pixels.size(); ++i) {
+                     cuda_data[i] = make_uchar4(pixels[i].r, pixels[i].g, pixels[i].b, pixels[i].a);
+                 }
+             }
+             
+             err = cudaMemcpy2DToArray(cuda_array, 0, 0, cuda_data.data(),
+                width * sizeof(uchar4),
+                width * sizeof(uchar4), height,
+                cudaMemcpyHostToDevice);
+        }
+
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("Texture update failed: " + std::string(cudaGetErrorString(err)));
+        }
+    }
+
+    cudaTextureObject_t getTextureObject() const { return tex_obj; }
+    bool isUploaded() const { return is_gpu_uploaded; }
 
     void cleanup_gpu() {
         if (tex_obj) {

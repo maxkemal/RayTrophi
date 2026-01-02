@@ -1,4 +1,12 @@
 
+#include "SceneCommand.h"
+#include "scene_ui.h"
+#include "scene_data.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "Triangle.h"
+#include "globals.h"
+
 // ============================================================================
 // TRANSFORM COMMAND IMPLEMENTATION
 // ============================================================================
@@ -10,7 +18,7 @@ void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
         if (tri && tri->nodeName == object_name_) {
             // Apply transform
-            tri->setBase(state.position, state.rotation, state.scale);
+            tri->setBaseTransform(state.matrix);
             tri->updateTransformedVertices();
             found = true;
         }
@@ -28,7 +36,7 @@ void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
         
         if (ctx.optix_gpu_ptr) {
             // Use updateGeometry for transforms - it's faster!
-            ctx.optix_gpu_ptr->updateGeometry(); 
+            ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects); 
             ctx.optix_gpu_ptr->resetAccumulation();
         }
     }

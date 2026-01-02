@@ -5,31 +5,15 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include "scene_data.h"
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MANUEL TAŞIMA TALİMATI (MANUAL TRANSFER INSTRUCTIONS):
-// ═════════════════════════════════════════════════════════════════════════════
-// Lütfen aşağıdaki fonksiyonları `scene_ui.cpp` dosyasından buraya Kes/Yapıştır yapın:
-// Please Cut/Paste the following functions from `scene_ui.cpp` to here:
-//
-// 1. void SceneUI::drawSelectionBoundingBox(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~5464 - 5606)
-//
-// 2. void SceneUI::drawTransformGizmo(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~5608 - 6471)
-//
-// 3. void SceneUI::drawCameraGizmos(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~6473 - 6603)
-//
-// 4. void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
-//    (Tahmini Satırlar / Approx Lines: ~2945 - 3109)
-//
-// 5. void SceneUI::drawSelectionGizmos(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~3222 - 3228)
-//
+
 // ═════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // SELECTION BOUNDING BOX DRAWING (Multi-selection support)
@@ -697,12 +681,19 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     auto command = std::make_unique<DuplicateObjectCommand>(targetName, newName, new_tri_vec);
                     history.record(std::move(command));
 
-                    // Full rebuild for duplication
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    // ═══════════════════════════════════════════════════════════
+                    // DEFERRED FULL REBUILD (Reliable - async in Main.cpp)
+                    // ═══════════════════════════════════════════════════════════
+                    // Incremental clone had issues with SBT/transform sync.
+                    // Full rebuild is slower but reliable. Async mechanism prevents UI freeze.
+                    extern bool g_optix_rebuild_pending;
+                    g_optix_rebuild_pending = true;
+                    
+                    // Defer CPU BVH rebuild (async in Main.cpp)
+                    extern bool g_bvh_rebuild_pending;
+                    g_bvh_rebuild_pending = true;
                     ctx.renderer.resetCPUAccumulation();
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                    }
+                    
                     is_bvh_dirty = false;
                     SCENE_LOG_INFO("Duplicated object: " + targetName + " -> " + newName);
                 }
@@ -735,6 +726,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     bool is_using = ImGuizmo::IsUsing();
 
     // IDLE PREVIEW: Track when mouse stops moving during drag
+    // NOTE: In TLAS mode, transforms are already updated in real-time via instance matrices.
+    // The heavy updateTLASGeometry and rebuildBVH calls here were causing major freezes!
     static ImVec2 last_mouse_pos = ImVec2(0, 0);
     static float idle_time = 0.0f;
     static bool preview_updated = false;
@@ -751,13 +744,24 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
             // If idle for threshold and not yet updated, do preview update
             if (idle_time >= IDLE_THRESHOLD && !preview_updated) {
-                // SCENE_LOG_INFO("[GIZMO] Idle preview - updating BVH");
+                // SCENE_LOG_INFO("[GIZMO] Idle preview - updating geometry");
                 if (ctx.optix_gpu_ptr) {
-                    ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                    ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.optix_gpu_ptr->isUsingTLAS()) {
+                        // TLAS MODE: Transforms are ALREADY updated via instance matrices!
+                        // Just reset accumulation to show the updated render, NO heavy rebuild.
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                        // Skip rebuildBVH too - picking uses linear search, not BVH.
+                    } else {
+                        // GAS MODE: Use fast vertex update (legacy)
+                        ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    }
+                } else {
+                    // No OptiX: CPU mode still needs BVH
+                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                 }
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                 ctx.renderer.resetCPUAccumulation();
                 preview_updated = true;
                 // Note: Don't set is_bvh_dirty = false, so final update still happens
@@ -779,62 +783,111 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
     if (is_using && !was_using_gizmo) {
         // Manipülasyon yeni başladı
-        if (ImGui::GetIO().KeyShift && sel.selected.type == SelectableType::Object && sel.selected.object) {
-
-            std::string targetName = sel.selected.object->nodeName;
-            if (targetName.empty()) targetName = "Unnamed";
-
-            // Unique name generation
-            std::string baseName = targetName;
-            size_t lastUnderscore = baseName.rfind('_');
-            if (lastUnderscore != std::string::npos) {
-                std::string suffix = baseName.substr(lastUnderscore + 1);
-                if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
-                    baseName = baseName.substr(0, lastUnderscore);
-                }
+        if (ImGui::GetIO().KeyShift && sel.hasSelection()) {
+            
+            // Build a list of objects to duplicate
+            // If multi-selection exists, use it. Otherwise use the single active selection.
+            std::vector<SelectableItem> itemsToDuplicate;
+            if (sel.multi_selection.size() > 0) {
+                itemsToDuplicate = sel.multi_selection;
+            } else {
+                itemsToDuplicate.push_back(sel.selected);
             }
-            int copyNum = 1;
-            std::string newName;
-            do { newName = baseName + "_" + std::to_string(copyNum++); } while (mesh_cache.find(newName) != mesh_cache.end());
 
+            std::vector<std::shared_ptr<Hittable>> allNewTriangles;
+            std::vector<SelectableItem> newSelectionList;
+            
+            // Temporary map for name uniqueness check
             if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+            
+            // Perform duplication for each item
+            bool anyDuplicated = false;
+            
+            for (const auto& item : itemsToDuplicate) {
+                if (item.type == SelectableType::Object && item.object) {
+                    
+                    std::string targetName = item.object->nodeName;
+                    if (targetName.empty()) targetName = "Unnamed";
 
-            // Create Unique Transform
-            std::shared_ptr<Transform> newTransform = std::make_shared<Transform>();
-            if (sel.selected.object->getTransformHandle()) {
-                *newTransform = *sel.selected.object->getTransformHandle();
-            }
+                    // Unique name generation
+                    std::string baseName = targetName;
+                    size_t lastUnderscore = baseName.rfind('_');
+                    if (lastUnderscore != std::string::npos) {
+                        std::string suffix = baseName.substr(lastUnderscore + 1);
+                        if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(), ::isdigit)) {
+                            baseName = baseName.substr(0, lastUnderscore);
+                        }
+                    }
+                    int copyNum = 1;
+                    std::string newName;
+                    do { newName = baseName + "_" + std::to_string(copyNum++); } while (mesh_cache.find(newName) != mesh_cache.end());
 
-            // Duplicate Triangles
-            std::vector<std::shared_ptr<Hittable>> newTriangles;
-            std::shared_ptr<Triangle> firstNewTri = nullptr;
-            auto it = mesh_cache.find(targetName);
-            if (it != mesh_cache.end()) {
-                for (auto& pair : it->second) {
-                    auto& oldTri = pair.second;
-                    auto newTri = std::make_shared<Triangle>(*oldTri);
-                    newTri->setTransformHandle(newTransform);
-                    newTri->setNodeName(newName);
-                    newTriangles.push_back(newTri);
-                    if (!firstNewTri) firstNewTri = newTri;
+                    // Create Unique Transform
+                    std::shared_ptr<Transform> newTransform = std::make_shared<Transform>();
+                    if (item.object->getTransformHandle()) {
+                        *newTransform = *item.object->getTransformHandle();
+                    }
+
+                    // Duplicate Triangles
+                    std::shared_ptr<Triangle> firstNewTri = nullptr;
+                    auto it = mesh_cache.find(targetName);
+                    if (it != mesh_cache.end()) {
+                        for (auto& pair : it->second) {
+                            auto& oldTri = pair.second;
+                            auto newTri = std::make_shared<Triangle>(*oldTri);
+                            newTri->setTransformHandle(newTransform);
+                            newTri->setNodeName(newName);
+                            
+                            allNewTriangles.push_back(newTri);
+                            if (!firstNewTri) firstNewTri = newTri;
+                        }
+                    }
+                    
+                    if (firstNewTri) {
+                        SelectableItem newItem;
+                        newItem.type = SelectableType::Object;
+                        newItem.object = firstNewTri;
+                        newItem.name = newName;
+                        newSelectionList.push_back(newItem);
+                        anyDuplicated = true;
+                    }
                 }
+                // TODO: Add support for duplicating Lights? (Currently UI usually handles lights separately)
             }
 
-            // Add to Scene
-            if (!newTriangles.empty()) {
-                ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), newTriangles.begin(), newTriangles.end());
-                sel.selectObject(firstNewTri, -1, newName); // Select New
+            if (anyDuplicated) {
+                // Add all new triangles to world
+                ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), allNewTriangles.begin(), allNewTriangles.end());
+                
+                // Rebuild mesh cache with new objects
                 rebuildMeshCache(ctx.scene.world.objects);
-
-                // CRITICAL: Duplication adds new triangles - requires full rebuild
-                // Material index buffer must be regenerated (same as deletion)
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) {
-                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                
+                // Select the NEW objects
+                sel.clearSelection();
+                for (const auto& newItem : newSelectionList) {
+                    sel.addToSelection(newItem); // This automatically handles primary/multi logic
                 }
+                
+                // Record Undo (Grouped)
+                // For simplicity, we might record just the last one or need a GroupDuplicateCommand
+                // Currently keeping it simple (no comprehensive undo for multi-duplicate yet or relies on individual commands)
+                // Ideally: history.record(std::make_unique<MultiDuplicateCommand>(...)); 
+                
+                // ═══════════════════════════════════════════════════════════════════
+                // DEFERRED FULL REBUILD (Reliable - async in Main.cpp)
+                // ═══════════════════════════════════════════════════════════════════
+                // Incremental clone had issues with SBT/transform sync.
+                // Full rebuild is slower but reliable. Async mechanism prevents UI freeze.
+                extern bool g_optix_rebuild_pending;
+                g_optix_rebuild_pending = true;
+                
+                // Defer CPU BVH rebuild (async in Main.cpp)
+                extern bool g_bvh_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+                ctx.renderer.resetCPUAccumulation();
                 is_bvh_dirty = false;
-                SCENE_LOG_INFO("Duplicated object: " + targetName + " -> " + newName);
+                
+                SCENE_LOG_INFO("Multi-Duplicate: " + std::to_string(newSelectionList.size()) + " objects copied.");
             }
         }
         else if (ImGui::GetIO().KeyShift && sel.selected.type == SelectableType::Light && sel.selected.light) {
@@ -1040,6 +1093,12 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     }
                 } // End of multi_selection loop
 
+                // Trigger TLAS Update after processing all objects
+                if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                    ctx.optix_gpu_ptr->rebuildTLAS(); // Fast Update
+                    ctx.optix_gpu_ptr->resetAccumulation();
+                }
+
                 sel.selected.has_cached_aabb = false;
 
                 // DEFERRED UPDATE: Only mark dirty during drag
@@ -1142,8 +1201,44 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         // Apply full matrix from gizmo (supports translate, rotate, scale)
                         t_handle->setBase(newMat);
 
+                        // Update CPU vertices for THIS object (fast - only selected object's triangles)
+                        // This keeps gizmo position correct and CPU data in sync
                         for (auto& pair : it->second) {
                             pair.second->updateTransformedVertices();
+                        }
+
+                        // TLAS INSTANCING UPDATE (Fast GPU Path)
+                        // Only use GPU path if both: OptiX enabled AND using TLAS mode
+                        bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                        if (using_gpu_tlas) {
+                            // Support multi-material instances (one object name -> multiple instances)
+                            std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(targetName);
+                            
+                            if (!inst_ids.empty()) {
+                                float t[12];
+                                // Convert 4x4 -> 3x4 (row-major)
+                                t[0] = newMat.m[0][0]; t[1] = newMat.m[0][1]; t[2] = newMat.m[0][2]; t[3] = newMat.m[0][3];
+                                t[4] = newMat.m[1][0]; t[5] = newMat.m[1][1]; t[6] = newMat.m[1][2]; t[7] = newMat.m[1][3];
+                                t[8] = newMat.m[2][0]; t[9] = newMat.m[2][1]; t[10] = newMat.m[2][2]; t[11] = newMat.m[2][3];
+                                
+                                // Update ALL instances belonging to this object
+                                for (int inst_id : inst_ids) {
+                                    ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
+                                }
+                                
+                                ctx.optix_gpu_ptr->rebuildTLAS(); // Very fast (~0.01ms)
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                            }
+                            // NOTE: Skip is_bvh_dirty in GPU mode - CPU BVH rebuild is expensive
+                            // BVH will be rebuilt when switching to CPU mode
+                        }
+                        else {
+                            // CPU/GAS MODE: Also need BVH rebuild
+                            is_bvh_dirty = true;
+                            
+                            // Trigger Fast Refit during interaction (CPU Mode only)
+                            extern bool g_cpu_bvh_refit_pending;
+                            g_cpu_bvh_refit_pending = true;
                         }
                     }
                     else {
@@ -1180,17 +1275,42 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                     th->setBase(deltaMat * th->base);
                                 }
                                 processed_transforms.insert(th.get());
+
+                                // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
+                                if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                                    std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(targetName);
+                                    if (!inst_ids.empty()) {
+                                        float t[12];
+                                        Matrix4x4 finalMat = th->base; // Get the newly calculated base
+                                        
+                                        t[0] = finalMat.m[0][0]; t[1] = finalMat.m[0][1]; t[2] = finalMat.m[0][2]; t[3] = finalMat.m[0][3];
+                                        t[4] = finalMat.m[1][0]; t[5] = finalMat.m[1][1]; t[6] = finalMat.m[1][2]; t[7] = finalMat.m[1][3];
+                                        t[8] = finalMat.m[2][0]; t[9] = finalMat.m[2][1]; t[10] = finalMat.m[2][2]; t[11] = finalMat.m[2][3];
+                                        
+                                        for (int inst_id : inst_ids) {
+                                            ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
+                                        }
+                                        // Auto-rebuild TLAS periodically or on release
+                                    }
+                                } else {
+                                    // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
+                                    tri->updateTransformedVertices();
+                                }
                             }
-                            tri->updateTransformedVertices();
                         }
                     }
                 }
 
                 sel.selected.has_cached_aabb = false;
 
-                // DEFERRED UPDATE: Only mark dirty, don't rebuild during drag
-                // BVH rebuild will happen when gizmo is released (see below)
-                is_bvh_dirty = true;
+                // DEFERRED UPDATE: Mark dirty when NOT using GPU rendering
+                // Check use_optix setting (from render_settings) not just isUsingTLAS
+                bool using_gpu_render = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                if (!using_gpu_render) {
+                    is_bvh_dirty = true;
+                    extern bool g_cpu_bvh_refit_pending;
+                    g_cpu_bvh_refit_pending = true;
+                }
             }
         }
     }
@@ -1198,15 +1318,29 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // DEFERRED BVH UPDATE: Rebuild when gizmo drag ends (not during)
     // This check is at the END so is_bvh_dirty has been set above
     if (!is_using && was_using_gizmo && is_bvh_dirty) {
-        SCENE_LOG_INFO("[GIZMO] Released - Triggering BVH update");
-        if (ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-            if (ctx.scene.camera) ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        // SCENE_LOG_INFO("[GIZMO] Released - Triggering deferred geometry update");
+        // Check actual render mode, not just pointer existence
+        bool using_gpu = ctx.optix_gpu_ptr && ctx.render_settings.use_optix;
+        
+        if (using_gpu && ctx.optix_gpu_ptr->isUsingTLAS()) {
+            // TLAS MODE: Commits all pending transform changes
+            // During drag, updateInstanceTransform() queues changes but doesn't rebuild TLAS.
+            // On release, we must rebuild TLAS to apply those transforms to GPU.
+            ctx.optix_gpu_ptr->rebuildTLAS();
+        } else if (using_gpu) {
+            // GAS MODE: Defer update to Main loop to avoid UI freeze
+            extern bool g_gpu_refit_pending;
+            g_gpu_refit_pending = true;
+            
+            // Only GAS mode needs CPU BVH rebuild because vertex positions change
+            extern bool g_bvh_rebuild_pending;
+            g_bvh_rebuild_pending = true;
+        } else {
+            // No OptiX / CPU rendering: needs BVH rebuild
+            extern bool g_bvh_rebuild_pending;
+            g_bvh_rebuild_pending = true;
         }
-        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-        ctx.renderer.resetCPUAccumulation();
+        
         is_bvh_dirty = false;
     }
 

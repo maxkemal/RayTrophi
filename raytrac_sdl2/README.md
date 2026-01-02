@@ -46,12 +46,27 @@ A high-performance modular ray tracing engine built with NVIDIA OptiX 7, SDL2, a
   - `Ctrl + Y`: Redo
   - `F12`: Trigger Final Render
 
-## 📦 Recent Updates (v1.5)
-- **Full Undo/Redo Implementation:** Added Command Pattern architecture to handle scene state reversal.
-- **Smart History:** Differentiates between 'Heavy' operations (Geometry changes) and 'Light' operations (Transforms) to optimize RAM usage.
-- **Crash Fixes:** Solved empty scene crashes by properly handling BVH/OptiX cleanup states.
-- **OptiX Sync:** Fixed issues where GPU geometry wasn't updating correctly after deletion or undo.
-- **UI Logic:** Added 'Edit' menu and cleaned up verbose logging for better performance.
+## 📦 Recent Updates
+- **Terrain Node System 2.0:** 
+  - Gaea-style procedural texturing (AutoSplat) based on height & slope.
+  - New Node Types: `AutoSplat`, `MaskPaint`, `MaskImage`, `SplatOutput`.
+  - Export Splat Maps directly to PNG.
+- **Advanced Sky System:**
+  - "RayTrophi Spectral Sky" (Nishita model) with Day/Night cycle.
+  - Volumetric Fog, God Rays, and Multi-Scattering support.
+  - Dual-Lobe Cumulus Clouds with height-based density.
+- **Animation Timeline:**
+  - Keyframe support for Objects, Lights, Cameras, and World properties.
+  - Interpolated rendering for smooth animations.
+- **GPU Acceleration:**
+  - Fully GPU-accelerated Hydraulic & Wind Erosion.
+  - Real-time Gerstner Water Waves calculation on GPU.
+
+### Previous Updates
+- **Full Undo/Redo Implementation:** Command Pattern for scene state reversal.
+- **Smart History:** Optimized memory usage for undo sizing.
+- **Crash Fixes & OptiX Sync:** Improved stability during object deletion.
+
 
 ## 🔧 Build Instructions
 1. Open `raytrac_sdl2.sln` in Visual Studio 2022.

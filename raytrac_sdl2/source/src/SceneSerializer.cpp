@@ -8,6 +8,8 @@
 #include <iostream>
 #include "json.hpp"
 #include <filesystem>
+#include "TerrainManager.h"
+#include <unordered_set>
 
 using json = nlohmann::json;
 
@@ -81,7 +83,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         out << "      \"type\": " << (int)light->type() << ",\n";
         out << "      \"position\": " << vec3ToJson(light->position) << ",\n";
         out << "      \"color\": " << vec3ToJson(light->color) << ",\n";
-        out << "      \"intensity\": " << light->intensity;
+        out << "      \"intensity\": " << light->intensity << ",\n";
+        out << "      \"name\": " << json(light->nodeName);
         
         if (auto dl = std::dynamic_pointer_cast<DirectionalLight>(light)) {
             out << ",\n      \"direction\": " << vec3ToJson(dl->direction) << ",\n";
@@ -110,10 +113,25 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
 
     // 4. Object Transforms (Streamed!)
     out << "  \"objects\": [\n";
+
+    // FILTERING: Identify terrain triangles to exclude from generic serialization
+    std::unordered_set<std::shared_ptr<Hittable>> terrain_triangles;
+    auto& terrains = TerrainManager::getInstance().getTerrains();
+    for (auto& t : terrains) {
+        for (auto& tri : t.mesh_triangles) {
+            terrain_triangles.insert(tri);
+        }
+    }
+
     bool first_obj = true;
     for (const auto& obj : scene.world.objects) {
+        // Skip terrain chunks (they are saved in terrain_system)
+        if (std::dynamic_pointer_cast<Hittable>(obj) && terrain_triangles.count(std::dynamic_pointer_cast<Hittable>(obj))) {
+            continue;
+        }
+
         auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (tri && !tri->nodeName.empty()) {
+        if (tri) { // Serialize all triangles to maintain index alignment
             if (!first_obj) out << ",\n";
             
             out << "    {";
@@ -151,6 +169,13 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     out << "    \"use_optix\": " << (settings.use_optix ? "true" : "false") << "\n";
     out << "  },\n";
 
+    // Terrain System
+    auto abs_path = std::filesystem::absolute(filepath);
+    std::string terrainDir = abs_path.parent_path().string();
+    SCENE_LOG_INFO("[SceneSerializer] Saving terrain system to: " + terrainDir);
+    json terrainJson = TerrainManager::getInstance().serialize(terrainDir);
+    out << "  \"terrain_system\": " << terrainJson << ",\n";
+
     // 6. PostFX
     const auto& pp = scene.color_processor.params;
     out << "  \"postfx\": {\n";
@@ -166,7 +191,16 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     // 7. World
     out << "  \"world\": {\n";
     out << "    \"background_color\": " << vec3ToJson(scene.background_color) << "\n";
-    out << "  }\n";
+    out << "  },\n";
+
+    // 8. Timeline
+    json j_timeline;
+    scene.timeline.serialize(j_timeline);
+    // Indent the timeline json for better readability in file
+    std::string timeline_str = j_timeline.dump(2); // Use indent 2
+    // We need to verify if dump is consistent or if we should just stream it.
+    // Streaming simple json object is fine.
+    out << "  \"timeline\": " << timeline_str << "\n";
 
     out << "}";
     out.flush();
@@ -207,11 +241,12 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     renderer.resetCPUAccumulation();
     if (optix_gpu) optix_gpu->resetAccumulation();
 
-    if (model_path == "Untitled" || model_path.empty()) {
-        createDefaultScene(scene, renderer, optix_gpu);
-    } else {
+    // NOTE: Do NOT call createDefaultScene here - geometry is loaded from binary in ProjectManager
+    // Only load external models if specified
+    if (!model_path.empty() && model_path != "Untitled") {
         renderer.create_scene(scene, optix_gpu, model_path, nullptr); 
     }
+    // If model_path is "Untitled", scene geometry will be loaded from .bin file by ProjectManager
 
     // 2. Apply Camera
     if (root.contains("camera")) {
@@ -237,6 +272,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             Vec3 pos = jsonToVec3(l["position"]);
             Vec3 col = jsonToVec3(l["color"]);
             float inten = l.value("intensity", 1.0f);
+            std::string name = l.value("name", "Light");
             
             if (type == (int)LightType::Point) {
                 float r = l.value("radius", 0.1f);
@@ -265,7 +301,10 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                 lightPtr = al;
             }
             
-            if (lightPtr) scene.lights.push_back(lightPtr);
+            if (lightPtr) {
+                lightPtr->nodeName = name;
+                scene.lights.push_back(lightPtr);
+            }
         }
     }
 
@@ -289,6 +328,10 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     th->setBase(jsonToMat4(o["transform"]));
                 }
                 
+                if (o.contains("name")) {
+                    tri->nodeName = o["name"];
+                }
+                
                 if (o.contains("material_id")) {
                     tri->setMaterialID(o["material_id"]);
                 }
@@ -302,7 +345,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         json s = root["settings"];
         settings.quality_preset = (QualityPreset)s.value("quality_preset", 0);
         settings.samples_per_pixel = s.value("samples_per_pixel", 1);
-        settings.max_bounces = s.value("max_bounces", 4);
+        settings.max_bounces = s.value("max_bounces", 10);
         settings.use_adaptive_sampling = s.value("use_adaptive", true);
         settings.use_denoiser = s.value("use_denoiser", false);
         settings.use_optix = s.value("use_optix", true);
@@ -328,8 +371,37 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         // Extended World settings (HDRI, Nishita) can be loaded here
         // renderer.world.setColor(scene.background_color); // If needed
     }
+
+    // 8. Timeline
+    if (root.contains("timeline")) {
+        scene.timeline.deserialize(root["timeline"]);
+    }
     
-    // 8. Rebuild All
+    // 9. Terrains (Must be after materials/timeline but before BVH build)
+    // 9. Terrains (Must be after materials/timeline but before BVH build)
+    if (root.contains("terrain_system")) {
+        // CLEANUP: Purge any zombie terrain mesh chunks loaded from binary geometry
+        // to prevent duplication (static mesh blocking the editable terrain).
+        auto& objs = scene.world.objects;
+        size_t purged_count = 0;
+        for (auto it = objs.begin(); it != objs.end(); ) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(*it);
+            if (tri && tri->nodeName.find("Terrain_") == 0 && tri->nodeName.find("_Chunk") != std::string::npos) {
+                it = objs.erase(it);
+                purged_count++;
+            } else {
+                ++it;
+            }
+        }
+        if (purged_count > 0) SCENE_LOG_INFO("[SceneSerializer] Purged " + std::to_string(purged_count) + " zombie terrain chunks.");
+
+        auto abs_path = std::filesystem::absolute(filepath);
+        std::string terrainDir = abs_path.parent_path().string();
+        SCENE_LOG_INFO("[SceneSerializer] Loading terrain system from: " + terrainDir);
+        TerrainManager::getInstance().deserialize(root["terrain_system"], terrainDir, scene);
+    }
+    
+    // 10. Rebuild All
     renderer.rebuildBVH(scene, settings.UI_use_embree);
     
     if (optix_gpu) {
@@ -339,5 +411,22 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     }
 
     SCENE_LOG_INFO("Scene loaded from: " + filepath);
+    
+    // DEBUG: Verify Animation Tracks
+    for(const auto& [name, track] : scene.timeline.tracks) {
+        std::string msg = "[Anim] Track: " + name + " Keys: " + std::to_string(track.keyframes.size());
+        SCENE_LOG_INFO(msg);
+        
+        // Debug first keyframe flags
+        if (!track.keyframes.empty()) {
+            const auto& k = track.keyframes[0];
+            if (k.has_light) {
+                std::string l_msg = "  - Light Keyframe 0: Pos=" + std::to_string(k.light.has_position) + 
+                                    " Int=" + std::to_string(k.light.has_intensity);
+                SCENE_LOG_INFO(l_msg);
+            }
+        }
+    }
+
     return true;
 }

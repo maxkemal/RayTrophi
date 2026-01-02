@@ -2,9 +2,17 @@
 
 #include "ProjectData.h"
 #include "scene_data.h"
+#include "Camera.h"
+#include "Light.h"
+#include "json.hpp"
 #include <string>
 #include <vector>
 #include <functional>
+#include <fstream>
+#include <unordered_map>
+
+// TextureType enum forward declaration (defined in Texture.h)
+enum class TextureType;
 
 // Forward declarations
 class Renderer;
@@ -30,14 +38,14 @@ public:
     // Create a new empty project
     void newProject();
     
-    // Save current project to .rtp file
+    // Save current project to .rtp file (NEW: includes geometry, lights, cameras)
     // Returns true on success
-    // Save current project to .rtp file
-    // Returns true on success
-    bool saveProject(const std::string& filepath, std::function<void(int, const std::string&)> progress_callback = nullptr);
+    bool saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+                     std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // Save without dialog if path already known
-    bool saveProject(std::function<void(int, const std::string&)> progress_callback = nullptr);
+    bool saveProject(SceneData& scene, RenderSettings& settings,
+                     std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // Synchronize ProjectData with live SceneData (Captures moves, deletes, etc.)
     void syncProjectToScene(SceneData& scene);
@@ -109,12 +117,75 @@ private:
     bool writeZipPackage(const std::string& filepath);
     bool readZipPackage(const std::string& filepath);
     
+    // ========================================================================
+    // Geometry Serialization (Self-Contained Project)
+    // ========================================================================
+    
+    // Write all scene geometry to binary file
+    bool writeGeometryBinary(std::ofstream& out, const SceneData& scene);
+    
+    // Read geometry from binary file and recreate scene objects
+    bool readGeometryBinary(std::ifstream& in, SceneData& scene);
+    
+    // ========================================================================
+    // Component Serialization
+    // ========================================================================
+    
+    // Serialize lights to JSON
+    nlohmann::json serializeLights(const std::vector<std::shared_ptr<Light>>& lights);
+    void deserializeLights(const nlohmann::json& j, std::vector<std::shared_ptr<Light>>& lights);
+    
+    // Serialize cameras to JSON
+    nlohmann::json serializeCameras(const std::vector<std::shared_ptr<Camera>>& cameras, size_t active_index);
+    void deserializeCameras(const nlohmann::json& j, SceneData& scene);
+    
+    // Serialize render settings
+    nlohmann::json serializeRenderSettings(const RenderSettings& settings);
+    void deserializeRenderSettings(const nlohmann::json& j, RenderSettings& settings);
+    
+    // Serialize textures (with embed option)
+    nlohmann::json serializeTextures(std::ofstream& bin_out, bool embed_textures);
+    void deserializeTextures(const nlohmann::json& j, std::ifstream& bin_in, const std::string& project_dir);
+    
     // Temporary storage for package contents during editing
     struct PackageFile {
         std::string path;
         std::vector<uint8_t> data;
     };
     std::vector<PackageFile> m_package_files;
+    
+    // ========================================================================
+    // Embedded Texture Cache - stores texture binary data in memory
+    // Avoids writing temp files to disk when loading embedded textures
+    // ========================================================================
+public:
+    struct EmbeddedTextureData {
+        std::vector<char> data;
+        TextureType type;
+    };
+    std::unordered_map<std::string, EmbeddedTextureData> m_embedded_texture_cache;
+    
+    // Get embedded texture data by name (returns nullptr if not found)
+    const EmbeddedTextureData* getEmbeddedTexture(const std::string& name) const {
+        auto it = m_embedded_texture_cache.find(name);
+        return (it != m_embedded_texture_cache.end()) ? &it->second : nullptr;
+    }
+    
+    // Clear embedded texture cache (call on new/open project)
+    void clearEmbeddedTextureCache() { m_embedded_texture_cache.clear(); }
+    
+private:
+    
+public:
+    // ========================================================================
+    // Project Save Settings
+    // ========================================================================
+    struct SaveSettings {
+        bool embed_textures = true;        // Pack textures into binary (true = self-contained project)
+        bool embed_missing_only = false;   // Embed all textures, not just missing ones
+        bool save_geometry = true;         // Save scene geometry (for self-contained)
+    };
+    SaveSettings save_settings;
 };
 
 // Convenience macro

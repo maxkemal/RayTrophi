@@ -17,29 +17,32 @@ std::atomic<int> ParallelBVHNode::active_threads(0);
 ParallelBVHNode::ParallelBVHNode(const std::vector<std::shared_ptr<Hittable>>& src_objects,
     size_t start, size_t end, float time0, float time1, int depth)
 {
+    if (src_objects.empty() || start >= end) {
+        // Safe initialization for empty node
+        return;
+    }
     init(src_objects, start, end, time0, time1, depth);
 }
 
-// Önceden hesaplanmýþ AABB'leri saklamak için struct
+// Struct to store precomputed AABBs
 struct alignas(64) ObjectInfo {
     std::shared_ptr<Hittable> object;
     AABB box;
     Vec3 centroid;
-    float surface_area;  // Önbelleklenmiþ alan
-    // 1. Varsayýlan constructor (STL konteynerleri için zorunlu)
+    float surface_area;
+    
     ObjectInfo() = default;
     ObjectInfo(std::shared_ptr<Hittable> obj, float time0, float time1)
         : object(obj), centroid(0, 0, 0) {
         obj->bounding_box(time0, time1, box);
         centroid = (box.min + box.max) * 0.5;
-        surface_area = box.surface_area();  // Baþta hesapla
+        surface_area = box.surface_area(); 
     }
 };
 
 constexpr float OBJECT_INTERSECTION_COST = 1.0;
 inline float sah_cost(size_t num_left, const AABB& left_box,
     size_t num_right, const AABB& right_box) {
-    // Önbelleklenmiþ deðerler otomatik kullanýlýr.
     return OBJECT_INTERSECTION_COST *
         (num_left * left_box.surface_area() +
             num_right * right_box.surface_area());
@@ -48,92 +51,101 @@ inline float sah_cost(size_t num_left, const AABB& left_box,
 ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittable>>& src_objects,
     size_t start, size_t end, float time0, float time1,  int depth)
 {
-
     const size_t object_span = end - start;
     if (depth >= MAX_DEPTH || object_span <= 1) {
         left = src_objects[start];
-        right = nullptr; // Right boþ olsun
+        right = nullptr; 
         left->bounding_box(time0, time1, box);
         return this;
     }
 
-
     std::vector<ObjectInfo> object_infos;
-    object_infos.resize(object_span);  // !
+    object_infos.resize(object_span);
     AABB overall_box;
 
-    // Object bilgilerini paralel hesapla
-#pragma omp parallel for reduction(surrounding_box: overall_box)
-    for (int i = 0; i < static_cast<int>(object_span); ++i) {
-        ObjectInfo& info = object_infos[i];
-        info.object = src_objects[start + i];
-        info.object->bounding_box(time0, time1, info.box);
-        info.centroid = (info.box.min + info.box.max) * 0.5;
-        overall_box = surrounding_box(overall_box, info.box);
+    // Parallel calculation of ObjectInfo
+    #pragma omp parallel
+    {
+        AABB local_box; 
+        #pragma omp for nowait
+        for (int i = 0; i < static_cast<int>(object_span); ++i) {
+            ObjectInfo& info = object_infos[i];
+            info.object = src_objects[start + i];
+            info.object->bounding_box(time0, time1, info.box);
+            info.centroid = (info.box.min + info.box.max) * 0.5;
+            local_box = surrounding_box(local_box, info.box);
+        }
+        #pragma omp critical
+        {
+            overall_box = surrounding_box(overall_box, local_box);
+        }
     }
 
-    // En iyi bölme noktasýný bul
+    // Find best split
     int best_axis = -1;
     size_t best_split_idx = 0;
     double best_cost = std::numeric_limits<double>::max();
 
-    // Her eksen için SAH hesapla
+    // Calculate SAH for each axis
     for (int axis = 0; axis < 3; ++axis) {
-        // Bu eksene göre sýrala
         std::sort(object_infos.begin(), object_infos.end(),
             [axis](const ObjectInfo& a, const ObjectInfo& b) {
                 return a.centroid[axis] < b.centroid[axis];
             });
 
-        // Sol ve sað box'larý önceden hesapla
         std::vector<AABB> left_boxes(object_span);
         std::vector<AABB> right_boxes(object_span);
 
-        // Sol taraftan ileri doðru
         AABB running_left;
         for (size_t i = 0; i < object_span - 1; ++i) {
             running_left = surrounding_box(running_left, object_infos[i].box);
             left_boxes[i] = running_left;
         }
 
-        // Sað taraftan geri doðru
         AABB running_right;
         for (size_t i = object_span - 1; i > 0; --i) {
             running_right = surrounding_box(running_right, object_infos[i].box);
             right_boxes[i - 1] = running_right;
         }
 
-        // Her bölme noktasý için SAH hesapla
-#pragma omp parallel for reduction(min:best_cost)
-        for (int i = 1; i < static_cast<int>(object_span); ++i) {
-            double cost = sah_cost(i, left_boxes[i - 1],
-                object_span - i, right_boxes[i - 1]);
+        // Parallel SAH calculation
+        #pragma omp parallel
+        {
+            double local_best_cost = std::numeric_limits<double>::max();
+            int local_best_axis = -1;
+            size_t local_best_split = 0;
 
-#pragma omp critical
+            #pragma omp for nowait
+            for (int i = 1; i < static_cast<int>(object_span); ++i) {
+                double cost = sah_cost(i, left_boxes[i - 1],
+                    object_span - i, right_boxes[i - 1]);
+                
+                if (cost < local_best_cost) {
+                    local_best_cost = cost;
+                    local_best_axis = axis;
+                    local_best_split = i;
+                }
+            }
+
+            #pragma omp critical
             {
-                if (cost < best_cost) {
-                    best_cost = cost;
-                    best_axis = axis;
-                    best_split_idx = i;
+                if (local_best_cost < best_cost) {
+                    best_cost = local_best_cost;
+                    best_axis = local_best_axis;
+                    best_split_idx = local_best_split;
                 }
             }
         }
     }
 
-    // En iyi eksene göre tekrar sýrala
-    // GÜVENLÝK ÖNLEMÝ: Eðer split çok dengesizse (örneðin bir tarafta 0 obje kalýyorsa)
-// veya SAH maliyeti bölmemekten daha pahalýysa, manuel olarak ortadan böl.
     if (best_split_idx == 0 || best_split_idx == object_span || best_cost >= overall_box.surface_area() * object_span) {
         best_split_idx = object_span / 2;
-        // Eðer obje sayýsý çok azsa ve SAH baþarýsýzsa bölmeyi iptal etmeyi de düþünebilirsin
-        // ama derinlik kontrolün olduðu için ortadan bölmek güvenlidir.
     }
     std::sort(object_infos.begin(), object_infos.end(),
         [best_axis](const ObjectInfo& a, const ObjectInfo& b) {
             return a.centroid[best_axis] < b.centroid[best_axis];
         });
 
-    // Alt aðaçlar için vektörleri oluþtur
     std::vector<std::shared_ptr<Hittable>> left_objects;
     std::vector<std::shared_ptr<Hittable>> right_objects;
     left_objects.reserve(best_split_idx);
@@ -146,7 +158,6 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
         right_objects.push_back(object_infos[i].object);
     }
 
-    // Alt aðaçlarý paralel oluþtur
     bool can_parallelize = object_span >= MIN_OBJECTS_PER_THREAD &&
         active_threads < std::thread::hardware_concurrency();
 
@@ -186,9 +197,9 @@ ParallelBVHNode* ParallelBVHNode::init(const std::vector<std::shared_ptr<Hittabl
     return this;
 
 }
-// updateTree fonksiyonunun basitleþtirilmiþ bir örneði
+
 bool ParallelBVHNode::updateTree(const std::vector<std::shared_ptr<Hittable>>& animated_objects, float time0, float time1) {
-    if (left == right) { // Yaprak düðüm
+    if (left == right) { 
         if (std::find(animated_objects.begin(), animated_objects.end(), left) != animated_objects.end()) {
             return left->bounding_box(time0, time1, box);
         }
@@ -214,21 +225,11 @@ bool ParallelBVHNode::hit(const Ray& r, float t_min, float t_max, HitRecord& rec
     if (!box.hit(r, t_min, t_max))
         return false;
 
-    // Eðer sað taraf yoksa bu bir yaprak düðümdür, sadece solu kontrol et
     if (!right) {
         return left->hit(r, t_min, t_max, rec);
     }
 
-    // --- OPTÝMÝZASYON: Önce hangi kutu daha yakýn? ---
-    // BVH'in en büyük numarasý budur: Yakýn olan çocuða önce gir.
-    // Eðer yakýndakine çarpýp 't' deðerini kýsaltýrsan, uzaktakini hiç kontrol etmezsin.
-
-    // Not: Bu optimizasyon için child node'larýn box'larýna eriþebilmemiz lazým. 
-    // ParallelBVHNode olduðundan eminsek cast edebiliriz veya hittable'a box sorabiliriz.
-    // Basit ve hýzlý bir yöntem þudur (her zaman önce solu sonra saðý denemek yerine):
-
     bool hit_left = left->hit(r, t_min, t_max, rec);
-    // Eðer solda vurduysak, t_max artýk rec.t oldu (daha yakýn bir engel var)
     bool hit_right = right->hit(r, t_min, hit_left ? rec.t : t_max, rec);
 
     return hit_left || hit_right;

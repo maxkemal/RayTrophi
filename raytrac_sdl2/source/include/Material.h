@@ -1,4 +1,4 @@
-# pragma once
+ï»¿# pragma once
 
 #include "Ray.h"
 #include "Vec3.h"
@@ -29,15 +29,15 @@ enum class WrapMode {
 struct MaterialProperty {
     Vec3 color;
     float intensity=0.0f;
-    float alpha=1.0f;  // Alfa kanalý için ek alan
+    float alpha=1.0f;  // Alfa kanalÄ± iÃ§in ek alan
     std::shared_ptr<Texture> texture;
     operator float() const {
-        return intensity;  // veya baþka bir uygun deðer
+        return intensity;  // veya baÅŸka bir uygun deÄŸer
     }
-    // Texture varsa UV'den örnek al, yoksa sabit deðeri döndür
+    // Texture varsa UV'den Ã¶rnek al, yoksa sabit deÄŸeri dÃ¶ndÃ¼r
     Vec3 evaluate(const Vec2& uv) const {
         if (texture) {
-            return texture->get_color(uv.u,uv.v) ;  // Texture örneðini yoðunlukla çarp
+            return texture->get_color(uv.u,uv.v) ;  // Texture Ã¶rneÄŸini yoÄŸunlukla Ã§arp
         }
         return color * intensity;
     }
@@ -51,9 +51,9 @@ struct MaterialProperty {
 
     // Veya
     float getValue() const {
-        return intensity;  // veya baþka bir uygun deðer
+        return intensity;  // veya baÅŸka bir uygun deÄŸer
     }
-    // Yeni yapýcý
+    // Yeni yapÄ±cÄ±
     MaterialProperty(std::shared_ptr<Texture> tex, float i = 1.0f, float a = 1.0f)
         : color(1.0f, 1.0f, 1.0f), intensity(i), texture(tex), alpha(a) {}
     MaterialProperty(const Vec3& c = Vec3(1, 1, 1), float i = 1.0f, std::shared_ptr<Texture> tex = nullptr)
@@ -80,36 +80,37 @@ public:
         }
         return prop.color * prop.intensity;
     }
-    // Materyal türünü döndüren sanal metot
+    // Materyal tÃ¼rÃ¼nÃ¼ dÃ¶ndÃ¼ren sanal metot
     virtual MaterialType type() const = 0;
 
-    // Maksimum derinlik deðerini döndüren metot
+    // Maksimum derinlik deÄŸerini dÃ¶ndÃ¼ren metot
     int get_max_depth() const {
         static const std::unordered_map<MaterialType, int> max_depths = {
             {MaterialType::Dielectric,16},
             {MaterialType::Volumetric, 12},
             {MaterialType::PrincipledBSDF,16}
-            // Diðer materyal türleri ve derinlik deðerleri...
+            // DiÄŸer materyal tÃ¼rleri ve derinlik deÄŸerleri...
         };
 
-        // Materyal türüne göre derinlik deðerini döndür
+        // Materyal tÃ¼rÃ¼ne gÃ¶re derinlik deÄŸerini dÃ¶ndÃ¼r
         auto it = max_depths.find(type());
-        return (it != max_depths.end()) ? it->second : 1; // Varsayýlan deðer: 1
+        return (it != max_depths.end()) ? it->second : 1; // VarsayÄ±lan deÄŸer: 1
     }
-    virtual double getIndexOfRefraction() const = 0;
+    virtual float getIndexOfRefraction() const = 0;
     float get_roughness(float u, float v) const {
         return getPropertyValue(roughnessProperty, Vec2(u, v)).y;
     }
 
-    bool useSmartUVProjection = false; // Yeni üye
+    bool useSmartUVProjection = false; // Yeni Ã¼ye
     MaterialProperty albedoProperty;
     MaterialProperty roughnessProperty;
     MaterialProperty metallicProperty;
     MaterialProperty normalProperty;
     MaterialProperty opacityProperty;
 	MaterialProperty transmissionProperty;
-    virtual Vec2 applyTextureTransform(double u, double v) const {
-        return Vec2(u, v);  // Varsayýlan olarak dönüþüm uygulamaz
+    MaterialProperty emissionProperty;
+    virtual Vec2 applyTextureTransform(float u, float v) const {
+        return Vec2(u, v);  // VarsayÄ±lan olarak dÃ¶nÃ¼ÅŸÃ¼m uygulamaz
     }
     virtual std::shared_ptr<Texture> getTexture() const {
         if (albedoProperty.texture) return albedoProperty.texture;
@@ -117,6 +118,8 @@ public:
         if (metallicProperty.texture) return metallicProperty.texture;
         if (normalProperty.texture) return normalProperty.texture;
         if (transmissionProperty.texture) return transmissionProperty.texture;
+        if (opacityProperty.texture) return opacityProperty.texture;
+        if (emissionProperty.texture) return emissionProperty.texture;
         return nullptr;
     }
    
@@ -128,7 +131,7 @@ public:
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const = 0;
     virtual float get_metallic() const { return metallic.getValue(); }
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
-        return emissionColor* materyalproperty.intensity;
+        return emissionProperty.color * emissionProperty.intensity;
     }
     virtual bool isEmissive() const { return false; }
     // Texture handling
@@ -137,22 +140,22 @@ public:
         return opacityProperty.texture != nullptr;
     }
     virtual float get_opacity(const Vec2& uv) const {
-        return 1.0f; // Varsayýlan olarak tam opak
+        return 1.0f; // VarsayÄ±lan olarak tam opak
     }
 
     void setTexture(std::shared_ptr<Texture> tex) { texture = tex; }
 
    
-    // Material.h (varsayýlan baz sýnýf)
+    // Material.h (varsayÄ±lan baz sÄ±nÄ±f)
     virtual float getTransmission(const Vec2& uv) const { return 0.0f; }
 	virtual void setTransmission(float transmission, float ior) {
 		transmissionProperty.intensity = transmission;
 		ior = ior;
 	}
-    virtual float getIOR() const { return ior; } // Yeni: Kýrýlma indeksi
-    virtual Vec3 getF0() const { return f0; } // Yeni: Fresnel yansýma katsayýsý
+    virtual float getIOR() const { return ior; } // Yeni: KÄ±rÄ±lma indeksi
+    virtual Vec3 getF0() const { return f0; } // Yeni: Fresnel yansÄ±ma katsayÄ±sÄ±
     virtual bool has_normal_map() const { return false; }
-    virtual Vec3 get_normal_from_map(double u, double v) const { return Vec3(0, 0, 1); }
+    virtual Vec3 get_normal_from_map(float u, float v) const { return Vec3(0, 0, 1); }
     virtual float get_normal_strength() const { return normalStrength; }
     virtual void set_normal_strength(float norm)  {
         normalStrength = norm;
@@ -170,25 +173,25 @@ public:
     virtual bool volumetric_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
     virtual bool sss_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
 
-    // Yeni: Anizotropik malzemeler için
+    // Yeni: Anizotropik malzemeler iÃ§in
     virtual Vec3 getAnisotropicDirection() const;
     virtual float getAnisotropy() const;
 
-    // Yeni: Emisyon özelliði
+    // Yeni: Emisyon Ã¶zelliÄŸi
     virtual Vec3 getEmission() const;
     virtual float get_scattering_factor() const = 0;
     Vec3 albedo;
     float artistic_albedo_response = 0.50f; // default fiziksel
-    float ior = 1.5f; // Yeni: Varsayýlan kýrýlma indeksi
+    float ior = 1.5f; // Yeni: VarsayÄ±lan kÄ±rÄ±lma indeksi
 protected:
    
-    float normalStrength;
+    float normalStrength = 1.0f;
     float roughness = 0.0f;
    
-    Vec3 f0 = Vec3(0.04f); // Yeni: Varsayýlan Fresnel yansýma katsayýsý
+    Vec3 f0 = Vec3(0.04f); // Yeni: VarsayÄ±lan Fresnel yansÄ±ma katsayÄ±sÄ±
     std::shared_ptr<Texture> texture;
     Vec3 emissionColor = 0;
-    // Yeni: Malzeme özelliklerini ayarlamak için yardýmcý metotlar
+    // Yeni: Malzeme Ã¶zelliklerini ayarlamak iÃ§in yardÄ±mcÄ± metotlar
     void setAlbedo(const Vec3& a) { albedo = a; }
    // void setMetallic(float m) { metallic = m; }
     void setRoughness(float r) { roughness = r; }

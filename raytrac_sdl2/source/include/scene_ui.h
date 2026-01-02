@@ -1,14 +1,23 @@
 ﻿#pragma once
 
-#include "renderer.h" // SceneData'nın header'ı
-#include "OptixWrapper.h"
-#include "ColorProcessingParams.h"
+// Forward Declarations
+class Renderer;
+struct SceneData;
+class OptixWrapper;
+class ColorProcessor;
+class SceneSelection;
+struct RenderSettings;
+class Texture;
+
 #include "ui_modern.h"  // Modern UI sistemi
-#include "SceneSelection.h"  // Scene selection system
 #include "SceneHistory.h"  // Undo/Redo system
 #include "SceneCommand.h"  // TransformState struct
 #include "TimelineWidget.h"  // Timeline animation widget
 #include "CameraPresets.h"   // Camera body, lens, ISO, shutter presets
+#include "TimelineWidget.h"  // Timeline animation widget
+#include "CameraPresets.h"   // Camera body, lens, ISO, shutter presets
+#include "TerrainNodesV2.h" // Terrain node graph V2 system
+#include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
 #include <fstream>
 #include <map>
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -71,6 +80,12 @@ public:
     // UI State
     int pivot_mode = 0; // 0=Median Point (Group), 1=Individual Origins
     bool show_animation_panel = true; // Default open
+    bool show_foliage_tab = false;    // Default closed (User preference)
+    bool show_water_tab = false;      // Default closed
+    bool show_terrain_tab = false;    // Default closed
+    bool show_system_tab = false;     // Default closed
+    bool show_terrain_graph = false;  // Terrain node editor panel
+    std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Static Helpers (Shared across modules)
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
@@ -101,11 +116,25 @@ public:
      void draw(UIContext& ctx);
      void handleMouseSelection(UIContext& ctx); // Publicly accessible for Main loop call
      void triggerDelete(UIContext& ctx); // Trigger delete operation (for Menu and Key)
+     void processAnimations(UIContext& ctx); // Apply keyframe data to scene objects
   
      void invalidateCache() { mesh_cache_valid = false; }
+     void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
      
+     // Viewport Messages (HUD)
+     struct ViewportMessage {
+         std::string text;
+         float time_remaining;
+         ImVec4 color;
+     };
+     std::vector<ViewportMessage> active_messages;
+     void addViewportMessage(const std::string& text, float duration = 2.0f, ImVec4 color = ImVec4(1,1,1,1));
+     void clearViewportMessages(); // Force clear all messages
+     void drawViewportMessages(UIContext& ctx, float left_offset);
+
      // Interaction Flags
      bool is_picking_focus = false; // Flag for "Pick Focus" mode (hit distance only)
+     bool hud_captured_mouse = false; // Flag set when HUD elements capture mouse clicks
      
      // Sun Sync Logic (Global)
      bool sync_sun_with_light = true;
@@ -149,6 +178,50 @@ public:
          bool show_center = false;
      };
      GuideSettings guide_settings;
+     
+     // Scatter Brush Settings (Foliage/Instance painting)
+     struct ScatterBrushSettings {
+         bool enabled = false;           // Scatter brush mode active
+         int active_group_id = -1;       // Currently selected instance group
+         float brush_radius = 2.0f;      // Brush size in world units
+         float brush_strength = 1.0f;    // Density multiplier
+         int brush_mode = 0;             // 0=Add, 1=Remove, 2=Adjust
+         bool show_brush_preview = true; // Show brush circle in viewport
+         std::string target_surface_name; // Which mesh to paint on (empty = any)
+     };
+     ScatterBrushSettings scatter_brush;
+     
+     // Scatter Brush UI
+     void drawScatterBrushPanel(UIContext& ctx);
+     void handleScatterBrush(UIContext& ctx);  // Viewport brush interaction
+     void drawBrushPreview(UIContext& ctx);    // Draw brush circle in viewport
+    
+    // Terrain Brush Settings
+    struct TerrainBrushSettings {
+        bool enabled = false;
+        int active_terrain_id = -1;
+        float radius = 5.0f;
+        float strength = 0.5f;
+        int mode = 0; // 0=Raise, 1=Lower, 2=Flatten, 3=Smooth, 4=Stamp
+        bool show_preview = true;
+        
+        // Flatten Params
+        float flatten_target = 0.0f;
+        bool use_fixed_height = false;
+        
+        // Stamp Params
+        std::shared_ptr<class Texture> stamp_texture;
+        float stamp_rotation = 0.0f; // Degrees
+        
+        // Paint Params
+        int paint_channel = 0; // 0=R(Layer0), 1=G(Layer1), 2=B(Layer2), 3=A(Layer3)
+    };
+    TerrainBrushSettings terrain_brush;
+
+    // Water & Terrain UI
+    void drawWaterPanel(UIContext& ctx);
+    void drawTerrainPanel(UIContext& ctx);
+    void handleTerrainBrush(UIContext& ctx);
      
 private:
     // --- UI Structure ---
@@ -209,7 +282,7 @@ private:
 
 
     bool mesh_cache_valid = false;
-    void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);    
+   
     // Interaction State
     bool is_dragging = false; // Tracks if a gizmo manipulation is in progress
     bool is_bvh_dirty = false; // Flag for lazy BVH updates
@@ -232,5 +305,8 @@ private:
     
     // Timeline Widget
     class TimelineWidget timeline;  // Timeline animation widget
-   
+    
+    // Terrain Node Graph (V2 System)
+    TerrainNodesV2::TerrainNodeGraphV2 terrainNodeGraph;
+    TerrainNodesV2::TerrainNodeEditorUI terrainNodeEditorUI;
 };

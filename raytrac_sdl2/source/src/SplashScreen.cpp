@@ -1,4 +1,4 @@
-#include "SplashScreen.h"
+﻿#include "SplashScreen.h"
 #include <SDL_image.h>
 #include <iostream>
 #include <chrono>
@@ -41,8 +41,13 @@ bool SplashScreen::init(const std::string& logoPath, int maxWidth, int maxHeight
         "RayTrophi",
         posX, posY,
         m_windowWidth, m_windowHeight,
-        SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP
+        SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP | SDL_WINDOW_SKIP_TASKBAR
     );
+    
+    if (m_window) {
+        // Start transparent
+        SDL_SetWindowOpacity(m_window, 0.0f);
+    }
     
     if (!m_window) {
         std::cerr << "[SplashScreen] Failed to create window: " << SDL_GetError() << std::endl;
@@ -69,6 +74,11 @@ bool SplashScreen::init(const std::string& logoPath, int maxWidth, int maxHeight
     
     m_initialized = true;
     render();
+    render();
+    
+    // Fade in effect
+    fadeIn(800);
+    
     return true;
 }
 
@@ -157,6 +167,10 @@ void SplashScreen::waitForClick() {
         }
         SDL_Delay(16); // ~60fps
     }
+    
+    
+    // Fade out before finishing
+    fadeOut(500);
 }
 
 void SplashScreen::close() {
@@ -178,4 +192,62 @@ void SplashScreen::close() {
 void SplashScreen::drawText(const std::string& text, int x, int y, SDL_Color color) {
     // Placeholder - SDL_ttf would be needed for actual text
     // For now, we just show colored indicators
+}
+
+void SplashScreen::setOpacity(float opacity) {
+    if (m_window) {
+        SDL_SetWindowOpacity(m_window, opacity);
+    }
+}
+
+void SplashScreen::fadeIn(int durationMs) {
+    if (!m_window) return;
+    
+    auto startTime = std::chrono::steady_clock::now();
+    bool fading = true;
+    
+    while (fading) {
+        auto now = std::chrono::steady_clock::now();
+        float elapsed = std::chrono::duration<float, std::milli>(now - startTime).count();
+        float progress = elapsed / durationMs;
+        
+        if (progress >= 1.0f) {
+            progress = 1.0f;
+            fading = false;
+        }
+        
+        setOpacity(progress);
+        
+        // Keep checking events to keep window responsive (and allow early quit)
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {} 
+        
+        SDL_Delay(10);
+    }
+}
+
+void SplashScreen::fadeOut(int durationMs) {
+    if (!m_window) return;
+    
+    auto startTime = std::chrono::steady_clock::now();
+    bool fading = true;
+    
+    while (fading) {
+        auto now = std::chrono::steady_clock::now();
+        float elapsed = std::chrono::duration<float, std::milli>(now - startTime).count();
+        float progress = 1.0f - (elapsed / durationMs);
+        
+        if (progress <= 0.0f) {
+            progress = 0.0f;
+            fading = false;
+        }
+        
+        setOpacity(progress);
+        
+        // Keep checking events
+        SDL_Event e;
+        while (SDL_PollEvent(&e)) {}
+        
+        SDL_Delay(10);
+    }
 }

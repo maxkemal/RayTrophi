@@ -5,6 +5,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
 #include "imgui.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
@@ -12,16 +16,6 @@
 #include "scene_data.h"
 #include <ProjectManager.h>
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MANUEL TAŞIMA TALİMATI (MANUAL TRANSFER INSTRUCTIONS):
-// ═════════════════════════════════════════════════════════════════════════════
-// Lütfen aşağıdaki fonksiyonu `scene_ui.cpp` dosyasından buraya Kes/Yapıştır yapın:
-// Please Cut/Paste the following function from `scene_ui.cpp` to here:
-//
-// 1. void SceneUI::drawMaterialPanel(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~4600 - 5461)
-//
-// ═════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 // MATERIAL & TEXTURE EDITOR PANEL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -411,9 +405,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             auto perlin = std::make_shared<Perlin>();
             auto new_mat = std::make_shared<Volumetric>(
                 Vec3(0.8f),     // albedo
-                1.0,            // density
-                0.1,            // absorption
-                0.5,            // scattering
+                1.0f,            // density
+                0.1f,            // absorption
+                0.5f,            // scattering
                 Vec3(0.0f),     // emission
                 perlin          // noise
             );
@@ -613,6 +607,26 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             mat->gpuMaterial->ior = mat->ior;
             mat->gpuMaterial->transmission = mat->transmission;
             mat->gpuMaterial->opacity = mat->opacityProperty.alpha;
+            
+            // SSS (Random Walk)
+            mat->gpuMaterial->subsurface = mat->subsurface;
+            Vec3 sssColor = mat->subsurfaceColor;
+            mat->gpuMaterial->subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+            Vec3 sssRadius = mat->subsurfaceRadius;
+            mat->gpuMaterial->subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+            mat->gpuMaterial->subsurface_scale = mat->subsurfaceScale;
+            mat->gpuMaterial->subsurface_anisotropy = mat->subsurfaceAnisotropy;
+            mat->gpuMaterial->subsurface_ior = mat->subsurfaceIOR;
+            
+            // Clear Coat
+            mat->gpuMaterial->clearcoat = mat->clearcoat;
+            mat->gpuMaterial->clearcoat_roughness = mat->clearcoatRoughness;
+            
+            // Translucent
+            mat->gpuMaterial->translucent = mat->translucent;
+            
+            // Anisotropic
+            mat->gpuMaterial->anisotropic = mat->anisotropic;
             };
 
         // 2. Update Texture Bundle for a Triangle
@@ -680,10 +694,11 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             auto tex = std::make_shared<Texture>(path, type);
             if (tex && tex->is_loaded()) {
                 tex->upload_to_gpu();
-                SCENE_LOG_INFO("Loaded texture: " + path);
+                // SCENE_LOG_INFO("Loaded texture: " + path);
                 return tex;
             }
             SCENE_LOG_WARN("Failed to load texture: " + path);
+            addViewportMessage("Failed to load texture: " + path, 3.0f, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
             return nullptr;
             };
 
@@ -784,6 +799,142 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             pbsdf->emissionProperty.intensity = emissionStr;
             changed = true;
         }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // SUBSURFACE SCATTERING (Random Walk)
+        // ═══════════════════════════════════════════════════════════════════════
+        ImGui::Separator();
+        if (ImGui::TreeNode("Subsurface Scattering")) {
+            
+            // SSS Amount
+            float sss_amount = pbsdf->subsurface;
+            if (ImGui::SliderFloat("Subsurface", &sss_amount, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->subsurface = sss_amount;
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Amount of subsurface scattering (0=off, 1=full)");
+            
+            // SSS Color
+            Vec3 sss_color = pbsdf->subsurfaceColor;
+            float sss_color_arr[3] = {(float)sss_color.x, (float)sss_color.y, (float)sss_color.z};
+            if (ImGui::ColorEdit3("SSS Color", sss_color_arr)) {
+                pbsdf->subsurfaceColor = Vec3(sss_color_arr[0], sss_color_arr[1], sss_color_arr[2]);
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Color of scattered light inside the material");
+            
+            // SSS Radius (Per RGB channel)
+            Vec3 sss_radius = pbsdf->subsurfaceRadius;
+            float sss_radius_arr[3] = {(float)sss_radius.x, (float)sss_radius.y, (float)sss_radius.z};
+            if (ImGui::DragFloat3("Radius (RGB)", sss_radius_arr, 0.01f, 0.001f, 10.0f, "%.3f")) {
+                pbsdf->subsurfaceRadius = Vec3(sss_radius_arr[0], sss_radius_arr[1], sss_radius_arr[2]);
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Scatter distance per RGB channel.\nSkin: R=1.0, G=0.2, B=0.1 (red scatters far, blue stays near surface)");
+            
+            // SSS Scale
+            float sss_scale = pbsdf->subsurfaceScale;
+            if (ImGui::DragFloat("Scale", &sss_scale, 0.001f, 0.001f, 2.0f, "%.4f")) {
+                pbsdf->subsurfaceScale = sss_scale;
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Global multiplier for SSS radius (adjust based on object size)");
+            
+            // SSS Anisotropy
+            float sss_aniso = pbsdf->subsurfaceAnisotropy;
+            if (ImGui::SliderFloat("Anisotropy##SSS", &sss_aniso, -0.9f, 0.9f, "%.2f")) {
+                pbsdf->subsurfaceAnisotropy = sss_aniso;
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Scatter direction bias:\n0 = Isotropic\n+ve = Forward scattering (deeper)\n-ve = Backward scattering");
+            
+            // Presets
+            ImGui::Separator();
+            ImGui::Text("Presets:");
+            if (ImGui::SmallButton("Skin")) {
+                pbsdf->subsurface = 0.3f;
+                pbsdf->subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);
+                pbsdf->subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);
+                pbsdf->subsurfaceScale = 0.05f;
+                pbsdf->subsurfaceAnisotropy = 0.0f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Wax")) {
+                pbsdf->subsurface = 0.5f;
+                pbsdf->subsurfaceColor = Vec3(1.0f, 0.9f, 0.6f);
+                pbsdf->subsurfaceRadius = Vec3(0.3f, 0.3f, 0.2f);
+                pbsdf->subsurfaceScale = 0.1f;
+                pbsdf->subsurfaceAnisotropy = 0.0f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Milk")) {
+                pbsdf->subsurface = 0.8f;
+                pbsdf->subsurfaceColor = Vec3(1.0f, 1.0f, 1.0f);
+                pbsdf->subsurfaceRadius = Vec3(0.5f, 0.5f, 0.5f);
+                pbsdf->subsurfaceScale = 0.2f;
+                pbsdf->subsurfaceAnisotropy = 0.8f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Jade")) {
+                pbsdf->subsurface = 0.4f;
+                pbsdf->subsurfaceColor = Vec3(0.3f, 0.8f, 0.4f);
+                pbsdf->subsurfaceRadius = Vec3(0.2f, 0.5f, 0.2f);
+                pbsdf->subsurfaceScale = 0.05f;
+                pbsdf->subsurfaceAnisotropy = 0.3f;
+                changed = true;
+            }
+            
+            ImGui::TreePop();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // CLEAR COAT (Car paint lacquer layer)
+        // ═══════════════════════════════════════════════════════════════════════
+        if (ImGui::TreeNode("Clear Coat")) {
+            
+            float cc_amount = pbsdf->clearcoat;
+            if (ImGui::SliderFloat("Clear Coat", &cc_amount, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->clearcoat = cc_amount;
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Extra glossy layer on top (like car paint lacquer)");
+            
+            float cc_roughness = pbsdf->clearcoatRoughness;
+            if (ImGui::SliderFloat("Roughness##CC", &cc_roughness, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->clearcoatRoughness = cc_roughness;
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Roughness of the clear coat layer (0=mirror, 1=matte)");
+            
+            // Preset
+            ImGui::Separator();
+            if (ImGui::SmallButton("Car Paint")) {
+                pbsdf->clearcoat = 1.0f;
+                pbsdf->clearcoatRoughness = 0.03f;
+                changed = true;
+            }
+            
+            ImGui::TreePop();
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // TRANSLUCENT (Thin surface light pass-through)
+        // ═══════════════════════════════════════════════════════════════════════
+        if (ImGui::TreeNode("Translucent")) {
+            
+            float trans = pbsdf->translucent;
+            if (ImGui::SliderFloat("Translucent", &trans, 0.0f, 1.0f, "%.3f")) {
+                pbsdf->translucent = trans;
+                changed = true;
+            }
+            UIWidgets::HelpMarker("Thin surface light pass-through (leaves, paper, fabric, curtains)");
+            
+            ImGui::TreePop();
+        }
+
 
         // ─── TEXTURES UI ─────────────────────────────────────────────────────
         if (ImGui::TreeNodeEx("Texture Maps", ImGuiTreeNodeFlags_DefaultOpen)) {

@@ -5,6 +5,7 @@ C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeCommonLanguageInclude.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeGenericSystem.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeInitializeConfigs.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeLanguageInformation.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeParseImplicitLinkInfo.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeRCInformation.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeSystemSpecificInformation.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/CMakeSystemSpecificInitialize.cmake
@@ -14,6 +15,7 @@ C:/Program Files/CMake/share/cmake-3.30/Modules/Compiler/MSVC.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/Compiler/NVIDIA-CUDA.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/Compiler/NVIDIA.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/FindCUDAToolkit.cmake
+C:/Program Files/CMake/share/cmake-3.30/Modules/FindOpenMP.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/FindPackageHandleStandardArgs.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/FindPackageMessage.cmake
 C:/Program Files/CMake/share/cmake-3.30/Modules/Platform/Windows-Initialize.cmake

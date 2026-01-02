@@ -37,7 +37,7 @@ struct OptixHitResult {
     int pad0; // 16 byte hizalama için
     
     // Volumetric material info
-    int is_volumetric;        // 1 = volumetric, 0 = surface
+    int is_volumetric;        // Volumetric stuff
     float vol_density;
     float vol_absorption;
     float vol_scattering;
@@ -45,18 +45,26 @@ struct OptixHitResult {
     float3 vol_emission;
     float vol_g;
     float vol_step_size;
-    int vol_max_steps;
-    float vol_noise_scale;
-    float3 aabb_min;
-    float3 aabb_max;
     
-    // Multi-Scattering parameters (NEW)
+    // Multi-scattering
     float vol_multi_scatter;
     float vol_g_back;
     float vol_lobe_mix;
     int vol_light_steps;
     float vol_shadow_strength;
-
+    float vol_noise_scale; // Added noise scale
+    
+    int vol_max_steps;
+    float3 aabb_min;
+    float3 aabb_max;
+    
+    // Blended Material Data (For Terrain Layers)
+    int use_blended_data;      // 1 = use baked values below instead of sampling textures again
+    float3 blended_albedo;
+    float blended_roughness;
+    float3 blended_normal;     // Tangent space or World space? Let's assume standard logic handles Normal.
+                               // Actually, normal is already computed and stored in 'normal' field above.
+                               // So we don't need blended_normal.
 };
 
 

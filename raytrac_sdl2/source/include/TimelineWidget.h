@@ -15,7 +15,8 @@ enum class TrackGroup {
     Objects = 0,
     Lights,
     Cameras,
-    World
+    World,
+    Terrain  // For terrain morphing animation
 };
 
 
@@ -31,10 +32,15 @@ enum class KeyframeInsertType {
 // Channel type for sub-tracks
 enum class ChannelType {
     None = 0,       // Main entity track
-    Location,       // Position sub-channel
-    Rotation,       // Rotation sub-channel
-    Scale,          // Scale sub-channel
-    Material        // Material sub-channel
+    Location,       // Position sub-channel (Compound)
+    Rotation,       // Rotation sub-channel (Compound)
+    Scale,          // Scale sub-channel (Compound)
+    Material,       // Material sub-channel
+    
+    // Detailed axis channels
+    LocationX, LocationY, LocationZ,
+    RotationX, RotationY, RotationZ,
+    ScaleX, ScaleY, ScaleZ
 };
 
 // Visual representation of a track in the timeline
@@ -127,6 +133,7 @@ private:
     bool group_lights_expanded = true;
     bool group_cameras_expanded = true;
     bool group_world_expanded = true;
+    bool group_terrain_expanded = true;
     
     // Colors
     static constexpr ImU32 COLOR_TRANSFORM = IM_COL32(100, 150, 255, 255);  // Blue
@@ -134,6 +141,7 @@ private:
     static constexpr ImU32 COLOR_LIGHT = IM_COL32(255, 200, 100, 255);      // Orange
     static constexpr ImU32 COLOR_CAMERA = IM_COL32(200, 100, 255, 255);     // Purple
     static constexpr ImU32 COLOR_WORLD = IM_COL32(255, 150, 200, 255);      // Pink
+    static constexpr ImU32 COLOR_TERRAIN = IM_COL32(139, 90, 43, 255);      // Brown (terrain)
     static constexpr ImU32 COLOR_SELECTED = IM_COL32(255, 255, 255, 255);   // White
     static constexpr ImU32 COLOR_GRID = IM_COL32(60, 60, 60, 255);
     static constexpr ImU32 COLOR_CURRENT_FRAME = IM_COL32(255, 80, 80, 200);

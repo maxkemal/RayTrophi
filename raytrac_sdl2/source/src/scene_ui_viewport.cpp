@@ -6,33 +6,23 @@
 //   - drawZoomRing()        : FOV control ring
 //   - drawDollyArc()        : Camera dolly track control (disabled)
 //   - drawExposureInfo()    : Exposure triangle with AE toggle
-//   - drawViewportControls(): Blender-style viewport overlay buttons
+//   - drawViewportControls(): viewport overlay buttons
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
+#include "scene_data.h"   // Explicit include
 #include "imgui.h"
 #include "CameraPresets.h"
 #include <cmath>
 
 
-// ═════════════════════════════════════════════════════════════════════════════
-// INSTRUCTIONS FOR MANUAL TRANSFER:
-// ═════════════════════════════════════════════════════════════════════════════
-// Copy the following functions from scene_ui.cpp to this file:
-//
-// 1. drawViewportControls()  - Lines ~1757-1845
-// 2. drawFocusIndicator()    - Lines ~1847-2071
-// 3. drawZoomRing()          - Lines ~2073-2212
-// 4. drawDollyArc()          - Lines ~2214-2373
-// 5. drawExposureInfo()      - Lines ~2375-2622
-//
-// After copying, delete those functions from scene_ui.cpp
-// and add this to scene_ui.cpp at the top:
-//   #include "scene_ui_viewport.cpp"
-// ═════════════════════════════════════════════════════════════════════════════
 
 // ═════════════════════════════════════════════════════════════════════════════
-// VIEWPORT CONTROLS OVERLAY (Blender-style)
+// VIEWPORT CONTROLS OVERLAY
 // ═════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
@@ -176,6 +166,7 @@ void SceneUI::drawFocusIndicator(UIContext& ctx) {
         is_dragging_ring = true;
         drag_start_x = mouse.x;
         drag_start_focus = focus_dist;
+        hud_captured_mouse = true; // Prevent viewport selection
     }
 
     if (is_dragging_ring) {
@@ -401,6 +392,7 @@ void SceneUI::drawZoomRing(UIContext& ctx) {
         is_dragging_zoom = true;
         drag_start_x = mouse.x;
         drag_start_fov = fov;
+        hud_captured_mouse = true; // Prevent viewport selection
     }
 
     if (is_dragging_zoom) {
@@ -557,6 +549,7 @@ void SceneUI::drawDollyArc(UIContext& ctx) {
         // Set rig mode to Dolly
         cam.rig_mode = Camera::RigMode::Dolly;
         cam.dolly_start_pos = cam.lookfrom;
+        hud_captured_mouse = true; // Prevent viewport selection
     }
 
     if (is_dragging_dolly) {
@@ -742,9 +735,9 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     // Handle dragging
     if (!io.WantCaptureMouse) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            if (iso_hover) { dragging = 1; drag_start_x = mouse.x; drag_start_idx = iso_idx; }
-            else if (shutter_hover) { dragging = 2; drag_start_x = mouse.x; drag_start_idx = shutter_idx; }
-            else if (aperture_hover) { dragging = 3; drag_start_x = mouse.x; drag_start_idx = fstop_idx; }
+            if (iso_hover) { dragging = 1; drag_start_x = mouse.x; drag_start_idx = iso_idx; hud_captured_mouse = true; }
+            else if (shutter_hover) { dragging = 2; drag_start_x = mouse.x; drag_start_idx = shutter_idx; hud_captured_mouse = true; }
+            else if (aperture_hover) { dragging = 3; drag_start_x = mouse.x; drag_start_idx = fstop_idx; hud_captured_mouse = true; }
         }
     }
 
@@ -810,6 +803,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     // Click to toggle auto exposure
     if (ae_hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !io.WantCaptureMouse) {
         cam.auto_exposure = !cam.auto_exposure;
+        hud_captured_mouse = true; // Prevent viewport selection
 
         if (ctx.optix_gpu_ptr) {
             ctx.optix_gpu_ptr->setCameraParams(cam);
@@ -908,4 +902,142 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
         ImVec2 hint_size = ImGui::CalcTextSize(hint);
         draw_list->AddText(ImVec2(cx - hint_size.x * 0.5f, cy + height * 0.5f + 10), col_value_hover, hint);
     }
+}
+
+// ============================================================================
+// VIEWPORT MESSAGES (HUD) - Display simple toast notifications
+// ============================================================================
+
+void SceneUI::addViewportMessage(const std::string& text, float duration, ImVec4 color) {
+    // Check for duplicate message and update if found
+    for (auto& msg : active_messages) {
+        if (msg.text == text) {
+            msg.time_remaining = duration; // Reset timer
+            msg.color = color;             // Update color
+            return;
+        }
+    }
+
+    ViewportMessage msg;
+    msg.text = text;
+    msg.time_remaining = duration;
+    msg.color = color;
+    active_messages.push_back(msg);
+}
+
+void SceneUI::clearViewportMessages() {
+    active_messages.clear();
+}
+
+void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
+    // ALWAYS draw if selection exists OR messages exist OR scene is initialized (for render stats)
+    if (active_messages.empty() && !ctx.selection.hasSelection() && !ctx.scene.initialized) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    float dt = io.DeltaTime;
+    
+    // Position: Top Left of Viewport (respecting Left Panel)
+    // Left Offset + 20px padding (user requested: "panelin solunda" but "viewport içinde", assuming next to panel)
+    float x = left_offset + 20.0f;
+    float y = 50.0f; // Below menu bar (approx)
+
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f); // Invisible background (HUD style)
+    
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | 
+                             ImGuiWindowFlags_NoResize | 
+                             ImGuiWindowFlags_AlwaysAutoResize | 
+                             ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoInputs; // Pass-through clicks
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    
+    // Transparent window container
+    if (ImGui::Begin("##ViewportMessages", nullptr, flags)) {
+        
+        // 1. Persistent HUD: Render Status (ALWAYS AT TOP)
+        if (ctx.scene.initialized) {
+            int current = ctx.render_settings.render_current_samples;
+            int target = ctx.render_settings.render_target_samples;
+            bool use_optix = ctx.render_settings.use_optix;
+            bool is_paused = ctx.render_settings.is_render_paused;
+            
+            std::string status_text;
+            std::string mode_tag = use_optix ? "[GPU]" : "[CPU]";
+            
+            if (current >= target && target > 0) {
+                 status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Done)";
+            } else if (is_paused) {
+                 status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Paused)";
+            } else {
+                 status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples";
+            }
+            
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            
+            // Shadow
+            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), status_text.c_str());
+            
+            // Text Color (Green if done, Orange if paused, White otherwise)
+            ImU32 text_col = IM_COL32(220, 220, 220, 255);
+            if (current >= target && target > 0) text_col = IM_COL32(100, 255, 100, 255);
+            else if (is_paused) text_col = IM_COL32(255, 180, 80, 255);
+            
+            ImGui::GetWindowDrawList()->AddText(pos, text_col, status_text.c_str());
+            
+            // Advance cursor with DYNAMIC width to prevent clipping
+            ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
+            ImGui::Dummy(text_size); 
+            ImGui::Dummy(ImVec2(0, 2)); // Small spacing
+        }
+
+        // 2. Persistent HUD: Selected Object (BELOW RENDER STATUS)
+        if (ctx.selection.hasSelection()) {
+            std::string sel_text = "Selected: " + ctx.selection.selected.name;
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            
+            // Shadow
+            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), sel_text.c_str());
+            // Text (Orange)
+            ImGui::GetWindowDrawList()->AddText(pos, IM_COL32(255, 180, 50, 255), sel_text.c_str());
+            
+            // Advance cursor to push messages down
+            ImVec2 text_size = ImGui::CalcTextSize(sel_text.c_str());
+            ImGui::Dummy(text_size); 
+            ImGui::Dummy(ImVec2(0, 5)); // Extra spacing
+        }
+
+        // 3. Dynamic Messages (BELOW SELECTION)
+        // Remove expired messages
+        for (auto it = active_messages.begin(); it != active_messages.end();) {
+            it->time_remaining -= dt;
+            if (it->time_remaining <= 0.0f) {
+                it = active_messages.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        // Draw messages
+        for (const auto& msg : active_messages) {
+            // Fade out
+            float alpha = 1.0f;
+            if (msg.time_remaining < 0.5f) {
+                alpha = msg.time_remaining / 0.5f;
+            }
+            if (alpha < 0.0f) alpha = 0.0f;
+            
+            // Text Color with Alpha
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(msg.color.x, msg.color.y, msg.color.z, alpha));
+            
+            // Add subtle shadow for readability against 3D viewport
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0,0,0, (int)(200 * alpha)), msg.text.c_str());
+            
+            ImGui::TextUnformatted(msg.text.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
 }
