@@ -5,6 +5,8 @@
 #include <assimp/postprocess.h>
 #include <memory>
 #include <format>
+#include <algorithm>
+#include <cmath>
 #include "Triangle.h"
 #include "Camera.h"
 #include "Mesh.h"
@@ -588,8 +590,43 @@ public:
                 gpuMat.opacity = 1.0f;
             } else if (mat->gpuMaterial) {
                 gpuMat = *mat->gpuMaterial;
+            } else if (mat->type() == MaterialType::PrincipledBSDF) {
+                // CRITICAL FIX: Build GpuMaterial from PrincipledBSDF properties
+                // This handles deserialized materials where gpuMaterial pointer is null
+                PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+                
+                Vec3 alb = pbsdf->albedoProperty.color;
+                gpuMat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+                gpuMat.roughness = (float)pbsdf->roughnessProperty.color.x;
+                gpuMat.metallic = (float)pbsdf->metallicProperty.intensity;
+                
+                Vec3 em = pbsdf->emissionProperty.color;
+                float emStr = pbsdf->emissionProperty.intensity;
+                gpuMat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+                
+                gpuMat.ior = pbsdf->ior;
+                gpuMat.transmission = pbsdf->transmission;
+                gpuMat.opacity = pbsdf->opacityProperty.alpha;
+                
+                // SSS
+                gpuMat.subsurface = pbsdf->subsurface;
+                Vec3 sssColor = pbsdf->subsurfaceColor;
+                gpuMat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+                Vec3 sssRadius = pbsdf->subsurfaceRadius;
+                gpuMat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+                gpuMat.subsurface_scale = pbsdf->subsurfaceScale;
+                gpuMat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
+                gpuMat.subsurface_ior = pbsdf->subsurfaceIOR;
+                
+                // Clear Coat
+                gpuMat.clearcoat = pbsdf->clearcoat;
+                gpuMat.clearcoat_roughness = pbsdf->clearcoatRoughness;
+                
+                // Translucent & Anisotropic
+                gpuMat.translucent = pbsdf->translucent;
+                gpuMat.anisotropic = pbsdf->anisotropic;
             } else {
-                // Fallback default material (Matches Renderer.cpp)
+                // Fallback default material for unknown types
                 gpuMat.albedo = make_float3(0.8f, 0.8f, 0.8f);
                 gpuMat.roughness = 0.5f;
                 gpuMat.metallic = 0.0f;
@@ -1466,13 +1503,13 @@ private:
        // Roughness
        float roughness = 0.0f;
        aiMat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness);
-       material->roughnessProperty = MaterialProperty( Vec3(roughness));
+       material->roughnessProperty = MaterialProperty( Vec3(std::clamp(roughness, 0.0f, 1.0f)));
 	  
        // Metallic
        aiColor3D colorM(0.0f, 0.0f, 0.0f);
        float metalicFactor = 0.0;
        aiMat->Get(AI_MATKEY_METALLIC_FACTOR, metalicFactor);
-       material->metallicProperty = MaterialProperty(Vec3(color.r, color.g, color.b), metalicFactor);
+       material->metallicProperty = MaterialProperty(Vec3(color.r, color.g, color.b), std::clamp(metalicFactor, 0.0f, 1.0f));
 
        // Emissive Color
        aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
@@ -1482,7 +1519,11 @@ private:
        float emissiveStrength = std::max({ emissiveColor.r, emissiveColor.g, emissiveColor.b });
 	   
        // Materyale uygula
-       material->emissionProperty = MaterialProperty(Vec3(emissiveColor.r, emissiveColor.g, emissiveColor.b), emissiveStrength);
+       // GPU uses emissiveColor directly (without multiplying by intensity)
+       // So CPU's emissionProperty.intensity must be 1.0f for GPU parity
+       // The color already contains the emission strength (max component)
+       float hasEmission = (emissiveColor.r > 0.001f || emissiveColor.g > 0.001f || emissiveColor.b > 0.001f) ? 1.0f : 0.0f;
+       material->emissionProperty = MaterialProperty(Vec3(emissiveColor.r, emissiveColor.g, emissiveColor.b), hasEmission);
 	   //std::cout << "emissiveStrength : " << emissiveStrength << std::endl;
      
        // Specular Reflection (Glossiness)
@@ -1508,11 +1549,13 @@ private:
        if (!aiMat->Get(AI_MATKEY_REFRACTI, ior)) {
            aiMat->Get("IOR", 0, 0, ior);  // GLTF için fallback
        }
+       // Clamp IOR to be at least 1.0f
+       ior = std::max(ior, 1.0f);
        material->ior = ior;
 	  // std::cout << "Material IOR: " << ior << std::endl;
        float transmission = 0.0f;
        if (AI_SUCCESS == aiGetMaterialFloat(aiMat, AI_MATKEY_TRANSMISSION_FACTOR, &transmission)) {
-           material->setTransmission(transmission, ior);
+           material->setTransmission(std::clamp(transmission, 0.0f, 1.0f), ior);
           
        }
 
@@ -1529,7 +1572,7 @@ private:
        float opacity = 1.0f;
            material->opacityProperty = MaterialProperty(Vec3(opacity));     
            if (AI_SUCCESS == aiGetMaterialFloat(aiMat, AI_MATKEY_OPACITY, &opacity)) {
-               material->opacityProperty.alpha = opacity;
+               material->opacityProperty.alpha = std::clamp(opacity, 0.0f, 1.0f);
               
            }
 
@@ -1575,6 +1618,7 @@ private:
                switch (texInfo.type)
                {
                case aiTextureType_DIFFUSE:
+               case 12: // aiTextureType_BASE_COLOR
                    material->albedoProperty.texture = texture;
                    if (texture->has_alpha) {
                        material->opacityProperty.texture = texture;
@@ -1589,6 +1633,12 @@ private:
                    break;
                case aiTextureType_EMISSIVE:
                    material->emissionProperty.texture = texture;
+                   // Fix: If emission color was black (causing intensity 0), but we have a texture,
+                   // we must enable emission (intensity 1.0, color white) so the texture is visible.
+                   if (material->emissionProperty.intensity < 0.001f) {
+                       material->emissionProperty.intensity = 1.0f;
+                       material->emissionProperty.color = Vec3(1.0f); 
+                   }
                    break;
                case aiTextureType_OPACITY:
                    material->opacityProperty.texture = texture;

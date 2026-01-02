@@ -22,10 +22,10 @@ struct HitRecord {
     std::shared_ptr<Material> material;
     uint16_t materialID = 0xFFFF;
     
-    float t;
-    float u;
-    float v;
-    bool front_face;
+    float t = 0.0f;
+    float u = 0.0f;
+    float v = 0.0f;
+    bool front_face = false;
   
     // Add reference to the hit object itself (for accessing AABB etc.)
     // const Hittable* obj = nullptr; // REMOVED: potentially circular and redundant (we use triangle ptr)
@@ -41,7 +41,7 @@ struct HitRecord {
         normal = front_face ? outward_normal : -outward_normal;
     }
    
-    HitRecord() : t(0), front_face(false), u(0), v(0), materialID(0xFFFF) {}
+    HitRecord() = default;
 };
 
 class Hittable {
@@ -66,3 +66,4 @@ private:
 };
 
 #endif // HITTABLE_H
+

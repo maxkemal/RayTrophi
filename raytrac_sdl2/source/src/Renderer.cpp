@@ -1,58 +1,43 @@
 ﻿#include "renderer.h"
 #include <SDL_image.h>
-#include "SpotLight.h"
 #include <filesystem>
 #include <execution>
 #include <cstring>      // std::memcpy for camera hash
-#include <EmbreeBVH.h>
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
-#include "CameraPresets.h"
 #include "OptixWrapper.h"
+
+// Includes moved from renderer.h
+#include "Camera.h"
+#include "light.h"
+#include "PointLight.h"
+#include "DirectionalLight.h"
+#include "AreaLight.h"
+#include "SpotLight.h"
+#include "Volumetric.h"
+#include "PrincipledBSDF.h"
+#include "Dielectric.h"
+#include "Material.h"
+#include "Triangle.h"
+#include "Mesh.h"
+#include "AABB.h"
+#include "Ray.h"
+#include "Hittable.h"
+#include "HittableList.h"
+#include "ParallelBVHNode.h"
+#include "AnimatedObject.h"
+#include "scene_data.h"
 
 // Unified rendering system for CPU/GPU parity
 #include "unified_types.h"
 #include "unified_brdf.h"
 #include "unified_light_sampling.h"
 #include "unified_converters.h"
-#include "PrincipledBSDF.h"
-#include "Volumetric.h"
 #include "MaterialManager.h"
+#include "CameraPresets.h"
+#include "TerrainManager.h"
 
-
-
-void Renderer::updatePixel(SDL_Surface* surface, int i, int j, const Vec3& color) {
-    Uint32* pixel = static_cast<Uint32*>(surface->pixels) + (surface->h - 1 - j) * surface->pitch / 4 + i;
-    // Linear to sRGB dönüşüm (basit approx veya doğru dönüşüm kullanabilirsin)
-    auto toSRGB = [](float c) {
-        if (c <= 0.0031308f)
-            return 12.92f * c;
-        else
-            return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-        };
-    int r = static_cast<int>(255 * std::clamp(toSRGB(color.x), 0.0f, 1.0f));
-    int g = static_cast<int>(255 * std::clamp(toSRGB(color.y), 0.0f, 1.0f));
-    int b = static_cast<int>(255 * std::clamp(toSRGB(color.z), 0.0f, 1.0f));
-    *pixel = SDL_MapRGB(surface->format, r, g, b);
-}
-void Renderer::init(SDL_Surface* surface)
-{
-    pixelFormat = surface->format; // sadece pointer, copy değil
-
-    Rshift = pixelFormat->Rshift;
-    Gshift = pixelFormat->Gshift;
-    Bshift = pixelFormat->Bshift;
-
-    // Gerekirse maske info
-    Rmask = pixelFormat->Rmask;
-    Gmask = pixelFormat->Gmask;
-    Bmask = pixelFormat->Bmask;
-
-    // Başka yapman gereken şeyler...
-}
-
-std::vector<Vec3> normal_buffer(image_width* image_height);
 bool Renderer::isCudaAvailable() {
     try {
         oidn::DeviceRef testDevice = oidn::newDevice(oidn::DeviceType::CUDA);
@@ -185,7 +170,7 @@ Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int
     : image_width(image_width), image_height(image_height), aspect_ratio(static_cast<double>(image_width) / image_height), halton_cache(new float[MAX_DIMENSIONS * MAX_SAMPLES_HALTON]), color_processor(image_width, image_height)
 {
     initialize_halton_cache();
-    initialize_sobol_cache();
+  
     frame_buffer.resize(image_width * image_height);
     sample_counts.resize(image_width * image_height, 0);
     max_halton_index = MAX_SAMPLES_HALTON - 1; // Halton dizisi için maksimum indeks
@@ -194,8 +179,7 @@ Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int
     variance_buffer.resize(image_width * image_height, 0.0f);
 
     rendering_complete = false;
-    // Normal map buffer'ı başlat
-    normal_buffer.resize(image_width * image_height, Vec3(0.0f));
+   
     variance_map.resize(image_width * image_height, 0.0f);
 
 
@@ -228,18 +212,8 @@ Renderer::~Renderer()
     sample_counts.clear();
     variance_map.clear();
 }
-void Renderer::set_window(SDL_Window* win) {
-    window = win;
-}
-void Renderer::draw_progress_bar(SDL_Surface* surface, float progress) {
-    const int bar_width = surface->w - 40;  // Kenarlarda 20 piksel boşluk bırakıyoruz
-    const int bar_height = 20;
-    const int bar_y = surface->h - 40;  // Alt kenardan 40 piksel yukarıda
 
-    char percent_text[10];
-    snprintf(percent_text, sizeof(percent_text), "%.1f%%", progress * 100);
 
-}
 bool Renderer::SaveSurface(SDL_Surface* surface, const char* file_path)
 {
    
@@ -272,56 +246,7 @@ bool Renderer::SaveSurface(SDL_Surface* surface, const char* file_path)
 
     return true;
 }
-void Renderer::removeFireflies(SDL_Surface* surface) {
-    const float threshold = 8.0f; // Bu değeri sahnenize göre ayarlayabilirsiniz
-    const int radius = 1; // Kontrol edilecek komşu piksel sayısı
-    int width = surface->w;
-    int height = surface->h;
-    std::vector<Uint32> newPixels(width * height);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            Uint32* pixels = static_cast<Uint32*>(surface->pixels);
-            Uint32 currentPixel = pixels[y * width + x];
-            Uint8 r, g, b;
-            SDL_GetRGB(currentPixel, surface->format, &r, &g, &b);
-            float luminance = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            float sum = 0;
-            int count = 0;
-            for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dx = -radius; dx <= radius; ++dx) {
-                    int nx = x + dx;
-                    int ny = y + dy;
 
-                    if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
-                        Uint32 neighborPixel = pixels[ny * width + nx];
-                        Uint8 nr, ng, nb;
-                        SDL_GetRGB(neighborPixel, surface->format, &nr, &ng, &nb);
-                        float neighborLuminance = 0.2126f * nr + 0.7152f * ng + 0.0722f * nb;
-
-                        sum += neighborLuminance;
-                        count++;
-                    }
-                }
-            }
-
-            float avgLuminance = sum / count;
-
-            if (luminance > threshold * avgLuminance) {
-                float scale = avgLuminance * threshold / luminance;
-                r = static_cast<Uint8>(r * scale);
-                g = static_cast<Uint8>(g * scale);
-                b = static_cast<Uint8>(b * scale);
-                newPixels[y * width + x] = SDL_MapRGB(surface->format, r, g, b);
-            }
-            else {
-                newPixels[y * width + x] = currentPixel;
-            }
-        }
-    }
-    SDL_LockSurface(surface);
-    std::memcpy(surface->pixels, newPixels.data(), width * height * sizeof(Uint32));
-    SDL_UnlockSurface(surface);
-}
 Vec3 Renderer::getColorFromSurface(SDL_Surface* surface, int i, int j) {
     Uint32* pixels = static_cast<Uint32*>(surface->pixels);
     Uint32 pixel = pixels[(surface->h - 1 - j) * surface->pitch / 4 + i];
@@ -333,34 +258,6 @@ Vec3 Renderer::getColorFromSurface(SDL_Surface* surface, int i, int j) {
     return Vec3(r / 255.0f, g / 255.0f, b / 255.0f);
 }
 
-void Renderer::update_variance_map_from_surface(SDL_Surface* surface) {
-    for (int j = 0; j < image_height; ++j) {
-        for (int i = 0; i < image_width; ++i) {
-            Vec3 color = getColorFromSurface(surface, i, j);
-            float luminance = color.luminance(); // veya başka bir noise ölçütü
-
-            // Normalize veya ölçekle
-            float scaled = std::clamp(luminance * 1.0f, 0.0f, 1.0f);
-            variance_map[j * image_width + i] = Vec3(scaled);
-        }
-    }
-}
-
-void Renderer::update_variance_map_hybrid(SDL_Surface* surface) {
-    for (int j = 0; j < image_height; ++j) {
-        for (int i = 0; i < image_width; ++i) {
-            int index = j * image_width + i;
-
-            Vec3 denoised = getColorFromSurface(surface, i, j);
-            Vec3 raw = frame_buffer[index] / std::max(sample_counts[index], 1); // Ham ortalama
-
-            Vec3 diff = (denoised - raw).abs();
-            float hybrid_error = diff.luminance(); // veya max(diff.x, diff.y, diff.z);
-
-            variance_map[index] = Vec3(std::clamp(hybrid_error, 0.0f, 1.0f));
-        }
-    }
-}
 static int point_light_pick_count = 0;
 static int directional_pick_count = 0;
 
@@ -806,49 +703,59 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
         }
     }
 
-    // --- MATERIAL KEYFRAME EVALUATION (NEW!) ---
-    // Apply material keyframes to objects during playback
+    // --- MATERIAL KEYFRAME EVALUATION (OPTIMIZED!) ---
+    // OPTIMIZATION: Instead of iterating through ALL objects (10M+), iterate only through
+    // timeline tracks that have material keyframes. This is O(tracks) instead of O(objects).
     if (!scene.timeline.tracks.empty()) {
         extern RenderSettings render_settings;
         int current_frame = static_cast<int>(current_time * render_settings.animation_fps);
         
-        for (auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (!tri) continue;
-            
-            std::string nodeName = tri->getNodeName();
-            if (nodeName.empty()) continue;
-            
-            auto track_it = scene.timeline.tracks.find(nodeName);
-            if (track_it == scene.timeline.tracks.end()) continue;
-            if (track_it->second.keyframes.empty()) continue;
+        // Build a cache of node names to material IDs for fast lookup (done once)
+        // OPTIMIZATION: This cache should ideally be built once when scene loads,
+        // but for now we only process tracks that have keyframes - much faster than 10M objects
+        
+        for (auto& [track_name, track] : scene.timeline.tracks) {
+            // Skip tracks without material keyframes
+            if (track.keyframes.empty()) continue;
             
             // Evaluate keyframe at current frame
-            Keyframe kf = track_it->second.evaluate(current_frame);
+            Keyframe kf = track.evaluate(current_frame);
+            if (!kf.has_material) continue;
             
-            if (kf.has_material) {
-                // Get material ID from keyframe (or use object's current material)
-                uint16_t mat_id = kf.material.material_id;
-                if (mat_id == 0) {
-                    mat_id = tri->getMaterialID();  // Fallback to current
-                }
-                
-                // Get material and apply keyframe values
-                Material* mat_ptr = MaterialManager::getInstance().getMaterial(mat_id);
-                if (mat_ptr && mat_ptr->gpuMaterial) {
-                    // Apply interpolated material properties to GpuMaterial
-                    kf.material.applyTo(*mat_ptr->gpuMaterial);
-                    
-                    // Also update CPU-side material properties if it's a PrincipledBSDF
-                    if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(mat_ptr)) {
-                        pbsdf->albedoProperty.color = kf.material.albedo;
-                        pbsdf->roughnessProperty.color = Vec3(kf.material.roughness);
-                        pbsdf->metallicProperty.intensity = kf.material.metallic;
-                        pbsdf->emissionProperty.color = kf.material.emission;
-                        pbsdf->ior = kf.material.ior;
-                        pbsdf->transmission = kf.material.transmission;
-                        pbsdf->opacityProperty.alpha = kf.material.opacity;
+            // Get material ID from keyframe
+            uint16_t mat_id = kf.material.material_id;
+            
+            // If no material ID in keyframe, we need to find it from an object with this node name
+            // This is a fallback - ideally material ID should be stored in the keyframe
+            if (mat_id == 0) {
+                // Quick lookup: find first object with this node name
+                // TODO: Cache this mapping for better performance
+                for (const auto& obj : scene.world.objects) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                    if (tri && tri->getNodeName() == track_name) {
+                        mat_id = tri->getMaterialID();
+                        break; // Found it, no need to continue
                     }
+                }
+            }
+            
+            if (mat_id == 0) continue; // No material ID found
+            
+            // Get material and apply keyframe values
+            Material* mat_ptr = MaterialManager::getInstance().getMaterial(mat_id);
+            if (mat_ptr && mat_ptr->gpuMaterial) {
+                // Apply interpolated material properties to GpuMaterial
+                kf.material.applyTo(*mat_ptr->gpuMaterial);
+                
+                // Also update CPU-side material properties if it's a PrincipledBSDF
+                if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(mat_ptr)) {
+                    pbsdf->albedoProperty.color = kf.material.albedo;
+                    pbsdf->roughnessProperty.color = Vec3(kf.material.roughness);
+                    pbsdf->metallicProperty.intensity = kf.material.metallic;
+                    pbsdf->emissionProperty.color = kf.material.emission;
+                    pbsdf->ior = kf.material.ior;
+                    pbsdf->transmission = kf.material.transmission;
+                    pbsdf->opacityProperty.alpha = kf.material.opacity;
                 }
             }
         }
@@ -1031,6 +938,31 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // Returns true if geometry changed
         // Returns true if geometry changed
         bool geometry_changed = this->updateAnimationState(scene, current_time);
+        
+        // --- TERRAIN ANIMATION ---
+        // Apply terrain keyframes for this frame (morphing animation)
+        for (auto& [track_name, track] : scene.timeline.tracks) {
+            // Check if this track has terrain keyframes
+            bool has_terrain_kf = false;
+            for (auto& kf : track.keyframes) {
+                if (kf.has_terrain) {
+                    has_terrain_kf = true;
+                    break;
+                }
+            }
+            
+            if (has_terrain_kf) {
+                // Find terrain by name
+                auto& terrains = TerrainManager::getInstance().getTerrains();
+                for (auto& terrain : terrains) {
+                    if (terrain.name == track_name) {
+                        TerrainManager::getInstance().updateFromTrack(&terrain, track, frame);
+                        geometry_changed = true;  // Terrain morph = geometry change
+                        break;
+                    }
+                }
+            }
+        }
 
         // --- RENDER BUFFER SETUP ---
         // Use a dedicated off-screen surface for BOTH CPU and OptiX to prevent 
@@ -1051,8 +983,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // --- OPTIX RENDER PATH ---
             
             // 1. Update Geometry if needed
+            // IMPORTANT: Terrain erosion can change triangle count, not just positions.
+            // Full rebuildOptiXGeometry is required to handle topology changes.
             if (geometry_changed) {
-                 optix_gpu->updateGeometry(scene.world.objects);
+                 this->rebuildOptiXGeometry(scene, optix_gpu);
             }
             
             // 1.5. Update GPU Materials (CRITICAL for material keyframe animations!)
@@ -1170,10 +1104,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         SCENE_LOG_INFO("Animation rendering completed successfully!");
     }
 }
-//void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
-//    std::string default_path = "e:/data/home/bedroom.gltf";
-//    create_scene(scene, optix_gpu_ptr, default_path);
-//}
+
 void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     if (!scene.initialized) {
         SCENE_LOG_WARN("Scene not initialized, BVH rebuild skipped.");
@@ -1187,7 +1118,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         return;
     }
 
-    scene.bvh = nullptr; // eskiyi temizle
+    //scene.bvh = nullptr; // eskiyi temizle
 
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
@@ -1201,7 +1132,13 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     }
 }
 
-
+void Renderer::updateBVH(SceneData& scene, bool use_embree) {
+    if (scene.world.objects.empty()) {
+        scene.bvh = nullptr;
+        return;
+    }
+    rebuildBVH(scene, use_embree);
+}
 
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
     std::function<void(int progress, const std::string& stage)> progress_callback,
@@ -1487,32 +1424,7 @@ void Renderer::render_worker(
     );
 }
 
-void Renderer::update_display(SDL_Window* window, SDL_Texture* raytrace_texture,SDL_Surface* surface, SDL_Renderer* renderer) {
 
-    while (!rendering_complete) {
-        SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-
-        // Renderer komutları
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255); // Siyah temizleme
-        ImGui::Render();
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-        SDL_RenderPresent(renderer);
-        // float progress = static_cast<float>(completed_pixels) / (image_width * image_height) * 100.0f;
-
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) {
-                rendering_complete = true;
-                return;
-            }
-        }
-
-        //std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // 100ms aralıklarla güncelle
-    }
-
-}
 void Renderer::apply_normal_map(HitRecord& rec) {
     if (!rec.material) {
         return;
@@ -1572,108 +1484,6 @@ void Renderer::create_coordinate_system(const Vec3& N, Vec3& T, Vec3& B) {
     }
 }
 
-// Sobol dizisini hesaplayan bir fonksiyon. Dimension vektörlerini tablodan alıyoruz.
-float Renderer::sobol(int index, int dimension) {
-    static const unsigned int direction_vectors[2][32] = {
-        {0x80000000, 0x40000000, 0x20000000, 0x10000000, 0x08000000, 0x04000000, 0x02000000, 0x01000000,
-         0x00800000, 0x00400000, 0x00200000, 0x00100000, 0x00080000, 0x00040000, 0x00020000, 0x00010000,
-         0x00008000, 0x00004000, 0x00002000, 0x00001000, 0x00000800, 0x00000400, 0x00000200, 0x00000100,
-         0x00000080, 0x00000040, 0x00000020, 0x00000010, 0x00000008, 0x00000004, 0x00000002, 0x00000001},
-
-        {0x80000000, 0xC0000000, 0xA0000000, 0xF0000000, 0x88000000, 0xCC000000, 0xAA000000, 0xFF000000,
-         0x80800000, 0xC0C00000, 0xA0A00000, 0xF0F00000, 0x88880000, 0xCCCC0000, 0xAAAA0000, 0xFFFF0000,
-         0x80008000, 0xC000C000, 0xA000A000, 0xF000F000, 0x88008800, 0xCC00CC00, 0xAA00AA00, 0xFF00FF00,
-         0x80808080, 0xC0C0C0C0, 0xA0A0A0A0, 0xF0F0F0F0, 0x88888888, 0xCCCCCCCC, 0xAAAAAAAA, 0xFFFFFFFF}
-    };
-
-    // Gray code kullanarak optimizasyon
-    unsigned int gray = index ^ (index >> 1);
-
-    // Lookup table kullanarak hızlı bit sayımı
-    static const unsigned char BitsSetTable256[256] = {
-        #define B2(n) n,     n+1,     n+2,     n+3
-        #define B4(n) B2(n), B2(n+1), B2(n+2), B2(n+3)
-        #define B6(n) B4(n), B4(n+1), B4(n+2), B4(n+3)
-        B6(0), B6(1), B6(2), B6(3)
-    };
-
-    unsigned int result = 0;
-    const unsigned int* v = direction_vectors[dimension];
-
-    // 8 bitlik parçalar halinde işlem
-    while (gray) {
-        result ^= v[BitsSetTable256[gray & 0xff]];
-        gray >>= 8;
-    }
-
-    return static_cast<float>(result) * (1.0f / static_cast<float>(0xFFFFFFFF));
-}
-Renderer::SobolCache Renderer::cache;  // Static üyenin tanımlanması
-
-float Renderer::get_sobol_value(int index, int dimension) {
-    if (index < 0 || dimension < 0 || dimension >= DIMENSION_COUNT) {
-        return 0.0f;
-    }
-    constexpr size_t MAX_CACHE_SIZE = 1024; // Örneğin, 1024 örnek sakla
-    size_t cache_size = std::min(CACHE_SIZE, MAX_CACHE_SIZE);
-    // Cache büyüklüğünü kontrol et
-    if (index >= cache_size) {
-        return sobol(index, dimension);
-    }
-
-    // Cache'i güncelle
-    size_t current_computed = cache.last_computed_index.load();
-    if (index >= current_computed) {
-        size_t expected = current_computed;
-        if (cache.last_computed_index.compare_exchange_weak(expected, index + 1)) {
-            for (int d = 0; d < DIMENSION_COUNT; ++d) {
-                for (size_t i = current_computed; i <= index; ++i) {
-                    cache.values[d][i] = sobol(i, d);
-                }
-            }
-        }
-    }
-
-
-    return cache.values[dimension][index];
-}
-
-
-void Renderer::initialize_sobol_cache() {
-    sobol_cache.resize(MAX_DIMENSIONS); // Dış boyutları ayarlama
-    for (int d = 0; d < MAX_DIMENSIONS; ++d) {
-        sobol_cache[d].resize(MAX_SAMPLES_SOBOL); // İç boyutları ayarlama
-        for (int i = 0; i < MAX_SAMPLES_SOBOL; ++i) {
-            sobol_cache[d][i] = sobol(i, d); // Sobol dizisini hesaplama
-        }
-    }
-}
-
-void Renderer::precompute_sobol(int max_index) {
-    for (int i = 0; i < 2; ++i) {  // İlk iki boyutu kullanıyoruz
-        sobol_cache[i].resize(max_index);
-        for (int j = 0; j < max_index; ++j) {
-            sobol_cache[i][j] = sobol(j, i);
-        }
-    }
-}
-
-Vec2 Renderer::stratified_sobol(int x, int y, int sample_index, int samples_per_pixel) {
-    int index = (y * image_width + x) * samples_per_pixel + sample_index;
-    index = index % MAX_SAMPLES_SOBOL;
-    float u = sobol_cache[0][index];
-    float v = sobol_cache[1][index];
-
-    // Sobol dizisinin örneklerini doğrudan kullanıyoruz
-    u /= samples_per_pixel;
-    v /= samples_per_pixel;
-
-    return Vec2(
-        (x + u) / image_width,
-        (y + v) / image_height
-    );
-}
-
 void Renderer::initialize_halton_cache() {
     halton_cache = std::make_unique<float[]>(MAX_DIMENSIONS * MAX_SAMPLES_HALTON);
 
@@ -1730,54 +1540,8 @@ Vec2 Renderer::stratified_halton(int x, int y, int sample_index, int samples_per
         (y + v + jitter_v) / image_height
     );
 }
-inline float luminance(const Vec3& c) {
-    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-}
 
-//float Renderer::compute_ambient_occlusion(HitRecord& rec, const ParallelBVHNode* bvh) {
-//    if (rec.ao_computed) return rec.ao;
-//
-//    const int baseSamples = 32;
-//    const int maxAdditionalSamples = 32;
-//    const float aoRadius = 8.0f;
-//    const float bias = 0.001f;
-//
-//    // Adaptive sampling based on surface complexity
-//    Vec3 normal = rec.normal;
-//    float complexity = 1.0f - std::abs(normal.dot(Vec3(0, 1, 0)));
-//    int numSamples = baseSamples + static_cast<int>(complexity * maxAdditionalSamples);
-//
-//    float occlusion = 0.0f;
-//    Vec3 samplePoint = rec.point + normal * bias;
-//
-//    // Use thread-local RNG for better performance
-//    static thread_local std::mt19937 gen(std::random_device{}());
-//    static thread_local std::uniform_real_distribution<float> dis(0.0f, 1.0f);
-//
-//    for (int i = 0; i < numSamples; ++i) {
-//        // Stratified sampling
-//        float u = (i + dis(gen)) / numSamples;
-//        float v = dis(gen);
-//
-//        Vec3 randomDir = Vec3::random_in_hemisphere(normal);
-//        Ray aoRay(samplePoint, randomDir);
-//
-//        float hitDistance=rec.t;
-//        if (bvh->hit(aoRay, bias, aoRadius, rec)) {
-//            float distanceFactor = 1.0f - (hitDistance / aoRadius);
-//            occlusion += distanceFactor * distanceFactor; // Quadratic falloff
-//        }
-//    }
-//
-//    // Apply contrast enhancement
-//    float rawAO = occlusion / static_cast<float>(numSamples);
-//    float contrastedAO = std::pow(rawAO, 2.5f);
-//
-//    rec.ao = 1.0f - contrastedAO;
-//    rec.ao_computed = true;
-//
-//    return rec.ao;
-//}
+
 void Renderer::render_chunk_adaptive(SDL_Surface* surface,
     const std::vector<std::pair<int, int>>& shuffled_pixel_list,
     std::atomic<int>& next_pixel_index,
@@ -1974,15 +1738,6 @@ void Renderer::render_chunk(SDL_Surface* surface,
 
     render_chunk_adaptive(surface, shuffled_pixel_list, next_pixel_index,
         world, lights, background_color, bvh, camera, total_samples_per_pixel);
-}
-// Işın ve küre kesişim testi
-bool intersects_sphere(const Ray& ray, const Vec3& center, float radius) {
-    Vec3 oc = ray.origin - center;
-    float a = ray.direction.length_squared();
-    float b = 2.0f * Vec3::dot(oc, ray.direction);
-    float c = oc.length_squared() - radius * radius;
-    float discriminant = b * b - 4 * a * c;
-    return discriminant > 0;
 }
 
 float Renderer::luminance(const Vec3& color) {
@@ -2365,9 +2120,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 // Transmission
                 transmission = pbsdf->getTransmission(uv);
                 
-                // Emission
-                Vec3 em = pbsdf->getEmission(uv, Vec3(0.0f));
-                emission = toVec3f(em);
+                // NOTE: Emission is now retrieved polymorphically for all materials after scatter
             }
         }
         
@@ -2393,7 +2146,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
               emission += toVec3f(vol_emit);
          }
         
-        color += throughput * emission;
+        // NOTE: Emission is added to total_contribution AFTER scatter (matching GPU)
 
         // --- Scatter ray ---
         Vec3 attenuation;
@@ -2426,6 +2179,11 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 throughput *= (UnifiedConstants::MAX_CONTRIBUTION / max_throughput);
             }
         }
+
+        // --- Emissive Contribution (OLD WORKING PATTERN) ---
+        // Use polymorphic getEmission() for ALL material types, not just PrincipledBSDF
+        Vec3 emitted = rec.material->getEmission(rec.uv, rec.point);
+        emission = toVec3f(emitted);
 
         // --- Direct lighting with unified functions ---
         Vec3f direct_light(0.0f);
@@ -2493,8 +2251,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         
         // NOTE: Transmission handling is now inside evaluate_brdf_unified (GPU-matching)
 
-        // --- Accumulate contribution ---
-        Vec3f total_contribution =  direct_light;
+        // --- Accumulate contribution (GPU: total = direct + brdf_mis + emission) ---
+        Vec3f total_contribution = direct_light + emission;  // Emission added here (GPU parity)
         
         // Final contribution clamp
         float total_lum = total_contribution.luminance();
@@ -2515,96 +2273,6 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     color = color.clamp(0.0f, 100.0f);
     
     return toVec3(color);
-}
-
-float Renderer::radical_inverse(unsigned int bits) {
-    bits = (bits << 16u) | (bits >> 16u);
-    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
-    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
-    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
-    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
-    return float(bits) * 2.3283064365386963e-10f; // 1 / (2^32)
-}
-float Renderer::compute_ambient_occlusion(HitRecord& rec, const ParallelBVHNode* bvh) {
-
-
-    const int baseSamples = 2;
-    const int maxAdditionalSamples = 2;
-    const float aoRadius = 8.0f;
-    const float bias = 0.001f;
-
-    // Adaptive sampling based on surface complexity
-    Vec3 normal = rec.normal;
-    float complexity = 1.0f - std::abs(Vec3::dot(normal, (Vec3(0, 1, 0))));
-    int numSamples = baseSamples + static_cast<int>(complexity * maxAdditionalSamples);
-
-    float occlusion = 0.0f;
-    Vec3 samplePoint = rec.point + normal * bias;
-
-    // Use thread-local RNG for better performance
-    static thread_local std::mt19937 gen(std::random_device{}());
-    static thread_local std::uniform_real_distribution<float> dis(0.0f, 1.0f);
-
-    for (int i = 0; i < numSamples; ++i) {
-        // Stratified sampling
-        float u = (i + dis(gen)) / numSamples;
-        float v = dis(gen);
-
-        Vec3 randomDir = Vec3::random_in_hemisphere(normal);
-        Ray aoRay(samplePoint, randomDir);
-
-
-        float hitDistance = rec.t;
-        if (bvh->hit(aoRay, bias, aoRadius, rec)) {
-            float distanceFactor = 1.0f - (hitDistance / aoRadius);
-            occlusion += distanceFactor * distanceFactor; // Quadratic falloff
-        }
-    }
-
-    // Apply contrast enhancement
-    float rawAO = occlusion / static_cast<float>(numSamples);
-    float contrastedAO = std::pow(rawAO, 2.5f);
-
-
-    return 0;
-}
-Vec3 Renderer::fresnel_schlick(float cosTheta, Vec3 F0) {
-    return F0 + (Vec3(1.0f) - F0) * pow(1.0f - cosTheta, 5.0f);
-}
-// Farklı ışık türleri için alternatif değerler
-namespace LightAttenuation {
-    // Küçük ışık kaynakları (masa lambası, mum, vb.)
-    struct Small {
-        static constexpr float constant = 1.0f;
-        static constexpr float linear = 0.7f;
-        static constexpr float quadratic = 1.8f;
-    };
-
-    // Orta büyüklükte ışık kaynakları (tavan lambası, sokak lambası)
-    struct Medium {
-        static constexpr float constant = 1.0f;
-        static constexpr float linear = 0.35f;
-        static constexpr float quadratic = 0.44f;
-    };
-
-    // Büyük ışık kaynakları (projektör, büyük spot ışıklar)
-    struct Large {
-        static constexpr float constant = 1.0f;
-        static constexpr float linear = 0.22f;
-        static constexpr float quadratic = 0.20f;
-    };
-}
-inline float lerp(float a, float b, float t) {
-    return a * (1.0f - t) + b * t;
-}
-
-
-inline Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) {
-    // Roughness arttıkça Fresnel eğrisi yumuşatılır (özellikle kenar parlamaları bastırılır)
-    float factor = powf(1.0f - cosTheta, 5.0f);
-    Vec3 oneMinusRough = Vec3(1.0f - roughness); // roughness → F'nin tavanını etkiler
-    Vec3 fresnel = F0 + (Vec3::max(oneMinusRough, F0) - F0) * factor;
-    return fresnel;
 }
 
 // ============================================================================
@@ -2658,7 +2326,8 @@ bool Renderer::isCPUAccumulationComplete() const {
 
 void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass, int override_target_samples) {
     extern RenderSettings render_settings;
-    
+
+
     // Ensure accumulation buffer is allocated
     const size_t pixel_count = image_width * image_height;
     if (cpu_accumulation_buffer.size() != pixel_count) {
@@ -2880,13 +2549,25 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
             }
 
-            // Apply Exposure
+
+            // Apply Reinhard Tone Mapping (CPU Parity with GPU)
+            // GPU uses: color / (color + 1.0f) in make_color
+            // Note: Exposure is applied BEFORE tone mapping in some pipelines, 
+            // but GPU make_color applies it AFTER "new_color" is computed.
+            // Wait, GPU raygen applies exposure to new_color, THEN calls make_color.
+            // So Tone Mapping happens on EXPOSED color.
+
             Vec3 exposed_color = new_color * exposure_factor;
+
+            // Reinhard Operator
+            exposed_color.x = exposed_color.x / (exposed_color.x + 1.0f);
+            exposed_color.y = exposed_color.y / (exposed_color.y + 1.0f);
+            exposed_color.z = exposed_color.z / (exposed_color.z + 1.0f);
 
             int r = static_cast<int>(255 * std::clamp(toSRGB(std::max(0.0f, exposed_color.x)), 0.0f, 1.0f));
             int g = static_cast<int>(255 * std::clamp(toSRGB(std::max(0.0f, exposed_color.y)), 0.0f, 1.0f));
             int b = static_cast<int>(255 * std::clamp(toSRGB(std::max(0.0f, exposed_color.z)), 0.0f, 1.0f));
-            
+
             Uint32* pixels = static_cast<Uint32*>(surface->pixels);
             int screen_index = (surface->h - 1 - j) * (surface->pitch / 4) + i;
             pixels[screen_index] = SDL_MapRGB(surface->format, r, g, b);
@@ -2983,11 +2664,25 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
         // CRITICAL: Validate material indices before build to prevent crash
         optix_gpu_ptr->validateMaterialIndices(optix_data);
         
-        // Full rebuild with updated material indices
-        optix_gpu_ptr->buildFromData(optix_data);
+        // ═══════════════════════════════════════════════════════════════════════════
+        // BUILD MODE SELECTION: Single GAS vs TLAS/BLAS
+        // ═══════════════════════════════════════════════════════════════════════════
+        // TLAS mode is currently disabled by default to ensure stability.
+        // To enable: Set use_tlas_mode = true in OptixWrapper or call buildFromDataTLAS
+        // Benefits: Faster transform updates, proper instancing support
+        // Note: Texture handling is identical in both modes.
         
-        // Sync GPU before continuing (prevents race conditions)
-        cudaDeviceSynchronize();
+        if (optix_gpu_ptr->isUsingTLAS()) {
+            // Continue using TLAS mode (already initialized)
+            optix_gpu_ptr->buildFromDataTLAS(optix_data, scene.world.objects);
+        } else {
+            // Default: Single GAS mode (proven stable, good texture support)
+            optix_gpu_ptr->buildFromData(optix_data);
+        }
+        
+        // NOTE: Removed cudaDeviceSynchronize() here!
+        // It was causing GPU to freeze even when this runs in async thread.
+        // The next optixLaunch() will naturally sync with any pending CUDA work.
         
         optix_gpu_ptr->resetAccumulation();
         
@@ -3007,6 +2702,7 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
         }
     }
 }
+
 
 // ============================================================================
 // updateOptiXMaterialsOnly - Fast Material Update (No GAS Rebuild)

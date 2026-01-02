@@ -32,16 +32,27 @@ struct alignas(16) GpuMaterial {
     float3 emission;                  // 12 bytes - emission color
     float ior;                        // 4 bytes  - index of refraction
     
-    // Block 4: Subsurface (16 bytes)
-    float3 subsurface_color;          // 12 bytes
-    float subsurface;                 // 4 bytes
+    // Block 4: Subsurface color + amount (16 bytes)
+    float3 subsurface_color;          // 12 bytes - SSS tint color
+    float subsurface;                 // 4 bytes  - SSS amount (0-1)
     
-    // Block 5: Additional properties (8 bytes + 8 padding)   
-    float anisotropic;                // 4 bytes (new - for future use)
-    float sheen;                      // 4 bytes (new - for future use)  
-    float sheen_tint;                 // 4 bytes (new - for future use)
+    // Block 5: Subsurface Radius RGB + scale (16 bytes)
+    float3 subsurface_radius;         // 12 bytes - Per-channel scatter distance (e.g., skin: R=1.0, G=0.2, B=0.1)
+    float subsurface_scale;           // 4 bytes  - Global radius multiplier
+    
+    // Block 6: Clear Coat + Translucent (16 bytes)
+    float clearcoat_roughness;        // 4 bytes  - Clear coat layer roughness
+    float translucent;                // 4 bytes  - Thin surface light pass-through
+    float subsurface_anisotropy;      // 4 bytes  - SSS scatter direction bias (-1 to 1)
+    float subsurface_ior;             // 4 bytes  - SSS internal IOR (typically 1.3-1.5)
+    
+    // Block 7: Additional properties (16 bytes)   
+    float anisotropic;                // 4 bytes - Surface anisotropy
+    float sheen;                      // 4 bytes - Sheen amount  
+    float sheen_tint;                 // 4 bytes - Sheen color tint
+    float _padding;                   // 4 bytes - Alignment padding
 };  
-// Total: 80 bytes (vs 92 before) - well aligned for GPU
+// Total: 112 bytes - well aligned for GPU (7 x 16-byte blocks)
 
 inline bool float3_equal(float3 a, float3 b, float epsilon = FLOAT_COMPARE_EPSILON) {  
     return fabsf(a.x - b.x) < epsilon && 
@@ -57,10 +68,17 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.clearcoat - b.clearcoat) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.transmission - b.transmission) < FLOAT_COMPARE_EPSILON &&
         float3_equal(a.emission, b.emission) &&
-        fabsf(a.ior - b.ior) < FLOAT_COMPARE_EPSILON;
-
-
-}  
+        fabsf(a.ior - b.ior) < FLOAT_COMPARE_EPSILON &&
+        // SSS fields
+        float3_equal(a.subsurface_color, b.subsurface_color) &&
+        fabsf(a.subsurface - b.subsurface) < FLOAT_COMPARE_EPSILON &&
+        float3_equal(a.subsurface_radius, b.subsurface_radius) &&
+        fabsf(a.subsurface_scale - b.subsurface_scale) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.subsurface_anisotropy - b.subsurface_anisotropy) < FLOAT_COMPARE_EPSILON &&
+        // Clear Coat & Translucent
+        fabsf(a.clearcoat_roughness - b.clearcoat_roughness) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.translucent - b.translucent) < FLOAT_COMPARE_EPSILON;
+}    
 
 namespace std {  
     template <>  
@@ -90,6 +108,20 @@ namespace std {
             hash_combine(h, m.emission.z);  
             hash_combine(h, m.ior);  
 
+            // SSS block
+            hash_combine(h, m.subsurface_color.x);
+            hash_combine(h, m.subsurface_color.y);
+            hash_combine(h, m.subsurface_color.z);
+            hash_combine(h, m.subsurface);
+            hash_combine(h, m.subsurface_radius.x);
+            hash_combine(h, m.subsurface_radius.y);
+            hash_combine(h, m.subsurface_radius.z);
+            hash_combine(h, m.subsurface_scale);
+            hash_combine(h, m.subsurface_anisotropy);
+
+            // Clear Coat & Translucent
+            hash_combine(h, m.clearcoat_roughness);
+            hash_combine(h, m.translucent);
 
             return h;  
         }  

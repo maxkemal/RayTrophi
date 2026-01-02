@@ -13,7 +13,7 @@
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"  // Değiştirildi: sdlrenderer2
 #include <scene_ui.h>
-#include "ParallelBVHNode.h"
+
 #include "EmbreeBVH.h"
 #include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
 #include "default_scene_creator.hpp"
@@ -21,6 +21,7 @@
 #include "scene_data.h"       // Added explicit include
 #include "OptixWrapper.h"     // Added explicit include
 #include "SceneSelection.h"   // Added explicit include
+#include "Triangle.h"         // Added for CPU sync
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
@@ -127,21 +128,32 @@ float u;
 float v;
 bool rayhit = false;
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 // DIRTY FLAGS - Prevents unnecessary GPU buffer updates when data unchanged
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 bool g_camera_dirty = true;
 bool g_lights_dirty = true;
 bool g_world_dirty = true;
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 // DEFERRED REBUILD FLAGS - For optimized batched rebuilds
 // Set these instead of calling rebuild immediately, Main loop handles them
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
-bool g_optix_rebuild_pending = false;    // GPU OptiX geometry needs rebuild
+bool g_optix_rebuild_pending = false;
+bool g_optix_rebuild_in_progress = false; // True while TLAS rebuild is happening    // GPU OptiX geometry needs rebuild
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
+bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
+bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
+
+// ===========================================================================
+// SCENE LOADING FLAGS - Thread safety for project load/save operations
+// ===========================================================================
+std::atomic<bool> g_scene_loading_in_progress{false};  // Prevents concurrent load operations
+bool g_needs_geometry_rebuild = false;   // Set by loader thread, main loop does actual rebuild
+bool g_needs_optix_sync = false;         // Set by loader thread, main loop syncs OptiX buffers
+
 
 Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float strength = 1.0f) {
     float u = (x / (float)width - 0.5f) * 2.0f;
@@ -267,8 +279,8 @@ void reset_render_resolution(int w, int h)
 static bool hasRTCores(int major, int minor)
 {
     // RTX donanımı SM 7.5 ile başladı.
-    if (major > 7) return true;            // SM 8.x, 9.x, 10.x → yeni RTX mimarileri
-    if (major == 7 && minor >= 5) return true; // SM 7.5 → Turing
+    if (major > 7) return true;            // SM 8.x, 9.x, 10.x › yeni RTX mimarileri
+    if (major == 7 && minor >= 5) return true; // SM 7.5 › Turing
     return false;
 }
 
@@ -290,7 +302,7 @@ void detectOptixHardware()
     int deviceCount = 0;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
 
-    // NVIDIA kart yok / CUDA yok / sürücü yok → OptiX yok.
+    // NVIDIA kart yok / CUDA yok / sürücü yok › OptiX yok.
     if (err != cudaSuccess || deviceCount == 0) {
         g_hasOptix = false;
         g_gpu_name = "CPU Only";
@@ -447,9 +459,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SPLASH SCREEN - Frameless startup screen with loading status
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     SplashScreen splash;
     bool splashOk = splash.init("RayTrophi_image.png", 900, 700);
     if (splashOk) {
@@ -536,9 +548,9 @@ int main(int argc, char* argv[]) {
     // Update initial camera vectors
     if (scene.camera) scene.camera->update_camera_vectors();
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SPLASH COMPLETE - Wait for user click to continue
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (splashOk) {
         splash.waitForClick();
         splash.close();
@@ -548,9 +560,9 @@ int main(int argc, char* argv[]) {
     SDL_ShowWindow(window);
     SDL_MaximizeWindow(window);
     
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // GPU MODE HUD NOTIFICATION - Inform user about rendering backend
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (g_hasOptix) {
         if (g_has_rt_cores) {
             ui.addViewportMessage("GPU: " + g_gpu_name + " (RTX - Hardware Ray Tracing)", 5.0f, ImVec4(0.3f, 1.0f, 0.5f, 1.0f));
@@ -647,9 +659,9 @@ int main(int argc, char* argv[]) {
         ImGui::NewFrame();
         ui_ctx.ray_texture = raytrace_texture;
         
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // SCENE LOADING POPUP
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         if (ui.scene_loading.load()) {
             if (!ImGui::IsPopupOpen("Loading Scene...")) {
                  ImGui::OpenPopup("Loading Scene...");
@@ -691,14 +703,28 @@ int main(int argc, char* argv[]) {
             // Refresh UI cache and start render
             ui.invalidateCache();
             
-            // REBUILD ON MAIN THREAD (Crash Update)
-            ui_ctx.renderer.rebuildBVH(ui_ctx.scene, ui_ctx.render_settings.UI_use_embree);
+            // =========================================================================
+            // REBUILD ON MAIN THREAD (Thread-safe OptiX handling)
+            // ProjectManager sets g_needs_geometry_rebuild, we do actual GPU work here
+            // =========================================================================
+            if (g_needs_geometry_rebuild) {
+                ui_ctx.renderer.rebuildBVH(ui_ctx.scene, ui_ctx.render_settings.UI_use_embree);
+                g_needs_geometry_rebuild = false;
+            }
+            
             ui_ctx.renderer.resetCPUAccumulation();
-            if (ui_ctx.optix_gpu_ptr) {
+            
+            if (ui_ctx.optix_gpu_ptr && g_needs_optix_sync) {
                 ui_ctx.renderer.rebuildOptiXGeometry(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
+                
+                // CRITICAL: Update materials AFTER geometry rebuild
+                ui_ctx.renderer.updateOptiXMaterialsOnly(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
+                
                 ui_ctx.optix_gpu_ptr->setLightParams(ui_ctx.scene.lights);
                 if (ui_ctx.scene.camera) ui_ctx.optix_gpu_ptr->setCameraParams(*ui_ctx.scene.camera);
                 ui_ctx.optix_gpu_ptr->resetAccumulation();
+                g_needs_optix_sync = false;
+                SCENE_LOG_INFO("GPU rebuild complete on main thread.");
             }
             
             // Mark all buffers dirty for fresh scene
@@ -714,9 +740,9 @@ int main(int argc, char* argv[]) {
         
         // Scene Hierarchy panel now called inside ui.draw()
         
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // VIEWPORT GUIDES - Draw safe areas, letterbox, grids on viewport
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         {
             // Get viewport bounds (full window for now)
             int win_w, win_h;
@@ -1174,6 +1200,32 @@ int main(int argc, char* argv[]) {
                         // ============ SYNCHRONOUS CPU RENDER (Like OptiX) ============
                         // Each pass is 1 sample per pixel, accumulates progressively
                         
+                        // ===============================================================
+                        // GPU -> CPU MODE SYNC: Update CPU vertices from GPU state
+                        // ===============================================================
+                        if (g_cpu_sync_pending) {
+                            ui.addViewportMessage("Syncing CPU data...", 5.0f);
+                            
+                            // Update all CPU vertices from their Transform handles
+                            for (auto& obj : scene.world.objects) {
+                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                if (tri) {
+                                    tri->updateTransformedVertices();
+                                }
+                            }
+                            
+                            // Trigger CPU BVH rebuild (SYNCHRONOUS for safety)
+                            // Async rebuild causes crashes if objects were deleted in GPU mode
+                            extern bool use_embree;
+                            ray_renderer.rebuildBVH(scene, use_embree);
+                            
+                            g_bvh_rebuild_pending = false; // Cancel any pending async rebuilds
+                            ray_renderer.resetCPUAccumulation();
+                            g_cpu_sync_pending = false;
+                            
+                            SCENE_LOG_INFO("[CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild");
+                        }
+                        
                         // OPTIMIZATION: Only update animation state when timeline frame changed
                         static int last_cpu_anim_frame = -1;
                         if (current_f != last_cpu_anim_frame) {
@@ -1334,10 +1386,10 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // TEXTURE UPDATE OPTIMIZATION
         // Only update texture when there's actual rendering happening
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         bool accumulation_done_for_display = false;
         if (ui_ctx.render_settings.use_optix && g_hasOptix) {
             accumulation_done_for_display = optix_gpu.isAccumulationComplete();
@@ -1363,9 +1415,9 @@ int main(int argc, char* argv[]) {
         ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
         SDL_RenderPresent(renderer);
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // IDLE OPTIMIZATION: Longer sleep when render is complete
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         if (accumulation_done_for_display && !camera_moved && !dragging && !start_render && !ImGui::GetIO().WantCaptureMouse) {
             // Render complete and no user interaction - aggressive sleep
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1374,9 +1426,9 @@ int main(int argc, char* argv[]) {
             std::this_thread::sleep_for(std::chrono::milliseconds(16));
         }
         
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // DEFERRED REBUILD PROCESSING - Batched at frame end for faster UI response
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         if (g_mesh_cache_dirty) {
             ui.rebuildMeshCache(scene.world.objects);
             g_mesh_cache_dirty = false;
@@ -1386,7 +1438,7 @@ int main(int argc, char* argv[]) {
         // ASYNC BVH REBUILD (Non-Blocking)
         // ===========================================================================
         if (g_gpu_refit_pending) {
-            ui.addViewportMessage("Updating GPU...", 2.0f);
+            // ui.addViewportMessage("Updating GPU...", 2.0f); // Removed to prevent spam
             if (g_hasOptix) {
                 // LIGHTWEIGHT UPDATE: Transforms only (fast)
                 // If actual geometry (vertices) changed, use g_optix_rebuild_pending instead.
@@ -1399,11 +1451,32 @@ int main(int argc, char* argv[]) {
             g_gpu_refit_pending = false;
         }
 
+        // CPU BVH Fast Refit (Embree only)
+        // CPU BVH Fast Refit (Embree only)
+        if (g_cpu_bvh_refit_pending && !g_bvh_rebuild_pending) {
+            // Only update if not fully rebuilding
+            bool use_embree = ui_ctx.render_settings.UI_use_embree;
+            // FORCE REBUILD for correctness during drag (User Request: "CPU Sync")
+            ray_renderer.rebuildBVH(scene, use_embree);
+            ray_renderer.resetCPUAccumulation();
+            g_cpu_bvh_refit_pending = false;
+        }
+
         static std::future<std::shared_ptr<Hittable>> g_bvh_future;
         
         if (g_bvh_rebuild_pending) {
+            // OPTIMIZATION: In GPU mode, skip CPU BVH rebuild entirely!
+            // - GPU raytracing uses OptiX, not CPU BVH
+            // - Picking (mouse selection) uses linear search, not BVH
+            // - Copying 4M shared_ptr for async rebuild takes ~3 seconds due to atomic ref count increments
+            // NOTE: Only skip if actually using GPU AND not switching to CPU mode
+            // g_cpu_sync_pending means user switched from GPU to CPU - must rebuild!
+            if (g_hasOptix && ui_ctx.render_settings.use_optix && !g_cpu_sync_pending) {
+                // GPU mode active: Skip expensive CPU BVH rebuild
+                g_bvh_rebuild_pending = false;
+            }
             // Only trigger if not already rebuilding
-            if (!g_bvh_future.valid()) {
+            else if (!g_bvh_future.valid()) {
                 // Determine if we actually need it (if using OptiX, maybe unnecessary?)
                 // But picking (selection) uses CPU BVH. So we DO need it eventually.
                 // Async allows it to happen without freezing.
@@ -1414,15 +1487,19 @@ int main(int argc, char* argv[]) {
                 
                 ui.addViewportMessage("Rebuilding BVH...", 10.0f); // Show status
                 
-                g_bvh_future = std::async(std::launch::async, [objects_copy, use_embree]() -> std::shared_ptr<Hittable> {
+                // Capture by MOVE to avoid second copy (Save 1x copy of millions of shared_ptrs)
+                g_bvh_future = std::async(std::launch::async, [objs = std::move(objects_copy), use_embree]() -> std::shared_ptr<Hittable> {
+                     // Empty scene guard - prevents freeze when last object is deleted
+                     if (objs.empty()) {
+                         return nullptr;
+                     }
+                     
                      if (use_embree) {
                          auto bvh = std::make_shared<EmbreeBVH>();
-                         bvh->build(objects_copy);
-                         // EmbreeBVH inherits from Hittable
+                         bvh->build(objs);
                          return bvh;
-                     } else {
-                         return std::make_shared<ParallelBVHNode>(objects_copy, 0, objects_copy.size(), 0.0, 1.0, 0);
-                     }
+                     } 
+                     return nullptr; 
                 });
             }
             g_bvh_rebuild_pending = false; 

@@ -5,6 +5,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
 #include "imgui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -13,18 +17,10 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "Volumetric.h"
-#include <unordered_set>
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MANUEL TAŞIMA TALİMATI (MANUAL TRANSFER INSTRUCTIONS):
-// ═════════════════════════════════════════════════════════════════════════════
-// Lütfen aşağıdaki fonksiyonu `scene_ui.cpp` dosyasından buraya Kes/Yapıştır yapın:
-// Please Cut/Paste the following function from `scene_ui.cpp` to here:
-//
-// 1. void SceneUI::drawSceneHierarchy(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~3382 - 4598)
-//
-// ═════════════════════════════════════════════════════════════════════════════
+#include <unordered_set>
+#include "TerrainManager.h"
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE HIERARCHY PANEL (Outliner)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -284,6 +280,26 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (!kv.second.empty()) {
                         auto& first_pair = kv.second[0];
                         sel.selectObject(first_pair.second, first_pair.first, name);
+                        
+                        // TERRAIN CONNECTION: Check if this is a terrain chunk
+                        if (name.find("Terrain_") == 0) {
+                            // Try to find corresponding TerrainObject
+                            // Name format: "Terrain_X" or "Terrain_X_Chunk"
+                            // Let's strip "_Chunk" if present
+                            std::string tName = name;
+                            size_t chunkPos = tName.find("_Chunk");
+                            if (chunkPos != std::string::npos) {
+                                tName = tName.substr(0, chunkPos);
+                            }
+                            
+                            auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                            if (terrain) {
+                                terrain_brush.active_terrain_id = terrain->id;
+                                show_terrain_tab = true;
+                                tab_to_focus = "Terrain";
+                                SCENE_LOG_INFO("Terrain selected: " + tName);
+                            }
+                        }
                     }
                 }
 
@@ -426,6 +442,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 }
                 ImGui::PopStyleColor();
             } // End World check block
+
+
 
 
             // Custom Keyframe Buttons Helper (Draws Diamond Shape Manually)

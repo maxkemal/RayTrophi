@@ -18,7 +18,7 @@ float Dielectric::get_opacity(const Vec2& uv) const {
 }
 
 Vec3 Dielectric::getEmission(const Vec2& uv, const Vec3& p) const {
-    return Vec3(0.0, 0.0, 0.0);
+    return Vec3(0.0f, 0.0, 0.0f);
 }
 Vec3 Dielectric::calculate_reflected_attenuation(const Vec3& base_color, const Vec3& fresnel_factor) const {
     Vec3 reflected_color = base_color * fresnel_factor;
@@ -28,7 +28,7 @@ Vec3 Dielectric::calculate_reflected_attenuation(const Vec3& base_color, const V
 // Kırılan ışığın katkısını hesaplama
 Vec3 Dielectric::calculate_refracted_attenuation(const Vec3& base_color, double thickness, const Vec3& fresnel_factor, const Vec3& ior) const {
     // Fresnel hesabından gelen kırılma bileşeni
-    Vec3 refracted_color = base_color * (Vec3(1.0, 1.0, 1.0) - fresnel_factor);
+    Vec3 refracted_color = base_color * (Vec3(1.0f, 1.0, 1.0f) - fresnel_factor);
 
     // Beer-Lambert yasasına göre zayıflama
     // Malzeme için yaklaşık absorpsiyon katsayısı
@@ -44,33 +44,33 @@ Vec3 Dielectric::calculate_refracted_attenuation(const Vec3& base_color, double 
     return apply_tint(refracted_color * attenuation);
 }
 Vec3 Dielectric::apply_scratches(const Vec3& color, const Vec3& point) const {
-    if (scratch_density <= 0.0) return color;
+    if (scratch_density <= 0.0f) return color;
 
     static Perlin noise; // Static olarak tanımlayarak her seferinde yeni instance oluşturmasını önlüyoruz
 
     // Scale faktörlerini ayarla
-    double base_scale = 20.0;
+    float base_scale = 20.0f;
     Vec3 scaled_point = point * base_scale;
 
     // Farklı frekanslarda noise ve turbulence kullan
-    double noise_val = noise.noise(scaled_point);
-    double turb_val = noise.turb(scaled_point * 2.0, 4); // Daha detaylı çizikler için turbulence
+    float noise_val = noise.noise(scaled_point);
+    float turb_val = noise.turb(scaled_point * 2.0f, 4); // Daha detaylı çizikler için turbulence
 
     // Çiziklerin yönünü belirle
     Vec3 direction_point = point * 0.1; // Daha geniş ölçekte yön değişimi için
-    double angle = noise.noise(direction_point) * M_PI;
-    Vec3 scratch_direction(std::cos(angle), std::sin(angle), 0.0);
+    float angle = noise.noise(direction_point) * M_PI;
+    Vec3 scratch_direction(std::cos(angle), std::sin(angle), 0.0f);
 
     // Ana scratch pattern'i oluştur
-    double pattern = std::abs(noise_val) * 0.5 + std::abs(turb_val) * 0.5;
+    float pattern = std::abs(noise_val) * 0.5f + std::abs(turb_val) * 0.5f;
 
     // Scratch threshold'u scratch_density'e göre ayarla
-    double scratch_threshold = 1.0 - scratch_density;
+    float scratch_threshold = 1.0f - scratch_density;
 
     // Scratch efektinin gücünü hesapla
-    double scratch_strength = 0.0;
+    float scratch_strength = 0.0f;
     if (pattern > scratch_threshold) {
-        scratch_strength = (pattern - scratch_threshold) / (1.0 - scratch_threshold);
+        scratch_strength = (pattern - scratch_threshold) / (1.0f - scratch_threshold);
 
         // Non-linear scratch effect için üstel fonksiyon
         scratch_strength = std::pow(scratch_strength, 1.5);
@@ -78,28 +78,28 @@ Vec3 Dielectric::apply_scratches(const Vec3& color, const Vec3& point) const {
         // Yöne bağlı faktörü ekle
         double directional_factor = std::abs(Vec3::dot(
             scratch_direction,
-            Vec3(point.x, point.y, 0.0).normalize()
+            Vec3(point.x, point.y, 0.0f).normalize()
         ));
-        scratch_strength *= (0.7 + 0.3 * directional_factor);
+        scratch_strength *= (0.7f + 0.3f * directional_factor);
 
         // Turbulence ile detay ekle
-        scratch_strength *= (1.0 + 0.2 * turb_val);
+        scratch_strength *= (1.0 + 0.2f * turb_val);
     }
 
     // Scratch rengi için temel beyaz highlight
-    Vec3 scratch_color(1.0, 1.0, 1.0);
+    Vec3 scratch_color(1.0f, 1.0, 1.0f);
 
     // Derinlik etkisi için scratch rengini hafifçe karart
-    scratch_color = scratch_color * (0.9 + 0.1 * pattern);
+    scratch_color = scratch_color * (0.9f + 0.1f * pattern);
 
     // Final renk karışımını hesapla
-    Vec3 final_color = color * (1.0 - scratch_strength * 0.4) +
+    Vec3 final_color = color * (1.0f - scratch_strength * 0.4) +
         scratch_color * scratch_strength * 0.4;
 
     // Hafif kontrast ayarı
     final_color = Vec3(
-        std::pow(final_color.x, 1.05),
-        std::pow(final_color.y, 1.05),
+        std::pow(final_color.x, 1.05f),
+        std::pow(final_color.y, 1.05f),
         std::pow(final_color.z, 1.05)
     );
 
@@ -114,27 +114,27 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     float adjusted_thickness = 0.01f;  // Daha küçük bir kalınlık değeri
 
     // Açı hesaplamaları
-    double cos_theta = fmin(Vec3::dot(-unit_direction, outward_normal), 1.0);
-    double sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+    float cos_theta = fmin(Vec3::dot(-unit_direction, outward_normal), 1.0f);
+    float sin_theta = sqrt(1.0f - cos_theta * cos_theta);
 
     // Fresnel hesaplaması - kırılma indisi daha doğru kullanılıyor
     Vec3 reversed_ir = Vec3(1.0f / ir.x, 1.0f / ir.y, 1.0f / ir.z);
 
     Vec3 current_ir = rec.front_face ? ir : reversed_ir;
     Vec3 fresnel_factor = fresnel(unit_direction, outward_normal, current_ir);
-    double fresnel_reflect = fresnel_factor.y; // Yeşil kanal üzerinden hesaplamak daha doğru olabilir
+    float fresnel_reflect = fresnel_factor.y; // Yeşil kanal üzerinden hesaplamak daha doğru olabilir
 
     // Kırılma oranı (yeşil kanal için)
-    double refract_ratio = rec.front_face ? (1.0 / ir[1]) : ir[1];
+    float refract_ratio = rec.front_face ? (1.0f / ir[1]) : ir[1];
     bool cannot_refract = sin_theta * refract_ratio > 1.0;
 
     // Olasılık hesaplamaları
-    double direct_trans_prob = 0.05; // %5 doğrudan geçiş
-    double reflect_prob = fresnel_reflect;
-    double refract_prob = cannot_refract ? 0.0 : (1.0 - fresnel_reflect) * (1.0 - direct_trans_prob);
+    float direct_trans_prob = 0.05; // %5 doğrudan geçiş
+    float reflect_prob = fresnel_reflect;
+    float refract_prob = cannot_refract ? 0.0 : (1.0f - fresnel_reflect) * (1.0f - direct_trans_prob);
 
     // Normalize
-    double total_prob = reflect_prob + refract_prob + direct_trans_prob;
+    float total_prob = reflect_prob + refract_prob + direct_trans_prob;
     reflect_prob /= total_prob;
     refract_prob /= total_prob;
     direct_trans_prob /= total_prob;
@@ -142,7 +142,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     
     // Işık yönü hesaplaması
     Vec3 direction;
-    double random_val = Vec3::random_float();
+    float random_val = Vec3::random_float();
 
     if (random_val < reflect_prob) {
         // Yansıma
@@ -156,7 +156,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
         direction = apply_roughness(refracted_dir, outward_normal).normalize(); // Daha az pürüzlülük
 
         // Beer-Lambert yasasına göre zayıflama
-        double distance = (rec.point - r_in.origin).length();  // Başlangıç noktası ile etkileşim noktası arasındaki mesafe
+        float distance = (rec.point - r_in.origin).length();  // Başlangıç noktası ile etkileşim noktası arasındaki mesafe
        attenuation *= calculate_attenuation(distance);       
         attenuation += calculate_refracted_attenuation(color,adjusted_thickness,fresnel_factor,ir);        
         // Kostikler için kontrollü ekleme
@@ -169,7 +169,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
         direction = unit_direction;       
         // Çok hafif zayıflama
           // Beer-Lambert yasasına göre zayıflama
-        double distance = (rec.point - r_in.origin).length();
+        float distance = (rec.point - r_in.origin).length();
         attenuation += calculate_attenuation(distance );
     }
   
@@ -179,7 +179,7 @@ bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuatio
     return true;
 }
 
-double Dielectric::getIndexOfRefraction() const {
+float Dielectric::getIndexOfRefraction() const {
     return ir[1];  // Return the green channel IOR as an average
 }
 
@@ -210,17 +210,17 @@ Vec3 Dielectric::fresnel(const Vec3& incident, const Vec3& normal, const Vec3& i
 Vec3 Dielectric::calculate_caustic(const Vec3& incident, const Vec3& normal, const Vec3& refracted) const {
     float dot_product = Vec3::dot(incident, normal);
     float refraction_angle = std::acos(std::clamp(Vec3::dot(refracted, -normal), -1.0f, 1.0f));
-    float caustic_factor = pow(std::max(refraction_angle, 0.0f), 3.0) * caustic_intensity;
-    return color * caustic_factor * (1.0 - dot_product * dot_product);
+    float caustic_factor = pow(std::max(refraction_angle, 0.0f), 3.0f) * caustic_intensity;
+    return color * caustic_factor * (1.0f - dot_product * dot_product);
 }
 
 Vec3 Dielectric::apply_tint(const Vec3& color) const {   
-    return color *(1.0 - tint_factor) + color * tint_factor;
+    return color *(1.0f - tint_factor) + color * tint_factor;
 }
 
 Vec3 Dielectric::apply_roughness(const Vec3& dir, const Vec3& normal) const {
-    double rough_factor = roughness * roughness; // Roughness karesi daha doğru sonuç verir
-    if (rough_factor == 0.0) return dir; // Pürüzsüzse yön değiştirme
+    float rough_factor = roughness * roughness; // Roughness karesi daha doğru sonuç verir
+    if (rough_factor == 0.0f) return dir; // Pürüzsüzse yön değiştirme
 
     // Rastgele küçük bir yön sapması ekleyelim
     Vec3 random_vec = Vec3::random_unit_vector() * rough_factor;
@@ -229,7 +229,9 @@ Vec3 Dielectric::apply_roughness(const Vec3& dir, const Vec3& normal) const {
     return perturbed_dir;
 }
 
-double Dielectric::calculate_attenuation(double distance) const {
+float Dielectric::calculate_attenuation(float distance) const {
     const float absorption_coefficient = 0.01f;  // Daha düşük absorpsiyon
     return std::exp(-absorption_coefficient * distance);
 }
+
+

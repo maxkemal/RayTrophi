@@ -5,20 +5,14 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "renderer.h"
+#include "OptixWrapper.h"
+#include "ColorProcessingParams.h"
+#include "SceneSelection.h"
 #include "imgui.h"
 #include "CameraPresets.h"
 #include "scene_data.h"
 
-// ═════════════════════════════════════════════════════════════════════════════
-// MANUEL TAŞIMA TALİMATI (MANUAL TRANSFER INSTRUCTIONS):
-// ═════════════════════════════════════════════════════════════════════════════
-// Lütfen aşağıdaki fonksiyonu `scene_ui.cpp` dosyasından buraya Kes/Yapıştır yapın:
-// Please Cut/Paste the following function from `scene_ui.cpp` to here:
-//
-// 1. void SceneUI::drawCameraContent(UIContext& ctx)
-//    (Tahmini Satırlar / Approx Lines: ~393 - 1056)
-//
-// ═════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawCameraContent(UIContext& ctx)
 {
     // Camera selector for multi-camera support

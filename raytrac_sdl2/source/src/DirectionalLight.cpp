@@ -45,7 +45,7 @@ LightType DirectionalLight::type() const {
 
 float DirectionalLight::pdf(const Vec3& /*hit_point*/, const Vec3& incoming_direction) const {
     float cos_angle = Vec3::dot(-direction.normalize(), incoming_direction);
-    float apparent_angle = atan2(radius, 1000.0);
+    float apparent_angle = atan2(radius, 10000.0);
     float cos_epsilon = cos(apparent_angle);
 
     if (cos_angle > cos_epsilon) {

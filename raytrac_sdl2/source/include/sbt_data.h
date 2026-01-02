@@ -58,6 +58,23 @@ struct __align__(16) HitGroupData
     int vol_max_steps = 100;      // Max ray march steps
     float vol_noise_scale = 1.0f; // Noise frequency multiplier
     
+    // Terrain Layer System
+    int is_terrain = 0;           // 1 = use layer blending
+    int pad3 = 0;                 // Alignment
+    
+    cudaTextureObject_t splat_map_tex = 0;
+    
+    // Arrays for 4 layers (Albedo, Normal, Roughness)
+    // 4 * 8 bytes = 32 bytes (16-byte aligned)
+    cudaTextureObject_t layer_albedo_tex[4] = {0}; 
+    cudaTextureObject_t layer_normal_tex[4] = {0};
+    cudaTextureObject_t layer_roughness_tex[4] = {0};
+    
+    // Tiling scales for each layer
+    float layer_uv_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // 16 bytes
+    
+    // Multi-Scattering parameters (NEW)
+    
     // Multi-Scattering Parameters (NEW)
     float vol_multi_scatter = 0.3f;   // Multi-scatter contribution (0-1)
     float vol_g_back = -0.3f;         // Backward scattering anisotropy

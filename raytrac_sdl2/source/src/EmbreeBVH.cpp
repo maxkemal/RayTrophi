@@ -3,18 +3,41 @@
 #include <chrono>
 #include <Volumetric.h>
 
+// Static member initialization
+RTCDevice EmbreeBVH::device = nullptr;
+
 EmbreeBVH::EmbreeBVH() {
-    device = rtcNewDevice(nullptr);
-    scene = rtcNewScene(device);
+    // Lazily create device once
+    if (!device) {
+        device = rtcNewDevice(nullptr);
+        // Error handling?
+        if (!device) {
+             SCENE_LOG_ERROR("Failed to create Embree device!");
+        }
+    }
     
-    // Configure scene for optimal BVH build performance
-    rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM); // Balance between build time and ray tracing performance
-    rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC); // Allow dynamic updates
+    // Create scene (unique per BVH instance)
+    if (device) {
+        scene = rtcNewScene(device);
+        // Configure scene for optimal BVH build performance
+        rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM); 
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC); 
+    }
 }
 
 EmbreeBVH::~EmbreeBVH() {
-    rtcReleaseScene(scene);
-    rtcReleaseDevice(device);
+    if (scene) {
+        rtcReleaseScene(scene);
+        scene = nullptr;
+    }
+    // DO NOT release device here! It is shared.
+}
+
+void EmbreeBVH::shutdown() {
+    if (device) {
+        rtcReleaseDevice(device);
+        device = nullptr;
+    }
 }
 
 void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
@@ -173,27 +196,45 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
     // where only vertex positions change but topology remains the same.
     rtcSetGeometryBuildQuality(geom, RTC_BUILD_QUALITY_REFIT);
 
-    size_t updateCount = std::min(objects.size(), triangle_data.size());
+    // FIX: Ensure perfectly aligned indexing between 'objects' and Embree buffer.
+    // Since 'objects' might contain non-Triangle items (which are skipped in build),
+    // we must first extract all valid Triangles to match the dense buffer layout.
+    std::vector<std::shared_ptr<Triangle>> active_triangles;
+    active_triangles.reserve(objects.size());
     
-    for (size_t i = 0; i < updateCount; ++i) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
-        if (!tri) continue;
+    for (const auto& obj : objects) {
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            active_triangles.push_back(tri);
+        }
+    }
+    
+    size_t valid_tri_count = active_triangles.size();
+    if (valid_tri_count == 0) return;
 
+    // Parallelize vertex update on the DENSE list (safe indexing)
+    #pragma omp parallel for
+    for (int i = 0; i < (int)valid_tri_count; ++i) {
+        const auto& tri = active_triangles[i];
+        
+        // Direct write to mapped Embree buffer
         vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
         vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
         vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
 
-        // TriangleData içindeki gölge bilgisi de güncellensin
-        triangle_data[i].v0 = tri->getVertexPosition(0);
-        triangle_data[i].v1 = tri->getVertexPosition(1);
-        triangle_data[i].v2 = tri->getVertexPosition(2);
+        // Update shadow cache in TriangleData if necessary
+        // Note: Check bounds for triangle_data just in case
+        // (Assuming triangle_data resized in build() to match tri count)
+         if (i < triangle_data.size()) { // Safe but maybe slow inside loop?
+            triangle_data[i].v0 = tri->getVertexPosition(0);
+            triangle_data[i].v1 = tri->getVertexPosition(1);
+            triangle_data[i].v2 = tri->getVertexPosition(2);
 
-        // Normal updates (only if normals were originally set)
-        if (triangle_data[i].n0 != Vec3()) {
-            triangle_data[i].n0 = tri->getVertexNormal(0);
-            triangle_data[i].n1 = tri->getVertexNormal(1);
-            triangle_data[i].n2 = tri->getVertexNormal(2);
-        }
+            if (triangle_data[i].n0 != Vec3()) {
+                triangle_data[i].n0 = tri->getVertexNormal(0);
+                triangle_data[i].n1 = tri->getVertexNormal(1);
+                triangle_data[i].n2 = tri->getVertexNormal(2);
+            }
+         }
     }
 
     rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
@@ -382,14 +423,30 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
             gpuMat.opacity = material->get_opacity(Vec2(0.5f, 0.5f));
             gpuMat.roughness = material->getPropertyValue(material->roughnessProperty, Vec2(0.5f, 0.5f)).y;
             gpuMat.metallic = material->getPropertyValue(material->metallicProperty, Vec2(0.5f, 0.5f)).z;
-            gpuMat.clearcoat = 0.0f;
             gpuMat.transmission = material->getPropertyValue(material->transmissionProperty, Vec2(0.5f, 0.5f)).x;
             Vec3 emissionColor = material->getEmission(Vec2(0.5f, 0.5f), Vec3(0,0,0));
             gpuMat.emission = make_float3(emissionColor.x, emissionColor.y, emissionColor.z);
             gpuMat.ior = material->getIOR();
-            gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
+            
+            // SSS defaults (will be overwritten by PrincipledBSDF if available)
             gpuMat.subsurface = 0.0f;
-          
+            gpuMat.subsurface_color = make_float3(1.0f, 0.8f, 0.6f);
+            gpuMat.subsurface_radius = make_float3(1.0f, 0.2f, 0.1f);
+            gpuMat.subsurface_scale = 0.05f;
+            gpuMat.subsurface_anisotropy = 0.0f;
+            gpuMat.subsurface_ior = 1.4f;
+            
+            // Clear Coat defaults
+            gpuMat.clearcoat = 0.0f;
+            gpuMat.clearcoat_roughness = 0.03f;
+            
+            // Translucent default
+            gpuMat.translucent = 0.0f;
+            
+            // Other defaults
+            gpuMat.anisotropic = 0.0f;
+            gpuMat.sheen = 0.0f;
+            gpuMat.sheen_tint = 0.0f;
         }
         else {
             // Fallback pink material - properly initialize all fields
@@ -397,13 +454,29 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
             gpuMat.opacity = 1.0f;
             gpuMat.roughness = 0.5f;
             gpuMat.metallic = 0.0f;
-            gpuMat.clearcoat = 0.0f;
             gpuMat.transmission = 0.0f;
             gpuMat.emission = make_float3(0.0f, 0.0f, 0.0f);
             gpuMat.ior = 1.5f;
-            gpuMat.subsurface_color = make_float3(1.0f, 1.0f, 1.0f);
+            
+            // SSS defaults
             gpuMat.subsurface = 0.0f;
-           
+            gpuMat.subsurface_color = make_float3(1.0f, 0.8f, 0.6f);
+            gpuMat.subsurface_radius = make_float3(1.0f, 0.2f, 0.1f);
+            gpuMat.subsurface_scale = 0.05f;
+            gpuMat.subsurface_anisotropy = 0.0f;
+            gpuMat.subsurface_ior = 1.4f;
+            
+            // Clear Coat defaults
+            gpuMat.clearcoat = 0.0f;
+            gpuMat.clearcoat_roughness = 0.03f;
+            
+            // Translucent default
+            gpuMat.translucent = 0.0f;
+            
+            // Other defaults
+            gpuMat.anisotropic = 0.0f;
+            gpuMat.sheen = 0.0f;
+            gpuMat.sheen_tint = 0.0f;
         }
 
         // Benzersiz materyal kontrolu (basit ekle, hash'e gerek yok burada)

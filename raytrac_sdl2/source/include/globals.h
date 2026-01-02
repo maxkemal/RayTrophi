@@ -31,7 +31,7 @@ struct RenderSettings {
     // Sampling
     int samples_per_pixel = 1;
     int samples_per_pass = 1;
-    int max_bounces = 4;
+    int max_bounces = 10;
 
     // Adaptive Sampling
     bool use_adaptive_sampling = true;
@@ -180,14 +180,14 @@ extern UILogger g_sceneLog;
 // Yalnızca bildirim:
 extern RenderSettings render_settings;
 extern std::atomic<int> completed_pixels;
-extern const double min_distance;
-extern const double max_distance;
+extern const float min_distance;
+extern const float max_distance;
 extern  float aspect_ratio; // Sabit olarak double türünde tanımlıyoruz
 extern  int image_width;
 extern  int image_height;
 extern const float EPSILON;
 extern std::atomic<int> next_row;
-extern const double infinity;
+extern const float infinity;
 extern  std::string baseDirectory;
 extern bool atmosferic_effect_enabled;
 extern const float max_normal_distance;
@@ -216,4 +216,32 @@ extern std::atomic<bool> rendering_in_progress;
 extern std::atomic<bool> rendering_stopped_gpu;
 extern std::atomic<bool> rendering_stopped_cpu;
 
+// ===========================================================================
+// DIRTY FLAGS - Set to true when respective data changes
+// Prevents unnecessary GPU buffer updates when data is unchanged
+// ===========================================================================
+extern bool g_camera_dirty;
+extern bool g_lights_dirty;
+extern bool g_world_dirty;
+
+// ===========================================================================
+// DEFERRED REBUILD FLAGS - For optimized batched rebuilds
+// Set these instead of calling rebuild immediately, Main loop handles them
+// ===========================================================================
+extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
+extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
+extern bool g_optix_rebuild_pending;
+extern bool g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render    // GPU OptiX geometry needs rebuild
+extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild
+extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
+
+// ===========================================================================
+// SCENE LOADING FLAGS - Thread safety for project load/save operations
+// ===========================================================================
+extern std::atomic<bool> g_scene_loading_in_progress;  // Prevents concurrent load operations
+extern bool g_needs_geometry_rebuild;   // Set by loader thread, main loop does actual rebuild
+extern bool g_needs_optix_sync;         // Set by loader thread, main loop syncs OptiX buffers
+
 #endif // GLOBALS_H
+
+

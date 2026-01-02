@@ -13,6 +13,15 @@
 #include "Texture.h"
 #include "Material.h" // Ensure Material class is fully defined
 
+// CUDA Driver API
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include "erosion_ops.cuh"
+
+// For linking with CUDA Driver API (nvcuda.dll is loaded by driver usually, but we need cuda.lib for symbols)
+#pragma comment(lib, "cuda.lib")
+#pragma comment(lib, "cudart.lib")
+
 // Helper function for autoMask
 inline float smoothstep(float edge0, float edge1, float x) {
     x = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
@@ -449,6 +458,46 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
     
     // Clear dirty regions after full update
     terrain->dirty_region.clear();
+}
+
+void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain) {
+    if (!terrain) return;
+
+    // 1. Remove old triangles from scene
+    // This removes pointers from the global object list if they match those in the terrain
+    auto& objs = scene.world.objects;
+    
+    // Optimization: Create a set for O(1) lookups
+    std::unordered_set<Hittable*> triSet;
+    triSet.reserve(terrain->mesh_triangles.size());
+    for(auto& t : terrain->mesh_triangles) triSet.insert(t.get());
+    
+    if (!triSet.empty()) {
+        objs.erase(
+            std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& obj){
+                return triSet.count(obj.get()) > 0;
+            }),
+            objs.end()
+        );
+    }
+    
+    // 2. Clear internal list
+    terrain->mesh_triangles.clear();
+    
+    // 3. Re-generate mesh (triangles)
+    updateTerrainMesh(terrain);
+    
+    // 4. Add new triangles to scene
+    objs.reserve(objs.size() + terrain->mesh_triangles.size());
+    for (auto& tri : terrain->mesh_triangles) {
+        objs.push_back(tri);
+    }
+    
+    // 5. Flag for rebuild
+    extern bool g_bvh_rebuild_pending;
+    extern bool g_optix_rebuild_pending;
+    g_bvh_rebuild_pending = true;
+    g_optix_rebuild_pending = true;
 }
 
 // ===========================================================================
@@ -954,13 +1003,15 @@ int TerrainManager::getEdgeFadeWidth(TerrainObject* terrain) {
 // EROSION SYSTEM
 // ===========================================================================
 
-void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& p) {
+void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {
     if (!terrain) return;
     
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     auto& data = terrain->heightmap.data;
     float cellSize = terrain->heightmap.scale_xz / w;
+    bool hasHardness = !terrain->hardnessMap.empty();
+    bool hasMask = !mask.empty() && mask.size() == w * h;
     
     // EDGE PRESERVATION: Save original heights before erosion
     std::vector<float> originalHeights = data;
@@ -978,10 +1029,10 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     
     for (int dy = -brushRadius; dy <= brushRadius; dy++) {
         for (int dx = -brushRadius; dx <= brushRadius; dx++) {
-            float dist = sqrtf(dx*dx + dy*dy);
+            float dist = sqrtf((float)(dx*dx + dy*dy));
             if (dist <= brushRadius) {
-                float weight = 1.0f - dist / (brushRadius + 0.001f);
-                weight *= weight; // Quadratic falloff
+                float weight = 1.0f - (dist / brushRadius);
+                weight = weight * weight * (3 - 2 * weight); // Smoothstep
                 brushWeights.push_back(weight);
                 brushOffsets.push_back(dy * w + dx);
                 weightSum += weight;
@@ -1117,6 +1168,11 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
                 erode = fminf(erode, data[idx] * 0.05f); // Max 5% of height per step
                 erode *= hardnessFactor;
                 
+                // MASK INFLUENCE
+                if (hasMask) {
+                    erode *= mask[idx];
+                }
+                
                 // BRUSH EROSION - distribute erosion to prevent spikes
                 for (size_t b = 0; b < brushOffsets.size(); b++) {
                     int brushIdx = idx + brushOffsets[b];
@@ -1219,13 +1275,14 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     SCENE_LOG_INFO("Hydraulic erosion completed: " + std::to_string(p.iterations) + " droplets");
 }
 
-void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosionParams& p) {
+void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosionParams& p, const std::vector<float>& mask) {
     if (!terrain) return;
     
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     auto& data = terrain->heightmap.data;
     bool hasHardness = !terrain->hardnessMap.empty();
+    bool hasMask = !mask.empty() && mask.size() == w * h;
     
     std::vector<float> temp(data.size());
     
@@ -1259,6 +1316,10 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
                 
                 if (maxIdx >= 0) {
                     float moveAmount = (maxDiff - effectiveTalus) * 0.5f * p.erosionAmount;
+                    
+                    if (hasMask) {
+                        moveAmount *= mask[y * w + x];
+                    }
                     
                     // Hardness also limits movement rate but less aggressively
                     moveAmount *= (1.0f - hardness * 0.4f); // Was 0.5f
@@ -1299,13 +1360,14 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
     SCENE_LOG_INFO("Thermal erosion completed");
 }
 
-void TerrainManager::windErosion(TerrainObject* terrain, float strength, float direction, int iterations) {
+void TerrainManager::windErosion(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask) {
     if (!terrain) return;
     
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     auto& data = terrain->heightmap.data;
     bool hasHardness = !terrain->hardnessMap.empty();
+    bool hasMask = !mask.empty() && mask.size() == w * h;
     
     float dirX = cosf(direction * 3.14159f / 180.0f);
     float dirY = sinf(direction * 3.14159f / 180.0f);
@@ -1331,6 +1393,10 @@ void TerrainManager::windErosion(TerrainObject* terrain, float strength, float d
                 float resistance = hasHardness ? terrain->hardnessMap[idx] : 0.0f;
                 float actual_erode = erode * (1.0f - resistance * 0.8f);
                 
+                if (hasMask) {
+                    actual_erode *= mask[idx];
+                }
+                
                 data[idx] -= actual_erode;
                 
                 // Transport material downwind
@@ -1350,7 +1416,7 @@ void TerrainManager::windErosion(TerrainObject* terrain, float strength, float d
     SCENE_LOG_INFO("Wind erosion completed");
 }
 
-void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& p) {
+void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {
     if (!terrain) return;
     
     int w = terrain->heightmap.width;
@@ -1359,6 +1425,7 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
     float cellSize = terrain->heightmap.scale_xz / w;
     float maxTerrainHeight = terrain->heightmap.scale_y;
     bool hasHardness = !terrain->hardnessMap.empty();
+    bool hasMask = !mask.empty() && mask.size() == w * h;
     
     SCENE_LOG_INFO("Fluvial Erosion: Starting...");
     
@@ -1532,6 +1599,10 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
             float hardnessMultiplier = 1.0f - hardness * 0.7f;
             streamPower *= hardnessMultiplier;
             
+            if (hasMask) {
+                streamPower *= mask[i];
+            }
+            
             // Apply erosion to channel area (wider for soft, narrow for hard)
             for (int dy = -channelRadius; dy <= channelRadius; dy++) {
                 for (int dx = -channelRadius; dx <= channelRadius; dx++) {
@@ -1644,19 +1715,21 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
                 float inwardHeight = height[inwardY * w + inwardX];
                 
                 // Fade edge cells towards a fraction of the inward height
-                height[idx] = height[idx] * smoothT + inwardHeight * 0.3f * (1.0f - smoothT);
+                // Use stronger blending to eliminate walls
+                height[idx] = height[idx] * smoothT + inwardHeight * (1.0f - smoothT);
             }
         }
     }
     
     // ========================================================
-    // STEP 6: FINAL THERMAL SMOOTHING
+    // STEP 6: AGGRESSIVE THERMAL SMOOTHING (for edge blending)
     // ========================================================
+    // More iterations to smooth out any remaining sharp edges
     SCENE_LOG_INFO("Fluvial: Thermal smoothing...");
     ThermalErosionParams tp;
-    tp.iterations = 5;
-    tp.talusAngle = 0.5f;
-    tp.erosionAmount = 0.3f;
+    tp.iterations = 15;  // Increased from 5 for better edge smoothing
+    tp.talusAngle = 0.4f;  // Lower talus = more smoothing on slopes
+    tp.erosionAmount = 0.4f;
     this->thermalErosion(terrain, tp);  // This also calls updateTerrainMesh
     
     SCENE_LOG_INFO("Fluvial Erosion Complete!");
@@ -1887,10 +1960,10 @@ void TerrainManager::paintHardness(TerrainObject* terrain, const Vec3& hitPoint,
 // COMBINED WIZARD PROCESS
 // ===========================================================================
 
-void TerrainManager::applyCombinedErosion(TerrainObject* terrain, int iterations, float strength) {
+void TerrainManager::applyCombinedErosion(TerrainObject* terrain, int iterations, float strength, bool use_gpu) {
     if (!terrain) return;
     
-    SCENE_LOG_INFO("Starting Combined Wizard Process...");
+    SCENE_LOG_INFO(std::string("Starting Combined Wizard Process (GPU: ") + (use_gpu ? "ON" : "OFF") + ")...");
     
     // 1. HARDNESS CHECK - Ensure valid map
     if (terrain->hardnessMap.empty() || terrain->hardnessMap.size() != terrain->heightmap.data.size()) {
@@ -1899,48 +1972,53 @@ void TerrainManager::applyCombinedErosion(TerrainObject* terrain, int iterations
     
     // 2. PARAMS SETUP - Balanced for natural terrain (spike-free)
     HydraulicErosionParams hydro;
-    hydro.iterations = iterations * 2000;  // Reduced from 5000
-    hydro.erodeSpeed = 0.4f * strength;    // Reduced from 0.8
-    hydro.depositSpeed = 0.2f;             // Increased for balance
+    hydro.iterations = iterations * 2000;
+    hydro.erodeSpeed = 0.4f * strength;
+    hydro.depositSpeed = 0.2f;
     hydro.evaporateSpeed = 0.02f;
-    hydro.sedimentCapacity = 8.0f;         // Reduced from 20
-    hydro.erosionRadius = 2;               // Brush erosion radius
+    hydro.sedimentCapacity = 8.0f;
+    hydro.erosionRadius = 2;
     
-    // Fluvial parameters - primary channel carver
     HydraulicErosionParams fluvialParams;
-    fluvialParams.erodeSpeed = 1.5f * strength;  // Main erosion driver
+    fluvialParams.erodeSpeed = 1.5f * strength;
     fluvialParams.depositSpeed = 0.1f;
+    fluvialParams.iterations = 2000;
     
     ThermalErosionParams thermal;
-    thermal.iterations = 15;    // Increased initial smoothing
-    thermal.talusAngle = 0.5f;  // Gentler angle
+    thermal.iterations = 15;
+    thermal.talusAngle = 0.5f;
     thermal.erosionAmount = 0.4f;
     
-    // 3. WIZARD LOOP (Spike-free workflow)
+    // 3. WIZARD LOOP
     
-    // A. Strong Initial Thermal - Smooth out noise before any erosion
+    // A. Initial Thermal
     SCENE_LOG_INFO("Wizard: Phase 1 - Initial Smoothing");
-    thermalErosion(terrain, thermal);
+    if (use_gpu) thermalErosionGPU(terrain, thermal);
+    else thermalErosion(terrain, thermal);
     
-    // B. Light Hydraulic - Surface texturing, not deep channels
+    // B. Hydraulic
     SCENE_LOG_INFO("Wizard: Phase 2 - Surface Hydraulic");
-    hydraulicErosion(terrain, hydro);
+    if (use_gpu) hydraulicErosionGPU(terrain, hydro);
+    else hydraulicErosion(terrain, hydro);
     
-    // C. Fluvial - Main river channel formation (the good stuff)
+    // C. Fluvial x2
     SCENE_LOG_INFO("Wizard: Phase 3 - Fluvial Channels");
-    for(int i = 0; i < 2; i++) {
-        fluvialErosion(terrain, fluvialParams);
+    for (int i = 0; i < 2; i++) {
+        if (use_gpu) fluvialErosionGPU(terrain, fluvialParams);
+        else fluvialErosion(terrain, fluvialParams);
     }
     
-    // D. Gentle Wind - Very light surface aging
+    // D. Wind
     SCENE_LOG_INFO("Wizard: Phase 4 - Wind Aging");
-    windErosion(terrain, 0.5f * strength, 45.0f, 10);  // Reduced from 2.0f, 30 iters
+    if (use_gpu) windErosionGPU(terrain, 0.5f * strength, 45.0f, 10);
+    else windErosion(terrain, 0.5f * strength, 45.0f, 10);
     
-    // E. Final Thermal Polish - Remove any remaining spikes
+    // E. Final Thermal
     SCENE_LOG_INFO("Wizard: Phase 5 - Final Polish");
     thermal.iterations = 10;
     thermal.erosionAmount = 0.3f;
-    thermalErosion(terrain, thermal);
+    if (use_gpu) thermalErosionGPU(terrain, thermal);
+    else thermalErosion(terrain, thermal);
     
     SCENE_LOG_INFO("Wizard Process Completed!");
 }
@@ -2383,4 +2461,566 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
     }
     
     SCENE_LOG_INFO("[TerrainManager] Deserialized " + std::to_string(terrains.size()) + " terrains (format v" + std::to_string(version) + ")");
+}
+
+// ===========================================================================
+// GPU EROSION IMPLEMENTATION
+// ===========================================================================
+
+void TerrainManager::initCuda() {
+    if (cudaInitialized) return;
+
+    SCENE_LOG_INFO("[GPU Erosion] Initializing CUDA...");
+
+    // Initialize CUDA Driver API
+    CUresult res = cuInit(0);
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] cuInit failed: " + std::to_string(res));
+        return;
+    }
+
+    // Get Device
+    CUdevice device;
+    res = cuDeviceGet(&device, 0);
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] cuDeviceGet failed");
+        return;
+    }
+
+    // Create Context (or use current)
+    CUcontext ctx;
+    res = cuCtxGetCurrent(&ctx);
+    if (res != CUDA_SUCCESS || ctx == nullptr) {
+        SCENE_LOG_INFO("[GPU Erosion] Creating new CUDA context");
+        res = cuCtxCreate(&ctx, 0, device);
+        if (res != CUDA_SUCCESS) {
+            SCENE_LOG_ERROR("[GPU Erosion] cuCtxCreate failed");
+            return;
+        }
+    }
+
+    // Load PTX Module
+    std::string ptxPath = "erosion_kernels.ptx";
+    if (!std::filesystem::exists(ptxPath)) {
+         // Try project root or build dir
+         ptxPath = "../erosion_kernels.ptx"; 
+    }
+    
+    // Check absolute path based on execution
+    // Assuming run from build dir? User said Compile PTX output is E:/.../raytrac_sdl2/erosion_kernels.ptx
+    // I'll try that specific path if relative fails, or just assume relative to executable.
+    
+    // Using simple path first
+    res = cuModuleLoad((CUmodule*)&cudaModule, "erosion_kernels.ptx");
+    if (res != CUDA_SUCCESS) {
+        // Try reading file content manually to debug or just informative error
+        SCENE_LOG_ERROR("[GPU Erosion] Failed to load module 'erosion_kernels.ptx' (Error: " + std::to_string(res) + ")");
+        SCENE_LOG_WARN("Make sure to run 'compile_ptx.bat' first!");
+        return;
+    }
+
+    // Get Function
+    res = cuModuleGetFunction((CUfunction*)&erosionKernelFunc, (CUmodule)cudaModule, "hydraulicErosionKernel");
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] Failed to get kernel function 'hydraulicErosionKernel'");
+        return;
+    }
+
+    res = cuModuleGetFunction((CUfunction*)&smoothKernelFunc, (CUmodule)cudaModule, "smoothTerrainKernel");
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] Failed to get kernel function 'smoothTerrainKernel'");
+        return;
+    }
+
+    res = cuModuleGetFunction((CUfunction*)&thermalKernelFunc, (CUmodule)cudaModule, "thermalErosionKernel");
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] Failed to get kernel function 'thermalErosionKernel'");
+        return;
+    }
+
+    cuModuleGetFunction((CUfunction*)&fluvRainKernelFunc, (CUmodule)cudaModule, "fluvialRainKernel");
+    cuModuleGetFunction((CUfunction*)&fluvFluxKernelFunc, (CUmodule)cudaModule, "fluvialFluxKernel");
+    cuModuleGetFunction((CUfunction*)&fluvWaterKernelFunc, (CUmodule)cudaModule, "fluvialWaterKernel");
+    cuModuleGetFunction((CUfunction*)&fluvErodeKernelFunc, (CUmodule)cudaModule, "fluvialErosionKernel");
+    cuModuleGetFunction((CUfunction*)&windKernelFunc, (CUmodule)cudaModule, "windErosionKernel");
+
+    // Post-processing kernels (for CPU-GPU parity)
+    cuModuleGetFunction((CUfunction*)&pitFillKernelFunc, (CUmodule)cudaModule, "pitFillingKernel");
+    cuModuleGetFunction((CUfunction*)&spikeRemovalKernelFunc, (CUmodule)cudaModule, "spikeRemovalKernel");
+    cuModuleGetFunction((CUfunction*)&edgePreservationKernelFunc, (CUmodule)cudaModule, "edgePreservationKernel");
+    cuModuleGetFunction((CUfunction*)&thermalWithHardnessKernelFunc, (CUmodule)cudaModule, "thermalErosionWithHardnessKernel");
+
+    cudaInitialized = true;
+    SCENE_LOG_INFO("[GPU Erosion] CUDA Initialized Successfully (with post-processing kernels)");
+}
+
+void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask) {
+    if (!terrain) return;
+    
+    // Lazy Init
+    if (!cudaInitialized) {
+        initCuda();
+        if (!cudaInitialized) {
+            SCENE_LOG_ERROR("[GPU Erosion] CUDA not initialized, falling back to CPU or aborting.");
+            // Fallback?
+            // hydraulicErosion(terrain, params); 
+            return;
+        }
+    }
+    
+    int w = terrain->heightmap.width;
+    int h = terrain->heightmap.height;
+    size_t mapSize = w * h * sizeof(float);
+    
+    // Allocate Device Memory
+    CUdeviceptr d_heightmap;
+    CUresult res = cuMemAlloc(&d_heightmap, mapSize);
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] Memory Allocation Failed");
+        return;
+    }
+    
+    // Copy Host to Device
+    res = cuMemcpyHtoD(d_heightmap, terrain->heightmap.data.data(), mapSize);
+    if (res != CUDA_SUCCESS) {
+        cuMemFree(d_heightmap);
+        SCENE_LOG_ERROR("[GPU Erosion] HtoD Copy Failed");
+        return;
+    }
+    
+    // Prepare Params
+    TerrainPhysics::HydraulicErosionParamsGPU gpuParams;
+    gpuParams.mapWidth = w;
+    gpuParams.mapHeight = h;
+    gpuParams.brushRadius = params.erosionRadius;
+    gpuParams.dropletLifetime = params.dropletLifetime;
+    gpuParams.inertia = params.inertia;
+    gpuParams.sedimentCapacity = params.sedimentCapacity;
+    gpuParams.minSlope = params.minSlope;
+    gpuParams.erodeSpeed = params.erodeSpeed;
+    gpuParams.depositSpeed = params.depositSpeed;
+    gpuParams.evaporateSpeed = params.evaporateSpeed;
+    gpuParams.gravity = params.gravity;
+    gpuParams.seed = rand();
+    
+    unsigned long long seed_offset = 0; // Could accumulate this
+    
+    // Kernel Args
+    void* args[] = { &d_heightmap, &gpuParams, &seed_offset };
+    
+    // Launch Config
+    int blockSize = 128; // 256
+    int numDroplets = params.iterations; // 50,000 to 1,000,000
+    int numBlocks = (numDroplets + blockSize - 1) / blockSize;
+    
+    SCENE_LOG_INFO("[GPU Erosion] Launching kernel with " + std::to_string(numDroplets) + " droplets...");
+    
+    // Launch
+    res = cuLaunchKernel((CUfunction)erosionKernelFunc,
+                         numBlocks, 1, 1,    // Grid Dim
+                         blockSize, 1, 1,    // Block Dim
+                         0, nullptr,         // Shared Mem, Stream
+                         args, nullptr);
+                         
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] Launch Failed: " + std::to_string(res));
+        cuMemFree(d_heightmap);
+        return;
+    }
+    
+    // Launch Smoothing Pass
+    // Grid dim for 2D heightmap
+    int tx = 16, ty = 16;
+    int bx = (w + tx - 1) / tx;
+    int by = (h + ty - 1) / ty;
+    
+    SCENE_LOG_INFO("[GPU Erosion] Running post-processing (CPU-GPU parity)...");
+    
+    // Calculate cellSize for threshold computation
+    float cellSize = terrain->heightmap.scale_xz / w;
+    
+    // Prepare PostProcessParams
+    TerrainPhysics::PostProcessParamsGPU postParams;
+    postParams.mapWidth = w;
+    postParams.mapHeight = h;
+    postParams.cellSize = cellSize;
+    postParams.pitThreshold = cellSize * 0.05f;     // Match CPU
+    postParams.spikeThreshold = cellSize * 0.1f;    // Match CPU
+    postParams.edgeFadeWidth = std::max(3, w / 40); // Match CPU
+    
+    // 1. SPIKE REMOVAL PASS (matches CPU post-erosion spike removal)
+    if (spikeRemovalKernelFunc) {
+        void* spikeArgs[] = { &d_heightmap, &postParams };
+        res = cuLaunchKernel((CUfunction)spikeRemovalKernelFunc,
+                             bx, by, 1, tx, ty, 1, 0, nullptr, spikeArgs, nullptr);
+        if (res != CUDA_SUCCESS) {
+            SCENE_LOG_WARN("[GPU Erosion] Spike Removal Failed: " + std::to_string(res));
+        }
+    }
+    
+    // 2. PIT FILLING PASS (matches CPU post-erosion pit filling)
+    if (pitFillKernelFunc) {
+        void* pitArgs[] = { &d_heightmap, &postParams };
+        res = cuLaunchKernel((CUfunction)pitFillKernelFunc,
+                             bx, by, 1, tx, ty, 1, 0, nullptr, pitArgs, nullptr);
+        if (res != CUDA_SUCCESS) {
+            SCENE_LOG_WARN("[GPU Erosion] Pit Filling Failed: " + std::to_string(res));
+        }
+    }
+    
+    // 3. EDGE PRESERVATION PASS (matches CPU edge fade-out)
+    // Note: For edge preservation, we need original heights which we don't have on GPU
+    // So we use the simplified version that blends with inward reference
+    if (edgePreservationKernelFunc) {
+        CUdeviceptr d_original = 0; // nullptr - we don't have original heights saved
+        void* edgeArgs[] = { &d_heightmap, &d_original, &postParams };
+        res = cuLaunchKernel((CUfunction)edgePreservationKernelFunc,
+                             bx, by, 1, tx, ty, 1, 0, nullptr, edgeArgs, nullptr);
+        if (res != CUDA_SUCCESS) {
+            SCENE_LOG_WARN("[GPU Erosion] Edge Preservation Failed: " + std::to_string(res));
+        }
+    }
+    
+    // 4. FINAL SMOOTHING PASS (existing behavior)
+    void* smoothArgs[] = { &d_heightmap, &w, &h };
+    res = cuLaunchKernel((CUfunction)smoothKernelFunc,
+                         bx, by, 1, tx, ty, 1, 0, nullptr, smoothArgs, nullptr);
+    if (res != CUDA_SUCCESS) {
+         SCENE_LOG_WARN("[GPU Erosion] Smooth Kernel Failed: " + std::to_string(res));
+    }
+    
+    // Synchronize (Wait for completion)
+    cuCtxSynchronize();
+    
+    // Copy Device to Host
+    res = cuMemcpyDtoH(terrain->heightmap.data.data(), d_heightmap, mapSize);
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Erosion] DtoH Copy Failed");
+    }
+    
+    // Cleanup
+    cuMemFree(d_heightmap);
+    
+    // Update Mesh (Visuals)
+    updateTerrainMesh(terrain);
+    terrain->dirty_mesh = true;
+    SCENE_LOG_INFO("[GPU Erosion] Complete with post-processing!");
+}
+
+void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalErosionParams& p, const std::vector<float>& mask) {
+    if (!terrain) return;
+    
+    if (!cudaInitialized) {
+        initCuda();
+        if (!cudaInitialized) return;
+    }
+    
+    int w = terrain->heightmap.width;
+    int h = terrain->heightmap.height;
+    size_t mapSize = w * h * sizeof(float);
+    
+    // Device Alloc
+    CUdeviceptr d_heightmap;
+    CUresult res = cuMemAlloc(&d_heightmap, mapSize);
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Thermal] Alloc Failed");
+        return;
+    }
+    
+    // Allocate hardness map if available
+    CUdeviceptr d_hardness = 0;
+    bool hasHardness = !terrain->hardnessMap.empty() && terrain->hardnessMap.size() == (size_t)(w * h);
+    if (hasHardness) {
+        res = cuMemAlloc(&d_hardness, mapSize);
+        if (res == CUDA_SUCCESS) {
+            cuMemcpyHtoD(d_hardness, terrain->hardnessMap.data(), mapSize);
+        } else {
+            hasHardness = false;
+        }
+    }
+    
+    // HtoD
+    cuMemcpyHtoD(d_heightmap, terrain->heightmap.data.data(), mapSize);
+    
+    // Params
+    TerrainPhysics::ThermalErosionParamsGPU gpuOps;
+    gpuOps.mapWidth = w;
+    gpuOps.mapHeight = h;
+    gpuOps.talusAngle = p.talusAngle;
+    gpuOps.erosionAmount = p.erosionAmount;
+    gpuOps.useHardness = hasHardness;
+    gpuOps.hardnessMap = hasHardness ? (float*)d_hardness : nullptr;
+    
+    // Launch Loop
+    int tx = 16, ty = 16;
+    int bx = (w + tx - 1) / tx;
+    int by = (h + ty - 1) / ty;
+    
+    // Use hardness-aware kernel if available and hardness map exists
+    if (hasHardness && thermalWithHardnessKernelFunc) {
+        void* args[] = { &d_heightmap, &d_hardness, &gpuOps };
+        for (int i = 0; i < p.iterations; i++) {
+            res = cuLaunchKernel((CUfunction)thermalWithHardnessKernelFunc,
+                                 bx, by, 1, tx, ty, 1, 0, nullptr, args, nullptr);
+        }
+        SCENE_LOG_INFO("[GPU Thermal] Using hardness-aware kernel.");
+    } else {
+        void* args[] = { &d_heightmap, &gpuOps };
+        for (int i = 0; i < p.iterations; i++) {
+            res = cuLaunchKernel((CUfunction)thermalKernelFunc,
+                                 bx, by, 1, tx, ty, 1, 0, nullptr, args, nullptr);
+        }
+    }
+    
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Thermal] Launch Failed: " + std::to_string(res));
+    }
+    
+    // POST-PROCESSING: Pit filling (matches CPU behavior)
+    float cellSize = terrain->heightmap.scale_xz / w;
+    TerrainPhysics::PostProcessParamsGPU postParams;
+    postParams.mapWidth = w;
+    postParams.mapHeight = h;
+    postParams.cellSize = cellSize;
+    postParams.pitThreshold = cellSize * 0.05f;
+    postParams.spikeThreshold = cellSize * 0.1f;
+    postParams.edgeFadeWidth = std::max(3, w / 40);
+    
+    if (pitFillKernelFunc) {
+        void* pitArgs[] = { &d_heightmap, &postParams };
+        cuLaunchKernel((CUfunction)pitFillKernelFunc,
+                       bx, by, 1, tx, ty, 1, 0, nullptr, pitArgs, nullptr);
+    }
+    
+    cuCtxSynchronize();
+    
+    // DtoH
+    cuMemcpyDtoH(terrain->heightmap.data.data(), d_heightmap, mapSize);
+    
+    // Cleanup
+    cuMemFree(d_heightmap);
+    if (d_hardness) cuMemFree(d_hardness);
+    
+    updateTerrainMesh(terrain);
+    terrain->dirty_mesh = true;
+    SCENE_LOG_INFO("[GPU Thermal] Completed " + std::to_string(p.iterations) + " iterations" + 
+                   (hasHardness ? " with hardness." : "."));
+}
+
+void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {
+    if (!terrain) return;
+    if (!cudaInitialized) { initCuda(); if (!cudaInitialized) return; }
+    
+    int w = terrain->heightmap.width;
+    int h = terrain->heightmap.height;
+    int numPixels = w * h;
+    
+    // Alloc temporary buffers
+    CUdeviceptr d_height, d_water, d_flux, d_vel, d_sed;
+    cuMemAlloc(&d_height, numPixels * sizeof(float));
+    cuMemAlloc(&d_water, numPixels * sizeof(float));
+    cuMemAlloc(&d_flux, numPixels * 4 * sizeof(float)); // L, R, T, B
+    cuMemAlloc(&d_vel, numPixels * 2 * sizeof(float));
+    cuMemAlloc(&d_sed, numPixels * sizeof(float)); // Sediment Map
+    
+    // Init Data
+    cuMemcpyHtoD(d_height, terrain->heightmap.data.data(), numPixels * sizeof(float));
+    cuMemsetD8(d_water, 0, numPixels * sizeof(float));
+    cuMemsetD8(d_flux, 0, numPixels * 4 * sizeof(float));
+    cuMemsetD8(d_vel, 0, numPixels * 2 * sizeof(float));
+    cuMemsetD8(d_sed, 0, numPixels * sizeof(float));
+    
+    // Params - TUNED to prevent flattening
+    TerrainPhysics::FluvialErosionParamsGPU gpuOps;
+    gpuOps.mapWidth = w;
+    gpuOps.mapHeight = h;
+    gpuOps.fixedDeltaTime = 0.02f; // Smaller time step for stability
+    gpuOps.pipeLength = 1.0f;
+    gpuOps.cellSize = 1.0f;
+    gpuOps.gravity = 9.8f;
+    
+    // Map UI params - SCALE DOWN significantly
+    gpuOps.erosionRate = p.erodeSpeed * 0.001f; // Much smaller erosion
+    gpuOps.depositionRate = p.depositSpeed * 0.5f; // Higher deposition to balance
+    gpuOps.evaporationRate = 0.15f; // Faster evaporation to prevent water buildup
+    gpuOps.sedimentCapacityConstant = p.sedimentCapacity * 0.1f; // Lower capacity
+
+    int tx = 16, ty = 16;
+    int bx = (w + tx - 1) / tx;
+    int by = (h + ty - 1) / ty;
+    
+    // Simulation Loop - Use user's iterations directly (scaled)
+    int steps = p.iterations; // Direct user control
+    if (steps < 100) steps = 100;
+    if (steps > 5000) steps = 5000; // Cap for safety
+    
+    float rainAmount = 0.002f; // Much less rain
+
+    SCENE_LOG_INFO("[GPU Fluvial] Simulating " + std::to_string(steps) + " steps...");
+    
+    void* rainArgs[] = { &d_water, &w, &h, &rainAmount, &gpuOps.fixedDeltaTime };
+    void* fluxArgs[] = { &d_height, &d_water, &d_flux, &gpuOps };
+    void* waterArgs[] = { &d_water, &d_flux, &d_vel, &gpuOps };
+    void* erodeArgs[] = { &d_height, &d_water, &d_vel, &d_sed, &gpuOps };
+    
+    for (int i = 0; i < steps; i++) {
+        // 1. Rain
+        cuLaunchKernel((CUfunction)fluvRainKernelFunc, bx, by, 1, tx, ty, 1, 0, nullptr, rainArgs, nullptr);
+        // 2. Flux
+        cuLaunchKernel((CUfunction)fluvFluxKernelFunc, bx, by, 1, tx, ty, 1, 0, nullptr, fluxArgs, nullptr);
+        // 3. Water Update
+        cuLaunchKernel((CUfunction)fluvWaterKernelFunc, bx, by, 1, tx, ty, 1, 0, nullptr, waterArgs, nullptr);
+        // 4. Erosion
+        cuLaunchKernel((CUfunction)fluvErodeKernelFunc, bx, by, 1, tx, ty, 1, 0, nullptr, erodeArgs, nullptr);
+    }
+    
+    // POST-PROCESSING: Spike removal and pit filling (matches CPU behavior)
+    float cellSize = terrain->heightmap.scale_xz / w;
+    TerrainPhysics::PostProcessParamsGPU postParams;
+    postParams.mapWidth = w;
+    postParams.mapHeight = h;
+    postParams.cellSize = cellSize;
+    postParams.pitThreshold = cellSize * 0.05f;
+    postParams.spikeThreshold = cellSize * 0.1f;
+    postParams.edgeFadeWidth = std::max(3, w / 40);
+    
+    if (spikeRemovalKernelFunc) {
+        void* spikeArgs[] = { &d_height, &postParams };
+        cuLaunchKernel((CUfunction)spikeRemovalKernelFunc,
+                       bx, by, 1, tx, ty, 1, 0, nullptr, spikeArgs, nullptr);
+    }
+    
+    if (pitFillKernelFunc) {
+        void* pitArgs[] = { &d_height, &postParams };
+        cuLaunchKernel((CUfunction)pitFillKernelFunc,
+                       bx, by, 1, tx, ty, 1, 0, nullptr, pitArgs, nullptr);
+    }
+    
+    cuCtxSynchronize();
+    
+    // Copy Back
+    cuMemcpyDtoH(terrain->heightmap.data.data(), d_height, numPixels * sizeof(float));
+    
+    // Cleanup
+    cuMemFree(d_height);
+    cuMemFree(d_water);
+    cuMemFree(d_flux);
+    cuMemFree(d_vel);
+    cuMemFree(d_sed);
+    
+    // ========================================================
+    // CPU POST-PROCESSING: Edge fade-out (matching CPU fluvial)
+    // ========================================================
+    auto& height = terrain->heightmap.data;
+    int edgeFadeWidth = std::max(5, w / 50);  // ~2% of terrain width
+    
+    #pragma omp parallel for
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int idx = y * w + x;
+            int distFromEdge = std::min({x, y, w - 1 - x, h - 1 - y});
+            
+            if (distFromEdge < edgeFadeWidth) {
+                float t = (float)distFromEdge / (float)edgeFadeWidth;
+                float smoothT = t * t * (3.0f - 2.0f * t);  // Smoothstep
+                
+                // Look inward for reference height
+                int inwardX = std::clamp(x + (x < w/2 ? edgeFadeWidth : -edgeFadeWidth), 0, w-1);
+                int inwardY = std::clamp(y + (y < h/2 ? edgeFadeWidth : -edgeFadeWidth), 0, h-1);
+                float inwardHeight = height[inwardY * w + inwardX];
+                
+                // Full blend with inward height (eliminates walls)
+                height[idx] = height[idx] * smoothT + inwardHeight * (1.0f - smoothT);
+            }
+        }
+    }
+    
+    // ========================================================
+    // AGGRESSIVE THERMAL SMOOTHING (matching CPU fluvial)
+    // ========================================================
+    ThermalErosionParams tp;
+    tp.iterations = 15;
+    tp.talusAngle = 0.4f;
+    tp.erosionAmount = 0.4f;
+    thermalErosion(terrain, tp);  // This also calls updateTerrainMesh
+    
+    terrain->dirty_mesh = true;
+    SCENE_LOG_INFO("[GPU Fluvial] Complete with edge smoothing.");
+}
+
+void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask) {
+    if (!terrain) return;
+    if (!cudaInitialized) { initCuda(); if (!cudaInitialized) return; }
+    
+    int w = terrain->heightmap.width;
+    int h = terrain->heightmap.height;
+    size_t mapSize = w * h * sizeof(float);
+    
+    // Device Alloc
+    CUdeviceptr d_heightmap;
+    CUresult res = cuMemAlloc(&d_heightmap, mapSize);
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Wind] Alloc Failed");
+        return;
+    }
+    
+    // HtoD
+    cuMemcpyHtoD(d_heightmap, terrain->heightmap.data.data(), mapSize);
+    
+    // Params
+    TerrainPhysics::WindErosionParamsGPU gpuOps;
+    gpuOps.mapWidth = w;
+    gpuOps.mapHeight = h;
+    
+    // Convert direction (degrees) to unit vector
+    float rad = direction * 3.14159265f / 180.0f;
+    gpuOps.windDirX = cosf(rad);
+    gpuOps.windDirY = sinf(rad);
+    gpuOps.strength = strength * 0.01f; // Scale down
+    gpuOps.suspensionRate = 0.3f;
+    gpuOps.depositionRate = 0.8f;
+    
+    int tx = 16, ty = 16;
+    int bx = (w + tx - 1) / tx;
+    int by = (h + ty - 1) / ty;
+    
+    void* args[] = { &d_heightmap, &gpuOps };
+    
+    for (int i = 0; i < iterations; i++) {
+        res = cuLaunchKernel((CUfunction)windKernelFunc,
+                             bx, by, 1,
+                             tx, ty, 1,
+                             0, nullptr,
+                             args, nullptr);
+    }
+    
+    if (res != CUDA_SUCCESS) {
+        SCENE_LOG_ERROR("[GPU Wind] Launch Failed: " + std::to_string(res));
+    }
+    
+    // POST-PROCESSING: Smoothing pass (wind erosion tends to create small artifacts)
+    void* smoothArgs[] = { &d_heightmap, &w, &h };
+    if (smoothKernelFunc) {
+        cuLaunchKernel((CUfunction)smoothKernelFunc,
+                       bx, by, 1, tx, ty, 1, 0, nullptr, smoothArgs, nullptr);
+    }
+    
+    cuCtxSynchronize();
+    
+    // DtoH
+    cuMemcpyDtoH(terrain->heightmap.data.data(), d_heightmap, mapSize);
+    
+    cuMemFree(d_heightmap);
+    
+    updateTerrainMesh(terrain);
+    terrain->dirty_mesh = true;
+    SCENE_LOG_INFO("[GPU Wind] Completed " + std::to_string(iterations) + " iterations with smoothing.");
+}
+
+
+TerrainObject* TerrainManager::getTerrainByName(const std::string& name) {
+    for (auto& t : terrains) {
+        if (t.name == name) return &t;
+    }
+    return nullptr;
 }

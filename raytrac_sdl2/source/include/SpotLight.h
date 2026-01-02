@@ -1,4 +1,4 @@
-#ifndef SPOTLIGHT_H
+﻿#ifndef SPOTLIGHT_H
 #define SPOTLIGHT_H
 
 #include "Light.h"
@@ -21,8 +21,9 @@ public:
     float getFalloff() const { return falloff; }
 
 private:
-    float angle_degrees;
+    float angle_degrees = 45.0f;
     float falloff = 0.1f;
 };
 
 #endif // SPOTLIGHT_H
+

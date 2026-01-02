@@ -6,6 +6,11 @@
 #include "Triangle.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
+#include "PointLight.h"
+#include "DirectionalLight.h"
+#include "SpotLight.h"
+#include "AreaLight.h"
+#include "WaterSystem.h"
 #include "json.hpp"
 #include <fstream>
 #include <filesystem>
@@ -14,6 +19,22 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <thread>
+#include <chrono>
+
+#include <chrono>
+#include "TerrainManager.h"
+
+#include "stb_image_write.h"
+
+// Helper for stbi_write_to_func
+namespace {
+    void write_to_vector_func(void* context, void* data, int size) {
+        auto* vec = static_cast<std::vector<char>*>(context);
+        const char* d = static_cast<const char*>(data);
+        vec->insert(vec->end(), d, d + size);
+    }
+}
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -182,18 +203,25 @@ void ProjectManager::newProject() {
     SCENE_LOG_INFO("New project created.");
 }
 
+// ============================================================================
+// NEW SAVE PROJECT (Self-Contained with Geometry)
+// ============================================================================
 
-bool ProjectManager::saveProject(std::function<void(int, const std::string&)> progress_callback) {
+bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings,
+                                  std::function<void(int, const std::string&)> progress_callback) {
     if (g_project.current_file_path.empty()) {
-        SCENE_LOG_ERROR("No file path set. Use saveProject(filepath) instead.");
+        SCENE_LOG_ERROR("No file path set. Use saveProject(filepath, scene, settings) instead.");
         return false;
     }
-    return saveProject(g_project.current_file_path, progress_callback);
+    return saveProject(g_project.current_file_path, scene, settings, progress_callback);
 }
 
-// Main Save Implementation
-bool ProjectManager::saveProject(const std::string& filepath, std::function<void(int, const std::string&)> progress_callback) {
+bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+                                  std::function<void(int, const std::string&)> progress_callback) {
     if (progress_callback) progress_callback(0, "Preparing to save...");
+
+    // Sync project data with current scene state
+    syncProjectToScene(scene);
 
     // 1. Prepare Safe Save paths
     fs::path final_json_path(filepath);
@@ -215,184 +243,101 @@ bool ProjectManager::saveProject(const std::string& filepath, std::function<void
     }
 
     try {
-        if (progress_callback) progress_callback(5, "Writing metadata...");
-
-        // 3. Write JSON Header (Streamed)
-        out_json << "{\n";
-        out_json << "  \"format_version\": " << json(g_project.format_version) << ",\n";
-        out_json << "  \"project_name\": " << json(g_project.project_name) << ",\n";
-        out_json << "  \"author\": " << json(g_project.author) << ",\n";
-        out_json << "  \"description\": " << json(g_project.description) << ",\n";
-        out_json << "  \"next_model_id\": " << g_project.next_model_id << ",\n";
-        out_json << "  \"next_object_id\": " << g_project.next_object_id << ",\n";
-        out_json << "  \"next_texture_id\": " << g_project.next_texture_id << ",\n";
+        if (progress_callback) progress_callback(5, "Writing geometry...");
         
-        // 4. IMPORTED MODELS - SPARSE SAVE OPTIMIZATION
-        out_json << "  \"imported_models\": [\n";
-        
-        size_t total_models = g_project.imported_models.size();
-        for (size_t i = 0; i < total_models; ++i) {
-            auto& model = g_project.imported_models[i];
-            
-            // Update Progress
-            if (progress_callback) {
-                int p = 10 + (int)((float)i / total_models * 80.0f); // 10% to 90%
-                std::string msg = "Saving model data: " + model.display_name;
-                progress_callback(p, msg);
-            }
-
-            // Record current offset in binary file
-            long long bin_start = out_bin.tellp();
-            size_t written_count = 0;
-            
-            // Write ONLY modified objects to binary
-            for (const auto& obj : model.objects) {
-                bool is_default = isIdentity(obj.transform) && obj.visible; 
-                
-                if (!is_default) {
-                    writeStringBinary(out_bin, obj.node_name);
-                    out_bin.write(reinterpret_cast<const char*>(&obj.transform), sizeof(Matrix4x4));
-                    out_bin.write(reinterpret_cast<const char*>(&obj.material_id), sizeof(uint16_t));
-                    uint8_t visible_byte = obj.visible ? 1 : 0;
-                    out_bin.write(reinterpret_cast<const char*>(&visible_byte), sizeof(uint8_t));
-                    written_count++;
-                }
-            }
-            
-            // Write metadata to JSON
-            out_json << "    {\n";
-            out_json << "      \"id\": " << model.id << ",\n";
-            out_json << "      \"original_path\": " << json(model.original_path) << ",\n";
-            out_json << "      \"package_path\": " << json(model.package_path) << ",\n";
-            out_json << "      \"display_name\": " << json(model.display_name) << ",\n";
-            
-            // Deleted Objects
-            out_json << "      \"deleted_objects\": [";
-            std::sort(model.deleted_objects.begin(), model.deleted_objects.end());
-            model.deleted_objects.erase(std::unique(model.deleted_objects.begin(), model.deleted_objects.end()), model.deleted_objects.end());
-            for (size_t k = 0; k < model.deleted_objects.size(); ++k) {
-                out_json << json(model.deleted_objects[k]);
-                if (k < model.deleted_objects.size() - 1) out_json << ",";
-            }
-            out_json << "],\n";
-            
-            // Binary Reference
-            out_json << "      \"objects_bin_offset\": " << bin_start << ",\n";
-            out_json << "      \"objects_count\": " << written_count << "\n";
-            
-            out_json << "    }";
-            if (i < total_models - 1) out_json << ",";
-            out_json << "\n";
+        // Write geometry to binary file FIRST
+        if (save_settings.save_geometry) {
+            writeGeometryBinary(out_bin, scene);
         }
-        out_json << "  ],\n"; // End imported_models
         
-        if (progress_callback) progress_callback(90, "Saving procedural objects...");
+        if (progress_callback) progress_callback(30, "Writing metadata...");
 
-        // 5. PROCEDURAL OBJECTS
-        out_json << "  \"procedural_objects\": [\n";
-        for (size_t i = 0; i < g_project.procedural_objects.size(); ++i) {
-            const auto& proc = g_project.procedural_objects[i];
-             out_json << "    {\n";
-            out_json << "      \"id\": " << proc.id << ",\n";
-            out_json << "      \"mesh_type\": " << (int)proc.mesh_type << ",\n";
-            out_json << "      \"display_name\": " << json(proc.display_name) << ",\n"; 
-            
-            out_json << "      \"transform\": [";
-            for(int r=0; r<4; ++r) for(int c=0; c<4; ++c) {
-                 out_json << proc.transform.m[r][c] << ( (r==3 && c==3) ? "" : ",");
-            }
-            out_json << "],\n";
-            
-            out_json << "      \"material_id\": " << proc.material_id << ",\n";
-            out_json << "      \"visible\": " << (proc.visible ? "true" : "false") << "\n";
-            out_json << "    }";
-            if (i < g_project.procedural_objects.size() - 1) out_json << ",";
-            out_json << "\n";
-        }
-        out_json << "  ],\n";
+        // 3. Write JSON 
+        json root;
+        root["format_version"] = "3.0";
+        root["project_name"] = g_project.project_name;
+        root["author"] = g_project.author;
+        root["description"] = g_project.description;
+        root["next_model_id"] = g_project.next_model_id;
+        root["next_object_id"] = g_project.next_object_id;
+        root["next_texture_id"] = g_project.next_texture_id;
+        root["has_geometry"] = save_settings.save_geometry;
         
-        // 6. TEXTURE ASSETS
-        out_json << "  \"texture_assets\": [\n";
-        for (size_t i = 0; i < g_project.texture_assets.size(); ++i) {
-            const auto& tex = g_project.texture_assets[i];
-             out_json << "    {\n";
-            out_json << "      \"id\": " << tex.id << ",\n";
-            out_json << "      \"original_path\": " << json(tex.original_path) << ",\n";
-            out_json << "      \"package_path\": " << json(tex.package_path) << ",\n";
-            out_json << "      \"usage\": " << json(tex.usage) << "\n";
-            out_json << "    }";
-            if (i < g_project.texture_assets.size() - 1) out_json << ",";
-            out_json << "\n";
+        // Procedural objects (still saved for non-geometry mode)
+        json procedurals_arr = json::array();
+        for (const auto& proc : g_project.procedural_objects) {
+            json p;
+            p["id"] = proc.id;
+            p["mesh_type"] = static_cast<int>(proc.mesh_type);
+            p["display_name"] = proc.display_name;
+            p["transform"] = mat4ToJson(proc.transform);
+            p["material_id"] = proc.material_id;
+            p["visible"] = proc.visible;
+            procedurals_arr.push_back(p);
         }
-        out_json << "  ]\n";
+        root["procedural_objects"] = procedurals_arr;
         
-        out_json << "}"; // End Root
+        if (progress_callback) progress_callback(50, "Saving materials...");
+        
+        // Materials
+        auto& mat_mgr = MaterialManager::getInstance();
+        root["materials"] = mat_mgr.serialize(fs::path(filepath).parent_path().string());
+        
+        if (progress_callback) progress_callback(60, "Saving lights...");
+        
+        // Lights
+        root["lights"] = serializeLights(scene.lights);
+        
+        if (progress_callback) progress_callback(70, "Saving cameras...");
+        
+        // Cameras
+        root["cameras"] = serializeCameras(scene.cameras, scene.active_camera_index);
+        
+        if (progress_callback) progress_callback(80, "Saving render settings...");
+        
+        // Render Settings
+        root["render_settings"] = serializeRenderSettings(settings);
+        
+        // Timeline/Animation (keyframes)
+        if (progress_callback) progress_callback(82, "Saving animation keyframes...");
+        json j_timeline;
+        scene.timeline.serialize(j_timeline);
+        root["timeline"] = j_timeline;
+        
+        // Water System
+        if (progress_callback) progress_callback(83, "Saving water surfaces...");
+        root["water"] = WaterManager::getInstance().serialize();
+
+        // Terrain System
+        if (progress_callback) progress_callback(84, "Saving terrain system...");
+        auto abs_path = std::filesystem::absolute(filepath);
+        std::string terrainDir = abs_path.parent_path().string();
+        SCENE_LOG_INFO("[ProjectManager] Saving terrain system to: " + terrainDir);
+        root["terrain_system"] = TerrainManager::getInstance().serialize(terrainDir);
+        
+        // Textures (with embed option)
+        if (progress_callback) progress_callback(85, "Processing textures...");
+        root["textures"] = serializeTextures(out_bin, save_settings.embed_textures);
+        
+        // Write JSON - Use error handler to replace invalid UTF-8 characters
+        out_json << root.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         
         out_json.flush();
-        out_bin.flush(); // Ensure everything is written
-        
+        out_bin.flush();
         out_json.close();
         out_bin.close();
         
-        // ---------------------------------------------------------
-        // COPY ASSETS TO PACKAGE FOLDER (Portability Logic)
-        // ---------------------------------------------------------
-        if (progress_callback) progress_callback(92, "Ensuring asset portability...");
-        
-        fs::path project_folder = final_json_path.parent_path();
-        
-        // Copy Models
-        for (const auto& model : g_project.imported_models) {
-            if (model.package_path.empty()) continue;
-            
-            fs::path dest = project_folder / model.package_path;
-            if (!fs::exists(dest) && fs::exists(model.original_path)) {
-                try {
-                    fs::create_directories(dest.parent_path());
-                    fs::copy_file(model.original_path, dest, fs::copy_options::overwrite_existing);
-                    
-                    // Also copy associated .bin file if it exists
-                    fs::path src_bin = fs::path(model.original_path).replace_extension(".bin");
-                    if (fs::exists(src_bin)) {
-                        // Ensure .bin is copied to the same folder as the .gltf with the SAME NAME
-                        // Since packagePath now uses original filename, replacing extension works perfectly.
-                        fs::path dest_bin = dest;
-                        dest_bin.replace_extension(".bin");
-                        fs::copy_file(src_bin, dest_bin, fs::copy_options::overwrite_existing);
-                        // No log needed per file to avoid spam
-                    }
-                } catch (const std::exception& e) {
-                    SCENE_LOG_WARN("Failed to copy model to project: " + model.display_name);
-                }
-            }
-        }
-        
-        // Copy Textures
-        for (const auto& tex : g_project.texture_assets) {
-             if (tex.package_path.empty()) continue;
-             
-             fs::path dest = project_folder / tex.package_path;
-             if (!fs::exists(dest) && fs::exists(tex.original_path)) {
-                 try {
-                     fs::create_directories(dest.parent_path());
-                     fs::copy_file(tex.original_path, dest, fs::copy_options::overwrite_existing);
-                 } catch (const std::exception& e) {
-                     SCENE_LOG_WARN("Failed to copy texture to project: " + fs::path(tex.original_path).filename().string());
-                 }
-             }
-        }
-        
         if (progress_callback) progress_callback(95, "Finalizing...");
 
-        // 7. Atomic Commit
+        // Atomic Commit
         try {
             if (fs::exists(final_json_path)) fs::remove(final_json_path);
             if (fs::exists(final_bin_path)) fs::remove(final_bin_path);
             fs::rename(temp_json_path, final_json_path);
             fs::rename(temp_bin_path, final_bin_path);
         } catch (const fs::filesystem_error& e) {
-             SCENE_LOG_ERROR("FileSystem Error during rename: " + std::string(e.what()));
-             return false;
+            SCENE_LOG_ERROR("FileSystem Error during rename: " + std::string(e.what()));
+            return false;
         }
         
     } catch (const std::exception& e) {
@@ -442,7 +387,20 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     
     // Clear current project and scene
     if (progress_callback) progress_callback(5, "Clearing scene...");
+    
+    // =========================================================================
+    // SYNCHRONIZATION: Ensure all GPU operations complete before clearing
+    // =========================================================================
+    if (optix_gpu) {
+        cudaDeviceSynchronize();  // Wait for all pending CUDA work
+    }
+    
+    // Brief wait to allow render threads to fully stop
+    // (rendering_stopped_* flags are set by caller before this function)
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
     newProject();
+    TerrainManager::getInstance().removeAllTerrains(scene);
     scene.clear();
     renderer.resetCPUAccumulation();
     if (optix_gpu) optix_gpu->resetAccumulation();
@@ -460,211 +418,116 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
              g_project.format_version = "2.0";
         }
         g_project.project_name = root.value("project_name", "Untitled");
-        // ... Load other metadata
+        g_project.author = root.value("author", "");
+        g_project.description = root.value("description", "");
+        g_project.next_model_id = root.value("next_model_id", 1);
+        g_project.next_object_id = root.value("next_object_id", 1);
+        g_project.next_texture_id = root.value("next_texture_id", 1);
         
         fs::path project_folder = fs::path(filepath).parent_path();
         
-        // Load Imported Models
-        if (root.contains("imported_models")) {
-            auto& models = root["imported_models"];
-            size_t total_count = models.size();
+        // Check if this is v3.0 format (self-contained geometry)
+        bool is_v3 = (g_project.format_version == "3.0" || g_project.format_version == "3.0");
+        bool has_geometry = root.value("has_geometry", false);
+        
+        if (is_v3 && has_geometry && has_binary) {
+            // ============================================================
+            // V3.0 FORMAT: Load geometry from binary
+            // ============================================================
+            if (progress_callback) progress_callback(10, "Loading geometry...");
+
+            if (!readGeometryBinary(in_bin, scene)) {
+                SCENE_LOG_ERROR("Failed to read geometry from binary file.");
+                return false;
+            }
+
+            // Load Textures FIRST (so materials can find them)
+            if (root.contains("textures")) {
+                if (progress_callback) progress_callback(35, "Restoring textures...");
+                deserializeTextures(root["textures"], in_bin, project_folder.string());
+            }
+
+            if (progress_callback) progress_callback(40, "Loading materials...");
+
+            // Load Materials
+            if (root.contains("materials")) {
+                MaterialManager::getInstance().deserialize(root["materials"], project_folder.string());
+                // NOTE: GPU material update moved to AFTER rebuildOptiXGeometry (line ~505)
+                // to ensure SBT records are valid before material buffer update.
+            }
+
+            if (progress_callback) progress_callback(50, "Loading lights...");
+
+            // Load Lights
+            if (root.contains("lights")) {
+                deserializeLights(root["lights"], scene.lights);
+            }
+
+            if (progress_callback) progress_callback(60, "Loading cameras...");
+
+            // Load Cameras
+            if (root.contains("cameras")) {
+                deserializeCameras(root["cameras"], scene);
+            }
+            else {
+                // Create default camera if none exists
+                auto default_cam = std::make_shared<Camera>(
+                    Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
+                    60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 10);
+                default_cam->nodeName = "Default Camera";
+                scene.addCamera(default_cam);
+            }
+
+            if (progress_callback) progress_callback(70, "Loading render settings...");
+
+            // Load Render Settings
+            if (root.contains("render_settings")) {
+                deserializeRenderSettings(root["render_settings"], settings);
+            }
+
+            // Load Water Surfaces
+            if (root.contains("water")) {
+                WaterManager::getInstance().deserialize(root["water"], scene);
+            }
+
+            // Load Terrain System (Must be before Timeline so tracks can find terrains)
+            if (root.contains("terrain_system")) {
+                if (progress_callback) progress_callback(75, "Loading terrain system...");
+                auto abs_path = std::filesystem::absolute(filepath);
+                std::string terrainDir = abs_path.parent_path().string();
+                SCENE_LOG_INFO("[ProjectManager] Loading terrain system from: " + terrainDir);
+                TerrainManager::getInstance().deserialize(root["terrain_system"], terrainDir, scene);
+            }
             
-            for (size_t i = 0; i < total_count; ++i) {
-                const auto& m = models[i];
-                
-                // Update Progress
-                if (progress_callback) {
-                    int p = 10 + (int)((float)i / total_count * 70.0f); // 10% to 80%
-                    std::string dname = m.value("display_name", "Model");
-                    progress_callback(p, "Loading model: " + dname);
+            // Load Timeline/Animation (keyframes) - AFTER Objects are created
+            if (root.contains("timeline")) {
+                scene.timeline.deserialize(root["timeline"]);
+                SCENE_LOG_INFO("[ProjectManager] Loaded timeline with " + std::to_string(scene.timeline.tracks.size()) + " tracks.");
+            }
+
+            // Load Procedural Objects (still supported)
+            if (root.contains("procedural_objects")) {
+                for (const auto& p : root["procedural_objects"]) {
+                    ProceduralObjectData proc;
+                    proc.id = p.value("id", 0);
+                    proc.mesh_type = static_cast<ProceduralMeshType>(p.value("mesh_type", 0));
+                    proc.display_name = p.value("display_name", "Procedural");
+                    if (p.contains("transform")) proc.transform = jsonToMat4(p["transform"]);
+                    proc.material_id = p.value("material_id", 0);
+                    proc.visible = p.value("visible", true);
+                    g_project.procedural_objects.push_back(proc);
+
+                    // Create procedural geometry...
+                    // (Same logic as legacy, but can be skipped if already in geometry binary)
                 }
 
-                ImportedModelData model;
-                model.id = m.value("id", 0);
-                model.original_path = m.value("original_path", "");
-                model.package_path = m.value("package_path", "");
-                model.display_name = m.value("display_name", "Model");
-                
-                // Deleted Objects
-                if (m.contains("deleted_objects") && m["deleted_objects"].is_array()) {
-                    for (const auto& d : m["deleted_objects"]) {
-                        model.deleted_objects.push_back(d.get<std::string>());
-                    }
-                }
-                
-                std::string actual_path;
-                fs::path pkg_path = project_folder / model.package_path;
-                if (fs::exists(pkg_path)) {
-                    actual_path = pkg_path.string();
-                } else if (fs::exists(model.original_path)) {
-                    actual_path = model.original_path;
-                    SCENE_LOG_WARN("Using original path for: " + model.display_name);
-                } else {
-                    SCENE_LOG_ERROR("Model file not found: " + model.package_path);
-                    continue;
-                }
-                
-                size_t objects_before = scene.world.objects.size();
-                renderer.create_scene(scene, optix_gpu, actual_path, nullptr);
-                
-                // RESTORE OBJECT PREFIXES (Critical for Sync)
-                std::string import_prefix = std::to_string(model.id) + "_";
-                for (size_t k = objects_before; k < scene.world.objects.size(); ++k) {
-                    auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[k]);
-                    if (tri) {
-                        tri->setNodeName(import_prefix + tri->nodeName);
-                    }
-                }
-                
-                // Apply Deletions
-                if (!model.deleted_objects.empty()) {
-                    std::unordered_set<std::string> deleted_set(model.deleted_objects.begin(), model.deleted_objects.end());
-                    auto& objs = scene.world.objects;
-                    objs.erase(
-                        std::remove_if(objs.begin() + objects_before, objs.end(),
-                            [&](const std::shared_ptr<Hittable>& obj) {
-                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                if (!tri) return false;
-                                return deleted_set.count(tri->nodeName) > 0;
-                            }),
-                        objs.end());
-                }
-                
-                // LOAD OBJECT OVERRIDES (Sparse Load)
-                if (has_binary && m.contains("objects_bin_offset")) {
-                    long long offset = m["objects_bin_offset"];
-                    size_t count = m.value("objects_count", 0);
-                    
-                    if (count > 0) {
-                        in_bin.seekg(offset);
-                        model.objects.reserve(count);
-                        
-                        for(size_t k=0; k<count; ++k) {
-                            ImportedModelData::ObjectInstance inst;
-                            inst.node_name = readStringBinary(in_bin);
-                            in_bin.read(reinterpret_cast<char*>(&inst.transform), sizeof(Matrix4x4));
-                            in_bin.read(reinterpret_cast<char*>(&inst.material_id), sizeof(uint16_t));
-                            uint8_t visible_byte = 1;
-                            in_bin.read(reinterpret_cast<char*>(&visible_byte), sizeof(uint8_t));
-                            inst.visible = (visible_byte != 0);
-                            model.objects.push_back(inst);
-                        }
-                    }
-                } else if (m.contains("objects")) {
-                    // JSON fallback
-                     for (const auto& o : m["objects"]) {
-                        ImportedModelData::ObjectInstance inst;
-                        inst.node_name = o.value("node_name", "");
-                        if (o.contains("transform")) {
-                             inst.transform = jsonToMat4(o["transform"]);
-                        } else {
-                             for(int r=0; r<4; ++r) for(int c=0; c<4; ++c) inst.transform.m[r][c] = (r==c ? 1.0f : 0.0f);
-                        }
-                        inst.material_id = o.value("material_id", 0);
-                        inst.visible = o.value("visible", true);
-                        model.objects.push_back(inst);
-                    }
-                }
-                
-                g_project.imported_models.push_back(model);
+            }
+            else {
+                // No geometry in binary - cannot load
+                SCENE_LOG_ERROR("Project file is in legacy format. Please re-import your models.");
+                return false;
             }
         }
-        
-        if (progress_callback) progress_callback(80, "Applying transforms...");
-
-        // Apply Transforms (O(N) Map-based approach)
-        std::unordered_map<std::string_view, std::shared_ptr<Triangle>> scene_map;
-        scene_map.reserve(scene.world.objects.size());
-        for (auto& obj : scene.world.objects) {
-             if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                 scene_map[tri->nodeName] = tri;
-             }
-        }
-
-        for (const auto& model : g_project.imported_models) {
-            for (const auto& inst : model.objects) {
-                auto it = scene_map.find(inst.node_name);
-                if (it != scene_map.end()) {
-                    auto tri = it->second;
-                    auto th = tri->getTransformHandle();
-                    if (!th) {
-                        th = std::make_shared<Transform>();
-                        tri->setTransformHandle(th);
-                    }
-                    th->setBase(inst.transform);
-                    tri->setMaterialID(inst.material_id);
-                    tri->updateTransformedVertices();
-                }
-            }
-        }
-        
-        // Load Procedural Objects
-        if (root.contains("procedural_objects")) {
-             for (const auto& p : root["procedural_objects"]) {
-                 ProceduralObjectData proc;
-                 proc.id = p.value("id", 0);
-                 proc.mesh_type = (ProceduralMeshType)p.value("mesh_type", 0);
-                 proc.display_name = p.value("display_name", "Procedural");
-                 if (p.contains("transform")) proc.transform = jsonToMat4(p["transform"]);
-                 proc.material_id = p.value("material_id", 0);
-                 proc.visible = p.value("visible", true);
-                 g_project.procedural_objects.push_back(proc);
-                 
-                 // Create Scene Object
-                 std::shared_ptr<Transform> t = std::make_shared<Transform>();
-                 t->setBase(proc.transform);
-                 
-                 if (proc.mesh_type == ProceduralMeshType::Plane) {
-                     Vec3 v0(-1, 0, 1), v1(1, 0, 1), v2(1, 0, -1), v3(-1, 0, -1);
-                     Vec3 n(0, 1, 0);
-                     Vec2 t0(0, 0), t1(1, 0), t2(1, 1), t3(0, 1);
-                     
-                     auto tri1 = std::make_shared<Triangle>(v0, v1, v2, n, n, n, t0, t1, t2, proc.material_id);
-                     tri1->setTransformHandle(t); tri1->setNodeName(proc.display_name); tri1->update_bounding_box();
-                     
-                     auto tri2 = std::make_shared<Triangle>(v0, v2, v3, n, n, n, t0, t2, t3, proc.material_id);
-                     tri2->setTransformHandle(t); tri2->setNodeName(proc.display_name); tri2->update_bounding_box();
-                     
-                     if(proc.visible) {
-                        scene.world.objects.push_back(tri1);
-                        scene.world.objects.push_back(tri2);
-                     }
-                 }
-                 else if (proc.mesh_type == ProceduralMeshType::Cube) {
-                    Vec3 pts[8] = {
-                        Vec3(-1,-1, 1), Vec3( 1,-1, 1), Vec3( 1, 1, 1), Vec3(-1, 1, 1),
-                        Vec3(-1,-1,-1), Vec3( 1,-1,-1), Vec3( 1, 1,-1), Vec3(-1, 1,-1)
-                    };
-                    int indices[36] = {
-                        0,1,2, 2,3,0, 1,5,6, 6,2,1, 7,6,5, 5,4,7, 4,0,3, 3,7,4, 4,5,1, 1,0,4, 3,2,6, 6,7,3
-                    };
-                    for(int k=0; k<36; k+=3) {
-                        Vec3 v0 = pts[indices[k]];
-                        Vec3 v1 = pts[indices[k+1]];
-                        Vec3 v2 = pts[indices[k+2]];
-                        Vec3 n = (v1-v0).cross(v2-v0).normalize();
-                        auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, Vec2(0,0), Vec2(1,0), Vec2(0,1), proc.material_id);
-                        tri->setTransformHandle(t);
-                        tri->setNodeName(proc.display_name);
-                        tri->update_bounding_box();
-                        if(proc.visible) scene.world.objects.push_back(tri);
-                    }
-                 }
-             }
-        }
-
-        // Load Textures
-        if (root.contains("texture_assets")) {
-            for (const auto& t : root["texture_assets"]) {
-                TextureAssetData tex;
-                tex.id = t.value("id", 0);
-                tex.original_path = t.value("original_path", "");
-                tex.package_path = t.value("package_path", "");
-                tex.usage = t.value("usage", "unknown");
-                g_project.texture_assets.push_back(tex);
-            }
-        }
-        
     } catch (const std::exception& e) {
         SCENE_LOG_ERROR("Error during project loading: " + std::string(e.what()));
         return false;
@@ -675,20 +538,25 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_project.current_file_path = filepath;
     g_project.is_modified = false;
     
-    if (progress_callback) progress_callback(90, "Rebuilding acceleration structures...");
+    if (progress_callback) progress_callback(90, "Preparing for GPU sync...");
 
-    // Rebuild Acceleration Structures
-    renderer.rebuildBVH(scene, settings.UI_use_embree);
+    // Mark scene as ID-Ready before rebuilding
+    scene.initialized = true;
     
-    if (optix_gpu) {
-        if (progress_callback) progress_callback(95, "Uploading to GPU...");
-        renderer.rebuildOptiXGeometry(scene, optix_gpu);
-        optix_gpu->setLightParams(scene.lights);
-        if (scene.camera) optix_gpu->setCameraParams(*scene.camera);
-    }
+    // =========================================================================
+    // THREAD SAFETY: DO NOT call OptiX rebuild from thread!
+    // Set flags and let Main loop handle GPU operations on main thread.
+    // =========================================================================
+    g_needs_geometry_rebuild = true;
+    g_needs_optix_sync = (optix_gpu != nullptr);
+    
+    // Mark dirty flags for complete refresh
+    g_camera_dirty = true;
+    g_lights_dirty = true;
+    g_world_dirty = true;
     
     if (progress_callback) progress_callback(100, "Done.");
-    SCENE_LOG_INFO("Project loaded: " + filepath);
+    SCENE_LOG_INFO("Project loaded: " + filepath + " (GPU rebuild pending on main thread)");
     return true;
 }
 
@@ -909,11 +777,585 @@ bool ProjectManager::fileExistsInPackage(const std::string& internal_path) {
 }
 
 bool ProjectManager::writeZipPackage(const std::string& filepath) {
-    SCENE_LOG_WARN("ZIP packaging not yet implemented. Using folder structure.");
-    return saveProject(filepath);
+    SCENE_LOG_WARN("ZIP packaging not yet implemented. Save using regular project format.");
+    return false; // Not implemented
 }
 
 bool ProjectManager::readZipPackage(const std::string& filepath) {
     SCENE_LOG_WARN("ZIP packaging not yet implemented.");
     return false;
+}
+
+// ============================================================================
+// GEOMETRY SERIALIZATION (Self-Contained Project)
+// ============================================================================
+
+// Binary format magic number and version
+static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '3'};
+static constexpr uint32_t RTP_VERSION = 3;
+
+bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& scene) {
+    // Write header
+    out.write(RTP_MAGIC, 4);
+    uint32_t version = RTP_VERSION;
+    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+    
+    // Collect all triangles
+    std::vector<std::shared_ptr<Triangle>> triangles;
+    std::unordered_map<std::shared_ptr<Transform>, uint32_t> transform_map;
+    std::vector<std::shared_ptr<Transform>> transforms;
+    
+    // FILTERING: Identify terrain triangles to exclude from binary geometry
+    std::unordered_set<std::shared_ptr<Triangle>> terrain_triangles;
+    auto& terrains = TerrainManager::getInstance().getTerrains();
+    for (auto& t : terrains) {
+        for (auto& tri : t.mesh_triangles) {
+            terrain_triangles.insert(tri);
+        }
+    }
+
+    for (const auto& obj : scene.world.objects) {
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            // Skip terrain chunks
+            if (terrain_triangles.count(tri)) continue;
+
+            triangles.push_back(tri);
+            
+            // Track unique transforms
+            auto th = tri->getTransformHandle();
+            if (th && transform_map.find(th) == transform_map.end()) {
+                transform_map[th] = static_cast<uint32_t>(transforms.size());
+                transforms.push_back(th);
+            }
+        }
+    }
+    
+    // Write transform count and data
+    uint32_t transform_count = static_cast<uint32_t>(transforms.size());
+    out.write(reinterpret_cast<const char*>(&transform_count), sizeof(transform_count));
+    
+    for (const auto& tr : transforms) {
+        out.write(reinterpret_cast<const char*>(&tr->base), sizeof(Matrix4x4));
+    }
+    
+    // Write triangle count
+    uint32_t tri_count = static_cast<uint32_t>(triangles.size());
+    out.write(reinterpret_cast<const char*>(&tri_count), sizeof(tri_count));
+    
+    // Write each triangle
+    for (const auto& tri : triangles) {
+        // Vertices (original, not transformed)
+        Vec3 v0 = tri->getOriginalVertexPosition(0);
+        Vec3 v1 = tri->getOriginalVertexPosition(1);
+        Vec3 v2 = tri->getOriginalVertexPosition(2);
+        out.write(reinterpret_cast<const char*>(&v0), sizeof(Vec3));
+        out.write(reinterpret_cast<const char*>(&v1), sizeof(Vec3));
+        out.write(reinterpret_cast<const char*>(&v2), sizeof(Vec3));
+        
+        // Normals
+        Vec3 n0 = tri->getOriginalVertexNormal(0);
+        Vec3 n1 = tri->getOriginalVertexNormal(1);
+        Vec3 n2 = tri->getOriginalVertexNormal(2);
+        out.write(reinterpret_cast<const char*>(&n0), sizeof(Vec3));
+        out.write(reinterpret_cast<const char*>(&n1), sizeof(Vec3));
+        out.write(reinterpret_cast<const char*>(&n2), sizeof(Vec3));
+        
+        // UVs
+        Vec2 uv0 = tri->t0;
+        Vec2 uv1 = tri->t1;
+        Vec2 uv2 = tri->t2;
+        out.write(reinterpret_cast<const char*>(&uv0), sizeof(Vec2));
+        out.write(reinterpret_cast<const char*>(&uv1), sizeof(Vec2));
+        out.write(reinterpret_cast<const char*>(&uv2), sizeof(Vec2));
+        
+        // Material ID
+        uint16_t mat_id = tri->getMaterialID();
+        out.write(reinterpret_cast<const char*>(&mat_id), sizeof(mat_id));
+        
+        // Transform index
+        uint32_t tr_idx = 0xFFFFFFFF; // No transform
+        auto th = tri->getTransformHandle();
+        if (th) {
+            auto it = transform_map.find(th);
+            if (it != transform_map.end()) {
+                tr_idx = it->second;
+            }
+        }
+        out.write(reinterpret_cast<const char*>(&tr_idx), sizeof(tr_idx));
+        
+        // Node name (length-prefixed string)
+        writeStringBinary(out, tri->nodeName);
+    }
+    
+    SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(tri_count) + " triangles, " + 
+                   std::to_string(transform_count) + " transforms to binary.");
+    return true;
+}
+
+bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
+    // Read and validate header
+    char magic[4];
+    in.read(magic, 4);
+    if (std::memcmp(magic, RTP_MAGIC, 4) != 0) {
+        SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
+        return false;
+    }
+    
+    uint32_t version;
+    in.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (version > RTP_VERSION) {
+        SCENE_LOG_WARN("[ProjectManager] Newer geometry format (v" + std::to_string(version) + "), some features may not load.");
+    }
+    
+    // Read transforms
+    uint32_t transform_count;
+    in.read(reinterpret_cast<char*>(&transform_count), sizeof(transform_count));
+    
+    std::vector<std::shared_ptr<Transform>> transforms;
+    transforms.reserve(transform_count);
+    
+    for (uint32_t i = 0; i < transform_count; ++i) {
+        auto tr = std::make_shared<Transform>();
+        in.read(reinterpret_cast<char*>(&tr->base), sizeof(Matrix4x4));
+        transforms.push_back(tr);
+    }
+    
+    // Read triangles
+    uint32_t tri_count;
+    in.read(reinterpret_cast<char*>(&tri_count), sizeof(tri_count));
+    
+    scene.world.objects.reserve(scene.world.objects.size() + tri_count);
+    
+    for (uint32_t i = 0; i < tri_count; ++i) {
+        // Vertices
+        Vec3 v0, v1, v2;
+        in.read(reinterpret_cast<char*>(&v0), sizeof(Vec3));
+        in.read(reinterpret_cast<char*>(&v1), sizeof(Vec3));
+        in.read(reinterpret_cast<char*>(&v2), sizeof(Vec3));
+        
+        // Normals
+        Vec3 n0, n1, n2;
+        in.read(reinterpret_cast<char*>(&n0), sizeof(Vec3));
+        in.read(reinterpret_cast<char*>(&n1), sizeof(Vec3));
+        in.read(reinterpret_cast<char*>(&n2), sizeof(Vec3));
+        
+        // UVs
+        Vec2 uv0, uv1, uv2;
+        in.read(reinterpret_cast<char*>(&uv0), sizeof(Vec2));
+        in.read(reinterpret_cast<char*>(&uv1), sizeof(Vec2));
+        in.read(reinterpret_cast<char*>(&uv2), sizeof(Vec2));
+        
+        // Material ID
+        uint16_t mat_id;
+        in.read(reinterpret_cast<char*>(&mat_id), sizeof(mat_id));
+        
+        // Transform index
+        uint32_t tr_idx;
+        in.read(reinterpret_cast<char*>(&tr_idx), sizeof(tr_idx));
+        
+        // Node name
+        std::string node_name = readStringBinary(in);
+        
+        // Create triangle
+        auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
+        tri->setNodeName(node_name);
+        
+        // Assign transform
+        if (tr_idx < transforms.size()) {
+            tri->setTransformHandle(transforms[tr_idx]);
+            tri->updateTransformedVertices();
+        }
+        
+        tri->update_bounding_box();
+        scene.world.objects.push_back(tri);
+    }
+    
+    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(tri_count) + " triangles, " + 
+                   std::to_string(transform_count) + " transforms from binary.");
+    return true;
+}
+
+// ============================================================================
+// LIGHT SERIALIZATION
+// ============================================================================
+
+json ProjectManager::serializeLights(const std::vector<std::shared_ptr<Light>>& lights) {
+    json arr = json::array();
+    
+    for (size_t i = 0; i < lights.size(); ++i) {
+        const auto& light = lights[i];
+        json l;
+        
+        l["id"] = i;
+        l["type"] = static_cast<int>(light->type());
+        l["position"] = vec3ToJson(light->position);
+        l["direction"] = vec3ToJson(light->direction);
+        l["color"] = vec3ToJson(light->color);
+        l["intensity"] = light->intensity;
+        l["radius"] = light->radius;
+        
+        // Spot light specific
+        if (light->type() == LightType::Spot) {
+            auto spot = std::dynamic_pointer_cast<SpotLight>(light);
+            if (spot) {
+                l["angle"] = spot->getAngleDegrees();
+                l["falloff"] = spot->getFalloff();
+            }
+        }
+        
+        // Area light specific
+        if (light->type() == LightType::Area) {
+            l["width"] = light->width;
+            l["height"] = light->height;
+        }
+        
+        arr.push_back(l);
+    }
+    
+    return arr;
+}
+
+void ProjectManager::deserializeLights(const json& j, std::vector<std::shared_ptr<Light>>& lights) {
+    lights.clear();
+    
+    for (const auto& l : j) {
+        LightType type = static_cast<LightType>(l.value("type", 0));
+        
+        Vec3 position = jsonToVec3(l.value("position", json::array({0, 5, 0})));
+        Vec3 direction = jsonToVec3(l.value("direction", json::array({0, -1, 0})));
+        Vec3 color = jsonToVec3(l.value("color", json::array({1, 1, 1})));
+        float intensity = l.value("intensity", 100.0f);
+        float radius = l.value("radius", 0.01f);
+        
+        std::shared_ptr<Light> light;
+        
+        switch (type) {
+            case LightType::Point: {
+                auto pl = std::make_shared<PointLight>(position, color * intensity, radius);
+                light = pl;
+                break;
+            }
+            case LightType::Directional: {
+                auto dl = std::make_shared<DirectionalLight>(direction, color * intensity, radius);
+                dl->position = position; // Very distant, but use position for reference
+                light = dl;
+                break;
+            }
+            case LightType::Spot: {
+                float angle = l.value("angle", 45.0f);
+                auto sl = std::make_shared<SpotLight>(position, direction, color * intensity, angle, radius);
+                sl->setFalloff(l.value("falloff", 0.1f));
+                light = sl;
+                break;
+            }
+            case LightType::Area: {
+                float width = l.value("width", 1.0f);
+                float height = l.value("height", 1.0f);
+                Vec3 u_vec(1, 0, 0);
+                Vec3 v_vec(0, 0, 1);
+                auto al = std::make_shared<AreaLight>(position, u_vec, v_vec, width, height, color * intensity);
+                light = al;
+                break;
+            }
+            default:
+                SCENE_LOG_WARN("[ProjectManager] Unknown light type: " + std::to_string(static_cast<int>(type)));
+                continue;
+        }
+        
+        if (light) {
+            light->nodeName = l.value("name", "Light_" + std::to_string(lights.size()));
+            lights.push_back(light);
+        }
+    }
+    
+    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(lights.size()) + " lights.");
+}
+
+// ============================================================================
+// CAMERA SERIALIZATION
+// ============================================================================
+
+json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>& cameras, size_t active_index) {
+    json arr = json::array();
+    
+    for (size_t i = 0; i < cameras.size(); ++i) {
+        const auto& cam = cameras[i];
+        json c;
+        
+        c["id"] = i;
+        c["name"] = cam->nodeName.empty() ? ("Camera_" + std::to_string(i)) : cam->nodeName;
+        c["position"] = vec3ToJson(cam->lookfrom);
+        c["target"] = vec3ToJson(cam->lookat);
+        c["up"] = vec3ToJson(cam->vup);
+        c["fov"] = cam->vfov;
+        c["aperture"] = cam->aperture;
+        c["focus_dist"] = cam->focus_dist;
+        c["is_active"] = (i == active_index);
+        
+        arr.push_back(c);
+    }
+    
+    return arr;
+}
+
+void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
+    scene.cameras.clear();
+    size_t active_idx = 0;
+    
+    for (const auto& c : j) {
+        Vec3 position = jsonToVec3(c.value("position", json::array({0, 2, 5})));
+        Vec3 target = jsonToVec3(c.value("target", json::array({0, 0, 0})));
+        Vec3 up = jsonToVec3(c.value("up", json::array({0, 1, 0})));
+        float fov = c.value("fov", 60.0f);
+        float aperture = c.value("aperture", 0.0f);
+        float focus_dist = c.value("focus_dist", 10.0f);
+        
+        // Get aspect ratio from render settings (or default 16:9)
+        float aspect = 16.0f / 9.0f;
+        
+        auto cam = std::make_shared<Camera>(position, target, up, fov, aspect, aperture, focus_dist, 6);
+        cam->nodeName = c.value("name", "Camera");
+        
+        scene.cameras.push_back(cam);
+        
+        if (c.value("is_active", false)) {
+            active_idx = scene.cameras.size() - 1;
+        }
+    }
+    
+    if (!scene.cameras.empty()) {
+        scene.setActiveCamera(active_idx);
+    }
+    
+    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.cameras.size()) + " cameras.");
+}
+
+// ============================================================================
+// RENDER SETTINGS SERIALIZATION
+// ============================================================================
+
+json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
+    json j;
+    
+    j["samples_per_pixel"] = settings.samples_per_pixel;
+    j["max_bounces"] = settings.max_bounces;
+    j["final_render_width"] = settings.final_render_width;
+    j["final_render_height"] = settings.final_render_height;
+    j["use_gpu"] = settings.use_optix;
+    j["use_embree"] = settings.UI_use_embree;
+    j["use_denoiser"] = settings.use_denoiser;
+    j["render_use_denoiser"] = settings.render_use_denoiser;
+    j["max_samples"] = settings.max_samples;
+    j["min_samples"] = settings.min_samples;
+    j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
+    j["variance_threshold"] = settings.variance_threshold;
+    
+    return j;
+}
+
+void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& settings) {
+    settings.samples_per_pixel = j.value("samples_per_pixel", 1);
+    settings.max_bounces = j.value("max_bounces", 10);
+    settings.final_render_width = j.value("final_render_width", 1280);
+    settings.final_render_height = j.value("final_render_height", 720);
+    settings.use_optix = j.value("use_gpu", false);
+    settings.UI_use_embree = j.value("use_embree", true);
+    settings.use_denoiser = j.value("use_denoiser", false);
+    settings.render_use_denoiser = j.value("render_use_denoiser", true);
+    settings.max_samples = j.value("max_samples", 32);
+    settings.min_samples = j.value("min_samples", 1);
+    settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);
+    settings.variance_threshold = j.value("variance_threshold", 0.1f);
+    
+    SCENE_LOG_INFO("[ProjectManager] Loaded render settings.");
+}
+
+// ============================================================================
+// TEXTURE SERIALIZATION (Path or Embed)
+// ============================================================================
+
+json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textures) {
+    json arr = json::array();
+    
+    // Get all textures from MaterialManager
+    auto& mgr = MaterialManager::getInstance();
+    std::unordered_map<std::string, uint32_t> texture_map; // path -> id
+    uint32_t texture_id = 0;
+    
+    SCENE_LOG_INFO("Starting texture serialization for " + std::to_string(mgr.getMaterialCount()) + " materials.");
+
+    for (size_t i = 0; i < mgr.getMaterialCount(); ++i) {
+        auto mat = mgr.getMaterial(static_cast<uint16_t>(i));
+        if (!mat) continue;
+
+        // CRITICAL FIX: Must cast to PrincipledBSDF to access texture properties correctly!
+        // Material base class may have different/shadowed albedoProperty member
+        if (mat->type() != MaterialType::PrincipledBSDF) continue;
+        
+        PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
+        if (!pbsdf) continue;
+
+        if (pbsdf->albedoProperty.texture) 
+            SCENE_LOG_INFO("DEBUG: Mat " + mat->materialName + " HAS Albedo Tex: " + pbsdf->albedoProperty.texture->name);
+        else 
+            SCENE_LOG_INFO("DEBUG: Mat " + mat->materialName + " has NO Albedo Tex");
+        
+        // Check all texture properties - use PrincipledBSDF pointer for correct member access
+        auto checkTexture = [&](MaterialProperty& prop, const std::string& usage) {
+            if (prop.texture && prop.texture->is_loaded()) {
+                std::string path = prop.texture->name;
+                
+                // Fallback for unnamed textures (embedded or generated)
+                if (path.empty()) {
+                    path = "texture_" + std::to_string(texture_id) + ".png"; // Default name
+                    SCENE_LOG_WARN("Texture has no name, using fallback: " + path);
+                }
+
+                // Skip if already processed
+                if (texture_map.find(path) != texture_map.end()) return;
+                
+                json tex_entry;
+                tex_entry["id"] = texture_id;
+                tex_entry["usage"] = usage;
+                tex_entry["width"] = prop.texture->width;
+                tex_entry["height"] = prop.texture->height;
+                
+                bool should_embed = embed_textures;
+                if (save_settings.embed_missing_only && !fs::exists(path)) {
+                    should_embed = true;
+                }
+                
+                // Name fallback override for embedding
+                if (prop.texture->name.empty() || prop.texture->name.find("embedded_") == 0) {
+                     should_embed = true; // Must embed if no file exists or it's an internal embedded texture
+                }
+
+                tex_entry["original_name"] = path; // Save Original Name for restoration
+
+                if (should_embed) {
+                    // Embed texture data
+                    tex_entry["mode"] = "embed";
+                    tex_entry["offset"] = static_cast<long long>(bin_out.tellp());
+                    
+                    // DEBUG: Log state for embedded texture serialization
+                    SCENE_LOG_INFO("Embedding texture: " + path + 
+                        " | pixels.empty()=" + std::to_string(prop.texture->pixels.empty()) +
+                        " | float_pixels.empty()=" + std::to_string(prop.texture->float_pixels.empty()) +
+                        " | width=" + std::to_string(prop.texture->width) +
+                        " | height=" + std::to_string(prop.texture->height) +
+                        " | is_loaded=" + std::to_string(prop.texture->is_loaded()));
+                    
+                    // IF texture has pixels in memory, write them (handle generated/unnamed textures)
+                    if (!prop.texture->pixels.empty()) {
+                         // Convert CompactVec4 to raw RGBA bytes for stbi_write_png
+                         std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
+                         for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
+                             const auto& px = prop.texture->pixels[pi];
+                             raw_pixels[pi * 4 + 0] = px.r;
+                             raw_pixels[pi * 4 + 1] = px.g;
+                             raw_pixels[pi * 4 + 2] = px.b;
+                             raw_pixels[pi * 4 + 3] = px.a;
+                         }
+                         
+                         // Encode to PNG in memory
+                         std::vector<char> png_data;
+                         stbi_write_png_to_func(write_to_vector_func, &png_data, 
+                             prop.texture->width, prop.texture->height, 4, 
+                             raw_pixels.data(), prop.texture->width * 4);
+                         
+                         if (!png_data.empty()) {
+                            bin_out.write(png_data.data(), png_data.size());
+                            tex_entry["size"] = png_data.size();
+                            tex_entry["format"] = ".png";
+                            SCENE_LOG_INFO("Embedded memory texture: " + path + " Size: " + std::to_string(png_data.size()));
+                         } else {
+                             SCENE_LOG_ERROR("Failed to encode memory texture to PNG: " + path);
+                         }
+
+                    } else if (!prop.texture->float_pixels.empty()) {
+                        // Handle Float textures (EXR/HDR) - TODO: Need stbi_write_hdr or similar
+                        // For now, skip or implement later.
+                        SCENE_LOG_WARN("Float texture embedding not fully implemented (skipping encode): " + path);
+
+                    } else if (fs::exists(path)) {
+                        // Read from file
+                        std::ifstream tex_file(path, std::ios::binary);
+                        if (tex_file) {
+                            tex_file.seekg(0, std::ios::end);
+                            size_t size = tex_file.tellg();
+                            tex_file.seekg(0, std::ios::beg);
+                            
+                            std::vector<char> data(size);
+                            tex_file.read(data.data(), size);
+                            bin_out.write(data.data(), size);
+                            
+                            tex_entry["size"] = size;
+                            tex_entry["format"] = fs::path(path).extension().string();
+                        }
+                    } 
+                } else {
+                    // Path reference
+                    tex_entry["mode"] = "path";
+                    tex_entry["path"] = path;
+                }
+                
+                texture_map[path] = texture_id++;
+                arr.push_back(tex_entry);
+            }
+        };
+        
+        // Use PrincipledBSDF pointer for correct texture property access
+        checkTexture(pbsdf->albedoProperty, "albedo");
+        checkTexture(pbsdf->normalProperty, "normal");
+        checkTexture(pbsdf->roughnessProperty, "roughness");
+        checkTexture(pbsdf->metallicProperty, "metallic");
+        checkTexture(pbsdf->emissionProperty, "emission");
+        checkTexture(pbsdf->opacityProperty, "opacity");
+        checkTexture(pbsdf->transmissionProperty, "transmission");
+    }
+    
+    SCENE_LOG_INFO("[ProjectManager] Serialized " + std::to_string(arr.size()) + " textures.");
+    return arr;
+}
+
+void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, const std::string& project_dir) {
+    // Clear previous embedded texture cache
+    m_embedded_texture_cache.clear();
+    
+    for (const auto& tex : j) {
+        std::string mode = tex.value("mode", "path");
+
+        if (mode == "embed") {
+            // Store embedded texture in memory cache (NO DISK WRITE!)
+            // MaterialManager::deserializeProperty will load from this cache
+            long long offset = tex.value("offset", 0LL);
+            size_t size = tex.value("size", 0);
+            std::string original_name = tex.value("original_name", "");
+            std::string usage = tex.value("usage", "albedo");
+
+            if (size > 0 && bin_in.is_open() && !original_name.empty()) {
+                bin_in.seekg(offset);
+                std::vector<char> data(size);
+                bin_in.read(data.data(), size);
+                
+                // Determine TextureType from usage string
+                TextureType texType = TextureType::Albedo;
+                if (usage == "normal") texType = TextureType::Normal;
+                else if (usage == "roughness") texType = TextureType::Roughness;
+                else if (usage == "metallic") texType = TextureType::Metallic;
+                else if (usage == "emission") texType = TextureType::Emission;
+                else if (usage == "opacity") texType = TextureType::Opacity;
+                else if (usage == "transmission") texType = TextureType::Transmission;
+                
+                // Store in memory cache - keyed by original_name
+                m_embedded_texture_cache[original_name] = {std::move(data), texType};
+                
+                SCENE_LOG_INFO("[EMBED CACHE] Stored texture in memory: " + original_name + 
+                               " (" + std::to_string(size) + " bytes)");
+            }
+        }
+        // Path mode textures are loaded directly by material deserializer from disk
+    }
+    SCENE_LOG_INFO("[ProjectManager] Cached " + std::to_string(m_embedded_texture_cache.size()) + 
+                   " embedded textures in memory (no temp files).");
 }

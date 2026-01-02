@@ -228,6 +228,33 @@
     <ClInclude Include="source\include\TimelineWidget.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\unified_noise.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_volume.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\unified_volume_sampling.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\OptixAccelManager.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\scene_ui_water.hpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\scene_ui_terrain.hpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\water_shaders.cuh">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\CloudNoise.cuh">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\scene_ui_nodeeditor.hpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -367,15 +394,6 @@
     <ClCompile Include="source\src\ProjectManager.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\miniz.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\miniz_tdef.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\miniz_tinfl.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
     <ClCompile Include="source\src\scene_ui_world.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
@@ -407,6 +425,42 @@
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
     <ClCompile Include="source\src\scene_ui_viewport.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\OptixAccelManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\scene_ui_animation.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\scene_ui_scatter.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\InstanceGroup.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\InstanceManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\WaterManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\TerrainManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz.c">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz_tdef.c">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz_tinfl.c">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz_zip.c">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\TerrainNodesV2.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
   </ItemGroup>

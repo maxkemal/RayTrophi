@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file unified_brdf.h
  * @brief Shared BRDF functions for CPU and GPU rendering parity
  * 
@@ -169,7 +169,7 @@ UNIFIED_FUNC Vec3f evaluate_brdf_unified(
     Vec3f k_d = (Vec3f(1.0f) - F_avg) * (1.0f - metallic_sampled);
     
     // Lambertian diffuse
-    Vec3f diffuse = k_d * albedo * UnifiedConstants::INV_PI;
+    Vec3f diffuse = k_d * albedo;
     
     // GPU-matching transmission handling:
     // When transmission >= 0.01, stochastically choose diffuse or specular

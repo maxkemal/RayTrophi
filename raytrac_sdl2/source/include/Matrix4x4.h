@@ -152,9 +152,9 @@ public:
         return m;
     }
 
-    double minor(int row, int col) const;
-    double cofactor(int row, int col) const;
-    double determinant() const;
+    float minor(int row, int col) const;
+    float cofactor(int row, int col) const;
+    float determinant() const;
     // Transpose metodu
     Matrix4x4 transpose() const;
 
@@ -181,13 +181,49 @@ public:
     // Statik matris oluşturucuları
     static Matrix4x4 translation(const Vec3& t);
     static Matrix4x4 scaling(const Vec3& s);
-    static Matrix4x4 rotation_x(double angle);
+    static Matrix4x4 rotation_x(float angle);
     // Y ve Z eksenleri için benzer rotasyon fonksiyonları eklenebilir
-    static Matrix4x4 translation(double x, double y, double z);
-    static Matrix4x4 scaling(double x, double y, double z);
-    static Matrix4x4 rotationX(double angle);
-    static Matrix4x4 rotationY(double angle);
-    static Matrix4x4 rotationZ(double angle);
+    static Matrix4x4 translation(float x, float y, float z);
+    static Matrix4x4 scaling(float x, float y, float z);
+    static Matrix4x4 rotationX(float angle);
+    static Matrix4x4 rotationY(float angle);
+    static Matrix4x4 rotationZ(float angle);
+    
+    // Compose TRS matrix from position, rotation (Euler XYZ degrees), and scale
+    static Matrix4x4 fromTRS(const Vec3& position, const Vec3& rotation, const Vec3& scale) {
+        const float deg2rad = 3.14159265358979f / 180.0f;
+        float rx = rotation.x * deg2rad;
+        float ry = rotation.y * deg2rad;
+        float rz = rotation.z * deg2rad;
+        
+        float cx = std::cos(rx), sx = std::sin(rx);
+        float cy = std::cos(ry), sy = std::sin(ry);
+        float cz = std::cos(rz), sz = std::sin(rz);
+        
+        // Build rotation matrix (XYZ order)
+        Matrix4x4 mat;
+        mat.m[0][0] = cy * cz * scale.x;
+        mat.m[0][1] = (-cy * sz * cz + sx * sy) * scale.y;
+        mat.m[0][2] = (sx * sz + cx * sy * cz) * scale.z;
+        mat.m[0][3] = position.x;
+        
+        mat.m[1][0] = sz * scale.x;
+        mat.m[1][1] = cz * cx * scale.y;
+        mat.m[1][2] = (-sx * cz + cx * sy * sz) * scale.z;
+        mat.m[1][3] = position.y;
+        
+        mat.m[2][0] = -sy * scale.x;
+        mat.m[2][1] = cy * sx * scale.y;
+        mat.m[2][2] = cx * cy * scale.z;
+        mat.m[2][3] = position.z;
+        
+        mat.m[3][0] = 0.0f;
+        mat.m[3][1] = 0.0f;
+        mat.m[3][2] = 0.0f;
+        mat.m[3][3] = 1.0f;
+        
+        return mat;
+    }
     
     // Decompose matrix into position, rotation (Euler XYZ degrees), and scale
     void decompose(Vec3& position, Vec3& rotation, Vec3& scale) const {
@@ -232,6 +268,7 @@ public:
 };
 
 #endif // MATRIX4X4_H
+
 
 
 

@@ -11,14 +11,14 @@ class Camera {
 private:
     struct Plane {
         Vec3 normal;
-        double distance;
+        float distance;
 
-        Plane() : normal(Vec3()), distance(0) {}
+        Plane() : normal(Vec3()), distance(0.0f) {}
         Plane(const Vec3& n, const Vec3& point) : normal(n.normalize()) {
             distance = -Vec3::dot(normal, point);
         }
 
-        double distanceToPoint(const Vec3& point) const {
+        float distanceToPoint(const Vec3& point) const {
             return Vec3::dot(normal, point) + distance;
         }
     };
@@ -26,20 +26,20 @@ private:
 public:
     Vec3 initialLookDirection;
     std::string nodeName;
-    int blade_count;
-    float aperture;
-    float focus_dist;
+    int blade_count = 6;
+    float aperture = 0.0f;
+    float focus_dist = 10.0f;
     Vec3 origin;
     Vec3 u, v, w;
     Vec3 lookfrom;
     Vec3 lookat;
     Vec3 vup;
-    float aspect;
-    float near_dist;
-    float far_dist;
-    float fov;
-    float aspect_ratio;
-    float vfov;
+    float aspect = 1.7777f;
+    float near_dist = 0.01f;
+    float far_dist = 1000.0f;
+    float fov = 45.0f;
+    float aspect_ratio = 1.7777f;
+    float vfov = 45.0f;
     // Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, double vfov, double aspect, double aperture, double focus_dist);
 
     Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
@@ -68,7 +68,7 @@ public:
     Vec3 lower_left_corner;
     Vec3 horizontal;
     Vec3 vertical;
-    float lens_radius;
+    float lens_radius = 0.0f;
     
     // ═══════════════════════════════════════════════════════════════════════════
     // PROFESSIONAL EXPOSURE SETTINGS
@@ -119,9 +119,9 @@ private:
     Vec3 init_lookfrom;
     Vec3 init_lookat;
     Vec3 init_vup;
-    float init_vfov;
-    float init_aperture;
-    float init_focus_dist;
+    float init_vfov = 45.0f;
+    float init_aperture = 0.0f;
+    float init_focus_dist = 10.0f;
     void updateFrustumPlanes();
 
     Vec3 getViewDirection() const;
@@ -132,4 +132,6 @@ private:
 };
 
 #endif // CAMERA_H
+
+
 

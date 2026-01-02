@@ -203,6 +203,7 @@
       <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <OpenMPSupport>true</OpenMPSupport>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -237,12 +238,17 @@
     <ClInclude Include="resource.h" />
     <ClInclude Include="source\external\miniz.h" />
     <ClInclude Include="source\include\ImGuizmo.h" />
+    <ClInclude Include="source\include\OptixAccelManager.h" />
     <ClInclude Include="source\include\SceneCommand.h" />
     <ClInclude Include="source\include\SceneHistory.h" />
     <ClInclude Include="source\include\SceneSelection.h" />
     <ClInclude Include="source\include\SceneSerializer.h" />
     <ClInclude Include="source\include\TimelineWidget.h" />
     <ClInclude Include="source\include\tinyexr.h" />
+    <ClInclude Include="source\include\unified_noise.h" />
+    <ClInclude Include="source\include\unified_volume.h" />
+    <ClInclude Include="source\include\unified_volume_sampling.h" />
+    <ClInclude Include="source\src\CloudNoise.cuh" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
@@ -253,6 +259,10 @@
     <ClInclude Include="source\external\imgui\imgui_impl_sdl2.h" />
     <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h" />
     <ClInclude Include="source\external\imgui\imgui_internal.h" />
+    <ClInclude Include="source\src\scene_ui_nodeeditor.hpp" />
+    <ClInclude Include="source\src\scene_ui_terrain.hpp" />
+    <ClInclude Include="source\src\scene_ui_water.hpp" />
+    <ClInclude Include="source\src\water_shaders.cuh" />
     <None Include="source\src\scatter_volume_step.h" />
     <None Include="source\src\material_scatter.cuh" />
     <None Include="source\src\vec3_utils.cuh" />
@@ -318,6 +328,7 @@
     <ClCompile Include="source\external\miniz.c" />
     <ClCompile Include="source\external\miniz_tdef.c" />
     <ClCompile Include="source\external\miniz_tinfl.c" />
+    <ClCompile Include="source\external\miniz_zip.c" />
     <ClCompile Include="source\src\AABB.cpp" />
     <ClCompile Include="source\src\AreaLight.cpp" />
     <ClCompile Include="source\src\AssimpLoader.cpp" />
@@ -328,11 +339,14 @@
     <ClCompile Include="source\src\globals.cpp" />
     <ClCompile Include="source\src\HittableList.cpp" />
     <ClCompile Include="source\src\ImGuizmo.cpp" />
+    <ClCompile Include="source\src\InstanceGroup.cpp" />
+    <ClCompile Include="source\src\InstanceManager.cpp" />
     <ClCompile Include="source\src\Light.cpp" />
     <ClCompile Include="source\src\Main.cpp" />
     <ClCompile Include="source\src\Material.cpp" />
     <ClCompile Include="source\src\Matrix4x4.cpp" />
     <ClCompile Include="source\src\Mesh.cpp" />
+    <ClCompile Include="source\src\OptixAccelManager.cpp" />
     <ClCompile Include="source\src\OptixWrapper.cpp" />
     <ClCompile Include="source\src\ParallelBVHNode.cpp" />
     <ClCompile Include="source\src\PointLight.cpp" />
@@ -344,17 +358,21 @@
     <ClCompile Include="source\src\SceneSelection.cpp" />
     <ClCompile Include="source\src\SceneSerializer.cpp" />
     <ClCompile Include="source\src\scene_ui.cpp" />
+    <ClCompile Include="source\src\scene_ui_animation.cpp" />
     <ClCompile Include="source\src\scene_ui_camera.cpp" />
     <ClCompile Include="source\src\scene_ui_gizmos.cpp" />
     <ClCompile Include="source\src\scene_ui_hierarchy.cpp" />
     <ClCompile Include="source\src\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\scene_ui_materials.cpp" />
+    <ClCompile Include="source\src\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\scene_ui_selection.cpp" />
     <ClCompile Include="source\src\scene_ui_viewport.cpp" />
     <ClCompile Include="source\src\scene_ui_world.cpp" />
     <ClCompile Include="source\src\SequencerAdapter.cpp" />
     <ClCompile Include="source\src\SplashScreen.cpp" />
     <ClCompile Include="source\src\SpotLight.cpp" />
+    <ClCompile Include="source\src\TerrainManager.cpp" />
+    <ClCompile Include="source\src\TerrainNodesV2.cpp" />
     <ClCompile Include="source\src\Texture.cpp" />
     <ClCompile Include="source\src\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\src\TimelineWidget.cpp" />
@@ -364,6 +382,7 @@
     <ClCompile Include="source\src\Vec3.cpp" />
     <ClCompile Include="source\src\Vec3SIMD.cpp" />
     <ClCompile Include="source\src\Volumetric.cpp" />
+    <ClCompile Include="source\src\WaterManager.cpp" />
     <ClCompile Include="source\src\World.cpp" />
     <ClCompile Include="source\src\MaterialManager.cpp" />
     <ClCompile Include="source\external\imgui\imgui.cpp" />

@@ -3,6 +3,7 @@
 #include <optix.h>
 #include <cuda_runtime.h>
 #include <vector>
+#include <memory>
 #include "Vec3.h"
 #include "Ray.h"
 #include "Hittable.h"
@@ -22,6 +23,10 @@
 #include <OpenImageDenoise/oidn.hpp>
 #include <sbt_data.h>
 
+// Forward declarations for TLAS/BLAS support
+class Triangle;
+struct MeshGeometry;
+struct MeshData;
 
 struct OptixGeometryData {
     std::vector<float3> vertices;
@@ -78,8 +83,8 @@ struct OptixGeometryData {
     std::vector<VolumetricInfo> volumetric_info;  // Parallel to materials
 };
 
-
-
+// Forward declare the acceleration manager (full include in OptixWrapper.cpp)
+class OptixAccelManager;
 
 class OptixWrapper {
 public:
@@ -97,7 +102,9 @@ public:
     void setupPipeline(const char* raygen_ptx);
     void destroyTextureObjects();
     void buildFromData(const OptixGeometryData& data);
-    void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // Dynamic update for animation
+    void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // Auto-decides based on mode
+    void updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // BLAS+TLAS update
+    void updateTLASMatricesOnly(const std::vector<std::shared_ptr<Hittable>>& objects); // Transform-only update
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
 
   
@@ -141,13 +148,62 @@ public:
     void updateSBTMaterialBindings(const std::vector<int>& material_indices);
     
     // Updates SBT hitgroup records with new volumetric parameters - for volumetric material changes
+    // Updates SBT hitgroup records with new volumetric parameters - for volumetric material changes
     void updateSBTVolumetricData(const std::vector<OptixGeometryData::VolumetricInfo>& volumetric_info);
-  
-      ColorProcessor color_processor;
 
-
-
+    // Set callback for OptixAccelManager status messages (for HUD)
+    void setAccelManagerStatusCallback(std::function<void(const std::string&, int)> callback);
+    // Rebuild TLAS only (call after transform updates)
+    void rebuildTLAS();
+    // Build scene using TLAS/BLAS structure (new method - replaces buildFromData for TLAS mode)
+    void buildFromDataTLAS(const OptixGeometryData& data,
+        const std::vector<std::shared_ptr<Hittable>>& objects);
+    // Check if using TLAS/BLAS mode
+    bool isUsingTLAS() const { return use_tlas_mode; }
+    // Update TLAS geometry (update all BLAS vertex buffers and refit)
+   
+    // Returns a vector because one object might be split into multiple instances (multi-material)
+    std::vector<int> getInstancesByNodeName(const std::string& nodeName) const {
+        auto it = node_to_instance.find(nodeName);
+        return (it != node_to_instance.end()) ? it->second : std::vector<int>{};
+    }
+    void updateInstanceTransform(int instance_id, const float transform[12]);
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // INCREMENTAL UPDATES (Fast delete/duplicate without BLAS rebuild)
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    // Hide all instances with matching node name (for delete - instant!)
+    void hideInstancesByNodeName(const std::string& nodeName);
+    
+    // Clone all instances with matching node name (for duplicate - instant!)
+    std::vector<int> cloneInstancesByNodeName(const std::string& sourceName, const std::string& newName);
+    
 private:
+    std::function<void(const std::string&, int)> m_accelStatusCallback;
+    
+    // OptiX context
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TLAS/BLAS ACCELERATION STRUCTURE (Two-Level AS for efficient updates)
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+   
+    
+    // Update instance transform without rebuilding BLAS (fast path for animation)
+    void updateInstanceTransform(int instance_id, const Vec3& position, 
+                                  const Vec3& rotation_deg, const Vec3& scale);
+    
+    // Enable TLAS mode (call before first buildFromDataTLAS)
+    void enableTLASMode(bool enable) { use_tlas_mode = enable; }
+
+   
+    
+    // Get AccelManager for advanced operations
+    OptixAccelManager* getAccelManager() { return accel_manager.get(); }
+    
+    ColorProcessor color_processor;
+
+
     Camera prev_camera;
     bool first_frame_camera = true;
     // OIDN members removed - denoising handled by Renderer class
@@ -160,6 +216,34 @@ private:
     //  Texture CUDA array tracking (memory leak fix)
     std::vector<cudaArray_t> texture_arrays;
     
+    // TLAS/BLAS acceleration structure managerstum süper
+    std::unique_ptr<OptixAccelManager> accel_manager;
+    bool use_tlas_mode = true;  // Set to true to use TLAS/BLAS instead of single GAS
+    
+    // Node name to instance mapping (for per-object transform updates)
+    // One node (e.g. "Car") can map to MULTIPLE instances (e.g. "Car_mat_0", "Car_mat_1")
+    std::unordered_map<std::string, std::vector<int>> node_to_instance;  // nodeName → vector<instance_id>
+    std::unordered_map<int, std::string> instance_to_node;  // instance_id → nodeName
+    
+    // Per-BLAS data storage (geometry buffers for each mesh)
+    struct PerBLASData {
+        CUdeviceptr d_vertices = 0;
+        CUdeviceptr d_indices = 0;
+        CUdeviceptr d_normals = 0;
+        CUdeviceptr d_uvs = 0;
+        CUdeviceptr d_tangents = 0;
+        CUdeviceptr d_material_indices = 0;
+        CUdeviceptr d_gas_output = 0;
+        OptixTraversableHandle handle = 0;
+        size_t triangle_count = 0;
+        std::string node_name;
+    };
+    std::vector<PerBLASData> per_blas_data;
+    
+    // Helper: Extract mesh geometry from triangles for BLAS building
+    MeshGeometry extractMeshGeometry(
+        const std::vector<std::shared_ptr<Triangle>>& all_triangles,
+        const MeshData& mesh);
 
     
     CUstream stream = nullptr;
@@ -230,4 +314,8 @@ private:
     
     // Helper function to compute camera hash
     uint64_t computeCameraHash() const;
+    
+    // Flag for parameter uploads
+    bool params_dirty = true;
+    size_t d_temp_buffer_size = 0; // Usage tracking for temp buffer optimization
 };

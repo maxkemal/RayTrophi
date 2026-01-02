@@ -9,12 +9,14 @@ __host__ __device__ inline float length3(const float3& v) {
     return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
 }
 
+#ifndef START_PARAMS_H_OVERRIDES
 __host__ __device__ inline float3 operator+(const float3& a, const float3& b) {
     return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
 }
 __host__ __device__ inline float3 operator-(const float3& a, const float3& b) {
     return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
 }
+#endif
 __host__ __device__ inline float3 operator-(const float3& v) {
     return make_float3(-v.x, -v.y, -v.z);
 }
@@ -24,9 +26,11 @@ __host__ __device__ inline float3 exp_componentwise(float3 v) {
 __host__ __device__ inline float3 operator*(const float3& a, const float3& b) {
     return make_float3(a.x * b.x, a.y * b.y, a.z * b.z);
 }
+#ifndef START_PARAMS_H_OVERRIDES
 __host__ __device__ inline float3 operator*(const float3& a, float t) {
     return make_float3(a.x * t, a.y * t, a.z * t);
 }
+#endif
 __host__ __device__ inline float3 operator*(float t, const float3& a) {
     return a * t;
 }
@@ -134,6 +138,19 @@ __host__ __device__ inline float3 min(const float3& a, const float3& b) {
 }
 __host__ __device__ inline float3 abs(const float3& a) {
     return make_float3(fabsf(a.x), fabsf(a.y), fabsf(a.z));
+}
+
+// === Extended Math ===
+__host__ __device__ inline float fract(float x) { return x - floorf(x); }
+__host__ __device__ inline float2 fract(float2 x) { return make_float2(fract(x.x), fract(x.y)); }
+__host__ __device__ inline float3 fract(float3 x) { return make_float3(fract(x.x), fract(x.y), fract(x.z)); }
+
+__host__ __device__ inline float2 floor_float2(float2 v) { return make_float2(floorf(v.x), floorf(v.y)); }
+__host__ __device__ inline float3 floor_float3(float3 v) { return make_float3(floorf(v.x), floorf(v.y), floorf(v.z)); }
+
+__host__ __device__ inline float smoothstep(float edge0, float edge1, float x) {
+    float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / (edge1 - edge0)));
+    return t * t * (3.0f - 2.0f * t);
 }
 
 // === Color & Utility ===

@@ -334,6 +334,15 @@ UNIFIED_FUNC int pick_smart_light_unified(
         if (light.type == 0) {  // Point
             weights[i] = falloff * intensity;
         }
+        else if (light.type == 1) {  // Directional Light (Sun)
+            // Modern approach: radiance-based weight instead of distance-based
+            // Sun has no position, use solid angle to estimate importance
+            float sun_angular_radius = fmaxf(light.radius, 0.01f);
+            float sun_solid_angle = 2.0f * UnifiedConstants::PI * (1.0f - cosf(sun_angular_radius));
+            float sun_radiance = intensity / fmaxf(sun_solid_angle, 0.0001f);
+            // Boost factor to compete with nearby point lights
+            weights[i] = sun_radiance * 0.2f;
+        }
         else if (light.type == 2) {  // Area
             float area = light.area_width * light.area_height;
             weights[i] = falloff * intensity * fminf(area, 10.0f);

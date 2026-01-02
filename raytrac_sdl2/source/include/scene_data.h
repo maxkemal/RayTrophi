@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <HittableList.h>
 #include <AssimpLoader.h>
 #include <AnimatedObject.h>
@@ -18,7 +18,7 @@ struct SceneData {
     std::shared_ptr<Camera> camera;  // Points to active camera
     
     std::vector<std::shared_ptr<Light>> lights;
-    Vec3 background_color = Vec3(0.2, 0.2, 0.2);
+    Vec3 background_color = Vec3(0.2f, 0.2f, 0.2f);
     bool initialized = false;
     BoneData boneData;
     ColorProcessor color_processor;

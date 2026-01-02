@@ -1,4 +1,4 @@
-[INFO] Found RTX-capable device: NVIDIA GeForce RTX 3060 (SM 8.6)
+[INFO] Found RTX device: NVIDIA GeForce RTX 3060 (SM 8.6) - Hardware RT Cores
 [INFO] OptiX is ready!
 [INFO] Loading Default Scene Asset: assets/default.glb
 [INFO] ========================================
@@ -38,6 +38,7 @@
 [INFO] [buildBoneData] Starting bone map generation...
 [INFO] [buildBoneData] Completed. Total unique bones: 0
 [INFO] Processing nodes to extract triangles...
+[INFO] [MaterialManager] getOrCreateMaterialID NEW: assets_default_material.002 -> ID=0 | NO TEXTURE
 [INFO] Triangle extraction completed: 2 triangles processed.
 [INFO] Processing animations...
 [INFO] No animations found in file: assets/default.glb
@@ -54,7 +55,6 @@
 [INFO] OptiX GPU detected. Creating OptiX geometry data...
 [INFO] [MAT-SUMMARY] Global materials: 1 | Triangles: 2
 [INFO] Converting 2 triangles to OptiX format.
-[INFO] Material indices verified (2 triangles checked)
 [INFO] Material indices validated.
 [INFO]  OptiX buildFromData is starting...
 [INFO] OptiX BVH and acceleration structures built.
@@ -68,5 +68,6 @@
 [INFO] Scene initialization flag set to true.
 [INFO] Found Directional Light in default asset. Syncing Nishita Sun...
 [INFO] [MAT-SUMMARY] Global materials: 1 | Triangles: 2
-[INFO] Material indices verified (2 triangles checked)
-[INFO]  OptiX buildFromData is starting...
+[INFO] [OptiX TLAS] Building scene with LOCAL SPACE geometry instancing...
+[INFO] [OptixAccelManager] Cleaned up
+[INFO] [OptiX TLAS] Found 1 mesh groups/instances

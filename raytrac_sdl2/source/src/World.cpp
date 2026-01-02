@@ -775,10 +775,23 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
                     float jitterSeed = (float)i + (rayDir.x * 53.0f + rayDir.z * 91.0f) * 10.0f;
                     Vec3 pos = camPos + rayDir * (t + stepSize * CPUCloudNoise::hash(jitterSeed));
                     
-                    // Height Gradient
+                    // Height Gradient - Anvil Shape (Matches GPU)
                     float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                    float heightGradient = 4.0f * heightFraction * (1.0f - heightFraction);
-                    heightGradient = fmaxf(0.0f, fminf(1.0f, heightGradient));
+                    
+                    auto smoothstep = [](float edge0, float edge1, float x) {
+                        float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / (edge1 - edge0)));
+                        return t * t * (3.0f - 2.0f * t);
+                    };
+                    
+                    // CUMULUS PROFILE (Strict Flat Bottom) - MATCHES GPU
+                    // 1. Sharp rise (0% to 5%)
+                    // 2. Round top (starts at 30%)
+                    float heightGradient = smoothstep(0.0f, 0.05f, heightFraction) * smoothstep(1.0f, 0.3f, heightFraction);
+
+                    // Boost bottom density
+                    if (heightFraction < 0.2f) {
+                        heightGradient = fmaxf(heightGradient, smoothstep(0.0f, 0.02f, heightFraction));
+                    }
                     
                     // Wind offset
                     Vec3 offsetPos = pos + Vec3(data.nishita.cloud_offset_x, 0.0f, data.nishita.cloud_offset_z);
@@ -798,9 +811,17 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
                         // ═══════════════════════════════════════════════════════════
                         float lightTransmittance = 1.0f;
                         int lightSteps = 0;  // Fewer steps for CPU performance
-                        float lightStepSize = (cloudMaxY - pos.y) / fmaxf(0.01f, sunDirVec.y) / (float)lightSteps;
-                        lightStepSize = fminf(lightStepSize, 500.0f);
-                        
+                        float safeSunY = fabsf(sunDirVec.y);
+                        if (safeSunY < 1e-3f) safeSunY = 1e-3f; // neredeyse yatay ışık
+
+                        float distance = cloudMaxY - pos.y;
+                        distance = fmaxf(distance, 0.0f);     // ters yöne gitme
+
+                        float steps = fmaxf((float)lightSteps, 1.0f);
+
+                        float lightStepSize = distance / safeSunY / steps;
+                        if (sunDirVec.y <= 0.0f || cloudMaxY <= pos.y)
+                            lightStepSize = 0.0f;                        
                         if (sunDirVec.y > 0.01f) {
                             for (int j = 1; j <= lightSteps; ++j) {
                                 Vec3 lightPos = pos + sunDirVec * (lightStepSize * (float)j);
@@ -811,7 +832,10 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
                                 float lightDensity = CPUCloudNoise::cloud_shape(lightNoisePos, coverage);
                                 
                                 float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                                float lightHeightGrad = 4.0f * lh * (1.0f - lh);
+                                // Match Cumulus profile
+                                float lightHeightGrad = smoothstep(0.0f, 0.05f, lh) * smoothstep(1.0f, 0.3f, lh);
+                                if (lh < 0.2f) lightHeightGrad = fmaxf(lightHeightGrad, smoothstep(0.0f, 0.02f, lh));
+                                
                                 lightDensity *= lightHeightGrad * densityMult;
                                 
                                 lightTransmittance *= expf(-lightDensity * lightStepSize * 0.015f);
@@ -824,7 +848,12 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
                         // ADVANCED COLOR CALCULATION
                         // ═══════════════════════════════════════════════════════════
                         float cosTheta = rayDir.x * sunDirVec.x + rayDir.y * sunDirVec.y + rayDir.z * sunDirVec.z;
-                        float phase = (1.0f - g * g) / (4.0f * (float)M_PI * powf(1.0f + g * g - 2.0f * g * cosTheta, 1.5f));
+                        
+                        // Dual-Lobe Henyey-Greenstein (Matches GPU)
+                        float phase1 = (1.0f - g * g) / (4.0f * (float)M_PI * powf(1.0f + g * g - 2.0f * g * cosTheta, 1.5f));
+                        float g2 = -0.4f; // Back scattering
+                        float phase2 = (1.0f - g2 * g2) / (4.0f * (float)M_PI * powf(1.0f + g2 * g2 - 2.0f * g2 * cosTheta, 1.5f));
+                        float phase = phase1 * 0.7f + phase2 * 0.3f; // Mix 70/30
                         float powder = CPUCloudNoise::powderEffect(density, cosTheta);
                         
                         // ═══════════════════════════════════════════════════════════
