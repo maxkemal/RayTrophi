@@ -69,10 +69,10 @@ void ThemeManager::registerDefaultThemes() {
         themes_.push_back(t);
     }
 
-    // --- 3: Blender Dark ---
+    // --- 3: Studio Dark ---
     {
         Theme t;
-        t.name = "Blender Dark";
+        t.name = "Studio Dark";
         t.style.frameRounding = 3.0f;
         t.style.windowRounding = 2.0f;
         t.style.scrollbarRounding = 3.0f;

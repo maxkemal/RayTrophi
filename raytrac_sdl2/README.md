@@ -15,7 +15,7 @@ A high-performance modular ray tracing engine built with NVIDIA OptiX 7, SDL2, a
 - **Denoiser:** Integrated OIDN (Open Image Denoise) for clean previews.
 
 ### 🛠️ Scene Editor (New!)
-- **Manipulators:** Maya/Blender style Gizmos for Translate, Rotate, Scale.
+- **Manipulators:** Modern 3D Gizmos for Translate, Rotate, Scale.
 - **Undo/Redo System:** 
   - Robust history stack for **Object Deletion**, **Duplication**, and **Transformations**.
   - Smart memory management (limits separate for heavy geometry vs. lightweight transforms).
@@ -48,7 +48,7 @@ A high-performance modular ray tracing engine built with NVIDIA OptiX 7, SDL2, a
 
 ## 📦 Recent Updates
 - **Terrain Node System 2.0:** 
-  - Gaea-style procedural texturing (AutoSplat) based on height & slope.
+  - Geo-based procedural texturing (AutoSplat) based on height & slope.
   - New Node Types: `AutoSplat`, `MaskPaint`, `MaskImage`, `SplatOutput`.
   - Export Splat Maps directly to PNG.
 - **Advanced Sky System:**

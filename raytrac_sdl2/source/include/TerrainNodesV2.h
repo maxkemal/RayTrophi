@@ -68,7 +68,7 @@ namespace TerrainNodesV2 {
         Overlay,
         Screen,
         // NEW: Procedural Texture Nodes
-        AutoSplat,       // Gaea-style auto texture mapping
+        AutoSplat,       // Geospatial auto texture mapping
         MaskPaint,       // Viewport brush painting
         MaskImage,       // Import grayscale mask
         // Outputs

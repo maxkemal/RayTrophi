@@ -559,7 +559,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             UIWidgets::EndSection();
         }
         
-        // Atmosphere Section (Blender-style parameters)
+        // Atmosphere Section (Realistic parameters)
         if (UIWidgets::BeginSection("Atmosphere", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
             // Air
             bool airKeyed = isWorldKeyed(WorldProp::AirDensity);
