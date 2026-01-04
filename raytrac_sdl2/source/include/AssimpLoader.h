@@ -125,13 +125,13 @@ struct AnimationData {
             double factor = (deltaTime == 0) ? 0.0 :
                 (animationTime - keys[frameIndex].mTime) / deltaTime;
 
-            Quaternion start(keys[frameIndex].mValue.x, keys[frameIndex].mValue.y, keys[frameIndex].mValue.z, keys[frameIndex].mValue.w);
-            Quaternion end(keys[nextFrameIndex].mValue.x, keys[nextFrameIndex].mValue.y, keys[nextFrameIndex].mValue.z, keys[nextFrameIndex].mValue.w);
+            Quaternion start(keys[frameIndex].mValue.w, keys[frameIndex].mValue.x, keys[frameIndex].mValue.y, keys[frameIndex].mValue.z);
+            Quaternion end(keys[nextFrameIndex].mValue.w, keys[nextFrameIndex].mValue.x, keys[nextFrameIndex].mValue.y, keys[nextFrameIndex].mValue.z);
             rotation = Quaternion::slerp(start, end, factor);
             rotationMatrix = rotation.toMatrix();
         } else {
              // Fallback to Bind Pose Rotation (Fixes FBX flipped camera issues)
-             Quaternion defQ(defRot.x, defRot.y, defRot.z, defRot.w);
+             Quaternion defQ(defRot.w, defRot.x, defRot.y, defRot.z);
              rotationMatrix = defQ.toMatrix();
         }
 

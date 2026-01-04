@@ -22,6 +22,9 @@
 #include "OptixWrapper.h"     // Added explicit include
 #include "SceneSelection.h"   // Added explicit include
 #include "Triangle.h"         // Added for CPU sync
+#include "WaterSystem.h"      // Added for WaterManager
+#include "CloudManager.h"     // Added for CloudManager
+
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
@@ -654,6 +657,35 @@ int main(int argc, char* argv[]) {
                 ui_ctx.animation_preview_ready = false;
             }
         }
+        // =========================================================================
+        // TIME & ANIMATION UPDATE
+        // =========================================================================
+        static auto last_sim_time = std::chrono::steady_clock::now();
+        auto current_sim_time = std::chrono::steady_clock::now();
+        float dt = std::chrono::duration<float>(current_sim_time - last_sim_time).count();
+        last_sim_time = current_sim_time;
+        
+        bool timeline_playing = ui.timeline.isPlaying();
+        
+        if (timeline_playing) {
+             // Update Water Manager
+             WaterManager::getInstance().update(dt);
+             
+             // Update OptiX Time
+             if (g_hasOptix) {
+                  // Use frame count from timeline (24 FPS assumption or settings)
+                  float time_seconds = ui.timeline.getCurrentFrame() / 24.0f;
+                  optix_gpu.setTime(time_seconds, time_seconds);
+                  
+                  // Force redraw (break accumulation)
+                  start_render = true;
+                  g_needs_optix_sync = true; // Signal that params changed
+             }
+        } else {
+             // Static update (for editor changes)
+             WaterManager::getInstance().update(0.0f);
+        }
+
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
@@ -959,7 +991,7 @@ int main(int argc, char* argv[]) {
             }
 
 
-            if (e.type == SDL_QUIT) quit = true;
+            if (e.type == SDL_QUIT) ui.tryExit();
         }
         const Uint8* key_state = SDL_GetKeyboardState(NULL);
 
@@ -1118,15 +1150,21 @@ int main(int argc, char* argv[]) {
                         
                         // OPTIMIZATION: Only update animation state when timeline frame changed
                         // Skip during camera-only movement to avoid expensive geometry updates
+                        // ALSO: Skip for manual keyframes - TimelineWidget::draw() handles those
                         static int last_anim_frame = -1;
                         bool geometry_updated = false;
-                        if (current_f != last_anim_frame) {
+                        bool has_file_animations = !scene.animationDataList.empty();
+                        
+                        if (current_f != last_anim_frame && has_file_animations) {
                             geometry_updated = ray_renderer.updateAnimationState(scene, time);
                             last_anim_frame = current_f;
                         }
                         
                         if (geometry_updated) {
-                            optix_gpu.updateGeometry(scene.world.objects);
+                            // SKINNING FIX: File-based animations may include skinning which deforms vertices.
+                            // updateGeometry() in TLAS mode only updates matrices (transforms).
+                            // For skinning, we need updateTLASGeometry() which rebuilds BLAS with new vertex data.
+                            optix_gpu.updateTLASGeometry(scene.world.objects);
                             // Geometry change implies all buffers need refresh
                             g_camera_dirty = true;
                             g_lights_dirty = true;
@@ -1148,6 +1186,38 @@ int main(int argc, char* argv[]) {
                             optix_gpu.setLightParams(scene.lights);
                             g_lights_dirty = false;
                         }
+                        // Update Cloud FFT map binding dynamically
+                        // 1. Update Cloud Manager (independent FFT) if needed
+                        float dt_cloud = ImGui::GetIO().DeltaTime;
+                        if (ui.timeline.isPlaying()) {
+                           // Use animation time step if playing
+                           // dt_cloud is already calculated above as dt?
+                        }
+
+                        CloudManager::getInstance().update(ImGui::GetIO().DeltaTime, ray_renderer.world.getNishitaParams());
+
+                        NishitaSkyParams nishita = ray_renderer.world.getNishitaParams();
+                        cudaTextureObject_t waterFFT = WaterManager::getInstance().getFirstFFTHeightMap();
+                        cudaTextureObject_t cloudFFT = CloudManager::getInstance().getCloudFFTTexture();
+                        
+                        // Priority: Ocean > CloudFFT (Standalone)
+                        // If we have an ocean, sync clouds to it. If not, use independent cloud FFT.
+                        cudaTextureObject_t activeFFT = waterFFT ? waterFFT : cloudFFT;
+                        
+                        if (nishita.cloud_fft_map != activeFFT) {
+                             nishita.cloud_fft_map = activeFFT;
+                             // Only set 'use_fft' flag if User requested it in settings, 
+                             // not just because we have a texture. But nishita.cloud_use_fft comes from UI.
+                             // Actually, we should force it enabled if texture exists AND user checked it?
+                             // No, user checks 'cloud_use_fft' in UI. We just provide map.
+                             // But render_cloud_layer checks both.
+                             
+                             // Update texture handle
+                             nishita.cloud_fft_map = activeFFT;
+                             ray_renderer.world.setNishitaParams(nishita);
+                             g_world_dirty = true;
+                        }
+
                         if (g_world_dirty) {
                             optix_gpu.setWorld(ray_renderer.world.getGPUData());
                             g_world_dirty = false;
@@ -1227,8 +1297,10 @@ int main(int argc, char* argv[]) {
                         }
                         
                         // OPTIMIZATION: Only update animation state when timeline frame changed
+                        // AND when we have file-based animations (not manual keyframes)
                         static int last_cpu_anim_frame = -1;
-                        if (current_f != last_cpu_anim_frame) {
+                        bool has_file_animations = !scene.animationDataList.empty();
+                        if (current_f != last_cpu_anim_frame && has_file_animations) {
                              ray_renderer.updateAnimationState(scene, time);
                              last_cpu_anim_frame = current_f;
                         }
@@ -1324,37 +1396,106 @@ int main(int argc, char* argv[]) {
                 int start_frame = ui_ctx.render_settings.animation_start_frame;
                 float time = (current_playback_frame - start_frame) / fps;
                 
-                // Update animation state immediately
-                ray_renderer.updateAnimationState(scene, time);
+                // PERFORMANCE OPTIMIZATION: 
+                // Check if ANY animation data exists (file-based OR manual keyframes)
+                // If no animation at all, SKIP all expensive updates - nothing to animate!
+                bool has_file_animations = !scene.animationDataList.empty();
+                bool has_timeline_tracks = !scene.timeline.tracks.empty();
                 
-                // Mark all buffers dirty for animation frame change
-                g_camera_dirty = true;
-                g_lights_dirty = true;
-                g_world_dirty = true;
+                // Count actual keyframes (not just tracks) - CACHE THIS to avoid repeated iteration
+                static size_t cached_total_keyframes = 0;
+                static bool keyframe_cache_valid = false;
                 
-                // Update OptiX if needed
-                if (ui_ctx.render_settings.use_optix && g_hasOptix) {
-                    optix_gpu.updateGeometry(scene.world.objects);
-                    if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
-                    optix_gpu.setLightParams(scene.lights);
-                    
-                    // Update GPU materials for material keyframe animation
-                    ray_renderer.updateOptiXMaterialsOnly(scene, &optix_gpu);
-                    
-                    // Reset accumulation for new frame
-                    optix_gpu.resetAccumulation();
-                    
-                    // Clear dirty flags since we just updated manually
-                    g_camera_dirty = false;
-                    g_lights_dirty = false;
-                    g_world_dirty = false;
-                } else {
-                    // Reset CPU accumulation for new frame
-                    ray_renderer.resetCPUAccumulation();
+                if (!keyframe_cache_valid || has_timeline_tracks) {
+                    cached_total_keyframes = 0;
+                    for (const auto& [name, track] : scene.timeline.tracks) {
+                        cached_total_keyframes += track.keyframes.size();
+                    }
+                    keyframe_cache_valid = true;
                 }
+                bool has_manual_keyframes = cached_total_keyframes > 0;
                 
-                // Trigger preview render
-                start_render = true;
+                // DEBUG: Uncomment to trace animation state
+                // SCENE_LOG_INFO("[ANIM DEBUG] Frame " + std::to_string(current_playback_frame) + 
+                //                " | FileAnims=" + std::to_string(has_file_animations) +
+                //                " | Tracks=" + std::to_string(scene.timeline.tracks.size()) +
+                //                " | Keyframes=" + std::to_string(cached_total_keyframes));
+                
+                // SKIP EVERYTHING if no animations exist at all
+                if (!has_file_animations && !has_manual_keyframes) {
+                    // No animation data - just reset accumulation and skip geometry updates
+                    if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+                        optix_gpu.resetAccumulation();
+                    } else {
+                        ray_renderer.resetCPUAccumulation();
+                    }
+                    start_render = true;
+                    last_playback_frame = current_playback_frame;
+                    // FAST PATH: Skip all expensive work below
+                }
+                else {
+                    // We have some animation data - process accordingly
+                    
+                    if (has_file_animations) {
+                        // File-based animations present - need full update (Assimp skinning, node hierarchy)
+                        ray_renderer.updateAnimationState(scene, time);
+                    }
+                    // else: TimelineWidget::draw() handles manual keyframes with O(1) object lookup - FAST!
+                    
+                    // Mark all buffers dirty for animation frame change
+                    g_camera_dirty = true;
+                    g_lights_dirty = true;
+                    g_world_dirty = true;
+                    
+                    // Update OptiX if needed
+                    if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+                        // PERFORMANCE: Only update geometry if file-based animations modified it
+                        if (has_file_animations) {
+                            optix_gpu.updateGeometry(scene.world.objects);
+                        } else if (has_manual_keyframes) {
+                            // PERFORMANCE CRITICAL: 
+                            // updateTLASMatricesOnly calls syncInstanceTransforms which iterates ALL 2M objects!
+                            // This was causing 5 second delays per frame.
+                            //
+                            // TimelineWidget::draw() already updated the transforms via th->setBase().
+                            // We DON'T need to sync transforms from CPU Triangle objects to GPU instances.
+                            // Instead, we just need to trigger a TLAS rebuild with the EXISTING instance data.
+                            //
+                            // The GPU instances already have correct transforms from the last build.
+                            // Manual keyframe transforms are applied to CPU Triangle->TransformHandle,
+                            // which OptiX instances already reference.
+                            //
+                            // SKIP: optix_gpu.updateTLASMatricesOnly(scene.world.objects);
+                            // SKIP: g_gpu_refit_pending = true; // This also calls updateTLASMatricesOnly!
+                            // 
+                            // TimelineWidget::draw() already updated instance transforms and called rebuildTLAS()
+                            // We don't need to do anything here - just let the updated TLAS be used.
+                            //
+                            // REMOVED: optix_gpu.rebuildTLAS(); // Already done in TimelineWidget
+                        }
+                        // If !has_file_animations && !has_manual_keyframes, we don't reach here
+                        
+                        if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
+                        optix_gpu.setLightParams(scene.lights);
+                        
+                        // Update GPU materials for material keyframe animation
+                        ray_renderer.updateOptiXMaterialsOnly(scene, &optix_gpu);
+                        
+                        // Reset accumulation for new frame
+                        optix_gpu.resetAccumulation();
+                        
+                        // Clear dirty flags since we just updated manually
+                        g_camera_dirty = false;
+                        g_lights_dirty = false;
+                        g_world_dirty = false;
+                    } else {
+                        // Reset CPU accumulation for new frame
+                        ray_renderer.resetCPUAccumulation();
+                    }
+                    
+                    // Trigger preview render
+                    start_render = true;
+                }
             }
             
             last_playback_frame = current_playback_frame;
@@ -1548,8 +1689,17 @@ int main(int argc, char* argv[]) {
                 auto optix_ptr = &optix_gpu;
                 auto& renderer_ref = ray_renderer;
                 
+                // CRITICAL FIX: Set global flag to pause rendering in OptixWrapper
+                g_optix_rebuild_in_progress = true;
+
                 g_optix_future = std::async(std::launch::async, [&scene_ref, optix_ptr, &renderer_ref]() {
                     renderer_ref.rebuildOptiXGeometry(scene_ref, optix_ptr);
+                    
+                    // REAPPLY FOLIAGE persistence (since rebuild wipes instances)
+                    // We must do this inside adding or after it finishes?
+                    // Actually, TerrainManager manages its own instances in AccelManager.
+                    // If rebuildOptiXGeometry wipes AccelManager, we must re-add them.
+                    TerrainManager::getInstance().reapplyAllFoliage(optix_ptr);
                 });
                 
                 g_optix_rebuilding = true;
@@ -1570,6 +1720,8 @@ int main(int argc, char* argv[]) {
                     SCENE_LOG_WARN(std::string("OptiX Rebuild Failed: ") + e.what());
                 }
                 g_optix_rebuilding = false;
+                // CRITICAL FIX: Resume rendering
+                g_optix_rebuild_in_progress = false;
             }
         }
         
