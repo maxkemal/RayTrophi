@@ -8,6 +8,7 @@ class ColorProcessor;
 class SceneSelection;
 struct RenderSettings;
 class Texture;
+struct InstanceGroup;
 
 #include "ui_modern.h"  // Modern UI sistemi
 #include "SceneHistory.h"  // Undo/Redo system
@@ -20,6 +21,7 @@ class Texture;
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
 #include <fstream>
 #include <map>
+#include <atomic> // For thread-safe flags
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HEADER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -90,6 +92,7 @@ public:
     // Static Helpers (Shared across modules)
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
     static std::string saveFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const wchar_t* defExt = L"rts");
+    static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
 
 
     void drawHistogramPanel(UIContext& ctx);      
@@ -113,6 +116,7 @@ public:
      void drawTransformGizmo(UIContext& ctx);  // ImGuizmo transform gizmo   
      void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
      void drawViewportControls(UIContext& ctx); // Blender-style viewport overlay (top-right)
+     void drawRenderWindow(UIContext& ctx); // Converted from global to member function
      void draw(UIContext& ctx);
      void handleMouseSelection(UIContext& ctx); // Publicly accessible for Main loop call
      void triggerDelete(UIContext& ctx); // Trigger delete operation (for Menu and Key)
@@ -131,6 +135,30 @@ public:
      void addViewportMessage(const std::string& text, float duration = 2.0f, ImVec4 color = ImVec4(1,1,1,1));
      void clearViewportMessages(); // Force clear all messages
      void drawViewportMessages(UIContext& ctx, float left_offset);
+     
+     // Background Save State (0=Idle, 1=Saving, 2=Done, 3=Error)
+     // Background Save State (0=Idle, 1=Saving, 2=Done, 3=Error)
+     std::atomic<int> bg_save_state{0};
+
+     // Exit Confirmation
+     bool show_exit_confirmation = false;
+     enum class PendingAction {
+        None,
+        Exit,
+        NewProject,
+        OpenProject
+    };
+
+    PendingAction pending_action = PendingAction::None;
+
+    void tryNew(UIContext& ctx);
+    void tryOpen(UIContext& ctx);
+    void performNewProject(UIContext& ctx);
+    void performOpenProject(UIContext& ctx);
+    
+    // Existing functions...
+    void tryExit();
+     void drawExitConfirmation(UIContext& ctx);
 
      // Interaction Flags
      bool is_picking_focus = false; // Flag for "Pick Focus" mode (hit distance only)
@@ -218,10 +246,22 @@ public:
     };
     TerrainBrushSettings terrain_brush;
 
+    // Terrain Foliage Brush Settings (Paint to add/remove foliage)
+    struct FoliageBrushSettings {
+        bool enabled = false;           // Foliage brush mode active
+        std::string active_layer_name;  // Which foliage layer to paint (by name)
+        float radius = 5.0f;            // Brush size in world units
+        int density = 3;                // Instances per stroke
+        int mode = 0;                   // 0=Add, 1=Remove
+        bool show_preview = true;       // Show brush circle in viewport
+    };
+    FoliageBrushSettings foliage_brush;
+
     // Water & Terrain UI
     void drawWaterPanel(UIContext& ctx);
     void drawTerrainPanel(UIContext& ctx);
     void handleTerrainBrush(UIContext& ctx);
+    void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
      
 private:
     // --- UI Structure ---
@@ -309,4 +349,9 @@ private:
     // Terrain Node Graph (V2 System)
     TerrainNodesV2::TerrainNodeGraphV2 terrainNodeGraph;
     TerrainNodesV2::TerrainNodeEditorUI terrainNodeEditorUI;
+    
+public:
+    // Terrain Node Graph accessors for serialization
+    TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() { return terrainNodeGraph; }
+    const TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() const { return terrainNodeGraph; }
 };
