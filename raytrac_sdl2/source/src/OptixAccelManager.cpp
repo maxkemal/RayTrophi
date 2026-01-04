@@ -74,6 +74,11 @@ std::vector<MeshData> OptixAccelManager::groupTrianglesByMesh(
         result.push_back(std::move(data));
     }
     
+    // Sort by name to ensure deterministic order (Stable Mesh IDs)
+    std::sort(result.begin(), result.end(), [](const MeshData& a, const MeshData& b) {
+        return a.mesh_name < b.mesh_name;
+    });
+
    // SCENE_LOG_INFO("[OptixAccelManager] Grouped " + std::to_string(triangles.size()) + 
     //               " triangles into " + std::to_string(result.size()) + " meshes");
     
@@ -383,10 +388,11 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
             
             uint32_t base = static_cast<uint32_t>(geom.vertices.size());
             
-            // Get LOCAL-SPACE vertex positions (bind-pose)
-            Vec3 v0 = tri->getOriginalVertexPosition(0);
-            Vec3 v1 = tri->getOriginalVertexPosition(1);
-            Vec3 v2 = tri->getOriginalVertexPosition(2);
+            // Get CURRENT vertex positions (skinned/transformed)
+            // CRITICAL FIX: Previously used getOriginalVertexPosition which ignored skinning!
+            Vec3 v0 = tri->getVertexPosition(0);
+            Vec3 v1 = tri->getVertexPosition(1);
+            Vec3 v2 = tri->getVertexPosition(2);
             geom.vertices.push_back({v0.x, v0.y, v0.z});
             geom.vertices.push_back({v1.x, v1.y, v1.z});
             geom.vertices.push_back({v2.x, v2.y, v2.z});
@@ -394,10 +400,10 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
             // Standard winding
             geom.indices.push_back({base, base + 1, base + 2});
             
-            // Normals - LOCAL SPACE (bind-pose, shader will transform)
-            Vec3 n0 = tri->getOriginalVertexNormal(0);
-            Vec3 n1 = tri->getOriginalVertexNormal(1);
-            Vec3 n2 = tri->getOriginalVertexNormal(2);
+            // Normals - CURRENT (skinned/transformed)
+            Vec3 n0 = tri->getVertexNormal(0);
+            Vec3 n1 = tri->getVertexNormal(1);
+            Vec3 n2 = tri->getVertexNormal(2);
             geom.normals.push_back({n0.x, n0.y, n0.z});
             geom.normals.push_back({n1.x, n1.y, n1.z});
             geom.normals.push_back({n2.x, n2.y, n2.z});

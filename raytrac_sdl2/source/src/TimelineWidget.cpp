@@ -7,6 +7,7 @@
 #include <chrono>
 #include <algorithm>
 #include <set>
+#include <map>
 #include <cmath>
 #include "SceneSelection.h"
 #include "renderer.h"
@@ -15,6 +16,7 @@
 #include "MaterialManager.h"
 #include "Matrix4x4.h"
 #include "world.h"
+#include "OptixWrapper.h"  // For direct instance transform updates
 
 // Helper to parse entity name and channel from track name
 // Returns { "Cube_1", ChannelType::Location } if input is "Cube_1.Location"
@@ -64,14 +66,22 @@ static std::pair<std::string, ChannelType> parseTrackName(const std::string& tra
 // MAIN DRAW FUNCTION
 // ============================================================================
 void TimelineWidget::draw(UIContext& ctx) {
+    // PERFORMANCE: Only sync once on first frame, or when explicitly triggered
+    // syncFromAnimationData is now called only when needed, not every frame
+    static bool first_sync_done = false;
+    if (!first_sync_done) {
+        syncFromAnimationData(ctx);
+        first_sync_done = true;
+    }
+    
+    // PERFORMANCE: Handle selection change with minimal overhead
+    handleSelectionSync(ctx);
+    
     // Rebuild tracks if needed
     if (tracks_dirty) {
         rebuildTrackList(ctx);
         tracks_dirty = false;
     }
-    
-    // Sync imported animation data
-    syncFromAnimationData(ctx);
     
     // Get available region
     ImVec2 region = ImGui::GetContentRegionAvail();
@@ -122,76 +132,157 @@ void TimelineWidget::draw(UIContext& ctx) {
     ctx.scene.timeline.current_frame = current_frame;
     
     // --- APPLY TERRAIN ANIMATIONS ---
-    // This runs independently of terrain panel - critical for playback/render
-    static int last_terrain_update_frame = -1;
-    if (current_frame != last_terrain_update_frame) {
-        // Find all terrain tracks and apply animation
-        for (auto& [track_name, track] : ctx.scene.timeline.tracks) {
-            // Check if this track has terrain keyframes
-            bool has_terrain_kf = false;
-            for (auto& kf : track.keyframes) {
-                if (kf.has_terrain) {
-                    has_terrain_kf = true;
-                    break;
+    // PERFORMANCE: Skip if no timeline tracks exist at all
+    if (!ctx.scene.timeline.tracks.empty()) {
+        static int last_terrain_update_frame = -1;
+        if (current_frame != last_terrain_update_frame) {
+            // Only iterate if we might have terrain keyframes
+            for (auto& [track_name, track] : ctx.scene.timeline.tracks) {
+                // PERFORMANCE: Skip empty tracks immediately
+                if (track.keyframes.empty()) continue;
+                
+                // Quick check: does first keyframe have terrain? (common case optimization)
+                bool has_terrain_kf = track.keyframes[0].has_terrain;
+                if (!has_terrain_kf) {
+                    // Check remaining only if first doesn't have it
+                    for (size_t i = 1; i < track.keyframes.size(); ++i) {
+                        if (track.keyframes[i].has_terrain) {
+                            has_terrain_kf = true;
+                            break;
+                        }
+                    }
                 }
-            }
-            
-            if (has_terrain_kf) {
-                // Find terrain by name
-                auto& terrains = TerrainManager::getInstance().getTerrains();
-                for (auto& terrain : terrains) {
-                    if (terrain.name == track_name) {
-                        TerrainManager::getInstance().updateFromTrack(&terrain, track, current_frame);
-                        
-                        // Trigger GPU/BVH rebuilds
-                        ctx.renderer.resetCPUAccumulation();
-                        g_bvh_rebuild_pending = true;
-                        g_optix_rebuild_pending = true;
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                        break;
+                
+                if (has_terrain_kf) {
+                    auto& terrains = TerrainManager::getInstance().getTerrains();
+                    for (auto& terrain : terrains) {
+                        if (terrain.name == track_name) {
+                            TerrainManager::getInstance().updateFromTrack(&terrain, track, current_frame);
+                            ctx.renderer.resetCPUAccumulation();
+                            g_bvh_rebuild_pending = true;
+                            g_optix_rebuild_pending = true;
+                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            break;
+                        }
                     }
                 }
             }
+            last_terrain_update_frame = current_frame;
         }
-        last_terrain_update_frame = current_frame;
     }
     
     // --- APPLY OBJECT/LIGHT/CAMERA/WORLD ANIMATIONS ---
-    static int last_anim_update_frame = -1;
-    if (current_frame != last_anim_update_frame) {
-        bool needs_bvh_update = false;
-        bool needs_light_update = false;
-        bool needs_camera_update = false;
-        
-        for (auto& [track_name, track] : ctx.scene.timeline.tracks) {
-            // Skip terrain tracks (already handled above)
-            bool is_terrain = false;
-            for (auto& kf : track.keyframes) {
-                if (kf.has_terrain) { is_terrain = true; break; }
+    // PERFORMANCE: Skip entire animation loop if no tracks exist OR no keyframes exist
+    // Count total keyframes FIRST to avoid entering expensive loops unnecessarily
+    size_t total_keyframe_count = 0;
+    for (const auto& [name, track] : ctx.scene.timeline.tracks) {
+        total_keyframe_count += track.keyframes.size();
+        if (total_keyframe_count > 0) break; // Early exit if any found
+    }
+    
+    if (total_keyframe_count > 0) {
+        static int last_anim_update_frame = -1;
+        if (current_frame != last_anim_update_frame) {
+            bool needs_bvh_update = false;
+            bool needs_light_update = false;
+            bool needs_camera_update = false;
+            
+            // PERFORMANCE: Build object cache ONCE before the track loop, not per-track
+            static std::map<std::string, std::shared_ptr<Triangle>> object_cache;
+            static bool cache_valid = false;
+            static size_t last_object_count = 0;
+            
+            // Invalidate cache if object count changed
+            if (ctx.scene.world.objects.size() != last_object_count) {
+                cache_valid = false;
+                last_object_count = ctx.scene.world.objects.size();
             }
-            if (is_terrain) continue;
+            
+            // Build cache once (not per track!)
+            if (!cache_valid) {
+                object_cache.clear();
+                for (auto& obj : ctx.scene.world.objects) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                    if (tri && !tri->nodeName.empty()) {
+                        object_cache[tri->nodeName] = tri;
+                    }
+                }
+                cache_valid = true;
+            }
+            
+            for (auto& [track_name, track] : ctx.scene.timeline.tracks) {
+                // PERFORMANCE: Skip empty tracks immediately
+                if (track.keyframes.empty()) continue;
+                
+                // Quick terrain check (first keyframe optimization)
+                bool is_terrain = track.keyframes[0].has_terrain;
+                if (is_terrain) continue;
             
             // Evaluate animation at current frame
             Keyframe evaluated = track.evaluate(current_frame);
             
             // Apply transform to objects
+            // PERFORMANCE: Skip CPU vertex update - GPU will apply transform via TLAS
             if (evaluated.has_transform) {
-                for (auto& obj : ctx.scene.world.objects) {
-                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri && tri->nodeName == track_name) {
-                        auto th = tri->getTransformHandle();
-                        if (th) {
-                            // Build transform from evaluated keyframe
-                            Matrix4x4 new_transform = Matrix4x4::fromTRS(
-                                evaluated.transform.position,
-                                evaluated.transform.rotation,
-                                evaluated.transform.scale
-                            );
-                            th->setBase(new_transform);
-                            tri->updateTransformedVertices();
-                            needs_bvh_update = true;
+                // O(1) lookup using pre-built cache
+                auto it = object_cache.find(track_name);
+                if (it != object_cache.end()) {
+                    auto& tri = it->second;
+                    auto th = tri->getTransformHandle();
+                    if (th) {
+                        // Build transform from evaluated keyframe
+                        Matrix4x4 new_transform = Matrix4x4::fromTRS(
+                            evaluated.transform.position,
+                            evaluated.transform.rotation,
+                            evaluated.transform.scale
+                        );
+                        th->setBase(new_transform);
+                        
+                        // PERFORMANCE CRITICAL: Directly update OptiX instances for this object!
+                        // This is O(1) lookup + O(small) instance updates, NOT O(2M) object scan!
+                        if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                            // Get instance IDs for this object
+                            auto instance_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(track_name);
+                            
+                            if (!instance_ids.empty()) {
+                                // Convert Matrix4x4 to float[12] for OptiX
+                                float transform_array[12];
+                                transform_array[0] = new_transform.m[0][0]; 
+                                transform_array[1] = new_transform.m[0][1]; 
+                                transform_array[2] = new_transform.m[0][2]; 
+                                transform_array[3] = new_transform.m[0][3];
+                                transform_array[4] = new_transform.m[1][0]; 
+                                transform_array[5] = new_transform.m[1][1]; 
+                                transform_array[6] = new_transform.m[1][2]; 
+                                transform_array[7] = new_transform.m[1][3];
+                                transform_array[8] = new_transform.m[2][0]; 
+                                transform_array[9] = new_transform.m[2][1]; 
+                                transform_array[10] = new_transform.m[2][2]; 
+                                transform_array[11] = new_transform.m[2][3];
+                                
+                                // Update each instance directly (typically 1-3 instances per object)
+                                for (int inst_id : instance_ids) {
+                                    ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, transform_array);
+                                }
+                            }
                         }
-                        break; // Found matching object
+                        
+                        // GPU mode: Skip CPU vertex update - TLAS handles transforms
+                        // CPU mode: Need to update world-space vertices for raytracing
+                        bool using_gpu = ctx.render_settings.use_optix && ctx.optix_gpu_ptr;
+                        if (!using_gpu) {
+                            // CPU rendering - update world-space vertices for ALL triangles with same nodeName
+                            // A mesh with 2M triangles shares the same nodeName, so we must update all of them
+                            // This is slow but necessary for correct CPU raytracing
+                            for (auto& obj : ctx.scene.world.objects) {
+                                auto mesh_tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                if (mesh_tri && mesh_tri->nodeName == track_name) {
+                                    mesh_tri->updateTransformedVertices();
+                                }
+                            }
+                        }
+                        
+                        needs_bvh_update = true;
                     }
                 }
             }
@@ -329,8 +420,27 @@ void TimelineWidget::draw(UIContext& ctx) {
         
         // Trigger updates
         if (needs_bvh_update) {
-            g_cpu_bvh_refit_pending = true;
-            g_gpu_refit_pending = true;
+            // PERFORMANCE CRITICAL:
+            // We already updated OptiX instance transforms directly above!
+            // DO NOT trigger g_gpu_refit_pending as it calls updateTLASMatricesOnly()
+            // which iterates ALL 2M objects again - causing 3+ second delays!
+            
+            // Check if we're actually using GPU rendering (both pointer exists AND use_optix is true)
+            bool using_gpu_render = ctx.optix_gpu_ptr && 
+                                    ctx.optix_gpu_ptr->isUsingTLAS() && 
+                                    ctx.render_settings.use_optix;
+            
+            if (using_gpu_render) {
+                // GPU rendering mode - use fast TLAS update
+                ctx.optix_gpu_ptr->rebuildTLAS();
+                // SKIP CPU BVH rebuild in GPU mode during animation!
+                // CPU BVH is only needed for picking, which is disabled during playback.
+            } else {
+                // CPU rendering mode - need CPU BVH refit
+                // NOTE: This is still slow for 2M objects, but necessary for CPU rendering
+                g_cpu_bvh_refit_pending = true;
+            }
+            
             ctx.renderer.resetCPUAccumulation();
             if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
         }
@@ -347,8 +457,9 @@ void TimelineWidget::draw(UIContext& ctx) {
             ctx.renderer.resetCPUAccumulation();
         }
         
-        last_anim_update_frame = current_frame;
-    }
+            last_anim_update_frame = current_frame;
+        }
+    } // end if (!ctx.scene.timeline.tracks.empty())
 }
 
 
@@ -1485,7 +1596,64 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
 }
 
 // ============================================================================
-// SYNC FROM IMPORTED ANIMATION DATA + KEYBOARD SHORTCUTS
+// LIGHTWEIGHT SELECTION SYNC - Runs every frame with minimal overhead
+// ============================================================================
+void TimelineWidget::handleSelectionSync(UIContext& ctx) {
+    // PERFORMANCE: This function is called every frame, so keep it minimal
+    
+    // Get current viewport selection name
+    std::string viewport_selection;
+    if (ctx.selection.hasSelection()) {
+        if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
+            viewport_selection = ctx.selection.selected.object->nodeName;
+            if (viewport_selection.empty()) {
+                viewport_selection = "Object_" + std::to_string(ctx.selection.selected.object_index);
+            }
+        } else if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light) {
+            viewport_selection = ctx.selection.selected.light->nodeName;
+        } else if (ctx.selection.selected.type == SelectableType::Camera && ctx.selection.selected.camera) {
+            viewport_selection = ctx.selection.selected.camera->nodeName;
+        }
+    }
+    
+    // PERFORMANCE: Only update and mark dirty if selection actually changed
+    static std::string last_selection;
+    if (viewport_selection != last_selection) {
+        last_selection = viewport_selection;
+        
+        // Update selected track
+        if (!viewport_selection.empty()) {
+            selected_track = viewport_selection;
+        }
+        
+        // PERFORMANCE: Only mark dirty when selection changes, not every frame
+        tracks_dirty = true;
+    }
+    
+    // --- KEYBOARD SHORTCUTS (lightweight, runs every frame) ---
+    bool timeline_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    ImGuiIO& io = ImGui::GetIO();
+    
+    // I key - Insert keyframe (global shortcut)
+    if (ImGui::IsKeyPressed(ImGuiKey_I) && !io.WantTextInput) {
+        if (!selected_track.empty()) {
+            insertKeyframeForTrack(ctx, selected_track, current_frame);
+            tracks_dirty = true;
+        }
+    }
+    
+    // Delete/X key - Delete selected keyframe (timeline focused only)
+    if (timeline_focused && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && !io.WantTextInput) {
+        if (!selected_track.empty() && selected_keyframe_frame >= 0) {
+            deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
+            selected_keyframe_frame = -1;
+            tracks_dirty = true;
+        }
+    }
+}
+
+// ============================================================================
+// SYNC FROM IMPORTED ANIMATION DATA - Called ONCE on first frame
 // ============================================================================
 void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
     // --- ONE-TIME: Convert AnimationData to Timeline Keyframes ---
@@ -1599,64 +1767,8 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
         tracks_dirty = true;  // Rebuild track list to show new keyframes
     }
     
-    // --- SYNC SELECTION FROM VIEWPORT ---
-    // This ensures I key works on the viewport selected object
-    std::string viewport_selection;
-    if (ctx.selection.hasSelection()) {
-        if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
-            viewport_selection = ctx.selection.selected.object->nodeName;
-            if (viewport_selection.empty()) {
-                viewport_selection = "Object_" + std::to_string(ctx.selection.selected.object_index);
-            }
-        } else if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light) {
-            viewport_selection = ctx.selection.selected.light->nodeName;
-        } else if (ctx.selection.selected.type == SelectableType::Camera && ctx.selection.selected.camera) {
-            viewport_selection = ctx.selection.selected.camera->nodeName;
-        }
-    }
-    
-    // Auto-select the viewport selection in timeline  
-    if (!viewport_selection.empty()) {
-        selected_track = viewport_selection;
-    }
-    
-    // --- KEYBOARD SHORTCUTS ---
-    // Only process when Timeline panel has focus (prevents conflicts with other panels)
-    bool timeline_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-    ImGuiIO& io = ImGui::GetIO();
-    
-    // I key - Insert keyframe for selected track (viewport selection)
-    // I key - Insert keyframe for selected track (viewport selection)
-    // Allow globally if not typing, as this is a common operation from Viewport
-    if ((timeline_focused || true) && ImGui::IsKeyPressed(ImGuiKey_I) && !io.WantTextInput) {
-        if (!selected_track.empty()) {
-            insertKeyframeForTrack(ctx, selected_track, current_frame);
-            tracks_dirty = true;
-        }
-    }
-    
-    // Delete/X key - Delete selected keyframe (ONLY when timeline is focused)
-    if (timeline_focused && (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_X)) && !io.WantTextInput) {
-        if (!selected_track.empty() && selected_keyframe_frame >= 0) {
-            deleteKeyframe(ctx, selected_track, selected_keyframe_frame);
-            selected_keyframe_frame = -1;
-            tracks_dirty = true;
-        }
-    }
-    
-    // Mark tracks dirty when selection changes
-    static std::string last_selection;
-    if (viewport_selection != last_selection) {
-        last_selection = viewport_selection;
-        tracks_dirty = true;
-    }
-    
-    // REMOVED: Periodic rebuild was causing MASSIVE performance issues on large scenes
-    // The old code iterated through ALL 10M+ objects every 60 frames (~1 second)
-    // to build valid_entities set in rebuildTrackList(). This caused 2+ second freezes.
-    // Scene changes should be handled via explicit dirty flags set by UI actions,
-    // not via polling. If a scene element changes, the code that changes it should
-    // set tracks_dirty = true explicitly.
+    // NOTE: Selection sync and keyboard shortcuts are now handled by handleSelectionSync()
+    // which is called every frame from draw(). This function is only called once on startup.
 }
 
 // INSERT KEYFRAME FOR TRACK - Uses selection data like existing code

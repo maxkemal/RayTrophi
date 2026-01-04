@@ -37,6 +37,7 @@
 #include "MaterialManager.h"
 #include "CameraPresets.h"
 #include "TerrainManager.h"
+#include "water_shaders_cpu.h"  // CPU water shader functions
 
 bool Renderer::isCudaAvailable() {
     try {
@@ -401,8 +402,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
                 if (scene.boneData.boneOffsetMatrices.count(boneName) == 0) continue;
                 Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
 
-                // Standard skinning formula
-                // TODO: Coordinate conversion for Blender models needs more investigation
+                // Standard skinning formula (Animated * Offset)
                 finalBoneMatrices[boneIndex] = animatedBoneGlobal * offsetMatrix;
                 
                 // Debug logging - MORE DETAILED
@@ -2120,6 +2120,52 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 // Transmission
                 transmission = pbsdf->getTransmission(uv);
                 
+                // === WATER WAVE SHADER (CPU) ===
+                // Detect water materials using sheen > 0 OR high transmission + low roughness
+                // GPU uses mat.sheen > 0.0001f as IS_WATER flag, CPU checks anisotropic (wave_speed)
+                bool is_water = (pbsdf->anisotropic > 0.0001f && transmission > 0.9f);
+                
+                if (is_water) {
+                    // Get frozen water time for CPU (matches GPU behavior)
+                    extern RenderSettings render_settings;
+                    float water_time = 0.0f;
+                    
+                    // Animation mode: frame-based time
+                    if (render_settings.start_animation_render || render_settings.animation_is_playing) {
+                        float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
+                        water_time = static_cast<float>(render_settings.animation_current_frame) / fps;
+                    } else {
+                        // Viewport mode: use SDL ticks (will be frozen per accumulation pass)
+                        water_time = SDL_GetTicks() / 1000.0f;
+                    }
+                    
+                    // Wave parameters from material (packed like GPU)
+                    float wave_speed = pbsdf->anisotropic;   // GPU: anisotropic
+                    float wave_strength = std::fmax(0.001f, pbsdf->clearcoat);  // GPU: sheen (but clearcoat for CPU fallback)
+                    float wave_frequency = pbsdf->clearcoatRoughness > 0.001f ? pbsdf->clearcoatRoughness : 1.0f;
+                    
+                    // Evaluate Gerstner waves (CPU version)
+                    Vec3 world_pos = rec.point;
+                    Vec3 base_normal(0.0f, 1.0f, 0.0f);  // Water is horizontal
+                    
+                    WaterResultCPU wave = evaluateGerstnerWaveCPU(
+                        world_pos, base_normal, water_time,
+                        wave_speed, wave_strength, wave_frequency
+                    );
+                    
+                    // Apply wave normal to interpolated normal
+                    rec.interpolated_normal = wave.normal;
+                    N = toVec3f(wave.normal);
+                    
+                    // Foam blending: lighten albedo where foam > 0
+                    float foam = wave.foam * pbsdf->translucent;  // translucent = foam_level
+                    if (foam > 0.0f) {
+                        Vec3f foam_color(0.95f, 0.97f, 1.0f);
+                        albedo = albedo * (1.0f - foam) + foam_color * foam;
+                        roughness = roughness * (1.0f - foam) + 0.3f * foam;  // Foam is rougher
+                    }
+                }
+                
                 // NOTE: Emission is now retrieved polymorphically for all materials after scatter
             }
         }
@@ -2672,13 +2718,8 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
         // Benefits: Faster transform updates, proper instancing support
         // Note: Texture handling is identical in both modes.
         
-        if (optix_gpu_ptr->isUsingTLAS()) {
-            // Continue using TLAS mode (already initialized)
-            optix_gpu_ptr->buildFromDataTLAS(optix_data, scene.world.objects);
-        } else {
-            // Default: Single GAS mode (proven stable, good texture support)
-            optix_gpu_ptr->buildFromData(optix_data);
-        }
+        // FORCE TLAS MODE for Instancing Support (Foliage)
+        optix_gpu_ptr->buildFromDataTLAS(optix_data, scene.world.objects);
         
         // NOTE: Removed cudaDeviceSynchronize() here!
         // It was causing GPU to freeze even when this runs in async thread.
