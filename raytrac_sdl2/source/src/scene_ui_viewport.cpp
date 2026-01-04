@@ -16,8 +16,12 @@
 #include "SceneSelection.h"
 #include "scene_data.h"   // Explicit include
 #include "imgui.h"
+#include "ProjectManager.h"
 #include "CameraPresets.h"
 #include <cmath>
+#include "ProjectManager.h"
+
+// extern ProjectManager g_ProjectManager; - Removed to use Singleton access
 
 
 
@@ -83,7 +87,9 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
 
     // Gizmo toggle checkbox (inline)
     ImGui::SameLine();
-    ImGui::Checkbox("##Gizmo", &viewport_settings.show_gizmos);
+    if (ImGui::Checkbox("##Gizmo", &viewport_settings.show_gizmos)) {
+        ProjectManager::getInstance().markModified();
+    }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Gizmos");
 
     // Camera HUD toggle button
@@ -93,6 +99,7 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     }
     if (ImGui::Button("HUD", ImVec2(32, btn_size))) {
         viewport_settings.show_camera_hud = !viewport_settings.show_camera_hud;
+        ProjectManager::getInstance().markModified();
     }
     if (viewport_settings.show_camera_hud) {
         ImGui::PopStyleColor();
@@ -127,7 +134,7 @@ void SceneUI::drawFocusIndicator(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
     ImDrawList* draw_list = ImGui::GetForegroundDrawList();
 
-    // Center of viewport
+    // Use Display dimensions for Foreground Overlay
     float cx = io.DisplaySize.x * 0.5f;
     float cy = io.DisplaySize.y * 0.5f;
 
@@ -179,6 +186,7 @@ void SceneUI::drawFocusIndicator(UIContext& ctx) {
             focus_dist = std::max(0.1f, std::min(focus_dist, 100.0f));  // Clamp
 
             cam.update_camera_vectors();
+            ProjectManager::getInstance().markModified();
 
             // Update GPU
             if (ctx.optix_gpu_ptr) {
@@ -360,6 +368,7 @@ void SceneUI::drawZoomRing(UIContext& ctx) {
     float& fov = ctx.scene.camera->vfov;
 
     // Center of viewport (same as focus ring)
+    // Center of viewport (Foreground)
     float cx = io.DisplaySize.x * 0.5f;
     float cy = io.DisplaySize.y * 0.5f;
 
@@ -413,6 +422,7 @@ void SceneUI::drawZoomRing(UIContext& ctx) {
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
         }
         else {
             is_dragging_zoom = false;
@@ -501,7 +511,7 @@ void SceneUI::drawDollyArc(UIContext& ctx) {
 
     Camera& cam = *ctx.scene.camera;
 
-    // Position: Left side of center (mirror of zoom ring)
+    // Position: Left side of center (Foreground)
     float cx = io.DisplaySize.x * 0.5f;
     float cy = io.DisplaySize.y * 0.5f;
 
@@ -571,6 +581,7 @@ void SceneUI::drawDollyArc(UIContext& ctx) {
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
         }
         else {
             is_dragging_dolly = false;
@@ -690,7 +701,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
     // Clamp EV to reasonable range
     ev = std::max(-6.0f, std::min(ev, 20.0f));
 
-    // Position: Right side, middle height
+    // Position: Right side, middle height (Foreground)
     float margin_right = 30.0f;
     float triangle_size = 85.0f;
 
@@ -761,9 +772,10 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
             int old_idx = fstop_idx;
             fstop_idx = std::max(0, std::min(new_idx, (int)CameraPresets::FSTOP_PRESET_COUNT - 1));
             if (fstop_idx != old_idx) {
-                // Update actual aperture from f-stop
-                float new_fstop = CameraPresets::FSTOP_PRESETS[fstop_idx].f_number;
-                cam.aperture = 1.0f / (new_fstop * 0.5f);
+                // Update actual aperture and lens_radius from f-stop preset
+                // Using the preset's aperture_value for consistency with hierarchy panel
+                cam.aperture = CameraPresets::FSTOP_PRESETS[fstop_idx].aperture_value;
+                cam.lens_radius = cam.aperture * 0.5f;  // DOF uses lens_radius!
                 value_changed = true;
             }
         }
@@ -778,6 +790,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
 
             // Set warning message timer
             static float warning_timer = 0.0f;
@@ -810,6 +823,7 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
             ctx.optix_gpu_ptr->resetAccumulation();
         }
         ctx.renderer.resetCPUAccumulation();
+        ProjectManager::getInstance().markModified();
     }
 
     // Draw AE button - Green=ON, Red=OFF
@@ -987,7 +1001,28 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             
             // Advance cursor with DYNAMIC width to prevent clipping
             ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
-            ImGui::Dummy(text_size); 
+            ImGui::Dummy(text_size);                 
+            
+            // Draw HUD overlays inside the RenderView window so they appear on top of render
+            // but behind other floating windows. They use GetWindowDrawList() now.
+            // This section is likely intended to be in the RenderView scope, not here.
+            // The instruction seems to be a bit mixed up.
+            // Assuming the user wants to move these calls from somewhere else *to* the RenderView scope,
+            // and this snippet is showing what should be *in* that scope.
+            // I will not insert the Image/drawFocusIndicator/etc. calls here as it would be syntactically incorrect
+            // and out of context for drawViewportMessages.
+            // The instruction's provided snippet for this part is:
+            // ImGui::Dummy(text_size);                 ImGui::Image((ImTextureID)display_tex, ImVec2(w, h));
+            //      // Draw HUD overlays inside the RenderView window so they appear on top of render
+            //      // but behind other floating windows. They use GetWindowDrawList() now.
+            //      if (!show_exit_confirmation) {
+            //          drawFocusIndicator(ctx);
+            //          drawZoomRing(ctx);
+            //          drawExposureInfo(ctx);
+            //          drawDollyArc(ctx); // Added dolly arc too
+            //      } // Small spacing
+            // This looks like a fragment from the RenderView loop itself, not a modification to drawViewportMessages.
+            // I will only apply the `ImGui::Dummy(ImVec2(0, 2));` part which is syntactically correct here.
             ImGui::Dummy(ImVec2(0, 2)); // Small spacing
         }
 

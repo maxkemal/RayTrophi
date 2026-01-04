@@ -14,6 +14,14 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include <thread>
+#include <filesystem>
+#include <algorithm>
+#include <fstream>
+#include "json.hpp"
+#include "ProjectManager.h"
+#include "TerrainManager.h"
+#include "SceneSerializer.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -791,29 +799,36 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             // -------------------------------------------------------------
             // TAB: TERRAIN
             // -------------------------------------------------------------
+            // -------------------------------------------------------------
+            // TAB: TERRAIN
+            // -------------------------------------------------------------
             if (show_terrain_tab) {
                 ImGuiTabItemFlags terrain_flags = 0;
                 if(tab_to_focus == "Terrain") { terrain_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-                if (ImGui::BeginTabItem("Terrain", &show_terrain_tab, terrain_flags)) {
+                
+                bool is_active = ImGui::BeginTabItem("Terrain", &show_terrain_tab, terrain_flags);
+                
+                // Auto-Focus Logic: If tab just became active, open Graph Panel
+                static bool was_active = false;
+                if (is_active && !was_active) {
+                    show_terrain_graph = true;
+                    show_animation_panel = false;
+                    show_scene_log = false;
+                    
+                    // Set reasonable default height if collapsed or too small
+                    if (bottom_panel_height < 350.0f) {
+                        bottom_panel_height = 350.0f;
+                    }
+                }
+                was_active = is_active;
+
+                if (is_active) {
                     drawTerrainPanel(ctx);
                     ImGui::EndTabItem();
                 }
             }
 
-            // -------------------------------------------------------------
-            // TAB: FOLIAGE (Scatter Brush / Instance Painting)
-            // -------------------------------------------------------------
-            if (show_foliage_tab) {
-                bool foliage_tab_was_active = scatter_brush.enabled;
-                ImGuiTabItemFlags foliage_flags = 0;
-                if(tab_to_focus == "Foliage") { foliage_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-                if (ImGui::BeginTabItem("Foliage", &show_foliage_tab, foliage_flags)) {
-                    drawScatterBrushPanel(ctx);
-                    ImGui::EndTabItem();
-                } else {
-                    if (foliage_tab_was_active) scatter_brush.enabled = false;
-                }
-            }
+
 
             // -------------------------------------------------------------
             // TAB: WATER
@@ -877,10 +892,38 @@ void SceneUI::draw(UIContext& ctx)
     drawSelectionGizmos(ctx);
     drawCameraGizmos(ctx);  // Draw camera frustum icons
     drawViewportControls(ctx);  // Blender-style viewport overlay
+    
+    // --- BACKGROUND SAVE STATUS POLL ---
+    static int last_save_state = 0;
+    int save_state = bg_save_state.load();
+    
+    if (save_state != last_save_state) {
+        if (save_state == 1) { // Saving...
+            addViewportMessage("Saving...", 300.0f, ImVec4(1.0f, 0.9f, 0.2f, 1.0f));
+        }
+        else if (save_state == 2) { // Done
+            clearViewportMessages();
+            addViewportMessage("Project saved", 2.0f, ImVec4(0.2f, 1.0f, 0.4f, 1.0f));
+            bg_save_state = 0; // Reset
+        }
+        else if (save_state == 3) { // Error
+            clearViewportMessages();
+            addViewportMessage("Save failed", 4.0f, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
+            bg_save_state = 0; // Reset
+        }
+        last_save_state = save_state;
+    }
+
     drawViewportMessages(ctx, left_offset); // Messages/HUD (e.g. Async Rebuild)
-    drawFocusIndicator(ctx);  // Split-prism focus aid
-    drawZoomRing(ctx);  // FOV zoom control
-    drawExposureInfo(ctx);  // Cinema camera exposure bar
+
+    // Hide HUD overlays if exit confirmation is open
+    // Otherwise draw them (they use ForegroundDrawList so they appear on top)
+    // Note: They might overlay panels like Graph, but visibility is priority.
+    if (!show_exit_confirmation) {
+        drawFocusIndicator(ctx);
+        drawZoomRing(ctx);
+        drawExposureInfo(ctx);
+    }
     
     // Scatter Brush System
     handleScatterBrush(ctx);   // Handle brush painting input
@@ -888,16 +931,28 @@ void SceneUI::draw(UIContext& ctx)
     
     // Terrain Sculpting
     handleTerrainBrush(ctx);
+    handleTerrainFoliageBrush(ctx);  // Foliage painting brush
 
     handleSceneInteraction(ctx, gizmo_hit);
     processDeferredSceneUpdates(ctx);
+    
+    // Update Water Animation
+    if (WaterManager::getInstance().update(io.DeltaTime)) {
+         if (ctx.optix_gpu_ptr) {
+             ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+             ctx.optix_gpu_ptr->resetAccumulation();
+         }
+         // Also reset CPU accumulation if needed, though water FFT is mostly for GPU?
+         // If CPU supports it (sampleOceanHeight), maybe reset CPU too.
+         ctx.renderer.resetCPUAccumulation();
+    }
+
     drawAuxWindows(ctx);
     
     // Global Sun Sync (Light -> Nishita)
     processSunSync(ctx);
-
-    extern void DrawRenderWindow(UIContext & ctx);
-    DrawRenderWindow(ctx);
+    drawRenderWindow(ctx);
+    drawExitConfirmation(ctx);
 
     // --- ANIMATION PREVIEW PANEL (REMOVED - Integrated into Render Result) ---
     /*
@@ -1184,6 +1239,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         }
         else if (show_terrain_graph) {
             // Terrain Node Graph Editor
+            // Disable edit tool when using node graph (performance optimization)
+            terrain_brush.enabled = false;
+            
             TerrainObject* activeTerrain = nullptr;
             if (terrain_brush.active_terrain_id != -1) {
                 activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
@@ -1424,7 +1482,7 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
 // Global flag for Render Window visibility
 bool show_render_window = false;
 
-void DrawRenderWindow(UIContext& ctx) {
+void SceneUI::drawRenderWindow(UIContext& ctx) {
     if (!show_render_window) return;
 
     ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
@@ -1619,6 +1677,8 @@ void DrawRenderWindow(UIContext& ctx) {
                  
                  ImGui::Image((ImTextureID)display_tex, ImVec2(w, h));
                  
+                 // HUD calls removed from here (moved back to main draw function)
+                 
                  if (ImGui::IsItemHovered()) {
                      ImGui::SetTooltip("Res: %dx%d | Zoom: %.1f%%", image_width, image_height, zoom * 100.0f);
                  }
@@ -1662,4 +1722,288 @@ void DrawRenderWindow(UIContext& ctx) {
          ctx.render_settings.is_final_render_mode = true;
     }
 }
+
+void SceneUI::tryExit() {
+    if (ProjectManager::getInstance().hasUnsavedChanges()) {
+        pending_action = PendingAction::Exit;
+        show_exit_confirmation = true;
+    } else {
+        extern bool quit;
+        quit = true;
+    }
+}
+
+void SceneUI::tryNew(UIContext& ctx) {
+    if (ProjectManager::getInstance().hasUnsavedChanges()) {
+        pending_action = PendingAction::NewProject;
+        show_exit_confirmation = true;
+    } else {
+        performNewProject(ctx);
+    }
+}
+
+void SceneUI::tryOpen(UIContext& ctx) {
+    if (ProjectManager::getInstance().hasUnsavedChanges()) {
+        pending_action = PendingAction::OpenProject;
+        show_exit_confirmation = true;
+    } else {
+        performOpenProject(ctx);
+    }
+}
+
+void SceneUI::drawExitConfirmation(UIContext& ctx) {
+    if (!show_exit_confirmation) return;
+
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    ImGui::OpenPopup("Unsaved Changes?");
+
+    if (ImGui::BeginPopupModal("Unsaved Changes?", &show_exit_confirmation, ImGuiWindowFlags_AlwaysAutoResize)) {
+        
+        std::string actionName = "exiting";
+        if (pending_action == PendingAction::NewProject) actionName = "creating a new project";
+        else if (pending_action == PendingAction::OpenProject) actionName = "opening a project";
+        else if (pending_action == PendingAction::Exit) actionName = "exiting";
+
+        ImGui::Text("You have unsaved changes.");
+        ImGui::Text("Do you want to save them before %s?", actionName.c_str());
+        ImGui::Separator();
+
+        // Save & Continue
+        if (ImGui::Button("Save & Continue", ImVec2(140, 0))) {
+            std::string path = ProjectManager::getInstance().getCurrentFilePath();
+            if (path.empty()) {
+                 path = saveFileDialogW(L"RayTrophi Project (.rtp)\0*.rtp\0", L"rtp");
+            }
+
+            if (!path.empty()) {
+                rendering_stopped_cpu = true;
+                bool success = ProjectManager::getInstance().saveProject(path, ctx.scene, ctx.render_settings);
+                
+                try {
+                    std::string auxPath = path + ".aux.json";
+                    nlohmann::json rootJson;
+                    rootJson["terrain_graph"] = terrainNodeGraph.toJson();
+                     rootJson["viewport_settings"] = {
+                        {"shading_mode", viewport_settings.shading_mode},
+                        {"show_gizmos", viewport_settings.show_gizmos},
+                        {"show_camera_hud", viewport_settings.show_camera_hud},
+                        {"show_focus_ring", viewport_settings.show_focus_ring},
+                        {"show_zoom_ring", viewport_settings.show_zoom_ring}
+                    };
+                    rootJson["guide_settings"] = {
+                        {"show_safe_areas", guide_settings.show_safe_areas},
+                        {"safe_area_type", guide_settings.safe_area_type},
+                        {"show_letterbox", guide_settings.show_letterbox},
+                        {"aspect_ratio_index", guide_settings.aspect_ratio_index},
+                        {"show_grid", guide_settings.show_grid},
+                        {"grid_type", guide_settings.grid_type},
+                        {"show_center", guide_settings.show_center}
+                    };
+                    std::ofstream auxFile(auxPath);
+                    if (auxFile.is_open()) {
+                        auxFile << rootJson.dump(2);
+                        auxFile.close();
+                    }
+                } catch (...) {}
+                
+                rendering_stopped_cpu = false;
+
+                if (success) {
+                    ImGui::CloseCurrentPopup();
+                    show_exit_confirmation = false;
+                    
+                    if (pending_action == PendingAction::Exit) {
+                         extern bool quit; quit = true;
+                    } else if (pending_action == PendingAction::NewProject) {
+                         performNewProject(ctx);
+                    } else if (pending_action == PendingAction::OpenProject) {
+                         performOpenProject(ctx);
+                    }
+                    pending_action = PendingAction::None;
+                }
+            }
+        }
+
+        ImGui::SameLine();
+
+        // Discard & Continue
+        ImGui::PushStyleColor(ImGuiCol_Button, (ImVec4)ImColor::HSV(0.0f, 0.6f, 0.6f));
+        if (ImGui::Button("Discard & Continue", ImVec2(140, 0))) {
+            ImGui::CloseCurrentPopup();
+            show_exit_confirmation = false;
+            
+            if (pending_action == PendingAction::Exit) {
+                extern bool quit; quit = true;
+            } else if (pending_action == PendingAction::NewProject) {
+                 performNewProject(ctx);
+            } else if (pending_action == PendingAction::OpenProject) {
+                 performOpenProject(ctx);
+            }
+            pending_action = PendingAction::None;
+        }
+        ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+
+        // Cancel
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+            ImGui::CloseCurrentPopup();
+            show_exit_confirmation = false;
+            pending_action = PendingAction::None;
+        }
+        
+        ImGui::EndPopup();
+    }
+}
+
+void SceneUI::performNewProject(UIContext& ctx) {
+     rendering_stopped_cpu = true;
+     rendering_stopped_gpu = true;
+     
+     TerrainManager::getInstance().removeAllTerrains(ctx.scene);
+
+     g_ProjectManager.newProject();
+     ctx.scene.clear();
+     ctx.renderer.resetCPUAccumulation();
+     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+     
+     createDefaultScene(ctx.scene, ctx.renderer, ctx.optix_gpu_ptr);
+     invalidateCache(); 
+     
+     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+     if (ctx.optix_gpu_ptr) {
+         ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+     }
+     if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
+     
+     active_model_path = "Untitled";
+     ctx.start_render = true;
+     
+     SCENE_LOG_INFO("New project created.");
+     addViewportMessage("New Project Created");
+     
+     g_ProjectManager.getProjectData().is_modified = false;
+
+     pending_action = PendingAction::None;
+     show_exit_confirmation = false;
+}
+
+void SceneUI::performOpenProject(UIContext& ctx) {
+    if (g_scene_loading_in_progress.load()) {
+        SCENE_LOG_WARN("Already loading a project. Please wait...");
+        return;
+    }
+    
+    std::string filepath = openFileDialogW(L"RayTrophi Project (.rtp;.rts)\0*.rtp;*.rts\0All Files\0*.*\0");
+    if (!filepath.empty()) {
+        g_scene_loading_in_progress = true;
+        rendering_stopped_cpu = true;
+        rendering_stopped_gpu = true;
+        
+        scene_loading = true;
+        scene_loading_done = false;
+        scene_loading_progress = 0;
+        scene_loading_stage = "Opening project...";
+        
+        std::thread loader_thread([this, filepath, &ctx]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            
+            std::string ext = filepath.substr(filepath.find_last_of('.'));
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            
+            if (ext == ".rtp") {
+                g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr,
+                    [this](int p, const std::string& s) {
+                        scene_loading_progress = p;
+                        scene_loading_stage = s;
+                    });
+                
+                {
+                    std::string auxPath = filepath + ".aux.json";
+                    std::string oldGraphPath = filepath + ".nodegraph.json";
+                    bool loaded = false;
+
+                    if (std::filesystem::exists(auxPath)) {
+                        try {
+                            std::ifstream file(auxPath);
+                            if (file.is_open()) {
+                                nlohmann::json rootJson;
+                                file >> rootJson;
+                                file.close();
+
+                                TerrainObject* terrain = nullptr;
+                                auto& terrains = TerrainManager::getInstance().getTerrains();
+                                if (!terrains.empty()) terrain = &terrains[0];
+
+                                if (rootJson.contains("terrain_graph")) {
+                                     terrainNodeGraph.fromJson(rootJson["terrain_graph"], terrain);
+                                }
+
+                                if (rootJson.contains("viewport_settings")) {
+                                    auto& vs = rootJson["viewport_settings"];
+                                    viewport_settings.shading_mode = vs.value("shading_mode", 1);
+                                    viewport_settings.show_gizmos = vs.value("show_gizmos", true);
+                                    viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
+                                    viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
+                                    viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);
+                                }
+
+                                if (rootJson.contains("guide_settings")) {
+                                    auto& gs = rootJson["guide_settings"];
+                                    guide_settings.show_safe_areas = gs.value("show_safe_areas", false);
+                                    guide_settings.safe_area_type = gs.value("safe_area_type", 0);
+                                    guide_settings.show_letterbox = gs.value("show_letterbox", false);
+                                    guide_settings.aspect_ratio_index = gs.value("aspect_ratio_index", 0);
+                                    guide_settings.show_grid = gs.value("show_grid", false);
+                                    guide_settings.grid_type = gs.value("grid_type", 0);
+                                    guide_settings.show_center = gs.value("show_center", false);
+                                }
+                                
+                                SCENE_LOG_INFO("[Load] Auxiliary settings loaded.");
+                                loaded = true;
+                            }
+                        } catch (...) {}
+                    } 
+                    
+                    if (!loaded && std::filesystem::exists(oldGraphPath)) {
+                        try {
+                            std::ifstream ngFile(oldGraphPath);
+                            if (ngFile.is_open()) {
+                                nlohmann::json graphJson;
+                                ngFile >> graphJson;
+                                ngFile.close();
+                                TerrainObject* terrain = nullptr;
+                                auto& terrains = TerrainManager::getInstance().getTerrains();
+                                if (!terrains.empty()) terrain = &terrains[0];
+                                terrainNodeGraph.fromJson(graphJson, terrain);
+                            }
+                        } catch (...) {}
+                    }
+                }
+            } else {
+                SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr, filepath);
+            }
+            
+            invalidateCache();
+            active_model_path = g_ProjectManager.getProjectName();
+            
+            if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
+            
+            g_ProjectManager.getProjectData().is_modified = false;
+
+            scene_loading = false;
+            scene_loading_done = true;
+            g_scene_loading_in_progress = false;
+            rendering_stopped_cpu = false;
+            rendering_stopped_gpu = false;
+        });
+        loader_thread.detach();
+    }
+    
+    pending_action = PendingAction::None;
+    show_exit_confirmation = false;
+}
+
     

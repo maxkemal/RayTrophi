@@ -10,6 +10,7 @@
 #include "SceneSelection.h"
 #include "OptixWrapper.h"
 #include "TerrainManager.h"
+#include <filesystem>
 
 void SceneUI::drawMainMenuBar(UIContext& ctx)
 {
@@ -21,40 +22,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             // NEW PROJECT
             // ================================================================
             if (ImGui::MenuItem("New Project", "Ctrl+N")) {
-                 // Check for unsaved changes
-                 if (g_ProjectManager.hasUnsavedChanges()) {
-                     // TODO: Show "Save changes?" dialog
-                 }
-                 
-                 rendering_stopped_cpu = true;
-                 rendering_stopped_gpu = true;
-                 
-                 // Clear project and scene
-                 
-                 // CLEANUP: Ensure stale terrain objects are removed
-                 TerrainManager::getInstance().removeAllTerrains(ctx.scene);
-
-                 g_ProjectManager.newProject();
-                 ctx.scene.clear();
-                 ctx.renderer.resetCPUAccumulation();
-                 if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                 
-                 // Create default scene
-                 createDefaultScene(ctx.scene, ctx.renderer, ctx.optix_gpu_ptr);
-                 invalidateCache(); 
-                 
-                 // Rebuild BVH and OptiX
-                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                 if (ctx.optix_gpu_ptr) {
-                     ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                 }
-                 if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
-                 
-                 active_model_path = "Untitled";
-                 ctx.start_render = true;
-                 
-                 SCENE_LOG_INFO("New project created.");
-                 this->addViewportMessage("New Project Created");
+                 tryNew(ctx);
             }
 
             ImGui::Separator();
@@ -63,58 +31,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             // OPEN PROJECT (.rtp / .rts)
             // ================================================================
             if (ImGui::MenuItem("Open Project...", "Ctrl+O")) {
-                // SAFETY: Prevent concurrent loads
-                if (g_scene_loading_in_progress.load()) {
-                    SCENE_LOG_WARN("Already loading a project. Please wait...");
-                } else {
-                    std::string filepath = openFileDialogW(L"RayTrophi Project (.rtp;.rts)\0*.rtp;*.rts\0All Files\0*.*\0");
-                    if (!filepath.empty()) {
-                        g_scene_loading_in_progress = true;  // Lock loading
-                        rendering_stopped_cpu = true;
-                        rendering_stopped_gpu = true;
-                        
-                        scene_loading = true;
-                        scene_loading_done = false;
-                        scene_loading_progress = 0;
-                        scene_loading_stage = "Opening project...";
-                        
-                    std::thread loader_thread([this, filepath, &ctx]() {
-                        // Wait for render threads to pause
-                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                        
-                        // Use new ProjectManager for .rtp files, fallback to old serializer for .rts
-                        std::string ext = filepath.substr(filepath.find_last_of('.'));
-                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                        
-                        if (ext == ".rtp") {
-                            g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr,
-                                [this](int p, const std::string& s) {
-                                    scene_loading_progress = p;
-                                    scene_loading_stage = s;
-                                });
-                        } else {
-                            // Legacy .rts format
-                            SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr, filepath);
-                        }
-                        
-                        invalidateCache();
-                        active_model_path = g_ProjectManager.getProjectName();
-                        
-                        if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
-                        
-                        scene_loading = false;
-                        scene_loading_done = true;
-                        g_scene_loading_in_progress = false;  // Unlock loading
-                        
-                        // Resume rendering
-                        rendering_stopped_cpu = false;
-                        rendering_stopped_gpu = false;
-                    });
-                    loader_thread.detach();
-                    
-                    SCENE_LOG_INFO("Opening project: " + filepath);
-                    }
-                } // end else (not already loading)
+                tryOpen(ctx);
             }
             
             // ================================================================
@@ -131,22 +48,62 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  rendering_stopped_gpu = true;
 
                  if (!current_path.empty()) {
-                     scene_loading = true;
-                     scene_loading_done = false;
-                     scene_loading_progress = 0;
-                     scene_loading_stage = "Saving project...";
+                     bg_save_state = 1; // State: Saving
                      
                      SCENE_LOG_INFO("Starting background save...");
                      
                      std::thread save_thread([this, current_path, &ctx]() {
                          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                         g_ProjectManager.saveProject(current_path, ctx.scene, ctx.render_settings,
+                         bool result = ProjectManager::getInstance().saveProject(current_path, ctx.scene, ctx.render_settings,
                             [this](int p, const std::string& s) {
-                                scene_loading_progress = p;
-                                scene_loading_stage = s;
+                                // Background save - no progress bar needed
                             });
-                         scene_loading = false;
-                         scene_loading_done = true;
+                         
+                         if (result) {
+                             // Save auxiliary settings (Terrain Node Graph + UI Settings) to separate file
+                             try {
+                                 std::string auxPath = current_path + ".aux.json";
+                                 nlohmann::json rootJson;
+                                 
+                                 // 1. Terrain Node Graph
+                                 rootJson["terrain_graph"] = terrainNodeGraph.toJson();
+                                 
+                                 // 2. Viewport Settings
+                                 rootJson["viewport_settings"] = {
+                                     {"shading_mode", viewport_settings.shading_mode},
+                                     {"show_gizmos", viewport_settings.show_gizmos},
+                                     {"show_camera_hud", viewport_settings.show_camera_hud},
+                                     {"show_focus_ring", viewport_settings.show_focus_ring},
+                                     {"show_zoom_ring", viewport_settings.show_zoom_ring}
+                                 };
+                                 
+                                 // 3. Guide Settings
+                                 rootJson["guide_settings"] = {
+                                     {"show_safe_areas", guide_settings.show_safe_areas},
+                                     {"safe_area_type", guide_settings.safe_area_type},
+                                     {"show_letterbox", guide_settings.show_letterbox},
+                                     {"aspect_ratio_index", guide_settings.aspect_ratio_index},
+                                     {"show_grid", guide_settings.show_grid},
+                                     {"grid_type", guide_settings.grid_type},
+                                     {"show_center", guide_settings.show_center}
+                                 };
+
+                                 std::ofstream auxFile(auxPath);
+                                 if (auxFile.is_open()) {
+                                     auxFile << rootJson.dump(2);
+                                     auxFile.close();
+                                     SCENE_LOG_INFO("[Save] Auxiliary settings saved: " + auxPath);
+                                     bg_save_state = 2; // State: Done
+                                 } else {
+                                     bg_save_state = 3; // State: Error
+                                 }
+                             } catch (const std::exception& e) {
+                                 SCENE_LOG_WARN("[Save] Failed to save auxiliary settings: " + std::string(e.what()));
+                                 bg_save_state = 3; // State: Error
+                             }
+                         } else {
+                             bg_save_state = 3; // State: Error
+                         }
                          
                          // Resume rendering
                          rendering_stopped_cpu = false;
@@ -157,22 +114,55 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      // No path yet, prompt Save As
                      std::string filepath = saveFileDialogW(L"RayTrophi Project (.rtp)\0*.rtp\0", L"rtp");
                      if (!filepath.empty()) {
-                         scene_loading = true;
-                         scene_loading_done = false;
-                         scene_loading_progress = 0;
-                         scene_loading_stage = "Saving project...";
+                         bg_save_state = 1; // State: Saving
                          
                          SCENE_LOG_INFO("Starting background save...");
                          
                          std::thread save_thread([this, filepath, &ctx]() {
                              std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                             g_ProjectManager.saveProject(filepath, ctx.scene, ctx.render_settings,
-                                [this](int p, const std::string& s) {
-                                    scene_loading_progress = p;
-                                    scene_loading_stage = s;
-                                });
-                             scene_loading = false;
-                             scene_loading_done = true;
+                             bool result = ProjectManager::getInstance().saveProject(filepath, ctx.scene, ctx.render_settings,
+                                [this](int p, const std::string& s) {});
+                             
+                             if (result) {
+                                 // Save auxiliary settings (.aux.json)
+                                 try {
+                                     std::string auxPath = filepath + ".aux.json";
+                                     nlohmann::json rootJson;
+                                     
+                                     rootJson["terrain_graph"] = terrainNodeGraph.toJson();
+                                     rootJson["viewport_settings"] = {
+                                         {"shading_mode", viewport_settings.shading_mode},
+                                         {"show_gizmos", viewport_settings.show_gizmos},
+                                         {"show_camera_hud", viewport_settings.show_camera_hud},
+                                         {"show_focus_ring", viewport_settings.show_focus_ring},
+                                         {"show_zoom_ring", viewport_settings.show_zoom_ring}
+                                     };
+                                     rootJson["guide_settings"] = {
+                                         {"show_safe_areas", guide_settings.show_safe_areas},
+                                         {"safe_area_type", guide_settings.safe_area_type},
+                                         {"show_letterbox", guide_settings.show_letterbox},
+                                         {"aspect_ratio_index", guide_settings.aspect_ratio_index},
+                                         {"show_grid", guide_settings.show_grid},
+                                         {"grid_type", guide_settings.grid_type},
+                                         {"show_center", guide_settings.show_center}
+                                     };
+
+                                     std::ofstream auxFile(auxPath);
+                                     if (auxFile.is_open()) {
+                                         auxFile << rootJson.dump(2);
+                                         auxFile.close();
+                                         SCENE_LOG_INFO("[Save] Auxiliary settings saved: " + auxPath);
+                                         bg_save_state = 2; // State: Done
+                                     } else {
+                                        bg_save_state = 3; // Error
+                                     }
+                                 } catch (const std::exception& e) {
+                                     SCENE_LOG_WARN("[Save] Failed to save auxiliary settings: " + std::string(e.what()));
+                                     bg_save_state = 3; // Error
+                                 }
+                             } else {
+                                 bg_save_state = 3; // Error
+                             }
                              
                              // Resume rendering
                              rendering_stopped_cpu = false;
@@ -195,22 +185,55 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      rendering_stopped_cpu = true;
                      rendering_stopped_gpu = true;
 
-                     scene_loading = true;
-                     scene_loading_done = false;
-                     scene_loading_progress = 0;
-                     scene_loading_stage = "Saving project...";
+                     bg_save_state = 1; // State: Saving
                      
                      SCENE_LOG_INFO("Starting background save...");
                      
                      std::thread save_thread([this, filepath, &ctx]() {
                          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                         g_ProjectManager.saveProject(filepath, ctx.scene, ctx.render_settings,
-                            [this](int p, const std::string& s) {
-                                scene_loading_progress = p;
-                                scene_loading_stage = s;
-                            });
-                         scene_loading = false;
-                         scene_loading_done = true;
+                         bool result = ProjectManager::getInstance().saveProject(filepath, ctx.scene, ctx.render_settings,
+                            [this](int p, const std::string& s) {});
+                         
+                         if (result) {
+                             // Save auxiliary settings (.aux.json)
+                             try {
+                                 std::string auxPath = filepath + ".aux.json";
+                                 nlohmann::json rootJson;
+                                 
+                                 rootJson["terrain_graph"] = terrainNodeGraph.toJson();
+                                 rootJson["viewport_settings"] = {
+                                     {"shading_mode", viewport_settings.shading_mode},
+                                     {"show_gizmos", viewport_settings.show_gizmos},
+                                     {"show_camera_hud", viewport_settings.show_camera_hud},
+                                     {"show_focus_ring", viewport_settings.show_focus_ring},
+                                     {"show_zoom_ring", viewport_settings.show_zoom_ring}
+                                 };
+                                 rootJson["guide_settings"] = {
+                                     {"show_safe_areas", guide_settings.show_safe_areas},
+                                     {"safe_area_type", guide_settings.safe_area_type},
+                                     {"show_letterbox", guide_settings.show_letterbox},
+                                     {"aspect_ratio_index", guide_settings.aspect_ratio_index},
+                                     {"show_grid", guide_settings.show_grid},
+                                     {"grid_type", guide_settings.grid_type},
+                                     {"show_center", guide_settings.show_center}
+                                 };
+
+                                 std::ofstream auxFile(auxPath);
+                                 if (auxFile.is_open()) {
+                                     auxFile << rootJson.dump(2);
+                                     auxFile.close();
+                                     SCENE_LOG_INFO("[Save] Auxiliary settings saved: " + auxPath);
+                                     bg_save_state = 2; // Done
+                                 } else {
+                                     bg_save_state = 3; // Error
+                                 }
+                             } catch (const std::exception& e) {
+                                 SCENE_LOG_WARN("[Save] Failed to save auxiliary settings: " + std::string(e.what()));
+                                 bg_save_state = 3; // Error
+                             }
+                         } else {
+                             bg_save_state = 3; // Error
+                         }
                          
                          // Resume rendering
                          rendering_stopped_cpu = false;
@@ -246,7 +269,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          }
                          
                          // Import WITHOUT clearing scene
-                         bool success = g_ProjectManager.importModel(file, ctx.scene, ctx.renderer, ctx.optix_gpu_ptr,
+                         bool success = ProjectManager::getInstance().importModel(file, ctx.scene, ctx.renderer, ctx.optix_gpu_ptr,
                              [this](int p, const std::string& s) {
                                  scene_loading_progress = p; 
                                  scene_loading_stage = s;
@@ -288,16 +311,15 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             ImGui::Separator();
             
             // Show project info
-            ImGui::TextDisabled("Project: %s", g_ProjectManager.getProjectName().c_str());
-            if (g_ProjectManager.hasUnsavedChanges()) {
+            ImGui::TextDisabled("Project: %s", ProjectManager::getInstance().getProjectName().c_str());
+            if (ProjectManager::getInstance().hasUnsavedChanges()) {
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(1,0.5f,0,1), "*");
             }
             
             ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4")) {
-                 extern bool quit; 
-                 quit = true;
+                 tryExit();
             }
             ImGui::EndMenu();
         }
