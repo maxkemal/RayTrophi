@@ -21,7 +21,9 @@ struct InstanceGroup;
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
 #include <fstream>
 #include <map>
+#include <set> // For lazy CPU sync
 #include <atomic> // For thread-safe flags
+#include "Vec3.h" // For bbox_cache
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HEADER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -87,6 +89,7 @@ public:
     bool show_terrain_tab = false;    // Default closed
     bool show_system_tab = false;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
+    bool show_anim_graph = false;     // Animation node editor panel
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Static Helpers (Shared across modules)
@@ -124,6 +127,7 @@ public:
   
      void invalidateCache() { mesh_cache_valid = false; }
      void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
+     void updateBBoxCache(const std::string& objectName);  // Update bounding box for specific object after transform
      
      // Viewport Messages (HUD)
      struct ViewportMessage {
@@ -185,10 +189,32 @@ public:
      struct ViewportDisplaySettings {
          int shading_mode = 1;  // 0=Solid, 1=Material, 2=Rendered
          bool show_gizmos = true;
+         
          // Camera HUD (viewport lens controls)
          bool show_camera_hud = true;      // Master toggle for camera HUD
          bool show_focus_ring = true;      // Focus ring (DOF control)
          bool show_zoom_ring = true;       // Zoom ring (FOV control)
+         
+         // === PRO CAMERA FEATURES ===
+         // Histogram
+         bool show_histogram = false;      // RGB/Luma histogram overlay
+         int histogram_mode = 0;           // 0=RGB, 1=Luma, 2=Parade
+         float histogram_opacity = 0.7f;   // Histogram transparency
+         
+         // Focus Peaking
+         bool show_focus_peaking = false;  // Edge detection overlay for sharp areas
+         int focus_peaking_color = 0;      // 0=Red, 1=Yellow, 2=Green, 3=Blue, 4=White
+         float focus_peaking_threshold = 0.15f; // Edge detection sensitivity
+         
+         // Zebra Stripes
+         bool show_zebra = false;          // Overexposure warning stripes
+         float zebra_threshold = 0.95f;    // Brightness threshold (0-1)
+         
+         // Multi-Point AF
+         bool show_af_points = false;      // AF point grid overlay
+         int af_mode = 0;                  // 0=Single, 1=Zone9, 2=Zone21, 3=Wide, 4=CenterWeighted
+         int af_selected_point = 4;        // Selected point index (center=4 for 3x3)
+         int focus_mode = 1;               // 0=MF, 1=AF-S, 2=AF-C (Default: AF-S)
      };
      ViewportDisplaySettings viewport_settings;
      
@@ -262,7 +288,7 @@ public:
     void drawTerrainPanel(UIContext& ctx);
     void handleTerrainBrush(UIContext& ctx);
     void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
-     
+    void tickProgressiveVertexSync(); // Called each frame to process a chunk
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
@@ -282,7 +308,14 @@ private:
     void drawFocusIndicator(UIContext& ctx);  // Split-prism focus aid
     void drawZoomRing(UIContext& ctx);        // FOV zoom control
     void drawExposureInfo(UIContext& ctx);    // Cinema camera exposure bar
-    void drawDollyArc(UIContext& ctx);        // Camera dolly track control
+    void drawDollyArc(UIContext& ctx);        // Camera dolly track control (disabled)
+    
+    // === PRO CAMERA HUD ===
+    void drawHistogramOverlay(UIContext& ctx);     // RGB/Luma histogram
+    void drawFocusPeakingOverlay(UIContext& ctx);  // Sharp edge highlighting
+    void drawZebraOverlay(UIContext& ctx);         // Overexposure warning
+    void drawAFPointsOverlay(UIContext& ctx);      // Multi-point autofocus grid
+    void drawProCameraPanel(UIContext& ctx);       // Settings panel for pro features
 
     // --- Scene Interaction ---
     void handleSceneInteraction(UIContext& ctx, bool gizmo_hit);
@@ -319,9 +352,22 @@ private:
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
     // Sequential cache for ImGui Clipper (Visualization)
     std::vector<std::pair<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>>> mesh_ui_cache;
-
+    
+    // Bounding Box Cache - avoids recalculating bounds every frame (HUGE perf win for large objects)
+    // Key: nodeName, Value: {bb_min, bb_max}
+    std::map<std::string, std::pair<Vec3, Vec3>> bbox_cache;
+    
+    // Material Slots Cache - avoids scanning all triangles every frame to get unique material IDs
+    // Key: nodeName, Value: list of unique material IDs used by that object
+    std::map<std::string, std::vector<uint16_t>> material_slots_cache;
 
     bool mesh_cache_valid = false;
+    
+    // Lazy CPU Vertex Sync - objects that need CPU update before picking
+    // In TLAS mode, we skip CPU vertex update on gizmo release for instant response.
+    // Instead, we mark objects as "needing sync" and only update when picking is attempted.
+    std::set<std::string> objects_needing_cpu_sync;
+    void ensureCPUSyncForPicking(); // Called before mouse picking to sync pending objects
    
     // Interaction State
     bool is_dragging = false; // Tracks if a gizmo manipulation is in progress
@@ -343,14 +389,15 @@ private:
     void handleMarqueeSelection(UIContext& ctx);  // Box selection implementation
     void drawMarqueeRect();  // Draw the selection rectangle
     
-    // Timeline Widget
-    class TimelineWidget timeline;  // Timeline animation widget
+   
     
     // Terrain Node Graph (V2 System)
     TerrainNodesV2::TerrainNodeGraphV2 terrainNodeGraph;
     TerrainNodesV2::TerrainNodeEditorUI terrainNodeEditorUI;
     
 public:
+    // Timeline Widget
+    class TimelineWidget timeline;  // Timeline animation widget
     // Terrain Node Graph accessors for serialization
     TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() { return terrainNodeGraph; }
     const TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() const { return terrainNodeGraph; }

@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "CameraPresets.h"
 #include "scene_data.h"
+#include "ProjectManager.h"
 
 void SceneUI::drawCameraContent(UIContext& ctx)
 {
@@ -156,10 +157,12 @@ void SceneUI::drawCameraContent(UIContext& ctx)
                 ctx.scene.camera->origin = pos;
                 ctx.scene.camera->update_camera_vectors();
             }
+            ProjectManager::getInstance().markModified();
         }
         if (target_changed) {
             ctx.scene.camera->lookat = target;
             ctx.scene.camera->update_camera_vectors();
+            ProjectManager::getInstance().markModified();
         }
 
         ImGui::Unindent(8.0f);
@@ -395,12 +398,34 @@ void SceneUI::drawCameraContent(UIContext& ctx)
                 ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
+            }
             ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
         }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // LENS DISTORTION
+        // ─────────────────────────────────────────────────────────────────────
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted("Distortion");
+        ImGui::SameLine(80);
+        ImGui::PushItemWidth(-40);
+        float dist = ctx.scene.camera->distortion;
+        if (ImGui::SliderFloat("##CamDist", &dist, -0.5f, 0.5f, "%.3f")) {
+             ctx.scene.camera->distortion = dist;
+             if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
+        }
+        ImGui::PopItemWidth();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Lens Distortion:\nNegative (-): Barrel (Wide Angle)\nPositive (+): Pincushion (Telephoto)");
 
         ImGui::Unindent(8.0f);
         ImGui::Spacing();
-    }
+    
 
     // ═══════════════════════════════════════════════════════════════════════════
     // SECTION 3: DEPTH OF FIELD
@@ -542,7 +567,9 @@ void SceneUI::drawCameraContent(UIContext& ctx)
                     ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
                     ctx.optix_gpu_ptr->resetAccumulation();
                 }
+                }
                 ctx.renderer.resetCPUAccumulation();
+                ProjectManager::getInstance().markModified();
             }
 
             // Bokeh Shape (collapsible sub-section)
@@ -570,8 +597,8 @@ void SceneUI::drawCameraContent(UIContext& ctx)
 
         ImGui::Unindent(8.0f);
         ImGui::Spacing();
-    }
-
+    
+    
     // ═══════════════════════════════════════════════════════════════════════════
     // SECTION 4: CONTROLS & ACTIONS
     // ═══════════════════════════════════════════════════════════════════════════
@@ -645,6 +672,7 @@ void SceneUI::drawCameraContent(UIContext& ctx)
             ctx.scene.camera->reset();
             ctx.start_render = true;
             SCENE_LOG_INFO("Camera reset to initial state.");
+            ProjectManager::getInstance().markModified();
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset camera to initial position");
 

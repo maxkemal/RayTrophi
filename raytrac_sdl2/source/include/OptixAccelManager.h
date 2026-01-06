@@ -13,6 +13,7 @@
 #include <OptixWrapper.h>
 #include <functional> // Added for std::function
 #include "PrincipledBSDF.h"
+#include "skinning_kernels.cuh" // GPU Skinning Kernels
 // ═══════════════════════════════════════════════════════════════════════════
 // OPTIX TLAS/BLAS ACCELERATION STRUCTURE MANAGER
 // ═══════════════════════════════════════════════════════════════════════════
@@ -37,6 +38,10 @@ struct MeshGeometry {
     std::vector<float3> tangents;
     int material_id = 0;
     std::string mesh_name;
+    
+    // Skinning Data (Optional)
+    std::vector<int4> boneIndices;
+    std::vector<float4> boneWeights;
 };
 
 // Per-mesh data for grouping triangles by nodeName
@@ -65,6 +70,13 @@ struct MeshBLAS {
     std::string mesh_name;                  // Unique name (e.g. "Car_mat_0")
     std::string original_name;              // Base node name (e.g. "Car")
     
+    // GPU Skinning Buffers
+    CUdeviceptr d_bindPoses = 0;            // Original Bind Pose Vertices
+    CUdeviceptr d_bindNormals = 0;          // Original Bind Pose Normals
+    CUdeviceptr d_boneIndices = 0;          // Bone Indices (int4)
+    CUdeviceptr d_boneWeights = 0;          // Bone Weights (float4)
+    bool hasSkinningData = false;
+    
     void cleanup() {
         if (d_vertices) { cudaFree(reinterpret_cast<void*>(d_vertices)); d_vertices = 0; }
         if (d_indices) { cudaFree(reinterpret_cast<void*>(d_indices)); d_indices = 0; }
@@ -72,6 +84,13 @@ struct MeshBLAS {
         if (d_uvs) { cudaFree(reinterpret_cast<void*>(d_uvs)); d_uvs = 0; }
         if (d_tangents) { cudaFree(reinterpret_cast<void*>(d_tangents)); d_tangents = 0; }
         if (d_gas_output) { cudaFree(reinterpret_cast<void*>(d_gas_output)); d_gas_output = 0; }
+        
+        // Free Skinning Buffers
+        if (d_bindPoses) { cudaFree(reinterpret_cast<void*>(d_bindPoses)); d_bindPoses = 0; }
+        if (d_bindNormals) { cudaFree(reinterpret_cast<void*>(d_bindNormals)); d_bindNormals = 0; }
+        if (d_boneIndices) { cudaFree(reinterpret_cast<void*>(d_boneIndices)); d_boneIndices = 0; }
+        if (d_boneWeights) { cudaFree(reinterpret_cast<void*>(d_boneWeights)); d_boneWeights = 0; }
+        
         handle = 0;
     }
 };
@@ -146,11 +165,14 @@ public:
     
     // Update BLAS vertices and refit (for transform updates)
     // Returns true if successful, false if refit not possible (needs full rebuild)
-    bool updateMeshBLAS(int mesh_id, const MeshGeometry& geometry);
+    bool updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload = false, bool sync = true);
     
     // Update ALL BLAS structures from triangle list (for gizmo transform)
     // Updates all BLAS vertex buffers (Heavy: for deformation)
-    void updateAllBLASFromTriangles(const std::vector<std::shared_ptr<Hittable>>& objects);
+    // Update ALL BLAS structures from triangle list (for gizmo transform)
+    // Updates all BLAS vertex buffers (Heavy: for deformation)
+    void updateAllBLASFromTriangles(const std::vector<std::shared_ptr<Hittable>>& objects,
+                                    const std::vector<Matrix4x4>& boneMatrices = {});
     
     // Updates only Instance Transforms (Lightweight: for rigid motion)
     void syncInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects);
@@ -276,6 +298,10 @@ private:
     OptixShaderBindingTable sbt = {};
     std::vector<SbtRecord<HitGroupData>> hitgroup_records;
     CUdeviceptr d_hitgroup_records = 0;
+    
+    // Global Bone Matrices (Persistent buffer to avoid per-frame allocation)
+    CUdeviceptr d_globalBoneMatrices = 0;
+    size_t globalBoneMatrices_capacity = 0; // In bytes
     
     // Helper: Build single GAS from geometry
     OptixTraversableHandle buildGAS(

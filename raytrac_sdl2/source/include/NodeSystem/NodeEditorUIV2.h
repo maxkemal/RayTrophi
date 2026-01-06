@@ -84,6 +84,7 @@ namespace NodeSystem {
         std::function<void(uint32_t linkId)> onLinkSelected;
         std::function<void()> onBackgroundContextMenu;
         std::function<void(uint32_t nodeId)> onNodeContextMenu;
+        std::function<void()> onGraphModified;
 
     private:
         std::unordered_map<uint32_t, ImVec2> pinPositions_;
@@ -235,9 +236,11 @@ namespace NodeSystem {
                     if (selectedLinkId != 0) {
                         graph.removeLink(selectedLinkId);
                         selectedLinkId = 0;
+                        if (onGraphModified) onGraphModified();
                     } else if (selectedNodeId != 0) {
                         graph.removeNode(selectedNodeId);
                         selectedNodeId = 0;
+                        if (onGraphModified) onGraphModified();
                     }
                 }
             }
@@ -257,6 +260,7 @@ namespace NodeSystem {
                     
                     if (targetPin != 0 && targetPin != linkStartPinId) {
                         graph.addLink(linkStartPinId, targetPin);
+                        if (onGraphModified) onGraphModified();
                     }
                     
                     isCreatingLink = false;

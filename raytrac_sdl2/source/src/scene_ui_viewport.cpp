@@ -106,6 +106,73 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Camera HUD (Focus/Zoom rings)");
 
+    // Pro Camera features toggle button
+    ImGui::SameLine();
+    bool any_pro_active = viewport_settings.show_histogram || 
+                          viewport_settings.show_focus_peaking || 
+                          viewport_settings.show_zebra || 
+                          viewport_settings.show_af_points;
+    if (any_pro_active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.3f, 0.5f, 1.0f));
+    }
+    if (ImGui::Button("PRO", ImVec2(32, btn_size))) {
+        // Open Pro Camera settings panel
+        ImGui::OpenPopup("ProCameraPopup");
+    }
+    if (any_pro_active) {
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pro Camera Features (Histogram, Focus Peaking, Zebra, AF Points)");
+
+    // Pro Camera Popup Panel
+    if (ImGui::BeginPopup("ProCameraPopup")) {
+        ImGui::Text("Pro Camera Features");
+        ImGui::Separator();
+        
+        // Histogram
+        ImGui::Checkbox("Histogram", &viewport_settings.show_histogram);
+        if (viewport_settings.show_histogram) {
+            ImGui::Indent();
+            ImGui::Combo("Mode##Hist", &viewport_settings.histogram_mode, "RGB\0Luma\0");
+            ImGui::SliderFloat("Opacity", &viewport_settings.histogram_opacity, 0.3f, 1.0f);
+            ImGui::Unindent();
+        }
+        
+        ImGui::Separator();
+        
+        // Focus Peaking
+        ImGui::Checkbox("Focus Peaking", &viewport_settings.show_focus_peaking);
+        if (viewport_settings.show_focus_peaking) {
+            ImGui::Indent();
+            ImGui::Combo("Color##Peak", &viewport_settings.focus_peaking_color, "Red\0Yellow\0Green\0Blue\0White\0");
+            ImGui::SliderFloat("Threshold##Peak", &viewport_settings.focus_peaking_threshold, 0.05f, 0.5f);
+            ImGui::Unindent();
+        }
+        
+        ImGui::Separator();
+        
+        // Zebra
+        ImGui::Checkbox("Zebra Stripes", &viewport_settings.show_zebra);
+        if (viewport_settings.show_zebra) {
+            ImGui::Indent();
+            ImGui::SliderFloat("Threshold##Zebra", &viewport_settings.zebra_threshold, 0.8f, 1.0f, "%.2f");
+            ImGui::Unindent();
+        }
+        
+        ImGui::Separator();
+        
+        // AF Points
+        ImGui::Checkbox("AF Points", &viewport_settings.show_af_points);
+        if (viewport_settings.show_af_points) {
+            ImGui::Indent();
+            ImGui::Combo("Mode##AF", &viewport_settings.af_mode, "Single\0Zone 9\0Zone 21\0Wide\0Center Weighted\0");
+            ImGui::Combo("Focus Mode", &viewport_settings.focus_mode, "MF (Manual)\0AF-S (Single)\0AF-C (Continuous)\0");
+            ImGui::Unindent();
+        }
+        
+        ImGui::EndPopup();
+    }
+
     // Pivot mode (same row)
     ImGui::SameLine();
     const char* pivot_opts[] = { "Median", "Individual" };
@@ -174,6 +241,9 @@ void SceneUI::drawFocusIndicator(UIContext& ctx) {
         drag_start_x = mouse.x;
         drag_start_focus = focus_dist;
         hud_captured_mouse = true; // Prevent viewport selection
+        
+        // Auto-switch to MF when manually checking focus
+        viewport_settings.focus_mode = 0;
     }
 
     if (is_dragging_ring) {

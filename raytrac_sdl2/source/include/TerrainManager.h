@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include "FoliageFwd.h"
 
 struct SceneData; // Forward decl
 class Material;
@@ -94,6 +95,13 @@ public:
     void exportSplatMap(TerrainObject* terrain, const std::string& filepath);
 
     // ===========================================================================
+    // FOLIAGE SYSTEM
+    // ===========================================================================    // Foliage
+    void updateFoliage(TerrainObject* terrain, OptixWrapper* optix);
+    void clearFoliage(TerrainObject* terrain, OptixWrapper* optix);
+    void reapplyAllFoliage(OptixWrapper* optix); // Re-adds persistence after rebuild
+    
+    // Serialization===========================================================================
     // EROSION SYSTEM
     // ===========================================================================
     void hydraulicErosion(TerrainObject* terrain, const HydraulicErosionParams& params, const std::vector<float>& mask = {});

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 /**
  * @file TerrainNodesV2.h
@@ -14,6 +14,9 @@
 #include "NodeSystem/Graph.h"
 #include "NodeSystem/EvaluationContext.h"
 #include "TerrainManager.h"
+#include "json.hpp"
+#include <unordered_map>
+#include <cstring>
 
 namespace TerrainNodesV2 {
 
@@ -54,6 +57,8 @@ namespace TerrainNodesV2 {
         HeightMask,
         SlopeMask,
         CurvatureMask,
+        FlowMask,        // Soil/sediment accumulation
+        ExposureMask,    // Sun-facing direction
         Add,
         Subtract,
         Multiply,
@@ -71,6 +76,18 @@ namespace TerrainNodesV2 {
         AutoSplat,       // Geospatial auto texture mapping
         MaskPaint,       // Viewport brush painting
         MaskImage,       // Import grayscale mask
+        // NEW: Geological Transform Nodes
+        Fault,           // Strike-slip fault line
+        Mesa,            // Flat-topped plateau
+        Shear,           // Diagonal deformation
+        Stacks,          // Sea stacks / hoodoos
+        Anastomosing,    // Braided channel patterns
+        // NEW: Sediment Deposition Nodes
+        SedimentDeposition,  // Sediment accumulation in valleys
+        AlluvialFan,         // Fan-shaped deposits at mountain bases
+        DeltaFormation,      // River delta formation
+        // NEW: Erosion Wizard
+        ErosionWizard,       // All-in-one erosion with presets
         // Outputs
         HeightOutput,
         SplatOutput
@@ -121,6 +138,33 @@ namespace TerrainNodesV2 {
             result.channels = 1;
             result.semantic = NodeSystem::ImageSemantic::Mask;
             return result;
+        }
+        
+        // ========================================================================
+        // SERIALIZATION
+        // ========================================================================
+        
+        /**
+         * @brief Serialize node-specific data to JSON
+         * Override in derived classes to save custom parameters
+         */
+        virtual void serializeToJson(nlohmann::json& j) const {
+            // Base: just save position and type
+            j["x"] = x;
+            j["y"] = y;
+            j["nodeType"] = static_cast<int>(terrainNodeType);
+            j["typeId"] = getTypeId();
+            j["name"] = name;
+        }
+        
+        /**
+         * @brief Deserialize node-specific data from JSON
+         * Override in derived classes to load custom parameters
+         */
+        virtual void deserializeFromJson(const nlohmann::json& j) {
+            if (j.contains("x")) x = j["x"].get<float>();
+            if (j.contains("y")) y = j["y"].get<float>();
+            if (j.contains("name")) name = j["name"].get<std::string>();
         }
     };
 
@@ -301,25 +345,64 @@ namespace TerrainNodesV2 {
         
         std::string getTypeId() const override { return "TerrainV2.HeightmapInput"; }
         float getCustomWidth() const override { return 140.0f; }
+        
+        // Serialization overrides
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["sourceMode"] = static_cast<int>(sourceMode);
+            j["filePath"] = std::string(filePath);
+            j["heightScale"] = heightScale;
+            j["maintainAspectRatio"] = maintainAspectRatio;
+            j["maxResolution"] = maxResolution;
+            j["smoothIterations"] = smoothIterations;
+        }
+        
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("sourceMode")) sourceMode = static_cast<SourceMode>(j["sourceMode"].get<int>());
+            if (j.contains("filePath")) {
+                std::string path = j["filePath"].get<std::string>();
+                std::strncpy(filePath, path.c_str(), sizeof(filePath) - 1);
+                filePath[sizeof(filePath) - 1] = '\0';
+            }
+            if (j.contains("heightScale")) heightScale = j["heightScale"].get<float>();
+            if (j.contains("maintainAspectRatio")) maintainAspectRatio = j["maintainAspectRatio"].get<bool>();
+            if (j.contains("maxResolution")) maxResolution = j["maxResolution"].get<int>();
+            if (j.contains("smoothIterations")) smoothIterations = j["smoothIterations"].get<int>();
+            
+            // Reload file if path exists
+            if (sourceMode == SourceMode::File && strlen(filePath) > 0) {
+                loadHeightmapFromFile();
+            }
+        }
     };
 
     // ============================================================================
     // NOISE GENERATOR
     // ============================================================================
     
-    enum class NoiseType { Perlin, Voronoi, Simplex };
+    enum class NoiseType { 
+        Perlin,      // Gradient FBM noise
+        Voronoi,     // Worley cell noise
+        Simplex,     // Hash-based FBM
+        Ridge,       // Ridge/mountain chains
+        Billow,      // Soft rolling hills
+        Warped       // Domain-warped organic
+    };
     
     class NoiseGeneratorNode : public TerrainNodeBase {
     public:
         NoiseType noiseType = NoiseType::Perlin;
         int seed = 1337;
-        float scale = 0.01f;
-        float frequency = 1.0f;
-        float amplitude = 1.0f;
+        float scale = 0.1f;            // Terrain-appropriate scale
+        float frequency = 0.01f;       // Detail frequency
+        float amplitude = 1.0f;       // Reasonable height range
         int octaves = 6;
         float persistance = 0.5f;
         float lacunarity = 2.0f;
-        float jitter = 1.0f; // Voronoi specific
+        float jitter = 1.0f;           // Voronoi specific
+        float warp_strength = 0.3f;    // Domain warp intensity
+        float ridge_offset = 1.0f;     // Ridge noise offset
         
         NoiseGeneratorNode() {
             name = "Noise Generator";
@@ -337,24 +420,64 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         
         void drawContent() override {
-            const char* noiseNames[] = { "Perlin", "Voronoi", "Simplex" };
+            const char* noiseNames[] = { "Perlin", "Voronoi", "Simplex", "Ridge", "Billow", "Warped" };
             int noiseIdx = (int)noiseType;
-            if (ImGui::Combo("Type", &noiseIdx, noiseNames, 3)) {
+            if (ImGui::Combo("Type", &noiseIdx, noiseNames, 6)) {
                 noiseType = (NoiseType)noiseIdx;
                 dirty = true;
             }
-            ImGui::DragInt("Seed", &seed);
-            ImGui::DragFloat("Scale", &scale, 0.001f, 0.0001f, 1.0f);
-            ImGui::DragFloat("Frequency", &frequency, 0.1f, 0.01f, 10.0f);
-            ImGui::DragFloat("Amplitude", &amplitude, 0.1f, 0.0f, 1000.0f);
-            ImGui::DragInt("Octaves", &octaves, 1, 1, 12);
-            ImGui::DragFloat("Persistance", &persistance, 0.01f, 0.0f, 1.0f);
+            if (ImGui::DragInt("Seed", &seed)) dirty = true;
+            if (ImGui::DragFloat("Scale", &scale, 0.1f, 0.1f, 10.0f)) dirty = true;
+            if (ImGui::DragFloat("Frequency", &frequency, 0.0001f, 0.0001f, 0.1f, "%.4f")) dirty = true;
+            if (ImGui::DragFloat("Amplitude", &amplitude, 1.0f, 1.0f, 1000.0f)) dirty = true;
+            if (ImGui::DragInt("Octaves", &octaves, 1, 1, 12)) dirty = true;
+            if (ImGui::DragFloat("Persistance", &persistance, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragFloat("Lacunarity", &lacunarity, 0.1f, 1.0f, 4.0f)) dirty = true;
+            
+            // Type-specific parameters
             if (noiseType == NoiseType::Voronoi) {
-                ImGui::DragFloat("Jitter", &jitter, 0.01f, 0.0f, 2.0f);
+                if (ImGui::DragFloat("Jitter", &jitter, 0.01f, 0.0f, 2.0f)) dirty = true;
+            }
+            if (noiseType == NoiseType::Ridge) {
+                if (ImGui::DragFloat("Ridge Offset", &ridge_offset, 0.01f, 0.5f, 2.0f)) dirty = true;
+            }
+            if (noiseType == NoiseType::Warped) {
+                if (ImGui::DragFloat("Warp Strength", &warp_strength, 0.01f, 0.0f, 1.0f)) dirty = true;
             }
         }
         
         std::string getTypeId() const override { return "TerrainV2.NoiseGenerator"; }
+        
+        // Serialization overrides
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["noiseType"] = static_cast<int>(noiseType);
+            j["seed"] = seed;
+            j["scale"] = scale;
+            j["frequency"] = frequency;
+            j["amplitude"] = amplitude;
+            j["octaves"] = octaves;
+            j["persistance"] = persistance;
+            j["lacunarity"] = lacunarity;
+            j["jitter"] = jitter;
+            j["warp_strength"] = warp_strength;
+            j["ridge_offset"] = ridge_offset;
+        }
+        
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("noiseType")) noiseType = static_cast<NoiseType>(j["noiseType"].get<int>());
+            if (j.contains("seed")) seed = j["seed"].get<int>();
+            if (j.contains("scale")) scale = j["scale"].get<float>();
+            if (j.contains("frequency")) frequency = j["frequency"].get<float>();
+            if (j.contains("amplitude")) amplitude = j["amplitude"].get<float>();
+            if (j.contains("octaves")) octaves = j["octaves"].get<int>();
+            if (j.contains("persistance")) persistance = j["persistance"].get<float>();
+            if (j.contains("lacunarity")) lacunarity = j["lacunarity"].get<float>();
+            if (j.contains("jitter")) jitter = j["jitter"].get<float>();
+            if (j.contains("warp_strength")) warp_strength = j["warp_strength"].get<float>();
+            if (j.contains("ridge_offset")) ridge_offset = j["ridge_offset"].get<float>();
+        }
     };
 
     // ============================================================================
@@ -426,6 +549,9 @@ namespace TerrainNodesV2 {
             name = "Fluvial Erosion";
             terrainNodeType = NodeType::FluvialErosion;
             
+            // Fluvial erosion uses lower sediment capacity than hydraulic
+            params.sedimentCapacity = 1.0f;
+            
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
@@ -473,6 +599,213 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.WindErosion"; }
+    };
+
+    // ============================================================================
+    // SEDIMENT DEPOSITION NODES
+    // ============================================================================
+    
+    /**
+     * @brief Sediment Deposition - Simulates sediment accumulation in low-slope areas
+     * 
+     * Flow-based sediment transport: erodes high slopes, deposits in valleys.
+     */
+    class SedimentDepositionNode : public TerrainNodeBase {
+    public:
+        int iterations = 20;              // Simulation iterations
+        float depositionRate = 0.3f;      // Rate of sediment settling
+        float transportCapacity = 1.0f;   // Max sediment per flow unit
+        float settlingSpeed = 0.5f;       // How fast sediment settles
+        bool useGPU = false;              // GPU acceleration (future)
+        
+        SedimentDepositionNode() {
+            name = "Sediment Deposition";
+            terrainNodeType = NodeType::SedimentDeposition;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Sediment Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Sediment Deposit";
+            metadata.category = "Erosion";
+            metadata.headerColor = IM_COL32(150, 120, 80, 255);
+            headerColor = ImVec4(0.6f, 0.5f, 0.3f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.SedimentDeposition"; }
+    };
+    
+    /**
+     * @brief Alluvial Fan - Creates fan-shaped deposits at mountain bases
+     * 
+     * Detects steep-to-flat transitions and spreads sediment in a fan pattern.
+     */
+    class AlluvialFanNode : public TerrainNodeBase {
+    public:
+        float slopeThreshold = 30.0f;     // Degrees: steep-to-flat transition
+        float fanSpreadAngle = 60.0f;     // Fan opening angle (degrees)
+        float depositionStrength = 0.5f;  // Strength of deposition
+        int fanLength = 50;               // Max fan length in pixels
+        
+        AlluvialFanNode() {
+            name = "Alluvial Fan";
+            terrainNodeType = NodeType::AlluvialFan;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Slope Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Fan Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Alluvial Fan";
+            metadata.category = "Erosion";
+            metadata.headerColor = IM_COL32(180, 140, 90, 255);
+            headerColor = ImVec4(0.7f, 0.55f, 0.35f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.AlluvialFan"; }
+    };
+    
+    /**
+     * @brief Delta Formation - Creates river delta patterns at low elevations
+     * 
+     * Uses flow accumulation to identify river mouths and builds branching deltas.
+     */
+    class DeltaFormationNode : public TerrainNodeBase {
+    public:
+        float seaLevel = 0.1f;            // Height threshold for delta formation
+        float deltaSpread = 45.0f;        // Delta spreading angle
+        int branchingFactor = 3;          // Number of delta branches
+        float sedimentRatio = 0.4f;       // Sediment deposit height ratio
+        
+        DeltaFormationNode() {
+            name = "Delta Formation";
+            terrainNodeType = NodeType::DeltaFormation;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Flow Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Delta Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Delta Formation";
+            metadata.category = "Erosion";
+            metadata.headerColor = IM_COL32(100, 140, 180, 255);
+            headerColor = ImVec4(0.4f, 0.55f, 0.7f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.DeltaFormation"; }
+    };
+    
+    // ============================================================================
+    // EROSION WIZARD NODE
+    // ============================================================================
+    
+    /**
+     * @brief Erosion Wizard - All-in-one erosion with geologic/cinematic presets
+     * 
+     * Combines multiple erosion types with preset configurations for:
+     * - Geology education (time-scale erosion simulation)
+     * - Film industry (quick dramatic terrain transformations)
+     * - Game development (realistic terrain aging)
+     */
+    
+    enum class ErosionPreset {
+        Custom = 0,           // User-defined parameters
+        YoungMountains,       // 1-10 My: Sharp peaks, V-valleys, active uplift
+        MatureMountains,      // 10-50 My: Rounded peaks, wider valleys
+        AncientPlateau,       // 100+ My: Peneplain, gentle hills
+        TropicalRainforest,   // High rainfall, deep chemical weathering
+        AridDesert,           // Wind dominant, mesas, buttes
+        GlacialCarving,       // U-valleys, cirques, moraines
+        CoastalErosion,       // Sea cliffs, wave-cut platforms
+        VolcanicTerrain,      // Lava flows, calderas, tephra
+        RiverDelta            // Fluvial deposition, braided channels
+    };
+    
+    class ErosionWizardNode : public TerrainNodeBase {
+    public:
+        // Preset selection
+        ErosionPreset preset = ErosionPreset::MatureMountains;
+        
+        // Time scale (millions of years simulation)
+        float timeScaleMy = 10.0f;  // Millions of years
+        
+        // Climate modifiers (0-2 range, 1 = normal)
+        float rainfallFactor = 1.0f;      // Affects hydraulic erosion
+        float temperatureFactor = 1.0f;   // Affects thermal erosion
+        float windFactor = 1.0f;          // Affects wind erosion
+        
+        // Quality/Performance
+        int qualityLevel = 2;             // 1=Fast, 2=Medium, 3=High
+        bool useGPU = true;
+        
+        // Output options
+        bool outputErosionMask = true;    // Shows where erosion occurred
+        
+        // Interactive Simulation State
+        bool isSimulating = false;
+        int currentPass = 0;
+        int totalPasses = 0;
+        std::vector<float> originalHeight; // For mask calculation
+        
+        // Erosion parameters for current run
+        int hydraulicItersPerPass = 0;
+        int thermalItersPerPass = 0;
+        int windItersPerPass = 0;
+        
+        TerrainObject* cachedTerrain = nullptr; // Cached during compute for UI updates
+        std::vector<float> cachedMask;          // Cached mask for simulation
+        
+        ErosionWizardNode() {
+            name = "Erosion Wizard";
+            terrainNodeType = NodeType::ErosionWizard;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Erosion Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Erosion Wizard";
+            metadata.category = "Erosion";
+            metadata.headerColor = IM_COL32(255, 180, 50, 255);  // Gold - stands out
+            headerColor = ImVec4(1.0f, 0.7f, 0.2f, 1.0f);
+        }
+        
+        // Helper to get preset name for UI
+        static const char* getPresetName(ErosionPreset p);
+        
+        // Apply preset configuration
+        void applyPreset(ErosionPreset p);
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.ErosionWizard"; }
     };
 
     // ============================================================================
@@ -641,9 +974,10 @@ namespace TerrainNodesV2 {
     
     class SlopeMaskNode : public TerrainNodeBase {
     public:
-        float minSlope = 0.0f;
-        float maxSlope = 90.0f;
-        float falloff = 0.1f;
+        // Default to select medium-steep slopes (cliff-like terrain)
+        float minSlope = 20.0f;  // 20 degrees minimum
+        float maxSlope = 60.0f;  // 60 degrees maximum
+        float falloff = 0.2f;
         
         SlopeMaskNode() {
             name = "Slope Mask";
@@ -668,9 +1002,10 @@ namespace TerrainNodesV2 {
 
     class HeightMaskNode : public TerrainNodeBase {
     public:
-        float minHeight = 0.0f;
-        float maxHeight = 1000.0f;
-        float falloff = 10.0f;
+        // Default to select mid-range heights (in physical terrain units, scale_y)
+        float minHeight = 2.0f;   // Lower threshold
+        float maxHeight = 8.0f;   // Upper threshold (typical scale_y=10)
+        float falloff = 2.0f;
         
         HeightMaskNode() {
             name = "Height Mask";
@@ -718,6 +1053,72 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.CurvatureMask"; }
+    };
+    
+    /**
+     * @brief Flow Mask - Simulates where soil/sediment would accumulate
+     * 
+     * Uses flow accumulation algorithm to find valleys and depressions.
+     */
+    class FlowMaskNode : public TerrainNodeBase {
+    public:
+        int iterations = 16;          // Flow simulation iterations (increased for more detail)
+        float strength = 1.0f;        // Flow strength multiplier
+        float decay = 0.8f;           // Flow decay per step (lowered for longer flow paths)
+        bool normalize = true;        // Normalize output to 0-1
+        
+        FlowMaskNode() {
+            name = "Flow Mask";
+            terrainNodeType = NodeType::FlowMask;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Flow / Soil";
+            metadata.category = "Mask";
+            metadata.headerColor = IM_COL32(100, 150, 200, 255);
+            headerColor = ImVec4(0.4f, 0.6f, 0.8f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.FlowMask"; }
+    };
+    
+    /**
+     * @brief Exposure Mask - Sun-facing direction based mask
+     * 
+     * Calculates how much each point faces a given direction (e.g., south for snow).
+     */
+    class ExposureMaskNode : public TerrainNodeBase {
+    public:
+        float sunAzimuth = 180.0f;    // Sun direction (0=North, 90=East, 180=South)
+        float sunElevation = 45.0f;   // Sun elevation angle
+        float contrast = 1.0f;        // Output contrast
+        bool invert = false;          // Invert for shadow areas
+        
+        ExposureMaskNode() {
+            name = "Exposure Mask";
+            terrainNodeType = NodeType::ExposureMask;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Sun Exposure";
+            metadata.category = "Mask";
+            metadata.headerColor = IM_COL32(220, 180, 80, 255);
+            headerColor = ImVec4(0.85f, 0.7f, 0.3f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.ExposureMask"; }
     };
 
     // ============================================================================
@@ -1075,6 +1476,118 @@ namespace TerrainNodesV2 {
     };
 
     // ============================================================================
+    // GEOLOGICAL TRANSFORM NODES
+    // ============================================================================
+    
+    /**
+     * @brief Fault Node - Strike-slip fault line with lateral offset
+     * 
+     * Creates a fault line across terrain with configurable offset and direction.
+     */
+    class FaultNode : public TerrainNodeBase {
+    public:
+        float direction = 45.0f;      // Fault angle (0-360 degrees)
+        float offset = 10.0f;         // Lateral offset (world units)
+        float verticalOffset = 0.0f;  // Vertical displacement
+        float width = 5.0f;           // Transition width (blur)
+        float position = 0.5f;        // Fault position (0-1 normalized)
+        
+        FaultNode() {
+            name = "Fault";
+            terrainNodeType = NodeType::Fault;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            
+            metadata.displayName = "Fault Line";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(180, 100, 80, 255);
+            headerColor = ImVec4(0.7f, 0.4f, 0.3f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Fault"; }
+    };
+    
+    /**
+     * @brief Mesa Node - Flat-topped plateau formation
+     * 
+     * Creates flat mesas/buttes with steep cliff edges.
+     */
+    class MesaNode : public TerrainNodeBase {
+    public:
+        float threshold = 0.5f;       // Height threshold for plateau (0-1)
+        float cliffSteepness = 0.9f;  // Cliff edge sharpness (0-1)
+        float plateauHeight = 1.0f;   // Plateau height multiplier
+        int terraceCount = 1;         // Number of terrace levels
+        float noiseAmount = 0.05f;    // Edge noise variation
+        
+        MesaNode() {
+            name = "Mesa";
+            terrainNodeType = NodeType::Mesa;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            
+            metadata.displayName = "Mesa / Plateau";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(160, 120, 80, 255);
+            headerColor = ImVec4(0.6f, 0.5f, 0.3f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Mesa"; }
+    };
+    
+    /**
+     * @brief Shear Node - Diagonal deformation / tectonic stress patterns
+     * 
+     * Applies shear deformation creating diagonal displacement bands.
+     */
+    class ShearNode : public TerrainNodeBase {
+    public:
+        float angle = 30.0f;          // Shear angle (degrees)
+        float strength = 0.3f;        // Deformation strength
+        int bands = 4;                // Number of shear bands
+        float bandWidth = 0.2f;       // Width of each band (0-1)
+        bool bidirectional = true;    // Alternate direction per band
+        
+        ShearNode() {
+            name = "Shear";
+            terrainNodeType = NodeType::Shear;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            
+            metadata.displayName = "Shear Zone";
+            metadata.category = "Geology";
+            metadata.headerColor = IM_COL32(140, 100, 120, 255);
+            headerColor = ImVec4(0.55f, 0.4f, 0.5f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.Shear"; }
+    };
+
+    // ============================================================================
     // TERRAIN GRAPH WRAPPER
     // ============================================================================
     
@@ -1093,6 +1606,22 @@ namespace TerrainNodesV2 {
         
         // Create a default graph with basic nodes
         void createDefaultGraph(TerrainObject* terrain);
+        
+        // ========================================================================
+        // SERIALIZATION
+        // ========================================================================
+        
+        /**
+         * @brief Serialize the entire graph to JSON
+         */
+        nlohmann::json toJson() const;
+        
+        /**
+         * @brief Deserialize the graph from JSON
+         * @param j JSON object containing graph data
+         * @param terrain Optional terrain for context during loading
+         */
+        void fromJson(const nlohmann::json& j, TerrainObject* terrain = nullptr);
     };
 
 } // namespace TerrainNodesV2

@@ -2,9 +2,7 @@
 
 // Include new node system to verify compilation
 #include "NodeSystemV2.h"
-#include "TerrainNodes/TerrainContext.h"
-#include "TerrainNodes/TerrainNodeBase.h"
-#include "TerrainNodes/TerrainNodesV2.h"
+// Old TerrainNodes folder removed - now using TerrainNodesV2 directly
 
 std::atomic<int> completed_pixels(0);
 constexpr float min_distance = 0.1f;  // Minimum mesafe

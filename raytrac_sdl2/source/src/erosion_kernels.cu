@@ -140,7 +140,7 @@ extern "C" __global__ void fluvialFluxKernel(float* heightMap, float* waterMap, 
     
     // Scaling to prevent negative water
     float sumFlux = *fL + *fR + *fT + *fB;
-    float velocityLimit = 1000.0f; // Limit excessive velocity
+    // float velocityLimit = 1000.0f; // Limit excessive velocity (unused variable warning fixed)
     if (sumFlux > 0) {
         float K = fminf(1.0f, (waterMap[idx] * p.cellSize * p.cellSize) / (sumFlux * p.fixedDeltaTime));
         *fL *= K; *fR *= K; *fT *= K; *fB *= K;
@@ -268,7 +268,7 @@ extern "C" __global__ void windErosionKernel(float* heightMap, WindErosionParams
     int downwindIdx = downwindY * p.mapWidth + downwindX;
     
     float upwindH = heightMap[upwindIdx];
-    float downwindH = heightMap[downwindIdx];
+    // float downwindH = heightMap[downwindIdx]; // Unused variable warning fixed
     
     // Windward side: erosion
     if (h > upwindH) {

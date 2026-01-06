@@ -125,22 +125,28 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
                 continue;
             }
 
-            // Calculate bounding box center for quick check
-            Vec3 bb_min(1e10f, 1e10f, 1e10f);
-            Vec3 bb_max(-1e10f, -1e10f, -1e10f);
-
-            for (auto& pair : triangles) {
-                auto& tri = pair.second;
-                Vec3 v0 = tri->getV0();
-                Vec3 v1 = tri->getV1();
-                Vec3 v2 = tri->getV2();
-
-                bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
-                bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
-                bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
-                bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
-                bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
-                bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+            // Calculate bounding box center for quick check - USE CACHED BBOX!
+            Vec3 bb_min, bb_max;
+            auto bbox_it = bbox_cache.find(name);
+            if (bbox_it != bbox_cache.end()) {
+                bb_min = bbox_it->second.first;
+                bb_max = bbox_it->second.second;
+            } else {
+                // Fallback: calculate if not in cache (shouldn't happen if cache is valid)
+                bb_min = Vec3(1e10f, 1e10f, 1e10f);
+                bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+                for (auto& pair : triangles) {
+                    auto& tri = pair.second;
+                    Vec3 v0 = tri->getV0();
+                    Vec3 v1 = tri->getV1();
+                    Vec3 v2 = tri->getV2();
+                    bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+                    bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+                    bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+                    bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+                    bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+                    bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+                }
             }
 
             Vec3 center = (bb_min + bb_max) * 0.5f;
@@ -297,6 +303,10 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             hud_captured_mouse = false;
             return;
         }
+
+        // LAZY CPU SYNC: Update any pending objects before picking
+        // This is where the deferred vertex update actually happens
+        ensureCPUSyncForPicking();
 
         // Check if Ctrl is held for multi-selection
         bool ctrl_held = ImGui::GetIO().KeyCtrl;

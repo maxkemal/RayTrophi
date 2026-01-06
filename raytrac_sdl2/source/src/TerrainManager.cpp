@@ -16,7 +16,11 @@
 // CUDA Driver API
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
 #include "erosion_ops.cuh"
+#include "OptixWrapper.h"
+#include "OptixAccelManager.h"
 
 // For linking with CUDA Driver API (nvcuda.dll is loaded by driver usually, but we need cuda.lib for symbols)
 #pragma comment(lib, "cuda.lib")
@@ -53,6 +57,9 @@ void TerrainManager::removeTerrain(SceneData& scene, int id) {
             scene.world.objects.erase(obj_it);
         }
     }
+    
+    // Actually remove from terrain list
+    terrains.erase(it);
 }
 // Optimization: Use unordered_set for O(1) lookup
 #include <unordered_set>
@@ -246,8 +253,11 @@ Vec3 TerrainManager::calculateFastNormal(TerrainObject* terrain, int x, int z) {
     if (!terrain) return Vec3(0, 1, 0);
     
     auto& hmap = terrain->heightmap;
-    float step_x = hmap.scale_xz / (float)(hmap.width - 1);
-    float step_z = hmap.scale_xz / (float)(hmap.height - 1);
+    // Use uniform step based on max dimension to preserve aspect ratio
+    int maxDim = std::max(hmap.width, hmap.height);
+    float step = hmap.scale_xz / (float)(maxDim - 1);
+    float step_x = step;
+    float step_z = step;
     
     // 4-neighbor central difference
     float hl = hmap.getHeight(x - 1, z);
@@ -279,8 +289,11 @@ Vec3 TerrainManager::calculateSobelNormal(TerrainObject* terrain, int x, int z) 
     if (!terrain) return Vec3(0, 1, 0);
     
     auto& hmap = terrain->heightmap;
-    float step_x = hmap.scale_xz / (float)(hmap.width - 1);
-    float step_z = hmap.scale_xz / (float)(hmap.height - 1);
+    // Use uniform step based on max dimension to preserve aspect ratio
+    int maxDim = std::max(hmap.width, hmap.height);
+    float step = hmap.scale_xz / (float)(maxDim - 1);
+    float step_x = step;
+    // For Sobel, still use step_x as the main scale factor
     float strength = terrain->normal_strength;
     
     // 8-neighbor heights for Sobel filter
@@ -343,8 +356,12 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
     float scale = terrain->heightmap.scale_xz;
     float max_h = terrain->heightmap.scale_y;
     
-    float step_x = scale / (float)(w - 1);
-    float step_z = scale / (float)(h - 1);
+    // Calculate step to preserve aspect ratio
+    // Use the larger dimension as the base, scale smaller dimension proportionally
+    int maxDim = std::max(w, h);
+    float step = scale / (float)(maxDim - 1);
+    float step_x = step;
+    float step_z = step;
     
     // Pre-calculate vertices for grid
     std::vector<Vec3> positions;
@@ -3023,4 +3040,194 @@ TerrainObject* TerrainManager::getTerrainByName(const std::string& name) {
         if (t.name == name) return &t;
     }
     return nullptr;
+}
+
+// ===========================================================================
+// FOLIAGE SYSTEM
+// ===========================================================================
+
+void TerrainManager::updateFoliage(TerrainObject* terrain, OptixWrapper* optix) {
+    if (!terrain || !optix) {
+        SCENE_LOG_WARN("[Foliage] updateFoliage called with null terrain or optix");
+        return;
+    }
+
+    OptixAccelManager* accel = optix->getAccelManager();
+    if (!accel) {
+        SCENE_LOG_WARN("[Foliage] No AccelManager available");
+        return;
+    }
+
+    SCENE_LOG_INFO("[Foliage] Updating foliage for terrain " + std::to_string(terrain->id) + 
+                   ", layers: " + std::to_string(terrain->foliageLayers.size()));
+
+    // 1. Clear existing foliage instances for this terrain
+    clearFoliage(terrain, optix);
+
+    int totalSpawned = 0;
+
+    // 2. Iterate through each foliage layer
+    for (size_t layerIdx = 0; layerIdx < terrain->foliageLayers.size(); ++layerIdx) {
+        auto& slayer = terrain->foliageLayers[layerIdx];
+        
+        if (!slayer.enabled) {
+            SCENE_LOG_INFO("[Foliage] Layer " + std::to_string(layerIdx) + " disabled, skipping");
+            continue;
+        }
+        if (slayer.meshPath.empty()) {
+            SCENE_LOG_INFO("[Foliage] Layer " + std::to_string(layerIdx) + " has no meshPath, skipping");
+            continue;
+        }
+        
+        // Skip if mesh not assigned (meshId -1)
+        if (slayer.meshId == -1) {
+            SCENE_LOG_WARN("[Foliage] Layer " + std::to_string(layerIdx) + 
+                          " meshId is -1 (path: " + slayer.meshPath + "), skipping");
+            continue; 
+        }
+
+        SCENE_LOG_INFO("[Foliage] Layer " + std::to_string(layerIdx) + 
+                       ": meshId=" + std::to_string(slayer.meshId) + 
+                       ", density=" + std::to_string(slayer.density) +
+                       ", path=" + slayer.meshPath);
+
+        // 3. Scatter Logic
+        int targetCount = slayer.density; 
+        if (targetCount <= 0) {
+            SCENE_LOG_WARN("[Foliage] Layer " + std::to_string(layerIdx) + " density is 0, skipping");
+            continue;
+        }
+
+        // Random generator
+        // Use terrain ID and layer ID for seed to ensure stability
+        std::mt19937 rng(12345 + terrain->id * 7 + slayer.meshId * 3); 
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+        int spawnedCount = 0;
+        int maxAttempts = targetCount * 5; // Avoid infinite loop
+
+        // Cache splat texture dimensions for faster access
+        int splatW = 0, splatH = 0;
+        Texture* splatTex = terrain->splatMap.get();
+        if (splatTex && splatTex->is_loaded()) {
+            splatW = splatTex->width;
+            splatH = splatTex->height;
+        }
+
+        for (int i = 0; i < maxAttempts; ++i) {
+            if (spawnedCount >= targetCount) break;
+
+            // Random position on terrain (0..1)
+            float u = dist(rng);
+            float v = dist(rng);
+
+            // Grid coords for heightmap
+            int gx = (int)(u * (terrain->heightmap.width - 1));
+            int gy = (int)(v * (terrain->heightmap.height - 1));
+
+            // Check Mask
+            float maskValue = 0.0f;
+            if (splatTex && splatW > 0 && splatH > 0) {
+                // Sample texture at UV
+                Vec3 color = splatTex->get_color(u, v);
+                float alpha = splatTex->get_alpha(u, v);
+                
+                int ch = slayer.targetMaskLayerId;
+                if (ch == 0) maskValue = color.x;
+                else if (ch == 1) maskValue = color.y;
+                else if (ch == 2) maskValue = color.z;
+                else if (ch == 3) maskValue = alpha;
+            } else {
+                 maskValue = 1.0f; // Uniform if no mask
+            }
+
+            if (maskValue < slayer.maskThreshold) continue;
+
+            // Compute World Position
+            float x = (u - 0.5f) * terrain->heightmap.scale_xz;
+            float z = (v - 0.5f) * terrain->heightmap.scale_xz;
+            
+            // Height from heightmap
+            float h_norm = terrain->heightmap.getHeight(gx, gy) / terrain->heightmap.scale_y;
+            float y = h_norm * terrain->heightmap.scale_y;
+            
+            // Apply Terrain Transform
+            Vec3 pos(x, y, z);
+            if (terrain->transform) {
+                 pos = pos + terrain->transform->position;
+            }
+
+            // Transform Generation
+            float scaleC = slayer.scaleRange.x + (slayer.scaleRange.y - slayer.scaleRange.x) * dist(rng);
+            float rotY = slayer.rotationRange.x + (slayer.rotationRange.y - slayer.rotationRange.x) * dist(rng);
+            
+            // Rotation Y Matrix
+            float rad = rotY * 3.14159265f / 180.0f;
+            float c = cosf(rad);
+            float s = sinf(rad);
+            
+            // Scale * Rotation * Translation (Row Major 3x4)
+            float t[12];
+            // Row 0
+            t[0] = scaleC * c;  t[1] = 0.0f;      t[2] = scaleC * s;  t[3] = pos.x;
+            // Row 1
+            t[4] = 0.0f;        t[5] = scaleC;    t[6] = 0.0f;        t[7] = pos.y;
+            // Row 2
+            t[8] = scaleC * -s; t[9] = 0.0f;      t[10] = scaleC * c; t[11] = pos.z;
+
+             // Unique Name
+             std::string instName = "Foliage_" + std::to_string(terrain->id) + "_" + std::to_string(slayer.meshId) + "_" + std::to_string(spawnedCount);
+
+             // Add Instance
+             int instId = accel->addInstance(slayer.meshId, t, 0, instName);
+             if (instId >= 0) {
+                 slayer.instanceIds.push_back(instId);
+                 spawnedCount++;
+             } else {
+                 // Log first failure
+                 if (spawnedCount == 0 && i == 0) {
+                     SCENE_LOG_ERROR("[Foliage] Failed to add instance for meshId " + std::to_string(slayer.meshId));
+                 }
+             }
+        }
+        
+        SCENE_LOG_INFO("[Foliage] Layer " + std::to_string(layerIdx) + 
+                       " spawned " + std::to_string(spawnedCount) + "/" + std::to_string(targetCount) + " instances");
+        totalSpawned += spawnedCount;
+    }
+    
+    SCENE_LOG_INFO("[Foliage] Total spawned: " + std::to_string(totalSpawned) + " instances");
+    
+    // Trigger TLAS rebuild
+    if (totalSpawned > 0) {
+        accel->buildTLAS();
+        SCENE_LOG_INFO("[Foliage] TLAS rebuild triggered");
+    }
+}
+
+void TerrainManager::clearFoliage(TerrainObject* terrain, OptixWrapper* optix) {
+    if (!terrain || !optix) return;
+    OptixAccelManager* accel = optix->getAccelManager();
+    if (!accel) return;
+
+    for (auto& slayer : terrain->foliageLayers) {
+        for (int id : slayer.instanceIds) {
+            accel->removeInstance(id);
+        }
+        slayer.instanceIds.clear();
+    }
+}
+
+
+void TerrainManager::reapplyAllFoliage(OptixWrapper* optix) {
+    if (!optix) return;
+    for (auto& t : terrains) {
+        // Only update if foliage layers exist and are enabled
+        bool hasFoliage = false;
+        for(const auto& l : t.foliageLayers) if(l.enabled && l.density > 0) hasFoliage = true;
+        
+        if (hasFoliage) {
+            updateFoliage(&t, optix);
+        }
+    }
 }

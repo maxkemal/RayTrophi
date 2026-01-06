@@ -1,4 +1,5 @@
 ﻿#include "OptixWrapper.h"
+#include "fft_ocean.cuh"
 #include "OptixAccelManager.h"
 #include <optix_stubs.h>
 #include <optix_function_table_definition.h>
@@ -82,6 +83,10 @@ OptixWrapper::OptixWrapper()
     d_params_persistent = 0;
     d_lights_persistent = 0;
     d_lights_capacity = 0;
+    
+    // FFT Ocean State
+    fft_ocean_state = new FFTOceanState();
+    
    // initialize();
 }
 void OptixWrapper::partialCleanup() {
@@ -250,6 +255,24 @@ OptixWrapper::~OptixWrapper() {
 }
 
 
+
+void OptixWrapper::setTime(float time, float water_time) {
+    params.time = time;
+    params.water_time = water_time;
+    // We update params directly, but need to ensure they are uploaded.
+    // The main loop calls updateParams implicitly via launch or separate call?
+    // Let's assume launch uploads params if persistent buffer is not used, 
+    // or we manually update it here.
+    if (d_params) {
+        // Direct upload to GPU for immediate effect
+        CUDA_CHECK(cudaMemcpy(
+            reinterpret_cast<void*>(reinterpret_cast<uintptr_t*>(d_params) + offsetof(RayGenParams, time)), 
+            &time, sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(
+            reinterpret_cast<void*>(reinterpret_cast<uintptr_t*>(d_params) + offsetof(RayGenParams, water_time)), 
+            &water_time, sizeof(float), cudaMemcpyHostToDevice));
+    }
+}
 
 void OptixWrapper::initialize() {
     if (context != nullptr) {
@@ -793,6 +816,7 @@ uint64_t OptixWrapper::computeCameraHash() const {
     hashFloat(params.camera.vertical.x);
     hashFloat(params.camera.vertical.y);
     hashFloat(params.camera.vertical.z);
+    hashFloat(params.camera.distortion);
     
     return hash;
 }
@@ -896,8 +920,26 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.clip_far = render_settings.viewport_far_clip;
     params.temporal_blend = 0.0f; // We handle blending manually via accumulation buffer
     
-    // Set global time for animations (Water, etc.)
+    // Set global time for animations
     params.time = SDL_GetTicks() / 1000.0f;
+    
+    // Water time logic:
+    // - During static viewport render (accumulating): freeze time to prevent ghosting
+    // - During animation render (each frame different): use frame-based time for wave motion
+    if (render_settings.start_animation_render || render_settings.animation_is_playing) {
+        // Animation mode: calculate time from frame number
+        // This ensures waves move consistently across frames in video output
+        float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
+        float frame_time = static_cast<float>(render_settings.animation_current_frame) / fps;
+        params.water_time = frame_time;
+        frozen_water_time = frame_time;  // Keep in sync
+    } else {
+        // Viewport mode: freeze time at accumulation start to prevent ghosting
+        if (accumulated_samples == 0) {
+            frozen_water_time = params.time;  // Capture time at accumulation start
+        }
+        params.water_time = frozen_water_time;
+    }
 
     // Full image tiles
     params.tile_x = 0;
@@ -1029,6 +1071,7 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.focus_dist = static_cast<float>(cpuCamera.focus_dist);
 	params.camera.aperture = static_cast<float>(cpuCamera.aperture);
     params.camera.blade_count = cpuCamera.blade_count;
+    params.camera.distortion = cpuCamera.distortion;
     
     // Calculate Exposure Factor for GPU
     float exposure_factor = 1.0f;
@@ -1712,6 +1755,59 @@ MeshGeometry OptixWrapper::extractMeshGeometry(
         geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
         geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
         geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+
+        // Skinning Data (Bone Weights)
+        // Check if triangle has skinning data (all vertices)
+        bool tri_has_skinning = !tri->getSkinBoneWeights(0).empty() || 
+                                !tri->getSkinBoneWeights(1).empty() || 
+                                !tri->getSkinBoneWeights(2).empty();
+        
+        if (tri_has_skinning) {
+            auto packWeights = [](const std::vector<std::pair<int, float>>& weights) {
+                int4 idx = make_int4(0, 0, 0, 0);
+                float4 w = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                
+                // Pack up to 4 weights
+                if (weights.size() > 0) { idx.x = weights[0].first; w.x = weights[0].second; }
+                if (weights.size() > 1) { idx.y = weights[1].first; w.y = weights[1].second; }
+                if (weights.size() > 2) { idx.z = weights[2].first; w.z = weights[2].second; }
+                if (weights.size() > 3) { idx.w = weights[3].first; w.w = weights[3].second; }
+                
+                // Normalize mechanism could be added here if needed, but Assimp usually provides normalized weights.
+                return std::make_pair(idx, w);
+            };
+
+            auto w0 = packWeights(tri->getSkinBoneWeights(0));
+            auto w1 = packWeights(tri->getSkinBoneWeights(1));
+            auto w2 = packWeights(tri->getSkinBoneWeights(2));
+
+            // If this is the first skinned triangle, resize previous elements to match (fill with zeros)
+            if (geom.boneIndices.empty() && !geom.vertices.empty()) {
+                // We added 3 vertices just now (geom.vertices is already pushed)
+                // We need to fill 0..N-3 with zeros
+                size_t num_existing = geom.vertices.size() - 3; 
+                geom.boneIndices.resize(num_existing, make_int4(0,0,0,0));
+                geom.boneWeights.resize(num_existing, make_float4(0,0,0,0));
+            }
+
+            geom.boneIndices.push_back(w0.first);
+            geom.boneIndices.push_back(w1.first);
+            geom.boneIndices.push_back(w2.first);
+
+            geom.boneWeights.push_back(w0.second);
+            geom.boneWeights.push_back(w1.second);
+            geom.boneWeights.push_back(w2.second);
+        } else if (!geom.boneIndices.empty()) {
+            // Triangle has NO skinning, but mesh DOES (mixed?). Fill with zeros to keep alignment.
+            geom.boneIndices.push_back(make_int4(0,0,0,0));
+            geom.boneIndices.push_back(make_int4(0,0,0,0));
+            geom.boneIndices.push_back(make_int4(0,0,0,0));
+
+            geom.boneWeights.push_back(make_float4(0,0,0,0));
+            geom.boneWeights.push_back(make_float4(0,0,0,0));
+            geom.boneWeights.push_back(make_float4(0,0,0,0));
+        }
+
     }
     
     return geom;
@@ -1927,14 +2023,14 @@ void OptixWrapper::rebuildTLAS() {
     resetAccumulation();
 }
 
-void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
+void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
     if (!accel_manager || !use_tlas_mode) {
         SCENE_LOG_ERROR("[OptiX] updateTLASGeometry called but not in TLAS mode");
         return;
     }
     
-    // Update all BLAS vertex buffers and refit
-    accel_manager->updateAllBLASFromTriangles(objects);
+    // Update all BLAS vertex buffers and refit (GPU Skinning happens here if boneMatrices provided)
+    accel_manager->updateAllBLASFromTriangles(objects, boneMatrices);
     
     // Rebuild TLAS (instances point to updated BLAS handles)
     accel_manager->updateTLAS();

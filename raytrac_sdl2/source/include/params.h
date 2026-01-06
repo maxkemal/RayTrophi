@@ -43,6 +43,7 @@ struct gpuCamera {
     int blade_count;
 	float aperture;  // lens aperture
     float exposure_factor; // Calculated exposure multiplier
+    float distortion;      // Lens Distortion (-0.5 to 0.5)
     
     // Motion Blur Parameters
     float shutter_open_time; // In seconds (derived from shutter speed)
@@ -110,7 +111,8 @@ struct RayGenParams {
     float grid_fade_distance; // Distance where grid fades out
     float clip_near;
     float clip_far;
-    float time;          // Global time for animation (water, etc.)
+    float time;            // Global time for animation (updates every frame)
+    float water_time;       // Water time - frozen during accumulation passes
     //float4* accumulation_buffer launch_tile_based_progressive için gerektiğinde;
    
 };

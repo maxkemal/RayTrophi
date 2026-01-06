@@ -38,6 +38,7 @@
 #include "scene_data.h"
 #include "scene_ui_water.hpp"   // Water panel implementation
 #include "scene_ui_terrain.hpp" // Terrain panel implementation
+#include "scene_ui_animgraph.hpp" // Animation Graph Editor
 #include "ParallelBVHNode.h"
 #include "Triangle.h"  // For object hierarchy
 #include "PointLight.h"
@@ -953,6 +954,9 @@ void SceneUI::draw(UIContext& ctx)
     processSunSync(ctx);
     drawRenderWindow(ctx);
     drawExitConfirmation(ctx);
+    
+    // NOTE: Animation Graph Editor is now in the bottom panel (like Terrain Graph)
+    // The floating window version (drawAnimationEditorPanel) is kept for optional use via View menu
 
     // --- ANIMATION PREVIEW PANEL (REMOVED - Integrated into Render Result) ---
     /*
@@ -1119,6 +1123,21 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         }
 
         ImGui::SameLine();
+        
+        // Animation Graph Editor button (bottom panel mode)
+        bool animgraph_active = show_anim_graph;
+        if (UIWidgets::StateButton(
+            animgraph_active ? "[AnimGraph]" : "AnimGraph",
+            animgraph_active,
+            ImVec4(0.8f, 0.5f, 0.8f, 1.0f),  // Purple for animation
+            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
+            ImVec2(80, 20)))
+        {
+            show_anim_graph = !show_anim_graph;
+            if (show_anim_graph) { show_animation_panel = false; show_scene_log = false; show_terrain_graph = false; }
+        }
+
+        ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
 
@@ -1167,7 +1186,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::PopStyleVar(2);
 
     // ---------------- BOTTOM PANEL (Resizable) ----------------
-    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph);
+    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph);
     if (!show_bottom) return;
 
     // Use class member for persistent height
@@ -1277,6 +1296,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             }
             terrainNodeEditorUI.draw(ctx, terrainNodeGraph, activeTerrain);
         }
+        else if (show_anim_graph) {
+            // Animation Node Graph Editor
+            drawAnimationGraphPanel(ctx);
+        }
     }
     ImGui::End();
     ImGui::PopStyleVar(); // Pop WindowPadding
@@ -1285,15 +1308,84 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 }
 bool SceneUI::drawOverlays(UIContext& ctx)
 {
+    // === UI SETTINGS SERIALIZATION ===
+    // 1. LOAD from SceneData if a new project was loaded
+    static int last_local_counter = -1;
+    if (ctx.scene.load_counter != last_local_counter) {
+        if (!ctx.scene.ui_settings_json_str.empty()) {
+            try {
+                auto j = nlohmann::json::parse(ctx.scene.ui_settings_json_str);
+                
+                // Pro Camera Settings
+                if (j.contains("viewport_settings")) {
+                    auto& vs = j["viewport_settings"];
+                    viewport_settings.show_histogram = vs.value("show_histogram", false);
+                    viewport_settings.histogram_mode = vs.value("histogram_mode", 0);
+                    viewport_settings.histogram_opacity = vs.value("histogram_opacity", 0.5f);
+                    viewport_settings.show_focus_peaking = vs.value("show_focus_peaking", false);
+                    viewport_settings.focus_peaking_color = vs.value("focus_peaking_color", 0);
+                    viewport_settings.focus_peaking_threshold = vs.value("focus_peaking_threshold", 0.15f);
+                    viewport_settings.show_zebra = vs.value("show_zebra", false);
+                    viewport_settings.zebra_threshold = vs.value("zebra_threshold", 0.95f);
+                    viewport_settings.show_af_points = vs.value("show_af_points", false);
+                    viewport_settings.af_mode = vs.value("af_mode", 0);
+                    viewport_settings.af_selected_point = vs.value("af_selected_point", 4);
+                    viewport_settings.focus_mode = vs.value("focus_mode", 1);
+                }
+            } catch (...) {}
+        }
+        last_local_counter = ctx.scene.load_counter;
+    }
+
+    // 2. SAVE to SceneData if settings changed
+    static ViewportDisplaySettings last_vs_check;
+    static bool first_run = true;
+    if (first_run) {
+        std::memset(&last_vs_check, 0, sizeof(last_vs_check));
+        first_run = false;
+    }
+    
+    if (std::memcmp(&viewport_settings, &last_vs_check, sizeof(ViewportDisplaySettings)) != 0) {
+        try {
+            nlohmann::json root;
+            if (!ctx.scene.ui_settings_json_str.empty()) {
+                try { root = nlohmann::json::parse(ctx.scene.ui_settings_json_str); } catch(...) {}
+            }
+            
+            nlohmann::json& vs = root["viewport_settings"];
+            vs["show_histogram"] = viewport_settings.show_histogram;
+            vs["histogram_mode"] = viewport_settings.histogram_mode;
+            vs["histogram_opacity"] = viewport_settings.histogram_opacity;
+            vs["show_focus_peaking"] = viewport_settings.show_focus_peaking;
+            vs["focus_peaking_color"] = viewport_settings.focus_peaking_color;
+            vs["focus_peaking_threshold"] = viewport_settings.focus_peaking_threshold;
+            vs["show_zebra"] = viewport_settings.show_zebra;
+            vs["zebra_threshold"] = viewport_settings.zebra_threshold;
+            vs["show_af_points"] = viewport_settings.show_af_points;
+            vs["af_mode"] = viewport_settings.af_mode;
+            vs["af_selected_point"] = viewport_settings.af_selected_point;
+            vs["focus_mode"] = viewport_settings.focus_mode;
+            
+            ctx.scene.ui_settings_json_str = root.dump();
+            std::memcpy(&last_vs_check, &viewport_settings, sizeof(ViewportDisplaySettings));
+        } catch (...) {}
+    }
+
     bool gizmo_hit = false;
 
     // Draw Viewport HUDs
     // Render status is now integrated into drawViewportMessages
 
-
     if (ctx.scene.camera && ctx.selection.show_gizmo) {
         drawLightGizmos(ctx, gizmo_hit);
     }
+
+    // === PRO CAMERA HUD OVERLAYS ===
+    // These are drawn on top of everything else
+    drawHistogramOverlay(ctx);
+    drawFocusPeakingOverlay(ctx);
+    drawZebraOverlay(ctx);
+    drawAFPointsOverlay(ctx);
 
     return gizmo_hit;
 }
@@ -1459,6 +1551,8 @@ void SceneUI::drawControlsContent()
 void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& objects) {
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    bbox_cache.clear();  // Clear bounding box cache too
+    material_slots_cache.clear();  // Clear material slots cache
     
     for (size_t i = 0; i < objects.size(); ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
@@ -1468,16 +1562,104 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
         }
     }
     
-    // Transfer to sequential vector for ImGui Clipper
+    // Transfer to sequential vector for ImGui Clipper AND calculate bounding boxes AND material slots
     mesh_ui_cache.reserve(mesh_cache.size());
     for (auto& kv : mesh_cache) {
         mesh_ui_cache.push_back(kv);
+        
+        // Calculate LOCAL bounding box from ORIGINAL vertices (not transformed!)
+        // This allows us to properly apply the transform matrix when drawing
+        Vec3 bb_min(1e10f, 1e10f, 1e10f);
+        Vec3 bb_max(-1e10f, -1e10f, -1e10f);
+        
+        // Collect unique material IDs for this object
+        std::vector<uint16_t> mat_ids;
+        
+        for (auto& pair : kv.second) {
+            auto& tri = pair.second;
+            // Use ORIGINAL vertices (local space) - not getV0() which returns transformed!
+            Vec3 v0 = tri->getOriginalVertexPosition(0);
+            Vec3 v1 = tri->getOriginalVertexPosition(1);
+            Vec3 v2 = tri->getOriginalVertexPosition(2);
+            
+            bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+            bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+            bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+            bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+            bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+            bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+            
+            // Collect material ID (check for duplicates - usually few materials)
+            uint16_t mid = tri->getMaterialID();
+            bool found = false;
+            for (uint16_t existing : mat_ids) {
+                if (existing == mid) { found = true; break; }
+            }
+            if (!found) mat_ids.push_back(mid);
+        }
+        
+        bbox_cache[kv.first] = {bb_min, bb_max};
+        material_slots_cache[kv.first] = std::move(mat_ids);
     }
     
     mesh_cache_valid = true;
 }
 
+// Update bounding box for a specific object (after transform)
+// NOTE: Since we now store LOCAL bbox (from original vertices), this may not need
+// to be called unless the mesh geometry itself changes. Transform is applied at draw time.
+void SceneUI::updateBBoxCache(const std::string& objectName) {
+    auto it = mesh_cache.find(objectName);
+    if (it == mesh_cache.end()) return;
+    
+    Vec3 bb_min(1e10f, 1e10f, 1e10f);
+    Vec3 bb_max(-1e10f, -1e10f, -1e10f);
+    
+    for (auto& pair : it->second) {
+        auto& tri = pair.second;
+        // Use ORIGINAL vertices (local space) for consistency with rebuildMeshCache
+        Vec3 v0 = tri->getOriginalVertexPosition(0);
+        Vec3 v1 = tri->getOriginalVertexPosition(1);
+        Vec3 v2 = tri->getOriginalVertexPosition(2);
+        
+        bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
+        bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
+        bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
+        bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
+        bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
+        bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
+    }
+    
+    bbox_cache[objectName] = {bb_min, bb_max};
+}
 
+// Lazy CPU Sync - called before mouse picking to ensure vertices are up to date
+// This is much more efficient than updating on gizmo release because:
+// 1. Gizmo release is instant (no freeze)
+// 2. Sync only happens when user actually tries to pick something
+// 3. If user moves object multiple times without picking, we only sync once
+void SceneUI::ensureCPUSyncForPicking() {
+    if (objects_needing_cpu_sync.empty()) return;
+    
+    // Update all pending objects
+    for (const auto& name : objects_needing_cpu_sync) {
+        auto it = mesh_cache.find(name);
+        if (it != mesh_cache.end()) {
+            for (auto& pair : it->second) {
+                pair.second->updateTransformedVertices();
+            }
+        }
+    }
+    
+    size_t count = objects_needing_cpu_sync.size();
+    objects_needing_cpu_sync.clear();
+    
+    // Trigger BVH rebuild for accurate picking
+    extern bool g_bvh_rebuild_pending;
+    g_bvh_rebuild_pending = true;
+    
+    SCENE_LOG_INFO("Lazy CPU sync completed for " + std::to_string(count) + " objects");
+}
 
 // Global flag for Render Window visibility
 bool show_render_window = false;
@@ -1990,6 +2172,22 @@ void SceneUI::performOpenProject(UIContext& ctx) {
             active_model_path = g_ProjectManager.getProjectName();
             
             if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
+            
+            // Register animation clips with AnimationController
+            // This ensures bone animations work immediately after project load
+            if (!ctx.scene.animationDataList.empty()) {
+                auto& animCtrl = AnimationController::getInstance();
+                animCtrl.registerClips(ctx.scene.animationDataList);
+                
+                // Auto-play first animation clip
+                const auto& clips = animCtrl.getAllClips();
+                if (!clips.empty()) {
+                    animCtrl.play(clips[0].name, 0.0f);  // Instant start, no blend
+                    SCENE_LOG_INFO("[SceneUI] Auto-playing animation: " + clips[0].name);
+                }
+                
+                SCENE_LOG_INFO("[SceneUI] Registered " + std::to_string(ctx.scene.animationDataList.size()) + " animation clips after project load.");
+            }
             
             g_ProjectManager.getProjectData().is_modified = false;
 

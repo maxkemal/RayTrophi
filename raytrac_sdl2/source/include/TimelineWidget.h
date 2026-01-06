@@ -89,7 +89,8 @@ private:
     
     // ===== DATA MANAGEMENT =====
     void rebuildTrackList(UIContext& ctx);
-    void syncFromAnimationData(UIContext& ctx);  // Import animation keyframes
+    void handleSelectionSync(UIContext& ctx);  // Lightweight selection sync (runs every frame)
+    void syncFromAnimationData(UIContext& ctx);  // Import animation keyframes (runs once)
     void insertKeyframeForTrack(UIContext& ctx, const std::string& track_name, int frame);
     void insertKeyframeType(UIContext& ctx, const std::string& track_name, int frame, KeyframeInsertType type);
     void deleteKeyframe(UIContext& ctx, const std::string& track_name, int frame);

@@ -1164,7 +1164,10 @@ int main(int argc, char* argv[]) {
                             // SKINNING FIX: File-based animations may include skinning which deforms vertices.
                             // updateGeometry() in TLAS mode only updates matrices (transforms).
                             // For skinning, we need updateTLASGeometry() which rebuilds BLAS with new vertex data.
-                            optix_gpu.updateTLASGeometry(scene.world.objects);
+                            
+                            // Pass Calculated Bone Matrices for GPU Skinning
+                            optix_gpu.updateTLASGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                            
                             // Geometry change implies all buffers need refresh
                             g_camera_dirty = true;
                             g_lights_dirty = true;

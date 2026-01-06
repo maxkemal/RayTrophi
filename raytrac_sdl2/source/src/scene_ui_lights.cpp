@@ -15,6 +15,7 @@
 #include "DirectionalLight.h"
 #include "SpotLight.h"
 #include "AreaLight.h"
+#include "ProjectManager.h"
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -261,6 +262,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
             ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
             ctx.optix_gpu_ptr->resetAccumulation();
         }
+        ProjectManager::getInstance().markModified();
     }
 }
 bool SceneUI::deleteSelectedLight(UIContext& ctx)
@@ -283,5 +285,6 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
     ctx.renderer.resetCPUAccumulation();
 
     SCENE_LOG_INFO("Deleted Light");
+    ProjectManager::getInstance().markModified();
     return true;
 }
