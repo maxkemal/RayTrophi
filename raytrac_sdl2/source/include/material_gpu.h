@@ -50,9 +50,25 @@ struct alignas(16) GpuMaterial {
     float anisotropic;                // 4 bytes - Surface anisotropy
     float sheen;                      // 4 bytes - Sheen amount  
     float sheen_tint;                 // 4 bytes - Sheen color tint
-    float _padding;                   // 4 bytes - Alignment padding
+    int flags;                        // 4 bytes - bitfield flags (replaced padding)
+
+    // Block 8: Water FFT Textures (16 bytes)
+    cudaTextureObject_t fft_height_tex; // 8 bytes 
+    cudaTextureObject_t fft_normal_tex; // 8 bytes
+
+    // Block 9: Advanced Water Details (16 bytes)
+    float micro_detail_strength;      // 4 bytes
+    float micro_detail_scale;         // 4 bytes
+    float foam_noise_scale;           // 4 bytes
+    float foam_threshold;             // 4 bytes
+
+    // Block 10: FFT Settings (16 bytes)
+    float fft_ocean_size;             // 4 bytes
+    float fft_choppiness;             // 4 bytes
+    float padding1;                   // 4 bytes
+    float padding2;                   // 4 bytes
 };  
-// Total: 112 bytes - well aligned for GPU (7 x 16-byte blocks)
+// Total: 160 bytes - well aligned (10 x 16-byte blocks)
 
 inline bool float3_equal(float3 a, float3 b, float epsilon = FLOAT_COMPARE_EPSILON) {  
     return fabsf(a.x - b.x) < epsilon && 
@@ -77,7 +93,15 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.subsurface_anisotropy - b.subsurface_anisotropy) < FLOAT_COMPARE_EPSILON &&
         // Clear Coat & Translucent
         fabsf(a.clearcoat_roughness - b.clearcoat_roughness) < FLOAT_COMPARE_EPSILON &&
-        fabsf(a.translucent - b.translucent) < FLOAT_COMPARE_EPSILON;
+        fabsf(a.translucent - b.translucent) < FLOAT_COMPARE_EPSILON &&
+        // Water Details
+        fabsf(a.micro_detail_strength - b.micro_detail_strength) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.micro_detail_scale - b.micro_detail_scale) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.foam_noise_scale - b.foam_noise_scale) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.foam_threshold - b.foam_threshold) < FLOAT_COMPARE_EPSILON &&
+        // FFT Settings
+        fabsf(a.fft_ocean_size - b.fft_ocean_size) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.fft_choppiness - b.fft_choppiness) < FLOAT_COMPARE_EPSILON;
 }    
 
 namespace std {  
@@ -122,6 +146,16 @@ namespace std {
             // Clear Coat & Translucent
             hash_combine(h, m.clearcoat_roughness);
             hash_combine(h, m.translucent);
+
+            // Water Details
+            hash_combine(h, m.micro_detail_strength);
+            hash_combine(h, m.micro_detail_scale);
+            hash_combine(h, m.foam_noise_scale);
+            hash_combine(h, m.foam_threshold);
+
+            // FFT Settings
+            hash_combine(h, m.fft_ocean_size);
+            hash_combine(h, m.fft_choppiness);
 
             return h;  
         }  

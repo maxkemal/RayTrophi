@@ -44,6 +44,34 @@
   - **RTX Series**: Full hardware RT core acceleration
   - **HUD Notification**: GPU mode displayed at startup (RTX vs Compute Mode)
 
+### 📸 Pro Camera System & Physical Lens (January 2025)
+
+- ✅ **Advanced Pro Camera HUD**: Complete overhaul of the camera interface for a professional photography experience.
+  - **Interactive Focus Ring**: Use the mouse wheel to manually pull focus with precision.
+  - **Focus Mode Control**: Dedicated slider to switch between Auto Focus (AF) and Manual Focus (MF).
+  - **Smart Auto-Focus**: Smooth, dampened transition when locking onto objects in the center of the frame.
+  - **Visual Feedback**: HUD elements react to focus changes (Green = Locked, White = Searching/Manual).
+
+- ✅ **Physically Correct Lens Distortion**:
+  - **Brown-Conrady Model**: Implemented realistic radial distortion simulation on both CPU and GPU (OptiX).
+  - **Auto-Calculated Defects**: Distortion is now derived purely from physical lens properties (Focal Length/FOV).
+  - **Wide Angle (Barrel)**: Lenses wider than 50mm naturally exhibit barrel distortion.
+  - **Telephoto (Pincushion)**: Long lenses exhibit slight pincushion distortion.
+  - **No Manual Sliders**: The "Distortion" slider has been removed in favor of this physically accurate, automatic behavior.
+
+### Project Serialization Improvements (December 31, 2024)
+
+- ✅ **Embedded Texture Serialization Fix**: GLB embedded textures now correctly saved and loaded with projects
+  - **Issue**: Embedded textures from GLB files were lost when saving/loading projects
+  - **Root Cause 1**: Member shadowing - `Material*` base pointer accessed wrong texture properties
+  - **Root Cause 2**: `MaterialManager::getOrCreateMaterialID` didn't update existing materials' textures
+  - **Solution**: Proper `PrincipledBSDF*` cast in `serializeTextures()` and texture reference updates
+
+- ✅ **Normal Map Texture Type Fix**: Fixed GPU rendering artifacts caused by incorrect texture type loading
+  - **Issue**: One triangle per polygon appeared black/inverted after project load
+  - **Root Cause**: All textures were loaded as `TextureType::Albedo`, causing sRGB conversion on normal maps
+  - **Solution**: `deserializeProperty()` now accepts texture type parameter, each property uses correct type
+
 ### Animation System Improvements
 
 - ✅ **Material Keyframe Rendering Fix**: Fixed batch animation rendering where material property keyframes (albedo, emission, roughness, etc.) were not being applied during OptiX-based animation output

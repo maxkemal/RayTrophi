@@ -6,6 +6,12 @@
 #include "PrincipledBSDF.h"
 #include "PrincipledBSDF.h"
 #include "globals.h"
+#include "fft_ocean.cuh"
+
+// CUDA Library Linking
+#pragma comment(lib, "cufft.lib")
+#pragma comment(lib, "cudart.lib")
+
 // #include "GeometryUtils.h" // Removed: Not needed for manual mesh generation
 
 WaterSurface* WaterManager::getWaterSurface(int id) {
@@ -22,6 +28,14 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
         
     if (it == water_surfaces.end()) return;
     
+    // Cleanup FFT resources
+    if (it->fft_state) {
+        FFTOceanState* state = static_cast<FFTOceanState*>(it->fft_state);
+        cleanupFFTOcean(state);
+        delete state;
+        it->fft_state = nullptr;
+    }
+    
     // 2. Remove triangles from scene
     for (auto& tri : it->mesh_triangles) {
         auto obj_it = std::find(scene.world.objects.begin(), scene.world.objects.end(), tri);
@@ -34,8 +48,101 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
     water_surfaces.erase(it);
 }
 
-void WaterManager::update(float dt) {
-    // Will be used for CPU animation later if needed
+void WaterManager::clear() {
+    for (auto& surf : water_surfaces) {
+         if (surf.fft_state) {
+             FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
+             cleanupFFTOcean(state);
+             delete state;
+             surf.fft_state = nullptr;
+         }
+    }
+    water_surfaces.clear();
+    next_id = 1;
+}
+
+bool WaterManager::update(float dt) {
+    static float global_time = 0.0f;
+    global_time += dt;
+    bool needs_gpu_sync = false;
+
+    for (auto& surf : water_surfaces) {
+        if (surf.params.use_fft_ocean) {
+            // Manage FFT State
+            if (!surf.fft_state) {
+                 FFTOceanState* state = new FFTOceanState();
+                 surf.fft_state = (void*)state;
+            }
+            
+            FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
+            
+            // Map parameters
+            FFTOceanParams fft_params;
+            fft_params.resolution = surf.params.fft_resolution;
+            fft_params.ocean_size = surf.params.fft_ocean_size;
+            fft_params.wind_speed = surf.params.fft_wind_speed;
+            fft_params.wind_direction = surf.params.fft_wind_direction;
+            fft_params.choppiness = surf.params.fft_choppiness;
+            fft_params.amplitude = surf.params.fft_amplitude;
+            fft_params.time_scale = surf.params.fft_time_scale;
+            
+            // Check initialization
+            if (!state->initialized || state->current_resolution != fft_params.resolution) {
+                if (initFFTOcean(state, &fft_params)) {
+                    needs_gpu_sync = true; // Texture handles might have changed (recreated)
+                }
+            }
+
+            // Run simulation
+            updateFFTOcean(state, &fft_params, global_time);
+            
+            // Connect to Material
+            if (surf.material_id > 0) {
+                auto mat = MaterialManager::getInstance().getMaterial(surf.material_id);
+                if (mat && mat->gpuMaterial) {
+                    // Update texture handles in material
+                    // Note: If handles haven't changed, this is lightweight. 
+                    // The actual texture data is updated on GPU by updateFFTOcean.
+                    if (mat->gpuMaterial->fft_height_tex != state->tex_height ||
+                        mat->gpuMaterial->fft_normal_tex != state->tex_normal) {
+                        
+                        mat->gpuMaterial->fft_height_tex = state->tex_height;
+                        mat->gpuMaterial->fft_normal_tex = state->tex_normal;
+                        needs_gpu_sync = true;
+                    }
+                }
+            }
+        } else {
+             // Cleanup if disabled but state exists
+             if (surf.fft_state) {
+                 FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
+                 cleanupFFTOcean(state);
+                 delete state;
+                 surf.fft_state = nullptr;
+                 needs_gpu_sync = true; // Texture handles removed
+                 
+                 // Also reset material handles
+                 if (surf.material_id > 0) {
+                     auto mat = MaterialManager::getInstance().getMaterial(surf.material_id);
+                     if (mat && mat->gpuMaterial) {
+                         mat->gpuMaterial->fft_height_tex = 0;
+                         mat->gpuMaterial->fft_normal_tex = 0;
+                     }
+                 }
+             }
+        }
+    }
+    return needs_gpu_sync;
+}
+
+cudaTextureObject_t WaterManager::getFirstFFTHeightMap() {
+    for (const auto& surf : water_surfaces) {
+        if (surf.params.use_fft_ocean && surf.fft_state) {
+            FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
+            return state->tex_height;
+        }
+    }
+    return 0;
 }
 
 WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, float size, float density) {
@@ -47,25 +154,74 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     auto water_mat = std::make_shared<PrincipledBSDF>();
     auto gpu = std::make_shared<GpuMaterial>();
     
-    // Approved Water Params
-    gpu->albedo = make_float3(1.0f, 1.0f, 1.0f); // White for clear transmission (Absorption = 1 - Albedo)
+    // === BASE WATER MATERIAL ===
+    // Albedo controls transmission tint - use deep_color for Beer's law
+    gpu->albedo = make_float3(
+        surf.params.deep_color.x, 
+        surf.params.deep_color.y, 
+        surf.params.deep_color.z
+    );
     gpu->transmission = 1.0f;
     gpu->opacity = 1.0f;
     gpu->roughness = surf.params.roughness;
     gpu->ior = surf.params.ior;
+    gpu->metallic = 0.0f;
     
-    // PACKING WAVE PARAMS into unused PBR fields
+    // === WAVE PARAMS (original packing) ===
     // anisotropic -> Wave Speed
     // sheen -> Wave Strength (Serves as IS_WATER flag if > 0)
     // sheen_tint -> Wave Frequency
     gpu->anisotropic = surf.params.wave_speed;
-    gpu->sheen = fmaxf(0.001f, surf.params.wave_strength); // Ensure > 0 to act as flag
+    gpu->sheen = fmaxf(0.001f, surf.params.wave_strength);  // >0 = IS_WATER flag
     gpu->sheen_tint = surf.params.wave_frequency;
+    
+    // === ADVANCED WATER PARAMS (new packing) ===
+    // clearcoat -> Shore Foam Intensity
+    // clearcoat_roughness -> Caustic Intensity
+    gpu->clearcoat = surf.params.shore_foam_intensity;
+    gpu->clearcoat_roughness = surf.params.caustic_intensity;
+    
+    // subsurface -> Depth Max (scaled: divide by 100 to fit 0-1 range)
+    // subsurface_scale -> Absorption Density
+    gpu->subsurface = surf.params.depth_max / 100.0f;
+    gpu->subsurface_scale = surf.params.absorption_density;
+    
+    // subsurface_color -> Absorption Color
+    gpu->subsurface_color = make_float3(
+        surf.params.absorption_color.x,
+        surf.params.absorption_color.y,
+        surf.params.absorption_color.z
+    );
+    
+    // subsurface_radius -> (shore_foam_distance, caustic_scale, sss_intensity)
+    gpu->subsurface_radius = make_float3(
+        surf.params.shore_foam_distance,
+        surf.params.caustic_scale,
+        surf.params.sss_intensity
+    );
+    
+    // emission -> Shallow Color (repurposed for water)
+    gpu->emission = make_float3(
+        surf.params.shallow_color.x,
+        surf.params.shallow_color.y,
+        surf.params.shallow_color.z
+    );
+    
+    // translucent -> Foam Level
+    gpu->translucent = surf.params.foam_level;
+    
+    // subsurface_anisotropy -> Caustic Speed
+    gpu->subsurface_anisotropy = surf.params.caustic_speed;
 
-    gpu->metallic = 0.0f;
-    // gpu->specular = 1.0f; // REMOVED: Not in GpuMaterial
-    // gpu->specTrans = 1.0f; // REMOVED: Not in GpuMaterial
-    // gpu->scatter_distance = ... // REMOVED
+    // Water Details (New)
+    gpu->micro_detail_strength = surf.params.micro_detail_strength;
+    gpu->micro_detail_scale = surf.params.micro_detail_scale;
+    gpu->foam_noise_scale = surf.params.foam_noise_scale;
+    gpu->foam_threshold = surf.params.foam_threshold;
+    
+    // FFT
+    gpu->fft_ocean_size = surf.params.fft_ocean_size;
+    gpu->fft_choppiness = surf.params.fft_choppiness;
     
     water_mat->gpuMaterial = gpu;
     
@@ -80,24 +236,27 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     if (segments > 256) segments = 256; // Limit for safety
     
     float step = size / segments;
-    float start_x = pos.x - size * 0.5f;
-    float start_z = pos.z - size * 0.5f;
+    // Create vertices around origin (local space) - pivot will be at center
+    float half_size = size * 0.5f;
     
+    // Transform stores the actual world position
     std::shared_ptr<Transform> shared_transform = std::make_shared<Transform>();
-    shared_transform->setBase(Matrix4x4::identity()); // World space vertices
+    Matrix4x4 world_transform = Matrix4x4::translation(pos);
+    shared_transform->setBase(world_transform);
     
     for (int z = 0; z < segments; z++) {
         for (int x = 0; x < segments; x++) {
-            float x0 = start_x + (x * step);
-            float z0 = start_z + (z * step);
+            // Local space coordinates (centered around origin)
+            float x0 = -half_size + (x * step);
+            float z0 = -half_size + (z * step);
             float x1 = x0 + step;
             float z1 = z0 + step;
             
-            // Grid cell vertices (y is flat initially)
-            Vec3 v0(x0, pos.y, z0);
-            Vec3 v1(x1, pos.y, z0);
-            Vec3 v2(x1, pos.y, z1);
-            Vec3 v3(x0, pos.y, z1);
+            // Grid cell vertices in local space (y=0 at local origin)
+            Vec3 v0(x0, 0, z0);
+            Vec3 v1(x1, 0, z0);
+            Vec3 v2(x1, 0, z1);
+            Vec3 v3(x0, 0, z1);
             
             // UVs
             float u0 = (float)x / segments;
@@ -151,12 +310,50 @@ nlohmann::json WaterManager::serialize() const {
         ws["wave_speed"] = surf.params.wave_speed;
         ws["wave_strength"] = surf.params.wave_strength;
         ws["wave_frequency"] = surf.params.wave_frequency;
+        
+        // Colors
         ws["deep_color"] = {surf.params.deep_color.x, surf.params.deep_color.y, surf.params.deep_color.z};
         ws["shallow_color"] = {surf.params.shallow_color.x, surf.params.shallow_color.y, surf.params.shallow_color.z};
+        
+        // Physics
         ws["clarity"] = surf.params.clarity;
         ws["foam_level"] = surf.params.foam_level;
         ws["ior"] = surf.params.ior;
         ws["roughness"] = surf.params.roughness;
+        
+        // Advanced: Depth & Absorption
+        ws["depth_max"] = surf.params.depth_max;
+        ws["absorption_color"] = {surf.params.absorption_color.x, surf.params.absorption_color.y, surf.params.absorption_color.z};
+        ws["absorption_density"] = surf.params.absorption_density;
+        
+        // Advanced: Shore Foam
+        ws["shore_foam_distance"] = surf.params.shore_foam_distance;
+        ws["shore_foam_intensity"] = surf.params.shore_foam_intensity;
+        
+        // Advanced: Caustics
+        ws["caustic_intensity"] = surf.params.caustic_intensity;
+        ws["caustic_scale"] = surf.params.caustic_scale;
+        ws["caustic_speed"] = surf.params.caustic_speed;
+        
+        // Advanced: SSS
+        ws["sss_intensity"] = surf.params.sss_intensity;
+        ws["sss_color"] = {surf.params.sss_color.x, surf.params.sss_color.y, surf.params.sss_color.z};
+        
+        // Advanced: FFT Ocean
+        ws["use_fft_ocean"] = surf.params.use_fft_ocean;
+        ws["fft_resolution"] = surf.params.fft_resolution;
+        ws["fft_ocean_size"] = surf.params.fft_ocean_size;
+        ws["fft_wind_speed"] = surf.params.fft_wind_speed;
+        ws["fft_wind_direction"] = surf.params.fft_wind_direction;
+        ws["fft_choppiness"] = surf.params.fft_choppiness;
+        ws["fft_amplitude"] = surf.params.fft_amplitude;
+        ws["fft_time_scale"] = surf.params.fft_time_scale;
+        
+        // Advanced: Water Details
+        ws["micro_detail_strength"] = surf.params.micro_detail_strength;
+        ws["micro_detail_scale"] = surf.params.micro_detail_scale;
+        ws["foam_noise_scale"] = surf.params.foam_noise_scale;
+        ws["foam_threshold"] = surf.params.foam_threshold;
         
         // Position (from reference triangle or first triangle)
         if (surf.reference_triangle) {
@@ -209,10 +406,11 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         surf.params.wave_strength = ws.value("wave_strength", 0.5f);
         surf.params.wave_frequency = ws.value("wave_frequency", 1.0f);
         surf.params.clarity = ws.value("clarity", 0.8f);
-        surf.params.foam_level = ws.value("foam_level", 0.1f);
+        surf.params.foam_level = ws.value("foam_level", 0.2f);
         surf.params.ior = ws.value("ior", 1.333f);
-        surf.params.roughness = ws.value("roughness", 0.05f);
+        surf.params.roughness = ws.value("roughness", 0.02f);
         
+        // Colors
         if (ws.contains("deep_color")) {
             surf.params.deep_color = Vec3(ws["deep_color"][0], ws["deep_color"][1], ws["deep_color"][2]);
         }
@@ -220,6 +418,44 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
             surf.params.shallow_color = Vec3(ws["shallow_color"][0], ws["shallow_color"][1], ws["shallow_color"][2]);
         }
         
+        // Advanced: Depth & Absorption
+        surf.params.depth_max = ws.value("depth_max", 15.0f);
+        surf.params.absorption_density = ws.value("absorption_density", 0.5f);
+        if (ws.contains("absorption_color")) {
+            surf.params.absorption_color = Vec3(ws["absorption_color"][0], ws["absorption_color"][1], ws["absorption_color"][2]);
+        }
+        
+        // Advanced: Shore Foam
+        surf.params.shore_foam_distance = ws.value("shore_foam_distance", 1.5f);
+        surf.params.shore_foam_intensity = ws.value("shore_foam_intensity", 0.6f);
+        
+        // Advanced: Caustics
+        surf.params.caustic_intensity = ws.value("caustic_intensity", 0.4f);
+        surf.params.caustic_scale = ws.value("caustic_scale", 2.0f);
+        surf.params.caustic_speed = ws.value("caustic_speed", 1.0f);
+        
+        // Advanced: SSS
+        surf.params.sss_intensity = ws.value("sss_intensity", 0.15f);
+        if (ws.contains("sss_color")) {
+            surf.params.sss_color = Vec3(ws["sss_color"][0], ws["sss_color"][1], ws["sss_color"][2]);
+        }
+        
+        // Advanced: FFT Ocean
+        surf.params.use_fft_ocean = ws.value("use_fft_ocean", false);
+        surf.params.fft_resolution = ws.value("fft_resolution", 256);
+        surf.params.fft_ocean_size = ws.value("fft_ocean_size", 100.0f);
+        surf.params.fft_wind_speed = ws.value("fft_wind_speed", 10.0f);
+        surf.params.fft_wind_direction = ws.value("fft_wind_direction", 0.0f);
+        surf.params.fft_choppiness = ws.value("fft_choppiness", 1.0f);
+        surf.params.fft_amplitude = ws.value("fft_amplitude", 0.0002f);
+        surf.params.fft_time_scale = ws.value("fft_time_scale", 1.0f);
+        
+        // Advanced: Water Details
+        surf.params.micro_detail_strength = ws.value("micro_detail_strength", 0.05f);
+        surf.params.micro_detail_scale = ws.value("micro_detail_scale", 20.0f);
+        surf.params.foam_noise_scale = ws.value("foam_noise_scale", 4.0f);
+        surf.params.foam_threshold = ws.value("foam_threshold", 0.4f);
+
         // Find existing triangles in scene by nodeName (don't create new ones!)
         for (auto& obj : scene.world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
@@ -235,18 +471,41 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         if (surf.material_id > 0) {
             auto mat = MaterialManager::getInstance().getMaterial(surf.material_id);
             if (mat && mat->gpuMaterial) {
-                // Restore ESSENTIAL water material properties
-                mat->gpuMaterial->albedo = make_float3(1.0f, 1.0f, 1.0f); // White for clear transmission
-                mat->gpuMaterial->transmission = 1.0f;
-                mat->gpuMaterial->opacity = 1.0f;
-                mat->gpuMaterial->metallic = 0.0f;
+                auto& gpu = mat->gpuMaterial;
                 
-                // Wave params packed into PBR fields
-                mat->gpuMaterial->anisotropic = surf.params.wave_speed;
-                mat->gpuMaterial->sheen = std::fmax(0.001f, surf.params.wave_strength); // IS_WATER flag
-                mat->gpuMaterial->sheen_tint = surf.params.wave_frequency;
-                mat->gpuMaterial->roughness = surf.params.roughness;
-                mat->gpuMaterial->ior = surf.params.ior;
+                // Base material properties
+                gpu->albedo = make_float3(surf.params.deep_color.x, surf.params.deep_color.y, surf.params.deep_color.z);
+                gpu->transmission = 1.0f;
+                gpu->opacity = 1.0f;
+                gpu->metallic = 0.0f;
+                gpu->roughness = surf.params.roughness;
+                gpu->ior = surf.params.ior;
+                
+                // Wave params
+                gpu->anisotropic = surf.params.wave_speed;
+                gpu->sheen = std::fmax(0.001f, surf.params.wave_strength);
+                gpu->sheen_tint = surf.params.wave_frequency;
+                
+                // Advanced params
+                gpu->clearcoat = surf.params.shore_foam_intensity;
+                gpu->clearcoat_roughness = surf.params.caustic_intensity;
+                gpu->subsurface = surf.params.depth_max / 100.0f;
+                gpu->subsurface_scale = surf.params.absorption_density;
+                gpu->subsurface_color = make_float3(surf.params.absorption_color.x, surf.params.absorption_color.y, surf.params.absorption_color.z);
+                gpu->subsurface_radius = make_float3(surf.params.shore_foam_distance, surf.params.caustic_scale, surf.params.sss_intensity);
+                gpu->emission = make_float3(surf.params.shallow_color.x, surf.params.shallow_color.y, surf.params.shallow_color.z);
+                gpu->translucent = surf.params.foam_level;
+                gpu->subsurface_anisotropy = surf.params.caustic_speed;
+                
+                // Water Details (New)
+                gpu->micro_detail_strength = surf.params.micro_detail_strength;
+                gpu->micro_detail_scale = surf.params.micro_detail_scale;
+                gpu->foam_noise_scale = surf.params.foam_noise_scale;
+                gpu->foam_threshold = surf.params.foam_threshold;
+                
+                // FFT
+                gpu->fft_ocean_size = surf.params.fft_ocean_size;
+                gpu->fft_choppiness = surf.params.fft_choppiness;
             }
         }
         

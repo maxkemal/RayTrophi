@@ -10,6 +10,7 @@
 #include "SceneSelection.h"
 #include "OptixWrapper.h"
 #include "TerrainManager.h"
+#include "scene_ui_animgraph.hpp"  // For AnimGraphUIState
 #include <filesystem>
 
 void SceneUI::drawMainMenuBar(UIContext& ctx)
@@ -461,6 +462,14 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
                 if (show_system_tab) tab_to_focus = "System"; 
             }
+            
+            ImGui::Separator();
+            
+            // Animation Graph Editor (floating window)
+            if (ImGui::MenuItem("Animation Graph Editor", nullptr, &g_animGraphUI.showNodeEditor)) {
+                // Toggle handled by MenuItem
+            }
+            
             ImGui::EndMenu();
         }
         

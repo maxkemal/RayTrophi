@@ -22,6 +22,7 @@
 #include <ColorProcessingParams.h>
 #include <OpenImageDenoise/oidn.hpp>
 #include <sbt_data.h>
+#include "Matrix4x4.h"
 
 // Forward declarations for TLAS/BLAS support
 class Triangle;
@@ -102,8 +103,9 @@ public:
     void setupPipeline(const char* raygen_ptx);
     void destroyTextureObjects();
     void buildFromData(const OptixGeometryData& data);
+    void buildFromDataTLAS(const OptixGeometryData& data, const std::vector<std::shared_ptr<Hittable>>& objects);
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // Auto-decides based on mode
-    void updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects); // BLAS+TLAS update
+    void updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices = {}); // BLAS+TLAS update
     void updateTLASMatricesOnly(const std::vector<std::shared_ptr<Hittable>>& objects); // Transform-only update
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
 
@@ -128,6 +130,7 @@ public:
     void setWorld(const WorldData& world);
 
     void setLightParams(const std::vector<std::shared_ptr<Light>>& lights);
+    void setTime(float time, float water_time);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
     void resetBuffers(int width, int height);
     
@@ -156,9 +159,7 @@ public:
     // Rebuild TLAS only (call after transform updates)
     void rebuildTLAS();
     // Build scene using TLAS/BLAS structure (new method - replaces buildFromData for TLAS mode)
-    void buildFromDataTLAS(const OptixGeometryData& data,
-        const std::vector<std::shared_ptr<Hittable>>& objects);
-    // Check if using TLAS/BLAS mode
+  
     bool isUsingTLAS() const { return use_tlas_mode; }
     // Update TLAS geometry (update all BLAS vertex buffers and refit)
    
@@ -177,7 +178,11 @@ public:
     void hideInstancesByNodeName(const std::string& nodeName);
     
     // Clone all instances with matching node name (for duplicate - instant!)
+    // Clone all instances with matching node name (for duplicate - instant!)
     std::vector<int> cloneInstancesByNodeName(const std::string& sourceName, const std::string& newName);
+    
+    // Get AccelManager for advanced operations
+    OptixAccelManager* getAccelManager() { return accel_manager.get(); }
     
 private:
     std::function<void(const std::string&, int)> m_accelStatusCallback;
@@ -198,8 +203,7 @@ private:
 
    
     
-    // Get AccelManager for advanced operations
-    OptixAccelManager* getAccelManager() { return accel_manager.get(); }
+
     
     ColorProcessor color_processor;
 
@@ -301,6 +305,12 @@ private:
     int accumulated_samples = 0;              // Total samples accumulated so far
     bool accumulation_valid = false;          // Is current accumulation buffer valid?
     float4* d_accumulation_float4 = nullptr;  // High precision accumulation buffer (float4)
+    float frozen_water_time = 0.0f;           // Water time frozen at accumulation start
+    
+    // FFT Ocean (Tessendorf) state
+    void* fft_ocean_state = nullptr;          // FFTOceanState* (opaque to avoid header dependency)
+    cudaTextureObject_t fft_height_tex = 0;   // Height map texture for shaders
+    cudaTextureObject_t fft_normal_tex = 0;   // Normal map texture for shaders
     
     // ═══════════════════════════════════════════════════════════════════════════
     // PERSISTENT GPU BUFFERS (Animation Performance Optimization)

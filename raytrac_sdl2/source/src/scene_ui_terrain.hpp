@@ -3,8 +3,15 @@
 
 #include "scene_ui.h"
 #include "MaterialManager.h" // Added for material selection
+#include "OptixWrapper.h"
+#include "OptixAccelManager.h"
 #include <TerrainManager.h>
 #include "PrincipledBSDF.h" // For layer texture editing
+#include <set>
+#include <random>
+#include <algorithm>
+#include "InstanceManager.h"
+#include "InstanceGroup.h"
 
 // ===============================================================================
 // TERRAIN PANEL UI
@@ -30,7 +37,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             auto t = TerrainManager::getInstance().createTerrain(ctx.scene, new_res, new_size);
             if (t) {
                 terrain_brush.active_terrain_id = t->id;
-                terrain_brush.enabled = true;
+                // Don't auto-enable edit tool - let user manually enable if needed
                 SCENE_LOG_INFO("Terrain created: " + t->name);
                 ctx.renderer.resetCPUAccumulation();
                 g_bvh_rebuild_pending = true;
@@ -59,7 +66,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 auto t = TerrainManager::getInstance().createTerrainFromHeightmap(ctx.scene, path, new_size, import_height, target_res);
                 if (t) {
                     terrain_brush.active_terrain_id = t->id;
-                    terrain_brush.enabled = true;
+                    // Don't auto-enable edit tool - let user manually enable if needed
                     SCENE_LOG_INFO("Terrain imported from: " + path);
                     ctx.renderer.resetCPUAccumulation();
                     g_bvh_rebuild_pending = true;
@@ -76,12 +83,19 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
         ImGui::Separator();
 
         if (ImGui::Button("Clear All Terrains")) {
+            // GPU sync BEFORE removal - ensure OptiX is not using terrain data
+            if (ctx.optix_gpu_ptr) {
+                cudaDeviceSynchronize();
+            }
             TerrainManager::getInstance().removeAllTerrains(ctx.scene);
             terrain_brush.active_terrain_id = -1;
             SCENE_LOG_INFO("All terrains cleared.");
             ctx.renderer.resetCPUAccumulation();
             g_bvh_rebuild_pending = true;
             g_optix_rebuild_pending = true;
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
         }
     }
 
@@ -196,11 +210,411 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     }
 
                     // UV Scale
-                    if (i < t->layer_uv_scales.size()) {
                         if (ImGui::DragFloat("UV Scale", &t->layer_uv_scales[i], 0.1f, 0.1f, 1000.0f)) {
                             g_optix_rebuild_pending = true;
                         }
+                    
+                    // Fill Button
+                     ImGui::SameLine();
+                     if (ImGui::SmallButton("Fill Mask")) {
+                        if (t->splatMap && t->splatMap->is_loaded()) {
+                            auto& pixels = t->splatMap->pixels; // vector<CompactVec4>
+                            for (auto& p : pixels) {
+                                if (i == 0) p.r = 255;
+                                else if (i == 1) p.g = 255;
+                                else if (i == 2) p.b = 255;
+                                else if (i == 3) p.a = 255;
+                            }
+                            t->splatMap->updateGPU(); // Helper needed? or manually?
+                            // Texture::updateGPU() exists in Texture.h (I saw it).
+                            t->splatMap->updateGPU();
+                            g_optix_rebuild_pending = true;
+                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            SCENE_LOG_INFO("Filled mask for Layer " + std::to_string(i));
+                        }
+                     }
+
+                    // Inline Material Editing (Textures)
+                    if (t->layers[i]) {
+                        auto pMat = std::dynamic_pointer_cast<PrincipledBSDF>(t->layers[i]);
+                        if (pMat) {
+                            ImGui::Indent();
+                            
+                            // Helper lambda for texture slot
+                            auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& texSlot, bool isNormal = false) {
+                                // 1. Label column (Fixed width)
+                                ImGui::Text("%s:", label); 
+                                ImGui::SameLine(80); // Fixed start for value
+
+                                // 2. Value (Filename only)
+                                std::string dispName = "[None]";
+                                std::string tooltipPath = "";
+                                if (texSlot && !texSlot->name.empty()) {
+                                    dispName = std::filesystem::path(texSlot->name).filename().string();
+                                    tooltipPath = texSlot->name;
+                                }
+                                
+                                // Truncate if too long to fit before buttons
+                                float availWidth = ImGui::GetContentRegionAvail().x;
+                                float buttonsWidth = 70.0f; // Space for Load + X
+                                float textWidth = availWidth - buttonsWidth;
+                                
+                                ImGui::TextDisabled("%s", dispName.c_str());
+
+                                if (!tooltipPath.empty() && ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("%s", tooltipPath.c_str());
+                                }
+
+                                // 3. Buttons (Right Aligned)
+                                ImGui::SameLine();
+                                float xTarget = ImGui::GetWindowContentRegionMax().x - buttonsWidth;
+                                if (xTarget > ImGui::GetCursorPosX()) {
+                                    ImGui::SetCursorPosX(xTarget);
+                                }
+
+                                if (ImGui::SmallButton((std::string("Load##") + label).c_str())) {
+                                    std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
+                                    if (!path.empty()) {
+                                        TextureType type = isNormal ? TextureType::Normal : TextureType::Albedo;
+                                        if (std::string(label) == "Roughness") type = TextureType::Roughness;
+                                        
+                                        texSlot = std::make_shared<Texture>(path, type);
+                                        g_optix_rebuild_pending = true;
+                                        ctx.renderer.resetCPUAccumulation();
+                                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                    }
+                                }
+                                
+                                if (texSlot) {
+                                    ImGui::SameLine();
+                                    if (ImGui::SmallButton((std::string("X##") + label).c_str())) {
+                                        texSlot = nullptr;
+                                        g_optix_rebuild_pending = true;
+                                        ctx.renderer.resetCPUAccumulation();
+                                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                    }
+                                }
+                            };
+
+                            DrawTextureSlot("Albedo", pMat->albedoProperty.texture);
+                            DrawTextureSlot("Normal", pMat->normalProperty.texture, true);
+                            DrawTextureSlot("Roughness", pMat->roughnessProperty.texture); 
+                            
+                            ImGui::Unindent();
+                        }
                     }
+                    
+                    // FOLIAGE UI INTEGRATION
+                    ImGui::Spacing();
+                    if (ImGui::TreeNode(("Foliage Settings##" + std::to_string(i)).c_str())) {
+                        // Ensure foliage layers exist
+                        if (t->foliageLayers.size() <= i) {
+                            t->foliageLayers.resize(4);
+                            // Set defaults for new layers
+                            t->foliageLayers[i].targetMaskLayerId = i;
+                            t->foliageLayers[i].name = std::string(autoLayerNames[i]) + " Foliage";
+                        }
+                        
+                        auto& fLayer = t->foliageLayers[i];
+                        
+                        ImGui::Checkbox("Enable Foliage", &fLayer.enabled);
+                        if (fLayer.enabled) {
+                            // Mesh Selection
+                            std::string meshName = fLayer.meshPath.empty() ? "[No Mesh]" : std::filesystem::path(fLayer.meshPath).filename().string();
+                            ImGui::Text("Mesh: %s", meshName.c_str());
+                            if (ImGui::SameLine(); ImGui::SmallButton("Load Mesh...")) {
+                                std::string path = SceneUI::openFileDialogW(L"Mesh Files\0*.obj;*.fbx;*.glb;*.gltf\0");
+                                if (!path.empty()) {
+                                    fLayer.meshPath = path;
+                                    // Trigger load? For V1 we rely on existing Scene loading or need a dedicated loader.
+                                    // Ideally we load it now into OptixAccelManager blindly? 
+                                    // For now, let's look up if it's already in scene or add it.
+                                    // Using a hack: we need a BLAS ID. 
+                                    // We can try to assume it's loaded as a "FoliageAsset"?
+                                    // For this iteration, we will just store the path. 
+                                    // Backend updateFoliage will handle loading if we improve it, 
+                                    // OR we force user to pick from loaded objects?
+                                    // "Pick from Loaded Objects" is safer for V1.
+                                }
+                            }
+
+                            // Mesh ID (Debug / Manual Override)
+                            // ImGui::InputInt("Mesh BLAS ID", &fLayer.meshId);
+
+                            // TEMPORARY: Pick from existing scene objects to get BLAS ID
+                            // Source Object Selection
+                            // NEW: Select by node name from scene objects (like scatter brush)
+                            // This captures actual triangles for cloning
+                            std::string selectedName = "Select Object...";
+                            if (!fLayer.meshPath.empty() && !fLayer.sourceTriangles.empty()) {
+                                selectedName = fLayer.meshPath + " (" + std::to_string(fLayer.sourceTriangles.size()) + " tris)";
+                            } else if (!fLayer.meshPath.empty()) {
+                                selectedName = fLayer.meshPath + " (no tris)";
+                            }
+                            
+                            if (ImGui::BeginCombo("Source Object", selectedName.c_str())) {
+                                // Auto-recapture: If meshPath is set but sourceTriangles is empty, recapture now
+                                if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
+                                    for (const auto& obj : ctx.scene.world.objects) {
+                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                        if (tri && tri->getNodeName() == fLayer.meshPath) {
+                                            fLayer.sourceTriangles.push_back(tri);
+                                        }
+                                    }
+                                    if (!fLayer.sourceTriangles.empty()) {
+                                        fLayer.calculateMeshCenter();
+                                        SCENE_LOG_INFO("[Foliage] Auto-recaptured '" + fLayer.meshPath + 
+                                                      "' with " + std::to_string(fLayer.sourceTriangles.size()) + " triangles");
+                                    }
+                                }
+                                
+                                // Build unique node names from scene
+                                std::set<std::string> nodeNames;
+                                for (const auto& obj : ctx.scene.world.objects) {
+                                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                    if (tri) {
+                                        std::string name = tri->getNodeName();
+                                        // Skip terrain and scatter instances
+                                        if (!name.empty() && 
+                                            name.find("Terrain") == std::string::npos &&
+                                            name.find("_inst_") == std::string::npos &&
+                                            name.find("Foliage_") == std::string::npos) {
+                                            nodeNames.insert(name);
+                                        }
+                                    }
+                                }
+                                
+                                for (const auto& nodeName : nodeNames) {
+                                    bool is_selected = (fLayer.meshPath == nodeName);
+                                    if (ImGui::Selectable(nodeName.c_str(), is_selected)) {
+                                        // Capture all triangles with this node name
+                                        fLayer.meshPath = nodeName;
+                                        fLayer.sourceTriangles.clear();
+                                        
+                                        for (const auto& obj : ctx.scene.world.objects) {
+                                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                            if (tri && tri->getNodeName() == nodeName) {
+                                                fLayer.sourceTriangles.push_back(tri);
+                                            }
+                                        }
+                                        
+                                        // Calculate mesh center for proper placement
+                                        fLayer.calculateMeshCenter();
+                                        
+                                        SCENE_LOG_INFO("[Foliage] Set source '" + nodeName + 
+                                                      "' with " + std::to_string(fLayer.sourceTriangles.size()) + " triangles");
+                                    }
+                                    if (is_selected) ImGui::SetItemDefaultFocus();
+                                }
+                                
+                                if (nodeNames.empty()) {
+                                    ImGui::TextDisabled("No objects in scene (load a model first)");
+                                }
+                                
+                                ImGui::EndCombo();
+                            }
+                            
+                            // Let's implement basic properties first
+                            ImGui::DragInt("Density", &fLayer.density, 10, 0, 10000);
+                            ImGui::SliderFloat("Threshold", &fLayer.maskThreshold, 0.0f, 1.0f);
+                            
+                            ImGui::DragFloat2("Scale Range", &fLayer.scaleRange.x, 0.01f, 0.1f, 5.0f);
+                            ImGui::DragFloat2("Rot Range (Y)", &fLayer.rotationRange.x, 1.0f, 0.0f, 360.0f);
+                            
+                            ImGui::Spacing();
+                            ImGui::Separator();
+                            
+                            // === BRUSH MODE ===
+                            bool brushActive = foliage_brush.enabled && foliage_brush.active_layer_name == fLayer.name;
+                            
+                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Paint Mode");
+                            if (ImGui::Checkbox("Enable Brush", &brushActive)) {
+                                if (brushActive) {
+                                    foliage_brush.enabled = true;
+                                    foliage_brush.active_layer_name = fLayer.name;
+                                    
+                                    // Ensure source is captured
+                                    if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
+                                        for (const auto& obj : ctx.scene.world.objects) {
+                                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                            if (tri && tri->getNodeName() == fLayer.meshPath) {
+                                                fLayer.sourceTriangles.push_back(tri);
+                                            }
+                                        }
+                                        if (!fLayer.sourceTriangles.empty()) {
+                                            fLayer.calculateMeshCenter();
+                                        }
+                                    }
+                                } else {
+                                    foliage_brush.enabled = false;
+                                }
+                            }
+                            
+                            if (brushActive) {
+                                ImGui::SameLine();
+                                ImGui::TextDisabled("(Click terrain to paint)");
+                                
+                                ImGui::SliderFloat("Brush Radius", &foliage_brush.radius, 1.0f, 50.0f);
+                                ImGui::SliderInt("Instances/Stroke", &foliage_brush.density, 1, 20);
+                                
+                                const char* modes[] = { "Add", "Remove" };
+                                ImGui::Combo("Mode", &foliage_brush.mode, modes, 2);
+                            }
+                            
+                            ImGui::Spacing();
+                            
+                            // === SCATTER NOW (Bulk scatter) ===
+                            if (ImGui::Button("Scatter Now")) {
+                                // Auto-recapture source if needed
+                                if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
+                                    SCENE_LOG_INFO("[Foliage] Trying to recapture source: '" + fLayer.meshPath + "'");
+                                    for (const auto& obj : ctx.scene.world.objects) {
+                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                        if (tri && tri->getNodeName() == fLayer.meshPath) {
+                                            fLayer.sourceTriangles.push_back(tri);
+                                        }
+                                    }
+                                    if (!fLayer.sourceTriangles.empty()) {
+                                        fLayer.calculateMeshCenter();
+                                        SCENE_LOG_INFO("[Foliage] Auto-recaptured sources.");
+                                    }
+                                }
+                                
+                                if (!fLayer.hasValidSource()) {
+                                    SCENE_LOG_WARN("[Foliage] No valid source - select an object first");
+                                } else {
+                                    // 1. Legacy Cleanup (Remove old non-instanced objects)
+                                    // This cleans up objects from the previous system to prevent duplicates
+                                    std::string legacyPrefix = "Foliage_" + t->name + "_" + fLayer.name + "_";
+                                    auto& objects = ctx.scene.world.objects;
+                                    objects.erase(
+                                        std::remove_if(objects.begin(), objects.end(),
+                                            [&legacyPrefix](const std::shared_ptr<Hittable>& obj) {
+                                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                                if (tri) return tri->getNodeName().find(legacyPrefix) == 0;
+                                                return false;
+                                            }),
+                                        objects.end()
+                                    );
+                                    
+                                    // 2. Instance Group Setup (New System)
+                                    std::string groupName = "Foliage_" + t->name + "_" + fLayer.name;
+                                    InstanceManager& im = InstanceManager::getInstance();
+                                    InstanceGroup* group = im.findGroupByName(groupName);
+                                    
+                                    if (!group) {
+                                        int newId = im.createGroup(groupName, fLayer.meshPath, fLayer.sourceTriangles);
+                                        group = im.getGroup(newId);
+                                    }
+                                    
+                                    if (group) {
+                                        // Clear existing instances in the group to restart scatter
+                                        group->clearInstances();
+                                        
+                                        // Sync settings
+                                        group->brush_settings.scale_min = fLayer.scaleRange.x;
+                                        group->brush_settings.scale_max = fLayer.scaleRange.y;
+                                        group->brush_settings.rotation_random_y = (fLayer.rotationRange.y - fLayer.rotationRange.x);
+
+                                        // Scatter Parameters
+                                        int targetCount = fLayer.density;
+                                        std::mt19937 rng(12345 + t->id);
+                                        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                                        
+                                        int spawnedCount = 0;
+                                        int maxAttempts = targetCount * 5;
+                                        
+                                        SCENE_LOG_INFO("[Foliage] Starting scatter: " + std::to_string(targetCount) + " instances");
+                                        
+                                        for (int attempt = 0; attempt < maxAttempts && spawnedCount < targetCount; ++attempt) {
+                                            float u = dist(rng);
+                                            float v = dist(rng);
+                                            
+                                            // Check heightmap mask
+                                            int gx = (int)(u * (t->heightmap.width - 1));
+                                            int gy = (int)(v * (t->heightmap.height - 1));
+                                            
+                                            float maskValue = 1.0f;
+                                            if (t->splatMap && t->splatMap->is_loaded()) {
+                                                Vec3 col = t->splatMap->get_color(u, v);
+                                                int ch = fLayer.targetMaskLayerId;
+                                                if (ch == 0) maskValue = col.x;
+                                                else if (ch == 1) maskValue = col.y;
+                                                else if (ch == 2) maskValue = col.z;
+                                                else maskValue = t->splatMap->get_alpha(u, v);
+                                            }
+                                            
+                                            if (maskValue < fLayer.maskThreshold) continue;
+                                            
+                                            // Calculate Position
+                                            float terrainX = (u - 0.5f) * t->heightmap.scale_xz;
+                                            float terrainZ = (v - 0.5f) * t->heightmap.scale_xz;
+                                            float terrainY = t->heightmap.getHeight(gx, gy);
+                                            
+                                            float x = terrainX;
+                                            float y = terrainY;
+                                            float z = terrainZ;
+                                            
+                                            // Random Scale & Rotation
+                                            float scale = fLayer.scaleRange.x + (fLayer.scaleRange.y - fLayer.scaleRange.x) * dist(rng);
+                                            float rotY_deg = fLayer.rotationRange.x + (fLayer.rotationRange.y - fLayer.rotationRange.x) * dist(rng);
+                                            
+                                            // Add Instance
+                                            InstanceTransform inst;
+                                            inst.position = Vec3(x, y, z);
+                                            inst.scale = Vec3(scale, scale, scale);
+                                            inst.rotation = Vec3(0, rotY_deg, 0);
+                                            group->addInstance(inst);
+                                            
+                                            spawnedCount++;
+                                        }
+                                        
+                                        // Sync to Scene
+                                        SceneUI::syncInstancesToScene(ctx, *group, false);
+                                        
+                                        // Rebuild
+                                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                                        ctx.renderer.resetCPUAccumulation();
+                                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                        
+                                        SCENE_LOG_INFO("[Foliage] Scattered " + std::to_string(spawnedCount) + " instances.");
+                                    }
+                                }
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Clear")) {
+                                // 1. Legacy Cleanup
+                                std::string legacyPrefix = "Foliage_" + t->name + "_" + fLayer.name + "_";
+                                auto& objects = ctx.scene.world.objects;
+                                objects.erase(
+                                    std::remove_if(objects.begin(), objects.end(),
+                                        [&legacyPrefix](const std::shared_ptr<Hittable>& obj) {
+                                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                            if (tri) return tri->getNodeName().find(legacyPrefix) == 0;
+                                            return false;
+                                        }),
+                                    objects.end()
+                                );
+                                
+                                // 2. InstanceGroup Cleanup
+                                std::string groupName = "Foliage_" + t->name + "_" + fLayer.name;
+                                InstanceGroup* group = InstanceManager::getInstance().findGroupByName(groupName);
+                                if (group) {
+                                    group->clearInstances();
+                                    SceneUI::syncInstancesToScene(ctx, *group, true); // Force remove from scene
+                                }
+                                
+                                // Rebuild
+                                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                                ctx.renderer.resetCPUAccumulation();
+                                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                    
                     ImGui::Separator();
                     ImGui::PopID();
                 }
@@ -210,12 +624,12 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
             // Auto Mask
             UIWidgets::ColoredHeader("Procedural Auto-Mask", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
-            static float am_height_min = 20.0f;
-            static float am_height_max = 80.0f;
+            static float am_height_min = 5.0f;
+            static float am_height_max = 20.0f;
             static float am_slope = 5.0f;
 
-            ImGui::DragFloat("Height Start (Snow)", &am_height_min, 0.5f, 0.0f, 200.0f);
-            ImGui::DragFloat("Height End", &am_height_max, 0.5f, 0.0f, 200.0f);
+            ImGui::DragFloat("Height Start (Snow)", &am_height_min, 0.1f, 0.0f, 50.0f);
+            ImGui::DragFloat("Height End", &am_height_max, 0.1f, 0.0f, 50.0f);
             ImGui::DragFloat("Slope Steepness", &am_slope, 0.1f, 1.0f, 20.0f);
 
             if (ImGui::Button("Generate Mask")) {
@@ -675,6 +1089,203 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      }
                      g_bvh_rebuild_pending = true;
                  }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TERRAIN FOLIAGE BRUSH - Paint to add/remove foliage instances
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
+    if (!foliage_brush.enabled) return;
+    if (ImGui::GetIO().WantCaptureMouse) return;
+    
+    // Get active terrain
+    auto& terrains = TerrainManager::getInstance().getTerrains();
+    if (terrains.empty()) return;
+    
+    TerrainObject* t = nullptr;
+    TerrainFoliageLayer* activeLayer = nullptr;
+    
+    // Find active terrain and layer by name
+    for (auto& terrain : terrains) {
+        for (auto& fLayer : terrain.foliageLayers) {
+            if (fLayer.name == foliage_brush.active_layer_name) {
+                t = &terrain;
+                activeLayer = &fLayer;
+                break;
+            }
+        }
+        if (t) break;
+    }
+    
+    if (!t || !activeLayer) return;
+    auto& fLayer = *activeLayer;
+    
+    // Auto-capture source if missing but meshPath is set
+    // This fixes the issue where user enables brush but hasn't clicked "Scatter Now" yet
+    if (fLayer.sourceTriangles.empty() && !fLayer.meshPath.empty()) {
+        for (const auto& obj : ctx.scene.world.objects) {
+             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+             if (tri && tri->getNodeName() == fLayer.meshPath) {
+                 fLayer.sourceTriangles.push_back(tri);
+             }
+        }
+        if (!fLayer.sourceTriangles.empty()) {
+             fLayer.calculateMeshCenter();
+        }
+    }
+    
+    if (!fLayer.hasValidSource()) return;
+    
+    // Check for mouse click on terrain
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
+    
+    // Throttle painting (paint every 200ms)
+    static float last_paint_time = 0.0f;
+    float current_time = static_cast<float>(ImGui::GetTime());
+    if (current_time - last_paint_time < 0.2f) return;
+    last_paint_time = current_time;
+    
+    // Get mouse position and raycast to terrain
+    ImVec2 mp = ImGui::GetMousePos();
+    
+    // Use globals for width/height
+    extern int image_width, image_height;
+    int width = image_width;
+    int height = image_height;
+    
+    float u = mp.x / width;
+    float v = mp.y / height;
+    
+    Ray ray;
+    if (ctx.scene.camera) {
+        ray = ctx.scene.camera->get_ray(u, 1.0f - v);
+    } else {
+        return;
+    }
+    
+    HitRecord hit;
+    if (!ctx.scene.bvh || !ctx.scene.bvh->hit(ray, 0.001f, 10000.0f, hit)) return;
+    
+    // Check if we hit terrain
+    if (!hit.triangle) return;
+    std::string hitName = hit.triangle->getNodeName();
+    // Simplified check: checking for "Terrain" string might fail if user renamed object.
+    // Since we are raycasting against the whole scene, we assume if user clicks on something while 
+    // aiming at terrain, they intend to paint. 
+    // Ideally we would check if hit object is the active terrain, but we don't have easy pointer comparison here 
+    // without iterating objects.
+    
+    Vec3 hitPoint = hit.point;
+    
+    // Declarations for flags
+    extern bool g_bvh_rebuild_pending;
+    extern bool g_optix_rebuild_pending;
+    
+    // Verify InstanceGroup exists for this layer
+    std::string groupName = "Foliage_" + t->name + "_" + fLayer.name;
+    InstanceManager& im = InstanceManager::getInstance();
+    InstanceGroup* group = im.findGroupByName(groupName);
+
+    if (!group) {
+        // Create new group if missing
+        int newId = im.createGroup(groupName, fLayer.meshPath, fLayer.sourceTriangles);
+        group = im.getGroup(newId);
+    }
+
+    if (group) {
+        // Sync settings
+        group->brush_settings.scale_min = fLayer.scaleRange.x;
+        group->brush_settings.scale_max = fLayer.scaleRange.y;
+        group->brush_settings.rotation_random_y = (fLayer.rotationRange.y - fLayer.rotationRange.x);
+
+        if (foliage_brush.mode == 0) {
+            // ADD MODE - Add instances to group
+            std::random_device rd;
+            std::mt19937 rng(rd());
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            
+            int added = 0;
+            for (int i = 0; i < foliage_brush.density; ++i) {
+                // Random offset within brush radius
+                float angle = dist(rng) * 6.28318f;
+                float r = dist(rng) * foliage_brush.radius;
+                float offsetX = cosf(angle) * r;
+                float offsetZ = sinf(angle) * r;
+                
+                // Position (XZ)
+                float x = hitPoint.x + offsetX;
+                float z = hitPoint.z + offsetZ;
+                
+                // Get Y from heightmap
+                float scale = t->heightmap.scale_xz;
+                float u_pos = (x / scale) + 0.5f;
+                float v_pos = (z / scale) + 0.5f;
+                u_pos = std::clamp(u_pos, 0.0f, 1.0f);
+                v_pos = std::clamp(v_pos, 0.0f, 1.0f);
+                
+                int gx = (int)(u_pos * (t->heightmap.width - 1));
+                int gy = (int)(v_pos * (t->heightmap.height - 1));
+                float y = t->heightmap.getHeight(gx, gy);
+                
+                // Properties
+                float instanceScale = fLayer.scaleRange.x + (fLayer.scaleRange.y - fLayer.scaleRange.x) * dist(rng);
+                float rotY_deg = fLayer.rotationRange.x + (fLayer.rotationRange.y - fLayer.rotationRange.x) * dist(rng);
+                
+                InstanceTransform inst;
+                inst.position = Vec3(x, y, z);
+                inst.scale = Vec3(instanceScale, instanceScale, instanceScale);
+                inst.rotation = Vec3(0, rotY_deg, 0); 
+                
+                group->addInstance(inst);
+                added++;
+            }
+            
+            if (added > 0) {
+                hud_captured_mouse = true;
+                
+                // Sync group to scene (updates renderable objects)
+                SceneUI::syncInstancesToScene(ctx, *group, false);
+                
+                // Rebuild acceleration structures
+                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                
+                g_bvh_rebuild_pending = true;
+                g_optix_rebuild_pending = true;
+                
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                
+                SCENE_LOG_INFO("[Foliage Brush] Added " + std::to_string(added) + " instances to " + groupName);
+            }
+        }
+        else if (foliage_brush.mode == 1) {
+            // REMOVE MODE
+            size_t before = group->getInstanceCount();
+            group->removeInstancesInRadius(hitPoint, foliage_brush.radius);
+            size_t after = group->getInstanceCount();
+            
+            if (before != after) {
+                hud_captured_mouse = true;
+                
+                // Sync group to scene
+                SceneUI::syncInstancesToScene(ctx, *group, false);
+                
+                // Rebuild
+                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                
+                g_bvh_rebuild_pending = true;
+                g_optix_rebuild_pending = true;
+                
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                
+                SCENE_LOG_INFO("[Foliage Brush] Removed " + std::to_string(before - after) + " instances");
             }
         }
     }

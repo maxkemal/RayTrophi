@@ -193,7 +193,7 @@ __device__ inline float cloud_shape(float3 p, float coverage) {
     // === COMBINE LAYERS ===
     // Base Perlin * Worley structure - Detail erosion
     float combined = baseShape * worlyClouds;
-    combined = combined - detailNoise * 0.25f - microDetail;
+    combined = combined - detailNoise * 0.15f - microDetail;
     combined = fmaxf(0.0f, combined);
     
     // === COVERAGE REMAP ===
@@ -209,7 +209,7 @@ __device__ inline float cloud_shape(float3 p, float coverage) {
     
     // === DENSITY BOOST ===
     // Make clouds more substantial
-    density *= 1.5f;
+    density *= 5.0f;
     
     return density;
 }
@@ -236,7 +236,7 @@ __device__ inline float fast_cloud_shape(float3 p, float coverage) {
     // Soft edge
     density *= fminf(1.0f, density * 4.0f);
     
-    return density * 1.5f;
+    return density * 5.0f;
 }
 
 // ═══════════════════════════════════════════════════════════

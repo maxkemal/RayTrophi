@@ -46,35 +46,16 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // 1. SCAN FOR USED MATERIALS (SLOTS)
+    // 1. GET MATERIAL SLOTS FROM CACHE (O(1) lookup, not O(N) triangle scan!)
     // ─────────────────────────────────────────────────────────────────────────
-    // We need to know which unique material IDs are used by this object's triangles.
-    // We'll store them in a list preserving order if possible (or just sorted/unique).
-    std::vector<uint16_t> used_material_ids;
-
-    // Simple scan: Iterate all triangles in the cache for this object
-    // Note: For very high-poly objects, this might be slow every frame. 
-    // Optimization: Cache this list in SceneSelection or similar if needed.
-    for (const auto& pair : cache_it->second) {
-        std::shared_ptr<Triangle> tri = pair.second;
-        if (tri) {
-            uint16_t mid = tri->getMaterialID();
-            bool found = false;
-            for (uint16_t existing_id : used_material_ids) {
-                if (existing_id == mid) {
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                used_material_ids.push_back(mid);
-            }
-        }
+    // Use cached material slots instead of scanning all triangles every frame
+    auto slots_it = material_slots_cache.find(obj_name);
+    if (slots_it == material_slots_cache.end()) {
+        ImGui::TextDisabled("Material data not cached. Cache may need rebuild.");
+        return;
     }
-
-    // Sort for consistent display order
-    // std::sort(used_material_ids.begin(), used_material_ids.end()); 
-    // (Optional: Sorting might re-order slots unexpectedly if ids change, but keeps it stable)
+    
+    const std::vector<uint16_t>& used_material_ids = slots_it->second;
 
     if (used_material_ids.empty()) {
         ImGui::TextDisabled("No geometry/materials found.");

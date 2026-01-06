@@ -92,6 +92,7 @@ public:
     float sensor_width_mm = 36.0f;     // Sensor width (Full Frame = 36mm)
     float sensor_height_mm = 24.0f;    // Sensor height (Full Frame = 24mm)
     bool enable_motion_blur = false;   // Enable Camera Motion Blur (requires velocity calculation)
+    float distortion = 0.0f;           // Lens Distortion (-0.5 to 0.5): Negative=Barrel, Positive=Pincushion
     
     // ═══════════════════════════════════════════════════════════════════════════
     // CAMERA RIG SYSTEM (Dolly, Crane, Orbit)

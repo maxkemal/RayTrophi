@@ -180,8 +180,61 @@ struct TextureInfo {
 struct BoneData {
     std::unordered_map<std::string, unsigned int> boneNameToIndex;
     std::unordered_map<std::string, aiNode*> boneNameToNode;
-    std::unordered_map<std::string, Matrix4x4> boneOffsetMatrices; // << DÜZELTİLDİ
+    std::unordered_map<std::string, Matrix4x4> boneOffsetMatrices;
     Matrix4x4 globalInverseTransform;
+    
+    // =========================================================================
+    // OPTIMIZATION: Reverse lookup table (bone index -> bone name)
+    // Eliminates O(n²) complexity in animation updates
+    // =========================================================================
+    std::vector<std::string> boneIndexToName;
+    
+    // Rebuild reverse lookup table - call after all bones are added
+    void rebuildReverseLookup() {
+        if (boneNameToIndex.empty()) {
+            boneIndexToName.clear();
+            return;
+        }
+        
+        // Find max index to size the vector correctly
+        unsigned int maxIndex = 0;
+        for (const auto& [name, idx] : boneNameToIndex) {
+            if (idx > maxIndex) maxIndex = idx;
+        }
+        
+        boneIndexToName.resize(maxIndex + 1);
+        for (const auto& [name, idx] : boneNameToIndex) {
+            boneIndexToName[idx] = name;
+        }
+    }
+    
+    // Get bone name by index (O(1) lookup)
+    const std::string& getBoneNameByIndex(unsigned int index) const {
+        static const std::string empty;
+        if (index < boneIndexToName.size()) {
+            return boneIndexToName[index];
+        }
+        return empty;
+    }
+    
+    // Check if bone index is valid
+    bool isValidBoneIndex(unsigned int index) const {
+        return index < boneIndexToName.size() && !boneIndexToName[index].empty();
+    }
+    
+    // Get total bone count
+    size_t getBoneCount() const {
+        return boneNameToIndex.size();
+    }
+    
+    // Clear all bone data
+    void clear() {
+        boneNameToIndex.clear();
+        boneNameToNode.clear();
+        boneOffsetMatrices.clear();
+        boneIndexToName.clear();
+        globalInverseTransform = Matrix4x4::identity();
+    }
 };
 
 
@@ -204,6 +257,28 @@ public:
     std::vector<TextureInfo> textureInfos;
     std::vector<std::shared_ptr<Camera>> cameras; // Kamera listesi
     bool isFBX = false; // Track if current file is FBX format
+    
+    // Transform cache: Ensures all meshes with the same nodeName share the same Transform
+    // This is critical for gizmo to move all parts of an object together
+    std::unordered_map<std::string, std::shared_ptr<Transform>> nodeNameToTransform;
+    
+    // Clear transform cache (call before each import)
+    void clearTransformCache() {
+        nodeNameToTransform.clear();
+    }
+    
+    // Get or create shared Transform for a node
+    std::shared_ptr<Transform> getOrCreateNodeTransform(const std::string& nodeName, const Matrix4x4& baseTransform) {
+        auto it = nodeNameToTransform.find(nodeName);
+        if (it != nodeNameToTransform.end()) {
+            return it->second;  // Return existing transform
+        }
+        // Create new transform
+        auto sharedTransform = std::make_shared<Transform>();
+        sharedTransform->setBase(baseTransform);
+        nodeNameToTransform[nodeName] = sharedTransform;
+        return sharedTransform;
+    }
 
     Assimp::Importer importer;
     const aiNode* getNodeByName(const std::string& name) const {
@@ -318,9 +393,10 @@ public:
 
         SCENE_LOG_INFO("Assimp file loaded successfully. Processing scene data...");
 
-        SCENE_LOG_INFO("Clearing existing cameras and lights...");
+        SCENE_LOG_INFO("Clearing existing cameras, lights, and transform cache...");
         cameras.clear();
         lights.clear();
+        clearTransformCache();  // Clear transform cache to ensure fresh transforms per import
 
         SCENE_LOG_INFO("Building node map from scene hierarchy...");
         std::function<void(aiNode*)> recurse = [&](aiNode* node) {
@@ -827,31 +903,41 @@ public:
         SCENE_LOG_INFO("  - Global FileTextureCache cleared: " + std::to_string(global_file_cache_size) + " entries");
     }
     // AssimpLoader sınıfı içinde veya uygun bir namespace'de
-     void calculateAnimatedNodeTransformsRecursive(
+    // Helper to generate unique names
+    std::string getUniqueName(const std::string& originalName) const {
+        if (currentImportName.empty()) return originalName;
+        return currentImportName + "_" + originalName;
+    }
+
+    void calculateAnimatedNodeTransformsRecursive(
         aiNode* node,
         const Matrix4x4& parentAnimatedGlobalTransform,
         const std::map<std::string, const AnimationData*>& animationMap,
         float currentTime,
         std::unordered_map<std::string, Matrix4x4>& animatedGlobalTransformsStore
     ) {
-        std::string nodeName = node->mName.C_Str();
+        // Original name for Animation lookup
+        std::string originalNodeName = node->mName.C_Str();
         
         // Varsayılan olarak node'un static (bind pose) local transform'unu al
         Matrix4x4 nodeLocalTransform = convert(node->mTransformation);
 
         // Eğer bu düğüm için animasyon verisi varsa, animasyonlu lokal transformu hesapla
-        if (animationMap.count(nodeName) > 0) {
-            const AnimationData* anim = animationMap.at(nodeName);
+        if (animationMap.count(originalNodeName) > 0) {
+            const AnimationData* anim = animationMap.at(originalNodeName);
             // AnimationData::calculateAnimationTransform animasyon keyframe'lerinden transform oluşturur
             // Blender'dan gelen animasyon keyframe'leri zaten objenin doğru pozisyonunu içerir
             // YENİ: Bind pose'u (nodeLocalTransform) varsayılan olarak gönderiyoruz.
-            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, nodeName, nodeLocalTransform);
+            nodeLocalTransform = anim->calculateAnimationTransform(*anim, currentTime, originalNodeName, nodeLocalTransform);
         }
         // Animasyon yoksa, static transform kullanılır (yukarıda zaten atandı)
 
         // Parent'ın global transform'u ile bu node'un local transform'unu birleştir
         Matrix4x4 currentAnimatedGlobalTransform = parentAnimatedGlobalTransform * nodeLocalTransform;
-        animatedGlobalTransformsStore[nodeName] = currentAnimatedGlobalTransform;
+        
+        // STORE WITH UNIQUE NAME to match BoneData keys
+        std::string uniqueNodeName = getUniqueName(originalNodeName);
+        animatedGlobalTransformsStore[uniqueNodeName] = currentAnimatedGlobalTransform;
 
         // Çocuk düğümler için rekürsif olarak devam et
         for (unsigned int i = 0; i < node->mNumChildren; ++i) {
@@ -961,15 +1047,18 @@ private:
 
             for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
                 aiBone* bone = mesh->mBones[b];
-                std::string boneName = bone->mName.C_Str();
+                std::string originalBoneName = bone->mName.C_Str();
+                std::string boneName = getUniqueName(originalBoneName);
 
                 if (boneData.boneNameToIndex.find(boneName) == boneData.boneNameToIndex.end()) {
                     unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
                     boneData.boneNameToIndex[boneName] = id;
                     
-                    // Haritayı doldur
-                    if (nodeMap.find(boneName) != nodeMap.end()) {
-                        boneData.boneNameToNode[boneName] = nodeMap[boneName];
+                    // Haritayı doldur - Node map uses ORIGINAL node names in hierarchy traverse, 
+                    // BUT our boneNameToNode map needs to find the node.
+                    // The nodeMap key is also ORIGINAL name (from C_Str()).
+                    if (nodeMap.find(originalBoneName) != nodeMap.end()) {
+                        boneData.boneNameToNode[boneName] = nodeMap[originalBoneName];
                     } else {
                          // SCENE_LOG_WARN("Bone node not found in hierarchy: " + boneName);
                     }
@@ -978,6 +1067,9 @@ private:
             }
         }
         SCENE_LOG_INFO("[buildBoneData] Completed. Total unique bones: " + std::to_string(boneData.boneNameToIndex.size()));
+        
+        // Build reverse lookup table for O(1) index-to-name queries
+        boneData.rebuildReverseLookup();
     }
 
 
@@ -1101,7 +1193,8 @@ private:
              result.hasSkinning = true;
              for (unsigned int i = 0; i < mesh->mNumBones; i++) {
                  aiBone* bone = mesh->mBones[i];
-                 std::string boneName(bone->mName.C_Str());
+                 std::string originalBoneName = bone->mName.C_Str();
+                 std::string boneName = getUniqueName(originalBoneName);
                  auto it = boneData.boneNameToIndex.find(boneName);
                  if (it != boneData.boneNameToIndex.end()) {
                      int boneIndex = it->second;
@@ -1145,9 +1238,9 @@ private:
             materialID = MaterialManager::getInstance().getOrCreateMaterialID(uniqueMatName, material);
         }
 
-        // Create shared transform for all triangles in this mesh - saves 248 bytes per triangle!
-        auto sharedTransform = std::make_shared<Transform>();
-        sharedTransform->setBase(convertMatrix(transform));
+        // Use shared Transform for all meshes with the same nodeName
+        // This ensures gizmo moves all parts of an object together
+        auto sharedTransform = getOrCreateNodeTransform(nodeName, convertMatrix(transform));
 
         // --- NEW: Pre-process bone weights for this mesh ---
         // This ensures every vertex gets its correct weight list before triangle splits
@@ -1155,7 +1248,8 @@ private:
         if (mesh->HasBones()) {
             for (unsigned int i = 0; i < mesh->mNumBones; i++) {
                 aiBone* bone = mesh->mBones[i];
-                std::string boneName(bone->mName.C_Str());
+                std::string originalBoneName = bone->mName.C_Str();
+                std::string boneName = getUniqueName(originalBoneName);
                 
                 auto it = boneData.boneNameToIndex.find(boneName);
                 if (it != boneData.boneNameToIndex.end()) {

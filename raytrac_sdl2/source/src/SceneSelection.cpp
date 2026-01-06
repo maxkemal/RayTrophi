@@ -51,6 +51,19 @@ void SceneSelection::updatePositionFromSelection() {
                     Matrix4x4 mat = transform->base;
                     // Use decompose to extract full transform (position, rotation, scale)
                     mat.decompose(selected.position, selected.rotation, selected.scale);
+                    
+                    // Fallback: If decomposed position is near origin but mesh isn't,
+                    // use bounding box center (handles legacy world-space vertex data)
+                    if (selected.position.length() < 0.001f) {
+                        AABB bounds;
+                        if (selected.object->bounding_box(0, 0, bounds)) {
+                            Vec3 bb_center = (bounds.min + bounds.max) * 0.5f;
+                            // Only use BB center if mesh is clearly not at origin
+                            if (bb_center.length() > 1.0f) {
+                                selected.position = bb_center;
+                            }
+                        }
+                    }
                 } else {
                     // Fallback: Get center of bounding box as position
                     AABB bounds;

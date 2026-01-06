@@ -310,50 +310,81 @@ extern "C" __global__ void __closesthit__ch() {
     }
 
     // 5. Tangent & Bitangent Setup (Common)
+    // NOTE: For skinned meshes, vertex tangents are NOT updated by skinning kernel,
+    // so we need to compute tangents from UV gradients to stay consistent with skinned normals.
     float3 world_tangent, world_bitangent;
     {
-         float3 obj_tangent;
          float sigma = 1.0f;
          
-         // Calculate Sigma (Handedness)
+         // Calculate Sigma (Handedness) from transform determinant
          float det_transform = m00*(m11*m22 - m12*m21) - m01*(m10*m22 - m12*m20) + m02*(m10*m21 - m11*m20);
          float sigma_inst = (det_transform < 0.0f) ? -1.0f : 1.0f;
          
+         // Get world-space edges for UV-based tangent calculation
+         float3 edge1 = vert1 - vert0;
+         float3 edge2 = vert2 - vert0;
+         
+         // Transform edges to world space (vertices are already in object space from SBT)
+         float3 world_edge1, world_edge2;
+         world_edge1.x = m00 * edge1.x + m01 * edge1.y + m02 * edge1.z;
+         world_edge1.y = m10 * edge1.x + m11 * edge1.y + m12 * edge1.z;
+         world_edge1.z = m20 * edge1.x + m21 * edge1.y + m22 * edge1.z;
+         
+         world_edge2.x = m00 * edge2.x + m01 * edge2.y + m02 * edge2.z;
+         world_edge2.y = m10 * edge2.x + m11 * edge2.y + m12 * edge2.z;
+         world_edge2.z = m20 * edge2.x + m21 * edge2.y + m22 * edge2.z;
+         
+         bool use_uv_tangent = false;
+         
          if (hgd->has_uvs) {
-             const float2 uv0 = hgd->uvs[tri.x];
-             const float2 uv1 = hgd->uvs[tri.y];
-             const float2 uv2 = hgd->uvs[tri.z];
-             float2 dUV1 = uv1 - uv0;
-             float2 dUV2 = uv2 - uv0;
+             const float2 uv0_local = hgd->uvs[tri.x];
+             const float2 uv1_local = hgd->uvs[tri.y];
+             const float2 uv2_local = hgd->uvs[tri.z];
+             float2 dUV1 = uv1_local - uv0_local;
+             float2 dUV2 = uv2_local - uv0_local;
              float det_uv = (dUV1.x * dUV2.y - dUV2.x * dUV1.y);
-             float sigma_uv = (det_uv < 0.0f) ? -1.0f : 1.0f;
-             sigma = sigma_uv * sigma_inst;
+             
+             // UV-based tangent calculation (works correctly with skinned normals)
+             if (fabsf(det_uv) > 1e-8f) {
+                 float inv_det = 1.0f / det_uv;
+                 
+                 // T = (dUV2.y * edge1 - dUV1.y * edge2) / det
+                 world_tangent.x = inv_det * (dUV2.y * world_edge1.x - dUV1.y * world_edge2.x);
+                 world_tangent.y = inv_det * (dUV2.y * world_edge1.y - dUV1.y * world_edge2.y);
+                 world_tangent.z = inv_det * (dUV2.y * world_edge1.z - dUV1.y * world_edge2.z);
+                 world_tangent = normalize(world_tangent);
+                 
+                 float sigma_uv = (det_uv < 0.0f) ? -1.0f : 1.0f;
+                 sigma = sigma_uv * sigma_inst;
+                 use_uv_tangent = true;
+             }
+         }
+         
+         // Fallback: Use stored tangents only if UV-based failed AND we have pre-computed tangents
+         // For skinned meshes, this is less reliable since tangents aren't skinned
+         if (!use_uv_tangent) {
+             if (hgd->has_tangents) {
+                 const float3 t0 = hgd->tangents[tri.x];
+                 const float3 t1 = hgd->tangents[tri.y];
+                 const float3 t2 = hgd->tangents[tri.z];
+                 float3 obj_tangent = normalize(w * t0 + u * t1 + v * t2);
+                 
+                 // Transform to world space
+                 world_tangent.x = m00 * obj_tangent.x + m01 * obj_tangent.y + m02 * obj_tangent.z;
+                 world_tangent.y = m10 * obj_tangent.x + m11 * obj_tangent.y + m12 * obj_tangent.z;
+                 world_tangent.z = m20 * obj_tangent.x + m21 * obj_tangent.y + m22 * obj_tangent.z;
+                 world_tangent = normalize(world_tangent);
+             } else {
+                 // Last resort: geometric tangent from first edge
+                 world_tangent = normalize(world_edge1); 
+             }
          }
 
-         if (hgd->has_tangents) {
-             const float3 t0 = hgd->tangents[tri.x];
-             const float3 t1 = hgd->tangents[tri.y];
-             const float3 t2 = hgd->tangents[tri.z];
-             obj_tangent = normalize(w * t0 + u * t1 + v * t2);
-         } else {
-             // Fallback geometric tangent
-             // Simplified: assumes Y-up UV map roughly aligns with geometric edges
-              float3 edge1 = vert1 - vert0;
-              float3 edge2 = vert2 - vert0;
-              // Assuming rudimentary mapping if UVs missing
-              obj_tangent = normalize(edge1); 
-         }
-
-         // Transform Tangent (Linear)
-         world_tangent.x = m00 * obj_tangent.x + m01 * obj_tangent.y + m02 * obj_tangent.z;
-         world_tangent.y = m10 * obj_tangent.x + m11 * obj_tangent.y + m12 * obj_tangent.z;
-         world_tangent.z = m20 * obj_tangent.x + m21 * obj_tangent.y + m22 * obj_tangent.z;
-         world_tangent = normalize(world_tangent);
-
-         // Gram-Schmidt Orthogonalization
+         // Gram-Schmidt Orthogonalization against the skinned/transformed normal
+         // This ensures TBN is consistent even when tangent wasn't skinned
          world_tangent = normalize(world_tangent - world_normal * dot(world_normal, world_tangent));
          
-         // Bitangent
+         // Bitangent from cross product (respects handedness)
          world_bitangent = normalize(cross(world_normal, world_tangent)) * sigma;
     }
 
@@ -438,54 +469,106 @@ extern "C" __global__ void __closesthit__ch() {
         }
     }
 
-    // 7. Water Wave Perturbation
+    // 7. Water Wave Perturbation & Advanced Effects
     if (hgd->material_id >= 0 && optixLaunchParams.materials) {
          const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
-         // Sheen hack for water
+         
+         // Check IS_WATER flag (sheen > 0)
          if (mat.sheen > 0.0001f) {
-             float time = optixLaunchParams.time;
-             // evaluateGerstnerWave returns normal and foam
-             WaterResult res = evaluateGerstnerWave(hitPoint, final_normal, time, mat.anisotropic, mat.sheen, mat.sheen_tint);
+             float time = optixLaunchParams.water_time;  // Use frozen water time for accumulation
              
-             final_normal = res.normal;
+             // === UNPACK WATER PARAMETERS FROM GPU MATERIAL ===
+             WaterParams params;
              
-             // Apply Foam
-             // If foam > 0, blend albedo towards white and roughness towards 0.8
-             if (res.foam > 0.01f) {
-                 // Use blended data to override material defaults
-                 float3 waterColor = mat.albedo; 
-                 // If material albedo is black (for physics), use a default deep blue tint for the water base if not overridden?
-                 // Actually, if we want the user to see Blue water, they should set Albedo to Blue.
-                 // But WaterManager sets albedo to Black.
-                 // Let's HARDCODE a nice water color ramp if the base is black.
-                 if (waterColor.x < 0.01f && waterColor.y < 0.01f && waterColor.z < 0.01f) {
-                     waterColor = make_float3(0.02f, 0.05f, 0.1f); // Setup default deep color
-                 }
+             // Wave params
+             params.wave_speed = mat.anisotropic;
+             params.wave_strength = mat.sheen;
+             params.wave_frequency = mat.sheen_tint;
+             
+             // Colors
+             params.shallow_color = mat.emission;
+             params.deep_color = mat.albedo;
+             params.absorption_color = mat.subsurface_color;
+             
+             // Depth & Appearance
+             params.depth_max = mat.subsurface * 100.0f;
+             params.absorption_density = mat.subsurface_scale;
+             params.clarity = fmaxf(0.1f, 1.0f - params.absorption_density);
+             
+             // Foam
+             params.foam_level = mat.translucent;
+             params.shore_foam_distance = mat.subsurface_radius.x;
+             params.shore_foam_intensity = mat.clearcoat;
+             
+             // Caustics
+             params.caustic_intensity = mat.clearcoat_roughness;
+             params.caustic_scale = mat.subsurface_radius.y;
+             params.caustic_speed = mat.subsurface_anisotropy;
+             
+             // SSS
+             params.sss_intensity = mat.subsurface_radius.z;
+             params.sss_color = mat.subsurface_color;
+             
+             // FFT Ocean
+             params.use_fft_ocean = (mat.fft_height_tex != 0);
+             params.fft_ocean_size = mat.fft_ocean_size;
+             params.fft_choppiness = mat.fft_choppiness;
+             params.fft_height_tex = mat.fft_height_tex;
+             params.fft_normal_tex = mat.fft_normal_tex;
+             
+             // Micro Details
+             params.micro_detail_strength = mat.micro_detail_strength;
+             params.micro_detail_scale = mat.micro_detail_scale;
+             params.foam_noise_scale = mat.foam_noise_scale;
+             params.foam_threshold = mat.foam_threshold;
+             
+             // === WATER EVALUATION (FFT or Gerstner) ===
+             WaterResult wave_res = evaluateWater(
+                 hitPoint, final_normal, time, params
+             );
+             
+             // Apply wave normal perturbation
+             final_normal = wave_res.normal;
+             
+             // === NORMAL PERTURBATION ONLY ===
+            final_normal = wave_res.normal;
+            
+            // === FOAM CALCULATION ===
+            float shore_foam = 0.0f;
+            // (Optional: Simple height-based shore foam proxy if needed, else rely on texture)
+             if (params.shore_foam_intensity > 0.01f) {
+                 float height_factor = fmaxf(wave_res.height + 0.5f, 0.0f);
+                 shore_foam = calculateShoreFoam(
+                     1.0f,  // Dummy depth
+                     params.shore_foam_distance,
+                     params.shore_foam_intensity,
+                     hitPoint,
+                     time
+                 );
+             }
+             
+             float total_foam = fminf(wave_res.foam * params.foam_level + shore_foam, 1.0f);
+             
+             // === BLENDED DATA FOR FOAM ===
+             // We do NOT bake absorption color here. Let path tracer handle Beer's Law.
+             // We only blend foam into the base albedo.
+             
+             float3 base_color = mat.albedo;
+             if (total_foam > 0.01f) {
+                 float3 foam_color = make_float3(0.92f, 0.96f, 1.0f);
+                 // Mix base albedo with foam
+                 base_color = lerp(base_color, foam_color, total_foam);
                  
-                 float3 foamColor = make_float3(0.9f, 0.95f, 1.0f);
-                 
-                 // Blend
-                 payload->blended_albedo = lerp(waterColor, foamColor, res.foam);
-                 payload->blended_roughness = lerp(mat.roughness, 0.6f, res.foam); // Foam is rougher
+                 // Reduce roughness where foam is
+                 payload->blended_roughness = lerp(mat.roughness, 0.8f, total_foam); 
                  payload->use_blended_data = 1;
              } else {
-                  // If base albedo is black, we might want to force a water color here too?
-                  // Doing so allows the transmission to work while having a 'surface' tint?
-                  // Transmission scatter uses albedo as Tint.
-                  // If albedo is Black, transmission is Clear (absorption = (1-0)*t = high absorption?)
-                  // Wait, Beer's law logic in `material_scatter`:
-                  // float3 absorption = (1 - tint) * thickness.
-                  // If tint is Black (0,0,0), absorption is High (1.0).
-                  // So Black albedo = Dark/Opaque liquid.
-                  // White albedo = Clear liquid.
-                  
-                  // WaterManager sets Albedo to Black (0,0,0). This creates Dark water.
-                  // If we want Clear water, Albedo should be White (1,1,1).
-                  // If we want Blue water, Albedo should be Blue.
-                  // I will NOT override it here for non-foam parts to respect Physics.
-                  // BUT, I will make sure Foam writes to blended_albedo.
+                 // No foam, use standard material properties
+                 payload->use_blended_data = 0; 
              }
-         }
+             
+             payload->blended_albedo = base_color;
+        }
     }
 
     // 8. Pack Payload
@@ -531,6 +614,9 @@ extern "C" __global__ void __closesthit__ch() {
     payload->vol_lobe_mix = hgd->vol_lobe_mix;
     payload->vol_light_steps = hgd->vol_light_steps;
     payload->vol_shadow_strength = hgd->vol_shadow_strength;
+    
+    // Mesafeyi kaydet (Beer's Law için gerekli)
+    payload->t = optixGetRayTmax();
 }
 
 extern "C" __global__ void __anyhit__ah() {

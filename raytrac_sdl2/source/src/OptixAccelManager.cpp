@@ -133,6 +133,32 @@ int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometry) {
         cudaMalloc(reinterpret_cast<void**>(&blas.d_tangents), t_size);
         cudaMemcpy(reinterpret_cast<void*>(blas.d_tangents), geometry.tangents.data(), t_size, cudaMemcpyHostToDevice);
     }
+
+    // Upload Skinning Data
+    if (!geometry.boneIndices.empty() && !geometry.boneWeights.empty()) {
+        size_t bi_size = geometry.boneIndices.size() * sizeof(int4);
+        cudaMalloc(reinterpret_cast<void**>(&blas.d_boneIndices), bi_size);
+        cudaMemcpy(reinterpret_cast<void*>(blas.d_boneIndices), geometry.boneIndices.data(), bi_size, cudaMemcpyHostToDevice);
+
+        size_t bw_size = geometry.boneWeights.size() * sizeof(float4);
+        cudaMalloc(reinterpret_cast<void**>(&blas.d_boneWeights), bw_size);
+        cudaMemcpy(reinterpret_cast<void*>(blas.d_boneWeights), geometry.boneWeights.data(), bw_size, cudaMemcpyHostToDevice);
+        
+        // Also allocate/copy Bind Pose data (initial vertex/normal state)
+        // Bind poses should be copied from the 'vertices' and 'normals' at build time
+        
+        size_t v_size = geometry.vertices.size() * sizeof(float3);
+        cudaMalloc(reinterpret_cast<void**>(&blas.d_bindPoses), v_size);
+        cudaMemcpy(reinterpret_cast<void*>(blas.d_bindPoses), geometry.vertices.data(), v_size, cudaMemcpyHostToDevice);
+
+        if (!geometry.normals.empty()) {
+            size_t n_size = geometry.normals.size() * sizeof(float3);
+            cudaMalloc(reinterpret_cast<void**>(&blas.d_bindNormals), n_size);
+            cudaMemcpy(reinterpret_cast<void*>(blas.d_bindNormals), geometry.normals.data(), n_size, cudaMemcpyHostToDevice);
+        }
+
+        blas.hasSkinningData = true;
+    }
     
     // Build GAS for this mesh
     blas.handle = buildGAS(blas.d_vertices, blas.vertex_count,
@@ -168,7 +194,7 @@ const MeshBLAS* OptixAccelManager::getBLAS(int mesh_id) const {
     return &mesh_blas_list[mesh_id];
 }
 
-bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry) {
+bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload, bool sync) {
     if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
         return false;
     }
@@ -183,14 +209,16 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
         return false;
     }
     
-    // Update vertex buffer on GPU
-    size_t v_size = geometry.vertices.size() * sizeof(float3);
-    cudaMemcpy(reinterpret_cast<void*>(blas.d_vertices), geometry.vertices.data(), v_size, cudaMemcpyHostToDevice);
-    
-    // Update normals if present
-    if (!geometry.normals.empty() && blas.d_normals) {
-        size_t n_size = geometry.normals.size() * sizeof(float3);
-        cudaMemcpy(reinterpret_cast<void*>(blas.d_normals), geometry.normals.data(), n_size, cudaMemcpyHostToDevice);
+    // Update vertex buffer on GPU (Only if not skipped)
+    if (!skipCpuUpload) {
+        size_t v_size = geometry.vertices.size() * sizeof(float3);
+        cudaMemcpy(reinterpret_cast<void*>(blas.d_vertices), geometry.vertices.data(), v_size, cudaMemcpyHostToDevice);
+
+        // Update normals if present
+        if (!geometry.normals.empty() && blas.d_normals) {
+            size_t n_size = geometry.normals.size() * sizeof(float3);
+            cudaMemcpy(reinterpret_cast<void*>(blas.d_normals), geometry.normals.data(), n_size, cudaMemcpyHostToDevice);
+        }
     }
     
     // Refit GAS with OPTIX_BUILD_OPERATION_UPDATE
@@ -239,7 +267,9 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
         return false;
     }
     
-    cudaStreamSynchronize(stream);
+    if (sync) {
+        cudaStreamSynchronize(stream);
+    }
     return true;
 }
 
@@ -337,7 +367,7 @@ void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr
     tlas_needs_rebuild = true;
 }
 
-void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared_ptr<Hittable>>& objects) {
+void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
     if (!context) return;
     
     // Flatten objects to triangles
@@ -356,6 +386,22 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
     for (const auto& group : mesh_groups) {
         name_to_group[group.mesh_name] = &group;
     }
+
+    // Upload Bone Matrices (Reuse global buffer)
+    CUdeviceptr d_boneMatricesPtr = 0;
+    if (!boneMatrices.empty()) {
+        size_t sz = boneMatrices.size() * 16 * sizeof(float);
+        
+        // Resize if needed
+        if (sz > globalBoneMatrices_capacity || d_globalBoneMatrices == 0) {
+            if (d_globalBoneMatrices) cudaFree(reinterpret_cast<void*>(d_globalBoneMatrices));
+            cudaMalloc(reinterpret_cast<void**>(&d_globalBoneMatrices), sz);
+            globalBoneMatrices_capacity = sz;
+        }
+        
+        cudaMemcpy(reinterpret_cast<void*>(d_globalBoneMatrices), boneMatrices.data(), sz, cudaMemcpyHostToDevice);
+        d_boneMatricesPtr = d_globalBoneMatrices;
+    }
     
     int updated_count = 0;
     
@@ -370,48 +416,73 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
         }
         
         const MeshData& mesh = *(it->second);
-        
-        // Extract updated geometry - USE LOCAL SPACE for BLAS efficiency
-        MeshGeometry geom;
-        geom.mesh_name = mesh.mesh_name;
-        geom.material_id = mesh.material_id;
-        
-        // ═══════════════════════════════════════════════════════════════════════════
-        // Use LOCAL-SPACE data for BLAS - instance transform handles world position.
-        // The shader uses OptiX built-in optixTransformNormalFromObjectToWorldSpace()
-        // which correctly handles the inverse-transpose for normal transformation.
-        // ═══════════════════════════════════════════════════════════════════════════
+        bool gpu_skinning_applied = false;
 
-        for (int tri_idx : mesh.triangle_indices) {
-            if (tri_idx < 0 || tri_idx >= static_cast<int>(triangles.size())) continue;
-            auto& tri = triangles[tri_idx];
+        // -----------------------------------------------------------------------
+        // GPU SKINNING PATH
+        // -----------------------------------------------------------------------
+        if (blas.hasSkinningData && d_boneMatricesPtr) {
+            launchSkinningKernel(
+                reinterpret_cast<float3*>(blas.d_bindPoses),
+                reinterpret_cast<float3*>(blas.d_bindNormals),
+                reinterpret_cast<int4*>(blas.d_boneIndices),
+                reinterpret_cast<float4*>(blas.d_boneWeights),
+                reinterpret_cast<float*>(d_boneMatricesPtr),
+                reinterpret_cast<float3*>(blas.d_vertices), // Output to BLAS directly
+                reinterpret_cast<float3*>(blas.d_normals),  // Output to BLAS directly
+                static_cast<int>(blas.vertex_count),
+                static_cast<int>(boneMatrices.size()),
+                stream
+            );
+
+            // Refit BLAS (Skip CPU Upload, NO Sync)
+            // We just need a geometry object with correct size to pass the check inside updateMeshBLAS
+            MeshGeometry dummyGeom;
+            dummyGeom.vertices.resize(blas.vertex_count); 
             
-            uint32_t base = static_cast<uint32_t>(geom.vertices.size());
-            
-            // Get CURRENT vertex positions (skinned/transformed)
-            // CRITICAL FIX: Previously used getOriginalVertexPosition which ignored skinning!
-            Vec3 v0 = tri->getVertexPosition(0);
-            Vec3 v1 = tri->getVertexPosition(1);
-            Vec3 v2 = tri->getVertexPosition(2);
-            geom.vertices.push_back({v0.x, v0.y, v0.z});
-            geom.vertices.push_back({v1.x, v1.y, v1.z});
-            geom.vertices.push_back({v2.x, v2.y, v2.z});
-            
-            // Standard winding
-            geom.indices.push_back({base, base + 1, base + 2});
-            
-            // Normals - CURRENT (skinned/transformed)
-            Vec3 n0 = tri->getVertexNormal(0);
-            Vec3 n1 = tri->getVertexNormal(1);
-            Vec3 n2 = tri->getVertexNormal(2);
-            geom.normals.push_back({n0.x, n0.y, n0.z});
-            geom.normals.push_back({n1.x, n1.y, n1.z});
-            geom.normals.push_back({n2.x, n2.y, n2.z});
+            // Pass sync=false to batch updates
+            if (updateMeshBLAS(static_cast<int>(blas_idx), dummyGeom, true, false)) {
+                updated_count++;
+            }
+            gpu_skinning_applied = true;
         }
-        
-        // Update this BLAS
-        if (updateMeshBLAS(static_cast<int>(blas_idx), geom)) {
-            updated_count++;
+
+        // -----------------------------------------------------------------------
+        // CPU PATH (Fallback)
+        // -----------------------------------------------------------------------
+        if (!gpu_skinning_applied) {
+            MeshGeometry geom;
+            geom.mesh_name = mesh.mesh_name;
+            geom.material_id = mesh.material_id;
+
+            for (int tri_idx : mesh.triangle_indices) {
+                if (tri_idx < 0 || tri_idx >= static_cast<int>(triangles.size())) continue;
+                auto& tri = triangles[tri_idx];
+                
+                uint32_t base = static_cast<uint32_t>(geom.vertices.size());
+                
+                // Get CURRENT vertex positions (skinned/transformed on CPU if GPU failed/inactive)
+                Vec3 v0 = tri->getVertexPosition(0);
+                Vec3 v1 = tri->getVertexPosition(1);
+                Vec3 v2 = tri->getVertexPosition(2);
+                geom.vertices.push_back({v0.x, v0.y, v0.z});
+                geom.vertices.push_back({v1.x, v1.y, v1.z});
+                geom.vertices.push_back({v2.x, v2.y, v2.z});
+                
+                geom.indices.push_back({base, base + 1, base + 2});
+                
+                Vec3 n0 = tri->getVertexNormal(0);
+                Vec3 n1 = tri->getVertexNormal(1);
+                Vec3 n2 = tri->getVertexNormal(2);
+                geom.normals.push_back({n0.x, n0.y, n0.z});
+                geom.normals.push_back({n1.x, n1.y, n1.z});
+                geom.normals.push_back({n2.x, n2.y, n2.z});
+            }
+            
+            // Pass sync=false to batch updates
+            if (updateMeshBLAS(static_cast<int>(blas_idx), geom, false, false)) {
+                updated_count++;
+            }
         }
         
         // ═══════════════════════════════════════════════════════════════════════════
@@ -441,6 +512,13 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
     }
     
    // SCENE_LOG_INFO("[OptixAccelManager] Updated " + std::to_string(updated_count) + " BLAS structures");
+    
+    
+
+    // Batch Sync at the end
+    cudaStreamSynchronize(stream);
+    
+    // SCENE_LOG_INFO("[OptixAccelManager] Updated " + std::to_string(updated_count) + " BLAS structures");
     
     // Mark TLAS for rebuild since BLAS handles changed
     tlas_needs_rebuild = true;
@@ -957,6 +1035,10 @@ void OptixAccelManager::cleanup() {
     tlas_handle = 0;
     tlas_output_size = 0;
     
+    // Cleanup Bone Matrices
+    if (d_globalBoneMatrices) { cudaFree(reinterpret_cast<void*>(d_globalBoneMatrices)); d_globalBoneMatrices = 0; }
+    globalBoneMatrices_capacity = 0;
+
     // Cleanup SBT
     if (d_hitgroup_records) { cudaFree(reinterpret_cast<void*>(d_hitgroup_records)); d_hitgroup_records = 0; }
     hitgroup_records.clear();

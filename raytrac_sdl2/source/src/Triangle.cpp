@@ -281,24 +281,6 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
         // Apply to normal
         Matrix4x4 normalMatrix = blendedBoneMatrix.inverse().transpose();
         vertices[vi].normal = normalMatrix.transform_vector(vertices[vi].originalNormal).normalize();
-        
-        // Debug logging for first vertex only, once
-        static bool logged_skinning = false;
-        if (!logged_skinning && vi == 0 && !boneWeights[vi].empty()) {
-            SCENE_LOG_INFO("[SKINNING DEBUG] Triangle node: " + nodeName);
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[SKINNING DEBUG] Original vertex position: (%.3f, %.3f, %.3f)", 
-                     origPositions[vi].x, origPositions[vi].y, origPositions[vi].z);
-            SCENE_LOG_INFO(std::string(buf));
-            snprintf(buf, sizeof(buf), "[SKINNING DEBUG] Transformed vertex position: (%.3f, %.3f, %.3f)", 
-                     vertices[vi].position.x, vertices[vi].position.y, vertices[vi].position.z);
-            SCENE_LOG_INFO(std::string(buf));
-            SCENE_LOG_INFO("[SKINNING DEBUG] Bone weights count: " + std::to_string(boneWeights[vi].size()));
-            for (const auto& [boneIdx, weight] : boneWeights[vi]) {
-                SCENE_LOG_INFO("[SKINNING DEBUG]   Bone " + std::to_string(boneIdx) + " weight: " + std::to_string(weight));
-            }
-            logged_skinning = true;
-        }
     }
 
     aabbDirty = true;

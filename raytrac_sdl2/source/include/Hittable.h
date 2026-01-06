@@ -44,25 +44,28 @@ struct HitRecord {
     HitRecord() = default;
 };
 
+/**
+ * @brief Abstract base class for all ray-traceable objects.
+ * 
+ * All renderable geometry (Triangle, Sphere, etc.) must inherit from this
+ * and implement hit() and bounding_box() methods.
+ */
 class Hittable {
 public:
     virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const = 0;
     virtual bool bounding_box(float time0, float time1, AABB& output_box) const = 0;
     virtual ~Hittable() = default;
     
+    // Optional: Collect neighbor normals for smoothing (default: no-op)
     virtual void collect_neighbor_normals(const AABB& query_box, Vec3& neighbor_normal,
         int& neighbor_count, const std::shared_ptr<Material>& current_material) const {
     }
     
+    // Fast occlusion test (default: just calls hit())
     virtual bool occluded(const Ray& ray, float t_min, float t_max) const {
         HitRecord dummy;
         return hit(ray, t_min, t_max, dummy);
     }
-
-    std::vector<std::shared_ptr<Hittable>> objects;
-
-private:
-    std::vector<std::shared_ptr<Hittable>> hittables;
 };
 
 #endif // HITTABLE_H

@@ -20,6 +20,7 @@
 
 #include <unordered_set>
 #include "TerrainManager.h"
+#include "ProjectManager.h"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE HIERARCHY PANEL (Outliner)
@@ -193,6 +194,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             ImGui::TreePop();
         }
     }
+    
     // Check for scene changes to invalidate cache
     static size_t last_obj_count = 0;
     if (ctx.scene.world.objects.size() != last_obj_count) {
@@ -258,17 +260,32 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 bool is_selected = (sel.selected.type == SelectableType::Object &&
                     sel.selected.object &&
                     sel.selected.object->nodeName == name);
+                
+                // Check if this object has skinning data
+                bool has_skinning = false;
+                if (!kv.second.empty()) {
+                    has_skinning = kv.second[0].second->hasSkinData();
+                }
 
                 ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
-                if (!is_selected) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+                // Always allow tree expansion for skinned meshes
+                if (!is_selected && !has_skinning) flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
                 if (is_selected) flags |= ImGuiTreeNodeFlags_Selected | ImGuiTreeNodeFlags_DefaultOpen;
 
                 ImGui::PushID(i);
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.85f, 1.0f));
-                std::string displayName = name.empty() ? "Unnamed Object" : name;
+                
+                // Different color/icon for skinned meshes
+                if (has_skinning) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.7f, 0.5f, 1.0f)); // Orange-ish for skinned
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.85f, 1.0f));
+                }
+                
+                std::string icon = has_skinning ? "[SK] " : "";
+                std::string displayName = icon + (name.empty() ? "Unnamed Object" : name);
 
                 bool node_open = false;
-                if (is_selected) {
+                if (is_selected || has_skinning) {
                     node_open = ImGui::TreeNodeEx(displayName.c_str(), flags);
                 }
                 else {
@@ -303,49 +320,119 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                 }
 
-                if (node_open && is_selected) {
+                if (node_open) {
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
                     ImGui::Indent();
-
-                    // --- In-Tree Properties ---
-                    Vec3 pos = sel.selected.position;
-                    // Position Control
-                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
-                    if (ImGui::DragFloat3("##Pos", &pos.x, 0.1f)) {
-                        Vec3 delta = pos - sel.selected.position;
-                        sel.selected.position = pos;
-                        if (!kv.second.empty()) {
-                            auto tri = kv.second[0].second;
-                            auto t_handle = tri->getTransformHandle();
-                            if (t_handle) {
-                                t_handle->base.m[0][3] = pos.x;
-                                t_handle->base.m[1][3] = pos.y;
-                                t_handle->base.m[2][3] = pos.z;
+                    
+                    // === SKINNING INFO (for skinned meshes) ===
+                    if (has_skinning) {
+                        // Show bone count
+                        size_t bone_count = ctx.scene.boneData.boneNameToIndex.size();
+                        ImGui::TextDisabled("Skinned Mesh (%zu bones)", bone_count);
+                        
+                        // Bones sub-tree
+                        if (!ctx.scene.boneData.boneNameToIndex.empty()) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.3f, 1.0f));
+                            if (ImGui::TreeNode("Bones##skinned")) {
+                                ImGui::PopStyleColor();
+                                
+                                // Sort bones by index
+                                std::vector<std::pair<std::string, unsigned int>> sorted_bones(
+                                    ctx.scene.boneData.boneNameToIndex.begin(),
+                                    ctx.scene.boneData.boneNameToIndex.end()
+                                );
+                                std::sort(sorted_bones.begin(), sorted_bones.end(),
+                                    [](const auto& a, const auto& b) { return a.second < b.second; });
+                                
+                                for (const auto& [boneName, boneIdx] : sorted_bones) {
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.45f, 1.0f));
+                                    ImGui::BulletText("%d: %s", boneIdx, boneName.c_str());
+                                    ImGui::PopStyleColor();
+                                }
+                                
+                                ImGui::TreePop();
+                            } else {
+                                ImGui::PopStyleColor();
                             }
-                            // Sync Updates
-                            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                            ctx.renderer.resetCPUAccumulation();
-                            if (ctx.optix_gpu_ptr) {
-                                ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                                ctx.optix_gpu_ptr->resetAccumulation();
-                            }
-                            sel.selected.has_cached_aabb = false;
                         }
-                    }
-                    ImGui::PopItemWidth();
-
-                    if (!kv.second.empty()) {
-                        int matID = kv.second[0].second->getMaterialID();
-                        ImGui::PushItemWidth(100);
-                        if (ImGui::InputInt("Mat ID", &matID)) {
-                            for (auto& pair : kv.second) pair.second->setMaterialID(matID);
-                            if (ctx.optix_gpu_ptr) {
-                                ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                                ctx.optix_gpu_ptr->resetAccumulation();
+                        
+                        // Animations sub-tree
+                        if (!ctx.scene.animationDataList.empty()) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+                            if (ImGui::TreeNode("Animations##skinned")) {
+                                ImGui::PopStyleColor();
+                                
+                                for (size_t ai = 0; ai < ctx.scene.animationDataList.size(); ++ai) {
+                                    const auto& anim = ctx.scene.animationDataList[ai];
+                                    ImGui::PushID((int)ai);
+                                    
+                                    std::string animName = anim.name.empty() ? "Animation " + std::to_string(ai) : anim.name;
+                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.95f, 0.7f, 1.0f));
+                                    
+                                    if (ImGui::TreeNode(animName.c_str())) {
+                                        ImGui::PopStyleColor();
+                                        ImGui::TextDisabled("Duration: %.2f sec", anim.duration / std::max(1.0, anim.ticksPerSecond));
+                                        ImGui::TextDisabled("Frames: %d - %d", anim.startFrame, anim.endFrame);
+                                        ImGui::TextDisabled("Channels: %zu", anim.positionKeys.size() + anim.rotationKeys.size());
+                                        ImGui::TreePop();
+                                    } else {
+                                        ImGui::PopStyleColor();
+                                    }
+                                    
+                                    ImGui::PopID();
+                                }
+                                
+                                ImGui::TreePop();
+                            } else {
+                                ImGui::PopStyleColor();
                             }
-                            ctx.renderer.resetCPUAccumulation();
+                        }
+                        
+                        ImGui::Separator();
+                    }
+
+                    // --- In-Tree Properties (for selected objects) ---
+                    if (is_selected) {
+                        Vec3 pos = sel.selected.position;
+                        // Position Control
+                        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x);
+                        if (ImGui::DragFloat3("##Pos", &pos.x, 0.1f)) {
+                            Vec3 delta = pos - sel.selected.position;
+                            sel.selected.position = pos;
+                            if (!kv.second.empty()) {
+                                auto tri = kv.second[0].second;
+                                auto t_handle = tri->getTransformHandle();
+                                if (t_handle) {
+                                    t_handle->base.m[0][3] = pos.x;
+                                    t_handle->base.m[1][3] = pos.y;
+                                    t_handle->base.m[2][3] = pos.z;
+                                }
+                                // Sync Updates
+                                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                                ctx.renderer.resetCPUAccumulation();
+                                if (ctx.optix_gpu_ptr) {
+                                    ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                }
+                                sel.selected.has_cached_aabb = false;
+                                ProjectManager::getInstance().markModified();
+                            }
                         }
                         ImGui::PopItemWidth();
+
+                        if (!kv.second.empty()) {
+                            int matID = kv.second[0].second->getMaterialID();
+                            ImGui::PushItemWidth(100);
+                            if (ImGui::InputInt("Mat ID", &matID)) {
+                                for (auto& pair : kv.second) pair.second->setMaterialID(matID);
+                                if (ctx.optix_gpu_ptr) {
+                                    ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                }
+                                ctx.renderer.resetCPUAccumulation();
+                            }
+                            ImGui::PopItemWidth();
+                        }
                     }
 
                     ImGui::Unindent();
@@ -435,6 +522,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             ctx.optix_gpu_ptr->resetAccumulation();
                         }
                         is_bvh_dirty = false;
+                        ProjectManager::getInstance().markModified();
                     }
                     else {
                         sel.clearSelection();
@@ -703,6 +791,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         ctx.optix_gpu_ptr->resetAccumulation();
                     }
                 }
+                
+                    if (ctx.optix_gpu_ptr && g_hasOptix) {
+                        ctx.optix_gpu_ptr->setCameraParams(cam);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                    }
+                
 
                 ImGui::Separator();
 

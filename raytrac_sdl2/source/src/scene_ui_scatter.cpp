@@ -353,7 +353,7 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
 // SYNC INSTANCES TO SCENE (Make them renderable)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only) {
+void SceneUI::syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only) {
     // Remove existing instances from scene (they have special name prefix)
     std::string instance_prefix = "_inst_" + group.name + "_";
     
@@ -540,8 +540,12 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void SceneUI::drawBrushPreview(UIContext& ctx) {
-    if (!scatter_brush.enabled) return;
-    if (!scatter_brush.show_brush_preview) return;
+    // Check if any brush is active
+    bool is_scatter = scatter_brush.enabled && scatter_brush.show_brush_preview;
+    bool is_foliage = foliage_brush.enabled && foliage_brush.show_preview;
+    
+    if (!is_scatter && !is_foliage) return;
+    
     if (!ctx.scene.camera || !ctx.scene.bvh) return;
     
     ImGuiIO& io = ImGui::GetIO();
@@ -550,6 +554,10 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     // Get mouse position
     int mx, my;
     SDL_GetMouseState(&mx, &my);
+    
+    // Use active brush parameters
+    float radius = is_scatter ? scatter_brush.brush_radius : foliage_brush.radius;
+    int mode = is_scatter ? scatter_brush.brush_mode : foliage_brush.mode;
     
     float u = (float)mx / io.DisplaySize.x;
     float v = 1.0f - ((float)my / io.DisplaySize.y);
@@ -597,7 +605,7 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     if (tangent.length() < 0.01f) tangent = hit.normal.cross(Vec3(1, 0, 0));
     tangent = tangent.normalize();
     
-    Vec3 edge_point = hit.point + tangent * scatter_brush.brush_radius;
+    Vec3 edge_point = hit.point + tangent * radius;
     ImVec2 edge = projectToScreen(edge_point);
     
     float screen_radius = sqrtf((edge.x - center.x) * (edge.x - center.x) + 
@@ -605,16 +613,32 @@ void SceneUI::drawBrushPreview(UIContext& ctx) {
     screen_radius = std::max(10.0f, std::min(screen_radius, 500.0f));
     
     // Color based on mode
-    ImU32 color = (scatter_brush.brush_mode == 0) 
-        ? IM_COL32(100, 255, 100, 180)   // Green for add
-        : IM_COL32(255, 100, 100, 180);  // Red for remove
+    ImU32 color;
+    if (is_foliage) {
+         // Cyan for foliage add, orange for remove
+         color = (mode == 0) 
+            ? IM_COL32(0, 255, 255, 180) 
+            : IM_COL32(255, 128, 0, 180);
+    } else {
+        // Green for scatter add, red for remove
+        color = (mode == 0) 
+            ? IM_COL32(100, 255, 100, 180)
+            : IM_COL32(255, 100, 100, 180);
+    }
     
     // Draw visual
     draw_list->AddCircle(center, screen_radius, color, 32, 3.0f);
     draw_list->AddCircleFilled(center, 4.0f, color);
     
     // Mode text
-    const char* mode_text = (scatter_brush.brush_mode == 0) ? "ADD" : "REMOVE";
+    const char* mode_text = (mode == 0) ? "ADD" : "REMOVE";
     ImVec2 text_size = ImGui::CalcTextSize(mode_text);
     draw_list->AddText(ImVec2(center.x - text_size.x * 0.5f, center.y + screen_radius + 5), color, mode_text);
+    
+    // Extra info for foliage (density)
+    if (is_foliage) {
+        std::string info = "Density: " + std::to_string(foliage_brush.density);
+        ImVec2 info_size = ImGui::CalcTextSize(info.c_str());
+        draw_list->AddText(ImVec2(center.x - info_size.x * 0.5f, center.y + screen_radius + 20), color, info.c_str());
+    }
 }

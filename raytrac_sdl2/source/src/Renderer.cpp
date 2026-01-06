@@ -1,6 +1,7 @@
 ﻿#include "renderer.h"
 #include <SDL_image.h>
 #include <filesystem>
+#include <chrono>      // For wall-clock deltaTime in animation fallback
 #include <execution>
 #include <cstring>      // std::memcpy for camera hash
 #include <imgui.h>
@@ -335,8 +336,80 @@ void Renderer::render_image(SDL_Surface* surface, SDL_Window* window, SDL_Textur
    
 }
 
+// ============================================================================
+// NEW ANIMATION SYSTEM INTEGRATION
+// ============================================================================
 
-bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
+void Renderer::initializeAnimationSystem(SceneData& scene) {
+    auto& animCtrl = AnimationController::getInstance();
+    
+    // Register all animation clips from the scene
+    if (!scene.animationDataList.empty()) {
+        animCtrl.registerClips(scene.animationDataList);
+        
+        SCENE_LOG_INFO("[AnimSystem] Initialized with " + 
+            std::to_string(scene.animationDataList.size()) + " animation clips.");
+        
+        // Auto-play first clip if available
+        const auto& clips = animCtrl.getAllClips();
+        if (!clips.empty()) {
+            animCtrl.play(clips[0].name, 0.0f);  // Instant start
+            SCENE_LOG_INFO("[AnimSystem] Auto-playing: " + clips[0].name);
+        }
+    }
+}
+
+bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning) {
+    auto& animCtrl = AnimationController::getInstance();
+    
+    // Update animation controller
+    bool changed = animCtrl.update(deltaTime, scene.boneData);
+    
+    if (!changed) {
+        return false;
+    }
+    
+    // Get computed bone matrices from animation controller
+    const auto& matrices = animCtrl.getFinalBoneMatrices();
+    
+    // Resize our matrices if needed
+    if (this->finalBoneMatrices.size() != matrices.size()) {
+        this->finalBoneMatrices.resize(matrices.size());
+    }
+    
+    // Copy matrices
+    for (size_t i = 0; i < matrices.size(); ++i) {
+        this->finalBoneMatrices[i] = matrices[i];
+    }
+    
+    // Apply skinning to triangles if CPU skinning is requested
+    if (apply_cpu_skinning) {
+        for (auto& obj : scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->hasSkinData()) {
+                // Disable transform handle for skinned meshes
+                auto transformHandle = tri->getTransformHandle();
+                if (transformHandle) {
+                    transformHandle->setBase(Matrix4x4::identity());
+                    transformHandle->setCurrent(Matrix4x4::identity());
+                }
+                
+                tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(this->finalBoneMatrices));
+            }
+        }
+    }
+    
+    // Reset CPU accumulation since geometry changed
+    resetCPUAccumulation();
+    
+    // Clear dirty flag in controller
+    animCtrl.clearDirtyFlag();
+    
+    return true;  // Geometry changed
+}
+
+
+bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool apply_cpu_skinning) {
     // ═══════════════════════════════════════════════════════════════════════════
     // GEOMETRY CHANGE TRACKING (Animation Performance Optimization)
     // ═══════════════════════════════════════════════════════════════════════════
@@ -354,27 +427,97 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
     resetCPUAccumulation();
     
     lastAnimationUpdateTime = current_time;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FALLBACK: Use AnimationController when importedModelContexts is empty
+    // ═══════════════════════════════════════════════════════════════════════════
+    // This happens after project load - loaders are not serialized but animation
+    // data is. Use the AnimationController-based system in this case.
+    // ═══════════════════════════════════════════════════════════════════════════
+    bool useAnimationController = scene.importedModelContexts.empty() && 
+                                   !scene.animationDataList.empty() && 
+                                   !scene.boneData.boneNameToIndex.empty();
+    
+    if (useAnimationController) {
+        // Use REAL wall-clock deltaTime instead of timeline time
+        // This ensures animation plays continuously regardless of timeline state
+        static auto lastRealTime = std::chrono::high_resolution_clock::now();
+        auto nowTime = std::chrono::high_resolution_clock::now();
+        float deltaTime = std::chrono::duration<float>(nowTime - lastRealTime).count();
+        lastRealTime = nowTime;
+        
+        // Clamp deltaTime to reasonable bounds
+        if (deltaTime < 0.0f || deltaTime > 0.5f) deltaTime = 1.0f / 60.0f;
+        
+        // Use the new AnimationController system
+        geometry_changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning);
+    }
 
     // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
     std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
 
-    if (assimpLoader.getScene() && assimpLoader.getScene()->mRootNode && !scene.animationDataList.empty()) {
-        Matrix4x4 identityParentTransform = Matrix4x4::identity(); 
-
+    // Iterate over ALL imported models to update their respective hierarchies
+    for (const auto& modelCtx : scene.importedModelContexts) {
+        if (!modelCtx.loader || !modelCtx.loader->getScene() || !modelCtx.loader->getScene()->mRootNode) continue;
+        
+        // ═══════════════════════════════════════════════════════════════════════════
+        // CRITICAL FIX: Skip models without animation data
+        // ═══════════════════════════════════════════════════════════════════════════
+        // Calling calculateAnimatedNodeTransformsRecursive on non-animated models:
+        // 1. Recalculates node hierarchy with FBX root transform (Z-up to Y-up)
+        // 2. Overwrites existing user transforms (translations applied via gizmo)
+        // 3. Causes static rigged objects to "jump" to bind pose at world origin
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (!modelCtx.hasAnimation) {
+            continue; // Skip non-animated models - preserve their transforms
+        }
+        
+        // Restore context (names, etc.) - implicitly handled by using the specific loader instance
+        Matrix4x4 identityParentTransform = Matrix4x4::identity();
+        
+        // Build lookups for THIS model's animations
         std::map<std::string, const AnimationData*> animationLookupMap;
         for (const auto& anim : scene.animationDataList) {
-            for (const auto& pair : anim.positionKeys) animationLookupMap[pair.first] = &anim;
-            for (const auto& pair : anim.rotationKeys) animationLookupMap[pair.first] = &anim;
-            for (const auto& pair : anim.scalingKeys) animationLookupMap[pair.first] = &anim;
+             for (const auto& pair : anim.positionKeys) animationLookupMap[pair.first] = &anim;
+             for (const auto& pair : anim.rotationKeys) animationLookupMap[pair.first] = &anim;
+             for (const auto& pair : anim.scalingKeys) animationLookupMap[pair.first] = &anim;
         }
 
-        assimpLoader.calculateAnimatedNodeTransformsRecursive(
-            assimpLoader.getScene()->mRootNode,
+        modelCtx.loader->calculateAnimatedNodeTransformsRecursive(
+            modelCtx.loader->getScene()->mRootNode,
             identityParentTransform,
             animationLookupMap,
             current_time,
-            animatedGlobalNodeTransforms
+            animatedGlobalNodeTransforms // Accumulate into global map
         );
+    }
+
+    // --- 1.5. PRE-CALCULATE GLOBAL BONE MATRICES (Optimization) ---
+    // Instead of recalculating per-mesh (which causes massive slowdown), do it once globally.
+    if (!scene.boneData.boneNameToIndex.empty()) {
+        // Ensure vector is large enough for the largest index
+        // Since indices are 0-based, size needs to be max_index + 1. 
+        // Using map size is usually correct unless there are gaps/overlaps. 
+        // We'll trust map size but verify inside loop.
+        if (this->finalBoneMatrices.size() < scene.boneData.boneNameToIndex.size()) {
+            this->finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size());
+        }
+
+        for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
+            // Robustness: Handle out-of-bounds indices due to potential merges
+            if (boneIndex >= finalBoneMatrices.size()) {
+                finalBoneMatrices.resize(boneIndex + 1);
+            }
+
+            if (animatedGlobalNodeTransforms.count(boneName) > 0 && scene.boneData.boneOffsetMatrices.count(boneName) > 0) {
+                 Matrix4x4 animatedBoneGlobal = animatedGlobalNodeTransforms[boneName];
+                 Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
+                 finalBoneMatrices[boneIndex] = animatedBoneGlobal * offsetMatrix;
+            } else {
+                 // Fallback to identity to prevent explosions, though this usually implies broken rig or missing update
+                 finalBoneMatrices[boneIndex] = Matrix4x4::identity();
+            }
+        }
     }
 
     // --- 2. Adım: Üçgenleri Animasyon Türüne Göre Güncelle ---
@@ -386,103 +529,47 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time) {
         bool isSkinnedMesh = tri->hasSkinData();
 
         if (isSkinnedMesh) {
-            std::vector<Matrix4x4> finalBoneMatrices(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
-
-            // PURE SKINNING - NO COORDINATE CONVERSION
-            // Let's test if the basic skinning works without any conversion.
-            // If it still pinches, the problem is NOT in coordinate conversion!
-            
-            for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
-                if (animatedGlobalNodeTransforms.count(boneName) == 0) {
-                    continue;
-                }
-
-                Matrix4x4 animatedBoneGlobal = animatedGlobalNodeTransforms[boneName];
+            // ═══════════════════════════════════════════════════════════════════════════
+            // Check if this mesh belongs to an animated model
+            // ═══════════════════════════════════════════════════════════════════════════
+            // animatedGlobalNodeTransforms only contains nodes from models with animation.
+            // If NONE of this mesh's bones are in the map, the mesh is from a non-animated
+            // model and should be skipped to preserve its transform.
+            // ═══════════════════════════════════════════════════════════════════════════
+            bool meshBelongsToAnimatedModel = false;
+            const auto& boneWeights = tri->getSkinBoneWeights(0);
+            for (const auto& [boneIdx, weight] : boneWeights) {
+                if (weight < 0.001f) continue;
                 
-                if (scene.boneData.boneOffsetMatrices.count(boneName) == 0) continue;
-                Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
-
-                // Standard skinning formula (Animated * Offset)
-                finalBoneMatrices[boneIndex] = animatedBoneGlobal * offsetMatrix;
-                
-                // Debug logging - MORE DETAILED
-                static int logCount = 0;
-                if (logCount < 1 && boneIndex < 3) {
-                    SCENE_LOG_INFO("[SKINNING] ====== Bone #" + std::to_string(boneIndex) + ": " + boneName + " ======");
-                    
-                    // Log globalInverseTransform once
-                    if (boneIndex == 0) {
-                        SCENE_LOG_INFO("[SKINNING]   GlobalInverse Diagonal: (" + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[0][0]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[1][1]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[2][2]) + ")");
-                        SCENE_LOG_INFO("[SKINNING]   GlobalInverse Row0: (" + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[0][0]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[0][1]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[0][2]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[0][3]) + ")");
-                        SCENE_LOG_INFO("[SKINNING]   GlobalInverse Row1: (" + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[1][0]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[1][1]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[1][2]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[1][3]) + ")");
-                        SCENE_LOG_INFO("[SKINNING]   GlobalInverse Row2: (" + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[2][0]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[2][1]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[2][2]) + ", " + 
-                            std::to_string(scene.boneData.globalInverseTransform.m[2][3]) + ")");
-                    }
-                    
-                    // Log FULL animated bone matrix (rotation + translation)
-                    SCENE_LOG_INFO("[SKINNING]   AnimBone Row0: (" + 
-                        std::to_string(animatedBoneGlobal.m[0][0]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[0][1]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[0][2]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[0][3]) + ")");
-                    SCENE_LOG_INFO("[SKINNING]   AnimBone Row1: (" + 
-                        std::to_string(animatedBoneGlobal.m[1][0]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[1][1]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[1][2]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[1][3]) + ")");
-                    SCENE_LOG_INFO("[SKINNING]   AnimBone Row2: (" + 
-                        std::to_string(animatedBoneGlobal.m[2][0]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[2][1]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[2][2]) + ", " + 
-                        std::to_string(animatedBoneGlobal.m[2][3]) + ")");
-                    
-                    // Log FULL offset matrix (all 3 rows)
-                    SCENE_LOG_INFO("[SKINNING]   Offset Row0: (" + 
-                        std::to_string(offsetMatrix.m[0][0]) + ", " + 
-                        std::to_string(offsetMatrix.m[0][1]) + ", " + 
-                        std::to_string(offsetMatrix.m[0][2]) + ", " + 
-                        std::to_string(offsetMatrix.m[0][3]) + ")");
-                    SCENE_LOG_INFO("[SKINNING]   Offset Row1: (" + 
-                        std::to_string(offsetMatrix.m[1][0]) + ", " + 
-                        std::to_string(offsetMatrix.m[1][1]) + ", " + 
-                        std::to_string(offsetMatrix.m[1][2]) + ", " + 
-                        std::to_string(offsetMatrix.m[1][3]) + ")");
-                    SCENE_LOG_INFO("[SKINNING]   Offset Row2: (" + 
-                        std::to_string(offsetMatrix.m[2][0]) + ", " + 
-                        std::to_string(offsetMatrix.m[2][1]) + ", " + 
-                        std::to_string(offsetMatrix.m[2][2]) + ", " + 
-                        std::to_string(offsetMatrix.m[2][3]) + ")");
-                    SCENE_LOG_INFO("[SKINNING]   Final Matrix Pos: (" + 
-                        std::to_string(finalBoneMatrices[boneIndex].m[0][3]) + ", " + 
-                        std::to_string(finalBoneMatrices[boneIndex].m[1][3]) + ", " + 
-                        std::to_string(finalBoneMatrices[boneIndex].m[2][3]) + ")");
-                    if (boneIndex == 2) logCount++;
+                // OPTIMIZATION: O(1) reverse lookup instead of O(n) map traversal
+                const std::string& boneName = scene.boneData.getBoneNameByIndex(static_cast<unsigned int>(boneIdx));
+                if (!boneName.empty() && animatedGlobalNodeTransforms.count(boneName) > 0) {
+                    meshBelongsToAnimatedModel = true;
+                    break;
                 }
             }
             
-            // Disable transform handle for skinned meshes
+            // Skip meshes from non-animated models
+            if (!meshBelongsToAnimatedModel) {
+                continue; // Preserve transform for non-animated rigged objects
+            }
+            
+            // Disable transform handle for animated skinned meshes
             auto transformHandle = tri->getTransformHandle();
             if (transformHandle) {
                 transformHandle->setBase(Matrix4x4::identity());
                 transformHandle->setCurrent(Matrix4x4::identity());
             }
 
-            tri->apply_skinning(finalBoneMatrices);
-            geometry_changed = true;  // Skinning modifies vertex positions
+            // Geometry changes (either on GPU or CPU), so flag it.
+            // This ensures GPU update is triggered even if CPU skinning is skipped.
+            geometry_changed = true;
+
+            // Only apply CPU skinning if requested (skip for GPU rendering to save perf)
+            if (apply_cpu_skinning) {
+                // Now just use the pre-calculated finalBoneMatrices
+                tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(finalBoneMatrices));
+            }
         }
         else {
             bool nodeHasAnimation = false;
@@ -937,7 +1024,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // --- UPDATE ANIMATION ---
         // Returns true if geometry changed
         // Returns true if geometry changed
-        bool geometry_changed = this->updateAnimationState(scene, current_time);
+        // --- UPDATE ANIMATION ---
+        // Disable CPU skinning if running on OptiX to save performance and prevent crashes
+        bool geometry_changed = this->updateAnimationState(scene, current_time, !run_optix);
         
         // --- TERRAIN ANIMATION ---
         // Apply terrain keyframes for this frame (morphing animation)
@@ -986,7 +1075,14 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // IMPORTANT: Terrain erosion can change triangle count, not just positions.
             // Full rebuildOptiXGeometry is required to handle topology changes.
             if (geometry_changed) {
-                 this->rebuildOptiXGeometry(scene, optix_gpu);
+                 if (optix_gpu->isUsingTLAS()) {
+                     // FAST PATH: GPU Skinning & Transform Update (Refit)
+                     // Pass computed bone matrices to the GPU kernel
+                     optix_gpu->updateTLASGeometry(scene.world.objects, this->finalBoneMatrices);
+                 } else {
+                     // Fallback: Full Rebuild (Slow)
+                     this->rebuildOptiXGeometry(scene, optix_gpu);
+                 }
             }
             
             // 1.5. Update GPU Materials (CRITICAL for material keyframe animations!)
@@ -1161,8 +1257,8 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         // ---- 1. Sahne verilerini sıfırla ----
         scene.world.clear();
         scene.lights.clear();
-        scene.animatedObjects.clear();
         scene.animationDataList.clear();
+        scene.boneData.clear();
         scene.camera = nullptr;
         scene.bvh = nullptr;
         scene.initialized = false;
@@ -1207,40 +1303,101 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     // ---- 1. Geometri ve animasyon yükle ----
     update_progress(15, "Loading geometry & animations...");
     SCENE_LOG_INFO("Loading model geometry and animations...");
-    auto [loaded_triangles, loaded_animations, loaded_bone_data] = assimpLoader.loadModelToTriangles(model_path);
+    
+    // Create a dedicated loader for this import to keep the aiScene alive
+    auto newLoader = std::make_shared<AssimpLoader>();
+    auto [loaded_triangles, loaded_animations, loaded_bone_data] = newLoader->loadModelToTriangles(model_path);
+
+    // Store the context
+    SceneData::ImportedModelContext modelCtx;
+    modelCtx.loader = newLoader;
+    modelCtx.importName = newLoader->currentImportName;
+    modelCtx.hasAnimation = (newLoader->getScene() && newLoader->getScene()->mNumAnimations > 0);
+    scene.importedModelContexts.push_back(modelCtx);
 
     update_progress(40, "Processing triangles...");
-    scene.animationDataList = loaded_animations;
-    scene.boneData = loaded_bone_data;
-
+    
     if (loaded_triangles.empty()) {
         SCENE_LOG_ERROR("No triangle data, scene loading failed: " + model_path);
         SCENE_LOG_ERROR("Please provide a valid model file.");
     }
     else {
+        // --- MERGE ANIMATION DATA & BONES ---
+        // Verify bone/animation usage
+        bool hasBones = !loaded_bone_data.boneNameToIndex.empty();
+        
+        // Calculate Offset for Bone Indices (Append Mode)
+        unsigned int boneIndexOffset = 0;
+        if (append) {
+             boneIndexOffset = static_cast<unsigned int>(scene.boneData.boneNameToIndex.size());
+        } else {
+             // New Scene - already cleared in Step 0, but ensure boneData is fresh
+             scene.boneData.boneNameToIndex.clear();
+             scene.boneData.boneOffsetMatrices.clear();
+             scene.boneData.boneNameToNode.clear();
+        }
+
+        // 1. Update Triangle Bone Indices with Offset
+        if (hasBones && boneIndexOffset > 0) {
+            for (auto& tri : loaded_triangles) {
+                if (tri->hasSkinData()) {
+                     // Access bone weights via accessor which returns reference to internal data
+                     auto& vertexWeightsList = tri->getVertexBoneWeights();
+                     for (auto& vertexWeights : vertexWeightsList) {
+                         for (auto& bw : vertexWeights) {
+                             bw.first += boneIndexOffset; // .first is the bone index
+                         }
+                     }
+                }
+            }
+        }
+
+        // 2. Merge Bone Data
+        if (hasBones) {
+            for (const auto& [name, id] : loaded_bone_data.boneNameToIndex) {
+                scene.boneData.boneNameToIndex[name] = id + boneIndexOffset;
+            }
+            // Merge Offset Matrices and Node Pointers
+            scene.boneData.boneOffsetMatrices.insert(loaded_bone_data.boneOffsetMatrices.begin(), loaded_bone_data.boneOffsetMatrices.end());
+            scene.boneData.boneNameToNode.insert(loaded_bone_data.boneNameToNode.begin(), loaded_bone_data.boneNameToNode.end());
+            
+            // Only set global inverse if it's the first model or handle separately? 
+            // It seems unused for skinning (offset matrix handles it), so valid to leave or overwrite.
+            if (!append) scene.boneData.globalInverseTransform = loaded_bone_data.globalInverseTransform;
+            
+            // CRITICAL: Rebuild reverse lookup after merge for O(1) index->name queries
+            scene.boneData.rebuildReverseLookup();
+        }
+
+        // 3. Merge Animations
+        if (append) {
+            scene.animationDataList.insert(scene.animationDataList.end(), loaded_animations.begin(), loaded_animations.end());
+        } else {
+            scene.animationDataList = loaded_animations;
+        }
+
         SCENE_LOG_INFO("Successfully loaded triangles: " + std::to_string(loaded_triangles.size()));
         SCENE_LOG_INFO("Loaded animations: " + std::to_string(loaded_animations.size()));
+        SCENE_LOG_INFO("Total Bones (Merged): " + std::to_string(scene.boneData.boneNameToIndex.size()));
     }
 
     update_progress(45, "Adding triangles to scene...");
     SCENE_LOG_INFO("Adding triangles to scene world...");
+    
+    // Add triangles to scene - animation is handled via TransformHandle and skinning
+    // NOTE: AnimatedObject wrappers removed (were unused, wasted memory)
     for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
-        auto hittable = std::dynamic_pointer_cast<Hittable>(tri);
-        if (hittable) {
-            auto animatedObj = std::make_shared<AnimatedObject>(std::vector<std::shared_ptr<Hittable>>{hittable});
-            scene.animatedObjects.push_back(animatedObj);
-        }
     }
-    SCENE_LOG_INFO("Added " + std::to_string(scene.animatedObjects.size()) + " animated objects to scene.");
+    SCENE_LOG_INFO("Added " + std::to_string(loaded_triangles.size()) + " triangles to scene.");
 
     // ---- 2. Kamera ve ışık verisi ----
     update_progress(55, "Loading camera & lights...");
     SCENE_LOG_INFO("Loading camera and lighting data...");
     
-    // Get new cameras and lights from loaded model
-    auto new_lights = assimpLoader.getLights();
-    auto new_cameras = assimpLoader.getCameras();  // Get ALL cameras
+    // Get new cameras and lights from loaded model using NEW loader
+    auto new_lights = newLoader->getLights();
+    auto new_cameras = newLoader->getCameras();  // Get ALL cameras
     
     // Handle cameras: Add all to the list
     if (append) {
@@ -1269,7 +1426,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         
         // If no cameras from model, create default
         if (scene.cameras.empty()) {
-            auto new_camera = assimpLoader.getDefaultCamera();
+            auto new_camera = newLoader->getDefaultCamera();
             if (new_camera) {
                 new_camera->save_initial_state();
                 new_camera->update_camera_vectors();
@@ -1298,7 +1455,19 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         scene.lights = new_lights;
         SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
     }
-
+    // ...
+    // Note: OptiX conversion below (in original code) referenced 'assimpLoader' which was the member.
+    // We must update that block too, but replacing only up to line 1335 handles the loading/merging logic.
+    // The OptiX block is below 1335. I should include it in replacement range or do another replace.
+    // The instruction requested updating create_scene. I'll replace the block covering loading to lighting.
+    
+    // BUT wait, I need to check if 'assimpLoader.convertTrianglesToOptixData' is called later.
+    // Yes, line 1364. That uses member assimpLoader. Since it's a stateless helper (except texture cache maybe?), it MIGHT be okay?
+    // BUT convertTrianglesToOptixData uses `MaterialManager` and triangle data. It seems stateless.
+    // However, it's safer to use `newLoader`.
+    
+    // I will replace up to line 1400.
+    
     //  Selectable BVH (Embree or in-house BVH)
     update_progress(60, "Building BVH structure...");
     SCENE_LOG_INFO("Building BVH structure...");
@@ -1327,7 +1496,8 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         {
             update_progress(78, "Creating OptiX geometry...");
             SCENE_LOG_INFO("OptiX GPU detected. Creating OptiX geometry data...");
-            OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(loaded_triangles);
+            // Use newLoader here
+            OptixGeometryData optix_data = newLoader->convertTrianglesToOptixData(loaded_triangles);
             SCENE_LOG_INFO("Converting " + std::to_string(loaded_triangles.size()) + " triangles to OptiX format.");
 
             update_progress(82, "Validating materials...");

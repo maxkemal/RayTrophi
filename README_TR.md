@@ -31,6 +31,36 @@
 
 ---
 
+## 🆕 Son Güncellemeler (Ocak 2025)
+
+### 📸 Pro Kamera Sistemi & Fiziksel Lens
+
+- ✅ **Gelişmiş Pro Kamera HUD**: Profesyonel bir fotoğrafçılık deneyimi için kamera arayüzü tamamen yenilendi.
+  - **İnteraktif Netleme Halkası (Focus Ring)**: Hassas odak için fare tekerleğini kullanarak manuel odaklama.
+  - **Odak Modu Kontrolü**: Auto Focus (AF) ve Manual Focus (MF) arasında geçiş için özel slider.
+  - **Akıllı Otomatik Odaklama**: Ekranın ortasındaki objelere kilitlenirken yumuşak, sönümlü geçiş efekti.
+  - **Görsel Geri Bildirim**: Odak değişikliklerine tepki veren HUD (Yeşil = Kilitlendi, Beyaz = Arıyor/Manuel).
+
+- ✅ **Fiziksel Lens Distorsiyonu**:
+  - **Brown-Conrady Modeli**: Hem CPU hem GPU (OptiX) üzerinde gerçekçi radyal lens bükülmesi simülasyonu.
+  - **Otomatik Kusur Hesaplama**: Distorsiyon artık tamamen lensin fiziksel özelliklerine (Odak Uzaklığı) göre hesaplanıyor.
+  - **Geniş Açı (Barrel)**: 50mm'den geniş lensler doğal olarak fıçı bükülmesi (dışa doğru) gösterir.
+  - **Telefoto (Pincushion)**: Uzun lensler hafif yastık bükülmesi (içe doğru) gösterir.
+  - **Manuel Slider Yok**: "Distortion" ayarı kaldırılarak tam fiziksel doğrulukta otomatik davranışa geçildi.
+
+### Proje Serileştirme İyileştirmeleri (31 Aralık 2024)
+
+- ✅ **Gömülü Texture Serileştirme Düzeltmesi**: GLB gömülü texture'ları artık proje kaydet/aç döngüsünde doğru çalışıyor
+  - **Sorun**: GLB dosyalarındaki gömülü texture'lar proje kaydedilip açılınca kayboluyordu
+  - **Çözüm**: `serializeTextures()`'da `PrincipledBSDF*` cast ve texture referans güncellemeleri
+
+- ✅ **Normal Map Texture Tipi Düzeltmesi**: GPU rendering'de görsel hataları (bir üçgenin siyah görünmesi) çözdü
+  - **Sorun**: Proje yüklenince bir poligonun yarısı siyah/ters görünüyordu
+  - **Kök Neden**: Tüm texture'lar `TextureType::Albedo` olarak yükleniyordu, normal map'lere sRGB dönüşümü uygulanıyordu
+  - **Çözüm**: `deserializeProperty()` artık texture tipi parametresi alıyor, her property doğru tip ile yükleniyor
+
+---
+
 ## ✨ Özellikler
 
 ### 🎨 Rendering Yetenekleri

@@ -18,9 +18,31 @@ Camera::Camera()
     focus_dist(0.0), fov(0.0), lens_radius(0.0), near_dist(0.0), vfov(0.0) {
 }
 Ray Camera::get_ray(float s, float t) const {
+    float use_s = s;
+    float use_t = t;
+
+    // ---------------- LENS DISTORTION (CPU) ----------------
+    if (std::abs(distortion) > 0.001f) {
+        float h_len = horizontal.length();
+        float v_len = vertical.length();
+        float aspect = h_len / (v_len + 1e-6f);
+        
+        float u_centered = (s - 0.5f) * aspect;
+        float v_centered = (t - 0.5f);
+        
+        float r2 = u_centered * u_centered + v_centered * v_centered;
+        float factor = 1.0f + distortion * r2;
+        
+        u_centered *= factor;
+        v_centered *= factor;
+        
+        use_s = (u_centered / aspect) + 0.5f;
+        use_t = v_centered + 0.5f;
+    }
+
     Vec3 rd = lens_radius * random_in_unit_polygon(blade_count);
     Vec3 offset = u * rd.x + v * rd.y;
-    return Ray(origin + offset, lower_left_corner + s * horizontal + t * vertical - origin - offset);
+    return Ray(origin + offset, lower_left_corner + use_s * horizontal + use_t * vertical - origin - offset);
 }
 int Camera::random_int(int min, int max) const {
     static std::random_device rd;
@@ -47,6 +69,29 @@ void Camera::update_camera_vectors() {
 
     origin = lookfrom;
     fov = vfov;
+
+    // ---------------- PHYSICAL LENS DEFECTS (Auto-Calculated) ----------------
+    // Calculate distortion based on estimated focal length (assuming 35mm full frame)
+    // f = h / (2 * tan(vfov/2))
+    // We use a fixed sensor height reference (24mm) to map "Wide Angle" feel consistently.
+    // This allows the distortion to feel "physically correct" relative to standard FOV.
+    
+    // Note: theta is already calculated above as (vfov * PI / 180)
+    float est_f = (24.0f / 2.0f) / tan(theta / 2.0f);
+    
+    if (est_f < 50.0f) {
+         // Barrel Distortion for Wide Angle (< 50mm)
+         // Quadratic curve: stronger effect as f decreases (e.g. 16mm is visible)
+         float ratio = (50.0f - est_f) / 50.0f;
+         distortion = -0.25f * (ratio * ratio); 
+    } else {
+         // Pincushion Distortion for Telephoto (> 50mm)
+         // Linear, mild effect
+         float ratio = (est_f - 50.0f) / 200.0f;
+         distortion = 0.05f * ratio;
+         if (distortion > 0.05f) distortion = 0.05f; // Cap at max
+    }
+    // -------------------------------------------------------------------------
 
     updateFrustumPlanes();
 }

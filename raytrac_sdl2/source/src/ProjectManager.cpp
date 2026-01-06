@@ -304,6 +304,100 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         scene.timeline.serialize(j_timeline);
         root["timeline"] = j_timeline;
         
+        // BoneData (skeleton/skinning information)
+        if (progress_callback) progress_callback(83, "Saving bone data...");
+        {
+            json j_bones;
+            
+            // Save bone name to index mapping
+            json j_bone_map = json::object();
+            for (const auto& [name, idx] : scene.boneData.boneNameToIndex) {
+                j_bone_map[name] = idx;
+            }
+            j_bones["boneNameToIndex"] = j_bone_map;
+            
+            // Save bone offset matrices
+            json j_offsets = json::object();
+            for (const auto& [name, matrix] : scene.boneData.boneOffsetMatrices) {
+                j_offsets[name] = mat4ToJson(matrix);
+            }
+            j_bones["boneOffsetMatrices"] = j_offsets;
+            
+            // Save global inverse transform
+            j_bones["globalInverseTransform"] = mat4ToJson(scene.boneData.globalInverseTransform);
+            
+            root["boneData"] = j_bones;
+        }
+        
+        // AnimationData (bone animation keyframes)
+        if (progress_callback) progress_callback(83, "Saving animation data...");
+        {
+            json j_animations = json::array();
+            
+            for (const auto& anim : scene.animationDataList) {
+                json j_anim;
+                j_anim["name"] = anim.name;
+                j_anim["duration"] = anim.duration;
+                j_anim["ticksPerSecond"] = anim.ticksPerSecond;
+                j_anim["startFrame"] = anim.startFrame;
+                j_anim["endFrame"] = anim.endFrame;
+                
+                // Position keys
+                json j_pos_keys = json::object();
+                for (const auto& [nodeName, keys] : anim.positionKeys) {
+                    json j_keys = json::array();
+                    for (const auto& key : keys) {
+                        j_keys.push_back({
+                            {"time", key.mTime},
+                            {"x", key.mValue.x},
+                            {"y", key.mValue.y},
+                            {"z", key.mValue.z}
+                        });
+                    }
+                    j_pos_keys[nodeName] = j_keys;
+                }
+                j_anim["positionKeys"] = j_pos_keys;
+                
+                // Rotation keys
+                json j_rot_keys = json::object();
+                for (const auto& [nodeName, keys] : anim.rotationKeys) {
+                    json j_keys = json::array();
+                    for (const auto& key : keys) {
+                        j_keys.push_back({
+                            {"time", key.mTime},
+                            {"w", key.mValue.w},
+                            {"x", key.mValue.x},
+                            {"y", key.mValue.y},
+                            {"z", key.mValue.z}
+                        });
+                    }
+                    j_rot_keys[nodeName] = j_keys;
+                }
+                j_anim["rotationKeys"] = j_rot_keys;
+                
+                // Scaling keys
+                json j_scale_keys = json::object();
+                for (const auto& [nodeName, keys] : anim.scalingKeys) {
+                    json j_keys = json::array();
+                    for (const auto& key : keys) {
+                        j_keys.push_back({
+                            {"time", key.mTime},
+                            {"x", key.mValue.x},
+                            {"y", key.mValue.y},
+                            {"z", key.mValue.z}
+                        });
+                    }
+                    j_scale_keys[nodeName] = j_keys;
+                }
+                j_anim["scalingKeys"] = j_scale_keys;
+                
+                j_animations.push_back(j_anim);
+            }
+            
+            root["animationDataList"] = j_animations;
+            SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.animationDataList.size()) + " animation clips.");
+        }
+        
         // Water System
         if (progress_callback) progress_callback(83, "Saving water surfaces...");
         root["water"] = WaterManager::getInstance().serialize();
@@ -315,6 +409,15 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         SCENE_LOG_INFO("[ProjectManager] Saving terrain system to: " + terrainDir);
         root["terrain_system"] = TerrainManager::getInstance().serialize(terrainDir);
         
+        // UI Settings (Pro Camera, Viewport, etc.)
+        if (!scene.ui_settings_json_str.empty()) {
+            try {
+                root["ui_settings"] = json::parse(scene.ui_settings_json_str);
+            } catch (...) {
+                SCENE_LOG_WARN("Failed to parse UI settings JSON for saving.");
+            }
+        }
+
         // Textures (with embed option)
         if (progress_callback) progress_callback(85, "Processing textures...");
         root["textures"] = serializeTextures(out_bin, save_settings.embed_textures);
@@ -503,6 +606,113 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             if (root.contains("timeline")) {
                 scene.timeline.deserialize(root["timeline"]);
                 SCENE_LOG_INFO("[ProjectManager] Loaded timeline with " + std::to_string(scene.timeline.tracks.size()) + " tracks.");
+            }
+            
+            // Load BoneData (skeleton/skinning information)
+            if (root.contains("boneData")) {
+                if (progress_callback) progress_callback(78, "Loading bone data...");
+                auto& j_bones = root["boneData"];
+                
+                // Clear existing bone data
+                scene.boneData.clear();
+                
+                // Load bone name to index mapping
+                if (j_bones.contains("boneNameToIndex")) {
+                    for (auto& [name, idx] : j_bones["boneNameToIndex"].items()) {
+                        scene.boneData.boneNameToIndex[name] = idx.get<int>();
+                    }
+                }
+                
+                // Load bone offset matrices
+                if (j_bones.contains("boneOffsetMatrices")) {
+                    for (auto& [name, mat] : j_bones["boneOffsetMatrices"].items()) {
+                        scene.boneData.boneOffsetMatrices[name] = jsonToMat4(mat);
+                    }
+                }
+                
+                // Load global inverse transform
+                if (j_bones.contains("globalInverseTransform")) {
+                    scene.boneData.globalInverseTransform = jsonToMat4(j_bones["globalInverseTransform"]);
+                }
+                
+                // Rebuild reverse lookup for O(1) access
+                scene.boneData.rebuildReverseLookup();
+                
+                SCENE_LOG_INFO("[ProjectManager] Loaded bone data: " + std::to_string(scene.boneData.boneNameToIndex.size()) + " bones.");
+            }
+            
+            // Load UI Settings
+            if (root.contains("ui_settings")) {
+                scene.ui_settings_json_str = root["ui_settings"].dump();
+                scene.load_counter++; // Signal SceneUI to reload settings
+            }
+            
+            // Load AnimationData (bone animation keyframes)
+            if (root.contains("animationDataList")) {
+                if (progress_callback) progress_callback(79, "Loading animation data...");
+                scene.animationDataList.clear();
+                
+                for (const auto& j_anim : root["animationDataList"]) {
+                    AnimationData anim;
+                    anim.name = j_anim.value("name", "");
+                    anim.duration = j_anim.value("duration", 0.0);
+                    anim.ticksPerSecond = j_anim.value("ticksPerSecond", 24.0);
+                    anim.startFrame = j_anim.value("startFrame", 0);
+                    anim.endFrame = j_anim.value("endFrame", 0);
+                    
+                    // Position keys
+                    if (j_anim.contains("positionKeys")) {
+                        for (auto& [nodeName, j_keys] : j_anim["positionKeys"].items()) {
+                            std::vector<aiVectorKey> keys;
+                            for (const auto& k : j_keys) {
+                                aiVectorKey key;
+                                key.mTime = k.value("time", 0.0);
+                                key.mValue.x = k.value("x", 0.0f);
+                                key.mValue.y = k.value("y", 0.0f);
+                                key.mValue.z = k.value("z", 0.0f);
+                                keys.push_back(key);
+                            }
+                            anim.positionKeys[nodeName] = keys;
+                        }
+                    }
+                    
+                    // Rotation keys
+                    if (j_anim.contains("rotationKeys")) {
+                        for (auto& [nodeName, j_keys] : j_anim["rotationKeys"].items()) {
+                            std::vector<aiQuatKey> keys;
+                            for (const auto& k : j_keys) {
+                                aiQuatKey key;
+                                key.mTime = k.value("time", 0.0);
+                                key.mValue.w = k.value("w", 1.0f);
+                                key.mValue.x = k.value("x", 0.0f);
+                                key.mValue.y = k.value("y", 0.0f);
+                                key.mValue.z = k.value("z", 0.0f);
+                                keys.push_back(key);
+                            }
+                            anim.rotationKeys[nodeName] = keys;
+                        }
+                    }
+                    
+                    // Scaling keys
+                    if (j_anim.contains("scalingKeys")) {
+                        for (auto& [nodeName, j_keys] : j_anim["scalingKeys"].items()) {
+                            std::vector<aiVectorKey> keys;
+                            for (const auto& k : j_keys) {
+                                aiVectorKey key;
+                                key.mTime = k.value("time", 0.0);
+                                key.mValue.x = k.value("x", 1.0f);
+                                key.mValue.y = k.value("y", 1.0f);
+                                key.mValue.z = k.value("z", 1.0f);
+                                keys.push_back(key);
+                            }
+                            anim.scalingKeys[nodeName] = keys;
+                        }
+                    }
+                    
+                    scene.animationDataList.push_back(anim);
+                }
+                
+                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.animationDataList.size()) + " animation clips.");
             }
 
             // Load Procedural Objects (still supported)
@@ -790,9 +1000,9 @@ bool ProjectManager::readZipPackage(const std::string& filepath) {
 // GEOMETRY SERIALIZATION (Self-Contained Project)
 // ============================================================================
 
-// Binary format magic number and version
-static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '3'};
-static constexpr uint32_t RTP_VERSION = 3;
+// Binary format magic number and version (v4 adds skinning data)
+static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '4'};
+static constexpr uint32_t RTP_VERSION = 4;
 
 bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& scene) {
     // Write header
@@ -885,6 +1095,26 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         
         // Node name (length-prefixed string)
         writeStringBinary(out, tri->nodeName);
+        
+        // Skinning data (v4+)
+        uint8_t has_skin = tri->hasSkinData() ? 1 : 0;
+        out.write(reinterpret_cast<const char*>(&has_skin), sizeof(has_skin));
+        
+        if (has_skin) {
+            // Write bone weights for each vertex (3 vertices)
+            for (int vi = 0; vi < 3; ++vi) {
+                const auto& weights = tri->getSkinBoneWeights(vi);
+                uint8_t weight_count = static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
+                out.write(reinterpret_cast<const char*>(&weight_count), sizeof(weight_count));
+                
+                for (size_t w = 0; w < weight_count; ++w) {
+                    int32_t bone_idx = weights[w].first;
+                    float weight = weights[w].second;
+                    out.write(reinterpret_cast<const char*>(&bone_idx), sizeof(bone_idx));
+                    out.write(reinterpret_cast<const char*>(&weight), sizeof(weight));
+                }
+            }
+        }
     }
     
     SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(tri_count) + " triangles, " + 
@@ -893,10 +1123,15 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
 }
 
 bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
-    // Read and validate header
+    // Read and validate header (accept both RTP3 and RTP4 formats)
     char magic[4];
     in.read(magic, 4);
-    if (std::memcmp(magic, RTP_MAGIC, 4) != 0) {
+    
+    // Check for valid magic (RTP3 or RTP4)
+    bool is_v3 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '3');
+    bool is_v4 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '4');
+    
+    if (!is_v3 && !is_v4) {
         SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
         return false;
     }
@@ -959,6 +1194,35 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         // Create triangle
         auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
         tri->setNodeName(node_name);
+        
+        // Read skinning data (v4+)
+        if (version >= 4) {
+            uint8_t has_skin;
+            in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
+            
+            if (has_skin) {
+                tri->initializeSkinData();
+                
+                // Read bone weights for each vertex
+                for (int vi = 0; vi < 3; ++vi) {
+                    uint8_t weight_count;
+                    in.read(reinterpret_cast<char*>(&weight_count), sizeof(weight_count));
+                    
+                    std::vector<std::pair<int, float>> weights;
+                    weights.reserve(weight_count);
+                    
+                    for (uint8_t w = 0; w < weight_count; ++w) {
+                        int32_t bone_idx;
+                        float weight;
+                        in.read(reinterpret_cast<char*>(&bone_idx), sizeof(bone_idx));
+                        in.read(reinterpret_cast<char*>(&weight), sizeof(weight));
+                        weights.emplace_back(bone_idx, weight);
+                    }
+                    
+                    tri->setSkinBoneWeights(vi, weights);
+                }
+            }
+        }
         
         // Assign transform
         if (tr_idx < transforms.size()) {
@@ -1092,6 +1356,23 @@ json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>
         c["focus_dist"] = cam->focus_dist;
         c["is_active"] = (i == active_index);
         
+        // Extended Camera Parameters
+        c["iso"] = cam->iso_preset_index;
+        c["shutter"] = cam->shutter_preset_index;
+        c["fstop_idx"] = cam->fstop_preset_index;
+        c["auto_exposure"] = cam->auto_exposure;
+        c["ev_comp"] = cam->ev_compensation;
+        c["output_aspect_idx"] = cam->output_aspect_index;
+        c["use_physical_lens"] = cam->use_physical_lens;
+        c["focal_length_mm"] = cam->focal_length_mm;
+        c["sensor_width_mm"] = cam->sensor_width_mm;
+        c["enable_motion_blur"] = cam->enable_motion_blur;
+        c["rig_mode"] = static_cast<int>(cam->rig_mode);
+        c["dolly_pos"] = cam->dolly_position;
+        c["lens_radius"] = cam->lens_radius;
+        c["blade_count"] = cam->blade_count;
+        c["distortion"] = cam->distortion;
+        
         arr.push_back(c);
     }
     
@@ -1109,12 +1390,29 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
         float fov = c.value("fov", 60.0f);
         float aperture = c.value("aperture", 0.0f);
         float focus_dist = c.value("focus_dist", 10.0f);
+        int blade_count = c.value("blade_count", 6);
         
         // Get aspect ratio from render settings (or default 16:9)
         float aspect = 16.0f / 9.0f;
         
-        auto cam = std::make_shared<Camera>(position, target, up, fov, aspect, aperture, focus_dist, 6);
+        auto cam = std::make_shared<Camera>(position, target, up, fov, aspect, aperture, focus_dist, blade_count);
         cam->nodeName = c.value("name", "Camera");
+        
+        // Restore Extended Parameters
+        cam->iso_preset_index = c.value("iso", 1);
+        cam->shutter_preset_index = c.value("shutter", 1);
+        cam->fstop_preset_index = c.value("fstop_idx", 4);
+        cam->auto_exposure = c.value("auto_exposure", true);
+        cam->ev_compensation = c.value("ev_comp", 0.0f);
+        cam->output_aspect_index = c.value("output_aspect_idx", 2);
+        cam->use_physical_lens = c.value("use_physical_lens", false);
+        cam->focal_length_mm = c.value("focal_length_mm", 50.0f);
+        cam->sensor_width_mm = c.value("sensor_width_mm", 36.0f);
+        cam->enable_motion_blur = c.value("enable_motion_blur", false);
+        cam->rig_mode = static_cast<Camera::RigMode>(c.value("rig_mode", 0));
+        cam->dolly_position = c.value("dolly_pos", 0.0f);
+        cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
+        cam->distortion = c.value("distortion", 0.0f);
         
         scene.cameras.push_back(cam);
         

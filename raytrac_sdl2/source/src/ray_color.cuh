@@ -59,13 +59,25 @@ __device__ float3 render_cloud_layer(
     }
     
     if (t_exit <= 0.0f || t_exit <= t_enter) return noCloud;  // No valid intersection
+    
+    // Performance Optimization: Distance Culling (Frustum/Range Limit)
+    // Extended to 300km to support realistic horizon (User Request)
+    const float MAX_CLOUD_DIST = 300000.0f;
+    if (t_enter > MAX_CLOUD_DIST) return noCloud;
+    t_exit = fminf(t_exit, MAX_CLOUD_DIST);
+    
     if (t_enter < 0.0f) t_enter = 0.0f;
     
-    // Horizon fade
-    float h_val = rayDir.y / 0.15f;
+    // Horizon fade - ONLY fade at the very edge (approx 1 degree)
+    // Was 0.15f (~8.5 degrees) which cut off clouds too high up
+    float h_val = rayDir.y / 0.02f;
     float h_t = fmaxf(0.0f, fminf(1.0f, fabsf(h_val)));
     float horizonFade = h_t * h_t * (3.0f - 2.0f * h_t);
     
+    // Additional fade out at max distance (starts 50km before edge)
+    float distFade = 1.0f - fmaxf(0.0f, (t_enter - (MAX_CLOUD_DIST - 50000.0f)) / 50000.0f);
+    horizonFade *= distFade;
+
     // Quality-based step count
     float quality = fmaxf(0.1f, fminf(3.0f, world.nishita.cloud_quality));
     int baseSteps = (int)(16.0f * quality);
@@ -104,7 +116,35 @@ __device__ float3 render_cloud_layer(
         // Use 3D texture if available, otherwise fallback to procedural
         // FORCE CINEMATIC QUALITY (Procedural)
         float3 noisePos = offsetPos * scale;
-        float rawDensity = cloud_shape(noisePos, coverage);
+        
+        float effectiveCoverage = coverage;
+        
+        // FFT Based Coverage Modulation
+        if (world.nishita.cloud_use_fft && world.nishita.cloud_fft_map) {
+            // Apply similar scaling to UVs based on cloud scale
+            // FFT ocean tiles, so we can tile it across the sky
+            // INCREASED TILING for more detail
+            float uvScale = 0.002f; 
+            float u = offsetPos.x * uvScale;
+            float v = offsetPos.z * uvScale;
+            
+            // Wrap UVs
+            u = u - floorf(u);
+            v = v - floorf(v);
+            
+            // Sample FFT texture (assuming standard float texture)
+            // FFT texture typically contains displacement. We use .x as height/intensity.
+            float4 fftData = tex2D<float4>(world.nishita.cloud_fft_map, u, v);
+            
+            // ADDITIVE BIAS instead of multiplicative
+            // This preserves existing clouds but adds FFT wave influence
+            // FFT height is usually -2 to +2. We scale it down.
+            float fftBias = fftData.x * 0.15f; 
+            
+            effectiveCoverage = fmaxf(0.0f, fminf(1.0f, effectiveCoverage + fftBias));
+        }
+
+        float rawDensity = cloud_shape(noisePos, effectiveCoverage);
         
         float density = rawDensity * heightGradient;
         
@@ -1400,6 +1440,8 @@ __device__ float3 raymarch_volumetric_object(
 __device__ float3 ray_color(Ray ray, curandState* rng) {
     float3 color = make_float3(0.0f, 0.0f, 0.0f);
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
+    float3 current_medium_absorb = make_float3(0.0f, 0.0f, 0.0f); // Default: Air (no absorption)
+
     const int max_depth = optixLaunchParams.max_depth;
     int light_count = optixLaunchParams.light_count;
     int light_index = (light_count > 0) ? pick_smart_light(ray.origin, rng) : -1;
@@ -1416,6 +1458,18 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
         
         trace_ray(ray, &payload, t_min, t_max);
+
+        // === VOLUMETRIC ABSORPTION (Beer's Law) ===
+        // Apply absorption based on the distance traveled in the current medium
+        if (payload.hit && (current_medium_absorb.x > 0.0f || current_medium_absorb.y > 0.0f || current_medium_absorb.z > 0.0f)) {
+            float dist = payload.t;
+            float3 transmission = make_float3(
+                expf(-current_medium_absorb.x * dist),
+                expf(-current_medium_absorb.y * dist),
+                expf(-current_medium_absorb.z * dist)
+            );
+            throughput *= transmission;
+        }
         
         // ═══════════════════════════════════════════════════════════
         // VOLUMETRIC GOD RAYS - Only on primary ray for performance
@@ -1495,6 +1549,27 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             break;
        
         throughput *= attenuation;
+
+        // --- Volumetric Medium Tracking (for Beer's Law) ---
+        if (is_specular && mat.transmission > 0.01f) {
+            // Check if we are entering or exiting based on normal direction
+            // Ray direction is incoming, Normal is surface normal
+            float NdotD = dot(normalize(ray.direction), payload.normal);
+            bool entering = NdotD < 0.0f; 
+            
+            if (entering) {
+                // Entering medium: Set absorption coefficient
+                // sigma_a = (1 - color) * density
+                float3 absorb_base = make_float3(1.0f, 1.0f, 1.0f) - mat.subsurface_color;
+                // Clamp to avoid negative values
+                absorb_base = make_float3(fmaxf(absorb_base.x, 0.0f), fmaxf(absorb_base.y, 0.0f), fmaxf(absorb_base.z, 0.0f));
+                
+                current_medium_absorb = absorb_base * mat.subsurface_scale;
+            } else {
+                // Exiting medium: Reset to air (no absorption)
+                current_medium_absorb = make_float3(0.0f, 0.0f, 0.0f);
+            }
+        }
 
         // --- GPU VOLUMETRIC RENDERING ---
         // Check if this is a volumetric material using the proper flag

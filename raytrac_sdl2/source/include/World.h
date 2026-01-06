@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Vec3.h"
 #include <cuda_runtime.h>
 
@@ -44,7 +44,12 @@ struct NishitaSkyParams {
     float cloud_height_min;  // Bottom altitude (meters)
     float cloud_height_max;  // Top altitude (meters)
     float cloud_offset_x;    // Wind/Seed Offset X
+
     float cloud_offset_z;    // Wind/Seed Offset Z
+    
+    // FFT Cloud Modulation
+    cudaTextureObject_t cloud_fft_map; // FFT Height Map for Coverage
+    int cloud_use_fft;                 // 1 = Use FFT Map, 0 = Use Procedural
     
     // Cloud Layer 2 (Secondary) parameters - for multi-layer clouds
     int cloud_layer2_enabled;     // 1 = show second layer

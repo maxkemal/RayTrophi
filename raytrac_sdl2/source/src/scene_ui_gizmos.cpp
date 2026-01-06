@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include "scene_data.h"
+#include "ProjectManager.h"
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -110,31 +111,57 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             std::string selectedName = item.object->nodeName;
             if (selectedName.empty()) selectedName = "Unnamed";
 
-            bb_min = Vec3(1e10f, 1e10f, 1e10f);
-            bb_max = Vec3(-1e10f, -1e10f, -1e10f);
-            bool found_any = false;
-
             if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
-            auto it = mesh_cache.find(selectedName);
-            if (it != mesh_cache.end()) {
-                for (auto& pair : it->second) {
-                    auto& tri = pair.second;
-                    Vec3 v0 = tri->getV0();
-                    Vec3 v1 = tri->getV1();
-                    Vec3 v2 = tri->getV2();
-
-                    bb_min.x = fminf(bb_min.x, fminf(v0.x, fminf(v1.x, v2.x)));
-                    bb_min.y = fminf(bb_min.y, fminf(v0.y, fminf(v1.y, v2.y)));
-                    bb_min.z = fminf(bb_min.z, fminf(v0.z, fminf(v1.z, v2.z)));
-                    bb_max.x = fmaxf(bb_max.x, fmaxf(v0.x, fmaxf(v1.x, v2.x)));
-                    bb_max.y = fmaxf(bb_max.y, fmaxf(v0.y, fmaxf(v1.y, v2.y)));
-                    bb_max.z = fmaxf(bb_max.z, fmaxf(v0.z, fmaxf(v1.z, v2.z)));
-                    found_any = true;
+            // USE CACHED BOUNDING BOX (O(1) lookup instead of O(N) triangle scan!)
+            auto bbox_it = bbox_cache.find(selectedName);
+            if (bbox_it != bbox_cache.end()) {
+                Vec3 cached_min = bbox_it->second.first;
+                Vec3 cached_max = bbox_it->second.second;
+                
+                // TRANSFORM THE BOUNDING BOX by object's current transform matrix
+                // This ensures bbox follows the object in TLAS mode where CPU vertices aren't updated
+                auto transform = item.object->getTransformHandle();
+                if (transform) {
+                    Matrix4x4& m = transform->base;
+                    
+                    // Transform all 8 corners and find new AABB
+                    Vec3 corners[8] = {
+                        Vec3(cached_min.x, cached_min.y, cached_min.z),
+                        Vec3(cached_max.x, cached_min.y, cached_min.z),
+                        Vec3(cached_min.x, cached_max.y, cached_min.z),
+                        Vec3(cached_max.x, cached_max.y, cached_min.z),
+                        Vec3(cached_min.x, cached_min.y, cached_max.z),
+                        Vec3(cached_max.x, cached_min.y, cached_max.z),
+                        Vec3(cached_min.x, cached_max.y, cached_max.z),
+                        Vec3(cached_max.x, cached_max.y, cached_max.z)
+                    };
+                    
+                    bb_min = Vec3(1e10f, 1e10f, 1e10f);
+                    bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+                    
+                    for (int c = 0; c < 8; c++) {
+                        Vec3 p = corners[c];
+                        // Apply transform: p' = M * p
+                        Vec3 tp(
+                            m.m[0][0]*p.x + m.m[0][1]*p.y + m.m[0][2]*p.z + m.m[0][3],
+                            m.m[1][0]*p.x + m.m[1][1]*p.y + m.m[1][2]*p.z + m.m[1][3],
+                            m.m[2][0]*p.x + m.m[2][1]*p.y + m.m[2][2]*p.z + m.m[2][3]
+                        );
+                        bb_min.x = fminf(bb_min.x, tp.x);
+                        bb_min.y = fminf(bb_min.y, tp.y);
+                        bb_min.z = fminf(bb_min.z, tp.z);
+                        bb_max.x = fmaxf(bb_max.x, tp.x);
+                        bb_max.y = fmaxf(bb_max.y, tp.y);
+                        bb_max.z = fmaxf(bb_max.z, tp.z);
+                    }
+                } else {
+                    // No transform - use cached values directly
+                    bb_min = cached_min;
+                    bb_max = cached_max;
                 }
+                has_bounds = true;
             }
-
-            if (found_any) has_bounds = true;
         }
         else if (item.type == SelectableType::Light && item.light) {
             Vec3 lightPos = item.light->position;
@@ -542,9 +569,11 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         if (name.empty()) name = "Unnamed";
         auto it = mesh_cache.find(name);
         if (it != mesh_cache.end()) {
+            // OPTIMIZED: Only check first 100 triangles, not all 2M!
             Transform* firstT = nullptr;
-            for (auto& p : it->second) {
-                auto th = p.second->getTransformHandle().get();
+            const size_t MAX_CHECK = std::min((size_t)100, it->second.size());
+            for (size_t i = 0; i < MAX_CHECK; ++i) {
+                auto th = it->second[i].second->getTransformHandle().get();
                 if (!firstT) firstT = th;
                 else if (th != firstT) {
                     is_mixed_group = true;
@@ -621,7 +650,10 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 std::string targetName = sel.selected.object->nodeName;
                 if (targetName.empty()) targetName = "Unnamed";
 
-                // Unique name generation
+                // Ensure mesh cache is valid
+                if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+                // Unique name generation - USE MESH_CACHE instead of scanning all triangles!
                 std::string baseName = targetName;
                 size_t lastUnderscore = baseName.rfind('_');
                 if (lastUnderscore != std::string::npos) {
@@ -633,47 +665,62 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
                 int counter = 1;
                 std::string newName;
-                // BUILD OPTIMIZATION MAP: Name (View) -> Find Triangle
-       // Using string_view avoids allocating a copy of the name for every map node (Huge RAM/Time saver for 700k objs)
-                std::unordered_map<std::string_view, std::shared_ptr<Triangle>> scene_obj_map;
-                scene_obj_map.reserve(ctx.scene.world.objects.size());
-
-                for (const auto& obj : ctx.scene.world.objects) {
-                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri) {
-                        // Safe because tri->nodeName (std::string) lives in the scene which outlives this function map
-                        scene_obj_map[tri->nodeName] = tri;
-                    }
-                }
                 bool nameExists = true;
                 while (nameExists) {
                     newName = baseName + "_" + std::to_string(counter);
-                    nameExists = scene_obj_map.count(newName) > 0;
+                    // O(log N) lookup in mesh_cache instead of O(N) triangle scan!
+                    nameExists = mesh_cache.find(newName) != mesh_cache.end();
                     counter++;
                 }
 
-                // Create duplicates
-                std::vector<std::shared_ptr<Hittable>> newTriangles;
-                std::shared_ptr<Triangle> firstNewTri = nullptr;
+                // Find source triangles
                 auto it = mesh_cache.find(targetName);
-                if (it != mesh_cache.end()) {
-                    for (auto& pair : it->second) {
-                        auto& oldTri = pair.second;
+                if (it != mesh_cache.end() && !it->second.empty()) {
+                    // Pre-allocate for performance
+                    size_t numTris = it->second.size();
+                    std::vector<std::shared_ptr<Hittable>> newTriangles;
+                    newTriangles.reserve(numTris);
+                    
+                    std::vector<std::pair<int, std::shared_ptr<Triangle>>> newCacheEntries;
+                    newCacheEntries.reserve(numTris);
+
+                    std::shared_ptr<Triangle> firstNewTri = nullptr;
+                    int baseIndex = (int)ctx.scene.world.objects.size();
+
+                    // Create duplicates
+                    for (size_t i = 0; i < numTris; ++i) {
+                        auto& oldTri = it->second[i].second;
                         auto newTri = std::make_shared<Triangle>(*oldTri);
                         newTri->setNodeName(newName);
                         newTriangles.push_back(newTri);
+                        newCacheEntries.push_back({baseIndex + (int)i, newTri});
                         if (!firstNewTri) firstNewTri = newTri;
                     }
-                }
 
-                // Add to scene
-                if (!newTriangles.empty()) {
+                    // Add to scene
                     ctx.scene.world.objects.insert(ctx.scene.world.objects.end(), newTriangles.begin(), newTriangles.end());
+                    
+                    // INCREMENTAL CACHE UPDATE (instead of full rebuildMeshCache!)
+                    mesh_cache[newName] = std::move(newCacheEntries);
+                    mesh_ui_cache.push_back({newName, mesh_cache[newName]});
+                    
+                    // Calculate bbox for new object (from original since it's a copy)
+                    auto orig_bbox = bbox_cache.find(targetName);
+                    if (orig_bbox != bbox_cache.end()) {
+                        bbox_cache[newName] = orig_bbox->second;
+                    }
+                    
+                    // Copy material slots cache
+                    auto orig_mats = material_slots_cache.find(targetName);
+                    if (orig_mats != material_slots_cache.end()) {
+                        material_slots_cache[newName] = orig_mats->second;
+                    }
+                    
                     sel.selectObject(firstNewTri, -1, newName);
-                    rebuildMeshCache(ctx.scene.world.objects);
 
                     // Record undo command
                     std::vector<std::shared_ptr<Triangle>> new_tri_vec;
+                    new_tri_vec.reserve(numTris);
                     for (auto& ht : newTriangles) {
                         auto tri = std::dynamic_pointer_cast<Triangle>(ht);
                         if (tri) new_tri_vec.push_back(tri);
@@ -684,18 +731,15 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     // ═══════════════════════════════════════════════════════════
                     // DEFERRED FULL REBUILD (Reliable - async in Main.cpp)
                     // ═══════════════════════════════════════════════════════════
-                    // Incremental clone had issues with SBT/transform sync.
-                    // Full rebuild is slower but reliable. Async mechanism prevents UI freeze.
                     extern bool g_optix_rebuild_pending;
                     g_optix_rebuild_pending = true;
                     
-                    // Defer CPU BVH rebuild (async in Main.cpp)
                     extern bool g_bvh_rebuild_pending;
                     g_bvh_rebuild_pending = true;
                     ctx.renderer.resetCPUAccumulation();
                     
                     is_bvh_dirty = false;
-                    SCENE_LOG_INFO("Duplicated object: " + targetName + " -> " + newName);
+                    SCENE_LOG_INFO("Duplicated object: " + targetName + " -> " + newName + " (" + std::to_string(numTris) + " triangles)");
                 }
             }
         }
@@ -888,6 +932,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 is_bvh_dirty = false;
                 
                 SCENE_LOG_INFO("Multi-Duplicate: " + std::to_string(newSelectionList.size()) + " objects copied.");
+                ProjectManager::getInstance().markModified();
             }
         }
         else if (ImGui::GetIO().KeyShift && sel.selected.type == SelectableType::Light && sel.selected.light) {
@@ -904,6 +949,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 sel.selectLight(newLight);
                 if (ctx.optix_gpu_ptr) { ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights); ctx.optix_gpu_ptr->resetAccumulation(); }
                 SCENE_LOG_INFO("Duplicated Light (Shift+Drag)");
+                ProjectManager::getInstance().markModified();
             }
         }
         else if (sel.selected.type == SelectableType::Light && sel.selected.light && !ImGui::GetIO().KeyShift) {
@@ -938,6 +984,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
             if (changed) {
                 history.record(std::make_unique<TransformCommand>(drag_object_name, drag_start_state, final_state));
+                ProjectManager::getInstance().markModified();
             }
         }
     }
@@ -953,6 +1000,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
         if (changed) {
             history.record(std::make_unique<TransformLightCommand>(drag_light, drag_start_light_state, final_light_state));
+            ProjectManager::getInstance().markModified();
         }
         drag_light = nullptr;
     }
@@ -1055,30 +1103,43 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
                         auto it = mesh_cache.find(targetName);
                         if (it != mesh_cache.end() && !it->second.empty()) {
-
-                            // Apply to unique transforms in this name-group
-                            std::unordered_set<Transform*> processed_transforms;
-                            for (auto& pair : it->second) {
-                                auto tri = pair.second;
-                                auto th = tri->getTransformHandle();
-
-                                if (th && processed_transforms.find(th.get()) == processed_transforms.end()) {
-                                    if (pivot_mode == 1) {
-                                        // Individual Origins
-                                        Vec3 pos(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
-                                        th->base.m[0][3] = 0; th->base.m[1][3] = 0; th->base.m[2][3] = 0;
-                                        th->setBase(deltaRotScale * th->base);
-                                        th->base.m[0][3] = pos.x + deltaTranslation.x;
-                                        th->base.m[1][3] = pos.y + deltaTranslation.y;
-                                        th->base.m[2][3] = pos.z + deltaTranslation.z;
-                                    }
-                                    else {
-                                        // Median Point
-                                        th->setBase(deltaMat * th->base);
-                                    }
-                                    processed_transforms.insert(th.get());
+                            auto& firstTri = it->second[0].second;
+                            auto th = firstTri->getTransformHandle();
+                            
+                            if (th) {
+                                // Apply transform to the shared handle (most objects share one)
+                                if (pivot_mode == 1) {
+                                    // Individual Origins
+                                    Vec3 pos(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
+                                    th->base.m[0][3] = 0; th->base.m[1][3] = 0; th->base.m[2][3] = 0;
+                                    th->setBase(deltaRotScale * th->base);
+                                    th->base.m[0][3] = pos.x + deltaTranslation.x;
+                                    th->base.m[1][3] = pos.y + deltaTranslation.y;
+                                    th->base.m[2][3] = pos.z + deltaTranslation.z;
                                 }
-                                tri->updateTransformedVertices();
+                                else {
+                                    // Median Point
+                                    th->setBase(deltaMat * th->base);
+                                }
+                                
+                                // TLAS MODE: Update GPU instance transform (fast path)
+                                bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                                if (using_gpu_tlas) {
+                                    std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(targetName);
+                                    if (!inst_ids.empty()) {
+                                        float t[12];
+                                        Matrix4x4& m = th->base;
+                                        t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
+                                        t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
+                                        t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
+                                        
+                                        for (int inst_id : inst_ids) {
+                                            ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
+                                        }
+                                    }
+                                    // NOTE: TLAS mode - NO CPU vertex update during drag! (saves millions of calls)
+                                }
+                                // CPU mode handled on release
                             }
                         }
                         item.has_cached_aabb = false;
@@ -1101,9 +1162,11 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
                 sel.selected.has_cached_aabb = false;
 
-                // DEFERRED UPDATE: Only mark dirty during drag
-                // Lights don't need BVH but geometry does
-                is_bvh_dirty = true;
+                // DEFERRED UPDATE: Only mark dirty during drag (for CPU mode)
+                bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                if (!using_gpu_tlas) {
+                    is_bvh_dirty = true;
+                }
             }
         }
         else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
@@ -1190,9 +1253,11 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     auto& firstTri = it->second[0].second;
                     auto t_handle = firstTri->getTransformHandle();
 
-                    // Safety check for mixed transforms
+                    // Safety check for mixed transforms - OPTIMIZED: Only check first few triangles
+                    // Most objects either share one transform or have completely different ones
                     bool all_same_transform = true;
-                    for (size_t i = 1; i < it->second.size() && all_same_transform; ++i) {
+                    const size_t MAX_CHECK = std::min((size_t)100, it->second.size()); // Check up to 100, not 2M
+                    for (size_t i = 1; i < MAX_CHECK && all_same_transform; ++i) {
                         auto h = it->second[i].second->getTransformHandle();
                         if (h.get() != t_handle.get()) all_same_transform = false;
                     }
@@ -1200,12 +1265,6 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     if (all_same_transform && t_handle) {
                         // Apply full matrix from gizmo (supports translate, rotate, scale)
                         t_handle->setBase(newMat);
-
-                        // Update CPU vertices for THIS object (fast - only selected object's triangles)
-                        // This keeps gizmo position correct and CPU data in sync
-                        for (auto& pair : it->second) {
-                            pair.second->updateTransformedVertices();
-                        }
 
                         // TLAS INSTANCING UPDATE (Fast GPU Path)
                         // Only use GPU path if both: OptiX enabled AND using TLAS mode
@@ -1229,11 +1288,15 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                 ctx.optix_gpu_ptr->rebuildTLAS(); // Very fast (~0.01ms)
                                 ctx.optix_gpu_ptr->resetAccumulation();
                             }
-                            // NOTE: Skip is_bvh_dirty in GPU mode - CPU BVH rebuild is expensive
-                            // BVH will be rebuilt when switching to CPU mode
+                            // NOTE: TLAS mode - NO CPU vertex update needed! Transform is applied via instance matrix.
+                            // This saves 2M function calls per frame for large objects!
                         }
                         else {
-                            // CPU/GAS MODE: Also need BVH rebuild
+                            // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
+                            for (auto& pair : it->second) {
+                                pair.second->updateTransformedVertices();
+                            }
+                            
                             is_bvh_dirty = true;
                             
                             // Trigger Fast Refit during interaction (CPU Mode only)
@@ -1342,6 +1405,57 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         }
         
         is_bvh_dirty = false;
+    }
+    
+    // LAZY CPU SYNC: Mark objects for later sync instead of updating now
+    // This makes gizmo release INSTANT - sync happens when user tries to pick something
+    if (!is_using && was_using_gizmo) {
+        bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+        
+        if (sel.multi_selection.size() > 0) {
+            for (auto& item : sel.multi_selection) {
+                if (item.type == SelectableType::Object && item.object) {
+                    std::string name = item.object->nodeName;
+                    if (name.empty()) name = "Unnamed";
+                    
+                    if (using_gpu_tlas) {
+                        // TLAS mode: Just mark for lazy sync (instant release!)
+                        objects_needing_cpu_sync.insert(name);
+                    } else {
+                        // CPU mode: Need immediate update for rendering
+                        auto cache_it = mesh_cache.find(name);
+                        if (cache_it != mesh_cache.end()) {
+                            for (auto& pair : cache_it->second) {
+                                pair.second->updateTransformedVertices();
+                            }
+                        }
+                    }
+                }
+            }
+            if (!using_gpu_tlas) {
+                extern bool g_bvh_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+            }
+        } else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            std::string name = sel.selected.object->nodeName;
+            if (name.empty()) name = "Unnamed";
+            
+            if (using_gpu_tlas) {
+                // TLAS mode: Just mark for lazy sync (instant release!)
+                objects_needing_cpu_sync.insert(name);
+                SCENE_LOG_INFO("Marked for lazy sync: " + name);
+            } else {
+                // CPU mode: Need immediate update
+                auto cache_it = mesh_cache.find(name);
+                if (cache_it != mesh_cache.end()) {
+                    for (auto& pair : cache_it->second) {
+                        pair.second->updateTransformedVertices();
+                    }
+                }
+                extern bool g_bvh_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+            }
+        }
     }
 
     // Update gizmo state tracking at the END of the function

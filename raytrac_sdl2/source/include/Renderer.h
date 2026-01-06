@@ -40,6 +40,7 @@
 #include <ColorProcessingParams.h>
 #include <functional>
 #include "AssimpLoader.h"
+#include "AnimationController.h"  // New animation management system
 
 // Forward Declarations
 class HittableList;
@@ -106,7 +107,18 @@ public:
         const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
         const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
         OptixWrapper* optix_gpu = nullptr, bool use_optix = false, UIContext* ui_ctx = nullptr);
-    bool updateAnimationState(SceneData& scene, float time);
+    bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true);
+    std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame
+    
+    // ============ NEW ANIMATION SYSTEM ============
+    // Initialize animation controller with scene clips
+    void initializeAnimationSystem(SceneData& scene);
+    
+    // Update animation using the new node graph system (returns true if geometry changed)
+    bool updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning = true);
+    
+    // Flag to use new animation system (can be toggled for compatibility)
+    bool useNewAnimationSystem = false;
    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
     void rebuildBVH(SceneData& scene, bool use_embree);
@@ -239,6 +251,11 @@ public:
     bool isCPUAccumulationComplete() const;
     int getCPUAccumulatedSamples() const { return cpu_accumulated_samples; }
     uint64_t computeCPUCameraHash(const Camera& cam) const;
+    
+    // === PRO CAMERA HUD ACCESSORS ===
+    const std::vector<Vec3>& getFrameBuffer() const { return frame_buffer; }
+    int getImageWidth() const { return image_width; }
+    int getImageHeight() const { return image_height; }
     
 };
 #endif // RENDERER_H

@@ -12,6 +12,7 @@
 #include "TerrainNodesV2.h"
 #include "TerrainManager.h"
 #include "NodeSystem/NodeEditorUIV2.h"
+#include "ProjectManager.h" // Added for markModified
 #include <functional> // Added for callback
 #include <string>
 #include <unordered_map>
@@ -37,6 +38,22 @@ public:
     std::function<std::string(const wchar_t*)> onOpenFileDialog;
     std::function<std::string(const wchar_t*, const wchar_t*)> onSaveFileDialog; // filter, default name
     TerrainObject* currentTerrain = nullptr;  // For export operations
+    
+    // Resizable properties panel width
+    float propertiesWidth = 220.0f;
+    float minPropertiesWidth = 150.0f;
+    float maxPropertiesWidth = 400.0f;
+    bool isResizingProperties = false;
+    
+    // Mask preview cache and controls
+    uint32_t lastPreviewedNodeId = 0;
+    std::vector<float> lastPreviewedData;
+    int lastPreviewedWidth = 0;
+    int lastPreviewedHeight = 0;
+    float previewZoom = 1.0f;
+    float previewPanX = 0.0f;
+    float previewPanY = 0.0f;
+    bool isPanningPreview = false;
 
     TerrainNodeEditorUI() {
         // Setup node categories
@@ -46,10 +63,14 @@ public:
                 {NodeType::NoiseGenerator, "Noise Generator"}
             }},
             {"Erosion", ImVec4(0.3f, 0.5f, 0.9f, 1.0f), {
+                {NodeType::ErosionWizard, "Erosion Wizard"},
                 {NodeType::HydraulicErosion, "Hydraulic"},
                 {NodeType::ThermalErosion, "Thermal"},
                 {NodeType::FluvialErosion, "Fluvial"},
-                {NodeType::WindErosion, "Wind"}
+                {NodeType::WindErosion, "Wind"},
+                {NodeType::SedimentDeposition, "Sediment Deposit"},
+                {NodeType::AlluvialFan, "Alluvial Fan"},
+                {NodeType::DeltaFormation, "Delta Formation"}
             }},
             {"Filter", ImVec4(0.4f, 0.6f, 0.8f, 1.0f), {
                 {NodeType::Smooth, "Smooth"},
@@ -60,6 +81,8 @@ public:
                 {NodeType::HeightMask, "Height Mask"},
                 {NodeType::SlopeMask, "Slope Mask"},
                 {NodeType::CurvatureMask, "Curvature Mask"},
+                {NodeType::FlowMask, "Flow / Soil"},
+                {NodeType::ExposureMask, "Sun Exposure"},
                 {NodeType::MaskCombine, "Mask Combine"},
                 {NodeType::MaskPaint, "Mask Paint"},
                 {NodeType::MaskImage, "Mask Image"}
@@ -82,6 +105,11 @@ public:
             }},
             {"Texture", ImVec4(0.8f, 0.6f, 0.2f, 1.0f), {
                 {NodeType::AutoSplat, "Auto Splat"}
+            }},
+            {"Geology", ImVec4(0.7f, 0.45f, 0.35f, 1.0f), {
+                {NodeType::Fault, "Fault Line"},
+                {NodeType::Mesa, "Mesa / Plateau"},
+                {NodeType::Shear, "Shear Zone"}
             }}
         };
         
@@ -97,6 +125,11 @@ public:
         // Node selected callback
         editor.onNodeSelected = [](uint32_t nodeId) {
             // Could trigger property panel refresh
+        };
+        
+        // Graph modification callback (Mark Project Dirty)
+        editor.onGraphModified = []() {
+            ProjectManager::getInstance().markModified();
         };
     }
     
@@ -121,7 +154,6 @@ public:
         ImGui::SameLine();
         
         // Middle Panel - Node Canvas (will take remaining space minus properties panel)
-        float propertiesWidth = 200.0f;
         float availWidth = ImGui::GetContentRegionAvail().x;
         float canvasWidth = availWidth - propertiesWidth - 8; // 8 for spacing
         
@@ -156,11 +188,13 @@ public:
                     
                     if (newNode && tryInsertNodeIntoLink(graph, newNode, targetLink)) {
                         // Successfully inserted!
+                        ProjectManager::getInstance().markModified();
                     }
                     // If insertion failed, node is still created at position
                 } else {
                     // Normal drop - just create node
                     graph.addTerrainNode(droppedType, spawnX, spawnY);
+                    ProjectManager::getInstance().markModified();
                 }
             }
             ImGui::EndDragDropTarget();
@@ -173,10 +207,43 @@ public:
         
         ImGui::SameLine();
         
-        // Right Panel - Properties
+        // ========================================================================
+        // RESIZABLE SPLITTER
+        // ========================================================================
+        ImGui::InvisibleButton("##PropertiesSplitter", ImVec2(6.0f, ImGui::GetContentRegionAvail().y));
+        if (ImGui::IsItemActive()) {
+            isResizingProperties = true;
+            propertiesWidth -= ImGui::GetIO().MouseDelta.x;
+            propertiesWidth = std::clamp(propertiesWidth, minPropertiesWidth, maxPropertiesWidth);
+        }
+        if (ImGui::IsItemHovered() || isResizingProperties) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
+        if (!ImGui::IsMouseDown(0)) {
+            isResizingProperties = false;
+        }
+        
+        // Draw splitter visual feedback
+        ImVec2 splitterMin = ImGui::GetItemRectMin();
+        ImVec2 splitterMax = ImGui::GetItemRectMax();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImU32 splitterColor = ImGui::IsItemHovered() || isResizingProperties 
+            ? IM_COL32(100, 150, 255, 200) 
+            : IM_COL32(80, 80, 90, 150);
+        dl->AddRectFilled(splitterMin, splitterMax, splitterColor);
+        
+        ImGui::SameLine();
+        
+        // ========================================================================
+        // RIGHT PANEL - PROPERTIES (with border)
+        // ========================================================================
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildBorderSize, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.5f, 1.0f));
         ImGui::BeginChild("NodeProperties", ImVec2(propertiesWidth, 0), true);
         drawPropertiesPanel(graph);
         ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
     }
     
     void drawPropertiesPanel(TerrainNodeGraphV2& graph) {
@@ -220,7 +287,13 @@ public:
         // Draw node's content (parameters) with proper width
         float labelWidth = 80.0f;
         ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - labelWidth);
+        
+        bool wasDirty = node->dirty;
         node->drawContent();
+        if (node->dirty && !wasDirty) {
+            ProjectManager::getInstance().markModified();
+        }
+        
         ImGui::PopItemWidth();
 
         // Handle HeightmapInputNode file dialog request
@@ -269,7 +342,203 @@ public:
                 }
             }
         }
+        
+        // ========================================================================
+        // MASK NODE PREVIEW
+        // ========================================================================
+        drawMaskPreview(graph, node);
     }
+    
+    void drawMaskPreview(TerrainNodeGraphV2& graph, NodeSystem::NodeBase* node) {
+        auto* terrainNode = dynamic_cast<TerrainNodesV2::TerrainNodeBase*>(node);
+        if (!terrainNode) return;
+        
+        // Check if this is a mask-producing node
+        bool isMaskNode = false;
+        int maskOutputIndex = -1;
+        
+        for (size_t i = 0; i < node->outputs.size(); i++) {
+            if (node->outputs[i].imageSemantic == NodeSystem::ImageSemantic::Mask) {
+                isMaskNode = true;
+                maskOutputIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        
+        if (!isMaskNode || maskOutputIndex < 0) return;
+        
+        // Skip preview for heavy nodes (Wizard)
+        if (terrainNode->terrainNodeType == TerrainNodesV2::NodeType::ErosionWizard) {
+            ImGui::TextDisabled("Preview disabled for heavy node");
+            return;
+        }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        
+        // Check if we need to update preview (node changed or refresh clicked)
+        bool nodeChanged = (lastPreviewedNodeId != node->id);
+        
+        // Wrap preview in collapsed header (Closed by default to prevent freeze)
+        if (ImGui::CollapsingHeader("Mask Preview (Click to Show)", ImGuiTreeNodeFlags_None)) {
+            
+            // Refresh button inside the header
+            ImGui::SameLine(ImGui::GetContentRegionAvail().x - 60);
+            bool refreshClicked = ImGui::SmallButton("Refresh");
+            
+            bool needsUpdate = nodeChanged || refreshClicked || (lastPreviewedWidth == 0);
+            
+            if (needsUpdate && currentTerrain) {
+                // Create temporary evaluation context to compute this node's output
+                TerrainNodesV2::TerrainContext tctx(currentTerrain);
+                NodeSystem::EvaluationContext ctx(&graph);
+                ctx.setDomainContext(&tctx);
+                
+                // Request the mask output from this node
+                NodeSystem::PinValue result = node->requestOutput(maskOutputIndex, ctx);
+                
+                // Extract Image2DData from the result
+                auto* imgData = std::get_if<NodeSystem::Image2DData>(&result);
+                if (imgData && imgData->isValid()) {
+                    lastPreviewedData = *(imgData->data);
+                    lastPreviewedNodeId = node->id;
+                    lastPreviewedWidth = imgData->width;
+                    lastPreviewedHeight = imgData->height;
+                    // Reset pan when switching nodes
+                    if (nodeChanged) {
+                        previewPanX = 0.0f;
+                        previewPanY = 0.0f;
+                        previewZoom = 1.0f;
+                    }
+                }
+            }
+        
+        // Draw preview if we have data
+        if (!lastPreviewedData.empty() && lastPreviewedNodeId == node->id && lastPreviewedWidth > 0) {
+            float previewSize = ImGui::GetContentRegionAvail().x;
+            
+            int srcW = lastPreviewedWidth;
+            int srcH = lastPreviewedHeight;
+            
+            // Normalize values to 0-1 for display
+            float minVal = *std::min_element(lastPreviewedData.begin(), lastPreviewedData.end());
+            float maxVal = *std::max_element(lastPreviewedData.begin(), lastPreviewedData.end());
+            float range = maxVal - minVal;
+            if (range < 0.0001f) range = 1.0f;
+            
+            // Wrap preview in a child window to capture scroll events
+            ImGui::BeginChild("##MaskPreviewChild", ImVec2(previewSize, previewSize + 50), 
+                             false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            
+            // Draw preview box background
+            ImVec2 previewRect(previewSize, previewSize);
+            dl->AddRectFilled(p, ImVec2(p.x + previewRect.x, p.y + previewRect.y), 
+                             IM_COL32(20, 20, 25, 255));
+            
+            // Higher resolution preview with zoom/pan
+            int displayRes = std::min(128, std::max(srcW, srcH)); // Higher quality
+            float cellSize = previewSize / displayRes;
+            
+            // Calculate visible area based on zoom and pan
+            float viewSize = 1.0f / previewZoom;
+            float viewX = previewPanX - viewSize * 0.5f + 0.5f;
+            float viewY = previewPanY - viewSize * 0.5f + 0.5f;
+            
+            for (int py = 0; py < displayRes; py++) {
+                for (int px = 0; px < displayRes; px++) {
+                    // Calculate source UV with zoom/pan
+                    float u = viewX + (float(px) / displayRes) * viewSize;
+                    float v = viewY + (float(py) / displayRes) * viewSize;
+                    
+                    // Clamp to valid range
+                    u = std::clamp(u, 0.0f, 1.0f);
+                    v = std::clamp(v, 0.0f, 1.0f);
+                    
+                    // Sample with bilinear interpolation
+                    float fx = u * (srcW - 1);
+                    float fy = v * (srcH - 1);
+                    int x0 = static_cast<int>(fx);
+                    int y0 = static_cast<int>(fy);
+                    int x1 = std::min(x0 + 1, srcW - 1);
+                    int y1 = std::min(y0 + 1, srcH - 1);
+                    float tx = fx - x0;
+                    float ty = fy - y0;
+                    
+                    int idx00 = y0 * srcW + x0;
+                    int idx10 = y0 * srcW + x1;
+                    int idx01 = y1 * srcW + x0;
+                    int idx11 = y1 * srcW + x1;
+                    
+                    float v00 = lastPreviewedData[idx00];
+                    float v10 = lastPreviewedData[idx10];
+                    float v01 = lastPreviewedData[idx01];
+                    float v11 = lastPreviewedData[idx11];
+                    
+                    float val = v00 * (1 - tx) * (1 - ty) + v10 * tx * (1 - ty) +
+                                v01 * (1 - tx) * ty + v11 * tx * ty;
+                    
+                    val = (val - minVal) / range;
+                    val = std::clamp(val, 0.0f, 1.0f);
+                    
+                    int gray = static_cast<int>(val * 255.0f);
+                    ImU32 color = IM_COL32(gray, gray, gray, 255);
+                    
+                    ImVec2 cellMin(p.x + px * cellSize, p.y + py * cellSize);
+                    ImVec2 cellMax(cellMin.x + cellSize, cellMin.y + cellSize);
+                    dl->AddRectFilled(cellMin, cellMax, color);
+                }
+            }
+            
+            // Border
+            dl->AddRect(p, ImVec2(p.x + previewRect.x, p.y + previewRect.y), 
+                       IM_COL32(80, 80, 90, 255));
+            
+            // Handle mouse interaction for pan/zoom
+            ImGui::InvisibleButton("##PreviewInteract", previewRect);
+            bool isHovered = ImGui::IsItemHovered();
+            if (isHovered) {
+                // Zoom with scroll wheel - consume the event
+                float wheel = ImGui::GetIO().MouseWheel;
+                if (wheel != 0.0f) {
+                    previewZoom *= (wheel > 0) ? 1.2f : (1.0f / 1.2f);
+                    previewZoom = std::clamp(previewZoom, 0.5f, 8.0f);
+                    // Clear scroll to prevent parent from receiving it
+                    ImGui::GetIO().MouseWheel = 0.0f;
+                }
+                
+                // Pan with middle mouse or left drag
+                if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || 
+                    ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                    ImVec2 delta = ImGui::GetIO().MouseDelta;
+                    previewPanX -= delta.x / previewSize / previewZoom;
+                    previewPanY -= delta.y / previewSize / previewZoom;
+                }
+            }
+            
+            // Zoom controls (inside child window)
+            ImGui::Text("Zoom: %.1fx", previewZoom);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset")) {
+                previewZoom = 1.0f;
+                previewPanX = 0.0f;
+                previewPanY = 0.0f;
+            }
+            
+            ImGui::EndChild();
+            
+            // Stats (outside child window)
+            ImGui::TextDisabled("Size: %dx%d", srcW, srcH);
+            ImGui::TextDisabled("Range: %.3f - %.3f", minVal, maxVal);
+        } else {
+            ImGui::TextDisabled("No preview available");
+            ImGui::TextDisabled("Select terrain first");
+        }
+    } // End CollapsingHeader
+    } // End drawMaskPreview
     // Access graph for external use  
     TerrainNodeGraphV2& getGraph() { return ownedGraph; }
     
@@ -417,6 +686,7 @@ private:
                             float spawnX = (-editor.scrollX + ImGui::GetWindowSize().x * 0.5f) / editor.zoom;
                             float spawnY = (-editor.scrollY + ImGui::GetWindowSize().y * 0.5f) / editor.zoom;
                             graph.addTerrainNode(nodePair.first, spawnX, spawnY);
+                            ProjectManager::getInstance().markModified();
                         }
                     }
                     ImGui::EndMenu();

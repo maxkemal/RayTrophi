@@ -7,6 +7,7 @@
 #include <algorithm>
 #include "Vec3.h"
 #include "Triangle.h"
+#include "FoliageFwd.h"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TERRAIN DATA STRUCTURES
@@ -98,6 +99,9 @@ struct TerrainObject {
     std::shared_ptr<class Texture> splatMap;   // RGBA Splat Map (Control Texture)
     std::vector<std::shared_ptr<class Material>> layers; // Up to 4 layers
     std::vector<float> layer_uv_scales;      // UV tiling scale for each layer
+    
+    // Foliage System
+    std::vector<TerrainFoliageLayer> foliageLayers;
     
     // Hardness map for erosion: 0.0 = soft (sand/soil), 1.0 = hard (bedrock)
     std::vector<float> hardnessMap;  // Same resolution as heightmap
