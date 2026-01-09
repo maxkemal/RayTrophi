@@ -249,6 +249,7 @@
     <ClInclude Include="source\include\unified_volume.h" />
     <ClInclude Include="source\include\unified_volume_sampling.h" />
     <ClInclude Include="source\src\CloudNoise.cuh" />
+    <ClInclude Include="source\src\fft_ocean.cuh" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
@@ -314,6 +315,7 @@
     <ClInclude Include="source\include\MaterialManager.h" />
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
+    <ClInclude Include="source\include\TerrainFFT.h" />
     <!-- Unified Rendering System for CPU/GPU Parity -->
     <ClInclude Include="source\include\unified_types.h" />
     <ClInclude Include="source\include\unified_brdf.h" />
@@ -330,6 +332,8 @@
     <ClCompile Include="source\external\miniz_tinfl.c" />
     <ClCompile Include="source\external\miniz_zip.c" />
     <ClCompile Include="source\src\AABB.cpp" />
+    <ClCompile Include="source\src\AnimationController.cpp" />
+    <ClCompile Include="source\src\AnimationNodes.cpp" />
     <ClCompile Include="source\src\AreaLight.cpp" />
     <ClCompile Include="source\src\AssimpLoader.cpp" />
     <ClCompile Include="source\src\Camera.cpp" />
@@ -353,6 +357,7 @@
     <ClCompile Include="source\src\PrincipledBSDF.cpp" />
     <ClCompile Include="source\src\ProjectManager.cpp" />
     <ClCompile Include="source\src\Renderer.cpp" />
+    <ClCompile Include="source\src\RiverManager.cpp" />
     <ClCompile Include="source\src\SceneCommand.cpp" />
     <ClCompile Include="source\src\SceneHistory.cpp" />
     <ClCompile Include="source\src\SceneSelection.cpp" />
@@ -364,6 +369,7 @@
     <ClCompile Include="source\src\scene_ui_hierarchy.cpp" />
     <ClCompile Include="source\src\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\scene_ui_materials.cpp" />
+    <ClCompile Include="source\src\scene_ui_procamera.cpp" />
     <ClCompile Include="source\src\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\scene_ui_selection.cpp" />
     <ClCompile Include="source\src\scene_ui_viewport.cpp" />
@@ -373,6 +379,7 @@
     <ClCompile Include="source\src\SpotLight.cpp" />
     <ClCompile Include="source\src\TerrainManager.cpp" />
     <ClCompile Include="source\src\TerrainNodesV2.cpp" />
+    <ClCompile Include="source\src\TerrainFFT.cpp" />
     <ClCompile Include="source\src\Texture.cpp" />
     <ClCompile Include="source\src\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\src\TimelineWidget.cpp" />
@@ -403,6 +410,10 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="source\resources\RayTrophi_icon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="source\src\fft_ocean.cu" />
+    <CudaCompile Include="source\src\skinning_kernels.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

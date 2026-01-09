@@ -388,7 +388,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
             // Intensity
             float intensity = world.getColorIntensity();
-            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f)) {
+            if (SceneUI::DrawSmartFloat("sint", "Intensity", &intensity, 0.0f, 10.0f, "%.2f", isWorldKeyed(WorldProp::BackgroundStrength), [&]{ insertWorldKey("BG Intensity", WorldProp::BackgroundStrength); }, 16)) {
                 world.setColorIntensity(intensity);
                 changed = true;
             }
@@ -428,9 +428,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             // Rotation
             float rotation = world.getHDRIRotation();
             bool rotKeyed = isWorldKeyed(WorldProp::HDRIRotation);
-            if (KeyframeButton("##WRot", rotKeyed, "Rotation")) { insertWorldKey("HDRI Rot", WorldProp::HDRIRotation); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Rotation", &rotation, 0.0f, 360.0f, "%.1f deg")) {
+            if (SceneUI::DrawSmartFloat("hrot", "Rotation", &rotation, 0.0f, 360.0f, "%.1f deg", rotKeyed, [&]{ insertWorldKey("HDRI Rot", WorldProp::HDRIRotation); }, 16)) {
                 world.setHDRIRotation(rotation);
                 changed = true;
             }
@@ -438,7 +436,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
             // Intensity
             float intensity = world.getHDRIIntensity();
-            if (ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f, "%.2f")) {
+            if (SceneUI::DrawSmartFloat("hint", "Intensity", &intensity, 0.0f, 10.0f, "%.2f", false, nullptr, 16)) {
                 world.setHDRIIntensity(intensity);
                 changed = true;
             }
@@ -505,9 +503,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         if (UIWidgets::BeginSection(sunPosTitle, ImVec4(1.0f, 0.7f, 0.3f, 1.0f))) {
             // Elevation
             bool sunKeyed = isWorldKeyed(WorldProp::SunElevation);
-            if (KeyframeButton("##WSunEl", sunKeyed, "Elevation")) { insertWorldKey("Sun Elev", WorldProp::SunElevation); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg")) {
+            if (SceneUI::DrawSmartFloat("ssel", "Elevation", &params.sun_elevation, -10.0f, 90.0f, "%.1f deg", sunKeyed, [&]{ insertWorldKey("Sun Elev", WorldProp::SunElevation); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker(sync_sun_with_light ? 
@@ -516,9 +512,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
             // Azimuth
             bool azKeyed = isWorldKeyed(WorldProp::SunAzimuth);
-            if (KeyframeButton("##WSunAz", azKeyed, "Azimuth")) { insertWorldKey("Sun Azimuth", WorldProp::SunAzimuth); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg")) {
+            if (SceneUI::DrawSmartFloat("ssaz", "Azimuth", &params.sun_azimuth, 0.0f, 360.0f, "%.1f deg", azKeyed, [&]{ insertWorldKey("Sun Azimuth", WorldProp::SunAzimuth); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker(sync_sun_with_light ?
@@ -531,9 +525,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         if (UIWidgets::BeginSection("Sun", ImVec4(1.0f, 0.5f, 0.3f, 1.0f))) {
             // Intensity
             bool intKeyed = isWorldKeyed(WorldProp::SunIntensity);
-            if (KeyframeButton("##WSunInt", intKeyed, "Intensity")) { insertWorldKey("Sun Intensity", WorldProp::SunIntensity); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Intensity", &params.sun_intensity, 0.0f, 100.0f, "%.1f")) {
+            if (SceneUI::DrawSmartFloat("ssin", "Intensity", &params.sun_intensity, 0.0f, 100.0f, "%.1f", intKeyed, [&]{ insertWorldKey("Sun Intensity", WorldProp::SunIntensity); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker("Brightness of the sun");
@@ -547,9 +539,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
             // Size
             bool sizeKeyed = isWorldKeyed(WorldProp::SunSize);
-            if (KeyframeButton("##WSunSz", sizeKeyed, "Size")) { insertWorldKey("Sun Size", WorldProp::SunSize); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Size", &params.sun_size, 0.1f, 5.0f, "%.3f deg")) {
+            if (SceneUI::DrawSmartFloat("sssz", "Size", &params.sun_size, 0.1f, 5.0f, "%.3f deg", sizeKeyed, [&]{ insertWorldKey("Sun Size", WorldProp::SunSize); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker("Angular diameter of the sun disc (real sun = 0.545 deg)");
@@ -563,27 +553,21 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         if (UIWidgets::BeginSection("Atmosphere", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
             // Air
             bool airKeyed = isWorldKeyed(WorldProp::AirDensity);
-            if (KeyframeButton("##WAir", airKeyed, "Air")) { insertWorldKey("Air", WorldProp::AirDensity); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Air", &params.air_density, 0.0f, 10.0f, "%.2f")) {
+            if (SceneUI::DrawSmartFloat("sair", "Air", &params.air_density, 0.0f, 10.0f, "%.2f", airKeyed, [&]{ insertWorldKey("Air", WorldProp::AirDensity); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker("Rayleigh scattering density");
             
             // Dust
             bool dustKeyed = isWorldKeyed(WorldProp::DustDensity);
-            if (KeyframeButton("##WDust", dustKeyed, "Dust")) { insertWorldKey("Dust", WorldProp::DustDensity); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Dust", &params.dust_density, 0.0f, 10.0f, "%.2f")) {
+            if (SceneUI::DrawSmartFloat("sdst", "Dust", &params.dust_density, 0.0f, 10.0f, "%.2f", dustKeyed, [&]{ insertWorldKey("Dust", WorldProp::DustDensity); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker("Mie scattering (haze/sun glow)");
             
             // Ozone
             bool ozoKeyed = isWorldKeyed(WorldProp::OzoneDensity);
-            if (KeyframeButton("##WOzn", ozoKeyed, "Ozone")) { insertWorldKey("Ozone", WorldProp::OzoneDensity); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Ozone", &params.ozone_density, 0.0f, 10.0f, "%.2f")) {
+            if (SceneUI::DrawSmartFloat("sozn", "Ozone", &params.ozone_density, 0.0f, 10.0f, "%.2f", ozoKeyed, [&]{ insertWorldKey("Ozone", WorldProp::OzoneDensity); }, 16)) {
                 changed = true;
             }
             ImGui::SameLine(); UIWidgets::HelpMarker("Ozone layer density");
@@ -591,9 +575,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             // Altitude
             float altitudeKm = params.altitude / 1000.0f;
             bool altKeyed = isWorldKeyed(WorldProp::Altitude);
-            if (KeyframeButton("##WAlt", altKeyed, "Altitude")) { insertWorldKey("Altitude", WorldProp::Altitude); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Altitude", &altitudeKm, 0.0f, 60.0f, "%.1f km")) {
+            if (SceneUI::DrawSmartFloat("salt", "Altitude", &altitudeKm, 0.0f, 60.0f, "%.1f km", altKeyed, [&]{ insertWorldKey("Altitude", WorldProp::Altitude); }, 16)) {
                 params.altitude = altitudeKm * 1000.0f;
                 changed = true;
             }
@@ -607,9 +589,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             
             // Mie Anisotropy
             bool mieKeyed = isWorldKeyed(WorldProp::MieAnisotropy);
-            if (KeyframeButton("##WMie", mieKeyed, "Mie")) { insertWorldKey("Mie", WorldProp::MieAnisotropy); }
-            ImGui::SameLine();
-            if (ImGui::SliderFloat("Mie Anisotropy", &params.mie_anisotropy, 0.0f, 0.99f, "%.2f")) {
+            if (SceneUI::DrawSmartFloat("smie", "Mie Anisotropy", &params.mie_anisotropy, 0.0f, 0.99f, "%.2f", mieKeyed, [&]{ insertWorldKey("Mie", WorldProp::MieAnisotropy); }, 16)) {
                 changed = true;
             }
             UIWidgets::HelpMarker("Sun glow directionality (0 = uniform, 0.8+ = strong forward scatter)");
@@ -668,13 +648,13 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     "Replace: Use ONLY the texture");
                 
                 // Intensity
-                if (ImGui::SliderFloat("Overlay Intensity", &params.env_overlay_intensity, 0.0f, 3.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("eoint", "Overlay Intensity", &params.env_overlay_intensity, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Strength of the overlay texture");
                 
                 // Rotation
-                if (ImGui::SliderFloat("Overlay Rotation", &params.env_overlay_rotation, 0.0f, 360.0f, "%.1f deg")) {
+                if (SceneUI::DrawSmartFloat("eorot", "Overlay Rotation", &params.env_overlay_rotation, 0.0f, 360.0f, "%.1f deg", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Rotate the overlay texture around Y axis");
@@ -699,23 +679,23 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             if (params.fog_enabled) {
                 ImGui::Indent();
                 
-                if (ImGui::SliderFloat("Fog Density", &params.fog_density, 0.001f, 0.1f, "%.4f")) {
+                if (SceneUI::DrawSmartFloat("fogd", "Fog Density", &params.fog_density, 0.001f, 0.1f, "%.4f", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Base fog density (lower = lighter fog)");
                 
-                if (ImGui::SliderFloat("Fog Height", &params.fog_height, 10.0f, 2000.0f, "%.0f m")) {
+                if (SceneUI::DrawSmartFloat("fogh", "Fog Height", &params.fog_height, 10.0f, 2000.0f, "%.0f m", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Fog is concentrated below this height");
                 
-                if (ImGui::SliderFloat("Fog Falloff", &params.fog_falloff, 0.0005f, 0.02f, "%.4f")) {
+                if (SceneUI::DrawSmartFloat("fogf", "Fog Falloff", &params.fog_falloff, 0.0005f, 0.02f, "%.4f", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Rate at which fog decreases with height");
                 
                 float fogDistKm = params.fog_distance / 1000.0f;
-                if (ImGui::SliderFloat("Fog Distance", &fogDistKm, 0.1f, 50.0f, "%.1f km")) {
+                if (SceneUI::DrawSmartFloat("fogD", "Fog Distance", &fogDistKm, 0.1f, 50.0f, "%.1f km", false, nullptr, 16)) {
                     params.fog_distance = fogDistKm * 1000.0f;
                     changed = true;
                 }
@@ -727,7 +707,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     changed = true;
                 }
                 
-                if (ImGui::SliderFloat("Sun Scatter", &params.fog_sun_scatter, 0.0f, 2.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("ssss", "Sun Scatter", &params.fog_sun_scatter, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("How much fog glows when looking towards sun");
@@ -752,15 +732,15 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             if (params.godrays_enabled) {
                 ImGui::Indent();
                 
-                if (ImGui::SliderFloat("Ray Intensity", &params.godrays_intensity, 0.0f, 3.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("grint", "Ray Intensity", &params.godrays_intensity, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) {
                     changed = true;
                 }
                 
-                if (ImGui::SliderFloat("Ray Density", &params.godrays_density, 0.01f, 1.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("grden", "Ray Density", &params.godrays_density, 0.01f, 1.0f, "%.2f", false, nullptr, 16)) {
                     changed = true;
                 }
                 
-                if (ImGui::SliderFloat("Ray Decay", &params.godrays_decay, 0.8f, 1.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("grdec", "Ray Decay", &params.godrays_decay, 0.8f, 1.0f, "%.2f", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("How quickly rays fade with distance from sun");
@@ -785,7 +765,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             if (params.multi_scatter_enabled) {
                 ImGui::Indent();
                 
-                if (ImGui::SliderFloat("MS Intensity", &params.multi_scatter_factor, 0.0f, 1.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("msint", "MS Intensity", &params.multi_scatter_factor, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Strength of multi-scattering contribution");
@@ -958,11 +938,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
             if (show_details || ImGui::CollapsingHeader("Cloud Details")) {
                 // Coverage
                 bool covKeyed = isWorldKeyed(WorldProp::CloudCoverage);
-                if (KeyframeButton("##WCov", covKeyed, "Coverage")) { 
-                    insertWorldKey("Cloud Cov", WorldProp::CloudCoverage); 
-                }
-                ImGui::SameLine();
-                if (ImGui::SliderFloat("Coverage", &cloudParams.cloud_coverage, 0.0f, 1.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("clcov", "Coverage", &cloudParams.cloud_coverage, 0.0f, 1.0f, "%.2f", covKeyed, [&]{ insertWorldKey("Cloud Cov", WorldProp::CloudCoverage); }, 16)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
@@ -970,11 +946,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
 
                 // Density
                 bool denKeyed = isWorldKeyed(WorldProp::CloudDensity);
-                if (KeyframeButton("##WCldDen", denKeyed, "Density")) { 
-                    insertWorldKey("Cloud Den", WorldProp::CloudDensity); 
-                }
-                ImGui::SameLine();
-                if (ImGui::DragFloat("Density", &cloudParams.cloud_density, 0.05f, 0.0f, 10.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("clden", "Density", &cloudParams.cloud_density, 0.0f, 10.0f, "%.2f", denKeyed, [&]{ insertWorldKey("Cloud Den", WorldProp::CloudDensity); }, 16)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
@@ -982,11 +954,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 
                 // Scale
                 bool sclKeyed = isWorldKeyed(WorldProp::CloudScale);
-                if (KeyframeButton("##WScl", sclKeyed, "Scale")) { 
-                    insertWorldKey("Cloud Scale", WorldProp::CloudScale); 
-                }
-                ImGui::SameLine();
-                if (ImGui::DragFloat("Scale", &cloudParams.cloud_scale, 0.1f, 0.1f, 100.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("clscl", "Scale", &cloudParams.cloud_scale, 0.1f, 100.0f, "%.2f", sclKeyed, [&]{ insertWorldKey("Cloud Scale", WorldProp::CloudScale); }, 16)) {
                     cloudParamsChanged = true;
                     weather_preset_index = 7;
                 }
@@ -1025,7 +993,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 UIWidgets::HelpMarker("Number of light marching steps.\n0 = Disabled (fast)\n4-6 = Normal\n8-12 = High quality");
                 
                 // Shadow Strength
-                if (ImGui::SliderFloat("Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 2.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("cshd", "Shadow Strength", &cloudParams.cloud_shadow_strength, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Cloud self-shadowing intensity.\n0 = No shadows\n1 = Normal\n2 = Dark, dramatic shadows");
@@ -1034,19 +1002,19 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(1.0f, 0.9f, 0.5f, 1.0f), "Lighting Effects:");
                 
                 // Silver Lining
-                if (ImGui::SliderFloat("Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 3.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("csil", "Silver Lining", &cloudParams.cloud_silver_intensity, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Bright rim effect when backlit by sun.\n0 = Off\n1 = Normal\n2+ = Strong glow");
                 
                 // Ambient Strength
-                if (ImGui::SliderFloat("Ambient Light", &cloudParams.cloud_ambient_strength, 0.0f, 2.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("camb", "Ambient Light", &cloudParams.cloud_ambient_strength, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Sky ambient light contribution.\nLower = Darker shadows\nHigher = Softer look");
                 
                 // Absorption
-                if (ImGui::SliderFloat("Absorption", &cloudParams.cloud_absorption, 0.2f, 3.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("cabs", "Absorption", &cloudParams.cloud_absorption, 0.2f, 3.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
                 UIWidgets::HelpMarker("Light absorption rate.\n0.5 = Thin, transparent\n1.0 = Normal\n2.0 = Thick, opaque");
@@ -1058,10 +1026,10 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     cloudParams.cloud_height_min, cloudParams.cloud_height_max,
                     cloudParams.cloud_height_max - cloudParams.cloud_height_min);
                 
-                if (ImGui::DragFloat("Min Height##L1", &cloudParams.cloud_height_min, 10.0f, 0.0f, 20000.0f, "%.0f m")) {
+                if (SceneUI::DrawSmartFloat("cmnh", "Min Height##L1", &cloudParams.cloud_height_min, 0.0f, 20000.0f, "%.0f m", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
-                if (ImGui::DragFloat("Max Height##L1", &cloudParams.cloud_height_max, 10.0f, 0.0f, 20000.0f, "%.0f m")) {
+                if (SceneUI::DrawSmartFloat("cmxh", "Max Height##L1", &cloudParams.cloud_height_max, 0.0f, 20000.0f, "%.0f m", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                 }
                 ImGui::TreePop();
@@ -1116,26 +1084,26 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     }
                 }
                 
-                if (ImGui::SliderFloat("Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 1.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("ccov2", "Coverage##L2", &cloudParams.cloud2_coverage, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
-                if (ImGui::DragFloat("Density##L2", &cloudParams.cloud2_density, 0.05f, 0.0f, 5.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("cden2", "Density##L2", &cloudParams.cloud2_density, 0.0f, 5.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
-                if (ImGui::DragFloat("Scale##L2", &cloudParams.cloud2_scale, 0.1f, 0.1f, 50.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("cscl2", "Scale##L2", &cloudParams.cloud2_scale, 0.1f, 50.0f, "%.2f", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
                 
                 ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Layer 2: %.0f - %.0f m", 
                     cloudParams.cloud2_height_min, cloudParams.cloud2_height_max);
-                if (ImGui::DragFloat("Min Height##L2", &cloudParams.cloud2_height_min, 50.0f, 0.0f, 20000.0f, "%.0f m")) {
+                if (SceneUI::DrawSmartFloat("cmnh2", "Min Height##L2", &cloudParams.cloud2_height_min, 0.0f, 20000.0f, "%.0f m", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }
-                if (ImGui::DragFloat("Max Height##L2", &cloudParams.cloud2_height_max, 50.0f, 0.0f, 20000.0f, "%.0f m")) {
+                if (SceneUI::DrawSmartFloat("cmxh2", "Max Height##L2", &cloudParams.cloud2_height_max, 0.0f, 20000.0f, "%.0f m", false, nullptr, 16)) {
                     cloudParamsChanged = true;
                     layer2_preset = 0;
                 }

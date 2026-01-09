@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Terrain Nodes</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2 style="margin-top:0;">RayTrophi</h2>
+        <a href="index.html" class="nav-link">Introduction</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="river.html" class="nav-link">River Tool</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="nodes.html" class="nav-link active">Terrain Nodes</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <a href="index.html" class="back-btn">← Back to Home</a>
+
+            <h1>Terrain Node Reference</h1>
+            <p>Reference guide for all procedural generation nodes available in the Terrain Node Graph.</p>
+
+            <!-- INPUT NODES -->
+            <h2 id="input">Input Nodes</h2>
+
+            <div class="card">
+                <h3>Perlin Noise</h3>
+                <p>Generates classic coherent noise. Good for mountains and rolling hills.</p>
+                <table class="param-table">
+                    <tr>
+                        <th>Param</th>
+                        <th>Desc</th>
+                    </tr>
+                    <tr>
+                        <td>Scale</td>
+                        <td>Frequency of the noise. Lower = larger features.</td>
+                    </tr>
+                    <tr>
+                        <td>Persistence</td>
+                        <td>Roughness of the fractals.</td>
+                    </tr>
+                    <tr>
+                        <td>Octaves</td>
+                        <td>Detail layers.</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="card">
+                <h3>Worley Noise (Voronoi)</h3>
+                <p>Cellular noise. Excellent for rocks, cracked earth, and alien landscapes.</p>
+                <table class="param-table">
+                    <tr>
+                        <th>Param</th>
+                        <th>Desc</th>
+                    </tr>
+                    <tr>
+                        <td>Jitter</td>
+                        <td>Randomness of cell centers.</td>
+                    </tr>
+                    <tr>
+                        <td>Type</td>
+                        <td>Distance metric (F1, F2, F2-F1).</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div class="card">
+                <h3>Image Input</h3>
+                <p>Loads an external heightmap (PNG/TIFF/EXR).</p>
+            </div>
+
+            <!-- MATH NODES -->
+            <h2 id="math">Math & Modification</h2>
+
+            <div class="card">
+                <h3>Math (Mix)</h3>
+                <p>Combines two heightmaps (Info A and Input B).</p>
+                <ul>
+                    <li><strong>Add:</strong> A + B</li>
+                    <li><strong>Subtract:</strong> A - B</li>
+                    <li><strong>Multiply:</strong> A * B (Masking)</li>
+                    <li><strong>Max/Min:</strong> Keeps highest/lowest points.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>Curve</h3>
+                <p>Remaps height values using a visual curve editor. Use this to create terraces, plateaus, or steep
+                    cliffs.</p>
+                <div class="screenshot-area">
+                    <img src="images/node_curve.png" alt="Curve Node"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">
+                        Please save a screenshot of a <strong>Curve Node</strong> as
+                        <code>manual/images/node_curve.png</code>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SIMULATION NODES -->
+            <h2 id="sim">Simulation</h2>
+
+            <div class="card">
+                <h3>Erosion Node</h3>
+                <p>Runs the hydraulic erosion simulation on the input heightmap and outputs the eroded result + water
+                    map + sediment map.</p>
+                <div class="hint">Warning: Erosion is computationally expensive. It runs on the CPU.</div>
+            </div>
+
+            <!-- OUTPUT -->
+            <h2 id="output">Output</h2>
+            <div class="card">
+                <h3>Terrain Output</h3>
+                <p>The final node. Connect your result here to apply it to the 3D terrain mesh.</p>
+            </div>
+
+            <div style="height:50px"></div>
+        </div>
+    </div>
+
+</body>
+
+</html>

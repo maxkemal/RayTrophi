@@ -1,0 +1,289 @@
+/* RayTrophi Studio - Modern Web Style */
+:root {
+    --bg-color: #0d0e12;
+    --sidebar-bg: #14161a;
+    --card-bg: #1e2126;
+    --text-main: #e0e0e0;
+    --text-muted: #a0a0a0;
+    --accent: #00ccff;
+    --accent-hover: #33ddff;
+    --accent-glow: rgba(0, 204, 255, 0.2);
+    --border: #333;
+    --font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    font-family: var(--font-family);
+    display: flex;
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+
+/* SCROLLBAR */
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-color);
+}
+
+::-webkit-scrollbar-thumb {
+    background: #444;
+    border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #666;
+}
+
+/* SIDEBAR */
+#sidebar {
+    width: 280px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 20px 0;
+    z-index: 1000;
+    box-shadow: 5px 0 15px rgba(0, 0, 0, 0.2);
+}
+
+#sidebar h2 {
+    color: #fff;
+    padding: 0 25px;
+    margin-bottom: 30px;
+    font-size: 1.5em;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    background: -webkit-linear-gradient(0deg, #fff, #888);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.nav-link {
+    display: block;
+    padding: 12px 25px;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: all 0.2s ease;
+    border-left: 3px solid transparent;
+    font-size: 0.95em;
+}
+
+.nav-link:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+    color: #fff;
+}
+
+.nav-link.active {
+    background-color: rgba(0, 204, 255, 0.1);
+    color: var(--accent);
+    border-left-color: var(--accent);
+    font-weight: 600;
+}
+
+/* CONTENT AREA */
+#content {
+    margin-left: 280px;
+    flex: 1;
+    padding: 40px 60px;
+    max-width: 1200px;
+}
+
+.container {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+/* TYPOGRAPHY */
+h1 {
+    font-size: 2.5em;
+    margin-bottom: 20px;
+    color: #fff;
+    font-weight: 300;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 15px;
+}
+
+h2 {
+    color: var(--accent);
+    margin-top: 40px;
+    font-weight: 500;
+}
+
+p,
+li {
+    line-height: 1.7;
+    color: #ccc;
+}
+
+a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.back-btn {
+    display: inline-block;
+    margin-bottom: 20px;
+    font-size: 0.9em;
+    color: #888;
+}
+
+/* CARDS & BOXES */
+.card {
+    background-color: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 25px;
+    margin-bottom: 30px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    transition: transform 0.2s;
+}
+
+.card:hover {
+    border-color: #444;
+}
+
+.hint {
+    background-color: rgba(0, 204, 255, 0.1);
+    border-left: 4px solid var(--accent);
+    padding: 15px;
+    border-radius: 4px;
+    margin: 20px 0;
+    color: #d0f0ff;
+}
+
+/* TABLES */
+.param-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+}
+
+.param-table th,
+.param-table td {
+    text-align: left;
+    padding: 12px 15px;
+    border-bottom: 1px solid var(--border);
+}
+
+.param-table th {
+    color: #fff;
+    font-weight: 600;
+    background-color: rgba(255, 255, 255, 0.03);
+}
+
+.param-table tr:hover {
+    background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* IMAGES & PLACEHOLDERS */
+.screenshot-area {
+    width: 100%;
+    margin: 20px 0;
+    border: 1px solid var(--border);
+    background: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+    /* Default vertical align is block. In split layout it will be controlled by flex */
+}
+
+.screenshot-area img {
+    width: 100%;
+    display: block;
+}
+
+.missing-img {
+    padding: 40px;
+    text-align: center;
+    color: #666;
+    background: #111;
+    display: none;
+    /* JS will toggle this by removing display:none when OnError fires */
+}
+
+/* SPLIT LAYOUT FOR VERTICAL PANELS */
+.split-layout {
+    display: flex;
+    gap: 30px;
+    align-items: flex-start;
+}
+
+.split-layout .screenshot-area {
+    flex: 0 0 320px;
+    /* Fixed width for vertical panels */
+    margin: 0;
+    /* Remove default margin */
+}
+
+.split-layout .table-container {
+    flex: 1;
+}
+
+/* FOOTER */
+.site-footer {
+    margin-top: 80px;
+    padding-top: 40px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    color: #666;
+    font-size: 0.9em;
+}
+
+/* RESPONSIVE */
+@media (max-width: 1000px) {
+    .split-layout {
+        flex-direction: column;
+    }
+
+    .split-layout .screenshot-area {
+        flex: none;
+        width: 100%;
+        max-width: 450px;
+        /* Limit max width on mobile so it doesn't look absurd */
+    }
+}
+
+@media (max-width: 900px) {
+    #sidebar {
+        width: 70px;
+        overflow: visible;
+        padding: 10px 0;
+    }
+
+    #sidebar h2 {
+        display: none;
+    }
+
+    .nav-link {
+        text-align: center;
+        padding: 15px 5px;
+        font-size: 0.8em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .nav-link span {
+        display: none;
+    }
+
+    #content {
+        margin-left: 70px;
+        padding: 20px;
+    }
+}

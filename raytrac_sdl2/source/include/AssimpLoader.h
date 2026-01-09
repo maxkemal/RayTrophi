@@ -827,8 +827,8 @@ public:
             
             // Safety check
             if (gpuIndex < 0 || gpuIndex >= static_cast<int>(data.materials.size())) {
-                SCENE_LOG_WARN("[AssimpLoader] Triangle has invalid material ID: " + std::to_string(gpuIndex) + 
-                             ". Using default (0).");
+             //   SCENE_LOG_WARN("[AssimpLoader] Triangle has invalid material ID: " + std::to_string(gpuIndex) + 
+             //                ". Using default (0).");
                 gpuIndex = 0;
             }
             
@@ -867,15 +867,15 @@ public:
             }
         }
 
-        SCENE_LOG_INFO("[MAT-SUMMARY] Global materials: " + std::to_string(data.materials.size()) + 
-                      " | Triangles: " + std::to_string(data.indices.size()));
+        //SCENE_LOG_INFO("[MAT-SUMMARY] Global materials: " + std::to_string(data.materials.size()) + 
+        //              " | Triangles: " + std::to_string(data.indices.size()));
         
         return data;
     }
 
 
     void clearTextureCache() {
-        SCENE_LOG_INFO("[TEXTURE CLEANUP] Starting texture cache cleanup...");
+      //  SCENE_LOG_INFO("[TEXTURE CLEANUP] Starting texture cache cleanup...");
         int gpu_cleaned = 0;
         int cpu_cleaned = 0;
         
@@ -896,11 +896,11 @@ public:
         TextureCache::instance().clear();
         FileTextureCache::instance().clear();
         
-        SCENE_LOG_INFO("[TEXTURE CLEANUP] Complete! Stats:");
+       /* SCENE_LOG_INFO("[TEXTURE CLEANUP] Complete! Stats:");
         SCENE_LOG_INFO("  - GPU textures cleaned: " + std::to_string(gpu_cleaned));
         SCENE_LOG_INFO("  - CPU cache entries removed: " + std::to_string(cpu_cleaned));
         SCENE_LOG_INFO("  - Global TextureCache cleared: " + std::to_string(global_texture_cache_size) + " entries");
-        SCENE_LOG_INFO("  - Global FileTextureCache cleared: " + std::to_string(global_file_cache_size) + " entries");
+        SCENE_LOG_INFO("  - Global FileTextureCache cleared: " + std::to_string(global_file_cache_size) + " entries");*/
     }
     // AssimpLoader sınıfı içinde veya uygun bir namespace'de
     // Helper to generate unique names
@@ -968,8 +968,7 @@ private:
         std::vector<Mesh>& meshes,
         BoneData& boneData
     ) {
-        std::cout << "[processBonesForMeshes] Starting...\n";
-
+       
         boneData.boneNameToIndex.clear();
         boneData.boneNameToNode.clear();
         boneData.boneOffsetMatrices.clear();
@@ -991,8 +990,6 @@ private:
             aiMesh* ai_mesh = scene->mMeshes[mesh.originalMeshIndex];
             if (!ai_mesh->HasBones()) continue;
 
-            std::cout << "[Mesh " << meshIdx << "] Bone count: " << ai_mesh->mNumBones << std::endl;
-
             for (unsigned int b = 0; b < ai_mesh->mNumBones; ++b) {
                 aiBone* bone = ai_mesh->mBones[b];
                 std::string boneName = bone->mName.C_Str();
@@ -1011,7 +1008,7 @@ private:
                     float weight = bone->mWeights[w].mWeight;
 
                     if (vertexId >= mesh.vertices.size()) {
-                        std::cerr << "[WARN] Bone weight vertexId out of range: " << vertexId << " vs " << mesh.vertices.size() << std::endl;
+                      
                         continue;
                     }
 
@@ -1019,12 +1016,11 @@ private:
                 }
             }
         }
-
-        std::cout << "[processBonesForMeshes] Completed. Total bones: " << boneData.boneNameToIndex.size() << std::endl;
+      
     }
 
     void buildBoneData(const aiScene* scene, BoneData& boneData) {
-        SCENE_LOG_INFO("[buildBoneData] Starting bone map generation...");
+       // SCENE_LOG_INFO("[buildBoneData] Starting bone map generation...");
 
         boneData.boneNameToIndex.clear();
         boneData.boneNameToNode.clear();
@@ -1066,7 +1062,7 @@ private:
                 }
             }
         }
-        SCENE_LOG_INFO("[buildBoneData] Completed. Total unique bones: " + std::to_string(boneData.boneNameToIndex.size()));
+       // SCENE_LOG_INFO("[buildBoneData] Completed. Total unique bones: " + std::to_string(boneData.boneNameToIndex.size()));
         
         // Build reverse lookup table for O(1) index-to-name queries
         boneData.rebuildReverseLookup();
@@ -1343,7 +1339,7 @@ private:
                 cameraNodeNames.insert(aiCam->mName.C_Str());
                 aiNode* camNode = scene->mRootNode->FindNode(aiCam->mName.C_Str());
                 if (!camNode) {
-                    SCENE_LOG_ERROR("Camera node not found: " + std::basic_string(aiCam->mName.C_Str()));
+                  //  SCENE_LOG_ERROR("Camera node not found: " + std::basic_string(aiCam->mName.C_Str()));
                     continue;
                 }
 
@@ -1371,13 +1367,13 @@ private:
                 camera->save_initial_state();  // Save initial state for reset functionality
 
                 cameras.push_back(camera);
-                SCENE_LOG_INFO("---- Camera Loaded: " + std::string(aiCam->mName.C_Str()));
-                // Loglama
-                SCENE_LOG_INFO("Pos: " + lookfrom.toString() +
-                    " | LookAt: " + lookat.toString() +
-                    " | Up: " + vup.toString() +
-                    " | Aspect:" + std::to_string(aspect) +
-                    " | FOV:" + std::to_string(vfov));
+                //SCENE_LOG_INFO("---- Camera Loaded: " + std::string(aiCam->mName.C_Str()));
+                //// Loglama
+                //SCENE_LOG_INFO("Pos: " + lookfrom.toString() +
+                //    " | LookAt: " + lookat.toString() +
+                //    " | Up: " + vup.toString() +
+                //    " | Aspect:" + std::to_string(aspect) +
+                //    " | FOV:" + std::to_string(vfov));
 
             }
         }
@@ -1402,16 +1398,16 @@ private:
     void processLights(const aiScene* scene) {
         try {
             if (!scene) {
-                SCENE_LOG_ERROR("Light processing failed: Scene is null");
+              //  SCENE_LOG_ERROR("Light processing failed: Scene is null");
                 return;
             }
 
             if (!scene->HasLights()) {
-                SCENE_LOG_WARN("Scene has no lights, skipping light processing");
+              //  SCENE_LOG_WARN("Scene has no lights, skipping light processing");
                 return;
             }
 
-            SCENE_LOG_INFO("Total lights in scene: " + std::to_string(scene->mNumLights));
+           // SCENE_LOG_INFO("Total lights in scene: " + std::to_string(scene->mNumLights));
 
             for (unsigned int i = 0; i < scene->mNumLights; i++) {
                 aiLight* aiLgt = scene->mLights[i];
@@ -1424,7 +1420,7 @@ private:
 
                 const aiNode* node = scene->mRootNode->FindNode(aiLgt->mName);
                 if (!node) {
-                    SCENE_LOG_WARN("Node not found for light: " + name);
+                  //  SCENE_LOG_WARN("Node not found for light: " + name);
                     continue;
                 }
 
@@ -1434,7 +1430,7 @@ private:
                 Vec3 dir = transformDirection(global, aiLgt->mDirection);
 
                 if ((aiLgt->mType == aiLightSource_DIRECTIONAL || aiLgt->mType == aiLightSource_SPOT) && dir.length() == 0.0f) {
-                    SCENE_LOG_WARN("Direction zero-length detected, fallback used for: " + name);
+                   // SCENE_LOG_WARN("Direction zero-length detected, fallback used for: " + name);
                     dir = Vec3(0, 0, -1);
                 }
                 else if (dir.length() > 0.0f) {
@@ -1515,12 +1511,12 @@ private:
                 }
 
                 default:
-                    SCENE_LOG_WARN("Unsupported light type: " + std::to_string(aiLgt->mType));
+                  //  SCENE_LOG_WARN("Unsupported light type: " + std::to_string(aiLgt->mType));
                     break;
                 }
 
                 if (!light) {
-                    SCENE_LOG_ERROR("Failed to create light object: " + name);
+                  //  SCENE_LOG_ERROR("Failed to create light object: " + name);
                     continue;
                 }
 
@@ -1528,14 +1524,14 @@ private:
                 light->initialDirection = dir;
                 lights.push_back(light);
 
-                SCENE_LOG_INFO(
+              /*  SCENE_LOG_INFO(
                     "Light created: " + name +
                     " | Type: " + typeStr +
                     " | Pos: (" + std::to_string(pos.x) + ", " + std::to_string(pos.y) + ", " + std::to_string(pos.z) + ")" +
                     " | Dir: (" + std::to_string(dir.x) + ", " + std::to_string(dir.y) + ", " + std::to_string(dir.z) + ")" +
                     " | Color: (" + std::to_string(color.x) + ", " + std::to_string(color.y) + ", " + std::to_string(color.z) + ")" +
                     " | Intensity: " + std::to_string(intensity)
-                );
+                );*/
             }
         }
         catch (const std::exception& e) {
@@ -1755,7 +1751,7 @@ private:
                bool gpu_ok = false;
                if (g_hasOptix && !texture->is_gpu_uploaded) {
                    if (!texture->upload_to_gpu()&& g_hasOptix) {
-                       SCENE_LOG_ERROR("Texture GPU upload failed: " + texInfo.path);
+                     //  SCENE_LOG_ERROR("Texture GPU upload failed: " + texInfo.path);
                        gpu_ok = false;
                    }
                    else {
@@ -1810,7 +1806,7 @@ private:
                            }
                        }
                        else {
-                           SCENE_LOG_WARN("Texture marked uploaded but cuda texture is null: " + texInfo.path);
+                          // SCENE_LOG_WARN("Texture marked uploaded but cuda texture is null: " + texInfo.path);
                        }
                    }
                    else {
@@ -2030,13 +2026,13 @@ private:
         auto tex = std::make_shared<Texture>(texPath.string(), type);
 
         if (!tex->is_loaded()) {  // ← Bu kontrolü ekle!
-            SCENE_LOG_ERROR("Texture is_loaded() = false after constructor: " + texPath.string());
+           // SCENE_LOG_ERROR("Texture is_loaded() = false after constructor: " + texPath.string());
             return nullptr;
         }
 
         if (g_hasOptix) {
             if (!tex->upload_to_gpu()) {
-                SCENE_LOG_ERROR("Disk texture GPU upload failed: " + texPath.string());
+               // SCENE_LOG_ERROR("Disk texture GPU upload failed: " + texPath.string());
                 return nullptr;
             }
         }

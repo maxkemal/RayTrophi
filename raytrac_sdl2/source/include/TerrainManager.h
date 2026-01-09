@@ -175,6 +175,128 @@ public:
     TerrainObject* getTerrain(int id);
     TerrainObject* getTerrainByName(const std::string& name);
     
+    // ===========================================================================
+    // HEIGHT SAMPLING (for River System, Foliage, etc.)
+    // ===========================================================================
+    
+    // Check if any terrain exists
+    bool hasActiveTerrain() const { return !terrains.empty(); }
+    
+    // Sample height at world XZ coordinate (finds appropriate terrain)
+    float sampleHeight(float worldX, float worldZ) const {
+        if (terrains.empty()) return 0.0f;
+        
+        // Use first terrain for now (TODO: find terrain containing point)
+        const TerrainObject& terrain = terrains[0];
+        const Heightmap& hm = terrain.heightmap;
+        if (hm.data.empty() || hm.width <= 0 || hm.height <= 0) return 0.0f;
+        
+        // Convert world position to heightmap grid coordinates
+        // Assuming terrain is centered at origin
+        float halfSize = hm.scale_xz * 0.5f;
+        float normalizedX = (worldX + halfSize) / hm.scale_xz;
+        float normalizedZ = (worldZ + halfSize) / hm.scale_xz;
+        
+        // Clamp to valid range
+        normalizedX = std::clamp(normalizedX, 0.0f, 1.0f);
+        normalizedZ = std::clamp(normalizedZ, 0.0f, 1.0f);
+        
+        // Get grid coordinates (with bilinear interpolation)
+        float gx = normalizedX * (hm.width - 1);
+        float gz = normalizedZ * (hm.height - 1);
+        
+        int x0 = (int)std::floor(gx);
+        int z0 = (int)std::floor(gz);
+        int x1 = (std::min)(x0 + 1, hm.width - 1);
+        int z1 = (std::min)(z0 + 1, hm.height - 1);
+        
+        float fx = gx - x0;
+        float fz = gz - z0;
+        
+        // Bilinear interpolation
+        float h00 = hm.data[z0 * hm.width + x0];
+        float h10 = hm.data[z0 * hm.width + x1];
+        float h01 = hm.data[z1 * hm.width + x0];
+        float h11 = hm.data[z1 * hm.width + x1];
+        
+        float h0 = h00 * (1.0f - fx) + h10 * fx;
+        float h1 = h01 * (1.0f - fx) + h11 * fx;
+        float height = h0 * (1.0f - fz) + h1 * fz;
+        
+        return height * hm.scale_y;
+    }
+    
+    // ===========================================================================
+    // RIVER BED CARVING (for River System integration)
+    // ===========================================================================
+    
+    /**
+     * @brief Natural carve parameters for realistic river bed generation
+     */
+    struct NaturalCarveParams {
+        bool enableNoise = true;           // Noise-based edge irregularity
+        float noiseScale = 0.15f;          // Noise frequency
+        float noiseStrength = 0.3f;        // Noise intensity
+        
+        bool enableDeepPools = true;       // Random deep pools
+        float poolFrequency = 0.15f;       // Pool occurrence rate
+        float poolDepthMult = 1.8f;        // Pool depth multiplier
+        
+        bool enableRiffles = true;         // Shallow riffle zones
+        float riffleFrequency = 0.2f;      // Riffle occurrence rate
+        float riffleDepthMult = 0.4f;      // Riffle depth multiplier
+        
+        bool enableAsymmetry = true;       // Asymmetric bank profiles
+        float asymmetryStrength = 0.6f;    // Inner/outer bank difference
+        
+        bool enablePointBars = true;       // Point bar deposits on inner bends
+        float pointBarStrength = 0.4f;     // Point bar elevation amount
+    };
+    
+    /**
+     * @brief Carve a river bed into the terrain along a path
+     * @param terrainId Target terrain ID (-1 for first terrain)
+     * @param points Vector of world-space points along the river center
+     * @param widths Width at each point
+     * @param depths Depth at each point (how deep to carve)
+     * @param smoothness Edge smoothing factor (0-1)
+     * @param scene SceneData for mesh update
+     */
+    void carveRiverBed(int terrainId, 
+                       const std::vector<Vec3>& points,
+                       const std::vector<float>& widths,
+                       const std::vector<float>& depths,
+                       float smoothness,
+                       SceneData& scene);
+    
+    /**
+     * @brief Carve a natural river bed with advanced features
+     * @param terrainId Target terrain ID (-1 for first terrain)
+     * @param points Vector of world-space points along the river center
+     * @param widths Width at each point
+     * @param depths Depth at each point
+     * @param smoothness Edge smoothing factor
+     * @param naturalParams Natural carve parameters (noise, pools, etc.)
+     * @param scene SceneData for mesh update
+     */
+    void carveRiverBedNatural(int terrainId, 
+                              const std::vector<Vec3>& points,
+                              const std::vector<float>& widths,
+                              const std::vector<float>& depths,
+                              float smoothness,
+                              const NaturalCarveParams& naturalParams,
+                              SceneData& scene);
+    
+    /**
+     * @brief Lower terrain height at a world position
+     * @param worldX World X coordinate
+     * @param worldZ World Z coordinate
+     * @param amount Amount to lower (positive = deeper)
+     * @param radius Falloff radius
+     * @param terrainId Target terrain (-1 for first)
+     */
+    void lowerHeightAt(float worldX, float worldZ, float amount, float radius, int terrainId = -1);
+    
     // Management
     void removeTerrain(SceneData& scene, int id);
     void removeAllTerrains(SceneData& scene);

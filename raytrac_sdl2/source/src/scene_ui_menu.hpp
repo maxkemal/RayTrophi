@@ -12,6 +12,13 @@
 #include "TerrainManager.h"
 #include "scene_ui_animgraph.hpp"  // For AnimGraphUIState
 #include <filesystem>
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
+extern bool show_controls_window; // Assume defined elsewhere
+
+
 
 void SceneUI::drawMainMenuBar(UIContext& ctx)
 {
@@ -449,9 +456,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             }
             ImGui::Separator();
             
-            if (ImGui::MenuItem("Foliage Tab", nullptr, &show_foliage_tab)) { 
-                if (show_foliage_tab) tab_to_focus = "Foliage"; 
-            }
+
             if (ImGui::MenuItem("Water Tab", nullptr, &show_water_tab)) { 
                 if (show_water_tab) tab_to_focus = "Water"; 
             }
@@ -476,7 +481,17 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 
         if (ImGui::BeginMenu("Help"))
         {
-            ImGui::MenuItem("Controls / Help", "F1", &show_controls_window);
+            if (ImGui::MenuItem("Documentation / Manual (Web)", "F1")) {
+#ifdef _WIN32
+                 char buffer[MAX_PATH];
+                 // Dosya yolunu oluştur (manual/index.html)
+                 // Proje "raytrac_sdl2" klasöründe çalışıyorsa:
+                 GetFullPathNameA("manual\\index.html", MAX_PATH, buffer, NULL);
+                 ShellExecuteA(NULL, "open", buffer, NULL, NULL, SW_SHOWNORMAL);
+#endif
+            }
+            ImGui::Separator();
+            ImGui::MenuItem("Legacy Controls", nullptr, &show_controls_window);
             ImGui::EndMenu();
         }
 

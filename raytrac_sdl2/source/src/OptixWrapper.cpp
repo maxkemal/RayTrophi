@@ -1147,6 +1147,83 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     
     params.camera.exposure_factor = exposure_factor;
     
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CINEMA MODE - Physical Lens Imperfections
+    // ═══════════════════════════════════════════════════════════════════════════
+    params.camera.camera_mode = static_cast<int>(cpuCamera.camera_mode);
+    
+    // Chromatic Aberration
+    bool ca_active = (cpuCamera.camera_mode == CameraMode::Cinema) && cpuCamera.enable_chromatic_aberration;
+    params.camera.chromatic_aberration_enabled = ca_active ? 1 : 0;
+    params.camera.chromatic_aberration = cpuCamera.chromatic_aberration;
+    params.camera.chromatic_aberration_r = cpuCamera.chromatic_aberration_r;
+    params.camera.chromatic_aberration_b = cpuCamera.chromatic_aberration_b;
+    
+    // Vignetting
+    bool vignette_active = (cpuCamera.camera_mode == CameraMode::Cinema) && cpuCamera.enable_vignetting;
+    params.camera.vignetting_enabled = vignette_active ? 1 : 0;
+     params.camera.vignetting_amount = cpuCamera.vignetting_amount;
+    params.camera.vignetting_falloff = cpuCamera.vignetting_falloff;
+    
+    // Camera Shake (calculated on CPU using time-based noise)
+    bool shake_active = cpuCamera.enable_camera_shake && 
+                        (cpuCamera.rig_mode == Camera::RigMode::Handheld || cpuCamera.enable_camera_shake);
+    params.camera.shake_enabled = shake_active ? 1 : 0;
+    
+    if (shake_active) {
+        float time = SDL_GetTicks() / 1000.0f;
+        float skill_mult = 1.0f;
+        switch (cpuCamera.operator_skill) {
+            case Camera::OperatorSkill::Amateur: skill_mult = 1.0f; break;
+            case Camera::OperatorSkill::Intermediate: skill_mult = 0.6f; break;
+            case Camera::OperatorSkill::Professional: skill_mult = 0.3f; break;
+            case Camera::OperatorSkill::Expert: skill_mult = 0.1f; break;
+        }
+        
+        float intensity = cpuCamera.shake_intensity * skill_mult;
+        if (cpuCamera.ibis_enabled) {
+            intensity /= powf(2.0f, cpuCamera.ibis_effectiveness);
+        }
+        
+        // Simple shake calculation using sin waves
+        float freq = cpuCamera.shake_frequency;
+        params.camera.shake_offset = make_float3(
+            sinf(time * freq * 1.0f) * cpuCamera.handheld_sway_amplitude * intensity,
+            sinf(time * freq * 1.3f + 1.5f) * cpuCamera.handheld_sway_amplitude * intensity +
+            sinf(time * cpuCamera.breathing_frequency * 6.28f) * cpuCamera.breathing_amplitude * intensity,
+            sinf(time * freq * 0.7f + 3.0f) * cpuCamera.handheld_sway_amplitude * intensity * 0.3f
+        );
+        params.camera.shake_rotation = make_float3(
+            sinf(time * freq * 1.1f) * 0.003f * intensity,      // Pitch
+            sinf(time * freq * 0.9f + 1.0f) * 0.003f * intensity, // Yaw
+            sinf(time * freq * 0.5f + 2.0f) * 0.001f * intensity  // Roll
+        );
+        
+        // Focus Drift: When camera shakes, focus plane also moves slightly
+        // This simulates real handheld focus breathing
+        // More visible with closer focus distances and wider apertures
+        if (cpuCamera.enable_focus_drift && cpuCamera.focus_drift_amount > 0.0f) {
+            // Use base shake intensity (before IBIS reduction) for more visible effect
+            float base_intensity = cpuCamera.shake_intensity * skill_mult;
+            
+            // Use a low-frequency wave for focus drift (slower than position shake)
+            float focus_wave = sinf(time * freq * 0.4f + 2.5f);
+            
+            // Focus drift scales with focus distance (closer = more visible drift)
+            // At 1m focus: full drift. At 10m: reduced drift
+            float distance_scale = 1.0f / (1.0f + cpuCamera.focus_dist * 0.1f);
+            
+            // Calculate final focus variation
+            float focus_variation = focus_wave * cpuCamera.focus_drift_amount * base_intensity * distance_scale * 10.0f;
+            
+            // Apply to focus_dist (modifying the base value)
+            params.camera.focus_dist = cpuCamera.focus_dist + focus_variation;
+        }
+    } else {
+        params.camera.shake_offset = make_float3(0.0f);
+        params.camera.shake_rotation = make_float3(0.0f);
+    }
+    
     // Mark params dirty for upload to GPU
     params_dirty = true;
 }

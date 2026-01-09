@@ -12,6 +12,7 @@
 #include "SceneSelection.h"
 #include "renderer.h"
 #include "TerrainManager.h"
+#include "WaterSystem.h"  // For water keyframe animation
 #include "globals.h"
 #include "MaterialManager.h"
 #include "Matrix4x4.h"
@@ -168,6 +169,46 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
             }
             last_terrain_update_frame = current_frame;
+        }
+    }
+    
+    // --- APPLY WATER KEYFRAME ANIMATIONS ---
+    // Similar to terrain, update water parameters when frame changes
+    {
+        static int last_water_update_frame = -1;
+        if (current_frame != last_water_update_frame) {
+            for (auto& [track_name, track] : ctx.scene.timeline.tracks) {
+                if (track.keyframes.empty()) continue;
+                
+                // Check if track has water keyframes
+                bool has_water_kf = false;
+                for (const auto& kf : track.keyframes) {
+                    if (kf.has_water) {
+                        has_water_kf = true;
+                        break;
+                    }
+                }
+                
+                if (has_water_kf && track_name.find("Water_") == 0) {
+                    // Extract water surface ID from track name (e.g., "Water_1" -> 1)
+                    int water_id = -1;
+                    try {
+                        water_id = std::stoi(track_name.substr(6));
+                    } catch (...) {
+                        continue;
+                    }
+                    
+                    WaterSurface* surf = WaterManager::getInstance().getWaterSurface(water_id);
+                    if (surf) {
+                        WaterManager::getInstance().updateFromTrack(surf, track, current_frame);
+                        ctx.renderer.resetCPUAccumulation();
+                        g_bvh_rebuild_pending = true;
+                        g_optix_rebuild_pending = true;
+                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                    }
+                }
+            }
+            last_water_update_frame = current_frame;
         }
     }
     
@@ -852,6 +893,25 @@ void TimelineWidget::drawTrackList(UIContext& ctx, float list_width, float canva
         }
         ImGui::TreePop();
     }
+    
+    // Group: Water (wave animation)
+    if (ImGui::TreeNodeEx("Water", ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (auto& track : tracks) {
+            if (track.group != TrackGroup::Water) continue;
+            
+            bool is_selected = (track.entity_name == selected_track);
+            if (ImGui::Selectable(track.name.c_str(), is_selected, 0, ImVec2(list_width - 20, track_height - 4))) {
+                selected_track = track.entity_name;
+            }
+            
+            ImVec2 item_min = ImGui::GetItemRectMin();
+            draw_list->AddRectFilled(
+                ImVec2(item_min.x - 12, item_min.y + 2),
+                ImVec2(item_min.x - 4, item_min.y + 16),
+                COLOR_WATER, 2.0f);
+        }
+        ImGui::TreePop();
+    }
 }
 
 // ============================================================================
@@ -944,6 +1004,8 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                     else if (kf.has_material && track.channel == ChannelType::Material) show_diamond = true;
                     // Terrain keyframes (for morphing animation)
                     else if (kf.has_terrain && track.group == TrackGroup::Terrain) show_diamond = true;
+                    // Water keyframes (for wave parameter animation)
+                    else if (kf.has_water && track.entity_name.find("Water_") == 0) show_diamond = true;
 
                     if (show_diamond) {
                          // Build specific track ID for selection
@@ -1541,6 +1603,15 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
             t.name = entity_name;
             t.group = TrackGroup::Terrain;
             t.color = COLOR_TERRAIN;
+            t.keyframe_frames = keyframes;
+            tracks.push_back(t);
+        } else if (entity_name.find("Water_") == 0) {
+            // Water surface track (wave parameter animation)
+            TimelineTrack t;
+            t.entity_name = entity_name;
+            t.name = entity_name;  // e.g. "Water_1"
+            t.group = TrackGroup::Water;
+            t.color = COLOR_WATER;
             t.keyframe_frames = keyframes;
             tracks.push_back(t);
         } else if (has_transform || has_material) {

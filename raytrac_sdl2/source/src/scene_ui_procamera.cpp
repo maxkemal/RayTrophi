@@ -562,3 +562,39 @@ void SceneUI::drawProCameraPanel(UIContext& ctx) {
     (void)ctx;  // Settings accessed via viewport controls PRO button popup
 }
 
+// Continuous Autofocus Update (Called independently of draw)
+void SceneUI::updateAutofocus(UIContext& ctx) {
+    if (!ctx.scene.camera || !ctx.scene.bvh) return;
+    
+    // Only active if Focus Mode is AF-C (Continuous)
+    if (viewport_settings.focus_mode != 2) return;
+
+    Camera& cam = *ctx.scene.camera;
+    
+    // Raycast from center (NDC 0,0)
+    float ndc_x = 0.0f; 
+    float ndc_y = 0.0f;
+    
+    float half_height = tanf(cam.vfov * 0.5f * 3.14159f / 180.0f);
+    float half_width = cam.aspect_ratio * half_height;
+    
+    Vec3 ray_dir = cam.w * (-1.0f) + cam.u * (ndc_x * half_width) + cam.v * (ndc_y * half_height);
+    ray_dir = ray_dir.normalize();
+    
+    Ray ray(cam.lookfrom, ray_dir);
+    HitRecord rec;
+    
+    // Use large t_max
+    if (ctx.scene.bvh->hit(ray, 0.001f, 10000.0f, rec)) {
+        if (std::abs(cam.focus_dist - rec.t) > 0.05f) { 
+            cam.focus_dist = rec.t;
+            
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->setCameraParams(cam);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            ctx.renderer.resetCPUAccumulation();
+        }
+    }
+}
+

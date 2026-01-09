@@ -31,10 +31,11 @@
 void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
 
-    // Positioning - right side, top aligned
-    float margin_right = 1.0f;  // Very close to right edge
+    // Positioning - right side, top aligned (with proper margin for visibility)
+    float margin_right = 8.0f;  // Proper margin from right edge
     float menu_height = 19.0f;
-    ImVec2 window_pos(io.DisplaySize.x - 220.0f - margin_right, menu_height); // Align to top of viewport
+    float controls_width = 280.0f;  // Increased width to fit all controls including Median/Individual combo
+    ImVec2 window_pos(io.DisplaySize.x - controls_width - margin_right, menu_height); // Align to top of viewport
 
     ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.0f); // Fully transparent
@@ -475,13 +476,47 @@ void SceneUI::drawZoomRing(UIContext& ctx) {
     }
 
     if (is_dragging_zoom) {
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            // Calculate FOV change based on horizontal mouse movement
+        // Enforce Prime/Zoom constraints
+        int lens_idx = cam.lens_preset_index;
+        bool is_prime = false;
+        float min_limit_mm = 12.0f;
+        float max_limit_mm = 1200.0f;
+        
+        // Validation of index
+        if (lens_idx > 0 && lens_idx < (int)CameraPresets::LENS_PRESET_COUNT) {
+            const auto& preset = CameraPresets::LENS_PRESETS[lens_idx];
+            if (!preset.is_zoom) {
+                is_prime = true;
+            } else {
+                min_limit_mm = preset.min_mm;
+                max_limit_mm = preset.max_mm;
+            }
+        }
+        
+        // Disable drag if Prime lens
+        if (is_prime) {
+             is_dragging_zoom = false; // Stop dragging immediately
+             // Ideally show a toast/notification "Prime Lens - Fixed Focal Length"
+             addViewportMessage("Prime Lens: Fixed Focal Length", 1.0f, ImVec4(1, 0.5f, 0, 1));
+        }
+        else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             float delta_x = mouse.x - drag_start_x;
-            float sensitivity = 0.15f;  // FOV change per pixel
+            
+            // Calculate current focal length from drag_start_fov
+            float start_focal = 24.0f / (2.0f * tanf(drag_start_fov * 0.5f * 3.14159f / 180.0f));
+            
+            // Adjust sensitivity based on focal length
+            float sensitivity = 0.15f;  
+            if (start_focal > 300.0f) sensitivity = 0.02f; 
+            else if (start_focal > 100.0f) sensitivity = 0.05f;
 
             fov = drag_start_fov + delta_x * sensitivity;
-            fov = std::max(10.0f, std::min(fov, 120.0f));  // Clamp
+            
+            // Clamp to active lens capacity (or global limits if Custom)
+            float max_fov_limit = 2.0f * atanf(24.0f / (2.0f * min_limit_mm)) * 180.0f / 3.14159f;
+            float min_fov_limit = 2.0f * atanf(24.0f / (2.0f * max_limit_mm)) * 180.0f / 3.14159f;
+            
+            fov = std::max(min_fov_limit, std::min(fov, max_fov_limit));
 
             ctx.scene.camera->fov = fov;
             cam.update_camera_vectors();
@@ -533,8 +568,8 @@ void SceneUI::drawZoomRing(UIContext& ctx) {
         draw_list->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), ring_col, 1.0f);
     }
 
-    // Current FOV marker position (maps FOV 10-120 to angle)
-    float fov_t = (fov - 10.0f) / 110.0f;  // 0 to 1
+    // Current FOV marker position (maps FOV 1.0-120 to angle)
+    float fov_t = (fov - 1.0f) / 119.0f;  // 0 to 1 (Range: 1 to 120)
     float fov_angle = -3.14159f * 0.5f + fov_t * 3.14159f;  // -90° to +90°
     float marker_x = cx + zoom_ring_radius * cosf(fov_angle);
     float marker_y = cy + zoom_ring_radius * sinf(fov_angle);
@@ -843,9 +878,10 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
             fstop_idx = std::max(0, std::min(new_idx, (int)CameraPresets::FSTOP_PRESET_COUNT - 1));
             if (fstop_idx != old_idx) {
                 // Update actual aperture and lens_radius from f-stop preset
-                // Using the preset's aperture_value for consistency with hierarchy panel
+                float f_val = CameraPresets::FSTOP_PRESETS[fstop_idx].f_number;
                 cam.aperture = CameraPresets::FSTOP_PRESETS[fstop_idx].aperture_value;
-                cam.lens_radius = cam.aperture * 0.5f;  // DOF uses lens_radius!
+                cam.lens_radius = cam.aperture * 0.5f;
+                cam.fstop_preset_index = fstop_idx; // Synch preset index
                 value_changed = true;
             }
         }
@@ -986,6 +1022,49 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
         ImVec2 hint_size = ImGui::CalcTextSize(hint);
         draw_list->AddText(ImVec2(cx - hint_size.x * 0.5f, cy + height * 0.5f + 10), col_value_hover, hint);
     }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // LENS INFO (Below the triangle - transparent overlay)
+    // ─────────────────────────────────────────────────────────────────────────
+    float lens_y = cy + height * 0.5f + 35.0f;  // Moved up (was +50)
+    
+    // Calculate focal length from FOV
+    float fov = (float)cam.vfov;
+    float focal_mm = 24.0f / (2.0f * tanf(fov * 0.5f * 3.14159f / 180.0f));
+    
+    // Determine lens type name
+    const char* lens_type = "";
+    if (focal_mm < 20.0f) lens_type = "Ultra Wide";
+    else if (focal_mm < 28.0f) lens_type = "Wide";
+    else if (focal_mm < 40.0f) lens_type = "Std Wide";
+    else if (focal_mm < 60.0f) lens_type = "Normal";
+    else if (focal_mm < 100.0f) lens_type = "Portrait";
+    else if (focal_mm < 200.0f) lens_type = "Tele";
+    else if (focal_mm < 400.0f) lens_type = "Long Tele";
+    else if (focal_mm < 800.0f) lens_type = "Super Tele";
+    else lens_type = "Extreme";
+    
+    // Line 1: Focal length + type
+    char lens_line1[48];
+    snprintf(lens_line1, sizeof(lens_line1), "%.0fmm %s", focal_mm, lens_type);
+    ImVec2 lens1_size = ImGui::CalcTextSize(lens_line1);
+    
+    // Semi-transparent colors
+    ImU32 col_lens_label = IM_COL32(180, 200, 255, 180);
+    ImU32 col_lens_value = IM_COL32(255, 230, 150, 200);
+    
+    // Shadow + text
+    draw_list->AddText(ImVec2(cx - lens1_size.x * 0.5f + 1, lens_y + 1), IM_COL32(0, 0, 0, 150), lens_line1);
+    draw_list->AddText(ImVec2(cx - lens1_size.x * 0.5f, lens_y), col_lens_value, lens_line1);
+    
+    // Line 2: Focus distance
+    char lens_line2[32];
+    snprintf(lens_line2, sizeof(lens_line2), "Focus: %.2fm", (float)cam.focus_dist);
+    ImVec2 lens2_size = ImGui::CalcTextSize(lens_line2);
+    
+    // Increased spacing (+18px instead of +15/16) to prevent overlap
+    draw_list->AddText(ImVec2(cx - lens2_size.x * 0.5f + 1, lens_y + 19), IM_COL32(0, 0, 0, 150), lens_line2);
+    draw_list->AddText(ImVec2(cx - lens2_size.x * 0.5f, lens_y + 18), col_lens_label, lens_line2);
 }
 
 // ============================================================================
@@ -1145,4 +1224,105 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
     }
     ImGui::End();
     ImGui::PopStyleVar();
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// LENS INFO HUD (Top-left corner - shows current lens and settings)
+// ═════════════════════════════════════════════════════════════════════════════
+void SceneUI::drawLensInfoHUD(UIContext& ctx) {
+    if (!ctx.scene.camera) return;
+    if (!viewport_settings.show_camera_hud) return;
+    
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+    
+    Camera& cam = *ctx.scene.camera;
+    
+    // Position: Top-left corner, below menu bar
+    float margin_left = 10.0f;
+    float margin_top = 45.0f;  // Below menu bar
+    float box_width = 200.0f;
+    float box_height = 85.0f;
+    
+    ImVec2 box_pos(margin_left, margin_top);
+    
+    // Colors
+    ImU32 col_bg = IM_COL32(20, 25, 30, 200);
+    ImU32 col_border = IM_COL32(80, 100, 120, 200);
+    ImU32 col_title = IM_COL32(100, 180, 255, 255);
+    ImU32 col_label = IM_COL32(180, 180, 180, 255);
+    ImU32 col_value = IM_COL32(255, 220, 100, 255);
+    ImU32 col_fov = IM_COL32(100, 255, 150, 255);
+    
+    // Draw background
+    draw_list->AddRectFilled(box_pos, ImVec2(box_pos.x + box_width, box_pos.y + box_height), col_bg, 5.0f);
+    draw_list->AddRect(box_pos, ImVec2(box_pos.x + box_width, box_pos.y + box_height), col_border, 5.0f, 0, 1.5f);
+    
+    // Calculate focal length from FOV
+    float fov = (float)cam.vfov;
+    float focal_mm = 24.0f / (2.0f * tanf(fov * 0.5f * 3.14159f / 180.0f));
+    
+    // Determine lens type name
+    const char* lens_type = "Custom";
+    if (focal_mm < 20.0f) lens_type = "Ultra Wide";
+    else if (focal_mm < 28.0f) lens_type = "Wide Angle";
+    else if (focal_mm < 40.0f) lens_type = "Standard Wide";
+    else if (focal_mm < 60.0f) lens_type = "Normal";
+    else if (focal_mm < 100.0f) lens_type = "Portrait";
+    else if (focal_mm < 200.0f) lens_type = "Telephoto";
+    else if (focal_mm < 400.0f) lens_type = "Long Telephoto";
+    else if (focal_mm < 800.0f) lens_type = "Super Telephoto";
+    else lens_type = "Extreme Telephoto";
+    
+    // Get f-stop from preset
+    float f_stop = 2.8f;
+    if (cam.fstop_preset_index > 0 && cam.fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
+        f_stop = CameraPresets::FSTOP_PRESETS[cam.fstop_preset_index].f_number;
+    }
+    
+    // Draw icon/title
+    float x = box_pos.x + 8.0f;
+    float y = box_pos.y + 5.0f;
+    draw_list->AddText(ImVec2(x, y), col_title, "LENS");
+    
+    // Line 1: Focal Length + Type
+    y += 18.0f;
+    char line1[64];
+    snprintf(line1, sizeof(line1), "%.0fmm %s", focal_mm, lens_type);
+    draw_list->AddText(ImVec2(x, y), col_value, line1);
+    
+    // Line 2: FOV
+    y += 16.0f;
+    char line2[32];
+    snprintf(line2, sizeof(line2), "FOV: %.1f", fov);
+    draw_list->AddText(ImVec2(x, y), col_fov, line2);
+    draw_list->AddText(ImVec2(x + 70, y), col_label, "\xC2\xB0");  // degree symbol
+    
+    // Line 3: Aperture and Focus
+    y += 16.0f;
+    char line3[64];
+    snprintf(line3, sizeof(line3), "f/%.1f  Focus: %.2fm", f_stop, (float)cam.focus_dist);
+    draw_list->AddText(ImVec2(x, y), col_label, line3);
+    
+    // Camera Mode badge
+    y += 18.0f;
+    const char* mode_label = "AUTO";
+    ImU32 mode_color = IM_COL32(100, 200, 100, 255);
+    
+    if (cam.camera_mode == CameraMode::Pro) {
+        mode_label = "PRO";
+        mode_color = IM_COL32(100, 150, 255, 255);
+    } else if (cam.camera_mode == CameraMode::Cinema) {
+        mode_label = "CINEMA";
+        mode_color = IM_COL32(255, 180, 80, 255);
+    }
+    
+    draw_list->AddRectFilled(ImVec2(x, y), ImVec2(x + 50, y + 14), mode_color, 3.0f);
+    draw_list->AddText(ImVec2(x + 4, y), IM_COL32(0, 0, 0, 255), mode_label);
+    
+    // Shake indicator (if active)
+    if (cam.enable_camera_shake) {
+        draw_list->AddRectFilled(ImVec2(x + 55, y), ImVec2(x + 105, y + 14), IM_COL32(200, 100, 50, 255), 3.0f);
+        draw_list->AddText(ImVec2(x + 59, y), IM_COL32(255, 255, 255, 255), "SHAKE");
+    }
 }

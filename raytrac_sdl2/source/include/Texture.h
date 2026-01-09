@@ -426,10 +426,10 @@ public:
                 auto end_time = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
-                SCENE_LOG_INFO("[FILE CACHE HIT] " + filename +
-                    " | " + std::to_string(width) + "x" + std::to_string(height) +
-                    " | Fast memcpy load" +
-                    " | " + std::to_string(duration.count()) + "ms");
+                // SCENE_LOG_INFO("[FILE CACHE HIT] " + filename +
+                //     " | " + std::to_string(width) + "x" + std::to_string(height) +
+                //     " | Fast memcpy load" +
+                //     " | " + std::to_string(duration.count()) + "ms");
                 return;
             }
             else {
@@ -532,12 +532,12 @@ public:
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
 
-        SCENE_LOG_INFO("[FILE LOAD SUCCESS] '" + filename + "' | " + std::to_string(width) + "x" +
+        /* SCENE_LOG_INFO("[FILE LOAD SUCCESS] '" + filename + "' | " + std::to_string(width) + "x" +
             std::to_string(height) + (has_alpha ? " | alpha" : " | opaque") +
             (is_gray_scale ? " | grayscale" : " | color") +
             " | Fast memcpy load" +
             " | Cache size now: " + std::to_string(FileTextureCache::instance().size()) +
-            " | Total time: " + std::to_string(duration.count()) + "ms");
+            " | Total time: " + std::to_string(duration.count()) + "ms"); */
     }
 
     // ===== Constructor Memory Buffer - Embedded texture'lar için dosya yazmadan yükleme =====
@@ -617,9 +617,9 @@ public:
         auto perf_end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(perf_end - perf_start);
         
-        SCENE_LOG_INFO("[MEMORY LOAD] Texture loaded from buffer: " + textureName + 
-                       " | " + std::to_string(width) + "x" + std::to_string(height) +
-                       " | " + std::to_string(duration.count()) + "ms");
+        // SCENE_LOG_INFO("[MEMORY LOAD] Texture loaded from buffer: " + textureName + 
+        //                " | " + std::to_string(width) + "x" + std::to_string(height) +
+        //                " | " + std::to_string(duration.count()) + "ms");
     }
     
     Vec3 get_color(float u, float v) const {
@@ -686,7 +686,7 @@ public:
             cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
             err = cudaMallocArray(&cuda_array, &desc, width, height);
             if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("cudaMallocArray (float) failed: " + std::string(cudaGetErrorString(err)));
+                SCENE_LOG_ERROR("cudaMallocArray (float) failed for " + std::to_string(width) + "x" + std::to_string(height) + ": " + std::string(cudaGetErrorString(err)));
                 return false;
             }
             err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
@@ -727,7 +727,7 @@ public:
             cudaChannelFormatDesc desc = cudaCreateChannelDesc<uchar4>();
             err = cudaMallocArray(&cuda_array, &desc, width, height);
             if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("cudaMallocArray failed: " + std::string(cudaGetErrorString(err)));
+                SCENE_LOG_ERROR("cudaMallocArray failed for " + std::to_string(width) + "x" + std::to_string(height) + ": " + std::string(cudaGetErrorString(err)));
                 return false;
             }
 
@@ -778,10 +778,10 @@ public:
         default: break;
         }
 
-        SCENE_LOG_INFO("Texture uploaded to GPU | " +
-            std::to_string(width) + "x" + std::to_string(height) +
-            " | Type: " + std::string(type_str) +
-            (needs_srgb_conversion ? " | sRGB->Linear converted" : " | Linear (no conversion)"));
+        // SCENE_LOG_INFO("Texture uploaded to GPU | " +
+        //     std::to_string(width) + "x" + std::to_string(height) +
+        //     " | Type: " + std::string(type_str) +
+        //     (needs_srgb_conversion ? " | sRGB->Linear converted" : " | Linear (no conversion)"));
 
         return true;
     }

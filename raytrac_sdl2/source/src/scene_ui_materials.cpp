@@ -447,109 +447,134 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
         bool changed = false;
 
+        // ── DISTINCT INPUT FIELD STYLING FOR VOLUMETRIC PANEL (For Colors only) ────────────────
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
+
         // --- Reuse Volumetric UI Logic ---
         Vec3 alb = vol_mat->getAlbedo();
         if (ImGui::ColorEdit3("Scattering Color", &alb.x)) { vol_mat->setAlbedo(alb); changed = true; }
 
+        // Pop styling for ColorEdit
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(3);
+
+        ImGui::Spacing();
+
+        // LCD Sliders for Volumetric Params
         float dens = (float)vol_mat->getDensity();
-        if (ImGui::SliderFloat("Density", &dens, 0.0f, 10.0f)) { vol_mat->setDensity(dens); changed = true; }
+        if (SceneUI::DrawSmartFloat("dens", "Density", &dens, 0.0f, 10.0f, "%.2f", false, nullptr, 16)) { 
+            vol_mat->setDensity(dens); changed = true; 
+        }
 
         float scatt = (float)vol_mat->getScattering();
-        if (ImGui::SliderFloat("Scattering", &scatt, 0.0f, 5.0f)) { vol_mat->setScattering(scatt); changed = true; }
+        if (SceneUI::DrawSmartFloat("scatt", "Scatter", &scatt, 0.0f, 5.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setScattering(scatt); changed = true; 
+        }
 
         float abs = (float)vol_mat->getAbsorption();
-        if (ImGui::SliderFloat("Absorption", &abs, 0.0f, 2.0f)) { vol_mat->setAbsorption(abs); changed = true; }
+        if (SceneUI::DrawSmartFloat("abs", "Absorp", &abs, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setAbsorption(abs); changed = true; 
+        }
 
         float g = (float)vol_mat->getG();
-        if (ImGui::SliderFloat("Anisotropy", &g, -0.99f, 0.99f)) { vol_mat->setG(g); changed = true; }
+        if (SceneUI::DrawSmartFloat("aniso", "Aniso", &g, -0.99f, 0.99f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setG(g); changed = true; 
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Phase Function Anisotropy (G)\n>0 Forward, <0 Backward");
 
         // Emission Color with Strength Control                
         Vec3 emis = vol_mat->getEmissionColor();
-        // Emissive Strength Logic (Infer max component as strength)
         float max_e = emis.x;
         if (emis.y > max_e) max_e = emis.y;
         if (emis.z > max_e) max_e = emis.z;
         float strength = (max_e > 1.0f) ? max_e : 1.0f;
-        if (max_e < 0.001f) strength = 1.0f; // Default for black
+        if (max_e < 0.001f) strength = 1.0f; 
 
         Vec3 normalized_emis = (max_e > 0.001f) ? emis * (1.0f / strength) : emis;
+        bool em_changed = false;
 
-        if (ImGui::ColorEdit3("Emission Color", &normalized_emis.x)) {
-            vol_mat->setEmissionColor(normalized_emis * strength);
-            changed = true;
-        }
-        if (ImGui::DragFloat("Emission Strength", &strength, 0.1f, 0.0f, 1000.0f)) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+        if (ImGui::ColorEdit3("Emission Color", &normalized_emis.x)) em_changed = true;
+        ImGui::PopStyleColor();
+
+        // Use LCD slider for emission strength
+        if (SceneUI::DrawSmartFloat("emstr", "EmStr", &strength, 0.0f, 100.0f, "%.1f", false, nullptr, 16)) em_changed = true;
+        
+        if (em_changed) {
             vol_mat->setEmissionColor(normalized_emis * strength);
             changed = true;
         }
 
         float n_scale = vol_mat->getNoiseScale();
-        if (ImGui::DragFloat("Noise Scale", &n_scale, 0.01f, 0.01f, 100.0f)) {
-            vol_mat->setNoiseScale(n_scale);
+        if (SceneUI::DrawSmartFloat("nscale", "Scale", &n_scale, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setNoiseScale(n_scale); 
             changed = true;
         }
 
         float void_t = vol_mat->getVoidThreshold();
-        if (ImGui::SliderFloat("Void Threshold", &void_t, 0.0f, 1.0f)) {
-            vol_mat->setVoidThreshold(void_t);
+        if (SceneUI::DrawSmartFloat("void", "Void", &void_t, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setVoidThreshold(void_t); 
             changed = true;
         }
-        UIWidgets::HelpMarker("Controls empty space amount (Higher = More Voids)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls empty space amount (Higher = More Voids)");
 
         // Ray Marching Quality Settings
+        ImGui::Separator();
+        ImGui::TextDisabled("Ray Marching Quality:");
+        
         float step_size = vol_mat->getStepSize();
-        if (ImGui::DragFloat("Step Size (Quality)", &step_size, 0.001f, 0.001f, 1.0f, "%.4f")) {
-            vol_mat->setStepSize(step_size);
+        if (SceneUI::DrawSmartFloat("step", "Step", &step_size, 0.001f, 1.0f, "%.4f", false, nullptr, 16)) {
+            vol_mat->setStepSize(step_size); 
             changed = true;
         }
-        UIWidgets::HelpMarker("Smaller values = Higher Quality (Slower)");
-
-        int max_steps = vol_mat->getMaxSteps();
-        if (ImGui::DragInt("Max Steps", &max_steps, 1, 1, 1000)) {
-            vol_mat->setMaxSteps(max_steps);
-            changed = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Smaller values = Higher Quality (Slower)");
+        
+        float max_steps_f = (float)vol_mat->getMaxSteps(); // LCD expects float
+        if (SceneUI::DrawSmartFloat("mstep", "MaxStp", &max_steps_f, 1.0f, 1000.0f, "%.0f", false, nullptr, 16)) {
+             vol_mat->setMaxSteps((int)max_steps_f);
+             changed = true;
         }
 
         // ═══════════════════════════════════════════════════════════════════
-        // MULTI-SCATTERING CONTROLS (NEW)
+        // MULTI-SCATTERING CONTROLS
         // ═══════════════════════════════════════════════════════════════════
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Multi-Scattering");
 
         float multi_scatter = vol_mat->getMultiScatter();
-        if (ImGui::SliderFloat("Multi-Scatter##vol", &multi_scatter, 0.0f, 1.0f)) {
-            vol_mat->setMultiScatter(multi_scatter);
-            changed = true;
+        if (SceneUI::DrawSmartFloat("mscat", "MScat", &multi_scatter, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setMultiScatter(multi_scatter); changed = true;
         }
-        UIWidgets::HelpMarker("Controls multi-scattering brightness (0=single scatter, 1=full multi-scatter)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls multi-scattering brightness (0=single scatter, 1=full multi-scatter)");
 
         float g_back = vol_mat->getGBack();
-        if (ImGui::SliderFloat("Backward G##vol", &g_back, -0.99f, 0.0f)) {
-            vol_mat->setGBack(g_back);
-            changed = true;
+        if (SceneUI::DrawSmartFloat("gback", "GBack", &g_back, -0.99f, 0.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setGBack(g_back); changed = true;
         }
-        UIWidgets::HelpMarker("Backward scattering anisotropy for silver lining effect");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Backward scattering anisotropy for silver lining effect");
 
         float lobe_mix = vol_mat->getLobeMix();
-        if (ImGui::SliderFloat("Lobe Mix##vol", &lobe_mix, 0.0f, 1.0f)) {
-            vol_mat->setLobeMix(lobe_mix);
-            changed = true;
+        if (SceneUI::DrawSmartFloat("lmix", "LobeMx", &lobe_mix, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setLobeMix(lobe_mix); changed = true;
         }
-        UIWidgets::HelpMarker("Forward/Backward lobe blend (1.0=all forward, 0.0=all backward)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Forward/Backward lobe blend (1.0=all forward, 0.0=all backward)");
 
-        int light_steps = vol_mat->getLightSteps();
-        if (ImGui::SliderInt("Shadow Steps##vol", &light_steps, 0, 8)) {
-            vol_mat->setLightSteps(light_steps);
-            changed = true;
+        float light_steps_f = (float)vol_mat->getLightSteps();
+        if (SceneUI::DrawSmartFloat("lstep", "ShdStp", &light_steps_f, 0.0f, 8.0f, "%.0f", false, nullptr, 8)) {
+            vol_mat->setLightSteps((int)light_steps_f); changed = true;
         }
-        UIWidgets::HelpMarker("Light march steps for self-shadowing (0=disabled, 4-8 recommended)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Light march steps for self-shadowing (0=disabled, 4-8 recommended)");
 
         float shadow_str = vol_mat->getShadowStrength();
-        if (ImGui::SliderFloat("Shadow Strength##vol", &shadow_str, 0.0f, 1.0f)) {
-            vol_mat->setShadowStrength(shadow_str);
-            changed = true;
+        if (SceneUI::DrawSmartFloat("shstr", "ShdStr", &shadow_str, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {
+            vol_mat->setShadowStrength(shadow_str); changed = true;
         }
-        UIWidgets::HelpMarker("Self-shadow intensity (0=no shadows, 1=full shadows)");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Self-shadow intensity (0=no shadows, 1=full shadows)");
 
         if (changed) {
             // OPTIMIZED: Material property change - No geometry rebuild needed!
@@ -567,6 +592,17 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
         bool changed = false;
         bool texture_changed = false;
+
+        // ── DISTINCT INPUT FIELD STYLING FOR MATERIAL PANEL ──────────────────
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.35f, 0.65f, 0.45f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.45f, 0.75f, 0.55f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.40f, 0.38f, 0.8f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
 
         // ─────────────────────────────────────────────────────────────────────
         // HELPER LAMBDAS (Re-introduced for Texture Editing)
@@ -685,7 +721,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
         // ─── PROPERTIES UI ───────────────────────────────────────────────────
 
-        // Base Color (Albedo)
+        // Base Color (Albedo) - No LCD slider for Color yet, keeping standard UI
         Vec3 albedo = pbsdf->albedoProperty.color;
         float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
         bool albKeyed = isMatKeyed(active_mat_id, true, false, false, false, false, false, false, false);
@@ -700,10 +736,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // Metallic
         float metallic = pbsdf->metallicProperty.intensity;
         bool metKeyed = isMatKeyed(active_mat_id, false, false, false, true, false, false, false, false);
-        if (KeyframeButton("##MMet", metKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, true, false, false, false, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(metKeyed ? "REMOVE Metallic key" : "ADD Metallic key");
-        ImGui::SameLine();
-        if (ImGui::SliderFloat("Metallic", &metallic, 0.0f, 1.0f, "%.3f")) {
+        if (SceneUI::DrawSmartFloat("met", "Metal", &metallic, 0.0f, 1.0f, "%.3f", metKeyed, 
+            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, true, false, false, false, false); }, 16)) {
             pbsdf->metallicProperty.intensity = metallic;
             changed = true;
         }
@@ -711,10 +745,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // Roughness
         float roughness = (float)pbsdf->roughnessProperty.color.x;
         bool rghKeyed = isMatKeyed(active_mat_id, false, false, true, false, false, false, false, false);
-        if (KeyframeButton("##MRgh", rghKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, false, true, false, false, false, false, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(rghKeyed ? "REMOVE Roughness key" : "ADD Roughness key");
-        ImGui::SameLine();
-        if (ImGui::SliderFloat("Roughness", &roughness, 0.0f, 1.0f, "%.3f")) {
+        if (SceneUI::DrawSmartFloat("rgh", "Rough", &roughness, 0.0f, 1.0f, "%.3f", rghKeyed,
+            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, true, false, false, false, false, false); }, 16)) {
             pbsdf->roughnessProperty.color = Vec3(roughness);
             changed = true;
         }
@@ -722,10 +754,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // IOR
         float ior = pbsdf->ior;
         bool iorKeyed = isMatKeyed(active_mat_id, false, false, false, false, false, false, true, false);
-        if (KeyframeButton("##MIOR", iorKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, false, true, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(iorKeyed ? "REMOVE IOR key" : "ADD IOR key");
-        ImGui::SameLine();
-        if (ImGui::SliderFloat("IOR", &ior, 1.0f, 3.0f, "%.3f")) {
+        if (SceneUI::DrawSmartFloat("ior", "IOR", &ior, 1.0f, 3.0f, "%.3f", iorKeyed,
+            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, false, true, false); }, 16)) {
             pbsdf->ior = ior;
             changed = true;
         }
@@ -733,10 +763,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // Transmission
         float transmission = pbsdf->transmission;
         bool trnKeyed = isMatKeyed(active_mat_id, false, false, false, false, false, true, false, false);
-        if (KeyframeButton("##MTrn", trnKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, true, false, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(trnKeyed ? "REMOVE Transmission key" : "ADD Transmission key");
-        ImGui::SameLine();
-        if (ImGui::SliderFloat("Transmission", &transmission, 0.0f, 1.0f, "%.3f")) {
+        if (SceneUI::DrawSmartFloat("trans", "Trans", &transmission, 0.0f, 1.0f, "%.3f", trnKeyed,
+            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, true, false, false); }, 16)) {
             pbsdf->setTransmission(transmission, pbsdf->ior);
             changed = true;
         }
@@ -744,10 +772,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // Specular
         float specular = pbsdf->specularProperty.intensity;
         bool specKeyed = isMatKeyed(active_mat_id, false, false, false, false, false, false, false, true);
-        if (KeyframeButton("##MSpec", specKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, false, false, true); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(specKeyed ? "REMOVE Specular key" : "ADD Specular key");
-        ImGui::SameLine();
-        if (ImGui::SliderFloat("Specular", &specular, 0.0f, 1.0f, "%.3f")) {
+        if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
+            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, false, false, true); }, 16)) {
             pbsdf->specularProperty.intensity = specular;
             changed = true;
         }
@@ -755,10 +781,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // Opacity
         float opacity = pbsdf->opacityProperty.alpha;
         bool opKeyed = isMatKeyed(active_mat_id, false, true, false, false, false, false, false, false);
-        if (KeyframeButton("##MOpa", opKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, true, false, false, false, false, false, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(opKeyed ? "REMOVE Opacity key" : "ADD Opacity key");
-        ImGui::SameLine();
-        if (ImGui::SliderFloat("Opacity", &opacity, 0.0f, 1.0f, "%.3f")) {
+        if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,
+            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, true, false, false, false, false, false, false); }, 16)) {
             pbsdf->opacityProperty.alpha = opacity;
             changed = true;
         }
@@ -776,7 +800,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         }
 
         float emissionStr = pbsdf->emissionProperty.intensity;
-        if (ImGui::DragFloat("Emission Strength", &emissionStr, 0.1f, 0.0f, 1000.0f)) {
+        if (SceneUI::DrawSmartFloat("mems", "EmStr", &emissionStr, 0.0f, 1000.0f, "%.1f", false, nullptr, 12)) {
             pbsdf->emissionProperty.intensity = emissionStr;
             changed = true;
         }
@@ -789,7 +813,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             
             // SSS Amount
             float sss_amount = pbsdf->subsurface;
-            if (ImGui::SliderFloat("Subsurface", &sss_amount, 0.0f, 1.0f, "%.3f")) {
+            if (SceneUI::DrawSmartFloat("sss", "Subsurf", &sss_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
                 pbsdf->subsurface = sss_amount;
                 changed = true;
             }
@@ -815,7 +839,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             
             // SSS Scale
             float sss_scale = pbsdf->subsurfaceScale;
-            if (ImGui::DragFloat("Scale", &sss_scale, 0.001f, 0.001f, 2.0f, "%.4f")) {
+            if (SceneUI::DrawSmartFloat("sscl", "Scale", &sss_scale, 0.001f, 2.0f, "%.4f", false, nullptr, 12)) {
                 pbsdf->subsurfaceScale = sss_scale;
                 changed = true;
             }
@@ -823,7 +847,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             
             // SSS Anisotropy
             float sss_aniso = pbsdf->subsurfaceAnisotropy;
-            if (ImGui::SliderFloat("Anisotropy##SSS", &sss_aniso, -0.9f, 0.9f, "%.2f")) {
+            if (SceneUI::DrawSmartFloat("ssani", "Aniso", &sss_aniso, -0.9f, 0.9f, "%.2f", false, nullptr, 12)) {
                 pbsdf->subsurfaceAnisotropy = sss_aniso;
                 changed = true;
             }
@@ -877,14 +901,14 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         if (ImGui::TreeNode("Clear Coat")) {
             
             float cc_amount = pbsdf->clearcoat;
-            if (ImGui::SliderFloat("Clear Coat", &cc_amount, 0.0f, 1.0f, "%.3f")) {
+            if (SceneUI::DrawSmartFloat("cc", "ClearCt", &cc_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
                 pbsdf->clearcoat = cc_amount;
                 changed = true;
             }
             UIWidgets::HelpMarker("Extra glossy layer on top (like car paint lacquer)");
             
             float cc_roughness = pbsdf->clearcoatRoughness;
-            if (ImGui::SliderFloat("Roughness##CC", &cc_roughness, 0.0f, 1.0f, "%.3f")) {
+            if (SceneUI::DrawSmartFloat("ccr", "CCRough", &cc_roughness, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
                 pbsdf->clearcoatRoughness = cc_roughness;
                 changed = true;
             }
@@ -907,7 +931,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         if (ImGui::TreeNode("Translucent")) {
             
             float trans = pbsdf->translucent;
-            if (ImGui::SliderFloat("Translucent", &trans, 0.0f, 1.0f, "%.3f")) {
+            if (SceneUI::DrawSmartFloat("trns", "Transl", &trans, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
                 pbsdf->translucent = trans;
                 changed = true;
             }
@@ -926,56 +950,68 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type) {
                 ImGui::PushID(label);
 
-                ImGui::Text("%s:", label);
-                ImGui::SameLine(100);
+                // Label column (fixed width for alignment)
+                ImGui::Text("%s", label);
+                ImGui::SameLine(70);
 
                 if (tex_ref && tex_ref->is_loaded()) {
-                    // Show texture info
+                    // Show texture info - short file name (keeps panel compact)
                     std::string name = tex_ref->name;
                     std::string shortName = name;
                     size_t lastSlash = name.find_last_of("/\\");
                     if (lastSlash != std::string::npos) shortName = name.substr(lastSlash + 1);
-                    if (shortName.length() > 20) shortName = "..." + shortName.substr(shortName.length() - 17);
+                    // Short but readable (15 chars)
+                    if (shortName.length() > 15) shortName = shortName.substr(0, 12) + "...";
 
                     ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", shortName.c_str());
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
 
+                    // Buttons with reasonable size (not too small)
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(%dx%d)", tex_ref->width, tex_ref->height);
-
-                    // Clear button
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("X##Clear")) {
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));  // Bigger than before
+                    
+                    // Delete button (X)
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.2f, 0.2f, 1.0f));
+                    if (ImGui::SmallButton("X")) {
                         tex_ref = nullptr;
                         texture_changed = true;
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove Texture");
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove");
 
-                    // Copy Button
-                    ImGui::SameLine();
-                    if (ImGui::Button("C##Copy")) {
+                    // Copy button (C)
+                    ImGui::SameLine(0, 4);
+                    if (ImGui::SmallButton("C")) {
                         texture_clipboard = tex_ref;
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy Texture to Clipboard");
-
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy");
+                    
+                    ImGui::PopStyleVar();
                 }
                 else {
-                    ImGui::TextDisabled("[None]");
+                    ImGui::TextDisabled("-");
 
+                    // Buttons for empty slot
+                    ImGui::SameLine();
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+                    
                     // Paste Button (Only if clipboard has content)
                     if (texture_clipboard) {
-                        ImGui::SameLine();
-                        if (ImGui::Button("P##Paste")) {
+                        if (ImGui::SmallButton("P")) {
                             tex_ref = texture_clipboard;
                             texture_changed = true;
                         }
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste Texture from Clipboard");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste");
+                        ImGui::SameLine(0, 4);
                     }
+                    
+                    ImGui::PopStyleVar();
                 }
 
-                // Load button
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Load...")) {
+                // Load button - always visible
+                ImGui::SameLine(0, 4);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+                if (ImGui::SmallButton("+")) {
                     std::string initialDir = "";
                     std::string defaultFile = "";
 
@@ -988,7 +1024,6 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                         }
                     }
                     else if (texture_clipboard && !texture_clipboard->name.empty()) {
-                        // Optional: Start from clipboard's location if slot is empty
                         std::string fullPath = texture_clipboard->name;
                         size_t lastSlash = fullPath.find_last_of("/\\");
                         if (lastSlash != std::string::npos) {
@@ -1002,6 +1037,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                         texture_changed = true;
                     }
                 }
+                ImGui::PopStyleVar();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load texture...");
+                
                 ImGui::PopID();
                 };
 
@@ -1019,6 +1057,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             TriggerMaterialUpdate(texture_changed);
             g_ProjectManager.markModified();
         }
+        
+        // Pop all styling for Surface Properties
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(6);
     }
     else {
         ImGui::TextDisabled("Unknown material type.");

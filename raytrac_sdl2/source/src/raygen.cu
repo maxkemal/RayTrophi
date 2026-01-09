@@ -116,9 +116,39 @@ extern "C" __global__ void __raygen__rg() {
         float u = (i + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_width);
         float v = (j + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_height);
 
-        Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-        float3 sample = ray_color(ray, &rng);
-        color_sum += sample;
+        // ═══════════════════════════════════════════════════════════════════════════
+        // CHROMATIC ABERRATION (Cinema Mode)
+        // Traces separate rays for R, G, B channels with radially offset UVs
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (optixLaunchParams.camera.chromatic_aberration_enabled && 
+            optixLaunchParams.camera.chromatic_aberration > 0.0001f) {
+            
+            float ca_amount = optixLaunchParams.camera.chromatic_aberration;
+            float r_scale = optixLaunchParams.camera.chromatic_aberration_r; // > 1.0 = outward
+            float b_scale = optixLaunchParams.camera.chromatic_aberration_b; // < 1.0 = inward
+            
+            // Red channel - slightly outward
+            float2 uv_r = apply_chromatic_aberration(u, v, ca_amount, r_scale);
+            Ray ray_r = get_ray_from_camera(optixLaunchParams.camera, uv_r.x, uv_r.y, &rng);
+            float3 color_r = ray_color(ray_r, &rng);
+            
+            // Green channel - no offset
+            Ray ray_g = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
+            float3 color_g = ray_color(ray_g, &rng);
+            
+            // Blue channel - slightly inward
+            float2 uv_b = apply_chromatic_aberration(u, v, ca_amount, b_scale);
+            Ray ray_b = get_ray_from_camera(optixLaunchParams.camera, uv_b.x, uv_b.y, &rng);
+            float3 color_b = ray_color(ray_b, &rng);
+            
+            // Combine channels
+            color_sum += make_float3(color_r.x, color_g.y, color_b.z);
+        } else {
+            // Standard rendering - single ray for all channels
+            Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
+            float3 sample = ray_color(ray, &rng);
+            color_sum += sample;
+        }
     }
 
     // Average this pass's samples
@@ -128,6 +158,30 @@ extern "C" __global__ void __raygen__rg() {
     // Alternatively, apply after accumulation for post-process exposure (requires separation).
     // Current architecture resets accumulation on cam param change, so burning in is fine.
     new_color *= optixLaunchParams.camera.exposure_factor;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CINEMA MODE - Vignetting (Köşe Kararması)
+    // Applied after exposure to simulate lens light falloff
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (optixLaunchParams.camera.vignetting_enabled) {
+        // Calculate normalized distance from center (0 at center, 1 at corner)
+        float norm_x = (float(i) / float(optixLaunchParams.image_width)) * 2.0f - 1.0f;
+        float norm_y = (float(j) / float(optixLaunchParams.image_height)) * 2.0f - 1.0f;
+        float dist_sq = norm_x * norm_x + norm_y * norm_y;
+        
+        // Vignette factor: 1 at center, decreasing towards corners
+        // Using power function for controllable falloff
+        float vignette_radius = 1.414f; // sqrt(2) = corner distance
+        float normalized_dist = sqrtf(dist_sq) / vignette_radius;
+        
+        // Power-based falloff with user-controlled exponent
+        float falloff = optixLaunchParams.camera.vignetting_falloff;
+        float vignette_factor = 1.0f - optixLaunchParams.camera.vignetting_amount * 
+                                powf(normalized_dist, falloff);
+        vignette_factor = fmaxf(vignette_factor, 0.0f); // Clamp to prevent negative
+        
+        new_color *= vignette_factor;
+    }
 
     // ============ ACCUMULATION LOGIC (Cycles-style) ============
     // accumulation_buffer is float4*: RGB = accumulated color sum, W = total sample count

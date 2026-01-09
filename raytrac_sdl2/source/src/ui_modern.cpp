@@ -272,10 +272,20 @@ namespace UIWidgets {
 
 void HelpMarker(const char* desc) {
     ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
+    
+    // Use theme accent color for better visibility instead of disabled gray
+    ImVec4 helpColor = ThemeManager::instance().current().colors.accent;
+    ImGui::TextColored(helpColor, "[?]");
+    
     if (ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         ImGui::BeginTooltip();
-        ImGui::PushTextWrapPos(450.0f);
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+        
+        // Add a stylistic header
+        ImGui::TextColored(helpColor, "Info");
+        ImGui::Separator();
+        
         ImGui::TextUnformatted(desc);
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();

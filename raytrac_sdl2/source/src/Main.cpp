@@ -983,6 +983,10 @@ int main(int argc, char* argv[]) {
                     scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
 
                     scene.camera->update_camera_vectors();
+                    
+                    // Update Autofocus (AF-C) if enabled
+                    ui.updateAutofocus(ui_ctx);
+                    
                     last_camera_move_time = std::chrono::steady_clock::now();
                     camera_moved = true;
                     start_render = true;
