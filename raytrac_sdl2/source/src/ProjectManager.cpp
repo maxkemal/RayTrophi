@@ -24,6 +24,7 @@
 
 #include <chrono>
 #include "TerrainManager.h"
+#include "RiverSpline.h"
 
 #include "stb_image_write.h"
 
@@ -200,6 +201,7 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
 void ProjectManager::newProject() {
     g_project.clear();
     m_package_files.clear();
+    RiverManager::getInstance().clear();
     SCENE_LOG_INFO("New project created.");
 }
 
@@ -409,6 +411,11 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         SCENE_LOG_INFO("[ProjectManager] Saving terrain system to: " + terrainDir);
         root["terrain_system"] = TerrainManager::getInstance().serialize(terrainDir);
         
+        // River System
+        if (progress_callback) progress_callback(84, "Saving river system...");
+        root["rivers"] = RiverManager::getInstance().serialize();
+        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
+        
         // UI Settings (Pro Camera, Viewport, etc.)
         if (!scene.ui_settings_json_str.empty()) {
             try {
@@ -495,7 +502,18 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // SYNCHRONIZATION: Ensure all GPU operations complete before clearing
     // =========================================================================
     if (optix_gpu) {
-        cudaDeviceSynchronize();  // Wait for all pending CUDA work
+        cudaError_t err = cudaDeviceSynchronize();  // Wait for all pending CUDA work
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("cudaDeviceSynchronize failed during project close: " + std::string(cudaGetErrorString(err)));
+            // Attempt to reset device if context is corrupted?
+            // cudaDeviceReset(); // Risky as it destroys everything including textures
+        }
+        
+        // Clear any sticky errors
+        cudaError_t lastErr = cudaGetLastError();
+        if (lastErr != cudaSuccess) {
+            SCENE_LOG_ERROR("Clearing sticky CUDA error: " + std::string(cudaGetErrorString(lastErr)));
+        }
     }
     
     // Brief wait to allow render threads to fully stop
@@ -505,6 +523,16 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     newProject();
     TerrainManager::getInstance().removeAllTerrains(scene);
     scene.clear();
+    
+    // CRITICAL: Create a temporary placeholder camera immediately after clear()
+    // This prevents null pointer crashes if render threads access scene.camera
+    // during the brief period before cameras are loaded from project file
+    auto temp_camera = std::make_shared<Camera>(
+        Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
+        60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 6);
+    temp_camera->nodeName = "Loading...";
+    scene.addCamera(temp_camera);
+    
     renderer.resetCPUAccumulation();
     if (optix_gpu) optix_gpu->resetAccumulation();
     
@@ -600,6 +628,14 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 std::string terrainDir = abs_path.parent_path().string();
                 SCENE_LOG_INFO("[ProjectManager] Loading terrain system from: " + terrainDir);
                 TerrainManager::getInstance().deserialize(root["terrain_system"], terrainDir, scene);
+            }
+            
+            // Load River System (After terrain so rivers can follow terrain)
+            if (root.contains("rivers")) {
+                if (progress_callback) progress_callback(76, "Loading river system...");
+                RiverManager::getInstance().clear();
+                RiverManager::getInstance().deserialize(root["rivers"], scene);
+                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
             }
             
             // Load Timeline/Animation (keyframes) - AFTER Objects are created
@@ -764,6 +800,13 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
+
+    // Force initial camera update to GPU to prevent stale camera glitch
+    // This ensures the renderer uses the newly loaded camera immediately, preventing the 'default camera' flash
+    if (scene.camera) {
+        scene.camera->update_camera_vectors();
+        if (optix_gpu) optix_gpu->setCameraParams(*scene.camera);
+    }
     
     if (progress_callback) progress_callback(100, "Done.");
     SCENE_LOG_INFO("Project loaded: " + filepath + " (GPU rebuild pending on main thread)");
@@ -796,28 +839,11 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
     model.package_path = package_path;
     model.display_name = fs::path(filepath).stem().string();
     
-    // Copy file to package storage (if project folder exists)
-    if (!g_project.current_file_path.empty()) {
-        if (progress_callback) progress_callback(10, "Copying model file...");
-        fs::path project_folder = fs::path(g_project.current_file_path).parent_path();
-        fs::path dest_path = project_folder / package_path;
-        
-        try {
-            fs::create_directories(dest_path.parent_path());
-            fs::copy_file(filepath, dest_path, fs::copy_options::overwrite_existing);
-            
-            // Check for associated .bin file (GLTF standard)
-            fs::path bin_path = fs::path(filepath).replace_extension(".bin");
-            if (fs::exists(bin_path)) {
-                 fs::path dest_bin = dest_path;
-                 dest_bin.replace_extension(".bin");
-                 fs::copy_file(bin_path, dest_bin, fs::copy_options::overwrite_existing);
-                 SCENE_LOG_INFO("Copied associated bin file: " + dest_bin.filename().string());
-            }
-        } catch (const std::exception& e) {
-            SCENE_LOG_WARN("Could not copy model files: " + std::string(e.what()));
-        }
-    }
+    // NOTE: In v3.0+ format, geometry is embedded in the binary file (.bin)
+    // so we NO LONGER copy the original model file to the project folder.
+    // This saves disk space and avoids confusion.
+    // The original_path is kept for reference only (e.g., to show source).
+
     
     size_t objects_before = scene.world.objects.size();
     
@@ -1196,11 +1222,13 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         tri->setNodeName(node_name);
         
         // Read skinning data (v4+)
+        bool has_skin_data = false;
         if (version >= 4) {
             uint8_t has_skin;
             in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
+            has_skin_data = (has_skin != 0);
             
-            if (has_skin) {
+            if (has_skin_data) {
                 tri->initializeSkinData();
                 
                 // Read bone weights for each vertex
@@ -1227,7 +1255,15 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         // Assign transform
         if (tr_idx < transforms.size()) {
             tri->setTransformHandle(transforms[tr_idx]);
-            tri->updateTransformedVertices();
+            
+            // CRITICAL FIX: DO NOT call updateTransformedVertices for skinned meshes!
+            // Skinned mesh vertices are computed by the animation system using bone matrices.
+            // Applying the object transform here would cause double transformation or incorrect positioning.
+            // Non-skinned meshes still need their transforms applied.
+            if (!has_skin_data) {
+                tri->updateTransformedVertices();
+            }
+            // Note: Skinned meshes will be updated when animation system runs
         }
         
         tri->update_bounding_box();
@@ -1372,6 +1408,9 @@ json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>
         c["lens_radius"] = cam->lens_radius;
         c["blade_count"] = cam->blade_count;
         c["distortion"] = cam->distortion;
+        c["body_preset_index"] = cam->body_preset_index;
+        c["iso_val"] = cam->iso;
+        c["sensor_height_mm"] = cam->sensor_height_mm;
         
         arr.push_back(c);
     }
@@ -1412,7 +1451,11 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
         cam->rig_mode = static_cast<Camera::RigMode>(c.value("rig_mode", 0));
         cam->dolly_position = c.value("dolly_pos", 0.0f);
         cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
+        cam->lens_radius = c.value("lens_radius", aperture * 0.5f);
         cam->distortion = c.value("distortion", 0.0f);
+        cam->body_preset_index = c.value("body_preset_index", 1); // Default to Full Frame (index 1)
+        cam->iso = c.value("iso_val", 100);
+        cam->sensor_height_mm = c.value("sensor_height_mm", 24.0f);
         
         scene.cameras.push_back(cam);
         

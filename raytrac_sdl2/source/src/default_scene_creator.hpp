@@ -47,14 +47,24 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrappe
         // Load the GLB/GLTF file
         renderer.create_scene(scene, optix_gpu, defaultAssetPath, nullptr);
         
-        // If camera loaded from GLB is null, create a default one
-        if (!scene.camera) {
+        // ONLY create default camera if NO cameras were loaded from file
+        // The cameras list is the source of truth - if it has cameras, don't create another
+        if (scene.cameras.empty()) {
+             SCENE_LOG_INFO("No camera in GLB file, creating default camera");
              Vec3 lookfrom(7.0f, 5.0f, 7.0f);
              Vec3 lookat(0.0f, 0.0f, 0.0f);
              Vec3 vup(0.0f, 1.0f, 0.0f);
              float dist_to_focus = (lookfrom - lookat).length();
              float ar = 16.0f/9.0f; 
-             scene.camera = std::make_shared<Camera>(lookfrom, lookat, vup, 40.0f, ar, 0.0f, dist_to_focus, 0);
+             auto default_cam = std::make_shared<Camera>(lookfrom, lookat, vup, 40.0f, ar, 0.0f, dist_to_focus, 0);
+             default_cam->nodeName = "Default Camera";
+             scene.addCamera(default_cam);
+        } else {
+             // Cameras loaded from file - ensure scene.camera pointer is synced
+             if (!scene.camera && !scene.cameras.empty()) {
+                 scene.setActiveCamera(0);
+             }
+             SCENE_LOG_INFO("Using camera from GLB file (total: " + std::to_string(scene.cameras.size()) + ")");
         }
         
         // SYNC NISHITA WITH SCENE SUN (Directional Light)
@@ -180,7 +190,8 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrappe
     scene.background_color = Vec3(0.4f, 0.6f, 0.9f);
     
     // 3. Setup Camera - Looking towards sun and horizon (Landscape view)
-    if (!scene.camera) {
+    // Only create if NO cameras exist - cameras list is the source of truth
+    if (scene.cameras.empty()) {
         // Sun is at Azimuth 45, Elevation 15.
         // Position camera "behind" the origin to look towards the sun (+X, +Z direction)
         Vec3 lookfrom(-12.0f, 3.0f, -12.0f); 
@@ -191,7 +202,9 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrappe
         float vfov = 50.0f;  // Wide FOV for landscape
         float ar = 16.0f/9.0f;
         
-        scene.camera = std::make_shared<Camera>(lookfrom, lookat, vup, vfov, ar, aperture, dist_to_focus, 0);
+        auto default_cam = std::make_shared<Camera>(lookfrom, lookat, vup, vfov, ar, aperture, dist_to_focus, 0);
+        default_cam->nodeName = "Default Camera";
+        scene.addCamera(default_cam);
     }
 
     scene.initialized = true;

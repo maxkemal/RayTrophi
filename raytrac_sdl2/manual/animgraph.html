@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Anim Graph</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2 style="margin-top:0;">RayTrophi</h2>
+        <a href="index.html" class="nav-link">Introduction</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="river.html" class="nav-link">River Tool</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="animgraph.html" class="nav-link active">Anim Graph</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <a href="index.html" class="back-btn">← Back to Home</a>
+
+            <h1>Anim Graph & State Machines</h1>
+            <p>The Animation Graph allows for complex character logic using State Machines and Blend Trees.</p>
+
+            <!-- STATE MACHINE -->
+            <h2 id="fsm">1. State Machine</h2>
+            <p>Organize animations into logical states (e.g., Idle, Walk, Jump).</p>
+
+            <div class="card">
+                <div class="screenshot-area">
+                    <img src="images/anim_fsm.png" alt="State Machine"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">
+                        Please save a screenshot of the <strong>Anim Graph State Machine</strong> as
+                        <code>manual/images/anim_fsm.png</code>
+                    </div>
+                </div>
+
+                <p><strong>Transitions:</strong> Connect states with arrows. Click an arrow to define transition
+                    conditions.</p>
+                <ul>
+                    <li><strong>Has Exit Time:</strong> Transition happens automatically when animation finishes.</li>
+                    <li><strong>Conditions:</strong> Transition happens when a parameter meets a criteria (e.g., Speed >
+                        0.1).</li>
+                </ul>
+            </div>
+
+            <!-- PARAMETERS -->
+            <h2 id="params">2. Parameters</h2>
+            <p>Variables that control the graph logic. Listed in the left panel of the Anim Graph.</p>
+
+            <div class="card">
+                <ul>
+                    <li><strong>Float:</strong> Continuous values (Speed, Direction).</li>
+                    <li><strong>Int:</strong> Discrete states (WeaponID).</li>
+                    <li><strong>Bool:</strong> Binary states (IsGrounded, IsDead).</li>
+                    <li><strong>Trigger:</strong> One-shot events (Attack, Jump).</li>
+                </ul>
+            </div>
+
+            <div style="height:50px"></div>
+        </div>
+    </div>
+
+</body>
+
+</html>

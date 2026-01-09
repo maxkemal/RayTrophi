@@ -52,7 +52,29 @@ struct gpuCamera {
     float3 vel_horizontal;   // Change in horizontal vector
     float3 vel_vertical;     // Change in vertical vector
     int motion_blur_enabled; // 0=Off, 1=On
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CINEMA MODE - Physical Lens Imperfections
+    // ═══════════════════════════════════════════════════════════════════════════
+    int camera_mode;                    // 0=Auto, 1=Pro, 2=Cinema
+    
+    // Chromatic Aberration (Renk Sapması)
+    int chromatic_aberration_enabled;   // 0=Off, 1=On
+    float chromatic_aberration;         // Amount (0-0.05)
+    float chromatic_aberration_r;       // Red channel scale
+    float chromatic_aberration_b;       // Blue channel scale
+    
+    // Vignetting (Köşe Kararması)
+    int vignetting_enabled;             // 0=Off, 1=On
+    float vignetting_amount;            // Strength (0-1)
+    float vignetting_falloff;           // Falloff curve (1.5-4.0)
+    
+    // Camera Shake Offset (calculated on CPU, applied to rays)
+    float3 shake_offset;                // Position shake (meters)
+    float3 shake_rotation;              // Rotation shake (radians)
+    int shake_enabled;                  // 0=Off, 1=On
 };
+
 struct LightGPU {
     float3 position;
     float3 direction;       // directional, spot, area için

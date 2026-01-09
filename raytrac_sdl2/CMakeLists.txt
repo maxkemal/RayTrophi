@@ -107,6 +107,7 @@ set(SOURCES_CPP
     "source/src/unified_converters.cpp"
     "source/src/InstanceGroup.cpp"
     "source/src/InstanceManager.cpp"
+    "source/src/RiverManager.cpp"
 )
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
 file(GLOB HEADERS "source/include/*.h" "source/external/imgui/*.h")

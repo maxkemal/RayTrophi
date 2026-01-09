@@ -791,6 +791,142 @@ struct TransformKeyframe {
 };
 
 
+// ============================================================================
+// WATER KEYFRAME - Ocean/water surface animation parameters
+// ============================================================================
+struct WaterKeyframe {
+    // Water surface identification
+    int water_surface_id = -1;
+    
+    // Per-property flags
+    bool has_wave_height = false;
+    bool has_wave_scale = false;
+    bool has_wind_direction = false;
+    bool has_choppiness = false;
+    bool has_alignment = false;
+    bool has_damping = false;
+    bool has_swell_amplitude = false;
+    bool has_sharpening = false;
+    bool has_detail_strength = false;
+    
+    // Property values (matches WaterWaveParams)
+    float wave_height = 2.0f;
+    float wave_scale = 50.0f;
+    float wind_direction = 0.0f;      // degrees
+    float choppiness = 1.0f;
+    float alignment = 0.5f;
+    float damping = 0.0f;
+    float swell_amplitude = 0.2f;
+    float sharpening = 0.0f;
+    float detail_strength = 0.15f;
+    
+    WaterKeyframe() = default;
+    
+    static WaterKeyframe lerp(const WaterKeyframe& a, const WaterKeyframe& b, float t) {
+        WaterKeyframe result;
+        result.water_surface_id = a.water_surface_id;
+        
+        // Wave Height
+        result.has_wave_height = a.has_wave_height || b.has_wave_height;
+        if (a.has_wave_height && b.has_wave_height) {
+            result.wave_height = a.wave_height + (b.wave_height - a.wave_height) * t;
+        } else if (a.has_wave_height) {
+            result.wave_height = a.wave_height;
+        } else if (b.has_wave_height) {
+            result.wave_height = b.wave_height;
+        }
+        
+        // Wave Scale
+        result.has_wave_scale = a.has_wave_scale || b.has_wave_scale;
+        if (a.has_wave_scale && b.has_wave_scale) {
+            result.wave_scale = a.wave_scale + (b.wave_scale - a.wave_scale) * t;
+        } else if (a.has_wave_scale) {
+            result.wave_scale = a.wave_scale;
+        } else if (b.has_wave_scale) {
+            result.wave_scale = b.wave_scale;
+        }
+        
+        // Wind Direction (with angle wrapping)
+        result.has_wind_direction = a.has_wind_direction || b.has_wind_direction;
+        if (a.has_wind_direction && b.has_wind_direction) {
+            // Handle angle wrapping for smooth interpolation
+            float diff = b.wind_direction - a.wind_direction;
+            if (diff > 180.0f) diff -= 360.0f;
+            if (diff < -180.0f) diff += 360.0f;
+            result.wind_direction = a.wind_direction + diff * t;
+            if (result.wind_direction < 0) result.wind_direction += 360.0f;
+            if (result.wind_direction >= 360.0f) result.wind_direction -= 360.0f;
+        } else if (a.has_wind_direction) {
+            result.wind_direction = a.wind_direction;
+        } else if (b.has_wind_direction) {
+            result.wind_direction = b.wind_direction;
+        }
+        
+        // Choppiness
+        result.has_choppiness = a.has_choppiness || b.has_choppiness;
+        if (a.has_choppiness && b.has_choppiness) {
+            result.choppiness = a.choppiness + (b.choppiness - a.choppiness) * t;
+        } else if (a.has_choppiness) {
+            result.choppiness = a.choppiness;
+        } else if (b.has_choppiness) {
+            result.choppiness = b.choppiness;
+        }
+        
+        // Alignment
+        result.has_alignment = a.has_alignment || b.has_alignment;
+        if (a.has_alignment && b.has_alignment) {
+            result.alignment = a.alignment + (b.alignment - a.alignment) * t;
+        } else if (a.has_alignment) {
+            result.alignment = a.alignment;
+        } else if (b.has_alignment) {
+            result.alignment = b.alignment;
+        }
+        
+        // Damping
+        result.has_damping = a.has_damping || b.has_damping;
+        if (a.has_damping && b.has_damping) {
+            result.damping = a.damping + (b.damping - a.damping) * t;
+        } else if (a.has_damping) {
+            result.damping = a.damping;
+        } else if (b.has_damping) {
+            result.damping = b.damping;
+        }
+        
+        // Swell Amplitude
+        result.has_swell_amplitude = a.has_swell_amplitude || b.has_swell_amplitude;
+        if (a.has_swell_amplitude && b.has_swell_amplitude) {
+            result.swell_amplitude = a.swell_amplitude + (b.swell_amplitude - a.swell_amplitude) * t;
+        } else if (a.has_swell_amplitude) {
+            result.swell_amplitude = a.swell_amplitude;
+        } else if (b.has_swell_amplitude) {
+            result.swell_amplitude = b.swell_amplitude;
+        }
+        
+        // Sharpening
+        result.has_sharpening = a.has_sharpening || b.has_sharpening;
+        if (a.has_sharpening && b.has_sharpening) {
+            result.sharpening = a.sharpening + (b.sharpening - a.sharpening) * t;
+        } else if (a.has_sharpening) {
+            result.sharpening = a.sharpening;
+        } else if (b.has_sharpening) {
+            result.sharpening = b.sharpening;
+        }
+        
+        // Detail Strength
+        result.has_detail_strength = a.has_detail_strength || b.has_detail_strength;
+        if (a.has_detail_strength && b.has_detail_strength) {
+            result.detail_strength = a.detail_strength + (b.detail_strength - a.detail_strength) * t;
+        } else if (a.has_detail_strength) {
+            result.detail_strength = a.detail_strength;
+        } else if (b.has_detail_strength) {
+            result.detail_strength = b.detail_strength;
+        }
+        
+        return result;
+    }
+};
+
+
 // Complete keyframe - combines all types of animation data
 struct Keyframe {
     int frame = 0;
@@ -798,7 +934,7 @@ struct Keyframe {
     MaterialKeyframe material;
     LightKeyframe light;
     CameraKeyframe camera;
-    WorldKeyframe world;        // NEW
+    WorldKeyframe world;
     
     // Flags to track what's keyframed
     bool has_transform = false;
@@ -806,9 +942,11 @@ struct Keyframe {
     bool has_light = false;
     bool has_camera = false;   
     bool has_world = false;
-    bool has_terrain = false;   // NEW: Terrain morphing support
+    bool has_terrain = false;
+    bool has_water = false;     // NEW: Water animation support
     
-    TerrainKeyframe terrain;    // NEW
+    TerrainKeyframe terrain;
+    WaterKeyframe water;        // NEW
     
     Keyframe() = default;
     Keyframe(int f) : frame(f) {}
@@ -851,6 +989,10 @@ struct ObjectAnimationTrack {
             if (kf.has_terrain) {
                 it->terrain = kf.terrain;
                 it->has_terrain = true;
+            }
+            if (kf.has_water) {
+                it->water = kf.water;
+                it->has_water = true;
             }
         } else {
             keyframes.insert(it, kf);
@@ -1105,6 +1247,23 @@ struct ObjectAnimationTrack {
         } else if (n_terrain) {
             result.terrain = n_terrain->terrain;
             result.has_terrain = true;
+        }
+        
+        // --- WATER ---
+        const Keyframe* p_water = findPrev([](const auto& k){ return k.has_water; });
+        const Keyframe* n_water = findNext([](const auto& k){ return k.has_water; });
+        
+        if (p_water && n_water) {
+            float range = (float)(n_water->frame - p_water->frame);
+            float t = (range > 0) ? (float)(current_frame - p_water->frame) / range : 0.0f;
+            result.water = WaterKeyframe::lerp(p_water->water, n_water->water, t);
+            result.has_water = true;
+        } else if (p_water) {
+            result.water = p_water->water;
+            result.has_water = true;
+        } else if (n_water) {
+            result.water = n_water->water;
+            result.has_water = true;
         }
         
         return result;

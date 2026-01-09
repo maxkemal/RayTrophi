@@ -254,10 +254,10 @@ Vec3 TerrainManager::calculateFastNormal(TerrainObject* terrain, int x, int z) {
     
     auto& hmap = terrain->heightmap;
     // Use uniform step based on max dimension to preserve aspect ratio
-    int maxDim = std::max(hmap.width, hmap.height);
-    float step = hmap.scale_xz / (float)(maxDim - 1);
-    float step_x = step;
-    float step_z = step;
+    // STRETCH MODE: Width and Height independent steps to fit scale_xz
+    // This ensures terrain is always scale_xz * scale_xz in world space
+    float step_x = hmap.scale_xz / (float)(std::max(1, hmap.width - 1));
+    float step_z = hmap.scale_xz / (float)(std::max(1, hmap.height - 1));
     
     // 4-neighbor central difference
     float hl = hmap.getHeight(x - 1, z);
@@ -290,9 +290,10 @@ Vec3 TerrainManager::calculateSobelNormal(TerrainObject* terrain, int x, int z) 
     
     auto& hmap = terrain->heightmap;
     // Use uniform step based on max dimension to preserve aspect ratio
-    int maxDim = std::max(hmap.width, hmap.height);
-    float step = hmap.scale_xz / (float)(maxDim - 1);
-    float step_x = step;
+    // STRETCH MODE: Width and Height independent steps to fit scale_xz
+    // This ensures terrain is always scale_xz * scale_xz in world space
+    float step_x = hmap.scale_xz / (float)(std::max(1, hmap.width - 1));
+    float step_z = hmap.scale_xz / (float)(std::max(1, hmap.height - 1));
     // For Sobel, still use step_x as the main scale factor
     float strength = terrain->normal_strength;
     
@@ -313,8 +314,12 @@ Vec3 TerrainManager::calculateSobelNormal(TerrainObject* terrain, int x, int z) 
     float gz = (hld + 2.0f * hd + hrd) - (hlu + 2.0f * hu + hru);
     
     // Construct normal with adjustable strength
-    // Use larger Y component to prevent steep slopes from flipping normals
-    Vec3 n(-gx * strength, 8.0f * step_x, -gz * strength);
+    // Correctly handle non-uniform steps (stretched terrain)
+    float scaleX = (strength) / (8.0f * step_x);
+    float scaleZ = (strength) / (8.0f * step_z);
+    
+    // Gradient vector (-dHeight/dx, 1, -dHeight/dz)
+    Vec3 n(-gx * scaleX, 1.0f, -gz * scaleZ);
     n = n.normalize();
     
     // CRITICAL: Ensure normal always points upward (positive Y)
@@ -357,11 +362,10 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
     float max_h = terrain->heightmap.scale_y;
     
     // Calculate step to preserve aspect ratio
-    // Use the larger dimension as the base, scale smaller dimension proportionally
-    int maxDim = std::max(w, h);
-    float step = scale / (float)(maxDim - 1);
-    float step_x = step;
-    float step_z = step;
+    // Calculate step to Stretch to Fit (Square Terrain)
+    // Use independent X and Z steps to ensure terrain fills scale_xz * scale_xz area
+    float step_x = scale / (float)(std::max(1, w - 1));
+    float step_z = scale / (float)(std::max(1, h - 1));
     
     // Pre-calculate vertices for grid
     std::vector<Vec3> positions;
@@ -3230,4 +3234,648 @@ void TerrainManager::reapplyAllFoliage(OptixWrapper* optix) {
             updateFoliage(&t, optix);
         }
     }
+}
+
+// ===========================================================================
+// RIVER BED CARVING SYSTEM
+// ===========================================================================
+
+void TerrainManager::lowerHeightAt(float worldX, float worldZ, float amount, float radius, int terrainId) {
+    TerrainObject* terrain = nullptr;
+    
+    if (terrainId < 0) {
+        if (!terrains.empty()) terrain = &terrains[0];
+    } else {
+        terrain = getTerrain(terrainId);
+    }
+    
+    if (!terrain) return;
+    
+    auto& hm = terrain->heightmap;
+    int w = hm.width;
+    int h = hm.height;
+    
+    // Convert world coords to grid coords
+    float halfSize = hm.scale_xz * 0.5f;
+    float gx = ((worldX + halfSize) / hm.scale_xz) * (w - 1);
+    float gz = ((worldZ + halfSize) / hm.scale_xz) * (h - 1);
+    
+    // Radius in grid units
+    float gridRadius = (radius / hm.scale_xz) * w;
+    int iRadius = (int)std::ceil(gridRadius);
+    
+    int cx = (int)gx;
+    int cz = (int)gz;
+    
+    for (int dz = -iRadius; dz <= iRadius; ++dz) {
+        for (int dx = -iRadius; dx <= iRadius; ++dx) {
+            int ix = cx + dx;
+            int iz = cz + dz;
+            
+            if (ix < 0 || ix >= w || iz < 0 || iz >= h) continue;
+            
+            float dist = sqrtf((float)(dx * dx + dz * dz));
+            if (dist > gridRadius) continue;
+            
+            // Smooth falloff (cosine-based)
+            float t = dist / gridRadius;
+            float falloff = 0.5f * (1.0f + cosf(t * 3.14159f));
+            
+            int idx = iz * w + ix;
+            hm.data[idx] -= (amount / hm.scale_y) * falloff;
+        }
+    }
+}
+
+void TerrainManager::carveRiverBed(int terrainId, 
+                                   const std::vector<Vec3>& points,
+                                   const std::vector<float>& widths,
+                                   const std::vector<float>& depths,
+                                   float smoothness,
+                                   SceneData& scene) {
+    if (points.size() < 2) return;
+    
+    TerrainObject* terrain = nullptr;
+    if (terrainId < 0) {
+        if (!terrains.empty()) terrain = &terrains[0];
+    } else {
+        terrain = getTerrain(terrainId);
+    }
+    
+    if (!terrain) {
+        SCENE_LOG_WARN("[TerrainManager] carveRiverBed: No terrain found");
+        return;
+    }
+    
+    auto& hm = terrain->heightmap;
+    int w = hm.width;
+    int h = hm.height;
+    float halfSize = hm.scale_xz * 0.5f;
+    
+    SCENE_LOG_INFO("[TerrainManager] Carving continuous river bed with " + 
+                   std::to_string(points.size()) + " points");
+    
+    // For each heightmap cell, check distance to the river line
+    #pragma omp parallel for
+    for (int gz = 0; gz < h; ++gz) {
+        for (int gx = 0; gx < w; ++gx) {
+            // Convert grid to world coords
+            float worldX = ((float)gx / (w - 1)) * hm.scale_xz - halfSize;
+            float worldZ = ((float)gz / (h - 1)) * hm.scale_xz - halfSize;
+            
+            // Find nearest point on river spline segments
+            float minDist = 1e9f;
+            float nearestWidth = 2.0f;
+            float nearestDepth = 0.5f;
+            
+            for (size_t i = 0; i < points.size() - 1; ++i) {
+                const Vec3& p0 = points[i];
+                const Vec3& p1 = points[i + 1];
+                
+                // Project point onto line segment (2D: XZ plane)
+                Vec3 lineDir(p1.x - p0.x, 0, p1.z - p0.z);
+                float lineLen = sqrtf(lineDir.x * lineDir.x + lineDir.z * lineDir.z);
+                if (lineLen < 0.001f) continue;
+                
+                lineDir.x /= lineLen;
+                lineDir.z /= lineLen;
+                
+                Vec3 toPoint(worldX - p0.x, 0, worldZ - p0.z);
+                float projection = toPoint.x * lineDir.x + toPoint.z * lineDir.z;
+                
+                // Clamp to segment
+                float t = projection / lineLen;
+                t = (std::max)(0.0f, (std::min)(1.0f, t));
+                
+                // Nearest point on segment
+                float nearX = p0.x + lineDir.x * lineLen * t;
+                float nearZ = p0.z + lineDir.z * lineLen * t;
+                
+                float dx = worldX - nearX;
+                float dz = worldZ - nearZ;
+                float dist = sqrtf(dx * dx + dz * dz);
+                
+                if (dist < minDist) {
+                    minDist = dist;
+                    // Interpolate width and depth
+                    float w0 = (i < widths.size()) ? widths[i] : 2.0f;
+                    float w1 = (i + 1 < widths.size()) ? widths[i + 1] : 2.0f;
+                    float d0 = (i < depths.size()) ? depths[i] : 0.5f;
+                    float d1 = (i + 1 < depths.size()) ? depths[i + 1] : 0.5f;
+                    
+                    nearestWidth = w0 + (w1 - w0) * t;
+                    nearestDepth = d0 + (d1 - d0) * t;
+                }
+            }
+            
+            // Carve if within river width (with falloff for banks)
+            float halfWidth = nearestWidth * 0.5f;
+            float bankWidth = halfWidth * (1.0f + smoothness * 0.5f);  // Extended bank area
+            
+            if (minDist < bankWidth) {
+                float normalizedDist = minDist / halfWidth;
+                
+                float carveAmount;
+                if (normalizedDist < 1.0f) {
+                    // Inside main channel - full depth with flat bottom
+                    // Use smoothstep for gradual transition at edges
+                    float edgeFade = 1.0f - normalizedDist * normalizedDist * normalizedDist;
+                    carveAmount = nearestDepth * edgeFade;
+                } else {
+                    // Bank area - gradual slope
+                    float bankT = (minDist - halfWidth) / (bankWidth - halfWidth);
+                    bankT = (std::min)(1.0f, bankT);
+                    // Smooth falloff using cosine
+                    float bankFade = 0.5f * (1.0f + cosf(bankT * 3.14159f));
+                    carveAmount = nearestDepth * 0.3f * bankFade;
+                }
+                
+                if (carveAmount > 0.001f) {
+                    int idx = gz * w + gx;
+                    hm.data[idx] -= carveAmount / hm.scale_y;
+                }
+            }
+        }
+    }
+    
+    // Update terrain mesh
+    updateTerrainMesh(terrain);
+    terrain->dirty_mesh = true;
+    
+    SCENE_LOG_INFO("[TerrainManager] River bed carved successfully (continuous band)");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NATURAL RIVER BED CARVING - Advanced Algorithm
+// ═══════════════════════════════════════════════════════════════════════════════
+// Features:
+// - Perlin-like noise for edge irregularity
+// - Curvature-based asymmetric banks (meander physics)
+// - Deep pools at random intervals
+// - Shallow riffles (rapids zones)
+// - Point bar deposits on inner bends
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void TerrainManager::carveRiverBedNatural(int terrainId, 
+                                          const std::vector<Vec3>& points,
+                                          const std::vector<float>& widths,
+                                          const std::vector<float>& depths,
+                                          float smoothness,
+                                          const NaturalCarveParams& np,
+                                          SceneData& scene) {
+    if (points.size() < 2) return;
+    
+    TerrainObject* terrain = nullptr;
+    if (terrainId < 0) {
+        if (!terrains.empty()) terrain = &terrains[0];
+    } else {
+        terrain = getTerrain(terrainId);
+    }
+    
+    if (!terrain) {
+        SCENE_LOG_WARN("[TerrainManager] carveRiverBedNatural: No terrain found");
+        return;
+    }
+    
+    auto& hm = terrain->heightmap;
+    int w = hm.width;
+    int h = hm.height;
+    float halfSize = hm.scale_xz * 0.5f;
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // TERRAIN RESOLUTION CHECKS
+    // ─────────────────────────────────────────────────────────────────────────
+    float cellSize = hm.scale_xz / (float)(w - 1);
+    
+    // Calculate maximum reasonable depth based on terrain scale
+    // Don't carve deeper than 20% of terrain height range
+    float maxReasonableDepth = hm.scale_y * 0.2f;
+    
+    // Warn if terrain resolution is too low for river width
+    float minRiverWidth = 1e9f;
+    for (const auto& width : widths) {
+        if (width < minRiverWidth) minRiverWidth = width;
+    }
+    int pixelsAcrossRiver = (int)(minRiverWidth / cellSize);
+    if (pixelsAcrossRiver < 4) {
+        SCENE_LOG_WARN("[TerrainManager] Low resolution warning: River is only " + 
+                       std::to_string(pixelsAcrossRiver) + " pixels wide. Consider higher terrain resolution.");
+    }
+    
+    SCENE_LOG_INFO("[TerrainManager] Carving NATURAL river bed with " + 
+                   std::to_string(points.size()) + " points (cell size: " + 
+                   std::to_string(cellSize) + ", max depth: " + std::to_string(maxReasonableDepth) + ")");
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRECOMPUTE: Curvature and tangent data along spline
+    // ─────────────────────────────────────────────────────────────────────────
+    std::vector<float> curvatures(points.size(), 0.0f);
+    std::vector<Vec3> tangents(points.size());
+    std::vector<Vec3> normals(points.size());  // Right-hand perpendicular
+    std::vector<float> turnDirections(points.size(), 0.0f);  // +1 = right, -1 = left
+    
+    for (size_t i = 0; i < points.size(); ++i) {
+        // Tangent calculation
+        Vec3 tangent(0, 0, 1);
+        if (i == 0 && points.size() > 1) {
+            tangent = (points[1] - points[0]);
+        } else if (i == points.size() - 1 && points.size() > 1) {
+            tangent = (points[i] - points[i - 1]);
+        } else if (i > 0 && i < points.size() - 1) {
+            tangent = (points[i + 1] - points[i - 1]) * 0.5f;
+        }
+        tangent.y = 0;  // Project to XZ plane
+        float len = sqrtf(tangent.x * tangent.x + tangent.z * tangent.z);
+        if (len > 0.001f) {
+            tangent.x /= len;
+            tangent.z /= len;
+        }
+        tangents[i] = tangent;
+        
+        // Normal (perpendicular, pointing right)
+        normals[i] = Vec3(-tangent.z, 0, tangent.x);
+        
+        // Curvature calculation (change in tangent direction)
+        if (i > 0 && i < points.size() - 1) {
+            Vec3 t1 = (points[i] - points[i - 1]);
+            Vec3 t2 = (points[i + 1] - points[i]);
+            t1.y = 0; t2.y = 0;
+            float l1 = sqrtf(t1.x * t1.x + t1.z * t1.z);
+            float l2 = sqrtf(t2.x * t2.x + t2.z * t2.z);
+            if (l1 > 0.001f && l2 > 0.001f) {
+                t1.x /= l1; t1.z /= l1;
+                t2.x /= l2; t2.z /= l2;
+                float dot = t1.x * t2.x + t1.z * t2.z;
+                curvatures[i] = 1.0f - std::clamp(dot, -1.0f, 1.0f);
+                
+                // Turn direction: cross product z component
+                float cross = t1.x * t2.z - t1.z * t2.x;
+                turnDirections[i] = (cross > 0) ? 1.0f : -1.0f;
+            }
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRECOMPUTE: Pool and Riffle zones (pseudo-random along river)
+    // ─────────────────────────────────────────────────────────────────────────
+    std::vector<float> depthModifiers(points.size(), 1.0f);  // 1.0 = normal
+    
+    if (np.enableDeepPools || np.enableRiffles) {
+        // Simple hash-based pseudo-random for deterministic results
+        auto hashFloat = [](float x, float y, float seed) -> float {
+            int ix = (int)(x * 1000.0f);
+            int iy = (int)(y * 1000.0f);
+            int h = ix * 374761393 + iy * 668265263 + (int)(seed * 1000.0f);
+            h = (h ^ (h >> 13)) * 1274126177;
+            return (float)(h & 0x7FFFFFFF) / (float)0x7FFFFFFF;
+        };
+        
+        for (size_t i = 0; i < points.size(); ++i) {
+            float randVal = hashFloat(points[i].x, points[i].z, 42.0f);
+            
+            // Deep pools (less frequent, deeper)
+            if (np.enableDeepPools && randVal < np.poolFrequency) {
+                depthModifiers[i] = np.poolDepthMult;
+            }
+            // Riffles (more frequent, shallower) - only if not a pool
+            else if (np.enableRiffles && randVal > (1.0f - np.riffleFrequency)) {
+                depthModifiers[i] = np.riffleDepthMult;
+            }
+        }
+        
+        // Smooth depth modifiers for natural transitions
+        std::vector<float> smoothed = depthModifiers;
+        for (size_t i = 2; i < points.size() - 2; ++i) {
+            smoothed[i] = (depthModifiers[i-2] + depthModifiers[i-1] * 2 + 
+                          depthModifiers[i] * 4 + depthModifiers[i+1] * 2 + 
+                          depthModifiers[i+2]) / 10.0f;
+        }
+        depthModifiers = smoothed;
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // NOISE FUNCTION: Smooth gradient noise for natural variation
+    // Uses smooth hermite interpolation to avoid sharp transitions
+    // ─────────────────────────────────────────────────────────────────────────
+    
+    // Smooth step function (hermite interpolation)
+    auto smoothstep = [](float t) -> float {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    
+    // Smoother step (Ken Perlin's improved version)
+    auto smootherstep = [](float t) -> float {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+    };
+    
+    // Hash function for pseudo-random gradient
+    auto hash2D = [](int ix, int iy) -> float {
+        int n = ix + iy * 57;
+        n = (n << 13) ^ n;
+        return (1.0f - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) / 1073741824.0f);
+    };
+    
+    // Smooth value noise (grid-based interpolation)
+    auto getSmoothNoise = [&](float x, float z, float scale) -> float {
+        x *= scale;
+        z *= scale;
+        
+        int ix = (int)std::floor(x);
+        int iz = (int)std::floor(z);
+        
+        float fx = x - ix;
+        float fz = z - iz;
+        
+        // Smooth the fractions
+        fx = smootherstep(fx);
+        fz = smootherstep(fz);
+        
+        // Get corner values
+        float v00 = hash2D(ix, iz);
+        float v10 = hash2D(ix + 1, iz);
+        float v01 = hash2D(ix, iz + 1);
+        float v11 = hash2D(ix + 1, iz + 1);
+        
+        // Bilinear interpolation with smoothed fractions
+        float v0 = v00 * (1.0f - fx) + v10 * fx;
+        float v1 = v01 * (1.0f - fx) + v11 * fx;
+        
+        return v0 * (1.0f - fz) + v1 * fz;
+    };
+    
+    // Multi-octave smooth noise (FBM-like)
+    auto getNoiseValue = [&](float x, float z) -> float {
+        if (!np.enableNoise) return 0.0f;
+        
+        float value = 0.0f;
+        float amplitude = 1.0f;
+        float totalAmp = 0.0f;
+        float freq = np.noiseScale;
+        
+        // 3 octaves of smooth noise
+        for (int oct = 0; oct < 3; ++oct) {
+            value += getSmoothNoise(x, z, freq) * amplitude;
+            totalAmp += amplitude;
+            freq *= 2.0f;
+            amplitude *= 0.5f;
+        }
+        
+        value /= totalAmp;  // Normalize to [-1, 1]
+        return value * np.noiseStrength;
+    };
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // MAIN CARVING LOOP
+    // ─────────────────────────────────────────────────────────────────────────
+    #pragma omp parallel for
+    for (int gz = 0; gz < h; ++gz) {
+        for (int gx = 0; gx < w; ++gx) {
+            // Convert grid to world coords
+            float worldX = ((float)gx / (w - 1)) * hm.scale_xz - halfSize;
+            float worldZ = ((float)gz / (h - 1)) * hm.scale_xz - halfSize;
+            
+            // Find nearest point on river spline
+            float minDist = 1e9f;
+            float nearestWidth = 2.0f;
+            float nearestDepth = 0.5f;
+            float nearestCurvature = 0.0f;
+            float nearestTurnDir = 0.0f;
+            float nearestDepthMod = 1.0f;
+            Vec3 nearestNormal(0, 0, 1);
+            Vec3 nearestToPoint(0, 0, 0);
+            float nearestT = 0.0f;  // Parameter along segment
+            
+            for (size_t i = 0; i < points.size() - 1; ++i) {
+                const Vec3& p0 = points[i];
+                const Vec3& p1 = points[i + 1];
+                
+                // Project point onto line segment (2D: XZ plane)
+                Vec3 lineDir(p1.x - p0.x, 0, p1.z - p0.z);
+                float lineLen = sqrtf(lineDir.x * lineDir.x + lineDir.z * lineDir.z);
+                if (lineLen < 0.001f) continue;
+                
+                lineDir.x /= lineLen;
+                lineDir.z /= lineLen;
+                
+                Vec3 toPoint(worldX - p0.x, 0, worldZ - p0.z);
+                float projection = toPoint.x * lineDir.x + toPoint.z * lineDir.z;
+                
+                // Clamp to segment
+                float t = projection / lineLen;
+                t = std::clamp(t, 0.0f, 1.0f);
+                
+                // Nearest point on segment
+                float nearX = p0.x + lineDir.x * lineLen * t;
+                float nearZ = p0.z + lineDir.z * lineLen * t;
+                
+                float dx = worldX - nearX;
+                float dz = worldZ - nearZ;
+                float dist = sqrtf(dx * dx + dz * dz);
+                
+                if (dist < minDist) {
+                    minDist = dist;
+                    nearestToPoint = Vec3(dx, 0, dz);
+                    nearestT = t;
+                    
+                    // Interpolate properties
+                    float w0 = (i < widths.size()) ? widths[i] : 2.0f;
+                    float w1 = (i + 1 < widths.size()) ? widths[i + 1] : 2.0f;
+                    float d0 = (i < depths.size()) ? depths[i] : 0.5f;
+                    float d1 = (i + 1 < depths.size()) ? depths[i + 1] : 0.5f;
+                    
+                    nearestWidth = w0 + (w1 - w0) * t;
+                    nearestDepth = d0 + (d1 - d0) * t;
+                    
+                    // Interpolate precomputed data
+                    nearestCurvature = curvatures[i] + (curvatures[i + 1] - curvatures[i]) * t;
+                    nearestTurnDir = turnDirections[i] + (turnDirections[i + 1] - turnDirections[i]) * t;
+                    nearestNormal = normals[i];  // Use segment start normal
+                    nearestDepthMod = depthModifiers[i] + (depthModifiers[i + 1] - depthModifiers[i]) * t;
+                }
+            }
+            
+            // ─────────────────────────────────────────────────────────────────
+            // WIDTH - NO NOISE ON WIDTH (prevents sawtooth edges)
+            // Noise is applied to DEPTH only, not width
+            // ─────────────────────────────────────────────────────────────────
+            float effectiveWidth = nearestWidth;  // Clean width without noise
+            
+            // ─────────────────────────────────────────────────────────────────
+            // ASYMMETRIC BANKS (Meander Physics)
+            // ─────────────────────────────────────────────────────────────────
+            float asymmetryFactor = 1.0f;
+            if (np.enableAsymmetry && nearestCurvature > 0.01f) {
+                // Determine which side of river this point is on
+                float sideSign = (nearestToPoint.x * nearestNormal.x + 
+                                 nearestToPoint.z * nearestNormal.z);
+                sideSign = (sideSign > 0) ? 1.0f : -1.0f;
+                
+                // Inner bank (same side as turn) is shallower, outer is deeper
+                float isInnerBank = sideSign * nearestTurnDir;
+                
+                // Asymmetry modifies depth: outer bank deeper, inner shallower
+                float asymmetryAmount = nearestCurvature * np.asymmetryStrength * isInnerBank;
+                asymmetryFactor = 1.0f - asymmetryAmount * 0.4f;  // 0.6 to 1.4 range
+            }
+            
+            // ─────────────────────────────────────────────────────────────────
+            // POINT BAR DEPOSITS (Inner bends)
+            // ─────────────────────────────────────────────────────────────────
+            float pointBarRaise = 0.0f;
+            if (np.enablePointBars && nearestCurvature > 0.05f) {
+                float sideSign = (nearestToPoint.x * nearestNormal.x + 
+                                 nearestToPoint.z * nearestNormal.z);
+                sideSign = (sideSign > 0) ? 1.0f : -1.0f;
+                float isInnerBank = sideSign * nearestTurnDir;
+                
+                // Point bar on inner half
+                if (isInnerBank > 0) {
+                    float halfWidth = effectiveWidth * 0.5f;
+                    float normalizedDist = minDist / halfWidth;
+                    if (normalizedDist < 1.2f && normalizedDist > 0.3f) {
+                        float barStrength = nearestCurvature * np.pointBarStrength;
+                        float barProfile = 1.0f - fabsf(normalizedDist - 0.7f) / 0.5f;
+                        barProfile = std::clamp(barProfile, 0.0f, 1.0f);
+                        barProfile = smoothstep(barProfile);  // Smooth the profile
+                        pointBarRaise = barStrength * barProfile * nearestDepth * 0.5f;
+                    }
+                }
+            }
+            
+            // ─────────────────────────────────────────────────────────────────
+            // CARVING CALCULATION
+            // ─────────────────────────────────────────────────────────────────
+            float halfWidth = effectiveWidth * 0.5f;
+            float bankWidth = halfWidth * (1.0f + smoothness * 0.5f);
+            
+            int idx = gz * w + gx;
+            
+            if (minDist < bankWidth) {
+                float normalizedDist = minDist / halfWidth;
+                
+                // Apply depth modifier (pools/riffles) and asymmetry
+                float finalDepth = nearestDepth * nearestDepthMod * asymmetryFactor;
+                
+                // CLAMP depth to reasonable maximum (prevents excessive carving)
+                finalDepth = std::min(finalDepth, maxReasonableDepth);
+                
+                // Get smooth noise for this position (used for depth variation only)
+                float depthNoise = getNoiseValue(worldX, worldZ);
+                
+                float carveAmount;
+                if (normalizedDist < 1.0f) {
+                    // Inside main channel
+                    // Smooth parabolic profile for natural cross-section
+                    float profileT = normalizedDist;
+                    float channelProfile = 1.0f - profileT * profileT;
+                    
+                    // Apply smooth noise to DEPTH only (not edges)
+                    // Noise effect decreases toward edges (center has most variation)
+                    float centerWeight = 1.0f - profileT;  // 1 at center, 0 at edge
+                    float noiseEffect = depthNoise * 0.15f * centerWeight;
+                    
+                    carveAmount = finalDepth * channelProfile * (1.0f + noiseEffect);
+                } else {
+                    // Bank area - smooth gradual slope
+                    float bankT = (minDist - halfWidth) / (bankWidth - halfWidth);
+                    bankT = std::clamp(bankT, 0.0f, 1.0f);
+                    
+                    // Smoothstep falloff (no noise on banks to prevent sawtooth)
+                    float bankFade = 1.0f - smoothstep(bankT);
+                    
+                    carveAmount = finalDepth * 0.3f * bankFade;
+                }
+                
+                // Apply point bar (reduces carving / raises terrain)
+                carveAmount -= pointBarRaise;
+                
+                if (carveAmount > 0.001f) {
+                    hm.data[idx] -= carveAmount / hm.scale_y;
+                } else if (carveAmount < -0.001f) {
+                    // Point bar actually raises terrain
+                    hm.data[idx] -= carveAmount / hm.scale_y;  // Negative carve = raise
+                }
+            }
+        }
+    }
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // POST-CARVE SMOOTHING PASS
+    // Eliminates sawtooth artifacts on low-resolution terrains
+    // Uses Gaussian-like weighted average for smooth results
+    // ─────────────────────────────────────────────────────────────────────────
+    
+    // Smoothing radius in pixels (at least 1, scale with resolution)
+    // Low resolution = more smoothing needed
+    int smoothRadius = std::max(1, (int)std::ceil(2.0f / cellSize));
+    smoothRadius = std::min(smoothRadius, 3);  // Cap at 3 for performance
+    
+    // Create a copy of affected heightmap region for smoothing
+    std::vector<float> smoothedData = hm.data;
+    
+    // Apply Gaussian-like smoothing only to carved areas
+    #pragma omp parallel for
+    for (int gz = smoothRadius; gz < h - smoothRadius; ++gz) {
+        for (int gx = smoothRadius; gx < w - smoothRadius; ++gx) {
+            // Quick check: only smooth near river path
+            float worldX = ((float)gx / (w - 1)) * hm.scale_xz - halfSize;
+            float worldZ = ((float)gz / (h - 1)) * hm.scale_xz - halfSize;
+            
+            // Find approximate distance to river (fast check)
+            float minDistApprox = 1e9f;
+            float maxRiverWidth = 0.0f;
+            for (size_t i = 0; i < points.size(); i += 3) {  // Sample every 3rd point for speed
+                float dx = worldX - points[i].x;
+                float dz = worldZ - points[i].z;
+                float d = sqrtf(dx * dx + dz * dz);
+                if (d < minDistApprox) {
+                    minDistApprox = d;
+                    if (i < widths.size()) maxRiverWidth = widths[i];
+                }
+            }
+            
+            // Only smooth within extended river area
+            if (minDistApprox > maxRiverWidth * 1.5f) continue;
+            
+            int idx = gz * w + gx;
+            
+            // Gaussian-weighted average
+            float sum = 0.0f;
+            float weightSum = 0.0f;
+            
+            for (int dz = -smoothRadius; dz <= smoothRadius; ++dz) {
+                for (int dx = -smoothRadius; dx <= smoothRadius; ++dx) {
+                    int nx = gx + dx;
+                    int nz = gz + dz;
+                    int nidx = nz * w + nx;
+                    
+                    // Gaussian weight based on distance
+                    float dist = sqrtf((float)(dx * dx + dz * dz));
+                    float sigma = (float)smoothRadius * 0.5f;
+                    float weight = expf(-(dist * dist) / (2.0f * sigma * sigma));
+                    
+                    sum += hm.data[nidx] * weight;
+                    weightSum += weight;
+                }
+            }
+            
+            if (weightSum > 0.0f) {
+                // Blend: 70% smoothed, 30% original (preserves some detail)
+                float smoothedValue = sum / weightSum;
+                smoothedData[idx] = smoothedValue * 0.7f + hm.data[idx] * 0.3f;
+            }
+        }
+    }
+    
+    // Apply smoothed data back
+    hm.data = smoothedData;
+    
+    // Update terrain mesh
+    updateTerrainMesh(terrain);
+    terrain->dirty_mesh = true;
+    
+    SCENE_LOG_INFO("[TerrainManager] Natural river bed carved with smoothing (radius: " + 
+                   std::to_string(smoothRadius) + ")!");
 }

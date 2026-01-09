@@ -264,14 +264,18 @@ public:
             return;
         }
 
-        // Node Info Header
+        // Node Info Header (with text wrapping to prevent clipping)
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.8f, 1.0f, 1.0f));
-        ImGui::Text("%s", node->metadata.displayName.empty() ? node->name.c_str() : node->metadata.displayName.c_str());
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+        ImGui::TextWrapped("%s", node->metadata.displayName.empty() ? node->name.c_str() : node->metadata.displayName.c_str());
+        ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
 
-        // Category
+        // Category (wrapped to prevent overflow)
         if (!node->metadata.category.empty()) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
             ImGui::TextDisabled("Category: %s", node->metadata.category.c_str());
+            ImGui::PopTextWrapPos();
         }
         ImGui::TextDisabled("ID: %u", node->id);
 
@@ -284,9 +288,33 @@ public:
         ImGui::Separator();
         ImGui::Spacing();
 
-        // Draw node's content (parameters) with proper width
-        float labelWidth = 80.0f;
-        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - labelWidth);
+        // ========================================================================
+        // USER-FRIENDLY SLIDER/INPUT STYLING & WIDTH MANAGEMENT
+        // ========================================================================
+        // Problem 1: When panel is wide, sliders become too long
+        // Problem 2: Input fields blend into panel background, hard to distinguish
+        // Solution: Limit slider width + Apply distinct visual styling
+        
+        float availWidth = ImGui::GetContentRegionAvail().x;
+        
+        // Slider/input width: Capped at 140px for usability, minimum 80px
+        float maxSliderWidth = 140.0f;
+        float minSliderWidth = 80.0f;
+        float sliderWidth = std::clamp(availWidth * 0.6f, minSliderWidth, maxSliderWidth);
+        
+        ImGui::PushItemWidth(sliderWidth);
+        
+        // ── DISTINCT INPUT FIELD STYLING ──────────────────────────────────────
+        // Make sliders/inputs visually distinct from panel (darker, with border)
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));        // Dark background
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f)); // Lighter on hover
+        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));  // Even lighter when active
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.45f, 0.55f, 0.75f, 1.0f));     // Blue-ish slider grab
+        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.55f, 0.65f, 0.85f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.38f, 0.45f, 0.8f));         // Subtle border
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);      // Rounded corners
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);    // Visible border
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3)); // Compact padding
         
         bool wasDirty = node->dirty;
         node->drawContent();
@@ -294,6 +322,9 @@ public:
             ProjectManager::getInstance().markModified();
         }
         
+        // Pop all styling
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor(6);
         ImGui::PopItemWidth();
 
         // Handle HeightmapInputNode file dialog request

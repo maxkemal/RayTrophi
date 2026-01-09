@@ -8,6 +8,7 @@
 #include "Vec3.h"
 #include "Triangle.h"
 #include "FoliageFwd.h"
+#include "WaterSystem.h" // For WaterWaveParams
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TERRAIN DATA STRUCTURES
@@ -108,6 +109,13 @@ struct TerrainObject {
 
     // Non-destructive editing support (Node Graph)
     std::vector<float> original_heightmap_data; // Initial state before node graph evaluation
+    
+    // =========================================================================
+    // WATER RENDERING INTEGRATION
+    // =========================================================================
+    bool renderAsWater = false; // If true, treats this terrain as a water surface (mesh)
+    WaterWaveParams waterParams; // Wave parameters if rendered as water
+    int waterSurfaceId = -1;     // Internal ID for WaterManager integration
     
     // =========================================================================
     // QUALITY & OPTIMIZATION SETTINGS

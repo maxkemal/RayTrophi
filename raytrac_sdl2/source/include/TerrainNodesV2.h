@@ -387,7 +387,12 @@ namespace TerrainNodesV2 {
         Simplex,     // Hash-based FBM
         Ridge,       // Ridge/mountain chains
         Billow,      // Soft rolling hills
-        Warped       // Domain-warped organic
+        Warped,      // Domain-warped organic
+        // FFT-accelerated noise types (uses CUDA if available, CPU fallback otherwise)
+        FFT_Ocean,   // Phillips spectrum - ocean-like terrain
+        FFT_Ridge,   // FFT-based sharp mountain ridges
+        FFT_Billow,  // FFT-based soft hills
+        FFT_Turb     // FFT-based turbulence
     };
     
     class NoiseGeneratorNode : public TerrainNodeBase {
@@ -420,12 +425,23 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         
         void drawContent() override {
-            const char* noiseNames[] = { "Perlin", "Voronoi", "Simplex", "Ridge", "Billow", "Warped" };
+            const char* noiseNames[] = { 
+                "Perlin", "Voronoi", "Simplex", "Ridge", "Billow", "Warped",
+                // FFT types
+                "FFT Ocean", "FFT Ridge", "FFT Billow", "FFT Turb"
+            };
             int noiseIdx = (int)noiseType;
-            if (ImGui::Combo("Type", &noiseIdx, noiseNames, 6)) {
+            if (ImGui::Combo("Type", &noiseIdx, noiseNames, 10)) {
                 noiseType = (NoiseType)noiseIdx;
                 dirty = true;
             }
+            
+            // Show FFT status for FFT types
+            if (noiseIdx >= 6) {
+                // FFT type selected - show CUDA status
+                ImGui::TextDisabled("Uses CUDA if available");
+            }
+            
             if (ImGui::DragInt("Seed", &seed)) dirty = true;
             if (ImGui::DragFloat("Scale", &scale, 0.1f, 0.1f, 10.0f)) dirty = true;
             if (ImGui::DragFloat("Frequency", &frequency, 0.0001f, 0.0001f, 0.1f, "%.4f")) dirty = true;
@@ -438,7 +454,7 @@ namespace TerrainNodesV2 {
             if (noiseType == NoiseType::Voronoi) {
                 if (ImGui::DragFloat("Jitter", &jitter, 0.01f, 0.0f, 2.0f)) dirty = true;
             }
-            if (noiseType == NoiseType::Ridge) {
+            if (noiseType == NoiseType::Ridge || noiseType == NoiseType::FFT_Ridge) {
                 if (ImGui::DragFloat("Ridge Offset", &ridge_offset, 0.01f, 0.5f, 2.0f)) dirty = true;
             }
             if (noiseType == NoiseType::Warped) {

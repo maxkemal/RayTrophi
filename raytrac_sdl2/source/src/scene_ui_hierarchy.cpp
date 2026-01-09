@@ -661,9 +661,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     return false;
                     };
 
-                // Position with ◇ key button
+                // Position with Smart Slider
                 Vec3 pos = cam.lookfrom;
                 bool posKeyed = isCamKeyed(true, false, false, false, false);
+                // Note: DrawSmartFloat handles 1 float, here we have 3 (DragFloat3). 
+                // Currently DrawSmartFloat does not support Float3. We will keep DragFloat3 for vectors for now
+                // BUT we can use DrawLCDSlider logic if we wanted to overload it, or just keep DragFloat3 as it is standard for vectors.
+                // Reverting Position change plan as DrawSmartFloat is for single floats.
                 if (KeyframeButton("##CPos", posKeyed)) { insertCamKey("Position", true, false, false, false, false); }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(posKeyed ? "REMOVE Position key" : "ADD Position key");
                 ImGui::SameLine();
@@ -691,11 +695,106 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 }
 
                 ImGui::Separator();
+                
+                // ═══════════════════════════════════════════════════════════════════════════
+                // CAMERA MODE SELECTOR (TOP - Controls what's visible below)
+                // ═══════════════════════════════════════════════════════════════════════════
+                // Mode determines complexity: Auto (simple), Pro (full control), Cinema (effects)
+                {
+                    ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.4f, 1.0f), "Camera Mode");
+                    
+                    // Styled mode buttons (like radio buttons but prettier)
+                    float btn_width = (ImGui::GetContentRegionAvail().x - 8) / 3.0f;
+                    int current_mode = static_cast<int>(cam.camera_mode);
+                    
+                    auto ModeButton = [&](const char* label, int mode, ImVec4 color) -> bool {
+                        bool selected = (current_mode == mode);
+                        if (selected) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, color);
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.x + 0.1f, color.y + 0.1f, color.z + 0.1f, 1.0f));
+                        } else {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.25f, 1.0f));
+                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
+                        }
+                        bool clicked = ImGui::Button(label, ImVec2(btn_width, 0));
+                        ImGui::PopStyleColor(2);
+                        return clicked;
+                    };
+                    
+                    if (ModeButton("Auto", 0, ImVec4(0.2f, 0.6f, 0.3f, 1.0f))) {
+                        cam.camera_mode = CameraMode::Auto;
+                        cam.auto_exposure = true;
+                        cam.enable_chromatic_aberration = false;
+                        cam.enable_vignetting = false;
+                        cam.enable_camera_shake = false;
+                        if (ctx.optix_gpu_ptr && g_hasOptix) {
+                            ctx.optix_gpu_ptr->setCameraParams(cam);
+                            ctx.optix_gpu_ptr->resetAccumulation();
+                        }
+                        ctx.renderer.resetCPUAccumulation();
+                        ProjectManager::getInstance().markModified();
+                    }
+                    ImGui::SameLine(0, 4);
+                    if (ModeButton("Pro", 1, ImVec4(0.3f, 0.5f, 0.8f, 1.0f))) {
+                        cam.camera_mode = CameraMode::Pro;
+                        cam.auto_exposure = false;
+                        if (ctx.optix_gpu_ptr && g_hasOptix) {
+                            ctx.optix_gpu_ptr->setCameraParams(cam);
+                            ctx.optix_gpu_ptr->resetAccumulation();
+                        }
+                        ctx.renderer.resetCPUAccumulation();
+                        ProjectManager::getInstance().markModified();
+                    }
+                    ImGui::SameLine(0, 4);
+                    if (ModeButton("Cinema", 2, ImVec4(0.7f, 0.4f, 0.2f, 1.0f))) {
+                        cam.camera_mode = CameraMode::Cinema;
+                        cam.auto_exposure = false;
+                        cam.enable_vignetting = true;
+                        cam.vignetting_amount = 0.3f;
+                        if (ctx.optix_gpu_ptr && g_hasOptix) {
+                            ctx.optix_gpu_ptr->setCameraParams(cam);
+                            ctx.optix_gpu_ptr->resetAccumulation();
+                        }
+                        ctx.renderer.resetCPUAccumulation();
+                        ProjectManager::getInstance().markModified();
+                    }
+                    
+                    // Mode description
+                    const char* mode_desc[] = {
+                        "Simple controls, automatic settings",
+                        "Full manual control for professionals", 
+                        "Cinematic effects & lens simulation"
+                    };
+                    ImGui::TextDisabled("%s", mode_desc[current_mode]);
+                }
+                
+                ImGui::Separator();
+                ImGui::Spacing();
+                
+                // ── DISTINCT INPUT FIELD STYLING FOR CAMERA PROPERTIES ────────────────
+                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.4f, 0.6f, 0.8f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.5f, 0.7f, 0.9f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.38f, 0.45f, 0.8f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
 
                 // ═══════════════════════════════════════════════════════════════════════════
-                // CAMERA BODY - Sensor size affects crop factor
+                // PRO & CINEMA MODE: Full Camera Controls
                 // ═══════════════════════════════════════════════════════════════════════════
-                static int selected_body = 0;
+                // Show professional controls only in Pro and Cinema modes
+                bool show_pro_controls = (cam.camera_mode == CameraMode::Pro || cam.camera_mode == CameraMode::Cinema);
+                
+                if (show_pro_controls) {
+                // ═══════════════════════════════════════════════════════════════════════════
+                // CAMERA BODY - Sensor size affects crop factor and ISO limits
+                // ═══════════════════════════════════════════════════════════════════════════
+                // Use member index instead of static local
+                int selected_body = cam.body_preset_index; 
+                // Safety check
+                if (selected_body < 0 || selected_body >= (int)CameraPresets::CAMERA_BODY_COUNT) selected_body = 0;
 
                 if (ImGui::BeginCombo("Camera Body", CameraPresets::CAMERA_BODIES[selected_body].name)) {
                     for (size_t i = 0; i < CameraPresets::CAMERA_BODY_COUNT; ++i) {
@@ -705,83 +804,122 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             label += " (" + std::string(CameraPresets::getSensorTypeName(CameraPresets::CAMERA_BODIES[i].sensor)) + ")";
                         }
                         if (ImGui::Selectable(label.c_str(), is_selected)) {
-                            selected_body = (int)i;
+                            cam.body_preset_index = (int)i;
+                            
+                            // Apply Body Specs (Sensor Dimensions & ISO Limits)
+                            if (i > 0) {
+                                const auto& body = CameraPresets::CAMERA_BODIES[i];
+                                cam.sensor_width_mm = body.sensor_width_mm;
+                                cam.sensor_height_mm = body.sensor_height_mm;
+                                
+                                // Clamp ISO to camera capabilities
+                                if (cam.iso < body.min_iso) cam.iso = body.min_iso;
+                                if (cam.iso > body.max_iso) cam.iso = body.max_iso;
+                                
+                                // Recalculate FOV based on new Sensor Height (Crop Factor)
+                                if (cam.use_physical_lens) {
+                                    float vfov_rad = 2.0f * std::atan((cam.sensor_height_mm * 0.5f) / cam.focal_length_mm);
+                                    cam.vfov = vfov_rad * (180.0f / 3.14159265f);
+                                    cam.fov = cam.vfov;
+                                }
+                                cam.update_camera_vectors(); 
+                                
+                                if (ctx.optix_gpu_ptr && g_hasOptix) {
+                                    ctx.optix_gpu_ptr->setCameraParams(cam);
+                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                }
+                                ctx.renderer.resetCPUAccumulation();
+                            }
                         }
                         if (is_selected) ImGui::SetItemDefaultFocus();
                         if (ImGui::IsItemHovered() && i > 0) {
-                            ImGui::SetTooltip("%s - %s\nCrop: %.2fx",
+                            ImGui::SetTooltip("%s - %s\nCrop: %.2fx\nISO: %d - %d",
                                 CameraPresets::CAMERA_BODIES[i].brand,
                                 CameraPresets::CAMERA_BODIES[i].description,
-                                CameraPresets::CAMERA_BODIES[i].crop_factor);
+                                CameraPresets::CAMERA_BODIES[i].crop_factor,
+                                CameraPresets::CAMERA_BODIES[i].min_iso,
+                                CameraPresets::CAMERA_BODIES[i].max_iso);
                         }
                     }
                     ImGui::EndCombo();
                 }
-                if (selected_body > 0) {
+                
+                // Show current specs
+                ImGui::TextDisabled("Sensor: %.1f x %.1f mm", cam.sensor_width_mm, cam.sensor_height_mm);
+                if (cam.body_preset_index > 0) {
+                   ImGui::TextDisabled("Native ISO: %d - %d", 
+                       CameraPresets::CAMERA_BODIES[cam.body_preset_index].min_iso,
+                       CameraPresets::CAMERA_BODIES[cam.body_preset_index].max_iso);
+                }
+                
+                ImGui::SameLine();
+                if (ImGui::Button("Reset to Custom")) {
+                     cam.body_preset_index = 0; // Custom
+                }
                     ImGui::SameLine();
                     ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%.1fx crop",
                         CameraPresets::CAMERA_BODIES[selected_body].crop_factor);
-                }
+                
 
                 // ═══════════════════════════════════════════════════════════════════════════
                 // LENS PRESETS - Photographer-friendly focal length selection
                 // ═══════════════════════════════════════════════════════════════════════════
-                struct LensPreset {
-                    const char* name;
-                    float focal_mm;
-                    float fov;
-                    const char* description;
-                };
-                static const LensPreset lens_presets[] = {
-                    { "Custom",          0.0f,   0.0f, "Manual FOV control" },
-                    { "16mm Ultra Wide", 16.0f,  97.0f, "Extreme wide angle - landscapes, architecture" },
-                    { "24mm Wide",       24.0f,  84.0f, "Wide angle - interiors, groups" },
-                    { "35mm Standard",   35.0f,  63.0f, "Standard wide - street, documentary" },
-                    { "50mm Normal",     50.0f,  46.8f, "Human eye perspective - general use" },
-                    { "85mm Portrait",   85.0f,  28.6f, "Portrait lens - headshots, bokeh" },
-                    { "135mm Telephoto", 135.0f, 18.0f, "Telephoto - portrait, compression" },
-                    { "200mm Tele",      200.0f, 12.0f, "Long telephoto - wildlife, sports" },
-                };
-                static int selected_lens = 0;
+                int selected_lens = cam.lens_preset_index;
+                if (selected_lens < 0 || selected_lens >= (int)CameraPresets::LENS_PRESET_COUNT) selected_lens = 0;
 
+                if (ImGui::BeginCombo("Lens Preset", CameraPresets::LENS_PRESETS[selected_lens].name)) {
+                     for (int i = 0; i < (int)CameraPresets::LENS_PRESET_COUNT; i++) {
+                         const auto& preset = CameraPresets::LENS_PRESETS[i];
+                         
+                         char label[128];
+                         if (preset.is_zoom) {
+                             snprintf(label, sizeof(label), "%s (%.0f-%.0fmm)", preset.name, preset.min_mm, preset.max_mm);
+                         } else {
+                             snprintf(label, sizeof(label), "%s (%.0fmm)", preset.name, preset.focal_mm);
+                         }
+                         
+                         bool is_selected = (selected_lens == i);
+                         if (ImGui::Selectable(label, is_selected)) {
+                             cam.lens_preset_index = i;
+                             selected_lens = i;
+                             
+                             if (i > 0) {
+                                cam.vfov = preset.fov_deg;
+                                cam.fov = preset.fov_deg;
+                                cam.focal_length_mm = preset.focal_mm;
+                             }
+                             cam.update_camera_vectors();
+                             if (ctx.optix_gpu_ptr && g_hasOptix) {
+                                ctx.optix_gpu_ptr->setCameraParams(cam);
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                             }
+                         }
+                         if (is_selected) ImGui::SetItemDefaultFocus();
+                         
+                         if (ImGui::IsItemHovered() && i > 0) {
+                             if (preset.is_zoom)
+                                ImGui::SetTooltip("%s\nZoom Range: %.0f-%.0fmm\nMax Aperture: f/%.1f\n%s", 
+                                    preset.brand, preset.min_mm, preset.max_mm, preset.max_aperture, preset.description);
+                             else
+                                ImGui::SetTooltip("%s\nFocal Length: %.0fmm\nMax Aperture: f/%.1f\n%s", 
+                                    preset.brand, preset.focal_mm, preset.max_aperture, preset.description);
+                         }
+                     }
+                     ImGui::EndCombo();
+                }
+
+                if (selected_lens > 0) {
+                    float current_fov = (float)cam.vfov;
+                    float current_mm = 24.0f / (2.0f * tanf(current_fov * 0.5f * 3.14159f / 180.0f));
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.8f, 1.0f), "%.0fmm", current_mm);
+                }
                 float fov = (float)cam.vfov;
-
-                // Find current preset based on FOV
-                selected_lens = 0;
-                for (int i = 1; i < IM_ARRAYSIZE(lens_presets); i++) {
-                    if (std::abs(fov - lens_presets[i].fov) < 1.0f) {
-                        selected_lens = i;
-                        break;
-                    }
-                }
-
-                if (ImGui::Combo("Lens Preset", &selected_lens,
-                    [](void* data, int idx, const char** out_text) {
-                        *out_text = ((LensPreset*)data)[idx].name;
-                        return true;
-                    }, (void*)lens_presets, IM_ARRAYSIZE(lens_presets)))
-                {
-                    if (selected_lens > 0) {
-                        fov = lens_presets[selected_lens].fov;
-                        cam.vfov = fov;
-                        cam.fov = fov;
-                        cam.update_camera_vectors();
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
-                        }
-                    }
-                }
-                if (selected_lens > 0 && ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("%s", lens_presets[selected_lens].description);
-                }
-
                 // FOV with ◇ key button
+                // FOV with Smart Slider
                 bool fovKeyed = isCamKeyed(false, false, true, false, false);
-                if (KeyframeButton("##CFOV", fovKeyed)) { insertCamKey("FOV", false, false, true, false, false); }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(fovKeyed ? "REMOVE FOV key" : "ADD FOV key");
-                ImGui::SameLine();
-                if (ImGui::SliderFloat("FOV", &fov, 10.0f, 120.0f)) {
+                if (SceneUI::DrawSmartFloat("fov", "FOV", &fov, 10.0f, 120.0f, "%.1f", fovKeyed,
+                    [&](){ insertCamKey("FOV", false, false, true, false, false); }, 16)) {
                     cam.vfov = fov;
                     cam.fov = fov;
                     cam.update_camera_vectors();
@@ -803,31 +941,47 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // ═══════════════════════════════════════════════════════════════════════════
                 // F-STOP PRESETS - Photographer-friendly aperture selection
                 // ═══════════════════════════════════════════════════════════════════════════
-                // Find current preset based on index or aperture match if index is default
-                // Better to rely on index if it's set properly, or find match
-                if (cam.fstop_preset_index == 0 && cam.aperture > 0.01f) {
-                    for (size_t i = 1; i < CameraPresets::FSTOP_PRESET_COUNT; i++) {
-                        if (std::abs(cam.aperture - CameraPresets::FSTOP_PRESETS[i].aperture_value) < 0.05f) {
-                            cam.fstop_preset_index = (int)i;
-                            break;
-                        }
-                    }
+                // ═══════════════════════════════════════════════════════════════════════════
+                // F-STOP SELECTION (Dynamic based on Lens Body)
+                // ═══════════════════════════════════════════════════════════════════════════
+
+                // 1. Determine Limits from selected lens
+                float limit_min_f = 0.5f;    // Widest (Smallest number) - Custom default
+                float limit_max_f = 128.0f;  // Tightest (Largest number) - Custom default
+
+                if (cam.lens_preset_index > 0 && cam.lens_preset_index < (int)CameraPresets::LENS_PRESET_COUNT) {
+                    limit_min_f = CameraPresets::LENS_PRESETS[cam.lens_preset_index].max_aperture;
+                    limit_max_f = CameraPresets::LENS_PRESETS[cam.lens_preset_index].min_aperture;
                 }
 
-                if (ImGui::BeginCombo("F-Stop", CameraPresets::FSTOP_PRESETS[cam.fstop_preset_index].name)) {
+                // Auto-fix if current aperture is out of bounds (optional, or just clamp display)
+                // ...
+
+                // 2. Combo Box (Presets Filtering)
+                if (ImGui::BeginCombo("F-Stop Preset", CameraPresets::FSTOP_PRESETS[cam.fstop_preset_index].name)) {
                     for (size_t i = 0; i < CameraPresets::FSTOP_PRESET_COUNT; ++i) {
+                        float f_val = CameraPresets::FSTOP_PRESETS[i].f_number;
+                        
+                        // Filter: Skip if out of lens range (Always show Custom=0)
+                        if (i > 0 && (f_val < limit_min_f - 0.01f || f_val > limit_max_f + 0.01f)) {
+                            continue;
+                        }
+
                         bool is_selected = (cam.fstop_preset_index == (int)i);
                         if (ImGui::Selectable(CameraPresets::FSTOP_PRESETS[i].name, is_selected)) {
                             cam.fstop_preset_index = (int)i;
 
-                            // Update physical aperture based on preset
+                            // Apply Preset
                             if (cam.fstop_preset_index > 0) {
+                                // Calculate aperture diameter: D = f / N
+                                // Ensure focal length is updated
+                                float f_mm = (cam.focal_length_mm > 1.0f) ? cam.focal_length_mm : 50.0f;
+                                // Revert to using the preset's calibrated aperture_value
                                 cam.aperture = CameraPresets::FSTOP_PRESETS[i].aperture_value;
                                 cam.lens_radius = cam.aperture * 0.5f;
                             }
                             cam.update_camera_vectors();
-
-                            // Trigger update
+                            
                             if (ctx.optix_gpu_ptr && g_hasOptix) {
                                 ctx.optix_gpu_ptr->setCameraParams(cam);
                                 ctx.optix_gpu_ptr->resetAccumulation();
@@ -835,21 +989,29 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             ctx.renderer.resetCPUAccumulation();
                         }
                         if (is_selected) ImGui::SetItemDefaultFocus();
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", CameraPresets::FSTOP_PRESETS[i].description);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s (f/%.1f)", CameraPresets::FSTOP_PRESETS[i].description, f_val);
                     }
                     ImGui::EndCombo();
                 }
-                if (cam.fstop_preset_index > 0 && ImGui::IsItemHovered()) {
-                    // Main combo tooltip if needed, or leave blank
-                }
 
-                // DOF Settings - Aperture with ◇ key button
+                // 3. Manual F-Stop Slider
                 bool apKeyed = isCamKeyed(false, false, false, false, true);
                 if (KeyframeButton("##CAp", apKeyed)) { insertCamKey("Aperture", false, false, false, false, true); }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(apKeyed ? "REMOVE Aperture key" : "ADD Aperture key");
                 ImGui::SameLine();
-                if (ImGui::SliderFloat("Aperture", &cam.aperture, 0.0f, 5.0f)) {
+                
+                // Calculate current f-stop from physical aperture
+                float calc_f_mm = (cam.focal_length_mm > 1.0f) ? cam.focal_length_mm : 50.0f;
+                float current_f = (cam.aperture > 0.001f) ? (calc_f_mm / cam.aperture) : limit_max_f;
+                
+                // Clamp for display safely
+                current_f = std::max(limit_min_f, std::min(current_f, limit_max_f));
+
+                if (SceneUI::DrawSmartFloat("fstop", "F-Stop", &current_f, limit_min_f, limit_max_f, "f/%.2f", apKeyed,
+                    [&](){ insertCamKey("Aperture", false, false, false, false, true); }, 16)) {
                     cam.fstop_preset_index = 0; // Reset to Custom
+                    // Scale calculated aperture to match preset units (approx 0.01 scale factor)
+                    cam.aperture = (calc_f_mm / current_f) * 0.01f; 
                     cam.lens_radius = cam.aperture * 0.5f;
 
                     if (ctx.optix_gpu_ptr && g_hasOptix) {
@@ -886,7 +1048,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                     if (cam.use_physical_lens) {
                         // Focal Length
-                        if (ImGui::SliderFloat("Focal Length", &cam.focal_length_mm, 10.0f, 200.0f, "%.1f mm")) {
+                        if (SceneUI::DrawSmartFloat("flen", "Focal Len", &cam.focal_length_mm, 10.0f, 200.0f, "%.1f mm", false, nullptr, 12)) {
                             lens_changed = true;
                         }
 
@@ -948,12 +1110,10 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                 // Focus Distance with ◇ key button and Pick Focus button
                 bool focKeyed = isCamKeyed(false, false, false, true, false);
-                if (KeyframeButton("##CFoc", focKeyed)) { insertCamKey("Focus", false, false, false, true, false); }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(focKeyed ? "REMOVE Focus key" : "ADD Focus key");
-                ImGui::SameLine();
-                ImGui::DragFloat("Focus Dist", &cam.focus_dist, 0.1f, 0.01f, 100.0f);
-
-                // Pick Focus mode - sets focus to clicked object distance
+                if (SceneUI::DrawSmartFloat("dist", "Focus Dist", &cam.focus_dist, 0.1f, 100.0f, "%.2f", focKeyed,
+                    [&](){ insertCamKey("Focus", false, false, false, true, false); }, 16)) {
+                    // Changed
+                }             // Pick Focus mode - sets focus to clicked object distance
                 ImGui::SameLine();
                 if (is_picking_focus) {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.4f, 0.1f, 1.0f));
@@ -970,7 +1130,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                 // Mouse Sensitivity
                 ImGui::Spacing();
-                if (ImGui::SliderFloat("Mouse Sensitivity", &ctx.mouse_sensitivity, 0.01f, 5.0f, "%.3f")) {
+                if (SceneUI::DrawSmartFloat("msens", "Mouse Sens", &ctx.mouse_sensitivity, 0.01f, 5.0f, "%.3f", false, nullptr, 12)) {
                     // Value updated directly via reference
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera rotation/panning speed");
@@ -990,13 +1150,30 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                     ImGui::Spacing();
 
-                    // ISO Preset
-                    ImGui::PushItemWidth(180);
-                    if (ImGui::BeginCombo("ISO", CameraPresets::ISO_PRESETS[cam.iso_preset_index].name)) {
+                    // ISO Settings (Dynamic based on Body)
+                    int iso_min = 50;
+                    int iso_max = 819200;
+                    if (cam.body_preset_index > 0 && cam.body_preset_index < (int)CameraPresets::CAMERA_BODY_COUNT) {
+                        iso_min = CameraPresets::CAMERA_BODIES[cam.body_preset_index].min_iso;
+                        iso_max = CameraPresets::CAMERA_BODIES[cam.body_preset_index].max_iso;
+                    }
+
+                    ImGui::PushItemWidth(120);
+                    // Find current preset name or show "Custom" if index is invalid/-1
+                    const char* iso_preview = (cam.iso_preset_index >= 0 && cam.iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) 
+                         ? CameraPresets::ISO_PRESETS[cam.iso_preset_index].name 
+                         : "Custom";
+
+                    if (ImGui::BeginCombo("ISO", iso_preview)) {
                         for (size_t i = 0; i < CameraPresets::ISO_PRESET_COUNT; ++i) {
+                            int p_iso = CameraPresets::ISO_PRESETS[i].iso_value;
+                            // Filter based on body limits
+                            if (p_iso < iso_min || p_iso > iso_max) continue;
+
                             bool is_selected = (cam.iso_preset_index == (int)i);
                             if (ImGui::Selectable(CameraPresets::ISO_PRESETS[i].name, is_selected)) {
                                 cam.iso_preset_index = (int)i;
+                                cam.iso = p_iso;
                                 exposure_changed = true;
                             }
                             if (is_selected) ImGui::SetItemDefaultFocus();
@@ -1008,13 +1185,37 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         }
                         ImGui::EndCombo();
                     }
+                    ImGui::SameLine();
+                    
+                    // Manual ISO Drag
+                    // Clamp visual range but allow manual input
+                    int iso_val = cam.iso;
+                    if (ImGui::DragInt("##ISOVal", &iso_val, 10.0f, iso_min, iso_max, "ISO %d")) {
+                         // Clamp result
+                         if (iso_val < iso_min) iso_val = iso_min;
+                         if (iso_val > iso_max) iso_val = iso_max;
+                         cam.iso = iso_val;
+                         
+                         exposure_changed = true;
+                         // Try to match preset, else set to custom (-1)
+                         cam.iso_preset_index = -1; 
+                         for (size_t i=0; i<CameraPresets::ISO_PRESET_COUNT; ++i) {
+                             if (CameraPresets::ISO_PRESETS[i].iso_value == cam.iso) {
+                                 cam.iso_preset_index = (int)i;
+                                 break;
+                             }
+                         }
+                    }
+                    ImGui::PopItemWidth();
 
                     // Shutter Speed Preset  
+                    ImGui::PushItemWidth(180);
                     if (ImGui::BeginCombo("Shutter", CameraPresets::SHUTTER_SPEED_PRESETS[cam.shutter_preset_index].name)) {
                         for (size_t i = 0; i < CameraPresets::SHUTTER_SPEED_PRESET_COUNT; ++i) {
                             bool is_selected = (cam.shutter_preset_index == (int)i);
                             if (ImGui::Selectable(CameraPresets::SHUTTER_SPEED_PRESETS[i].name, is_selected)) {
                                 cam.shutter_preset_index = (int)i;
+                                cam.shutter_speed = 1.0f / CameraPresets::SHUTTER_SPEED_PRESETS[i].speed_seconds; // Optional sync
                                 exposure_changed = true;
                             }
                             if (is_selected) ImGui::SetItemDefaultFocus();
@@ -1046,10 +1247,11 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
 
                     // Calculate and show exposure info
-                    float iso_mult = CameraPresets::ISO_PRESETS[cam.iso_preset_index].exposure_multiplier;
-                    float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cam.shutter_preset_index].speed_seconds; // Corrected member name
+                    // Use literal ISO value (cam.iso) for EV calc, not just preset index multiplier
+                    float iso_mult = (float)cam.iso / 100.0f; 
+                    float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cam.shutter_preset_index].speed_seconds; 
                     float aperture_area = cam.aperture * cam.aperture;
-                    cam.calculated_ev = log2f(100.0f / (iso_mult * shutter_time * aperture_area + 0.001f)) + cam.ev_compensation;
+                    cam.calculated_ev = log2f(100.0f / (iso_mult * shutter_time * aperture_area + 0.0001f)) + cam.ev_compensation;
 
                     ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.7f, 1.0f), "Exposure: %.1f EV", cam.calculated_ev);
 
@@ -1058,6 +1260,174 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         ImGui::TextDisabled("(Auto Active)");
                     }
                 }
+                
+                } // END: if (show_pro_controls) - Pro & Cinema mode controls
+                
+                // ═══════════════════════════════════════════════════════════════════════════
+                // AUTO MODE: Simplified Controls (Only FOV and Focus)
+                // ═══════════════════════════════════════════════════════════════════════════
+                if (cam.camera_mode == CameraMode::Auto) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.5f, 1.0f), "Basic Settings");
+                    ImGui::Spacing();
+                    
+                    // Simple FOV slider
+                    float fov = (float)cam.vfov;
+                    if (ImGui::SliderFloat("Field of View", &fov, 20.0f, 100.0f, "%.0f°")) {
+                        cam.vfov = fov;
+                        cam.fov = fov;
+                        cam.update_camera_vectors();
+                        if (ctx.optix_gpu_ptr && g_hasOptix) {
+                            ctx.optix_gpu_ptr->setCameraParams(cam);
+                            ctx.optix_gpu_ptr->resetAccumulation();
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Wider = More visible area\nNarrower = Zoom in effect");
+                    
+                    // Simple Focus Distance
+                    if (ImGui::SliderFloat("Focus Distance", &cam.focus_dist, 0.5f, 50.0f, "%.1f m")) {
+                        if (ctx.optix_gpu_ptr && g_hasOptix) {
+                            ctx.optix_gpu_ptr->setCameraParams(cam);
+                            ctx.optix_gpu_ptr->resetAccumulation();
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Distance to the focused object");
+                    
+                    // Simple Depth of Field
+                    float dof_strength = 1.0f - std::min(1.0f, cam.aperture * 20.0f);  // Invert for intuitive slider
+                    if (ImGui::SliderFloat("Background Blur", &dof_strength, 0.0f, 1.0f, "%.2f")) {
+                        cam.aperture = (1.0f - dof_strength) * 0.05f;
+                        cam.lens_radius = cam.aperture * 0.5f;
+                        if (ctx.optix_gpu_ptr && g_hasOptix) {
+                            ctx.optix_gpu_ptr->setCameraParams(cam);
+                            ctx.optix_gpu_ptr->resetAccumulation();
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = Sharp everywhere\n1 = Blurry background (Portrait mode)");
+                    
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("Switch to Pro mode for full control");
+                }
+                
+                // ═══════════════════════════════════════════════════════════════════════════
+                // CINEMA MODE EFFECTS (Only visible in Cinema mode)
+                // ═══════════════════════════════════════════════════════════════════════════
+                if (cam.camera_mode == CameraMode::Cinema) {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.3f, 1.0f), "Cinema Effects");
+                    ImGui::Spacing();
+                        
+                        bool cinema_changed = false;
+                        
+                        // Lens Quality slider
+                        cinema_changed |= ImGui::SliderFloat("Lens Quality", &cam.lens_quality, 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                            "0.0 = Vintage/Budget lens (more aberrations)\n"
+                            "1.0 = Perfect optical design (minimal aberrations)");
+                        
+                        // Auto-calculate toggle
+                        cinema_changed |= ImGui::Checkbox("Auto Lens Characteristics", &cam.auto_lens_characteristics);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                            "Calculate vignetting, CA, and distortion\n"
+                            "from lens quality, focal length, and aperture");
+                        
+                        // If auto is on, recalculate and show the values read-only
+                        if (cam.auto_lens_characteristics) {
+                            cam.calculateLensCharacteristics();
+                            ImGui::TextDisabled("Vignette: %.1f%% | CA: %.3f | Dist: %.2f",
+                                cam.vignetting_amount * 100.0f,
+                                cam.chromatic_aberration,
+                                cam.distortion);
+                        } else {
+                            // Manual controls
+                            ImGui::Spacing();
+                            ImGui::TextColored(ImVec4(0.8f, 0.6f, 0.3f, 1.0f), "Manual Overrides");
+                            
+                            // Chromatic Aberration
+                            cinema_changed |= ImGui::Checkbox("Chromatic Aberration##CA", &cam.enable_chromatic_aberration);
+                            if (cam.enable_chromatic_aberration) {
+                                ImGui::Indent();
+                                cinema_changed |= ImGui::SliderFloat("Amount##CA", &cam.chromatic_aberration, 0.0f, 0.05f, "%.3f");
+                                ImGui::Unindent();
+                            }
+                            
+                            // Vignetting
+                            cinema_changed |= ImGui::Checkbox("Vignetting##Vig", &cam.enable_vignetting);
+                            if (cam.enable_vignetting) {
+                                ImGui::Indent();
+                                cinema_changed |= ImGui::SliderFloat("Amount##Vig", &cam.vignetting_amount, 0.0f, 1.0f, "%.2f");
+                                cinema_changed |= ImGui::SliderFloat("Falloff##Vig", &cam.vignetting_falloff, 1.0f, 4.0f, "%.1f");
+                                ImGui::Unindent();
+                            }
+                        }
+                        
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Camera Motion");
+                        
+                        // Camera Shake
+                        cinema_changed |= ImGui::Checkbox("Camera Shake (Handheld)##Shake", &cam.enable_camera_shake);
+                        if (cam.enable_camera_shake) {
+                            ImGui::Indent();
+                            cinema_changed |= ImGui::SliderFloat("Intensity##Shake", &cam.shake_intensity, 0.0f, 1.0f, "%.2f");
+                            cinema_changed |= ImGui::SliderFloat("Frequency##Shake", &cam.shake_frequency, 2.0f, 15.0f, "%.1f Hz");
+                            
+                            const char* skill_names[] = { "Amateur", "Intermediate", "Professional", "Expert" };
+                            int skill = static_cast<int>(cam.operator_skill);
+                            if (ImGui::Combo("Operator##Skill", &skill, skill_names, IM_ARRAYSIZE(skill_names))) {
+                                cam.operator_skill = static_cast<Camera::OperatorSkill>(skill);
+                                cinema_changed = true;
+                            }
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "Amateur: Maximum shake, unsteady hands\n"
+                                "Intermediate: Moderate shake\n"
+                                "Professional: Minimal shake, trained operator\n"
+                                "Expert: Almost no shake, documentary/cinema pro");
+                            
+                            // IBIS (In-Body Image Stabilization)
+                            cinema_changed |= ImGui::Checkbox("IBIS##Stab", &cam.ibis_enabled);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "In-Body Image Stabilization (IBIS)\n\n"
+                                "Simulates sensor-shift stabilization found in\n"
+                                "modern mirrorless cameras (Sony, Canon, etc.)\n\n"
+                                "Reduces shake by compensating sensor movement.\n"
+                                "Higher stops = more stabilization.\n\n"
+                                "Typical values:\n"
+                                "  3-4 stops: Basic IBIS\n"
+                                "  5-6 stops: Advanced (Sony A7)\n"
+                                "  7-8 stops: Professional (Olympus OM-1)");
+                            if (cam.ibis_enabled) {
+                                ImGui::SameLine();
+                                ImGui::PushItemWidth(60);
+                                cinema_changed |= ImGui::DragFloat("##IBISStops", &cam.ibis_effectiveness, 0.5f, 1.0f, 8.0f, "%.1f stops");
+                                ImGui::PopItemWidth();
+                            }
+                            
+                            ImGui::Spacing();
+                            
+                            // Focus Drift
+                            cinema_changed |= ImGui::Checkbox("Focus Drift##FocDrift", &cam.enable_focus_drift);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip(
+                                "When camera shakes, focus plane also moves.\n"
+                                "This simulates real handheld focus breathing.\n\n"
+                                "More noticeable with shallow DOF (wide aperture).");
+                            if (cam.enable_focus_drift) {
+                                ImGui::SameLine();
+                                ImGui::PushItemWidth(60);
+                                cinema_changed |= ImGui::DragFloat("##FocDriftAmt", &cam.focus_drift_amount, 0.01f, 0.0f, 0.5f, "%.2f m");
+                                ImGui::PopItemWidth();
+                            }
+                            
+                            ImGui::Unindent();
+                        }
+                        
+                        if (cinema_changed) {
+                            if (ctx.optix_gpu_ptr && g_hasOptix) {
+                                ctx.optix_gpu_ptr->setCameraParams(cam);
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                            }
+                            ctx.renderer.resetCPUAccumulation();
+                            ProjectManager::getInstance().markModified();
+                        }
+                } // END: Cinema mode effects
 
                 // ═══════════════════════════════════════════════════════════════════════════
                 // OUTPUT ASPECT RATIO - Syncs with Final Render
@@ -1179,6 +1549,10 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     // Center Crosshair
                     ImGui::Checkbox("Center Crosshair", &guide_settings.show_center);
                 }
+                
+                // Pop camera properties styling
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(6);
             }
 
             // LIGHT PROPERTIES
@@ -1300,30 +1674,30 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::SameLine();
                 if (ImGui::ColorEdit3("Color", &light.color.x)) light_changed = true;
 
-                // Intensity with ◇ key button
+                // Intensity with Smart Slider
                 bool intKeyed = isLightKeyed(false, false, true, false);
-                if (KeyframeButton("##LInt", intKeyed)) { insertLightKey("Intensity", false, false, true, false); }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip(intKeyed ? "REMOVE Intensity key" : "ADD Intensity key");
-                ImGui::SameLine();
-                if (ImGui::DragFloat("Intensity", &light.intensity, 0.5f, 0.0f, 1000.0f)) light_changed = true;
+                if (SceneUI::DrawSmartFloat("lint", "Intensity", &light.intensity, 0.5f, 1000.0f, "%.1f", intKeyed,
+                    [&](){ insertLightKey("Intensity", false, false, true, false); }, 16)) {
+                    light_changed = true;
+                }
 
                 if (light.type() == LightType::Point || light.type() == LightType::Directional) {
-                    if (ImGui::DragFloat("Radius", &light.radius, 0.01f, 0.01f, 100.0f)) light_changed = true;
+                    if (SceneUI::DrawSmartFloat("lrad", "Radius", &light.radius, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) light_changed = true;
                 }
 
                 if (auto sl = dynamic_cast<SpotLight*>(&light)) {
                     float angle = sl->getAngleDegrees();
-                    if (ImGui::DragFloat("Cone Angle", &angle, 0.5f, 1.0f, 89.0f)) {
+                    if (SceneUI::DrawSmartFloat("lcne", "Cone Angle", &angle, 1.0f, 89.0f, "%.1f", false, nullptr, 16)) {
                         sl->setAngleDegrees(angle);
                         light_changed = true;
                     }
                 }
                 else if (auto al = dynamic_cast<AreaLight*>(&light)) {
-                    if (ImGui::DragFloat("Width", &al->width, 0.05f, 0.01f, 100.0f)) {
+                    if (SceneUI::DrawSmartFloat("awid", "Width", &al->width, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
                         al->u = al->u.normalize() * al->width;
                         light_changed = true;
                     }
-                    if (ImGui::DragFloat("Height", &al->height, 0.05f, 0.01f, 100.0f)) {
+                    if (SceneUI::DrawSmartFloat("ahei", "Height", &al->height, 0.01f, 100.0f, "%.2f", false, nullptr, 16)) {
                         al->v = al->v.normalize() * al->height;
                         light_changed = true;
                     }
@@ -1345,10 +1719,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
 
         // ─────────────────────────────────────────────────────────────────────────
-        // MATERIAL EDITOR (Takes remaining space)
+        // MATERIAL EDITOR (Only for Objects - not Camera, Light, or World)
         // ─────────────────────────────────────────────────────────────────────────
-        // Hide Material Editor when World is selected (World has no materials)
-        if (sel.selected.type != SelectableType::World) {
+        if (sel.selected.type == SelectableType::Object) {
             ImGui::Separator();
             if (ImGui::CollapsingHeader("Material Editor", ImGuiTreeNodeFlags_DefaultOpen)) {
                 drawMaterialPanel(ctx);

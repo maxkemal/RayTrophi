@@ -165,7 +165,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         }
         else if (item.type == SelectableType::Light && item.light) {
             Vec3 lightPos = item.light->position;
-            float boxSize = 0.5f;
+            float boxSize = 0.15f; // Küçültüldü: 0.5 -> 0.15
             bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
             bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
             has_bounds = true;
@@ -252,27 +252,14 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
 
         // ================== DRAW BY TYPE ==================
 
-        // ---- POINT (Diamond) ----
+        // ---- POINT (Orta Daire + D\u0131\u015f Halka) ----
         if (light->type() == LightType::Point) {
-            float r = 0.2f;
-            Vec3 pts[6] = {
-                pos + Vec3(0, r, 0), pos + Vec3(0, -r, 0),
-                pos + Vec3(r, 0, 0), pos + Vec3(-r, 0, 0),
-                pos + Vec3(0, 0, r), pos + Vec3(0, 0, -r)
-            };
-
-            ImVec2 s[6];
-            for (int i = 0; i < 6; ++i) s[i] = Project(pts[i]);
-
-            draw_list->AddCircleFilled(center, 4.0f,
-                IM_COL32(255, 255, 200, 200));
-
-            draw_list->AddLine(s[2], s[4], col); draw_list->AddLine(s[4], s[3], col);
-            draw_list->AddLine(s[3], s[5], col); draw_list->AddLine(s[5], s[2], col);
-            draw_list->AddLine(s[0], s[2], col); draw_list->AddLine(s[0], s[3], col);
-            draw_list->AddLine(s[0], s[4], col); draw_list->AddLine(s[0], s[5], col);
-            draw_list->AddLine(s[1], s[2], col); draw_list->AddLine(s[1], s[3], col);
-            draw_list->AddLine(s[1], s[4], col); draw_list->AddLine(s[1], s[5], col);
+            // Parlak merkez daire
+            draw_list->AddCircleFilled(center, 5.0f, IM_COL32(255, 240, 180, 255));
+            // D\u0131\u015f halka
+            draw_list->AddCircle(center, 12.0f, col, 0, 2.0f);
+            // \u0130nce i\u00e7 halka (derinlik etkisi i\u00e7in)
+            draw_list->AddCircle(center, 8.0f, IM_COL32(255, 220, 100, 120), 0, 1.0f);
         }
 
         // ---- DIRECTIONAL (Sun + Arrow) ----
@@ -304,19 +291,30 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
             auto al = std::dynamic_pointer_cast<AreaLight>(light);
             if (!al) continue;
 
+            // Normalleştirilmiş u ve v vektörleri
             Vec3 u = al->getU();
             Vec3 v = al->getV();
+            float halfW = al->getWidth() * 0.5f;
+            float halfH = al->getHeight() * 0.5f;
 
-            ImVec2 c1 = Project(pos);
-            ImVec2 c2 = Project(pos + u);
-            ImVec2 c3 = Project(pos + u + v);
-            ImVec2 c4 = Project(pos + v);
+            // pos merkez noktası, köşeleri merkezden hesapla
+            Vec3 corner1 = pos - u * halfW - v * halfH;  // Sol-Alt
+            Vec3 corner2 = pos + u * halfW - v * halfH;  // Sağ-Alt  
+            Vec3 corner3 = pos + u * halfW + v * halfH;  // Sağ-Üst
+            Vec3 corner4 = pos - u * halfW + v * halfH;  // Sol-Üst
+
+            ImVec2 c1 = Project(corner1);
+            ImVec2 c2 = Project(corner2);
+            ImVec2 c3 = Project(corner3);
+            ImVec2 c4 = Project(corner4);
 
             draw_list->AddLine(c1, c2, col);
             draw_list->AddLine(c2, c3, col);
             draw_list->AddLine(c3, c4, col);
             draw_list->AddLine(c4, c1, col);
+            // X çizgisi: merkez artık gerçek merkez
             draw_list->AddLine(c1, c3, col, 1.0f);
+            draw_list->AddLine(c2, c4, col, 1.0f);
         }
 
         // ---- SPOT (Cone) ----
@@ -420,12 +418,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     float objectMatrix[16];
     Vec3 pos = sel.selected.position;
 
-    // Fix AreaLight Pivot: Use Center instead of Corner
-    if (sel.selected.type == SelectableType::Light) {
-        if (auto al = std::dynamic_pointer_cast<AreaLight>(sel.selected.light)) {
-            pos = al->position + al->u * 0.5f + al->v * 0.5f;
-        }
-    }
+    // AreaLight: position zaten merkez noktas\u0131, ek offset gerekli de\u011fil
 
     // Initialize as identity with position
     Matrix4x4 startMat = Matrix4x4::identity();
@@ -518,21 +511,22 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         }
         else if (auto al = std::dynamic_pointer_cast<AreaLight>(sel.selected.light)) {
             hasDir = false;
-            // Use actual magnitude for Scale interaction
-            Vec3 X = al->u;
-            Vec3 Z = al->v;
+            // Normalize vekt\u00f6rleri width/height ile \u00f6l\u00e7eklendirerek ger\u00e7ek boyutu yans\u0131t
+            Vec3 X = al->u * al->getWidth();   // u normalize, width ile \u00f6l\u00e7ekle
+            Vec3 Z = al->v * al->getHeight();  // v normalize, height ile \u00f6l\u00e7ekle
             // Normalized Y (Normal)
-            Vec3 Y = Vec3::cross(X, Z).normalize();
+            Vec3 Y = Vec3::cross(al->u, al->v).normalize();
 
             startMat.m[0][0] = X.x; startMat.m[0][1] = Y.x; startMat.m[0][2] = Z.x;
             startMat.m[1][0] = X.y; startMat.m[1][1] = Y.y; startMat.m[1][2] = Z.y;
             startMat.m[2][0] = X.z; startMat.m[2][1] = Y.z; startMat.m[2][2] = Z.z;
 
-            // Visualization: Direction Arrow
+            // Visualization: Direction Arrow (\u00d6l\u00e7e\u011fe g\u00f6re k\u0131salt)
             ImDrawList* dl = ImGui::GetBackgroundDrawList();
             Vec3 center = pos;
             Vec3 normal = Y.normalize();
-            float len = 3.0f;
+            float len = std::min(al->getWidth(), al->getHeight()) * 0.5f; // Daha k\u0131sa, orant\u0131l\u0131 ok
+            if (len < 0.3f) len = 0.3f;
             Vec3 pTip = center + normal * len;
             dl->AddLine(Project(center), Project(pTip), IM_COL32(255, 255, 0, 200), 2.0f);
             dl->AddCircleFilled(Project(pTip), 4.0f, IM_COL32(255, 255, 0, 255));
@@ -1199,19 +1193,20 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 Vec3 right(objectMatrix[0], objectMatrix[1], objectMatrix[2]);
                 Vec3 forward(objectMatrix[8], objectMatrix[9], objectMatrix[10]);
 
-                // Scale handling: Assign directly (Fixes infinite growth)
+                // Scale bilgisini vektörlerden çıkar
                 float sx = right.length();
                 float sz = forward.length();
 
+                // Width ve Height güncelle
                 if (sx > 0.001f) al->width = sx;
                 if (sz > 0.001f) al->height = sz;
 
-                // Set vectors directly (they carry rotation and scale)
-                al->u = right;
-                al->v = forward;
+                // u ve v HER ZAMAN normalize tutulmalı!
+                if (sx > 0.001f) al->u = right / sx;
+                if (sz > 0.001f) al->v = forward / sz;
 
-                // Correct Position
-                al->position = newPos - (al->u * 0.5f) - (al->v * 0.5f);
+                // Position doğrudan gizmo merkezinden alınmalı (artık position = merkez)
+                al->position = newPos;
             }
 
             if (ctx.optix_gpu_ptr) {

@@ -73,7 +73,7 @@ static void deserializeProperty(MaterialProperty& prop, const json& j, const std
         if (embedded) {
             // Load directly from memory buffer - fast and no temp files!
             prop.texture = std::make_shared<Texture>(embedded->data, texType, texPath);
-            SCENE_LOG_INFO("[MATERIAL] Loaded embedded texture from memory: " + texPath);
+            // SCENE_LOG_INFO("[MATERIAL] Loaded embedded texture from memory: " + texPath);
             return;
         }
         

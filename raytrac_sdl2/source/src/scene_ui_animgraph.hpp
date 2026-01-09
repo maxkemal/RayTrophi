@@ -77,7 +77,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx, AnimationGraph::Animati
     if (!evalCtx.floatParams.empty()) {
         if (ImGui::CollapsingHeader("Float Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
             for (auto& [name, value] : evalCtx.floatParams) {
-                ImGui::SliderFloat(name.c_str(), &value, 0.0f, 1.0f);
+                SceneUI::DrawSmartFloat(name.c_str(), name.c_str(), &value, 0.0f, 1.0f, "%.3f", false, nullptr, 16);
             }
         }
     }

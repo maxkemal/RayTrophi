@@ -270,8 +270,11 @@ bool AnimationController::update(float deltaTime, const BoneData& boneData) {
                     finalTransform = blendTransforms(transformA, transformB, state.blendWeight, state.mode);
                 }
                 
-                // Apply offset matrix
-                Matrix4x4 boneMatrix = finalTransform * offsetIt->second;
+                // CRITICAL FIX: Apply globalInverseTransform for correct axis transformation
+                // This is essential for FBX files which use Z-up coordinate system.
+                // Without this, skinned meshes will appear rotated and scaled incorrectly
+                // when loaded from a saved project (where loader context is not available).
+                Matrix4x4 boneMatrix = boneData.globalInverseTransform * finalTransform * offsetIt->second;
                 
                 // Blend with existing matrix based on layer weight
                 if (layer.weight < 1.0f && layer.blendMode == BlendMode::Replace) {

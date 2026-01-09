@@ -16,7 +16,8 @@ enum class TrackGroup {
     Lights,
     Cameras,
     World,
-    Terrain  // For terrain morphing animation
+    Terrain,  // For terrain morphing animation
+    Water     // For water wave parameter animation
 };
 
 
@@ -135,6 +136,7 @@ private:
     bool group_cameras_expanded = true;
     bool group_world_expanded = true;
     bool group_terrain_expanded = true;
+    bool group_water_expanded = true;   // NEW: Water track group
     
     // Colors
     static constexpr ImU32 COLOR_TRANSFORM = IM_COL32(100, 150, 255, 255);  // Blue
@@ -143,6 +145,7 @@ private:
     static constexpr ImU32 COLOR_CAMERA = IM_COL32(200, 100, 255, 255);     // Purple
     static constexpr ImU32 COLOR_WORLD = IM_COL32(255, 150, 200, 255);      // Pink
     static constexpr ImU32 COLOR_TERRAIN = IM_COL32(139, 90, 43, 255);      // Brown (terrain)
+    static constexpr ImU32 COLOR_WATER = IM_COL32(64, 164, 223, 255);       // Ocean Blue (water)
     static constexpr ImU32 COLOR_SELECTED = IM_COL32(255, 255, 255, 255);   // White
     static constexpr ImU32 COLOR_GRID = IM_COL32(60, 60, 60, 255);
     static constexpr ImU32 COLOR_CURRENT_FRAME = IM_COL32(255, 80, 80, 200);

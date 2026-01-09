@@ -85,8 +85,8 @@ public:
     int pivot_mode = 0; // 0=Median Point (Group), 1=Individual Origins
     bool show_animation_panel = true; // Default open
     bool show_foliage_tab = false;    // Default closed (User preference)
-    bool show_water_tab = false;      // Default closed
-    bool show_terrain_tab = false;    // Default closed
+    bool show_water_tab = true;       // DEFAULT OPEN
+    bool show_terrain_tab = true;     // DEFAULT OPEN
     bool show_system_tab = false;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
     bool show_anim_graph = false;     // Animation node editor panel
@@ -96,6 +96,32 @@ public:
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
     static std::string saveFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const wchar_t* defExt = L"rts");
     static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
+    
+    // ═══════════════════════════════════════════════════════════
+    // GLOBAL UI WIDGETS (Themable)
+    // ═══════════════════════════════════════════════════════════
+    struct LCDTheme {
+        ImU32 litColor = IM_COL32(200, 200, 200, 255);    // Active segment color
+        ImU32 offColor = IM_COL32(40, 45, 50, 255);       // Inactive segment color
+        ImU32 bgColor = IM_COL32(20, 20, 20, 255);        // Background/border color
+        ImU32 textValColor = IM_COL32(180, 230, 255, 255);// Value text color
+        bool isRetroGreen = false;                        // Preset flag
+    };
+    static LCDTheme currentTheme;
+    
+    enum class UISliderStyle { Modern, RetroLCD };
+    static UISliderStyle globalSliderStyle; // Definition
+
+    // Global LCD Slider Widget (Direct Call)
+    static bool DrawLCDSlider(const char* id, const char* label, float* value, float min, float max, 
+                              const char* format, bool keyed = false, 
+                              std::function<void()> onKeyframeClick = nullptr, int segments = 16);
+
+    // SMART SLIDER WRAPPER (Switchable Style)
+    // Uses globalSliderStyle to determine whether to draw LCD or Standard slider
+    static bool DrawSmartFloat(const char* id, const char* label, float* value, float min, float max, 
+                               const char* format = "%.2f", bool keyed = false, 
+                               std::function<void()> onKeyframeClick = nullptr, int segments = 16);
 
 
     void drawHistogramPanel(UIContext& ctx);      
@@ -283,12 +309,15 @@ public:
     };
     FoliageBrushSettings foliage_brush;
 
-    // Water & Terrain UI
+    // Water, River & Terrain UI
     void drawWaterPanel(UIContext& ctx);
+    void drawRiverPanel(UIContext& ctx);       // Bezier spline river editor
+    void drawRiverGizmos(UIContext& ctx, bool& gizmo_hit);  // River spline visualization
     void drawTerrainPanel(UIContext& ctx);
     void handleTerrainBrush(UIContext& ctx);
     void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
     void tickProgressiveVertexSync(); // Called each frame to process a chunk
+    void updateAutofocus(UIContext& ctx);  // Run autofocus logic (raycast center)rlay (focal, FOV, aperture)
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
@@ -316,6 +345,8 @@ private:
     void drawZebraOverlay(UIContext& ctx);         // Overexposure warning
     void drawAFPointsOverlay(UIContext& ctx);      // Multi-point autofocus grid
     void drawProCameraPanel(UIContext& ctx);       // Settings panel for pro features
+     void drawLensInfoHUD(UIContext& ctx);  // Lens info top-left
+    
 
     // --- Scene Interaction ---
     void handleSceneInteraction(UIContext& ctx, bool gizmo_hit);

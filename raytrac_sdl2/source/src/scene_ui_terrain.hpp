@@ -123,7 +123,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 UIWidgets::HelpMarker("Fast: Simple 4-neighbor average\nSobel: Smooth 8-neighbor filter (recommended)\nHigh Quality: Enhanced edge detection");
                 
                 // Normal Strength Slider
-                if (ImGui::SliderFloat("Normal Strength", &t->normal_strength, 0.1f, 3.0f, "%.2f")) {
+                if (SceneUI::DrawSmartFloat("nstr", "Normal Str", &t->normal_strength, 0.1f, 3.0f, "%.2f", false, nullptr, 16)) {
                     t->dirty_mesh = true;
                     TerrainManager::getInstance().updateTerrainMesh(t);
                     ctx.renderer.resetCPUAccumulation();
@@ -142,6 +142,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             
             ImGui::Spacing();
             
+            ImGui::Spacing();
+
             // -----------------------------------------------------------------------------
             // 3. LAYER MANAGEMENT
             // -----------------------------------------------------------------------------
@@ -210,7 +212,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     }
 
                     // UV Scale
-                        if (ImGui::DragFloat("UV Scale", &t->layer_uv_scales[i], 0.1f, 0.1f, 1000.0f)) {
+                        if (SceneUI::DrawSmartFloat("uvs", "UV Scale", &t->layer_uv_scales[i], 0.1f, 1000.0f, "%.1f", false, nullptr, 12)) {
                             g_optix_rebuild_pending = true;
                         }
                     
@@ -454,7 +456,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 ImGui::SameLine();
                                 ImGui::TextDisabled("(Click terrain to paint)");
                                 
-                                ImGui::SliderFloat("Brush Radius", &foliage_brush.radius, 1.0f, 50.0f);
+                                if (SceneUI::DrawSmartFloat("brad", "Radius", &foliage_brush.radius, 1.0f, 50.0f, "%.1f", false, nullptr, 12)) {}
                                 ImGui::SliderInt("Instances/Stroke", &foliage_brush.density, 1, 20);
                                 
                                 const char* modes[] = { "Add", "Remove" };
@@ -628,9 +630,9 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             static float am_height_max = 20.0f;
             static float am_slope = 5.0f;
 
-            ImGui::DragFloat("Height Start (Snow)", &am_height_min, 0.1f, 0.0f, 50.0f);
-            ImGui::DragFloat("Height End", &am_height_max, 0.1f, 0.0f, 50.0f);
-            ImGui::DragFloat("Slope Steepness", &am_slope, 0.1f, 1.0f, 20.0f);
+            if (SceneUI::DrawSmartFloat("mhmin", "Height Start", &am_height_min, 0.0f, 50.0f, "%.1f", false, nullptr, 12)) {}
+            if (SceneUI::DrawSmartFloat("mhmax", "Height End", &am_height_max, 0.0f, 50.0f, "%.1f", false, nullptr, 12)) {}
+            if (SceneUI::DrawSmartFloat("mslope", "Slope Steep", &am_slope, 1.0f, 20.0f, "%.1f", false, nullptr, 12)) {}
 
             if (ImGui::Button("Generate Mask")) {
                 TerrainManager::getInstance().autoMask(t, 0.0f, 0.0f, am_height_min, am_height_max, am_slope);
@@ -657,7 +659,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             UIWidgets::ColoredHeader("Rock Hardness", ImVec4(0.7f, 0.5f, 0.3f, 1.0f));
             
             static float defaultHardness = 0.3f;
-            ImGui::SliderFloat("Default Hardness", &defaultHardness, 0.0f, 1.0f, "%.2f");
+            if (SceneUI::DrawSmartFloat("hard", "Def Hardness", &defaultHardness, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {}
             UIWidgets::HelpMarker("0 = Soft (sand/soil), 1 = Hard (bedrock)");
             
             bool hasHardness = !t->hardnessMap.empty();
@@ -743,10 +745,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 else ImGui::TextDisabled("(Custom)");
                 
                 ImGui::DragInt("Iterations##H", &hydro_params.iterations, 1000, 1000, 500000);
-                ImGui::DragFloat("Erosion Speed", &hydro_params.erodeSpeed, 0.01f, 0.0f, 1.0f);
-                ImGui::DragFloat("Deposit Speed", &hydro_params.depositSpeed, 0.01f, 0.0f, 1.0f);
-                ImGui::DragFloat("Inertia", &hydro_params.inertia, 0.01f, 0.0f, 1.0f);
-                ImGui::DragFloat("Sediment Capacity", &hydro_params.sedimentCapacity, 0.1f, 0.1f, 10.0f);
+                if(SceneUI::DrawSmartFloat("espeed", "Erode Spd", &hydro_params.erodeSpeed, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {}
+                if(SceneUI::DrawSmartFloat("dspeed", "Dep Speed", &hydro_params.depositSpeed, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {}
+                if(SceneUI::DrawSmartFloat("inert", "Inertia", &hydro_params.inertia, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {}
+                if(SceneUI::DrawSmartFloat("scap", "SedCap", &hydro_params.sedimentCapacity, 0.1f, 10.0f, "%.1f", false, nullptr, 12)) {}
                 ImGui::DragInt("Brush Radius", &hydro_params.erosionRadius, 1, 1, 8);
 
                 if (ImGui::Button("Apply Hydraulic Erosion")) {
@@ -760,7 +762,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             else if (erosion_mode == 1) {
                 // FLUVIAL EROSION
                 UIWidgets::ColoredHeader("Fluvial Erosion (River Networks)", ImVec4(0.4f, 0.7f, 1.0f, 1.0f));
-                ImGui::DragFloat("Erosion Strength##F", &fluvial_strength, 0.1f, 0.1f, 5.0f);
+                if(SceneUI::DrawSmartFloat("fstr", "Erode Str", &fluvial_strength, 0.1f, 5.0f, "%.1f", false, nullptr, 12)) {}
                 UIWidgets::HelpMarker("Controls river channel depth and width.");
                 ImGui::TextWrapped("Creates realistic river networks using flow accumulation.");
                 
@@ -780,8 +782,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 // THERMAL EROSION
                 UIWidgets::ColoredHeader("Thermal Erosion (Slope Collapse)", ImVec4(0.8f, 0.5f, 0.4f, 1.0f));
                 ImGui::DragInt("Iterations##T", &thermal_params.iterations, 1, 1, 200);
-                ImGui::DragFloat("Talus Angle", &thermal_params.talusAngle, 0.01f, 0.1f, 1.0f);
-                ImGui::DragFloat("Amount", &thermal_params.erosionAmount, 0.1f, 0.1f, 2.0f);
+                if(SceneUI::DrawSmartFloat("ttal", "Talus Ang", &thermal_params.talusAngle, 0.1f, 1.0f, "%.2f", false, nullptr, 12)) {}
+                if(SceneUI::DrawSmartFloat("tamt", "Amount", &thermal_params.erosionAmount, 0.1f, 2.0f, "%.1f", false, nullptr, 12)) {}
 
                 if (ImGui::Button("Apply Thermal Erosion")) {
                     if (use_gpu) TerrainManager::getInstance().thermalErosionGPU(t, thermal_params);
@@ -794,8 +796,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             else if (erosion_mode == 3) {
                 // WIND EROSION
                 UIWidgets::ColoredHeader("Wind Erosion", ImVec4(0.7f, 0.7f, 0.5f, 1.0f));
-                ImGui::DragFloat("Wind Strength", &wind_strength, 0.1f, 0.1f, 10.0f);
-                ImGui::DragFloat("Direction (deg)", &wind_direction, 1.0f, 0.0f, 360.0f);
+                if(SceneUI::DrawSmartFloat("wstr", "Wind Str", &wind_strength, 0.1f, 10.0f, "%.1f", false, nullptr, 12)) {}
+                if(SceneUI::DrawSmartFloat("wdir", "Direction", &wind_direction, 0.0f, 360.0f, "%.0f", false, nullptr, 12)) {}
                 ImGui::DragInt("Iterations##W", &wind_iters, 1, 1, 200);
 
                 if (ImGui::Button("Apply Wind Erosion")) {

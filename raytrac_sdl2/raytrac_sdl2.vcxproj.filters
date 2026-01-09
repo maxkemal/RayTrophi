@@ -255,6 +255,12 @@
     <ClInclude Include="source\src\scene_ui_nodeeditor.hpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\fft_ocean.cuh">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TerrainFFT.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -463,6 +469,21 @@
     <ClCompile Include="source\src\TerrainNodesV2.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\AnimationController.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\AnimationNodes.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\scene_ui_procamera.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\TerrainFFT.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\RiverManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="source\src\raygen.cu">
@@ -494,5 +515,13 @@
     <Image Include="source\resources\RayTrophi_icon.ico">
       <Filter>Kaynak Dosyaları</Filter>
     </Image>
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="source\src\fft_ocean.cu">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </CudaCompile>
+    <CudaCompile Include="source\src\skinning_kernels.cu">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </CudaCompile>
   </ItemGroup>
 </Project>

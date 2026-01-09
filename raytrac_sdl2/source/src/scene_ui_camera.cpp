@@ -14,7 +14,11 @@
 #include "scene_data.h"
 #include "ProjectManager.h"
 
-void SceneUI::drawCameraContent(UIContext& ctx)
+// ═══════════════════════════════════════════════════════════════════════════
+// CAMERA SETTINGS PANEL CONTENT NOT USING. MOVE THE PRO CAMERA FEATURES 
+// ═══════════════════════════════════════════════════════════════════════════
+
+/*void SceneUI::drawCameraContent(UIContext& ctx)
 {
     // Camera selector for multi-camera support
     if (ctx.scene.cameras.size() > 1) {
@@ -425,7 +429,178 @@ void SceneUI::drawCameraContent(UIContext& ctx)
 
         ImGui::Unindent(8.0f);
         ImGui::Spacing();
-    
+   
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SECTION 2.5: CAMERA MODE (Auto / Pro / Cinema)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (ImGui::CollapsingHeader("Camera Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Indent(8.0f);
+        
+        // Mode Selection
+        const char* mode_names[] = { "Auto", "Pro", "Cinema" };
+        int current_mode = static_cast<int>(ctx.scene.camera->camera_mode);
+        
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.8f, 1.0f), "Camera Mode");
+        ImGui::SameLine();
+        UIWidgets::HelpMarker(
+            "AUTO: Point & shoot - automatic settings\n"
+            "PRO: Manual exposure, clean render\n"
+            "CINEMA: Full physical simulation with lens imperfections"
+        );
+        
+        ImGui::PushItemWidth(-1);
+        if (ImGui::Combo("##CameraMode", &current_mode, mode_names, IM_ARRAYSIZE(mode_names))) {
+            ctx.scene.camera->camera_mode = static_cast<CameraMode>(current_mode);
+            
+            // Apply mode presets
+            if (ctx.scene.camera->camera_mode == CameraMode::Auto) {
+                ctx.scene.camera->auto_exposure = true;
+                ctx.scene.camera->enable_chromatic_aberration = false;
+                ctx.scene.camera->enable_vignetting = false;
+                ctx.scene.camera->enable_camera_shake = false;
+            } else if (ctx.scene.camera->camera_mode == CameraMode::Pro) {
+                ctx.scene.camera->auto_exposure = false;
+                ctx.scene.camera->enable_chromatic_aberration = false;
+                ctx.scene.camera->enable_vignetting = false;
+                ctx.scene.camera->enable_camera_shake = false;
+            } else { // Cinema
+                ctx.scene.camera->auto_exposure = false;
+                // Enable cinema features with reasonable defaults
+                ctx.scene.camera->enable_vignetting = true;
+                ctx.scene.camera->vignetting_amount = 0.3f;
+            }
+            
+            if (ctx.optix_gpu_ptr) {
+                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+                ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            ctx.renderer.resetCPUAccumulation();
+            ProjectManager::getInstance().markModified();
+        }
+        ImGui::PopItemWidth();
+        
+        // Mode description
+        const char* mode_desc[] = {
+            "Automatic exposure, minimal controls, clean output",
+            "Manual control, professional quality, optional effects",
+            "Full physical simulation with lens imperfections"
+        };
+        ImGui::TextDisabled("%s", mode_desc[current_mode]);
+        
+        // ─────────────────────────────────────────────────────────────────────
+        // CINEMA MODE EFFECTS (Only visible in Cinema mode)
+        // ─────────────────────────────────────────────────────────────────────
+        if (ctx.scene.camera->camera_mode == CameraMode::Cinema) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Lens Imperfections");
+            
+            // Chromatic Aberration
+            bool ca_changed = false;
+            ImGui::Checkbox("Chromatic Aberration##CAEnable", &ctx.scene.camera->enable_chromatic_aberration);
+            if (ctx.scene.camera->enable_chromatic_aberration) {
+                ImGui::Indent(16.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Amount");
+                ImGui::SameLine(80);
+                ImGui::PushItemWidth(-1);
+                ca_changed |= ImGui::SliderFloat("##CAAmount", &ctx.scene.camera->chromatic_aberration, 0.0f, 0.05f, "%.3f");
+                ImGui::PopItemWidth();
+                ImGui::TextDisabled("Red/Blue channel separation");
+                ImGui::Unindent(16.0f);
+            }
+            
+            // Vignetting
+            bool vig_changed = false;
+            ImGui::Checkbox("Vignetting##VigEnable", &ctx.scene.camera->enable_vignetting);
+            if (ctx.scene.camera->enable_vignetting) {
+                ImGui::Indent(16.0f);
+                
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Amount");
+                ImGui::SameLine(80);
+                ImGui::PushItemWidth(-1);
+                vig_changed |= ImGui::SliderFloat("##VigAmount", &ctx.scene.camera->vignetting_amount, 0.0f, 1.0f, "%.2f");
+                ImGui::PopItemWidth();
+                
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Falloff");
+                ImGui::SameLine(80);
+                ImGui::PushItemWidth(-1);
+                vig_changed |= ImGui::SliderFloat("##VigFalloff", &ctx.scene.camera->vignetting_falloff, 1.0f, 4.0f, "%.1f");
+                ImGui::PopItemWidth();
+                ImGui::TextDisabled("Higher = sharper edge transition");
+                
+                ImGui::Unindent(16.0f);
+            }
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Camera Motion");
+            
+            // Camera Shake
+            bool shake_changed = false;
+            ImGui::Checkbox("Camera Shake (Handheld)##ShakeEnable", &ctx.scene.camera->enable_camera_shake);
+            if (ctx.scene.camera->enable_camera_shake) {
+                ImGui::Indent(16.0f);
+                
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Intensity");
+                ImGui::SameLine(80);
+                ImGui::PushItemWidth(-1);
+                shake_changed |= ImGui::SliderFloat("##ShakeInt", &ctx.scene.camera->shake_intensity, 0.0f, 1.0f, "%.2f");
+                ImGui::PopItemWidth();
+                
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Frequency");
+                ImGui::SameLine(80);
+                ImGui::PushItemWidth(-1);
+                shake_changed |= ImGui::SliderFloat("##ShakeFreq", &ctx.scene.camera->shake_frequency, 2.0f, 15.0f, "%.1f Hz");
+                ImGui::PopItemWidth();
+                
+                // Operator Skill
+                const char* skill_names[] = { "Amateur", "Intermediate", "Professional", "Expert" };
+                int skill = static_cast<int>(ctx.scene.camera->operator_skill);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextUnformatted("Operator");
+                ImGui::SameLine(80);
+                ImGui::PushItemWidth(-1);
+                if (ImGui::Combo("##OpSkill", &skill, skill_names, IM_ARRAYSIZE(skill_names))) {
+                    ctx.scene.camera->operator_skill = static_cast<Camera::OperatorSkill>(skill);
+                    shake_changed = true;
+                }
+                ImGui::PopItemWidth();
+                
+                // IBIS
+                ImGui::Checkbox("IBIS (Stabilization)", &ctx.scene.camera->ibis_enabled);
+                if (ctx.scene.camera->ibis_enabled) {
+                    ImGui::SameLine();
+                    ImGui::PushItemWidth(60);
+                    shake_changed |= ImGui::DragFloat("##IBISStops", &ctx.scene.camera->ibis_effectiveness, 0.5f, 1.0f, 8.0f, "%.1f stops");
+                    ImGui::PopItemWidth();
+                }
+                
+                ImGui::Unindent(16.0f);
+            }
+            
+            // Update GPU if any cinema parameter changed
+            if (ca_changed || vig_changed || shake_changed) {
+                if (ctx.optix_gpu_ptr) {
+                    ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+                    ctx.optix_gpu_ptr->resetAccumulation();
+                }
+                ctx.renderer.resetCPUAccumulation();
+                ProjectManager::getInstance().markModified();
+            }
+        }
+        
+        ImGui::Unindent(8.0f);
+        ImGui::Spacing();
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // SECTION 3: DEPTH OF FIELD
@@ -712,5 +887,5 @@ void SceneUI::drawCameraContent(UIContext& ctx)
 
         ImGui::Unindent(8.0f);
     }
-}
+}*/
 

@@ -70,9 +70,9 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
             
             // === WAVES ===
             if (ImGui::CollapsingHeader("Waves", ImGuiTreeNodeFlags_DefaultOpen)) {
-                changed |= ImGui::DragFloat("Speed##wave", &surf.params.wave_speed, 0.05f, 0.0f, 10.0f);
-                changed |= ImGui::SliderFloat("Height##wave", &surf.params.wave_strength, 0.0f, 3.0f);
-                changed |= ImGui::SliderFloat("Frequency##wave", &surf.params.wave_frequency, 0.1f, 5.0f);
+                if (SceneUI::DrawSmartFloat("w_wspd", "Speed", &surf.params.wave_speed, 0.0f, 10.0f, "%.2f", false, nullptr, 16)) changed = true;
+                if (SceneUI::DrawSmartFloat("w_whgt", "Height", &surf.params.wave_strength, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) changed = true;
+                if (SceneUI::DrawSmartFloat("w_wfrq", "Frequency", &surf.params.wave_frequency, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
             }
             
             // === COLORS ===
@@ -83,39 +83,39 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
             
             // === DEPTH & ABSORPTION ===
             if (ImGui::CollapsingHeader("Depth & Absorption")) {
-                changed |= ImGui::DragFloat("Max Depth", &surf.params.depth_max, 0.5f, 1.0f, 100.0f, "%.1f m");
+                if (SceneUI::DrawSmartFloat("w_dmax", "Max Depth", &surf.params.depth_max, 1.0f, 100.0f, "%.1f m", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Distance at which water reaches full deep color");
                 
                 changed |= ImGui::ColorEdit3("Absorption Tint", &surf.params.absorption_color.x);
                 ImGui::SetItemTooltip("What colors are absorbed by the water");
                 
-                changed |= ImGui::SliderFloat("Absorption Density", &surf.params.absorption_density, 0.0f, 2.0f);
+                if (SceneUI::DrawSmartFloat("w_absd", "Absorption Density", &surf.params.absorption_density, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("How quickly light is absorbed (murkiness)");
             }
             
             // === FOAM ===
             if (ImGui::CollapsingHeader("Foam", ImGuiTreeNodeFlags_DefaultOpen)) {
-                changed |= ImGui::SliderFloat("Wave Foam", &surf.params.foam_level, 0.0f, 1.0f);
+                if (SceneUI::DrawSmartFloat("w_wf", "Wave Foam", &surf.params.foam_level, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Foam on wave crests");
                 
                 ImGui::Separator();
                 ImGui::TextDisabled("Shore Foam");
-                changed |= ImGui::SliderFloat("Intensity##shore", &surf.params.shore_foam_intensity, 0.0f, 1.0f);
-                changed |= ImGui::DragFloat("Distance##shore", &surf.params.shore_foam_distance, 0.1f, 0.1f, 10.0f, "%.1f m");
+                if (SceneUI::DrawSmartFloat("w_fi", "Intensity", &surf.params.shore_foam_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+                if (SceneUI::DrawSmartFloat("w_fd", "Distance", &surf.params.shore_foam_distance, 0.1f, 10.0f, "%.1f m", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("How far from shore foam appears");
             }
             
             // === CAUSTICS ===
             if (ImGui::CollapsingHeader("Caustics")) {
-                changed |= ImGui::SliderFloat("Intensity##caustic", &surf.params.caustic_intensity, 0.0f, 1.0f);
-                changed |= ImGui::DragFloat("Scale##caustic", &surf.params.caustic_scale, 0.1f, 0.1f, 10.0f);
+                if (SceneUI::DrawSmartFloat("w_ci", "Intensity", &surf.params.caustic_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+                if (SceneUI::DrawSmartFloat("w_cs", "Scale", &surf.params.caustic_scale, 0.1f, 10.0f, "%.2f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Size of caustic patterns");
-                changed |= ImGui::DragFloat("Speed##caustic", &surf.params.caustic_speed, 0.1f, 0.1f, 5.0f);
+                if (SceneUI::DrawSmartFloat("w_csp", "Speed", &surf.params.caustic_speed, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
             }
             
             // === SSS ===
             if (ImGui::CollapsingHeader("Scattering")) {
-                changed |= ImGui::SliderFloat("SSS Intensity", &surf.params.sss_intensity, 0.0f, 0.5f);
+                if (SceneUI::DrawSmartFloat("w_sssi", "SSS Intensity", &surf.params.sss_intensity, 0.0f, 0.5f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Sub-surface light scattering at edges");
                 changed |= ImGui::ColorEdit3("SSS Color", &surf.params.sss_color.x);
             }
@@ -147,33 +147,38 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                     ImGui::SetItemTooltip("FFT grid resolution - higher = more detail, slower");
                     
                     // Ocean size
-                    changed |= ImGui::DragFloat("Ocean Size", &surf.params.fft_ocean_size, 1.0f, 10.0f, 10000.0f, "%.0f m");
+                    // Ocean size
+                    if (SceneUI::DrawSmartFloat("fft_sz", "Ocean Size", &surf.params.fft_ocean_size, 10.0f, 10000.0f, "%.0f m", false, nullptr, 16)) changed = true;
                     ImGui::SetItemTooltip("World space covered by one tile (tiles infinitely)");
                     
                     ImGui::Separator();
                     ImGui::Text("Wind Settings:");
                     
                     // Wind speed
-                    changed |= ImGui::DragFloat("Wind Speed", &surf.params.fft_wind_speed, 0.1f, 0.0f, 200.0f, "%.1f m/s");
+                    if (SceneUI::DrawSmartFloat("fft_ws", "Wind Speed", &surf.params.fft_wind_speed, 0.0f, 200.0f, "%.1f m/s", false, nullptr, 16)) changed = true;
                     ImGui::SetItemTooltip("Higher = larger, more energetic waves. >30 is storm force.");
                     
                     // Wind direction
-                    changed |= ImGui::SliderAngle("Wind Direction", &surf.params.fft_wind_direction, 0.0f, 360.0f);
+                    float wind_deg = surf.params.fft_wind_direction * 180.0f / 3.14159f;
+                    if (SceneUI::DrawSmartFloat("fft_wd", "Wind Direction", &wind_deg, 0.0f, 360.0f, "%.0f deg", false, nullptr, 16)) {
+                        surf.params.fft_wind_direction = wind_deg * 3.14159f / 180.0f;
+                        changed = true;
+                    }
                     ImGui::SetItemTooltip("Direction the waves travel");
                     
                     ImGui::Separator();
                     ImGui::Text("Wave Appearance:");
                     
                     // Choppiness
-                    changed |= ImGui::DragFloat("Choppiness", &surf.params.fft_choppiness, 0.05f, 0.0f, 5.0f);
+                    if (SceneUI::DrawSmartFloat("fft_ch", "Choppiness", &surf.params.fft_choppiness, 0.0f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
                     ImGui::SetItemTooltip("Horizontal displacement - makes peaks sharper. Too high causes loops.");
                     
                     // Amplitude
-                    changed |= ImGui::DragFloat("Amplitude Scale", &surf.params.fft_amplitude, 0.00001f, 0.000001f, 0.1f, "%.6f");
+                    if (SceneUI::DrawSmartFloat("fft_amp", "Amplitude Scale", &surf.params.fft_amplitude, 0.000001f, 0.1f, "%.6f", false, nullptr, 16)) changed = true;
                     ImGui::SetItemTooltip("Overall wave height multiplier (Phillips A parameter). Very sensitive!");
                     
                     // Time scale
-                    changed |= ImGui::DragFloat("Animation Speed", &surf.params.fft_time_scale, 0.1f, 0.0f, 20.0f);
+                    if (SceneUI::DrawSmartFloat("fft_ts", "Animation Speed", &surf.params.fft_time_scale, 0.0f, 20.0f, "%.2f", false, nullptr, 16)) changed = true;
                     ImGui::SetItemTooltip("Speed of wave animation");
                     
                     ImGui::Unindent();
@@ -184,24 +189,24 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
             
             // === PHYSICS ===
             if (ImGui::CollapsingHeader("Physics")) {
-                changed |= ImGui::SliderFloat("IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f");
+                if (SceneUI::DrawSmartFloat("w_ior", "IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Index of Refraction (Water = 1.333)");
-                changed |= ImGui::SliderFloat("Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f");
+                if (SceneUI::DrawSmartFloat("w_rgh", "Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Surface micro-roughness");
-                changed |= ImGui::SliderFloat("Clarity", &surf.params.clarity, 0.0f, 1.0f);
+                if (SceneUI::DrawSmartFloat("w_clr", "Clarity", &surf.params.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
             }
             
             // === SURFACE DETAIL ===
             if (ImGui::CollapsingHeader("Surface Detail (Realism)", ImGuiTreeNodeFlags_DefaultOpen)) {
-                changed |= ImGui::SliderFloat("Micro Detail Strength", &surf.params.micro_detail_strength, 0.0f, 0.2f);
+                if (SceneUI::DrawSmartFloat("w_mds", "Micro Detail Strength", &surf.params.micro_detail_strength, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Adds high-frequency noise/ripples to break up the smooth surface");
-                changed |= ImGui::DragFloat("Micro Detail Scale", &surf.params.micro_detail_scale, 0.5f, 1.0f, 100.0f);
+                if (SceneUI::DrawSmartFloat("w_msc", "Micro Detail Scale", &surf.params.micro_detail_scale, 1.0f, 100.0f, "%.1f", false, nullptr, 16)) changed = true;
                 
                 ImGui::Separator();
                 ImGui::TextDisabled("Foam Tuning");
-                changed |= ImGui::DragFloat("Foam Noise Scale", &surf.params.foam_noise_scale, 0.1f, 1.0f, 50.0f);
+                if (SceneUI::DrawSmartFloat("w_fns", "Foam Noise Scale", &surf.params.foam_noise_scale, 1.0f, 50.0f, "%.1f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Scale of noise used to break up foam");
-                changed |= ImGui::SliderFloat("Foam Threshold", &surf.params.foam_threshold, 0.0f, 1.0f);
+                if (SceneUI::DrawSmartFloat("w_fth", "Foam Threshold", &surf.params.foam_threshold, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
             }
             
             // === APPLY CHANGES ===

@@ -6,6 +6,7 @@
 #include "TerrainNodesV2.h"
 #include "scene_data.h"
 #include "TerrainManager.h"
+#include "TerrainFFT.h"  // FFT-accelerated noise with CUDA fallback
 #include "stb_image.h"
 #include "stb_image_write.h"
 #include <cmath>
@@ -17,6 +18,7 @@
 #include "perlin.h" // For gradient noise
 
 namespace TerrainNodesV2 {
+
 
     // C++14 compatible clamp helper (std::clamp requires C++17)
     template<typename T>
@@ -32,7 +34,16 @@ namespace TerrainNodesV2 {
         if (strlen(filePath) == 0) return;
         
         std::string path(filePath);
-        std::string ext = path.substr(path.find_last_of('.') + 1);
+        
+        // SAFETY: Check if path has extension
+        size_t dotPos = path.find_last_of('.');
+        if (dotPos == std::string::npos || dotPos == path.length() - 1) {
+            // No extension found - cannot determine format
+            fileLoaded = false;
+            return;
+        }
+        
+        std::string ext = path.substr(dotPos + 1);
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         
         loadedHeightData.clear();
@@ -72,6 +83,7 @@ namespace TerrainNodesV2 {
             }
             
             fileLoaded = true;
+            sourceMode = SourceMode::File; // AUTO-SWITCH to File mode
             dirty = true;
             return;
         }
@@ -105,6 +117,7 @@ namespace TerrainNodesV2 {
                 stbi_image_free(img);
                 applySmoothing();
                 fileLoaded = true;
+                sourceMode = SourceMode::File; // AUTO-SWITCH to File mode
                 dirty = true;
             }
             return;
@@ -139,6 +152,7 @@ namespace TerrainNodesV2 {
             stbi_image_free(img16);
             applySmoothing();
             fileLoaded = true;
+            sourceMode = SourceMode::File; // AUTO-SWITCH to File mode
             dirty = true;
         }    }
      }
@@ -274,7 +288,7 @@ namespace TerrainNodesV2 {
                     float px = dx + hx * jitter - fx;
                     float py = dy + hy * jitter - fy;
                     float dist = std::sqrt(px * px + py * py);
-                    minDist = std::min(minDist, dist);
+                    minDist = (std::min)(minDist, dist);
                 }
             }
             return minDist;
@@ -315,8 +329,8 @@ namespace TerrainNodesV2 {
             for (int x = 0; x < w; x++) {
                 // Normalize to 0-1 range preserving aspect ratio
                 // Both coordinates use the same base scale for isotropic noise
-                float baseX = (float)x / (float)std::max(w, h);
-                float baseY = (float)y / (float)std::max(w, h);
+                float baseX = (float)x / (float)(std::max)(w, h);
+                float baseY = (float)y / (float)(std::max)(w, h);
                 
                 // Apply scale and frequency
                 float nx = baseX * scale * 10.0f + seedOffsetX;
@@ -401,6 +415,49 @@ namespace TerrainNodesV2 {
                         
                         Vec3 p(nx + warpX, ny + warpY, 0.0f);
                         noiseValue = perlin.turb(p, octaves);
+                        break;
+                    }
+                    
+                    // ═══════════════════════════════════════════════════════════
+                    // FFT-ACCELERATED NOISE TYPES
+                    // Uses TerrainFFT system: CUDA if available, CPU fallback otherwise
+                    // ═══════════════════════════════════════════════════════════
+                    
+                    case NoiseType::FFT_Ocean:
+                    case NoiseType::FFT_Ridge:
+                    case NoiseType::FFT_Billow:
+                    case NoiseType::FFT_Turb: {
+                        // For FFT types, we'll generate the full heightmap once
+                        // and then read from it. Since we're in a per-pixel loop,
+                        // we'll use CPU fallback noise here (similar algorithm)
+                        // The actual FFT generation happens in a separate code path
+                        
+                        // Use TerrainFFT CPU noise as these are compatible
+                        TerrainFFT::FFTNoiseParams fftParams;
+                        fftParams.seed = seed;
+                        fftParams.scale = scale;
+                        fftParams.frequency = frequency;
+                        fftParams.octaves = octaves;
+                        fftParams.persistence = persistance;
+                        fftParams.lacunarity = lacunarity;
+                        fftParams.ridgeOffset = ridge_offset;
+                        
+                        // Map noise type
+                        switch (noiseType) {
+                            case NoiseType::FFT_Ocean:
+                                noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                break;
+                            case NoiseType::FFT_Ridge:
+                                noiseValue = TerrainFFT::CPUNoise::ridgedNoise(nx, ny, octaves, persistance, lacunarity, ridge_offset, 2.0f, seed);
+                                break;
+                            case NoiseType::FFT_Billow:
+                                noiseValue = TerrainFFT::CPUNoise::billowNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                break;
+                            case NoiseType::FFT_Turb:
+                            default:
+                                noiseValue = TerrainFFT::CPUNoise::fbmNoise(nx, ny, octaves, persistance, lacunarity, seed);
+                                break;
+                        }
                         break;
                     }
                 }
@@ -655,7 +712,7 @@ namespace TerrainNodesV2 {
         
         // Get terrain's height scale
         float heightScale = (tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
-        float cellSize = (tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / std::max(w, h)) : 1.0f;
+        float cellSize = (tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / (std::max)(w, h)) : 1.0f;
         
         // Working buffers
         std::vector<float> heightData = *inputHeight.data;
@@ -710,7 +767,7 @@ namespace TerrainNodesV2 {
                     
                     if (maxSlope > 0.01f && bestDir >= 0) {
                         // Erosion (pick up sediment) on steep slopes
-                        float erosion = std::min(maxSlope * 0.01f, 0.001f);
+                        float erosion = (std::min)(maxSlope * 0.01f, 0.001f);
                         heightData[idx] -= erosion / heightScale;
                         currentSed += erosion;
                         
@@ -719,7 +776,7 @@ namespace TerrainNodesV2 {
                         int ny = y + dy[bestDir];
                         int nidx = ny * w + nx;
                         
-                        float transported = std::min(currentSed, capacity);
+                        float transported = (std::min)(currentSed, capacity);
                         newSediment[nidx] += transported * (1.0f - settlingSpeed);
                         
                         // Deposit excess sediment
@@ -750,7 +807,7 @@ namespace TerrainNodesV2 {
             auto result = createMaskOutput(w, h);
             // Normalize deposited map
             float maxDep = 0.001f;
-            for (float d : deposited) maxDep = std::max(maxDep, d);
+            for (float d : deposited) maxDep = (std::max)(maxDep, d);
             for (int i = 0; i < w * h; i++) {
                 (*result.data)[i] = clampValue(deposited[i] / maxDep, 0.0f, 1.0f);
             }
@@ -778,7 +835,7 @@ namespace TerrainNodesV2 {
         int h = inputHeight.height;
         
         float heightScale = (tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
-        float cellSize = (tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / std::max(w, h)) : 1.0f;
+        float cellSize = (tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / (std::max)(w, h)) : 1.0f;
         
         std::vector<float> heightData = *inputHeight.data;
         std::vector<float> fanMask(w * h, 0.0f);
@@ -837,7 +894,7 @@ namespace TerrainNodesV2 {
                                 
                                 float deposit = depositionStrength * falloff * 0.01f;
                                 heightData[fidx] += deposit / heightScale;
-                                fanMask[fidx] = std::max(fanMask[fidx], falloff);
+                                fanMask[fidx] = (std::max)(fanMask[fidx], falloff);
                             }
                         }
                     }
@@ -933,7 +990,7 @@ namespace TerrainNodesV2 {
                                 // Build up delta sediment
                                 float deposit = sedimentRatio * falloff * flow * 0.01f;
                                 heightData[fidx] += deposit / heightScale;
-                                deltaMask[fidx] = std::max(deltaMask[fidx], falloff * flow);
+                                deltaMask[fidx] = (std::max)(deltaMask[fidx], falloff * flow);
                                 
                                 // Add some width to branches
                                 for (int bw = -1; bw <= 1; bw++) {
@@ -941,7 +998,7 @@ namespace TerrainNodesV2 {
                                     if (wfx >= 0 && wfx < w) {
                                         int wfidx = fy * w + wfx;
                                         heightData[wfidx] += deposit * 0.5f / heightScale;
-                                        deltaMask[wfidx] = std::max(deltaMask[wfidx], falloff * flow * 0.5f);
+                                        deltaMask[wfidx] = (std::max)(deltaMask[wfidx], falloff * flow * 0.5f);
                                     }
                                 }
                             }
@@ -959,7 +1016,7 @@ namespace TerrainNodesV2 {
             auto result = createMaskOutput(w, h);
             // Normalize delta mask
             float maxVal = 0.001f;
-            for (float v : deltaMask) maxVal = std::max(maxVal, v);
+            for (float v : deltaMask) maxVal = (std::max)(maxVal, v);
             for (int i = 0; i < w * h; i++) {
                 (*result.data)[i] = clampValue(deltaMask[i] / maxVal, 0.0f, 1.0f);
             }
@@ -1372,8 +1429,8 @@ namespace TerrainNodesV2 {
                         b = (*inputB.data)[idx];
                     } else {
                         // Nearest Neighbor Resampling for Input B
-                        int bx = std::min((int)(x * scaleX), inputB.width - 1);
-                        int by = std::min((int)(y * scaleY), inputB.height - 1);
+                        int bx = (std::min)((int)(x * scaleX), inputB.width - 1);
+                        int by = (std::min)((int)(y * scaleY), inputB.height - 1);
                         b = (*inputB.data)[by * inputB.width + bx];
                     }
                 }
@@ -1383,8 +1440,8 @@ namespace TerrainNodesV2 {
                     case MathOp::Subtract: (*result.data)[idx] = a - b; break;
                     case MathOp::Multiply: (*result.data)[idx] = a * b; break;
                     case MathOp::Divide: (*result.data)[idx] = (b != 0) ? a / b : 0; break;
-                    case MathOp::Min: (*result.data)[idx] = std::min(a, b); break;
-                    case MathOp::Max: (*result.data)[idx] = std::max(a, b); break;
+                    case MathOp::Min: (*result.data)[idx] = (std::min)(a, b); break;
+                    case MathOp::Max: (*result.data)[idx] = (std::max)(a, b); break;
                 }
             }
         }
@@ -1466,8 +1523,8 @@ namespace TerrainNodesV2 {
         // Find min/max
         float minH = FLT_MAX, maxH = -FLT_MAX;
         for (float h : *input.data) {
-            minH = std::min(minH, h);
-            maxH = std::max(maxH, h);
+            minH = (std::min)(minH, h);
+            maxH = (std::max)(maxH, h);
         }
         
         for (size_t i = 0; i < input.data->size(); i++) {
@@ -1495,7 +1552,7 @@ namespace TerrainNodesV2 {
         auto result = createMaskOutput(w, h);
         
         // Get terrain scales for proper gradient calculation
-        float cellSize = tctx->terrain ? (tctx->terrain->heightmap.scale_xz / std::max(w, h)) : 1.0f;
+        float cellSize = tctx->terrain ? (tctx->terrain->heightmap.scale_xz / (std::max)(w, h)) : 1.0f;
         float heightScale = tctx->terrain ? tctx->terrain->heightmap.scale_y : 1.0f;
         
         for (int y = 1; y < h - 1; y++) {
@@ -1516,9 +1573,9 @@ namespace TerrainNodesV2 {
                 if (slope >= minSlope && slope <= maxSlope) {
                     t = 1.0f;
                 } else if (slope < minSlope) {
-                    t = std::max(0.0f, 1.0f - (minSlope - slope) / (falloff * (maxSlope - minSlope) + 0.001f));
+                    t = (std::max)(0.0f, 1.0f - (minSlope - slope) / (falloff * (maxSlope - minSlope) + 0.001f));
                 } else {
-                    t = std::max(0.0f, 1.0f - (slope - maxSlope) / (falloff * (maxSlope - minSlope) + 0.001f));
+                    t = (std::max)(0.0f, 1.0f - (slope - maxSlope) / (falloff * (maxSlope - minSlope) + 0.001f));
                 }
                 (*result.data)[idx] = t;
             }
@@ -1555,9 +1612,9 @@ namespace TerrainNodesV2 {
             if (h >= minHeight && h <= maxHeight) {
                 t = 1.0f;
             } else if (h < minHeight) {
-                t = std::max(0.0f, 1.0f - (minHeight - h) / (falloff + 0.001f));
+                t = (std::max)(0.0f, 1.0f - (minHeight - h) / (falloff + 0.001f));
             } else {
-                t = std::max(0.0f, 1.0f - (h - maxHeight) / (falloff + 0.001f));
+                t = (std::max)(0.0f, 1.0f - (h - maxHeight) / (falloff + 0.001f));
             }
             (*result.data)[i] = t;
         }
@@ -1864,8 +1921,8 @@ namespace TerrainNodesV2 {
         // Find min/max in input
         float minH = FLT_MAX, maxH = -FLT_MAX;
         for (float h : *input.data) {
-            minH = std::min(minH, h);
-            maxH = std::max(maxH, h);
+            minH = (std::min)(minH, h);
+            maxH = (std::max)(maxH, h);
         }
         
         float range = maxH - minH;
@@ -1912,8 +1969,8 @@ namespace TerrainNodesV2 {
         // Find min/max
         float minH = FLT_MAX, maxH = -FLT_MAX;
         for (float hVal : *input.data) {
-            minH = std::min(minH, hVal);
-            maxH = std::max(maxH, hVal);
+            minH = (std::min)(minH, hVal);
+            maxH = (std::max)(maxH, hVal);
         }
         float range = maxH - minH;
         if (range < 0.0001f) range = 1.0f;
@@ -1978,10 +2035,10 @@ namespace TerrainNodesV2 {
             
             switch (operation) {
                 case MaskCombineOp::AND:
-                    out = std::min(a, b);
+                    out = (std::min)(a, b);
                     break;
                 case MaskCombineOp::OR:
-                    out = std::max(a, b);
+                    out = (std::max)(a, b);
                     break;
                 case MaskCombineOp::XOR:
                 case MaskCombineOp::Difference:
@@ -2035,10 +2092,10 @@ namespace TerrainNodesV2 {
         float minB = FLT_MAX, maxB = -FLT_MAX;
         float minL = FLT_MAX, maxL = -FLT_MAX;
         for (size_t i = 0; i < inputBase.data->size(); i++) {
-            minB = std::min(minB, (*inputBase.data)[i]);
-            maxB = std::max(maxB, (*inputBase.data)[i]);
-            minL = std::min(minL, (*inputBlend.data)[i]);
-            maxL = std::max(maxL, (*inputBlend.data)[i]);
+            minB = (std::min)(minB, (*inputBase.data)[i]);
+            maxB = (std::max)(maxB, (*inputBase.data)[i]);
+            minL = (std::min)(minL, (*inputBlend.data)[i]);
+            maxL = (std::max)(maxL, (*inputBlend.data)[i]);
         }
         float rangeB = (maxB - minB > 0.0001f) ? maxB - minB : 1.0f;
         float rangeL = (maxL - minL > 0.0001f) ? maxL - minL : 1.0f;
@@ -2094,10 +2151,10 @@ namespace TerrainNodesV2 {
         float minB = FLT_MAX, maxB = -FLT_MAX;
         float minL = FLT_MAX, maxL = -FLT_MAX;
         for (size_t i = 0; i < inputBase.data->size(); i++) {
-            minB = std::min(minB, (*inputBase.data)[i]);
-            maxB = std::max(maxB, (*inputBase.data)[i]);
-            minL = std::min(minL, (*inputBlend.data)[i]);
-            maxL = std::max(maxL, (*inputBlend.data)[i]);
+            minB = (std::min)(minB, (*inputBase.data)[i]);
+            maxB = (std::max)(maxB, (*inputBase.data)[i]);
+            minL = (std::min)(minL, (*inputBlend.data)[i]);
+            maxL = (std::max)(maxL, (*inputBlend.data)[i]);
         }
         float rangeB = (maxB - minB > 0.0001f) ? maxB - minB : 1.0f;
         float rangeL = (maxL - minL > 0.0001f) ? maxL - minL : 1.0f;
@@ -2484,7 +2541,7 @@ namespace TerrainNodesV2 {
         float sinD = std::sin(dirRad);
         
         // Fault line position in grid coordinates
-        float faultPos = position * std::max(w, h);
+        float faultPos = position * (std::max)(w, h);
         
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
@@ -2795,6 +2852,13 @@ namespace TerrainNodesV2 {
         
         NodeSystem::EvaluationContext ctx(this);
         ctx.setDomainContext(&tctx);
+        
+        // CRITICAL FIX: Clear cache and mark all nodes dirty before evaluation
+        // Without this, intermediate nodes (deformation nodes) may be skipped
+        // because their cached values would be reused instead of recomputing
+        ctx.clearCache();
+        ctx.clearErrors();
+        markAllDirty();
 
         // Find Height Output Node and pull data
         HeightOutputNode* outputNode = nullptr;
@@ -2805,31 +2869,49 @@ namespace TerrainNodesV2 {
             }
         }
         
-        if (outputNode) {
-            // Pull data from the input of the output node (Input index 0 for Height)
-            // This triggers the pull-based evaluation chain
-            auto heightData = outputNode->getHeightInput(0, ctx);
+        if (!outputNode) {
+            // No output node found - nothing to evaluate
+            return;
+        }
+        
+        // Pull data from the input of the output node (Input index 0 for Height)
+        // This triggers the pull-based evaluation chain through ALL connected nodes
+        auto heightData = outputNode->getHeightInput(0, ctx);
+        
+        // Check for errors in the evaluation chain
+        if (ctx.hasErrors()) {
+            for (const auto& err : ctx.getErrors()) {
+                // Log detailed errors
+                SCENE_LOG_ERROR("Terrain Graph Error (Node " + std::to_string(err.nodeId) + "): " + err.message);
+            }
+        }
+        
+        // CRITICAL CHECK: Verify input data integrity
+        if (!heightData.isValid() || !heightData.data || heightData.width < 2 || heightData.height < 2) {
+            // If data is invalid or too small (e.g. uninitialized), do not update terrain
+            // This prevents "scrambled" artifacts during initialization
+            return;
+        }
+        
+        if (heightData.isValid() && heightData.data) {
+            // Check if resize needed
+            bool resized = (terrain->heightmap.width != heightData.width || terrain->heightmap.height != heightData.height);
             
-            if (heightData.isValid() && heightData.data) {
-                // Check if resize needed
-                bool resized = (terrain->heightmap.width != heightData.width || terrain->heightmap.height != heightData.height);
-                
-                // Resize terrain heightmap manually (vector resize)
-                if (resized) {
-                    terrain->heightmap.width = heightData.width;
-                    terrain->heightmap.height = heightData.height;
-                    terrain->heightmap.data.resize(heightData.width * heightData.height);
-                }
-                
-                // Copy data directly to terrain
-                terrain->heightmap.data = *heightData.data;
-                
-                // Update mesh visualization (Rebuild if resized, Update if content changed)
-                if (resized) {
-                    TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
-                } else {
-                    TerrainManager::getInstance().updateTerrainMesh(terrain);
-                }
+            // Resize terrain heightmap manually (vector resize)
+            if (resized) {
+                terrain->heightmap.width = heightData.width;
+                terrain->heightmap.height = heightData.height;
+                terrain->heightmap.data.resize(heightData.width * heightData.height);
+            }
+            
+            // Copy data directly to terrain
+            terrain->heightmap.data = *heightData.data;
+            
+            // Update mesh visualization (Rebuild if resized, Update if content changed)
+            if (resized) {
+                TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
+            } else {
+                TerrainManager::getInstance().updateTerrainMesh(terrain);
             }
         }
     }

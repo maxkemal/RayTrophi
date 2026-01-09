@@ -2,6 +2,32 @@
 #include "ray.h"
 #include "params.h"
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHROMATIC ABERRATION HELPER
+// Calculates UV offset for each color channel based on radial distance from center
+// Red bends outward, Blue bends inward (typical lateral CA pattern)
+// ═══════════════════════════════════════════════════════════════════════════════
+__device__ inline float2 apply_chromatic_aberration(float s, float t, float ca_amount, float channel_scale) {
+    // Center-relative coordinates
+    float u_centered = s - 0.5f;
+    float v_centered = t - 0.5f;
+    
+    // Radial distance squared from center
+    float r2 = u_centered * u_centered + v_centered * v_centered;
+    
+    // CA scales with r² (stronger at edges, zero at center)
+    // channel_scale: R > 1.0, G = 1.0, B < 1.0 (or vice versa)
+    float offset = 1.0f + ca_amount * r2 * (channel_scale - 1.0f);
+    
+    // Apply offset to UV
+    float new_s = u_centered * offset + 0.5f;
+    float new_t = v_centered * offset + 0.5f;
+    
+    return make_float2(new_s, new_t);
+}
+
+
+
 
 
 __device__ float2 random_in_unit_polygon(int sides, curandState* rng) {
@@ -42,11 +68,33 @@ __device__ Ray get_ray_from_camera(const gpuCamera& cam, float s, float t, curan
         time_offset = curand_uniform(rng);
     }
     
-    // Interpolated positions
+    // Interpolated positions (with motion blur)
     float3 origin = cam.origin + cam.vel_origin * time_offset;
     float3 corner = cam.lower_left_corner + cam.vel_corner * time_offset;
     float3 horizontal = cam.horizontal + cam.vel_horizontal * time_offset;
     float3 vertical = cam.vertical + cam.vel_vertical * time_offset;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CAMERA SHAKE (Cinema Mode - Handheld Simulation)
+    // Uses pre-calculated shake offset/rotation from CPU
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (cam.shake_enabled) {
+        // Apply position shake to origin
+        origin = origin + cam.shake_offset;
+        
+        // Apply rotation shake to viewing direction
+        float3 shake_rot = cam.shake_rotation;
+        
+        // Shift the image plane based on rotation shake
+        float3 center = corner + horizontal * 0.5f + vertical * 0.5f;
+        center = center + cam.u * shake_rot.y * 10.0f;  // Yaw
+        center = center + cam.v * shake_rot.x * 10.0f;  // Pitch
+        
+        // Recalculate corner from shifted center
+        corner = center - horizontal * 0.5f - vertical * 0.5f;
+    }
+
+
     
     // ---------------- LENS DISTORTION ----------------
     // Brown-Conrady Model (Simplified Radial Distortion)
