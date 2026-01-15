@@ -8,6 +8,8 @@
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
 #include "OptixWrapper.h"
+#include <future>
+#include <thread>
 
 // Includes moved from renderer.h
 #include "Camera.h"
@@ -20,6 +22,9 @@
 #include "PrincipledBSDF.h"
 #include "Dielectric.h"
 #include "Material.h"
+#include "VDBVolume.h"
+#include "VDBVolumeManager.h"
+#include "VolumeShader.h"
 #include "Triangle.h"
 #include "Mesh.h"
 #include "AABB.h"
@@ -29,6 +34,7 @@
 #include "ParallelBVHNode.h"
 #include "AnimatedObject.h"
 #include "scene_data.h"
+#include "VDBVolumeManager.h"
 
 // Unified rendering system for CPU/GPU parity
 #include "unified_types.h"
@@ -988,6 +994,13 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 
     // Check if OptiX is valid
     bool run_optix = use_optix && optix_gpu && g_hasOptix;
+    
+    // IMPORTANT: Sync local optix pointer for updateWind updates to work
+    // render_Animation receives optix_gpu as argument, but updateWind uses member this->optix_gpu_ptr
+    if (run_optix) {
+        this->optix_gpu_ptr = optix_gpu;
+    }
+
     if (use_optix && !run_optix) {
         SCENE_LOG_WARN("OptiX requested but not available/valid. Falling back to CPU.");
     }
@@ -1026,7 +1039,28 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // Returns true if geometry changed
         // --- UPDATE ANIMATION ---
         // Disable CPU skinning if running on OptiX to save performance and prevent crashes
-        bool geometry_changed = this->updateAnimationState(scene, current_time, !run_optix);
+        // UPDATE (Fix GPU T-Pose): Re-enable CPU skinning so we can upload deformed vertices to GPU
+        // Foliage (Fast) is not skinned, so it won't be affected.
+        bool geometry_changed = this->updateAnimationState(scene, current_time, true); // Always calc CPU skinning for now
+        
+        // --- WIND ANIMATION ---
+        // Apply wind simulation for this frame
+        if (g_hasOptix) {  // Wind is currently GPU/OptiX instance based
+            this->updateWind(scene, current_time);
+            // Wind updates are self-contained in updateWind (Direct GPU update + TLAS Refit)
+            // No need to set geometry_changed = true, which would trigger expensive BLAS checks.
+        }
+
+        // --- VDB VOLUME ANIMATION (FIX) ---
+        // Update VDB sequences for current frame (loads new grid from disk if needed)
+        scene.updateVDBVolumesFromTimeline(frame);
+        
+        // Sync VDBs to GPU if running OptiX
+        // This ensures the new grid data is uploaded to GPU memory
+        if (run_optix && ui_ctx) {
+             SceneUI::syncVDBVolumesToGPU(*ui_ctx);
+             // Note: syncVDBVolumesToGPU handles geometry flag updates internally if needed
+        }
         
         // --- TERRAIN ANIMATION ---
         // Apply terrain keyframes for this frame (morphing animation)
@@ -1214,17 +1248,16 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
         return;
     }
 
-    //scene.bvh = nullptr; // eskiyi temizle
+    // VDB Volume Support: Now handled natively by EmbreeBVH via User Geometry.
+    // No need to fallback to ParallelBVH.
 
     if (use_embree) {
         auto embree_bvh = std::make_shared<EmbreeBVH>();
         embree_bvh->build(scene.world.objects);
         scene.bvh = embree_bvh;
-        // SCENE_LOG_INFO("[Embree] BVH rebuilt successfully.");  // Too verbose
     }
     else {
         scene.bvh = std::make_shared<ParallelBVHNode>(scene.world.objects, 0, scene.world.size(), 0.0, 1.0, 0);
-        // SCENE_LOG_INFO("[RayTrophi: RT_BVH] BVH rebuilt successfully.");  // Too verbose
     }
 }
 
@@ -2085,9 +2118,87 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     // --- Shadow ---
     // GPU ile uyumlu shadow bias (eski: 0.0001f -> self-shadowing yapabilir)
-    Ray shadow_ray(hit_point + N * 0.001f, L);
-    if (bvh->occluded(shadow_ray, 0.001f, light_distance))
-        return direct_light;
+    // Volumetric Shadow Logic (Transparent Shadows)
+    Ray shadow_ray_current(hit_point + N * 0.001f, L);
+    float remaining_dist = light_distance;
+    float shadow_transmittance = 1.0f;
+    int shadow_layers = 0;
+    
+    while (remaining_dist > 0.001f && shadow_layers < 4) {
+        HitRecord shadow_rec;
+        if (bvh->hit(shadow_ray_current, 0.001f, remaining_dist, shadow_rec)) {
+            
+            // Check if blocker is a Volume
+            if (shadow_rec.vdb_volume) {
+                const VDBVolume* vdb = shadow_rec.vdb_volume;
+                auto shader = vdb->volume_shader;
+                
+                // Get intersection interval
+                float t_enter, t_exit;
+                if (vdb->intersectTransformedAABB(shadow_ray_current, 0.001f, remaining_dist, t_enter, t_exit)) {
+                    if (t_enter < 0.001f) t_enter = 0.001f;
+                    if (t_exit > remaining_dist) t_exit = remaining_dist;
+                    
+                    // Shadow Ray Marching
+                    // Lower quality for shadows is usually acceptable
+                    float shadow_step = shader ? shader->quality.step_size * 2.0f : 0.2f;
+                    if (shadow_step < 0.01f) shadow_step = 0.01f;
+                    
+                    float density_scale = (shader ? shader->density.multiplier : 1.0f) * vdb->density_scale;
+                    float shadow_strength = shader ? shader->quality.shadow_strength : 1.0f;
+                    
+                    float t = t_enter;
+                    Matrix4x4 inv_transform = vdb->getInverseTransform();
+                    auto& mgr = VDBVolumeManager::getInstance();
+                    int vol_id = vdb->getVDBVolumeID();
+                    
+                    // Jitter shadow start
+                    t += ((float)rand() / RAND_MAX) * shadow_step;
+                    
+                    while (t < t_exit) {
+                        Vec3 p = shadow_ray_current.at(t);
+                        Vec3 local_p = inv_transform.transform_point(p);
+                        float density = mgr.sampleDensityCPU(vol_id, local_p.x, local_p.y, local_p.z);
+                        
+                        // Apply same threshold as primary ray to prevent box shadows
+                        if (density < 0.01f) density = 0.0f;
+                        
+                        if (density > 0.0f) {
+                            float sigma_t = density * density_scale * shadow_strength;
+                            shadow_transmittance *= exp(-sigma_t * shadow_step);
+                        }
+                        
+                        if (shadow_transmittance < 0.01f) break;
+                        t += shadow_step;
+                    }
+                }
+                
+                if (shadow_transmittance < 0.01f) {
+                    return direct_light; // Fully blocked by volume
+                }
+                
+                // Continue through volume
+                // Move ray to exit point + epsilon
+                float advance = t_exit + 0.001f;
+                shadow_ray_current = Ray(shadow_ray_current.at(advance), L);
+                remaining_dist -= advance;
+                shadow_layers++;
+            }
+            else {
+                // Opaque blocker found
+                return direct_light;
+            }
+        }
+        else {
+            // No blocker found
+            break; 
+        }
+    }
+    
+    // Apply calculated transmittance to light intensity
+    if (shadow_transmittance < 0.99f) {
+        Li = Li * shadow_transmittance;
+    }
 
     float NdotL = std::fmax(Vec3::dot(N, L), 0.0001f);
 
@@ -2241,6 +2352,336 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             Vec3f bg_contribution = final_bg_color * bg_factor;
             color += throughput * bg_contribution;
             break;
+        }
+
+
+        // --- VDB Volume Rendering ---
+        if (rec.vdb_volume) {
+            const VDBVolume* vdb = rec.vdb_volume;
+             
+            // Get entry and exit points
+            float t_enter, t_exit;
+            if (vdb->intersectTransformedAABB(current_ray, 0.001f, std::numeric_limits<float>::infinity(), t_enter, t_exit)) {
+                 
+                // Clamp t_enter
+                if (t_enter < 0.001f) t_enter = 0.001f;
+                
+                // Ray marching setup
+                // Use fixed step for now (TODO: Get from VolumeShader)
+                float step_size = 0.1f; 
+                
+                float t = t_enter;
+                float transparency = 1.0f;
+                Vec3f accumulated_color(0.0f);
+                
+                auto& mgr = VDBVolumeManager::getInstance();
+                int vol_id = vdb->getVDBVolumeID();
+                Matrix4x4 inv_transform = vdb->getInverseTransform();
+
+                // --- VOLUMETRIC RENDERING (CPU) ---
+                // Physical Integration using Beer-Lambert Law
+
+                // Access generic Volume Shader properties
+                auto shader = vdb->volume_shader;
+                
+                 step_size = shader ? shader->quality.step_size : 0.1f;
+                // Avoid infinite loops with bad step size
+                if (step_size < 0.001f) step_size = 0.001f;
+
+                float density_scale = (shader ? shader->density.multiplier : 1.0f) * vdb->density_scale;
+                
+                // Shader parameters - Convert to Vec3f for rendering consistency
+                Vec3 albedo_raw = shader ? shader->scattering.color : Vec3(1.0f);
+                Vec3f volume_albedo = toVec3f(albedo_raw);
+                float scattering_intensity = shader ? shader->scattering.coefficient : 1.0f;
+
+                // ═══════════════════════════════════════════════════════════════
+                // Absorption parameters (sigma_a)
+                // ═══════════════════════════════════════════════════════════════
+                Vec3 absorption_color_raw = shader ? shader->absorption.color : Vec3(0.0f);
+                Vec3f absorption_color = toVec3f(absorption_color_raw);
+                float absorption_coeff = shader ? shader->absorption.coefficient : 0.0f;
+                
+                // ═══════════════════════════════════════════════════════════════
+                // Emission parameters
+                // ═══════════════════════════════════════════════════════════════
+                VolumeEmissionMode emission_mode = shader ? shader->emission.mode : VolumeEmissionMode::None;
+                Vec3 emission_color_raw = shader ? shader->emission.color : Vec3(1.0f, 0.5f, 0.1f);
+                Vec3f emission_color = toVec3f(emission_color_raw);
+                float emission_intensity = shader ? shader->emission.intensity : 0.0f;
+                
+                // ═══════════════════════════════════════════════════════════════
+                // Anisotropy (Henyey-Greenstein phase function G parameter)
+                // ═══════════════════════════════════════════════════════════════
+                float anisotropy_g = shader ? shader->scattering.anisotropy : 0.0f;
+
+                float current_transparency = 1.0f;
+                Vec3f accumulated_vol_color(0.0f);
+
+                
+                // Jitter to reduce banding
+                float jitter = ((float)rand() / RAND_MAX) * step_size;
+                t += jitter;
+
+                int steps = 0;
+                int max_steps = shader ? shader->quality.max_steps : 256;
+
+                while (t < t_exit && steps < max_steps) {
+                    Vec3 p = current_ray.at(t);
+                    Vec3 local_p = inv_transform.transform_point(p);
+                    
+                    // Sample Density (Standard Coordinates)
+                    float density = mgr.sampleDensityCPU(vol_id, local_p.x, local_p.y, local_p.z);
+                    
+                    // CUTOFF REMOVED: User requested - was zeroing low densities
+                    
+                    // Edge falloff - smooth fade near bounding box boundaries
+                    float edge_falloff = shader ? shader->density.edge_falloff : 0.0f;
+                    if (edge_falloff > 0.0f && density > 0.0f) {
+                        Vec3 local_min = vdb->getLocalBoundsMin();
+                        Vec3 local_max = vdb->getLocalBoundsMax();
+                        
+                        // Calculate distance from edges (in local space)
+                        float dx = std::min(local_p.x - local_min.x, local_max.x - local_p.x);
+                        float dy = std::min(local_p.y - local_min.y, local_max.y - local_p.y);
+                        float dz = std::min(local_p.z - local_min.z, local_max.z - local_p.z);
+                        float edge_dist = std::min({dx, dy, dz});
+                        
+                        // Smooth falloff near edges
+                        if (edge_dist < edge_falloff) {
+                            float edge_factor = edge_dist / edge_falloff;
+                            density *= edge_factor * edge_factor; // Quadratic falloff
+                        }
+                    }
+                    
+                    if (density > 0.001f) {  // GPU-matching threshold to filter float noise
+                        // Physical coefficients: sigma_t = sigma_s + sigma_a
+                        float sigma_s = density * density_scale * scattering_intensity;
+                        float sigma_a = density * absorption_coeff;
+                        float sigma_t = sigma_s + sigma_a;
+                        
+                        // Beer-Lambert Transmittance for this step
+                        float step_transmittance = exp(-sigma_t * step_size);
+                        
+                        // --- LIGHT SAMPLING (In-Scattering) ---
+                        // Iterate scene lights to calculate incoming light at point 'p'
+                        Vec3f total_incoming_light(0.0f);
+                        
+                        // Only sample if transparency is significant
+                        if (current_transparency > 0.01f) {
+                             for (const auto& light : lights) {
+                                 if (!light) continue;
+                                 
+                                 Vec3 light_dir;
+                                 float light_dist;
+                                 
+                                 // Calculate Light Direction & Distance
+                                 if (light->type() == LightType::Directional) {
+                                     // Directional Light: Direction is constant (stored in light->direction)
+                                     // getDirection(p) returns normalized direction towards light (inverse of light flow)
+                                     light_dir = light->getDirection(p); 
+                                     light_dist = 1e9f; // Infinite distance
+                                 } else {
+                                     // Point/Spot/Area: Calculate from position
+                                     Vec3 to_light = light->position - p;
+                                     light_dist = to_light.length();
+                                     light_dir = to_light / std::max(light_dist, 0.0001f);
+                                 }
+
+                                 // Get Intensity at point p
+                                 Vec3f light_intensity = toVec3f(light->getIntensity(p, light->position));
+                                 
+                                 // OPTIMIZATION: Early exit for negligible light
+                                 if (light_intensity.luminance() < 1e-5f) continue;
+                                 
+                                 // Shadow Ray (p -> Light)
+                                 Ray shadow_ray_vol(p + light_dir * 0.001f, light_dir);
+                                 float shadow_transmittance = 1.0f;
+                                 
+                                 // 1. Check Opaque Occlusion (Fast)
+                                 HitRecord shadow_rec;
+                                 bool hit_something = bvh->hit(shadow_ray_vol, 0.001f, light_dist, shadow_rec);
+                                 
+                                 if (hit_something) {
+                                     if (!shadow_rec.vdb_volume) {
+                                         shadow_transmittance = 0.0f;
+                                     }
+                                     else {
+                                         // Hit Volume (Self-Shadow)
+                                         // Ray march towards light
+                                         float t_vol_enter = 0.0f;
+                                         float t_vol_exit = 0.0f;
+                                         
+                                         // Find exit point
+                                         if (vdb->intersectTransformedAABB(shadow_ray_vol, 0.0f, light_dist, t_vol_enter, t_vol_exit)) {
+                                             
+                                             // OPTIMIZATION: Moderate step for shadows (High Quality)
+                                             float shadow_march_step = step_size * 1.5f; 
+                                             if (shadow_march_step < 0.1f) shadow_march_step = 0.1f; // Minimum clamp
+                                             
+                                             if (t_vol_exit > light_dist) t_vol_exit = light_dist;
+                                             
+                                             // Jitter shadow start to hide banding
+                                             float t_shadow = ((float)rand() / RAND_MAX) * shadow_march_step;
+                                             
+                                             while (t_shadow < t_vol_exit) {
+                                                 Vec3 sp = shadow_ray_vol.at(t_shadow);
+                                                 Vec3 slocal_p = inv_transform.transform_point(sp);
+                                                 float s_density = mgr.sampleDensityCPU(vol_id, slocal_p.x, slocal_p.y, slocal_p.z);
+                                                 
+                                                 if (s_density > 1e-4f) {
+                                                     shadow_transmittance *= exp(-s_density * density_scale * shadow_march_step);
+                                                 }
+                                                 if (shadow_transmittance < 0.01f) break;
+                                                 t_shadow += shadow_march_step;
+                                             }
+                                         }
+                                     }
+                                 }
+                                 
+                                 // Henyey-Greenstein Phase Function
+                                 // g > 0: forward scattering, g < 0: back scattering, g = 0: isotropic
+                                 if (shadow_transmittance > 0.0f) {
+                                     float phase = 1.0f; // Default isotropic
+                                     if (std::abs(anisotropy_g) > 0.001f) {
+                                         // cos(theta) between view direction and light direction
+                                         float cos_theta = Vec3::dot(-current_ray.direction.normalize(), light_dir);
+                                         float g2 = anisotropy_g * anisotropy_g;
+                                         float denom = 1.0f + g2 - 2.0f * anisotropy_g * cos_theta;
+                                         phase = (1.0f - g2) / (4.0f * 3.14159265f * powf(std::max(denom, 0.0001f), 1.5f));
+                                         // Normalize to reasonable range (HG can be very peaked)
+                                         phase = std::min(phase, 10.0f);
+                                     }
+                                     total_incoming_light += light_intensity * shadow_transmittance * phase;
+                                 }
+                             }
+                        }
+
+                        // Combine: In-Scattering + Absorption
+                        // Light scattered towards camera from this step
+                        // L_scat = (Li * Phase) * (1 - exp(-sigma * dt))
+                        // Or approximation: Li * Density * Step
+                        
+                        // In-Scattering contribution
+                        Vec3f step_scattering_term = total_incoming_light * volume_albedo * sigma_s;
+                        
+                        // ═══════════════════════════════════════════════════════════════
+                        // EMISSION contribution
+                        // ═══════════════════════════════════════════════════════════════
+                        Vec3f step_emission(0.0f);
+                        if (emission_mode == VolumeEmissionMode::Constant && emission_intensity > 0.0f) {
+                            float scaled_density = density * (shader ? shader->density.multiplier : 1.0f);
+                            step_emission = emission_color * emission_intensity * scaled_density;
+                        }
+                        else if (emission_mode == VolumeEmissionMode::Blackbody && density > 0.0f) {
+                            // GPU-matching blackbody emission
+                            float temperature_scale = shader ? shader->emission.temperature_scale : 1.0f;
+                            float blackbody_intensity = shader ? shader->emission.blackbody_intensity : 10.0f;
+                            
+                            // Sample real temperature grid if available (GPU-matching)
+                            float temperature = 0.0f;
+                            if (mgr.hasTemperatureGrid(vol_id)) {
+                                temperature = mgr.sampleTemperatureCPU(vol_id, local_p.x, local_p.y, local_p.z);
+                            } else {
+                                // Fallback: use density as temperature proxy
+                                temperature = density;
+                            }
+                            
+                            Vec3f blackbody_color(0.0f);
+                            
+                            // Check if ColorRamp is enabled
+                            bool use_color_ramp = shader && shader->emission.color_ramp.enabled;
+                            
+                            if (use_color_ramp) {
+                                // GPU-matching: Use temperature for ramp (not density)
+                                float ramp_t = temperature * temperature_scale;
+                                ramp_t = std::max(0.0f, std::min(ramp_t, 1.0f));
+                                Vec3 ramp_color = shader->emission.color_ramp.sample(ramp_t);
+                                blackbody_color = toVec3f(ramp_color);
+                            }
+                            else {
+                                // Physical blackbody calculation
+                                float temp_k = temperature * temperature_scale * 1500.0f;
+                                temp_k = std::max(100.0f, std::min(temp_k, 10000.0f));
+                                float t = temp_k / 100.0f;
+                                float r, g, b;
+                                
+                                if (t <= 66.0f) {
+                                    r = 255.0f;
+                                    g = 99.4708025861f * logf(t) - 161.1195681661f;
+                                    if (t <= 19.0f) {
+                                        b = 0.0f;
+                                    } else {
+                                        b = 138.5177312231f * logf(t - 10.0f) - 305.0447927307f;
+                                    }
+                                } else {
+                                    r = 329.698727446f * powf(t - 60.0f, -0.1332047592f);
+                                    g = 288.1221695283f * powf(t - 60.0f, -0.0755148492f);
+                                    b = 255.0f;
+                                }
+                                
+                                blackbody_color.x = std::max(0.0f, std::min(r / 255.0f, 1.0f));
+                                blackbody_color.y = std::max(0.0f, std::min(g / 255.0f, 1.0f));
+                                blackbody_color.z = std::max(0.0f, std::min(b / 255.0f, 1.0f));
+                            }
+                            
+                            // GPU-matching: linear brightness formula
+                            // density is already scaled by sampleDensityCPU, apply shader multiplier
+                            float scaled_density = density * (shader ? shader->density.multiplier : 1.0f);
+                            float brightness = scaled_density * blackbody_intensity;
+                            step_emission = blackbody_color * brightness;
+                        }
+
+
+                        
+                        // Accumulate scattering + emission
+                        // GPU-matching: Use (1 - step_transmittance) instead of step_size for proper Beer-Lambert integration
+                        float integration_weight = 1.0f - step_transmittance;
+                        accumulated_vol_color += (step_scattering_term + step_emission) * integration_weight * current_transparency;
+                        
+                        // Update Ray Transmittance
+                        current_transparency *= step_transmittance;
+                    }
+                    
+                    if (current_transparency < 0.01f) break; // Early exit (opaque)
+                    
+                    t += step_size;
+                    steps++;
+                }
+
+                // Apply volumetric result to path tracer state
+                // Both accumulated_vol_color and throughput are Vec3f now
+                color += throughput * accumulated_vol_color;
+                throughput *= current_transparency;
+                
+                // Move ray to exit point (handled below)
+
+                
+                // Move ray to exit point to continue tracing background
+                current_ray = Ray(current_ray.at(t_exit + 0.0001f), current_ray.direction);
+                
+                // Check if we should stop
+                if (current_transparency < 0.01f) break;  // Fixed: was using wrong variable 'transparency'
+                
+                continue; // Continue to next bounce (tracing what's behind volume)
+            }
+            else {
+                // AABB intersection failed but VDB was hit - move ray past VDB bounding box
+                // This prevents falling through to normal material processing
+                AABB world_bounds = vdb->getWorldBounds();
+                // Find exit point of world AABB and move ray past it
+                float t_far = std::numeric_limits<float>::infinity();
+                Vec3 inv_dir = Vec3(1.0f / current_ray.direction.x, 
+                                    1.0f / current_ray.direction.y, 
+                                    1.0f / current_ray.direction.z);
+                for (int i = 0; i < 3; i++) {
+                    float t1 = (world_bounds.min[i] - current_ray.origin[i]) * inv_dir[i];
+                    float t2 = (world_bounds.max[i] - current_ray.origin[i]) * inv_dir[i];
+                    t_far = std::min(t_far, std::max(t1, t2));
+                }
+                current_ray = Ray(current_ray.at(t_far + 0.0001f), current_ray.direction);
+                continue; // Continue tracing behind VDB
+            }
         }
 
         // --- Normal map application ---
@@ -2629,8 +3070,8 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         
         while (!should_stop.load(std::memory_order_relaxed)) {
-            // Check global stop flag
-            if (rendering_stopped_cpu.load(std::memory_order_relaxed)) {
+            // Check global stop flag or FORCE STOP from UI
+            if (rendering_stopped_cpu.load(std::memory_order_relaxed) || force_stop_rendering.load(std::memory_order_relaxed)) {
                 should_stop.store(true, std::memory_order_relaxed);
                 break;
             }
@@ -2855,27 +3296,77 @@ void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_pt
         return;
     }
     
+    // Global flag to block concurrent updates (Animation vs Rebuild)
+    extern bool g_optix_rebuild_in_progress;
+    g_optix_rebuild_in_progress = true;
+
     try {
         // Convert current Hittable objects to Triangle list
+        if (scene.world.objects.empty()) {
+            SCENE_LOG_WARN("[OptiX] No objects in scene");
+            optix_gpu_ptr->clearScene();
+            optix_gpu_ptr->resetAccumulation();
+            g_optix_rebuild_in_progress = false;
+            return;
+        }
+
+        // Parallel Extraction of Triangles from Hittable objects
+        // (Replaces slow sequential dynamic_pointer_cast loop)
+        size_t num_objects = scene.world.objects.size();
         std::vector<std::shared_ptr<Triangle>> triangles;
-        triangles.reserve(scene.world.objects.size());
-        
-        for (const auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri) {
-                triangles.push_back(tri);
+        triangles.reserve(num_objects);
+
+        if (num_objects > 1000) {
+            unsigned int num_threads = std::thread::hardware_concurrency();
+            if (num_threads == 0) num_threads = 4;
+
+            size_t chunk_size = num_objects / num_threads;
+            std::vector<std::future<std::vector<std::shared_ptr<Triangle>>>> futures;
+
+            for (unsigned int t = 0; t < num_threads; ++t) {
+                size_t start = t * chunk_size;
+                size_t end = (t == num_threads - 1) ? num_objects : (start + chunk_size);
+
+                futures.push_back(std::async(std::launch::async, 
+                    [&scene, start, end]() {
+                        std::vector<std::shared_ptr<Triangle>> local_tris;
+                        local_tris.reserve((end - start)); // Heuristic reservation
+                        for (size_t i = start; i < end; ++i) {
+                            if (auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
+                                // OPTIMIZATION: Skip invisible objects (e.g. source meshes for instancing)
+                                if (tri->visible) {
+                                    local_tris.push_back(tri);
+                                }
+                            }
+                        }
+                        return local_tris;
+                    }
+                ));
+            }
+
+            for (auto& f : futures) {
+                auto part = f.get();
+                triangles.insert(triangles.end(), part.begin(), part.end());
+            }
+        } else {
+            // Sequential fallback for small object counts
+            for (const auto& obj : scene.world.objects) {
+                if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                    if (tri->visible) {
+                         triangles.push_back(tri);
+                    }
+                }
             }
         }
         
-        if (triangles.empty()) {
-            SCENE_LOG_WARN("[OptiX] No triangles found in scene");
-            optix_gpu_ptr->clearScene();
-            optix_gpu_ptr->resetAccumulation();
-            return;
-        }
+        // ALLOW instance-only scenes (triangles.empty() is OK if we have instances)
+        // If both are empty, clearScene was handled above.
         
         // Convert to OptiX format using internal assimpLoader
-        OptixGeometryData optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
+        OptixGeometryData optix_data;
+        if (!triangles.empty()) {
+             optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
+        }
         
         // CRITICAL: Validate material indices before build to prevent crash
         optix_gpu_ptr->validateMaterialIndices(optix_data);
@@ -3001,6 +3492,13 @@ void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gp
                     gpu_mat.ior = 1.0f;
                     gpu_mat.transmission = 0.0f;
                     gpu_mat.opacity = 1.0f;
+                    
+                    // Fetch NanoVDB Grid Pointer if available
+                    if (vol_mat->hasVDBVolume()) {
+                         void* grid_ptr = VDBVolumeManager::getInstance().getGPUGrid(vol_mat->getVDBVolumeID());
+                         vol_info.nanovdb_grid = grid_ptr;
+                         vol_info.has_nanovdb = (grid_ptr != nullptr) ? 1 : 0;
+                    }
                 }
             } else if (mat->gpuMaterial) {
                 // PrincipledBSDF with gpuMaterial
@@ -3037,3 +3535,106 @@ void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gp
     }
 }
 
+// ============================================================================
+// WIND ANIMATION SYSTEM
+// ============================================================================
+
+#include "InstanceManager.h"
+#include "HittableInstance.h"
+
+void Renderer::updateWind(SceneData& scene, float time) {
+    auto& im = InstanceManager::getInstance();
+    bool any_update = false;
+
+    // Iterate all instance groups
+    for (auto& groupRef : im.getGroups()) {
+        InstanceGroup* group = &groupRef;
+        
+        // 1. Initial State Capture (Lazy Init)
+        // If we loaded a scene from disk, initial_instances might be empty.
+        // We capture the current state as the "Rest Pose".
+        if (group->initial_instances.empty() && !group->instances.empty()) {
+            group->initial_instances = group->instances;
+        }
+        
+        // Safety sync if size mismatch (e.g. instances deleted externally without sync)
+        if (group->initial_instances.size() != group->instances.size()) {
+             group->initial_instances = group->instances; // Reset rest pose to current to capture new layout
+        }
+
+        if (!group->wind_settings.enabled) continue;
+
+        // 2. Wind Parameters
+        float speed = group->wind_settings.speed;
+        float strength = group->wind_settings.strength;
+        float turbulence = group->wind_settings.turbulence;
+        float wave = group->wind_settings.wave_size > 0.1f ? group->wind_settings.wave_size : 50.0f;
+        Vec3 dir = group->wind_settings.direction.normalize();
+        
+        // 3. Animation Loop (Parallelized)
+        // Updating 100k instances is heavy, let's try to be cache friendly.
+        // #pragma omp parallel for (if you have OpenMP enabled)
+        bool has_active_links = (group->active_hittables.size() == group->instances.size());
+        
+        for (size_t i = 0; i < group->instances.size(); ++i) {
+            const auto& init = group->initial_instances[i];
+            auto& curr = group->instances[i];
+
+            // Calculate Noise/Wave
+            // Simple sine approximation for wind waves
+            // Phase uses X+Z mostly
+            float pos_phase = (init.position.x + init.position.z) / wave;
+            float t_phase = time * speed;
+            
+            // Multi-octave "sway"
+            // Base wave + faster turbulence
+            float sway_val = sinf(pos_phase + t_phase) + 
+                             0.5f * sinf(pos_phase * 2.5f + t_phase * 1.3f * turbulence);
+            
+            // Apply Strength
+            float rot_angle = sway_val * strength; // in degrees
+            
+            // Directional Sway logic
+            float rot_z_delta = -dir.x * rot_angle; 
+            float rot_x_delta = dir.z * rot_angle;  
+            
+            // Drift Prevention: Always add delta to INITIAL rotation, not current.
+            curr.rotation.x = init.rotation.x + rot_x_delta;
+            curr.rotation.z = init.rotation.z + rot_z_delta;
+            
+            // Update Active HittableInstance if linked
+            if (has_active_links) {
+                if (auto hittable = group->active_hittables[i].lock()) {
+                    // We need to cast to HittableInstance to access setTransform
+                    // Since we know we created them as HittableInstance, static_cast is risky but fast.
+                    // dynamic_cast is safer.
+                    if (auto hi = std::dynamic_pointer_cast<HittableInstance>(hittable)) {
+                         Matrix4x4 new_mat = curr.toMatrix();
+                         hi->setTransform(new_mat); // Updates inv_transform too
+                         
+                         // OPTIMIZATION: Direct GPU Update (Avoids iterating all scene objects)
+                         if (this->optix_gpu_ptr && !hi->optix_instance_ids.empty()) {
+                             float t[12];
+                             const Matrix4x4& m = new_mat; 
+                             t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
+                             t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
+                             t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
+                             
+                             for(int id : hi->optix_instance_ids) {
+                                  this->optix_gpu_ptr->updateInstanceTransform(id, t);
+                             }
+                         }
+                    }
+                }
+            }
+        }
+        
+        group->gpu_dirty = true;
+        any_update = true;
+    }
+
+    // Commit changes to TLAS if any updates occurred
+    if (any_update && this->optix_gpu_ptr) {
+        this->optix_gpu_ptr->rebuildTLAS(); // Fast refit/update
+    }
+}

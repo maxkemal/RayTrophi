@@ -8,8 +8,13 @@
 #include "material_scatter.cuh"
 #include "random_utils.cuh"
 #include "CloudNoise.cuh"
+#include <nanovdb/NanoVDB.h>
+#include <nanovdb/math/SampleFromVoxels.h>
+#include <nanovdb/math/SampleFromVoxels.h>
 #include "ray.h"
 #include "scatter_volume_step.h"
+#include "params.h"  // For GpuVDBVolume
+
 
 // Helper function to render a single cloud layer
 // Returns ONLY the cloud color contribution (not blended with background)
@@ -339,6 +344,513 @@ __device__ float3 render_clouds(const WorldData& world, const float3& rayDir, fl
     // Final blend with background
     // No artificial minimum - clouds should be fully transparent where there's no density
     return bg_color * transmittance + cloudColor;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VDB VOLUME RAY MARCHING (Industry-Standard)
+// Independent volume objects with transform and NanoVDB sampling
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * @brief Convert temperature to blackbody RGB color (Planck approximation)
+ * @param kelvin Temperature in Kelvin (1000K - 40000K)
+ * @return RGB color normalized to 0-1
+ */
+__device__ float3 blackbody_to_rgb(float kelvin) {
+    kelvin = fmaxf(1000.0f, fminf(40000.0f, kelvin));
+    float temp = kelvin / 100.0f;
+    
+    float red, green, blue;
+    
+    // Red
+    if (temp <= 66.0f) {
+        red = 255.0f;
+    } else {
+        red = temp - 60.0f;
+        red = 329.698727446f * powf(red, -0.1332047592f);
+    }
+    
+    // Green
+    if (temp <= 66.0f) {
+        green = temp;
+        green = 99.4708025861f * logf(green) - 161.1195681661f;
+    } else {
+        green = temp - 60.0f;
+        green = 288.1221695283f * powf(green, -0.0755148492f);
+    }
+    
+    // Blue
+    if (temp >= 66.0f) {
+        blue = 255.0f;
+    } else if (temp <= 19.0f) {
+        blue = 0.0f;
+    } else {
+        blue = temp - 10.0f;
+        blue = 138.5177312231f * logf(blue) - 305.0447927307f;
+    }
+    
+    return make_float3(
+        fmaxf(0.0f, fminf(1.0f, red / 255.0f)),
+        fmaxf(0.0f, fminf(1.0f, green / 255.0f)),
+        fmaxf(0.0f, fminf(1.0f, blue / 255.0f))
+    );
+}
+
+/**
+ * @brief Stefan-Boltzmann intensity from temperature
+ */
+__device__ float blackbody_intensity(float kelvin, float scale) {
+    float t_normalized = kelvin / 3000.0f;  // Normalize around flame temp
+    return scale * t_normalized * t_normalized * t_normalized * t_normalized;
+}
+
+/**
+ * @brief Transform a point using a 3x4 affine matrix (row-major)
+ */
+__device__ float3 transform_point_affine(const float3& p, const float* m) {
+    return make_float3(
+        m[0] * p.x + m[1] * p.y + m[2] * p.z + m[3],
+        m[4] * p.x + m[5] * p.y + m[6] * p.z + m[7],
+        m[8] * p.x + m[9] * p.y + m[10] * p.z + m[11]
+    );
+}
+
+/**
+ * @brief Transform a direction vector using a 3x4 affine matrix (ignores translation)
+ */
+__device__ float3 transform_vector_affine(const float3& v, const float* m) {
+    return make_float3(
+        m[0] * v.x + m[1] * v.y + m[2] * v.z,
+        m[4] * v.x + m[5] * v.y + m[6] * v.z,
+        m[8] * v.x + m[9] * v.y + m[10] * v.z
+    );
+}
+
+/**
+ * @brief Ray-AABB intersection
+ */
+__device__ bool intersect_aabb_vdb(
+    const float3& origin, const float3& dir,
+    const float3& aabb_min, const float3& aabb_max,
+    float& t_enter, float& t_exit
+) {
+    float3 inv_dir = make_float3(
+        fabsf(dir.x) > 1e-6f ? 1.0f / dir.x : 1e6f * (dir.x >= 0 ? 1 : -1),
+        fabsf(dir.y) > 1e-6f ? 1.0f / dir.y : 1e6f * (dir.y >= 0 ? 1 : -1),
+        fabsf(dir.z) > 1e-6f ? 1.0f / dir.z : 1e6f * (dir.z >= 0 ? 1 : -1)
+    );
+    
+    float3 t0 = (aabb_min - origin) * inv_dir;
+    float3 t1 = (aabb_max - origin) * inv_dir;
+    
+    float3 tmin_v = make_float3(fminf(t0.x, t1.x), fminf(t0.y, t1.y), fminf(t0.z, t1.z));
+    float3 tmax_v = make_float3(fmaxf(t0.x, t1.x), fmaxf(t0.y, t1.y), fmaxf(t0.z, t1.z));
+    
+    t_enter = fmaxf(fmaxf(tmin_v.x, tmin_v.y), tmin_v.z);
+    t_exit = fminf(fminf(tmax_v.x, tmax_v.y), tmax_v.z);
+    
+    return t_exit >= t_enter && t_exit > 0.0f;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// VDB Occlusion Helper (for Shadow Rays)
+// ─────────────────────────────────────────────────────────────────────────
+__device__ float calculate_vdb_occlusion(
+    const float3& ray_origin,
+    const float3& ray_dir,
+    float max_dist,
+    curandState* rng
+) {
+    float total_transmittance = 1.0f;
+    
+    if (!optixLaunchParams.vdb_volumes || optixLaunchParams.vdb_volume_count == 0) return 1.0f;
+
+    for (int v = 0; v < optixLaunchParams.vdb_volume_count; ++v) {
+        const GpuVDBVolume& vol = optixLaunchParams.vdb_volumes[v];
+        if (!vol.density_grid) continue;
+        
+        // Transform ray to VDB local space
+        float3 local_origin = transform_point_affine(ray_origin, vol.inv_transform);
+        float3 local_dir = transform_vector_affine(ray_dir, vol.inv_transform);
+        float dir_length = length(local_dir);
+        if (dir_length < 1e-8f) continue;
+        
+        local_dir = local_dir / dir_length;
+        
+        // Ray-AABB intersection
+        float t0, t1;
+        if (!intersect_aabb_vdb(local_origin, local_dir, vol.local_bbox_min, vol.local_bbox_max, t0, t1)) continue;
+        
+        // Clip t1 with max_dist (converted to local scale)
+        float local_max_dist = max_dist * dir_length;
+        t1 = fminf(t1, local_max_dist);
+        
+        if (t0 >= t1) continue;
+        
+        t0 = fmaxf(t0, 0.0f);
+        
+        // Step size logic
+        float world_step = fmaxf(vol.step_size, (vol.world_bbox_max.x - vol.world_bbox_min.x) / (float)vol.max_steps);
+        float local_step = world_step * dir_length;
+        
+        // Jitter
+        float t = t0 + local_step * random_float(rng); 
+        
+        // NanoVDB Sampler (Trilinear)
+        nanovdb::FloatGrid* grid = (nanovdb::FloatGrid*)vol.density_grid;
+        nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::TreeType, 1> sampler(grid->tree());
+        
+        float remap_range = vol.density_remap_high - vol.density_remap_low;
+        if (remap_range < 0.001f) remap_range = 1.0f;
+        
+        float density_sum = 0.0f;
+        int steps = 0;
+        
+        // Ray Marching Loop for Shadow
+        while (t < t1 && steps < vol.shadow_steps * 2) { // Allow more steps for shadow ray
+            float3 pos = local_origin + local_dir * t;
+            nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
+            
+            float d = sampler(idx);
+            float density = fmaxf((d - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
+            
+            // Attenuate by scatter + absorption (sigma_t)
+            float sigma_t = density * (vol.scatter_coefficient + vol.absorption_coefficient);
+            density_sum += sigma_t * world_step;
+            
+            if (density_sum > 10.0f) break; // Fully occluded
+            
+            t += local_step;
+            steps++;
+        }
+        
+        float tr = expf(-density_sum * vol.shadow_strength);
+        total_transmittance *= tr;
+        
+        if (total_transmittance < 0.01f) return 0.0f;
+    }
+    
+    return total_transmittance;
+}
+
+// Helper to sample GPU Color Ramp
+__device__ float3 sample_color_ramp(const GpuVDBVolume& vol, float t) {
+    if (vol.ramp_stop_count == 0) return make_float3(1.0f);
+    
+    // Clamp t to first/last stop
+    if (t <= vol.ramp_positions[0]) return vol.ramp_colors[0];
+    if (t >= vol.ramp_positions[vol.ramp_stop_count - 1]) return vol.ramp_colors[vol.ramp_stop_count - 1];
+    
+    // Linear search (max 8 stops, fast enough)
+    for (int i = 1; i < vol.ramp_stop_count; ++i) {
+        if (t <= vol.ramp_positions[i]) {
+            float t0 = vol.ramp_positions[i-1];
+            float t1 = vol.ramp_positions[i];
+            float blend = (t - t0) / (t1 - t0);
+            return vol.ramp_colors[i-1] * (1.0f - blend) + vol.ramp_colors[i] * blend;
+        }
+    }
+    return vol.ramp_colors[vol.ramp_stop_count - 1];
+}
+
+/**
+ * @brief VDB Volume Ray Marching (GPU Kernel)
+ * 
+ * Samples NanoVDB density grid with optional temperature for blackbody emission.
+ * Supports full transform (position, rotation, scale).
+ * 
+ * @param vol GPU volume data structure
+ * @param ray_origin World-space ray origin
+ * @param ray_dir World-space ray direction (normalized)
+ * @param sun_dir Sun direction for lighting
+ * @param sun_intensity Sun intensity
+ * @param out_transmittance Output transmittance (1.0 = fully transparent)
+ * @param max_t Maximum ray distance (depth buffer) to clip volume
+ * @param rng Random state for jittering
+ * @return Accumulated color from volume
+ */
+__device__ float3 raymarch_vdb_volume(
+    const GpuVDBVolume& vol,
+    const float3& ray_origin,
+    const float3& ray_dir,
+    const float3& sun_dir,
+    float sun_intensity,
+    float& out_transmittance,
+    float max_t,
+    curandState* rng
+) {
+    // Skip if no density grid
+    if (!vol.density_grid) {
+        out_transmittance = 1.0f;
+        return make_float3(0.0f);
+    }
+    
+    // Transform ray to VDB local space
+    float3 local_origin = transform_point_affine(ray_origin, vol.inv_transform);
+    float3 local_dir = transform_vector_affine(ray_dir, vol.inv_transform);
+    float dir_length = length(local_dir);
+    if (dir_length < 1e-8f) {
+        out_transmittance = 1.0f;
+        return make_float3(0.0f);
+    }
+    local_dir = local_dir / dir_length;
+    
+    // Ray-AABB intersection in local space
+    float t_enter, t_exit;
+    if (!intersect_aabb_vdb(local_origin, local_dir, vol.local_bbox_min, vol.local_bbox_max, t_enter, t_exit)) {
+        out_transmittance = 1.0f;
+        return make_float3(0.0f);
+    }
+    
+    // Convert world max_t to local space distance
+    // world_dist = local_dist / dir_length  => local_max_t = world_max_t * dir_length
+    float local_max_t = max_t * dir_length;
+    
+    // Clip t_exit against occlusion depth
+    t_exit = fminf(t_exit, local_max_t);
+    
+    t_enter = fmaxf(t_enter, 0.001f);
+    if (t_enter >= t_exit) {
+        out_transmittance = 1.0f;
+        return make_float3(0.0f);
+    }
+    
+    // Initialize accumulation
+    float3 accumulated_color = make_float3(0.0f);
+    float transmittance = 1.0f;
+    
+    // Step size (adaptive based on volume size)
+    float3 vol_size = vol.local_bbox_max - vol.local_bbox_min;
+    float vol_extent = length(vol_size);
+    float step = fmaxf(vol.step_size, vol_extent / (float)vol.max_steps);
+    
+    // Jitter for anti-aliasing
+    float jitter = curand_uniform(rng) * step;
+    float t = t_enter + jitter;
+    
+    // Grid accessor - use accessor type for sampler template
+    const nanovdb::FloatGrid* grid = reinterpret_cast<const nanovdb::FloatGrid*>(vol.density_grid);
+    using AccT = decltype(grid->getAccessor());
+    AccT acc = grid->getAccessor();
+    nanovdb::math::SampleFromVoxels<AccT, 1, false> sampler(acc);
+    
+    // Temperature grid (optional)
+    const nanovdb::FloatGrid* temp_grid = nullptr;
+    if (vol.temperature_grid && vol.emission_mode == 2) {
+        temp_grid = reinterpret_cast<const nanovdb::FloatGrid*>(vol.temperature_grid);
+    }
+    
+    int steps = 0;
+    while (t < t_exit && steps < vol.max_steps && transmittance > 0.005f) {
+        float3 pos = local_origin + local_dir * t;
+        
+        // ─────────────────────────────────────────────────────────────────────
+        // SAMPLE DENSITY (with remapping)
+        // ─────────────────────────────────────────────────────────────────────
+        nanovdb::Vec3f idx = grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
+        float raw_density = sampler(idx);
+        
+        // Remap density
+        float remap_range = vol.density_remap_high - vol.density_remap_low + 1e-6f;
+        float density = (raw_density - vol.density_remap_low) / remap_range;
+        density = fmaxf(density, 0.0f) * vol.density_multiplier;
+        
+        if (density > 0.001f) {
+            // ─────────────────────────────────────────────────────────────────
+            // COMPUTE EXTINCTION
+            // ─────────────────────────────────────────────────────────────────
+            float sigma_a = density * vol.absorption_coefficient;
+            float sigma_s = density * vol.scatter_coefficient;
+            float sigma_t = sigma_a + sigma_s;
+            
+            float step_transmittance = expf(-sigma_t * step);
+            
+            // ─────────────────────────────────────────────────────────────────
+            // EMISSION (Fire/Explosions)
+            // ─────────────────────────────────────────────────────────────────
+            float3 emission = make_float3(0.0f);
+            
+            if (vol.emission_mode == 1) {
+                // Constant emission
+                emission = vol.emission_color * vol.emission_intensity * density;
+            }
+            // Blackbody / Color Ramp Emission
+            else if (vol.emission_mode == 2 && temp_grid) {
+                // Blackbody from temperature
+                using TempAccT = nanovdb::FloatGrid::AccessorType;
+                TempAccT temp_acc = temp_grid->getAccessor();
+                nanovdb::math::SampleFromVoxels<TempAccT, 1, false> temp_sampler_acc(temp_acc); // Renamed to avoid conflict
+                
+                // Use temp_grid's own transform for coordinate mapping (robustness)
+                nanovdb::Vec3f temp_idx = temp_grid->worldToIndexF(nanovdb::Vec3f(pos.x, pos.y, pos.z));
+                float temperature = temp_sampler_acc(temp_idx); // Use the accessor-based sampler
+                
+                float3 emission_color;
+                
+                if (vol.color_ramp_enabled) {
+                    // Map temperature to 0-1 range for ramp
+                    // Standard assumption: temperature of 1.0 = end of ramp?
+                    // Use temperature_scale to map raw value to ramp parameter t
+                    float t_ramp = temperature * vol.temperature_scale; // Renamed to avoid conflict
+                    emission_color = sample_color_ramp(vol, t_ramp);
+                } else {
+                    // Standard Physical Blackbody
+                    float kelvin = temperature * 3000.0f * vol.temperature_scale + 1000.0f; // Basic mapping
+                    emission_color = blackbody_to_rgb(kelvin);
+                }
+                
+                float brightness = density * vol.blackbody_intensity;
+                emission = emission_color * brightness; // Assign directly to emission
+            }
+            else if (vol.emission_mode == 3) {
+                // Channel-driven (use density as emission driver)
+                emission = vol.emission_color * vol.emission_intensity * density;
+            }
+            
+            // ─────────────────────────────────────────────────────────────────
+            // IN-SCATTERING (Light from sun)
+            // ─────────────────────────────────────────────────────────────────
+            // ─────────────────────────────────────────────────────────────────
+            // IN-SCATTERING (Light Accumulation)
+            // ─────────────────────────────────────────────────────────────────
+            float3 total_radiance = make_float3(0.0f);
+            
+            // 1. SUN LIGHT
+            {
+                float cos_theta = dot(local_dir, sun_dir);
+                
+                // Dual-lobe Henyey-Greenstein phase function
+                float g1 = vol.scatter_anisotropy;
+                float g2 = vol.scatter_anisotropy_back;
+                float p1 = (1.0f - g1 * g1) / (4.0f * CUDART_PI_F * powf(1.0f + g1 * g1 - 2.0f * g1 * cos_theta, 1.5f));
+                float p2 = (1.0f - g2 * g2) / (4.0f * CUDART_PI_F * powf(1.0f + g2 * g2 - 2.0f * g2 * cos_theta, 1.5f));
+                float phase = p1 * vol.scatter_lobe_mix + p2 * (1.0f - vol.scatter_lobe_mix);
+                
+                // Sun Shadow
+                float light_transmittance = 1.0f;
+                if (vol.shadow_steps > 0) {
+                    float shadow_step = vol_extent / (float)(vol.shadow_steps * 2);
+                    float shadow_t = 0.0f;
+                    float shadow_density_sum = 0.0f;
+                    
+                    for (int ls = 0; ls < vol.shadow_steps && shadow_density_sum < 5.0f; ++ls) {
+                        shadow_t += shadow_step;
+                        float3 shadow_pos = pos + sun_dir * shadow_t;
+                        
+                        // Check bounds (Local AABB check requires transforming shadow_pos back to local or doing check in world)
+                        // Transforming shadow_pos to local is expensive inside loop.
+                        // Better: intersect AABB with shadow ray first? To avoid complexity, skipping bounds check inside tight loop if possible, 
+                        // but VDB bounds check is needed. 
+                        // We are in WORLD space (pos is world). But intersection was local.
+                        // Wait, 'pos' is derived from 't' along ray. ray is world. So pos is WORLD.
+                        // We need to check if shadow_pos is inside volume.
+                        
+                        // Transform world shadow_pos to local index space
+                        float3 local_shadow_pos = transform_point_affine(shadow_pos, vol.inv_transform);
+                         if (local_shadow_pos.x < vol.local_bbox_min.x || local_shadow_pos.x > vol.local_bbox_max.x ||
+                            local_shadow_pos.y < vol.local_bbox_min.y || local_shadow_pos.y > vol.local_bbox_max.y ||
+                            local_shadow_pos.z < vol.local_bbox_min.z || local_shadow_pos.z > vol.local_bbox_max.z) {
+                            break; 
+                        }
+                        
+                        nanovdb::Vec3f sidx = grid->worldToIndexF(nanovdb::Vec3f(local_shadow_pos.x, local_shadow_pos.y, local_shadow_pos.z));
+                        float sd = sampler(sidx);
+                        sd = fmaxf((sd - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
+                        shadow_density_sum += sd * shadow_step * vol.scatter_coefficient;
+                    }
+                    light_transmittance = expf(-shadow_density_sum * vol.shadow_strength);
+                }
+                
+                total_radiance += make_float3(sun_intensity) * light_transmittance * phase;
+            }
+            
+            // 2. SCENE LIGHTS
+            if (optixLaunchParams.lights && optixLaunchParams.light_count > 0) {
+                for (int i = 0; i < optixLaunchParams.light_count; ++i) {
+                    const LightGPU& light = optixLaunchParams.lights[i];
+                    
+                    float3 L = light.position - pos;
+                    float dist_sq = dot(L, L);
+                    float dist = sqrtf(dist_sq);
+                    float3 L_dir = L / dist;
+                    
+                    // Attenuation
+                    float attenuation = 1.0f / (1.0f + 0.1f * dist + 0.01f * dist_sq);
+                    if (light.type == 1) { // Directional
+                        L_dir = -normalize(light.direction);
+                        dist = 1e9f;
+                        attenuation = 1.0f;
+                    } else if (light.type == 2) { // Spot
+                        float3 spot_dir = normalize(light.direction);
+                        float spot_cos = dot(-L_dir, spot_dir);
+                        if (spot_cos < light.outer_cone_cos) attenuation = 0.0f;
+                    }
+                    
+                    if (attenuation < 0.001f) continue;
+                    
+                    // Phase Function
+                    float cos_theta = dot(local_dir, L_dir);
+                    float g1 = vol.scatter_anisotropy;
+                    float p1 = (1.0f - g1 * g1) / (4.0f * CUDART_PI_F * powf(1.0f + g1 * g1 - 2.0f * g1 * cos_theta, 1.5f));
+                    // (Simplified phase for scene lights for perf - single lobe)
+                    float phase = p1;
+                    
+                    // Shadow Marching
+                    float light_transmittance = 1.0f;
+                    if (vol.shadow_steps > 0) {
+                         float shadow_step = dist / (float)(vol.shadow_steps);
+                         // Limit step size
+                         shadow_step = fminf(shadow_step, vol_extent / 10.0f);
+                         
+                         float shadow_t = 0.0f;
+                         float shadow_density_sum = 0.0f;
+                         
+                         for (int ls = 0; ls < vol.shadow_steps && shadow_density_sum < 5.0f; ++ls) {
+                            shadow_t += shadow_step;
+                            if (shadow_t >= dist) break; // Reached light
+                            
+                            float3 shadow_pos = pos + L_dir * shadow_t;
+                            float3 local_shadow_pos = transform_point_affine(shadow_pos, vol.inv_transform);
+                            
+                            // Bounds check
+                            if (local_shadow_pos.x < vol.local_bbox_min.x || local_shadow_pos.x > vol.local_bbox_max.x ||
+                                local_shadow_pos.y < vol.local_bbox_min.y || local_shadow_pos.y > vol.local_bbox_max.y ||
+                                local_shadow_pos.z < vol.local_bbox_min.z || local_shadow_pos.z > vol.local_bbox_max.z) {
+                                break; 
+                            }
+                            
+                            nanovdb::Vec3f sidx = grid->worldToIndexF(nanovdb::Vec3f(local_shadow_pos.x, local_shadow_pos.y, local_shadow_pos.z));
+                            float sd = sampler(sidx);
+                            sd = fmaxf((sd - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
+                            shadow_density_sum += sd * shadow_step * vol.scatter_coefficient;
+                         }
+                         light_transmittance = expf(-shadow_density_sum * vol.shadow_strength);
+                    }
+                    
+                    total_radiance += light.color * light.intensity * attenuation * light_transmittance * phase;
+                }
+            }
+            
+            float3 inscatter = vol.scatter_color * total_radiance * sigma_s;
+            
+            // Multi-scattering approximation (simplified)
+            // Multi-scattering approximation (simplified)
+            float3 multi_scatter = vol.scatter_color * total_radiance * vol.scatter_multi * sigma_s * 0.25f;
+            
+            // ─────────────────────────────────────────────────────────────────
+            // ACCUMULATE
+            // ─────────────────────────────────────────────────────────────────
+            float3 step_color = (inscatter + multi_scatter + emission) * transmittance * (1.0f - step_transmittance);
+            accumulated_color += step_color;
+            transmittance *= step_transmittance;
+        }
+        
+        t += step;
+        steps++;
+    }
+    
+    out_transmittance = transmittance;
+    return accumulated_color;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -975,6 +1487,10 @@ __device__ float3 calculate_light_contribution(
     
     trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
     if (shadow_payload.hit) return make_float3(0.0f, 0.0f, 0.0f);
+    
+    // Check VDB Occlusion (Volumetric Shadow)
+    float vdb_transmittance = calculate_vdb_occlusion(origin, wi, distance, rng);
+    if (vdb_transmittance < 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
 
     float3 f = evaluate_brdf(material, payload, wo, wi);
     float pdf_brdf_val = pdf_brdf(material, wo, wi, payload.normal);
@@ -1001,7 +1517,7 @@ __device__ float3 calculate_light_contribution(
     }
 
     float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
-    float3 Li = light.color * light.intensity * attenuation;
+    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance;
     return (f * Li * NdotL) * mis_weight;
 }
 
@@ -1226,12 +1742,15 @@ __device__ float3 raymarch_volumetric_object(
     float step_size,
     int max_steps,
     float noise_scale,
-    // Multi-scattering parameters (NEW)
+    // Multi-scattering parameters
     float multi_scatter,
     float g_back,
     float lobe_mix,
     int light_steps,
     float shadow_strength,
+    // NanoVDB parameters
+    void* nanovdb_grid,
+    int has_nanovdb,
     float& out_transmittance,
     curandState* rng
 ) {
@@ -1283,11 +1802,31 @@ __device__ float3 raymarch_volumetric_object(
     while (t < t_exit && steps < max_steps && transmittance > 0.01f) {
         float3 pos = ray_origin + ray_dir * t;
         
-        // Density at this point - start with base density
+        // Density at this point
         float local_density = vol_density;
         
-        // Apply procedural noise modulation if enabled
-        if (noise_scale > 0.01f) {
+        // ═══════════════════════════════════════════════════════════
+        // DENSITY SOURCE: NanoVDB or Procedural Noise
+        // ═══════════════════════════════════════════════════════════
+        if (has_nanovdb && nanovdb_grid) {
+             // Cast the void pointer to FloatGrid (GPU pointer)
+             const nanovdb::FloatGrid* grid = reinterpret_cast<const nanovdb::FloatGrid*>(nanovdb_grid);
+             
+             // Get accessor - lightweight object, safe to create on stack
+             // Note: using linear interpolation (order=1) for smooth clouds
+             // If SampleFromVoxels is not available, we could use acc.getValue(coord) but that's nearest neighbor
+             auto acc = grid->getAccessor();
+             auto sampler = nanovdb::math::createSampler<1>(acc);
+             
+             // Convert world position to index space (float coordinates)
+             nanovdb::Vec3f pos_vdb(pos.x, pos.y, pos.z);
+             nanovdb::Vec3f index_coord = grid->worldToIndexF(pos_vdb);
+             
+             // Sample density
+             local_density = sampler(index_coord) * vol_density;
+        }
+        else if (noise_scale > 0.01f) {
+            // Apply procedural noise modulation
             float3 aabb_size = aabb_max - aabb_min;
             float3 local_pos = (pos - aabb_min) / fmaxf(fmaxf(aabb_size.x, aabb_size.y), fmaxf(aabb_size.z, 0.001f));
             float3 noise_pos = local_pos * noise_scale;
@@ -1326,7 +1865,6 @@ __device__ float3 raymarch_volumetric_object(
             }
             
             // Simple density modulation: noise_val ~0.3-0.7, scale to 0.0-1.0 range
-            // This creates variations without cutting content
             local_density *= noise_val;
         }
         
@@ -1486,6 +2024,48 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             );
             color += godRayContribution;
         }
+        
+        // ═══════════════════════════════════════════════════════════
+        // VDB VOLUME RAY MARCHING (Independent volumes)
+        // Each VDB is rendered as a participating medium
+        // ═══════════════════════════════════════════════════════════
+        if (optixLaunchParams.vdb_volumes && optixLaunchParams.vdb_volume_count > 0) {
+            float3 sun_dir = normalize(optixLaunchParams.world.nishita.sun_direction);
+            float sun_intensity = optixLaunchParams.world.nishita.sun_intensity;
+            
+            for (int v = 0; v < optixLaunchParams.vdb_volume_count; ++v) {
+                const GpuVDBVolume& vdb = optixLaunchParams.vdb_volumes[v];
+                
+                // Skip if no density grid
+                if (!vdb.density_grid) continue;
+                
+                // Determine occlusion distance (depth clipping)
+                float max_dist = payload.hit ? payload.t : 1e16f;
+                // Use Viewport Clipping (if bounce=0)
+                if (bounce == 0 && max_dist > optixLaunchParams.clip_far) max_dist = optixLaunchParams.clip_far;
+
+                float vol_transmittance = 1.0f;
+                float3 vol_color = raymarch_vdb_volume(
+                    vdb,
+                    ray.origin,
+                    normalize(ray.direction),
+                    sun_dir,
+                    sun_intensity,
+                    vol_transmittance,
+                    max_dist,
+                    rng
+                );
+                
+                // Accumulate volume contribution
+                color += throughput * vol_color;
+                throughput *= vol_transmittance;
+                
+                // Early termination if fully absorbed
+                if (throughput.x < 0.001f && throughput.y < 0.001f && throughput.z < 0.001f) {
+                    return color;
+                }
+            }
+        }
 
         if (!payload.hit) {
             // --- Arka plan rengi ---
@@ -1590,12 +2170,15 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                 payload.vol_step_size,
                 payload.vol_max_steps,
                 payload.vol_noise_scale,
-                // Multi-scattering parameters (NEW)
+                // Multi-scattering parameters
                 payload.vol_multi_scatter,
                 payload.vol_g_back,
                 payload.vol_lobe_mix,
                 payload.vol_light_steps,
                 payload.vol_shadow_strength,
+                // NanoVDB parameters
+                payload.nanovdb_grid,
+                payload.has_nanovdb,
                 vol_transmittance,
                 rng
             );

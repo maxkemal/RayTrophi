@@ -58,6 +58,10 @@ struct OptixHitResult {
     float3 aabb_min;
     float3 aabb_max;
     
+    // NanoVDB Grid (for VDB-based volumetrics)
+    void* nanovdb_grid;           // Device pointer to NanoVDB grid
+    int has_nanovdb;              // 1 = use NanoVDB, 0 = procedural
+    
     // Blended Material Data (For Terrain Layers)
     int use_blended_data;      // 1 = use baked values below instead of sampling textures again
     float3 blended_albedo;

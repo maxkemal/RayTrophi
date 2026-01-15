@@ -6,7 +6,10 @@
 #include <algorithm>
 #include "TerrainManager.h"
 #include "Texture.h"
+#include "TerrainManager.h"
+#include "Texture.h"
 #include "Material.h"
+#include "HittableInstance.h" // Added for syncInstanceTransforms
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -194,6 +197,25 @@ const MeshBLAS* OptixAccelManager::getBLAS(int mesh_id) const {
     return &mesh_blas_list[mesh_id];
 }
 
+int OptixAccelManager::findBLAS(const std::string& name, int material_id) const {
+    // If name is empty, we can't search well, but try matching mat ID? No.
+    if (name.empty()) return -1;
+    
+    // Standard key format used in build: name + "_mat_" + mat_id
+    std::string key = name + "_mat_" + std::to_string(material_id);
+    
+    for (size_t i = 0; i < mesh_blas_list.size(); ++i) {
+        if (mesh_blas_list[i].mesh_name == key) {
+            return static_cast<int>(i);
+        }
+        // Also check if mesh_name is just the name (for single-material objects)
+        if (mesh_blas_list[i].mesh_name == name && mesh_blas_list[i].material_id == material_id) {
+             return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
 bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload, bool sync) {
     if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
         return false;
@@ -308,35 +330,29 @@ void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr
     // 
     // Let's use the same logic as updateAllBLASFromTriangles but skip vertex collection.
     
-    std::vector<std::shared_ptr<Triangle>> all_tris;
-    all_tris.reserve(objects.size());
-    
-    // Flatten
-    // (Assuming objects are triangles for now, or we support BVH traversal)
-    // For simplicity, let's assume objects are flat or we use the helper logic.
-    // Actually, 'updateAllBLASFromTriangles' takes 'objects'.
-    
-    for (const auto& obj : objects) {
-         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-             all_tris.push_back(tri);
-         }
-         // TODO: Handle BVH children if needed, but usually 'objects' passed here is the flat list or we flatten it.
-    }
+    // Using direct iteration over objects to populate transform_map
+    // std::vector<std::shared_ptr<Triangle>> all_tris; // Removed
     
     // Group by Mesh (Lightweight: only need 1 tri per mesh to get transform)
     std::unordered_map<std::string, Matrix4x4> transform_map;
     
-    for (const auto& tri : all_tris) {
-        std::string base_name = tri->getNodeName();
-        if (base_name.empty()) base_name = "default_mesh";
-        // Convert to key used in grouping (Name + MatID)
-        // Wait, instances are split by material.
-        // We need to update ALL instances sharing the same Node Name (if rigid transform).
-        // So we just need Map<NodeName, Matrix>.
-        
-        if (transform_map.find(base_name) == transform_map.end()) {
-             transform_map[base_name] = tri->getTransformMatrix();
+    for (const auto& obj : objects) {
+        // Handle HittableInstance (Foliage, Scatter)
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (!inst->node_name.empty()) {
+                transform_map[inst->node_name] = inst->transform;
+            }
         }
+        // Handle Triangle (Static Mesh)
+        else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+             std::string base_name = tri->getNodeName();
+             if (base_name.empty()) base_name = "default_mesh";
+             
+             if (transform_map.find(base_name) == transform_map.end()) {
+                  transform_map[base_name] = tri->getTransformMatrix();
+             }
+         }
+         // TODO: Handle BVH children if needed
     }
     
     // Update Instances
@@ -462,9 +478,22 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
                 uint32_t base = static_cast<uint32_t>(geom.vertices.size());
                 
                 // Get CURRENT vertex positions (skinned/transformed on CPU if GPU failed/inactive)
-                Vec3 v0 = tri->getVertexPosition(0);
-                Vec3 v1 = tri->getVertexPosition(1);
-                Vec3 v2 = tri->getVertexPosition(2);
+                // FORCE LOCAL SPACE: Instances already have a transform matrix in TLAS.
+                // Using World Space here would apply transform twice (Mesh * Instance).
+                Vec3 v0, v1, v2;
+                
+                // FIX: For skinned meshes, use the deformed (current) vertices from CPU skinning
+                if (tri->hasSkinData()) {
+                    v0 = tri->getV0();
+                    v1 = tri->getV1();
+                    v2 = tri->getV2();
+                } else {
+                    // For static meshes, use original local positions (transform handles handle the rest)
+                    v0 = tri->getOriginalVertexPosition(0);
+                    v1 = tri->getOriginalVertexPosition(1);
+                    v2 = tri->getOriginalVertexPosition(2);
+                }
+                
                 geom.vertices.push_back({v0.x, v0.y, v0.z});
                 geom.vertices.push_back({v1.x, v1.y, v1.z});
                 geom.vertices.push_back({v2.x, v2.y, v2.z});

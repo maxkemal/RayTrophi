@@ -6,6 +6,7 @@
 #include "Triangle.h"
 #include "MaterialManager.h"
 #include <memory>
+class HittableInstance; // Forward decl
 #include <vector>
 #include "AABB.h"
 #include <cstdint>
@@ -22,6 +23,7 @@ struct TriangleData {
     Vec3 n0, n1, n2;          // 36 bytes
     Vec2 t0, t1, t2;          // 24 bytes
     uint16_t materialID;      // 2 bytes
+    const Triangle* original_ptr = nullptr; // Pointer to original object for identity/name checks
     
     // Total: 98 bytes (was 114 bytes with shared_ptr)
     // Savings: 16 bytes per triangle!
@@ -70,7 +72,21 @@ private:
     static RTCDevice device; // Shared device across all BVH instances (persistent)
     RTCScene scene;
     std::vector<TriangleData> triangle_data;
+    
+    // Instance mapping: geometryID -> child BVH
+    unsigned triangle_geom_id = 0xFFFFFFFF; // RTC_INVALID_GEOMETRY_ID
+    std::vector<const HittableInstance*> instance_objects;
+
+    // VDB Volume Support (User Geometry)
+    unsigned vdb_geom_id = 0xFFFFFFFF;
+    std::vector<const class VDBVolume*> vdb_objects;
+
+    // Static callbacks for Embree User Geometry
+    static void userBoundsFunc(const struct RTCBoundsFunctionArguments* args);
+    static void userIntersectFunc(const struct RTCIntersectFunctionNArguments* args);
+    static void userOccludedFunc(const struct RTCOccludedFunctionNArguments* args);
 
 public:
+    RTCScene getRTCScene() const { return scene; }
     static void shutdown(); // Call on app exit to release device
 };

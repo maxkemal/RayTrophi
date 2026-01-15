@@ -246,6 +246,167 @@ TerrainObject* TerrainManager::createTerrainFromHeightmap(SceneData& scene, cons
 }
 
 // ===========================================================================
+// HEIGHT SAMPLING & RAYCAST
+// ===========================================================================
+
+TerrainObject* TerrainManager::getTerrainByName(const std::string& name) {
+    for (auto& t : terrains) {
+        if (t.name == name) return &t;
+    }
+    return nullptr;
+}
+
+bool TerrainManager::intersectRay(TerrainObject* terrain, const Ray& r, float& t_out, Vec3& normal_out, float t_min, float t_max) {
+    if (!terrain || terrain->heightmap.data.empty()) return false;
+    
+    // 1. Transform World Ray to Local Space (simplified AABB check)
+    // Terrain transform is usually just translation + scale. Rotation is rare for terrain but possible.
+    // For now, assume Axis-Aligned Terrain relative to World, just offset by position.
+    // If terrain has full transform matrix, we should multiply ray by inverse matrix.
+    
+    Vec3 ray_orig = r.origin;
+    Vec3 ray_dir = r.direction;
+    
+    if (terrain->transform) {
+        // Simple translation adjustment
+        ray_orig = ray_orig - terrain->transform->position;
+    }
+    
+    // Terrain AABB (Local)
+    float size = terrain->heightmap.scale_xz;
+    float maxY = terrain->heightmap.scale_y;
+    // Bounds: [0, 0, 0] to [size, maxY, size]
+    
+    // AABB intersection test (Slabs)
+    float t0 = t_min, t1 = t_max;
+    
+    // X axis: 0..size
+    if (abs(ray_dir.x) > 1e-6) {
+        float tx1 = (0.0f - ray_orig.x) / ray_dir.x;
+        float tx2 = (size - ray_orig.x) / ray_dir.x;
+        t0 = std::max(t0, std::min(tx1, tx2));
+        t1 = std::min(t1, std::max(tx1, tx2));
+    }
+    
+    // Z axis: 0..size
+    if (abs(ray_dir.z) > 1e-6) {
+        float tz1 = (0.0f - ray_orig.z) / ray_dir.z;
+        float tz2 = (size - ray_orig.z) / ray_dir.z;
+        t0 = std::max(t0, std::min(tz1, tz2));
+        t1 = std::min(t1, std::max(tz1, tz2));
+    }
+    
+    // Y axis: 0..maxY (Optimization: Check Y range strictly?)
+    // Actually terrain can be anywhere between min and max height.
+    if (t0 > t1) return false;
+    
+    // 2. Stepped Grid Traversal (Ray Marching)
+    // Walk along the ray from t0 to t1
+    // Step size: roughly 1 pixel diagonal
+    int w = terrain->heightmap.width;
+    int h = terrain->heightmap.height;
+    
+    float cell_size_x = size / (float)(w-1);
+    float step_dist = cell_size_x * 0.5f; // Step half a cell for precision
+    
+    float t_curr = t0;
+    
+    // Limit steps
+    int max_steps = 1000;
+    
+    // Start point
+    Vec3 p = ray_orig + ray_dir * t_curr;
+    
+    // If outside Y bounds (above max height), advance to intersection with MaxY plane
+    if (p.y > maxY && ray_dir.y < 0.0f && abs(ray_dir.y) > 1e-6) {
+        float t_enterY = (maxY - ray_orig.y) / ray_dir.y;
+        if (t_enterY > t_curr) {
+            t_curr = t_enterY;
+            p = ray_orig + ray_dir * t_curr;
+        }
+    }
+    
+    for (int i=0; i<max_steps; i++) {
+        if (t_curr > t1) break;
+        
+        // Map to grid
+        float gx = (p.x / size) * (w - 1);
+        float gz = (p.z / size) * (h - 1);
+        
+        // Check bounds
+        if (gx >= 0 && gx < w - 1 && gz >= 0 && gz < h - 1) {
+            int ix = (int)gx;
+            int iz = (int)gz;
+            
+            // Bilinear Height
+            float fx = gx - ix;
+            float fz = gz - iz;
+            float h00 = terrain->heightmap.getHeight(ix, iz);
+            float h10 = terrain->heightmap.getHeight(ix+1, iz);
+            float h01 = terrain->heightmap.getHeight(ix, iz+1);
+            float h11 = terrain->heightmap.getHeight(ix+1, iz+1);
+            float h_interp = (h00*(1-fx) + h10*fx)*(1-fz) + (h01*(1-fx) + h11*fx)*fz;
+            
+            // Intersection Check
+            // If ray Y is BELOW terrain height, we hit!
+            if (p.y <= h_interp) {
+                // Determine Hit Point
+                
+                // Refinement (Binary Search) - Optional but good for precision
+                // We are somewhere between t_curr-step and t_curr.
+                // Binary search for exact surface cross
+                float t_low = t_curr - step_dist;
+                float t_high = t_curr;
+                 
+                for(int k=0; k<5; k++) {
+                   float t_mid = (t_low + t_high) * 0.5f;
+                   Vec3 p_mid = ray_orig + ray_dir * t_mid;
+                   float gx_mid = (p_mid.x / size) * (w - 1);
+                   float gz_mid = (p_mid.z / size) * (h - 1);
+                   int ix_mid = (int)gx_mid;
+                   int iz_mid = (int)gz_mid;
+                   float h_val_mid = terrain->heightmap.getHeight(ix_mid, iz_mid); // Use simple nearest for binary step speed or bilinear again
+                   
+                   // Bilinear again for precision
+                   float fx_m = gx_mid - ix_mid; float fz_m = gz_mid - iz_mid;
+                   float hm00 = terrain->heightmap.getHeight(ix_mid, iz_mid);
+                   float hm10 = terrain->heightmap.getHeight(ix_mid+1, iz_mid);
+                   float hm01 = terrain->heightmap.getHeight(ix_mid, iz_mid+1);
+                   float hm11 = terrain->heightmap.getHeight(ix_mid+1, iz_mid+1);
+                   float h_interp_mid = (hm00*(1-fx_m) + hm10*fx_m)*(1-fz_m) + (hm01*(1-fx_m) + hm11*fx_m)*fz_m;
+                   
+                   if (p_mid.y <= h_interp_mid) {
+                       t_high = t_mid; // Still underground
+                   } else {
+                       t_low = t_mid; // Above ground
+                   }
+                }
+                
+                t_out = t_high;
+                
+                // Normal at hit point
+                // Convert back from t_out
+                Vec3 p_final = ray_orig + ray_dir * t_out;
+                float gx_final = (p_final.x / size) * (w - 1);
+                float gz_final = (p_final.z / size) * (h - 1);
+                
+                normal_out = calculateSobelNormal(terrain, (int)gx_final, (int)gz_final);
+                
+                // Note: Normal is Local Space. If Terrain has rotation, transform it.
+                // Assuming identity rotation for now as per `transform->position` usage.
+                
+                return true;
+            }
+        }
+        
+        t_curr += step_dist;
+        p = ray_orig + ray_dir * t_curr;
+    }
+    
+    return false;
+}
+
+// ===========================================================================
 // NORMAL CALCULATION METHODS
 // ===========================================================================
 
@@ -412,11 +573,17 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
             Vec3 n2 = normals[i2];
             Vec3 n3 = normals[i3];
             
-            // UVs
-            Vec2 uv0((float)x / w, (float)z / h);
-            Vec2 uv1((float)(x + 1) / w, (float)z / h);
-            Vec2 uv2((float)(x + 1) / w, (float)(z + 1) / h);
-            Vec2 uv3((float)x / w, (float)(z + 1) / h);
+            // UVs - Standard 0..1 Mapping
+            // Vertex 0 -> UV 0.0
+            // Vertex N -> UV 1.0
+            // This aligns perfectly with 0..1 generated mask data.
+            float divW = (float)(w > 1 ? w - 1 : 1);
+            float divH = (float)(h > 1 ? h - 1 : 1);
+            
+            Vec2 uv0((float)x / divW, (float)z / divH);
+            Vec2 uv1((float)(x + 1) / divW, (float)z / divH);
+            Vec2 uv2((float)(x + 1) / divW, (float)(z + 1) / divH);
+            Vec2 uv3((float)x / divW, (float)(z + 1) / divH);
             
             if (create_new) {
                 // Tri 1 - Corrected Winding Order (CCW for Upward Normal)
@@ -884,35 +1051,60 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
     int w = terrain->splatMap->width;
     int h = terrain->splatMap->height;
     float max_h = terrain->heightmap.scale_y;
+    float scale = terrain->heightmap.scale_xz;
     
-    // Resize Splat Map if needed to match heightmap or keep independent
-    // Let's assume splat map resolution is independent but mapped 0-1
+    // Calculate cell size for correct slope calculation (Rise / Run)
+    // Run = Distance between HEIGHTMAP pixels in world space (since we sample neighbors in heightmap)
+    float hmCellSizeX = scale / (float)(std::max(1, terrain->heightmap.width - 1));
+    float hmCellSizeZ = scale / (float)(std::max(1, terrain->heightmap.height - 1));
+
+    // Get world position Y for global height check
+    float worldPosY = 0.0f;
+    if (terrain->transform) {
+        worldPosY = terrain->transform->position.y;
+    }
     
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             // Sample height and slope at this UV
-            float u = (float)x / (w - 1);
-            float v = (float)y / (h - 1);
+            // Standard 0..1 Mapping (Aligns with Mesh UVs)
+            float u = (float)x / (float)(w > 1 ? w - 1 : 1);
+            float v = (float)y / (float)(h > 1 ? h - 1 : 1);
             
             // Map to heightmap coords
-            int hx = (int)(u * (terrain->heightmap.width - 1));
-            int hy = (int)(v * (terrain->heightmap.height - 1));
+            // u is 0..1, maps to 0..Width-1
+            float hx_f = u * (terrain->heightmap.width - 1);
+            float hy_f = v * (terrain->heightmap.height - 1);
+            int hx = (int)(hx_f + 0.5f); // Nearest neighbor
+            int hy = (int)(hy_f + 0.5f);
             
-            // getHeight already returns height * scale_y, so no need to multiply again
-            float real_height = terrain->heightmap.getHeight(hx, hy);
+            hx = std::clamp(hx, 0, terrain->heightmap.width - 1);
+            hy = std::clamp(hy, 0, terrain->heightmap.height - 1);
+            
+            // getHeight already returns height * scale_y
+            float local_height = terrain->heightmap.getHeight(hx, hy);
+            float global_height = local_height + worldPosY;
             
             // Calculate Slope
-            // Simple approximation: difference between neighbors
+            // Neighbors in Heightmap Grid
             float hl = terrain->heightmap.getHeight(hx - 1, hy);
             float hr = terrain->heightmap.getHeight(hx + 1, hy);
             float hu = terrain->heightmap.getHeight(hx, hy - 1);
             float hd = terrain->heightmap.getHeight(hx, hy + 1);
             
-            // Slope magnitude (0 = flat, 1 = vertical approx)
-            float dX = fabsf(hr - hl);
-            float dZ = fabsf(hd - hu);
-            float slope = sqrtf(dX*dX + dZ*dZ) * 2.0f; // Scale factor
-            slope = std::min(slope, 1.0f);
+            // Slope magnitude (Rise / Run)
+            // Distance between hx-1 and hx+1 is 2 * HeightmapCellSize
+            float dX = fabsf(hr - hl) / (2.0f * hmCellSizeX); 
+            float dZ = fabsf(hd - hu) / (2.0f * hmCellSizeZ);
+            
+            // Tangent of the angle
+            float slopeTan = sqrtf(dX*dX + dZ*dZ); 
+            
+            // Normalize slope for weight calculation (0..1 range)
+            // slopeSteepness now acts as a scaler for "What is considered steep?"
+            // e.g. if steepness is 5.0, a slope of 1/5 = 0.2 (approx 11 degrees) starts becoming rock
+            float normalizedSlope = slopeTan * slopeSteepness; 
+            normalizedSlope = std::min(normalizedSlope, 1.0f);
             
             // Logic:
             // Layer 0 (R): Base/Grass (Flat)
@@ -920,8 +1112,8 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
             // Layer 2 (B): Snow (High)
             // Layer 3 (A): Dirt (Transition/Noise)
             
-            float w_rock = smoothstep(0.1f, 0.4f * slopeSteepness, slope);
-            float w_snow = smoothstep(heightMin, heightMax, real_height);
+            float w_rock = smoothstep(0.2f, 0.8f, normalizedSlope); // Adjusted thresholds for tangent slope
+            float w_snow = smoothstep(heightMin, heightMax, global_height);
             float w_rest = 1.0f - w_rock; // What remains for flat
             
             // Base layer gets the rest, masked by snow
@@ -3038,13 +3230,6 @@ void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, floa
     SCENE_LOG_INFO("[GPU Wind] Completed " + std::to_string(iterations) + " iterations with smoothing.");
 }
 
-
-TerrainObject* TerrainManager::getTerrainByName(const std::string& name) {
-    for (auto& t : terrains) {
-        if (t.name == name) return &t;
-    }
-    return nullptr;
-}
 
 // ===========================================================================
 // FOLIAGE SYSTEM

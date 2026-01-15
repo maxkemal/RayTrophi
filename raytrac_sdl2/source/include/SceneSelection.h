@@ -12,6 +12,7 @@ class Light;
 class Camera;
 class Hittable;
 class Triangle;
+class VDBVolume;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE SELECTION SYSTEM
@@ -24,6 +25,7 @@ enum class SelectableType {
     Light,      // Any light type
     Camera,     // Scene camera (Position/Origin)
     CameraTarget, // Scene camera target (LookAt)
+    VDBVolume,  // VDB Volume object
     World       // World/Environment settings
 };
 
@@ -49,10 +51,12 @@ struct SelectableItem {
     std::shared_ptr<Light> light = nullptr;
     std::shared_ptr<Camera> camera = nullptr;
     std::shared_ptr<Triangle> object = nullptr;  // For mesh objects
+    std::shared_ptr<VDBVolume> vdb_volume = nullptr; // For VDB volumes
     
     // For objects loaded from scene (index-based reference)
     int object_index = -1;
     int light_index = -1;
+    int vdb_index = -1;
     
     // Transform data (cached for gizmo)
     Vec3 position = Vec3(0, 0, 0);
@@ -71,6 +75,7 @@ struct SelectableItem {
         if (type == SelectableType::Light) return light == other.light;
         if (type == SelectableType::Camera) return camera == other.camera;
         if (type == SelectableType::CameraTarget) return camera == other.camera; // Same camera for target
+        if (type == SelectableType::VDBVolume) return vdb_volume == other.vdb_volume;
         return false;
     }
     
@@ -79,8 +84,10 @@ struct SelectableItem {
         light = nullptr;
         camera = nullptr;
         object = nullptr;
+        vdb_volume = nullptr;
         object_index = -1;
         light_index = -1;
+        vdb_index = -1;
         has_cached_aabb = false;
     }
 };
@@ -111,6 +118,7 @@ public:
     // ─────────────────────────────────────────────────────────────────────────
     void selectObject(std::shared_ptr<Triangle> obj, int index, const std::string& name = "Object");
     void selectLight(std::shared_ptr<Light> light, int index = -1, const std::string& name = "Light");
+    void selectVDBVolume(std::shared_ptr<VDBVolume> vdb, int index = -1, const std::string& name = "VDB Volume");
     void selectCamera(std::shared_ptr<Camera> camera);
     void selectCameraTarget(std::shared_ptr<Camera> camera);
     void selectWorld();  // Select World/Environment

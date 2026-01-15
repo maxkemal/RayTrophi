@@ -69,7 +69,7 @@ struct OptixGeometryData {
         int max_steps = 100;
         float noise_scale = 1.0f;  // Noise frequency multiplier
         
-        // Multi-Scattering Parameters (NEW)
+        // Multi-Scattering Parameters
         float multi_scatter = 0.3f;
         float g_back = -0.3f;
         float lobe_mix = 0.7f;
@@ -78,6 +78,10 @@ struct OptixGeometryData {
         
         float3 aabb_min = {0.0f, 0.0f, 0.0f};
         float3 aabb_max = {1.0f, 1.0f, 1.0f};
+        
+        // NanoVDB GPU grid pointer
+        void* nanovdb_grid = nullptr;
+        int has_nanovdb = 0;
     };
 
     std::vector<TextureBundle> textures;
@@ -147,12 +151,18 @@ public:
     // Updates d_materials buffer only - for material property changes (color, roughness, etc.)
     void updateMaterialBuffer(const std::vector<GpuMaterial>& materials);
     
+    // Updates instance transform by Node Name (e.g. for Gizmo/UI updates)
+    void updateObjectTransform(const std::string& node_name, const Matrix4x4& transform);
+    
     // Updates d_material_indices buffer - for material slot reassignment (different material assigned)
     void updateSBTMaterialBindings(const std::vector<int>& material_indices);
     
     // Updates SBT hitgroup records with new volumetric parameters - for volumetric material changes
     // Updates SBT hitgroup records with new volumetric parameters - for volumetric material changes
     void updateSBTVolumetricData(const std::vector<OptixGeometryData::VolumetricInfo>& volumetric_info);
+    
+    // Updates VDB volume buffer for GPU ray marching
+    void updateVDBVolumeBuffer(const std::vector<GpuVDBVolume>& volumes);
 
     // Set callback for OptixAccelManager status messages (for HUD)
     void setAccelManagerStatusCallback(std::function<void(const std::string&, int)> callback);
@@ -170,6 +180,9 @@ public:
     }
     void updateInstanceTransform(int instance_id, const float transform[12]);
     
+    // Targeted BLAS Update for Terrain Sculpting (Avoids full scene rebuild)
+    void updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
+
     // ═══════════════════════════════════════════════════════════════════════
     // INCREMENTAL UPDATES (Fast delete/duplicate without BLAS rebuild)
     // ═══════════════════════════════════════════════════════════════════════
@@ -273,6 +286,11 @@ private:
     OptixPipeline pipeline = nullptr;
     OptixShaderBindingTable sbt = {};
     GpuMaterial* d_materials = nullptr;
+    GpuVolumetricInfo* d_volumetric_infos = nullptr;
+    
+    // VDB Volume Objects (independent objects with NanoVDB grids)
+    GpuVDBVolume* d_vdb_volumes = nullptr;
+    size_t d_vdb_volumes_capacity = 0;
     float* d_accumulation_buffer = nullptr;
     float* d_variance_buffer = nullptr;
     int* d_sample_count_buffer = nullptr;

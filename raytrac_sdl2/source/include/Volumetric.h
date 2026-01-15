@@ -76,6 +76,15 @@ public:
     float getShadowStrength() const { return shadow_strength; }
     void setShadowStrength(float ss) { shadow_strength = ss; }
 
+    // VDB Volume Support
+    void setVDBVolumeID(int id) { vdb_volume_id = id; }
+    int getVDBVolumeID() const { return vdb_volume_id; }
+    bool hasVDBVolume() const { return vdb_volume_id >= 0; }
+    
+    // Density Source (0 = Procedural, 1 = VDB)
+    int getDensitySource() const { return density_source; }
+    void setDensitySource(int src) { density_source = src; }
+
     std::shared_ptr<Perlin> noise;
 
 private:
@@ -99,6 +108,10 @@ private:
     float lobe_mix = 0.7f;        // Forward/backward lobe mix
     int light_steps = 4;          // Light march steps (0=disabled)
     float shadow_strength = 0.8f; // Self-shadow intensity
+    
+    // VDB Volume Settings
+    int vdb_volume_id = -1;       // -1 = None
+    int density_source = 0;       // 0 = Procedural, 1 = VDB
 
     // Core Ray Marching Function
     Vec3 march_volume(const Vec3& origin, const Vec3& dir, float& out_transmittance, const Vec3& aabb_min, const Vec3& aabb_max) const;

@@ -48,6 +48,7 @@
 #include "AreaLight.h"
 #include "PrincipledBSDF.h" // For material editing
 #include "Volumetric.h"     // For volumetric material
+#include "VDBVolume.h"      // For VDB volume UI panel
 #include "AssimpLoader.h"  // For scene rebuild after object changes
 #include "SceneCommand.h"  // For undo/redo
 #include "default_scene_creator.hpp"
@@ -1017,6 +1018,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 ImGui::InputInt("Start Frame", &ctx.render_settings.animation_start_frame);
                                 ImGui::InputInt("End Frame", &ctx.render_settings.animation_end_frame);
                                 ImGui::InputInt("FPS", &ctx.render_settings.animation_fps);
+                                ImGui::DragInt("Preview Samples", &ctx.render_settings.animation_samples_per_frame, 0.1f, 1, 64);
+                                UIWidgets::HelpMarker("Samples per frame during playback (Higher = Better Quality, Lower FPS)");
                                 ImGui::PopItemWidth();
                                 
                                 ImGui::Spacing();
@@ -1026,17 +1029,27 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 float anim_offset = (ImGui::GetContentRegionAvail().x - anim_button_width) * 0.5f;
                                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + anim_offset);
                                 
-                                if (UIWidgets::PrimaryButton("Render Animation", ImVec2(anim_button_width, 28))) {
-                                     ctx.render_settings.start_animation_render = true;
-                                     ctx.is_animation_mode = true; // Enable unified render window for animation
-                                     extern bool show_render_window;
-                                     show_render_window = true;
-                                     ctx.show_animation_preview = true; // Keep for internal logic (texture update)
+                                extern std::atomic<bool> rendering_in_progress;
+                                extern std::atomic<bool> rendering_stopped_cpu;
+                                extern std::atomic<bool> rendering_stopped_gpu;
+
+                                if (rendering_in_progress && ctx.is_animation_mode) {
+                                    if (UIWidgets::DangerButton("Stop Animation", ImVec2(anim_button_width, 28))) {
+                                        rendering_stopped_cpu = true;
+                                        rendering_stopped_gpu = true;
+                                    }
+                                }
+                                else {
+                                    if (UIWidgets::PrimaryButton("Render Animation", ImVec2(anim_button_width, 28))) {
+                                         ctx.render_settings.start_animation_render = true;
+                                         ctx.is_animation_mode = true; 
+                                         // Restore Window Visibility
+                                         extern bool show_render_window;
+                                         show_render_window = true;
+                                         ctx.show_animation_preview = true; 
+                                    }
                                 }
                                 ImGui::Spacing();
-                                // REMOVED: Separate Checkbox (integrated into main window)
-                                // ImGui::SetCursorPosX(ImGui::GetCursorPosX() + anim_offset);
-                                // ImGui::Checkbox("Show Preview", &ctx.show_animation_preview);
                                 ImGui::TreePop();
                         }
                         
@@ -1093,7 +1106,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 // Auto-Focus Logic: If tab just became active, open Graph Panel
                 static bool was_active = false;
                 if (is_active && !was_active) {
-                    show_terrain_graph = true;
+                    // show_terrain_graph = true; // <--- USER REQUEST: Don't auto-open graph
                     show_animation_panel = false;
                     show_scene_log = false;
                     
@@ -1107,7 +1120,13 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                 if (is_active) {
                     drawTerrainPanel(ctx);
                     ImGui::EndTabItem();
+                } else {
+                    // USER REQUEST: If not in Terrain tab, forcibly disable brush
+                    terrain_brush.enabled = false;
                 }
+            } else {
+                 // Also disable if tab is closed completely
+                 terrain_brush.enabled = false;
             }
 
 
@@ -1122,6 +1141,24 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     drawWaterPanel(ctx);
                     ImGui::Separator();
                     drawRiverPanel(ctx);  // Bezier spline river editor
+                    ImGui::EndTabItem();
+                }
+            }
+
+            // -------------------------------------------------------------
+            // TAB: VDB VOLUMES (Industry-Standard Volumetrics)
+            // -------------------------------------------------------------
+            if (show_vdb_tab) {
+                ImGuiTabItemFlags vdb_flags = 0;
+                if(tab_to_focus == "VDB") { vdb_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
+                
+                std::string vdb_label = "VDB";
+                if (!ctx.scene.vdb_volumes.empty()) {
+                    vdb_label += " (" + std::to_string(ctx.scene.vdb_volumes.size()) + ")";
+                }
+                
+                if (ImGui::BeginTabItem(vdb_label.c_str(), &show_vdb_tab, vdb_flags)) {
+                    drawVDBVolumePanel(ctx);
                     ImGui::EndTabItem();
                 }
             }
@@ -1154,6 +1191,64 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
 void SceneUI::draw(UIContext& ctx)
 {
+    // Export Popup Logic
+    if (SceneExporter::getInstance().drawExportPopup(ctx.scene)) {
+         std::wstring filter = SceneExporter::getInstance().settings.binary_mode ? L"GLTF Binary (.glb)\0*.glb\0" : L"GLTF Text (.gltf)\0*.gltf\0";
+         std::wstring defExt = SceneExporter::getInstance().settings.binary_mode ? L"glb" : L"gltf";
+         
+         std::string filepath = saveFileDialogW(filter.c_str(), defExt.c_str());
+         
+         if (!filepath.empty()) {
+             // Enforce extension
+             std::string ext = SceneExporter::getInstance().settings.binary_mode ? ".glb" : ".gltf";
+             if (!std::string(filepath).ends_with(ext)) {
+                 filepath += ext;
+             }
+
+             rendering_stopped_cpu = true;
+             rendering_stopped_gpu = true;
+             
+             // Show "Exporting..." modal or message? 
+             addViewportMessage("Exporting Scene... Check Console...", 10.0f, ImVec4(1, 1, 0, 1));
+             SCENE_LOG_INFO("[Export] Thread starting for: " + filepath);
+             
+             // Capture SceneData via pointer
+             SceneData* pScene = &ctx.scene;
+             
+             // Capture Selection (Convert SelectableItem to shared_ptr<Hittable>)
+             std::vector<std::shared_ptr<Hittable>> selected_hittables;
+             if (SceneExporter::getInstance().settings.export_selected_only) {
+                 for (const auto& item : ctx.selection.multi_selection) {
+                     if (item.type == SelectableType::Object && item.object) {
+                         selected_hittables.push_back(item.object);
+                     }
+                 }
+             }
+
+             std::thread export_thread([filepath, pScene, selected_hittables]() {
+                 SCENE_LOG_INFO("[Export] Thread running...");
+                 ExportSettings settings = SceneExporter::getInstance().settings;
+                 
+                 try {
+                     bool success = SceneExporter::getInstance().exportScene(filepath, *pScene, settings, selected_hittables);
+                     if (success) {
+                         SCENE_LOG_INFO("[Export] SUCCESS: " + filepath);
+                     } else {
+                         SCENE_LOG_ERROR("[Export] FAILED (Check logs)");
+                     }
+                 } catch (const std::exception& e) {
+                     SCENE_LOG_ERROR("[Export] EXCEPTION: " + std::string(e.what()));
+                 } catch (...) {
+                     SCENE_LOG_ERROR("[Export] UNKNOWN EXCEPTION");
+                 }
+
+                 rendering_stopped_cpu = false;
+                 rendering_stopped_gpu = false;
+             });
+             export_thread.detach();
+         }
+    }
+
     world_params_changed_this_frame = false; // Reset flag
     ImGuiIO& io = ImGui::GetIO();
     float screen_x = io.DisplaySize.x;
@@ -1241,47 +1336,6 @@ void SceneUI::draw(UIContext& ctx)
     
     // NOTE: Animation Graph Editor is now in the bottom panel (like Terrain Graph)
     // The floating window version (drawAnimationEditorPanel) is kept for optional use via View menu
-
-    // --- ANIMATION PREVIEW PANEL (REMOVED - Integrated into Render Result) ---
-    /*
-    if (ctx.animation_preview_texture && ctx.show_animation_preview) {
-        if (ImGui::Begin("Animation Preview", &ctx.show_animation_preview, ImGuiWindowFlags_None)) {
-             // ...
-        }
-        ImGui::End();
-    }
-    */
-             int w = ctx.animation_preview_width;
-             int h = ctx.animation_preview_height;
-             
-             if (w > 0 && h > 0) {
-                 ImVec2 avail = ImGui::GetContentRegionAvail();
-                 if (avail.x < 50) avail.x = 50;
-                 if (avail.y < 50) avail.y = 50;
-                 
-                 float aspect = (float)w / (float)h;
-                 float display_w = avail.x;
-                 float display_h = display_w / aspect;
-                 
-                 // If height exceeds available space, clamp by height
-                 if (display_h > avail.y) {
-                     display_h = avail.y;
-                     display_w = display_h * aspect;
-                 }
-
-                 ImGui::Image((ImTextureID)ctx.animation_preview_texture, ImVec2(display_w, display_h));
-                 
-                 if (ctx.render_settings.start_animation_render) {
-                    ImGui::Text("Initializing...");
-                 } else {
-                   
-                    if (rendering_in_progress) {
-                        ImGui::Text("Rendering Frame: %d / %d", ctx.render_settings.animation_current_frame, ctx.render_settings.animation_end_frame);
-                    } else {
-                        ImGui::Text("Last Rendered Frame: %d", ctx.render_settings.animation_current_frame);
-                    }
-                 }
-             }
         }
     
 void SceneUI::handleEditorShortcuts(UIContext& ctx)
@@ -1351,8 +1405,29 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     // ---------------- STATUS BAR ----------------
     float status_bar_height = 24.0f;
 
-    ImGui::SetNextWindowPos(ImVec2(0, screen_y - status_bar_height));
-    ImGui::SetNextWindowSize(ImVec2(screen_x, status_bar_height));
+    // EXPORT PROGRESS HUD
+    if (SceneExporter::getInstance().is_exporting) {
+        ImGui::OpenPopup("Exporting...");
+    }
+
+    if (ImGui::BeginPopupModal("Exporting...", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar)) {
+        if (!SceneExporter::getInstance().is_exporting) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            ImGui::Text("Exporting Scene...");
+            ImGui::Separator();
+            
+            // Spinner or Bar
+            ImGui::Text("Please wait, data is being processed.");
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", SceneExporter::getInstance().current_export_status.c_str());
+            
+            ImGui::Separator();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(0, screen_y - status_bar_height), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(screen_x, status_bar_height), ImGuiCond_Always);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 2));
@@ -2078,7 +2153,7 @@ void SceneUI::drawRenderWindow(UIContext& ctx) {
                 rendering_stopped_cpu = true;
             }
         } else {
-             if (UIWidgets::PrimaryButton("Render", ImVec2(60, 0))) {
+            if (UIWidgets::PrimaryButton("Render", ImVec2(60, 0))) {
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                 ctx.render_settings.is_final_render_mode = true;
@@ -2271,7 +2346,7 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
 
             if (!path.empty()) {
                 rendering_stopped_cpu = true;
-                bool success = ProjectManager::getInstance().saveProject(path, ctx.scene, ctx.render_settings);
+                bool success = ProjectManager::getInstance().saveProject(path, ctx.scene, ctx.render_settings, ctx.renderer);
                 
                 try {
                     std::string auxPath = path + ".aux.json";
@@ -2354,15 +2429,22 @@ void SceneUI::performNewProject(UIContext& ctx) {
      // Clear selection to remove references to objects about to be deleted
      ctx.selection.clearSelection();
 
+     // Reset Foliage Brush to prevent crashes (referencing deleted terrain)
+     foliage_brush.enabled = false;
+     foliage_brush.active_group_id = -1;
+
+
      rendering_stopped_cpu = true;
      rendering_stopped_gpu = true;
      
-     TerrainManager::getInstance().removeAllTerrains(ctx.scene);
-
-     g_ProjectManager.newProject();
+     g_ProjectManager.newProject(ctx.scene, ctx.renderer);
      ctx.scene.clear();
      ctx.renderer.resetCPUAccumulation();
-     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+     if (ctx.optix_gpu_ptr) {
+         ctx.optix_gpu_ptr->resetAccumulation();
+         // Explicitly clear GPU VDB buffer
+         syncVDBVolumesToGPU(ctx); // Sends empty list since scene.vdb_volumes is cleared
+     }
      
      createDefaultScene(ctx.scene, ctx.renderer, ctx.optix_gpu_ptr);
      invalidateCache(); 
@@ -2395,6 +2477,11 @@ void SceneUI::performOpenProject(UIContext& ctx) {
     if (!filepath.empty()) {
         // Clear selection to remove references to old objects (Fixes ghost camera issue)
         ctx.selection.clearSelection();
+
+        // Reset Foliage Brush
+        foliage_brush.enabled = false;
+        foliage_brush.active_group_id = -1;
+
 
         g_scene_loading_in_progress = true;
         rendering_stopped_cpu = true;
@@ -2506,6 +2593,9 @@ void SceneUI::performOpenProject(UIContext& ctx) {
             }
             
             g_ProjectManager.getProjectData().is_modified = false;
+
+            // Ensure VDB parameters are synchronized to GPU after load
+            SceneUI::syncVDBVolumesToGPU(ctx);
 
             scene_loading = false;
             scene_loading_done = true;

@@ -110,6 +110,9 @@ public:
     bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true);
     std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame
     
+    // Wind Animation System
+    void updateWind(SceneData& scene, float time);
+
     // ============ NEW ANIMATION SYSTEM ============
     // Initialize animation controller with scene clips
     void initializeAnimationSystem(SceneData& scene);
@@ -256,6 +259,11 @@ public:
     const std::vector<Vec3>& getFrameBuffer() const { return frame_buffer; }
     int getImageWidth() const { return image_width; }
     int getImageHeight() const { return image_height; }
+
+    // === RENDERING CONTROL ===
+    std::atomic<bool> force_stop_rendering{ false };
+    void stopRendering() { force_stop_rendering = true; }
+    void resumeRendering() { force_stop_rendering = false; }
     
 };
 #endif // RENDERER_H

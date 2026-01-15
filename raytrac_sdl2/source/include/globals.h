@@ -51,6 +51,7 @@ struct RenderSettings {
     // Animation
     float animation_duration = 1.0f;
     int animation_fps = 24;
+    int animation_samples_per_frame = 1; // New: Samples per frame during playbook
     bool start_animation_render = false;
     bool save_image_requested = false;
 	int animation_start_frame = 0;

@@ -127,7 +127,7 @@ Matrix4x4 Matrix4x4::inverse() const {
     // Daha karmaşık ve verimli bir implementasyon gerekebilir.
     Matrix4x4 result;
     float det = determinant();
-    if (std::abs(det) < 1e-6) {
+    if (std::abs(det) < 1e-12) {
         // Matris tekil, tersi alınamaz
         return Matrix4x4(); // Birim matris döndür
     }

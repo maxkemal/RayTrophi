@@ -43,7 +43,14 @@ struct MaterialProperty {
     }
     float evaluateOpacity(const Vec2& uv) const {
         if (texture) {
-            return texture->get_alpha(uv.x, uv.y) * alpha;
+            float val = 0.0f;
+            if (texture->has_alpha) {
+                val = texture->get_alpha(uv.u, uv.v);
+            } else {
+                val = texture->get_color(uv.u, uv.v).x;
+            }
+            // Cutoff for noise/compression artifacts
+            return (val < 0.1f) ? 0.0f : val * alpha;
         }
         return alpha;
     }

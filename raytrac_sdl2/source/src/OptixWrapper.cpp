@@ -14,9 +14,14 @@
 #include <filesystem>
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
-#include "Triangle.h"  
+#include "Matrix4x4.h"
+#include "HittableInstance.h"  
+#include "Triangle.h"
 #include "CameraPresets.h"
-
+#include <numeric>
+#include <HittableList.h>
+#include "Triangle.h"
+#include "../include/sbt_data.h"
 #define OPTIX_CHECK(call)                                                       \
     do {                                                                        \
         OptixResult res = call;                                                 \
@@ -148,6 +153,10 @@ void OptixWrapper::partialCleanup() {
     if (d_materials) {
         cudaFree(reinterpret_cast<void*>(d_materials));
         d_materials = nullptr;
+    }
+    if (d_volumetric_infos) {
+        cudaFree(reinterpret_cast<void*>(d_volumetric_infos));
+        d_volumetric_infos = nullptr;
     }
     
     if (d_accumulation_buffer) {
@@ -614,6 +623,42 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         cudaMemcpy(reinterpret_cast<void*>(d_materials), data.materials.data(), mat_size, cudaMemcpyHostToDevice);
     }
 
+    // GpuVolumetricInfo verilerini GPU'ya gönder (YENİ!!)
+    if (!data.volumetric_info.empty()) {
+        std::vector<GpuVolumetricInfo> temp_vol_infos;
+        temp_vol_infos.reserve(data.volumetric_info.size());
+
+        for (const auto& vol : data.volumetric_info) {
+            GpuVolumetricInfo gvi = {};
+            gvi.is_volumetric = vol.is_volumetric;
+            gvi.density = vol.density;
+            gvi.absorption = vol.absorption;
+            gvi.scattering = vol.scattering;
+            gvi.albedo = vol.albedo;
+            gvi.emission = vol.emission;
+            gvi.g = vol.g;
+            gvi.step_size = vol.step_size;
+            gvi.max_steps = vol.max_steps;
+            gvi.noise_scale = vol.noise_scale;
+            gvi.multi_scatter = vol.multi_scatter;
+            gvi.g_back = vol.g_back;
+            gvi.lobe_mix = vol.lobe_mix;
+            gvi.light_steps = vol.light_steps;
+            gvi.shadow_strength = vol.shadow_strength;
+            gvi.aabb_min = vol.aabb_min;
+            gvi.aabb_max = vol.aabb_max;
+            // CRITICAL: Pass NanoVDB pointer
+            gvi.nanovdb_grid = vol.nanovdb_grid;
+            gvi.has_nanovdb = vol.has_nanovdb;
+            
+            temp_vol_infos.push_back(gvi);
+        }
+
+        size_t vol_size = temp_vol_infos.size() * sizeof(GpuVolumetricInfo);
+        cudaMalloc(reinterpret_cast<void**>(&d_volumetric_infos), vol_size);
+        cudaMemcpy(reinterpret_cast<void*>(d_volumetric_infos), temp_vol_infos.data(), vol_size, cudaMemcpyHostToDevice);
+    }
+
     // 2. Her materyal için bir SBT kaydı oluştur
  
     for (size_t mat_index = 0; mat_index < data.materials.size(); ++mat_index) {
@@ -675,6 +720,10 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
             
             rec.data.aabb_min = vol.aabb_min;
             rec.data.aabb_max = vol.aabb_max;
+            
+            // NanoVDB grid pointer
+            rec.data.nanovdb_grid = vol.nanovdb_grid;
+            rec.data.has_nanovdb = vol.has_nanovdb;
         } else {
             // Default: surface material
             rec.data.is_volumetric = 0;
@@ -697,6 +746,10 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
             
             rec.data.aabb_min = make_float3(0.0f, 0.0f, 0.0f);
             rec.data.aabb_max = make_float3(1.0f, 1.0f, 1.0f);
+            
+            // No NanoVDB for default surface materials
+            rec.data.nanovdb_grid = nullptr;
+            rec.data.has_nanovdb = 0;
         }
 
         OPTIX_CHECK(optixSbtRecordPackHeader(hit_pg, &rec));
@@ -899,6 +952,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.image_height = height;
     params.handle = traversable_handle;
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
+    params.volumetric_infos = reinterpret_cast<GpuVolumetricInfo*>(d_volumetric_infos);
 
 
 
@@ -988,12 +1042,24 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // ------------------ LAUNCH RENDER -----------------------
     auto pass_start = high_resolution_clock::now();
 
-    OPTIX_CHECK(optixLaunch(
-        pipeline, stream,
-        d_params_persistent, sizeof(RayGenParams),
-        &sbt,
-        width, height, 1
-    ));
+    // CRITICAL: Ensure we have valid geometry and valid SBT before launching
+    // Use merged SBT (RayGen/Miss from Wrapper, HitGroups from AccelManager)
+    const OptixShaderBindingTable* current_sbt = &sbt;
+    
+    bool has_geometry = (traversable_handle != 0);
+    bool has_sbt = (sbt.raygenRecord && sbt.missRecordBase && sbt.hitgroupRecordBase);
+    
+    if (has_geometry && has_sbt) {
+        OPTIX_CHECK(optixLaunch(
+            pipeline, stream,
+            d_params_persistent, sizeof(RayGenParams),
+            &sbt,
+            width, height, 1
+        ));
+    } else {
+        // Empty scene or invalid state - clear to black/background
+        // This prevents the OPTIX_ERROR_CUDA_ERROR (7900) on startup
+    }
 
     cudaStreamSynchronize(stream);
 
@@ -1732,32 +1798,49 @@ void OptixWrapper::updateSBTVolumetricData(const std::vector<OptixGeometryData::
     bool updated = false;
     
     // Update each hitgroup record with volumetric info
-    for (size_t mat_index = 0; mat_index < volumetric_info.size() && mat_index < hitgroup_records.size(); ++mat_index) {
-        const auto& vol = volumetric_info[mat_index];
-        auto& rec = hitgroup_records[mat_index];
+    // Create a map for fast lookup of VolumetricInfo by material ID (index in vector is irrelevant if ids match)
+    // Actually, 'volumetric_info' vector size corresponds to MaterialManager's material count?
+    // Let's assume volumetric_info[i] corresponds to material ID 'i'. 
+    // If not, we need a way to map MaterialID -> VolumetricInfo.
+    // renderer.cpp fills this vector. Let's check renderer.cpp... 
+    // It pushes back ONE info per material in the manager loop. So yes, vector index == material ID (mostly).
+    
+    // Update each hitgroup record by checking its assigned material ID
+    for (auto& rec : hitgroup_records) {
+        int mat_id = rec.data.material_id;
         
-        rec.data.is_volumetric = vol.is_volumetric;
-        rec.data.vol_density = vol.density;
-        rec.data.vol_absorption = vol.absorption;
-        rec.data.vol_scattering = vol.scattering;
-        rec.data.vol_albedo = vol.albedo;
-        rec.data.vol_emission = vol.emission;
-        rec.data.vol_g = vol.g;
-        rec.data.vol_step_size = vol.step_size;
-        rec.data.vol_max_steps = vol.max_steps;
-        rec.data.vol_noise_scale = vol.noise_scale;
-        
-        // Multi-Scattering Parameters
-        rec.data.vol_multi_scatter = vol.multi_scatter;
-        rec.data.vol_g_back = vol.g_back;
-        rec.data.vol_lobe_mix = vol.lobe_mix;
-        rec.data.vol_light_steps = vol.light_steps;
-        rec.data.vol_shadow_strength = vol.shadow_strength;
-        
-        rec.data.aabb_min = vol.aabb_min;
-        rec.data.aabb_max = vol.aabb_max;
-        
-        updated = true;
+        if (mat_id >= 0 && mat_id < (int)volumetric_info.size()) {
+             const auto& vol = volumetric_info[mat_id];
+             
+             rec.data.is_volumetric = vol.is_volumetric;
+             
+             // Update Volumetric Data
+             if (vol.is_volumetric) {
+                 rec.data.vol_density = vol.density;
+                 rec.data.vol_absorption = vol.absorption;
+                 rec.data.vol_scattering = vol.scattering;
+                 rec.data.vol_albedo = vol.albedo; 
+                 rec.data.vol_emission = vol.emission;
+                 rec.data.vol_g = vol.g;
+                 rec.data.vol_step_size = vol.step_size;
+                 rec.data.vol_max_steps = vol.max_steps;
+                 rec.data.vol_noise_scale = vol.noise_scale;
+                 
+                 rec.data.vol_multi_scatter = vol.multi_scatter;
+                 rec.data.vol_g_back = vol.g_back;
+                 rec.data.vol_lobe_mix = vol.lobe_mix;
+                 rec.data.vol_light_steps = vol.light_steps;
+                 rec.data.vol_shadow_strength = vol.shadow_strength;
+                 
+                 rec.data.aabb_min = vol.aabb_min;
+                 rec.data.aabb_max = vol.aabb_max;
+                 
+                 rec.data.nanovdb_grid = vol.nanovdb_grid;
+                 rec.data.has_nanovdb = vol.has_nanovdb;
+                 
+                 updated = true;
+             }
+        }
     }
     
     if (updated && sbt.hitgroupRecordBase) {
@@ -1772,6 +1855,51 @@ void OptixWrapper::updateSBTVolumetricData(const std::vector<OptixGeometryData::
         }
         
        // SCENE_LOG_INFO("[OptiX] SBT volumetric data updated: " + std::to_string(volumetric_info.size()) + " materials");
+    }
+    // Also update global volumetric info buffer
+    if (!volumetric_info.empty()) {
+        std::vector<GpuVolumetricInfo> temp_infos;
+        temp_infos.reserve(volumetric_info.size());
+
+        for (const auto& vol : volumetric_info) {
+            GpuVolumetricInfo gvi = {};
+            gvi.is_volumetric = vol.is_volumetric;
+            gvi.density = vol.density;
+            gvi.absorption = vol.absorption;
+            gvi.scattering = vol.scattering;
+            gvi.albedo = vol.albedo;
+            gvi.emission = vol.emission;
+            gvi.g = vol.g;
+            gvi.step_size = vol.step_size;
+            gvi.max_steps = vol.max_steps;
+            gvi.noise_scale = vol.noise_scale;
+            gvi.multi_scatter = vol.multi_scatter;
+            gvi.g_back = vol.g_back;
+            gvi.lobe_mix = vol.lobe_mix;
+            gvi.light_steps = vol.light_steps;
+            gvi.shadow_strength = vol.shadow_strength;
+            gvi.aabb_min = vol.aabb_min;
+            gvi.aabb_max = vol.aabb_max;
+            gvi.nanovdb_grid = vol.nanovdb_grid;
+            gvi.has_nanovdb = vol.has_nanovdb;
+            
+            temp_infos.push_back(gvi);
+        }
+
+        // Reallocate if size changed or just update
+        // Simple strategy: Always free and alloc (performance is fine for sliders)
+        if (d_volumetric_infos) {
+             cudaFree(reinterpret_cast<void*>(d_volumetric_infos));
+             d_volumetric_infos = nullptr;
+        }
+        
+        size_t vol_size = temp_infos.size() * sizeof(GpuVolumetricInfo);
+        cudaMalloc(reinterpret_cast<void**>(&d_volumetric_infos), vol_size);
+        cudaMemcpy(reinterpret_cast<void*>(d_volumetric_infos), temp_infos.data(), vol_size, cudaMemcpyHostToDevice);
+        
+        // Mark params as dirty to ensure pointer is updated (though pointer address might change)
+        params.volumetric_infos = reinterpret_cast<GpuVolumetricInfo*>(d_volumetric_infos);
+        // Important: params buffer needs to be uploaded in launch()
     }
 }
 
@@ -1896,28 +2024,63 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     // Block render while rebuilding
     extern bool g_optix_rebuild_in_progress;
     g_optix_rebuild_in_progress = true;
-    cudaDeviceSynchronize();
-        SCENE_LOG_INFO("[OptiX TLAS] Building scene with LOCAL SPACE geometry instancing...");
+    cudaDeviceSynchronize(); // Ensure previous kernels finished
+    
+    SCENE_LOG_INFO("[OptiX TLAS] Building scene (Native Instancing Enabled)...");
     
     // ===========================================================================
-    // STEP 1: Convert Hittable objects to Triangle list
+    // STEP 1: CLASSIFY OBJECTS (Recursive Flattening)
     // ===========================================================================
-    std::vector<std::shared_ptr<Triangle>> triangles;
-    triangles.reserve(objects.size());
-    for (const auto& obj : objects) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (tri) {
-            triangles.push_back(tri);
+    std::vector<std::shared_ptr<Triangle>> static_triangles;
+    std::vector<std::shared_ptr<HittableInstance>> instances;
+    
+    // Recursive helper to flatten scene hierarchy
+    std::function<void(const std::shared_ptr<Hittable>&)> collectRenderables;
+    collectRenderables = [&](const std::shared_ptr<Hittable>& obj) {
+        if (!obj) return;
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            // Found Instance
+            instances.push_back(inst);
+        } 
+        else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            // Found Static Triangle
+            static_triangles.push_back(tri);
+        } 
+        else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
+            // Found List - Recurse
+            for (const auto& child : list->objects) {
+                collectRenderables(child);
+            }
         }
+        else if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
+             // Found BVH Node - Recurse
+             // Note: BVH might hide objects or have left/right
+             // Usually BVH replaces list. We need to check children.
+             // ParallelBVHNode usually has left/right members.
+             if (bvh->left) collectRenderables(bvh->left);
+             if (bvh->right) collectRenderables(bvh->right);
+        }
+    };
+    
+    // Flatten everything
+    for (const auto& obj : objects) {
+        collectRenderables(obj);
     }
     
-    if (triangles.empty()) {
-        SCENE_LOG_WARN("[OptiX TLAS] No triangles found in scene!");
-        return;
+    SCENE_LOG_INFO("[OptiX] Geometry Source - Static Triangles: " + std::to_string(static_triangles.size()) + 
+                   ", Instances: " + std::to_string(instances.size()));
+
+    // Check if we found anything regarding issue
+    if (static_triangles.empty() && instances.empty()) {
+         SCENE_LOG_WARN("[OptiX] No renderable geometry found after recursive search!");
     }
+
+    // Reserve space based on findings
+    // (Already pushed to vectors)
     
     // ===========================================================================
-    // STEP 2: CLEANUP - Clear previous data
+    // STEP 2: CLEANUP
     // ===========================================================================
     hitgroup_records.clear();
     node_to_instance.clear();
@@ -1936,9 +2099,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     per_blas_data.clear();
     partialCleanup();
     
-    // ===========================================================================
-    // STEP 3: Initialize AccelManager
-    // ===========================================================================
+    // Initialize AccelManager
     if (!accel_manager) {
         accel_manager = std::make_unique<OptixAccelManager>();
         if (m_accelStatusCallback) accel_manager->setMessageCallback(m_accelStatusCallback);
@@ -1946,124 +2107,317 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     accel_manager->cleanup();
     accel_manager->initialize(context, stream, hit_pg);
     
-    // ===========================================================================
-    // STEP 4: Group triangles by nodeName (Unique object based instancing)
-    // ===========================================================================
-    auto mesh_groups = OptixAccelManager::groupTrianglesByMesh(triangles);
+    // Note: We use OptixInstance vector for TLAS build
+    std::vector<OptixInstance> optix_instances;
+    int instance_id_counter = 0;
     
-    if (mesh_groups.empty()) {
-        SCENE_LOG_WARN("[OptiX TLAS] No mesh groups found!");
-        return;
-    }
-    
-    SCENE_LOG_INFO("[OptiX TLAS] Found " + std::to_string(mesh_groups.size()) + " mesh groups/instances");
+    // ===========================================================================
+    // STEP 3: BUILD BLAS FOR STATIC GEOMETRY
+    // ===========================================================================
+    // ===========================================================================
+    // STEP 3: BUILD BLAS FOR STATIC GEOMETRY
+    // ===========================================================================
+    // Map to track which BLAS have been built locally (Mesh Name -> Mesh ID)
+    std::unordered_map<std::string, int> built_mesh_ids;
 
-    // ===========================================================================
-    // STEP 5: Build BLAS for each mesh and create instances
-    // ===========================================================================
-    for (size_t mesh_idx = 0; mesh_idx < mesh_groups.size(); ++mesh_idx) {
-        const auto& mesh = mesh_groups[mesh_idx];
+    auto toFloat3 = [](const Vec3& v) { return make_float3(v.x, v.y, v.z); };
+    
+    if (!static_triangles.empty()) {
+        auto mesh_groups = OptixAccelManager::groupTrianglesByMesh(static_triangles);
         
-        // Extract geometry for this mesh (using LOCAL SPACE)
-        MeshGeometry geom = extractMeshGeometry(triangles, mesh);
-        
-        if (geom.vertices.empty() || geom.indices.empty()) {
-            SCENE_LOG_WARN("[OptiX TLAS] Skipping empty mesh: " + mesh.mesh_name);
-            continue;
-        }
-        
-        // Build BLAS for this mesh
-        int blas_id = accel_manager->buildMeshBLAS(geom);
-        if (blas_id < 0) {
-            SCENE_LOG_ERROR("[OptiX TLAS] Failed to build BLAS for: " + mesh.mesh_name);
-            continue;
-        }
-        
-        // ===========================================================================
-        // Instance Transform: Apply object-to-world matrix
-        // Since BLAS contains LOCAL-SPACE geometry, we need the actual transform.
-        // OptiX will use this transform and the shader's optixTransformNormalFromObjectToWorldSpace()
-        // will correctly handle the inverse-transpose for normals.
-        // ===========================================================================
-        float transform[12];
-        if (!mesh.triangle_indices.empty()) {
-            int first_tri_idx = mesh.triangle_indices[0];
-            if (first_tri_idx >= 0 && first_tri_idx < static_cast<int>(triangles.size())) {
-                const auto& tri = triangles[first_tri_idx];
-                Matrix4x4 m = tri->getTransformMatrix();
+        for (const auto& mesh : mesh_groups) {
+            // Extract geometry (WORLD SPACE - using getVertexPosition)
+            // This ensures static geometry matches exactly what is on CPU
+            MeshGeometry geom;
+            geom.mesh_name = mesh.mesh_name;
+            geom.material_id = mesh.material_id;
+            
+            // Reserve memory
+            size_t num_tris = mesh.triangle_indices.size();
+            geom.vertices.reserve(num_tris * 3);
+            geom.normals.reserve(num_tris * 3);
+            geom.uvs.reserve(num_tris * 3);
+            geom.indices.reserve(num_tris);
+            
+            uint32_t v_off = 0;
+            for (int idx : mesh.triangle_indices) {
+                const auto& tri = static_triangles[idx];
                 
-                // Copy 3x4 part (row-major, rows 0, 1, 2)
-                transform[0] = m.m[0][0]; transform[1] = m.m[0][1]; transform[2] = m.m[0][2]; transform[3] = m.m[0][3];
-                transform[4] = m.m[1][0]; transform[5] = m.m[1][1]; transform[6] = m.m[1][2]; transform[7] = m.m[1][3];
-                transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
-            } else {
-                // Fallback identity
-                std::fill(std::begin(transform), std::end(transform), 0.0f);
-                transform[0] = transform[5] = transform[10] = 1.0f;
+                // VERTICES: Use LOCAL Space (getOriginalVertexPosition)
+                // We will apply the transform via the Instance Matrix.
+                // This allows correct updates via updateObjectTransform without rebuilding BLAS.
+                Vec3 v0 = tri->getOriginalVertexPosition(0);
+                Vec3 v1 = tri->getOriginalVertexPosition(1);
+                Vec3 v2 = tri->getOriginalVertexPosition(2);
+                geom.vertices.push_back(toFloat3(v0));
+                geom.vertices.push_back(toFloat3(v1));
+                geom.vertices.push_back(toFloat3(v2));
+                
+                // NORMALS
+                Vec3 n0 = tri->getOriginalVertexNormal(0);
+                Vec3 n1 = tri->getOriginalVertexNormal(1);
+                Vec3 n2 = tri->getOriginalVertexNormal(2);
+                geom.normals.push_back(toFloat3(n0));
+                geom.normals.push_back(toFloat3(n1));
+                geom.normals.push_back(toFloat3(n2));
+                
+                // UVS
+                geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
+                geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
+                geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+                
+                // INDICES (0-based local)
+                geom.indices.push_back(make_uint3(v_off, v_off+1, v_off+2));
+                v_off += 3;
             }
-        } else {
-            // Fallback identity
-            std::fill(std::begin(transform), std::end(transform), 0.0f);
-            transform[0] = transform[5] = transform[10] = 1.0f;
-        }
-        
-        int inst_id = accel_manager->addInstance(blas_id, transform, mesh.material_id, mesh.mesh_name);
-        
-        if (inst_id >= 0) {
-            // Map ORIGINAL name to this instance ID (One object -> Multiple Instances)
-            node_to_instance[mesh.original_name].push_back(inst_id);
-            instance_to_node[inst_id] = mesh.original_name; // Reverse map
+            
+            if (geom.vertices.empty()) continue;
+            
+            // Build BLAS via Manager
+            int mesh_id = accel_manager->buildMeshBLAS(geom);
+            if (mesh_id >= 0) {
+                 built_mesh_ids[geom.mesh_name] = mesh_id;
+
+                 // Add Instance (Set Initial Transform from the Object)
+                 // NOTE: MeshGeometry.mesh_name IS the node name for static meshes
+                 // We need to find the transform for this group. Since it's grouped by NodeName,
+                 // all triangles should share the same transform. We take the first one.
+                 float transform[12] = {1,0,0,0, 0,1,0,0, 0,0,1,0};
+                 if (!mesh.triangle_indices.empty()) {
+                     const auto& first_tri = static_triangles[mesh.triangle_indices[0]];
+                     Matrix4x4 m = first_tri->getTransformMatrix();
+                     transform[0] = m.m[0][0]; transform[1] = m.m[0][1]; transform[2] = m.m[0][2]; transform[3] = m.m[0][3];
+                     transform[4] = m.m[1][0]; transform[5] = m.m[1][1]; transform[6] = m.m[1][2]; transform[7] = m.m[1][3];
+                     transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
+                 }
+
+                 int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, geom.mesh_name);
+                 
+                 if (inst_id >= 0) {
+                     node_to_instance[geom.mesh_name].push_back(inst_id);
+                     instance_to_node[inst_id] = geom.mesh_name;
+                 }
+            }
         }
     }
     
     // ===========================================================================
-    // STEP 6: Build TLAS from all instances
+    // STEP 4: BUILD BLAS FOR INSTANCES (Multi-Material Support)
+    // ===========================================================================
+    // Cache for source geometry to avoid rebuilding BLAS for same source
+    // Map<SourcePtr, Vector<MeshID>>
+    std::unordered_map<void*, std::vector<int>> processed_sources;
+    
+    for (const auto& inst : instances) {
+        if (!inst->visible || !inst->source_triangles || inst->source_triangles->empty()) continue;
+        
+        // Clear old IDs for this rebuild
+        inst->optix_instance_ids.clear();
+        
+        void* source_key = (void*)inst->source_triangles.get();
+        std::vector<int> mesh_ids;
+        
+        // 4a. Get or Build BLAS for this source geometry
+        if (processed_sources.count(source_key)) {
+            mesh_ids = processed_sources[source_key];
+        } 
+        else {
+            // Group source triangles by Mesh/Material manually
+            std::unordered_map<std::string, MeshData> groups;
+            for (size_t i = 0; i < inst->source_triangles->size(); ++i) {
+                Triangle* tri = (*inst->source_triangles)[i].get();
+                if (!tri) continue;
+                
+                std::string base = tri->getNodeName();
+                if (base.empty()) base = "inst_source";
+                int mat = tri->getMaterialID();
+                
+                // Unique key for this part
+                std::string key = base + "_mat_" + std::to_string(mat);
+                
+                auto& m = groups[key];
+                if (m.mesh_name.empty()) {
+                    m.mesh_name = key;
+                    m.original_name = base;
+                    m.material_id = mat;
+                }
+                m.triangle_indices.push_back((int)i);
+            }
+            
+            // Build/Find BLAS for each group
+            for (const auto& [key, grp] : groups) {
+                // Check if BLAS already exists (from Step 3)
+                int existing_id = accel_manager->findBLAS(grp.original_name, grp.material_id);
+                
+                if (existing_id != -1) {
+                    mesh_ids.push_back(existing_id);
+                } else {
+                    // Must build new BLAS for this source part
+                    MeshGeometry geom;
+                    geom.mesh_name = grp.mesh_name; // Use unique key
+                    geom.material_id = grp.material_id;
+                    
+                    for (int idx : grp.triangle_indices) {
+                        Triangle* tri = (*inst->source_triangles)[idx].get();
+                        // Use Original/Local positions for Instances using Lazy Scatter
+                        // Instance Transform will place them.
+                        Vec3 v0 = tri->getOriginalVertexPosition(0);
+                        Vec3 v1 = tri->getOriginalVertexPosition(1);
+                        Vec3 v2 = tri->getOriginalVertexPosition(2);
+                        geom.vertices.push_back(toFloat3(v0));
+                        geom.vertices.push_back(toFloat3(v1));
+                        geom.vertices.push_back(toFloat3(v2));
+                        
+                        Vec3 n0 = tri->getOriginalVertexNormal(0);
+                        Vec3 n1 = tri->getOriginalVertexNormal(1);
+                        Vec3 n2 = tri->getOriginalVertexNormal(2);
+                        geom.normals.push_back(toFloat3(n0));
+                        geom.normals.push_back(toFloat3(n1));
+                        geom.normals.push_back(toFloat3(n2));
+                        
+                        geom.uvs.push_back(make_float2(tri->t0.x, tri->t0.y));
+                        geom.uvs.push_back(make_float2(tri->t1.x, tri->t1.y));
+                        geom.uvs.push_back(make_float2(tri->t2.x, tri->t2.y));
+
+                        // Copy indices as 0..N
+                        uint32_t base_v = (uint32_t)geom.vertices.size() - 3;
+                        geom.indices.push_back(make_uint3(base_v, base_v+1, base_v+2));
+                    }
+                    
+                    if (!geom.vertices.empty()) {
+                        int new_id = accel_manager->buildMeshBLAS(geom);
+                        if (new_id >= 0) mesh_ids.push_back(new_id);
+                    }
+                }
+            }
+            processed_sources[source_key] = mesh_ids;
+        }
+        
+        // 4b. Add Instance(s)
+        float transform[12];
+        const Matrix4x4& m = inst->transform; 
+        transform[0] = m.m[0][0]; transform[1] = m.m[0][1]; transform[2] = m.m[0][2]; transform[3] = m.m[0][3];
+        transform[4] = m.m[1][0]; transform[5] = m.m[1][1]; transform[6] = m.m[1][2]; transform[7] = m.m[1][3];
+        transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
+        
+        for (int mid : mesh_ids) {
+            const MeshBLAS* blas = accel_manager->getBLAS(mid);
+            if (blas) {
+                // Node Name: Propagate original instance node name (e.g. "Tree_Instance_5")
+                // but maybe we should append material suffix? No, usually not needed for hit.
+                int inst_id = accel_manager->addInstance(mid, transform, blas->material_id, inst->node_name);
+                if (inst_id >= 0) {
+                     node_to_instance[inst->node_name].push_back(inst_id);
+                     instance_to_node[inst_id] = inst->node_name;
+                     inst->optix_instance_ids.push_back(inst_id); 
+                }
+            }
+        }
+    }
+    
+    
+    // ===========================================================================
+    // STEP 5: BUILD TLAS
     // ===========================================================================
     accel_manager->buildTLAS();
     traversable_handle = accel_manager->getTraversableHandle();
     
-    if (traversable_handle == 0) {
+    // Check handle
+    if (traversable_handle == 0 && accel_manager->getInstanceCount() > 0) {
         SCENE_LOG_ERROR("[OptiX TLAS] Failed to build TLAS!");
         return;
     }
     
-    // ===========================================================================
-    // STEP 7: Build SBT with material and texture data
-    // ===========================================================================
+    // Upload SBT via Manager
     accel_manager->buildSBT(data.materials, data.textures, data.volumetric_info);
     
-    // IMPORTANT: Only update hitgroup records, preserve raygen and miss from setupPipeline
+    // Allocate and update global material buffer
+    if (!data.materials.empty()) {
+        if (d_materials) cudaFree(reinterpret_cast<void*>(d_materials));
+        cudaMalloc(reinterpret_cast<void**>(&d_materials), data.materials.size() * sizeof(GpuMaterial));
+        updateMaterialBuffer(data.materials);
+    }
+    
+    // CRITICAL: Merge SBTs
+    // OptixAccelManager manages HitGroups. OptixWrapper manages RayGen/Miss.
+    // We must link them.
     const auto& accel_sbt = accel_manager->getSBT();
     sbt.hitgroupRecordBase = accel_sbt.hitgroupRecordBase;
     sbt.hitgroupRecordStrideInBytes = accel_sbt.hitgroupRecordStrideInBytes;
     sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
-    // Note: sbt.raygenRecord and sbt.missRecordBase are set by setupPipeline() and must NOT be overwritten
     
-    hitgroup_records = accel_manager->getHitGroupRecords();
+    g_optix_rebuild_in_progress = false;
+    SCENE_LOG_INFO("[OptiX TLAS] Build complete. Instances: " + std::to_string(accel_manager->getInstanceCount()));
+}
+
+
+void OptixWrapper::updateObjectTransform(const std::string& node_name, const Matrix4x4& transform) {
+    if (!accel_manager || !use_tlas_mode || node_name.empty()) return;
     
-    // ===========================================================================
-    // STEP 8: Upload global materials buffer (for shader uniform access)
-    // ===========================================================================
-    if (!data.materials.empty()) {
-        if (d_materials) cudaFree(d_materials);
-        size_t mat_size = data.materials.size() * sizeof(GpuMaterial);
-        cudaMalloc(reinterpret_cast<void**>(&d_materials), mat_size);
-        cudaMemcpy(d_materials, data.materials.data(), mat_size, cudaMemcpyHostToDevice);
+    auto it = node_to_instance.find(node_name);
+    if (it == node_to_instance.end()) {
+        //SCENE_LOG_WARN("updateObjectTransform: Node not found in instance map: " + node_name + ". Trying fallback search...");
+        
+        // Fallback: Linear search in AccelManager's instances (Robustness against map sync issues)
+        if (accel_manager) {
+            const auto& all_instances = accel_manager->getInstances();
+            bool found_any = false;
+            int found_count = 0;
+            // Convert Matrix4x4 to flat float array for OptiX
+            float t[12];
+            t[0] = transform.m[0][0]; t[1] = transform.m[0][1]; t[2] = transform.m[0][2]; t[3] = transform.m[0][3];
+            t[4] = transform.m[1][0]; t[5] = transform.m[1][1]; t[6] = transform.m[1][2]; t[7] = transform.m[1][3];
+            t[8] = transform.m[2][0]; t[9] = transform.m[2][1]; t[10] = transform.m[2][2]; t[11] = transform.m[2][3];
+
+            for (size_t i = 0; i < all_instances.size(); ++i) {
+                // Exact match OR prefix match (for multi-material splits)
+                // e.g. "Tree_01" matches "Tree_01_mat_0"
+                bool match = (all_instances[i].node_name == node_name);
+                if (!match && all_instances[i].node_name.find(node_name + "_mat_") == 0) {
+                     match = true;
+                }
+                
+                if (match) {
+                    accel_manager->updateInstanceTransform((int)i, t);
+                    found_any = true;
+                    found_count++;
+                }
+            }
+            
+            if (found_any) {
+                // SCENE_LOG_INFO("updateObjectTransform: Fallback found " + std::to_string(found_count) + " instances for " + node_name);
+                 accel_manager->updateTLAS();
+                 traversable_handle = accel_manager->getTraversableHandle();
+                 resetAccumulation();
+                 return;
+            } else {
+                 //SCENE_LOG_WARN("updateObjectTransform: Fallback ALSO failed for " + node_name);
+            }
+        }
+        
+        return;
     }
     
-    cudaStreamSynchronize(stream);
+    // Convert Matrix4x4 to flat float array for OptiX
+    float t[12];
+    t[0] = transform.m[0][0]; t[1] = transform.m[0][1]; t[2] = transform.m[0][2]; t[3] = transform.m[0][3];
+    t[4] = transform.m[1][0]; t[5] = transform.m[1][1]; t[6] = transform.m[1][2]; t[7] = transform.m[1][3];
+    t[8] = transform.m[2][0]; t[9] = transform.m[2][1]; t[10] = transform.m[2][2]; t[11] = transform.m[2][3];
     
-    // Rebuild complete - allow rendering
-    extern bool g_optix_rebuild_in_progress;
-    g_optix_rebuild_in_progress = false;
+    bool valid = false;
+    // SCENE_LOG_INFO("Updating transform for node: " + node_name + " Instances: " + std::to_string(it->second.size()));
     
-    use_tlas_mode = true;
-    is_gas_built_as_soup = false;
+    for (int inst_id : it->second) {
+        accel_manager->updateInstanceTransform(inst_id, t);
+        valid = true;
+    }
     
-   /* SCENE_LOG_INFO("[OptiX TLAS] Per-mesh build complete. Handle: " + std::to_string(traversable_handle) +
-                   ", Meshes: " + std::to_string(mesh_groups.size()) +
-                   ", Instances: " + std::to_string(accel_manager->getInstanceCount()) +
-                   ", Materials: " + std::to_string(data.materials.size()));*/
+    if (valid) {
+        // Trigger TLAS update
+        accel_manager->updateTLAS();
+        traversable_handle = accel_manager->getTraversableHandle();
+        resetAccumulation();
+    }
 }
 
 void OptixWrapper::updateInstanceTransform(int instance_id, const Vec3& position, 
@@ -2101,8 +2455,9 @@ void OptixWrapper::rebuildTLAS() {
 }
 
 void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
-    if (!accel_manager || !use_tlas_mode) {
-        SCENE_LOG_ERROR("[OptiX] updateTLASGeometry called but not in TLAS mode");
+    extern bool g_optix_rebuild_in_progress;
+    if (!accel_manager || !use_tlas_mode || g_optix_rebuild_in_progress) {
+        // SCENE_LOG_ERROR("[OptiX] updateTLASGeometry called but not in TLAS mode or rebuild in progress");
         return;
     }
     
@@ -2173,3 +2528,105 @@ std::vector<int> OptixWrapper::cloneInstancesByNodeName(const std::string& sourc
     
     return new_ids;
 }
+
+void OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    if (!accel_manager || triangles.empty() || !use_tlas_mode) return;
+
+    // 1. Group triangles by mesh/material
+    auto groups = OptixAccelManager::groupTrianglesByMesh(triangles);
+    bool any_updated = false;
+
+    for (const auto& group : groups) {
+         // 2. Find BLAS ID
+         // Try exact match first
+         int blas_id = accel_manager->findBLAS(group.mesh_name, group.material_id);
+         
+         if (blas_id == -1) {
+             // Fallback: Try constructing name from node_name + material
+             std::string alt_name = node_name;
+             if (group.material_id > 0) alt_name += "_mat_" + std::to_string(group.material_id);
+             
+             blas_id = accel_manager->findBLAS(alt_name, group.material_id);
+             
+             if (blas_id == -1) {
+                  // Fallback 2: Try original name
+                  blas_id = accel_manager->findBLAS(group.original_name, group.material_id);
+             }
+         }
+
+         if (blas_id >= 0) {
+             // 3. Extract Geometry (Uses LOCAL SPACE via getOriginalVertexPosition)
+             MeshGeometry geom = extractMeshGeometry(triangles, group);
+
+             // 4. Update BLAS
+             if (accel_manager->updateMeshBLAS(blas_id, geom, false, true)) {
+                 any_updated = true;
+             }
+         }
+    }
+
+    if (any_updated) {
+        // 5. Update TLAS (Refit)
+        accel_manager->updateTLAS();
+        traversable_handle = accel_manager->getTraversableHandle();
+        resetAccumulation();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VDB VOLUME GPU BUFFER UPDATE
+// ═══════════════════════════════════════════════════════════════════════════════
+void OptixWrapper::updateVDBVolumeBuffer(const std::vector<GpuVDBVolume>& volumes) {
+    // Handle empty case
+    if (volumes.empty()) {
+        params.vdb_volumes = nullptr;
+        params.vdb_volume_count = 0;
+        params_dirty = true; // Fix: Ensure params are updated on GPU when list is cleared!
+        return;
+    }
+    
+    size_t required_size = volumes.size() * sizeof(GpuVDBVolume);
+    
+    // Reallocate if needed
+    if (d_vdb_volumes_capacity < required_size) {
+        if (d_vdb_volumes) {
+            cudaFree(reinterpret_cast<void*>(d_vdb_volumes));
+            d_vdb_volumes = nullptr;
+        }
+        
+        cudaError_t err = cudaMalloc(reinterpret_cast<void**>(&d_vdb_volumes), required_size);
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("[OptiX] VDB Volume buffer allocation failed: " + std::string(cudaGetErrorString(err)));
+            params.vdb_volumes = nullptr;
+            params.vdb_volume_count = 0;
+            return;
+        }
+        d_vdb_volumes_capacity = required_size;
+    }
+    
+    // Upload data
+    cudaError_t err = cudaMemcpy(reinterpret_cast<void*>(d_vdb_volumes), volumes.data(), 
+                                  required_size, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        SCENE_LOG_ERROR("[OptiX] VDB Volume buffer upload failed: " + std::string(cudaGetErrorString(err)));
+        return;
+    }
+    
+    // Update params
+    params.vdb_volumes = d_vdb_volumes;
+    params.vdb_volume_count = static_cast<int>(volumes.size());
+    
+    SCENE_LOG_INFO("[OptiX] VDB Volumes uploaded: " + std::to_string(volumes.size()));
+    if (!volumes.empty()) {
+        const auto& v = volumes[0];
+        // Log first 4 elements to sanity check basic scale/rotation
+        SCENE_LOG_INFO("VDB[0] Transform[0-3]: " + std::to_string(v.transform[0]) + ", " + 
+                       std::to_string(v.transform[1]) + ", " + std::to_string(v.transform[2]) + ", " + std::to_string(v.transform[3]));
+        // Log Scale diagonal to check for hugeness
+        SCENE_LOG_INFO("VDB[0] ScaleCheck: " + std::to_string(v.transform[0]) + ", " + std::to_string(v.transform[5]) + ", " + std::to_string(v.transform[10]));
+    }
+    
+    // Mark params dirty so they are uploaded to GPU before next launch
+    params_dirty = true;
+}
+

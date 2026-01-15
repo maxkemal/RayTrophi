@@ -178,17 +178,16 @@ bool PrincipledBSDF::scatter(
     // 1. Opaklık kontrolü – ışığın geçip geçmeyeceğine karar ver
     // Opacity check – stochastic transparency
     if (opacity < 1.0f) {
-        if (Vec3::random_float() < opacity) {
-            // Opaque kısım - normal reflection
-            attenuation = albedo;
-        }
-        else {
-            // Işık geçiyor, bu yüzden ışık kaynağına geri döndür
+        if (Vec3::random_float() >= opacity) {
+            // Işık geçiyor (Transparent), kaynağa geri döndür
             scattered = Ray(rec.point + r_in.direction * 0.001f, r_in.direction);
-            attenuation = Vec3(1.0f); // Tam geçiş
-            return true; // Işık geçiyor
+            attenuation = Vec3(1.0f); // Tam geçiş (White attenuation for transparency)
+            return true; 
         }
+        // Random < Opacity -> Opaque hit.
+        // Falls through to standard PBR shading below.
     }
+    
   
      
     // 3. Transmission varsa cam/şeffaf gibi davran

@@ -12,12 +12,36 @@
 #include <algorithm>
 #include "InstanceManager.h"
 #include "InstanceGroup.h"
+#include <thread>
+#include <chrono>
 
+// ===============================================================================
 // ===============================================================================
 // TERRAIN PANEL UI
 // ===============================================================================
 
+// Texture Graveyard: Holds textures that are replaced until a rebuild confirms they are safe to delete
+static std::vector<std::shared_ptr<Texture>> texture_graveyard;
+
+static void ManageTextureGraveyard() {
+    // Only clear invalid textures when NO rebuild is pending
+    // This assumes that if rebuild_pending is false, the last rebuild has definitely finished
+    // and the SBT has been updated to point to new textures.
+    // CAUTION: This requires g_optix_rebuild_pending to be managed reliably in the main loop.
+    
+    if (!g_optix_rebuild_pending && !texture_graveyard.empty()) {
+        texture_graveyard.clear();
+        // SCENE_LOG_INFO("Texture graveyard cleared. Old textures released.");
+    }
+}
+
 void SceneUI::drawTerrainPanel(UIContext& ctx) {
+    // SCENE_UI_TERRAIN.HPP is included in Main.cpp, so static vector is shared? 
+    // Wait, if included multiple times, static vector duplicate?
+    // It is included in Main.cpp usually. If also in SceneUI.cpp, we have problem.
+    // Assuming single TU or safe.
+    ManageTextureGraveyard();
+    
     ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "TERRAIN SYSTEM");
     ImGui::Separator();
 
@@ -277,23 +301,64 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 if (ImGui::SmallButton((std::string("Load##") + label).c_str())) {
                                     std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
                                     if (!path.empty()) {
+                                        // CRITICAL: Stop rendering before modifying GPU resources to prevent "illegal memory access"
+                                        ctx.renderer.stopRendering();
+                                        // Wait a tiny bit to ensure kernel finished
+                                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                                        cudaDeviceSynchronize(); // Force GPU idle
+                                        
                                         TextureType type = isNormal ? TextureType::Normal : TextureType::Albedo;
                                         if (std::string(label) == "Roughness") type = TextureType::Roughness;
+                                        // GRAVEYARD: Keep old texture alive until rebuild completes
+                                        if (texSlot) {
+                                            texture_graveyard.push_back(texSlot);
+                                        }
                                         
                                         texSlot = std::make_shared<Texture>(path, type);
+                                        
+                                        // Update Material properties (scalars)
+                                        if (ctx.optix_gpu_ptr) {
+                                            ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                                        }
+
+                                        // CRITICAL: Request Geometry/SBT Rebuild to update texture handles in SBT
                                         g_optix_rebuild_pending = true;
+
                                         ctx.renderer.resetCPUAccumulation();
                                         if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                        
+                                        ctx.renderer.resumeRendering();
                                     }
                                 }
                                 
                                 if (texSlot) {
                                     ImGui::SameLine();
                                     if (ImGui::SmallButton((std::string("X##") + label).c_str())) {
+                                        ctx.renderer.stopRendering();
+                                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                                        // GRAVEYARD: Keep old texture alive until rebuild completes
+                                        // This prevents GPU accessing destroyed texture handle before SBT update
+                                        if (texSlot) {
+                                            texture_graveyard.push_back(texSlot);
+                                        }
+
+                                        cudaDeviceSynchronize(); // Force GPU idle
+
                                         texSlot = nullptr;
+
+                                        // Update Material properties (scalars)
+                                        if (ctx.optix_gpu_ptr) {
+                                            ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                                        }
+
+                                        // CRITICAL: Request Geometry/SBT Rebuild to update texture handles in SBT
+                                        // The main loop will handle this, ensuring synchronization.
                                         g_optix_rebuild_pending = true;
+
                                         ctx.renderer.resetCPUAccumulation();
                                         if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                        
+                                        ctx.renderer.resumeRendering();
                                     }
                                 }
                             };
@@ -306,17 +371,217 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         }
                     }
                     
-                    // FOLIAGE UI INTEGRATION
-                    ImGui::Spacing();
-                    if (ImGui::TreeNode(("Foliage Settings##" + std::to_string(i)).c_str())) {
-                        // Ensure foliage layers exist
-                        if (t->foliageLayers.size() <= i) {
-                            t->foliageLayers.resize(4);
-                            // Set defaults for new layers
-                            t->foliageLayers[i].targetMaskLayerId = i;
-                            t->foliageLayers[i].name = std::string(autoLayerNames[i]) + " Foliage";
-                        }
+                    // FOLIAGE UI INTEGRATION (Disabled - Moved to Central Section)
+                    if (false) { /* LEGACY UI REMOVED
+                    {
+                        InstanceManager& im = InstanceManager::getInstance();
+                        std::string foliageGroupName = "Foliage_" + t->name + "_Layer_" + std::to_string(i);
                         
+                        // Find or Create
+                        int groupID = im.getGroupIdByName(foliageGroupName);
+                        InstanceGroup* foliageGroup = nullptr;
+                        
+                        if (groupID == -1) {
+                             if (ImGui::Button("Initialize Foliage Layer")) {
+                                 groupID = im.createGroup(foliageGroupName, "", {}); 
+                                 foliageGroup = im.getGroup(groupID);
+                                 foliageGroup->brush_settings.splat_map_channel = i; // Lock channel
+                                 foliageGroup->brush_settings.use_global_settings = false; // Default to per-source
+                                 SCENE_LOG_INFO("[Foliage] Initialized layer: " + foliageGroupName);
+                             }
+                        } else {
+                            foliageGroup = im.getGroup(groupID);
+                        }
+
+                        if (foliageGroup) {
+                            // Enforce Rules
+                            foliageGroup->brush_settings.splat_map_channel = i; 
+
+                            // 1. TOP BAR (Stats & Global Controls)
+                            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.6f, 1.0f), "%zu instances", foliageGroup->instances.size());
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Clear All")) {
+                                foliageGroup->clearInstances();
+                                SceneUI::syncInstancesToScene(ctx, *foliageGroup, true);
+                                g_optix_rebuild_pending = true;
+                                ctx.renderer.resetCPUAccumulation();
+                            }
+                            
+                            // 2. PLACEMENT RULES (Group Level) - MOVED TO SCATTER SETTINGS
+                            // if (ImGui::TreeNodeEx("Placement Rules", ...)) { ... }
+                            
+                            // 3. SOURCE MESHES LIST
+                            ImGui::Separator();
+                            ImGui::Text("Source Meshes");
+                            ImGui::SameLine();
+                            
+                            // Add Source Button Logic
+                            bool has_selection = ctx.selection.hasSelection();
+                            if (ImGui::Button("+ Add Selected")) {
+                                if (has_selection) {
+                                    std::string node_name = ctx.selection.selected.name;
+                                    // Collect triangles
+                                    std::vector<std::shared_ptr<Triangle>> selected_tris;
+                                    for (auto& obj : ctx.scene.world.objects) {
+                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                        if (tri && tri->getNodeName() == node_name) selected_tris.push_back(tri);
+                                    }
+                                    
+                                    if (!selected_tris.empty()) {
+                                        foliageGroup->sources.emplace_back(node_name, selected_tris);
+                                        // Update BVH for source
+                                        // foliageGroup->updateSourceBVH(); // Handled by instance generation usually? 
+                                        // Actually calculateMeshCenter is needed. ScatterSource constructor does it.
+                                        SCENE_LOG_INFO("Added source: " + node_name);
+                                    } else {
+                                        SCENE_LOG_WARN("Selected object has no triangles or name mismatch.");
+                                    }
+                                } else {
+                                    SCENE_LOG_WARN("Select an object in the viewport first.");
+                                }
+                            }
+                            
+                            // Sources Table
+                            if (ImGui::BeginTable("FolSrcTable", 4, ImGuiTableFlags_BordersInner | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
+                                ImGui::TableSetupColumn("Object", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("Wgt", ImGuiTableColumnFlags_WidthFixed, 40.0f);
+                                ImGui::TableSetupColumn("Scale", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+                                ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 20.0f);
+                                ImGui::TableHeadersRow();
+                                
+                                int remove_idx = -1;
+                                for (size_t src_i = 0; src_i < foliageGroup->sources.size(); src_i++) {
+                                    auto& src = foliageGroup->sources[src_i];
+                                    ImGui::PushID((int)src_i);
+                                    ImGui::TableNextRow();
+                                    
+                                    ImGui::TableSetColumnIndex(0);
+                                    bool open = ImGui::TreeNodeEx(src.name.c_str(), ImGuiTreeNodeFlags_SpanFullWidth);
+                                    
+                                    ImGui::TableSetColumnIndex(1);
+                                    ImGui::SetNextItemWidth(-1);
+                                    ImGui::DragFloat("##w", &src.weight, 0.1f, 0.0f, 100.0f, "%.1f");
+                                    
+                                    ImGui::TableSetColumnIndex(2);
+                                    ImGui::Text("%.1f-%.1f", src.settings.scale_min, src.settings.scale_max);
+                                    
+                                    ImGui::TableSetColumnIndex(3);
+                                    if (ImGui::SmallButton("X")) remove_idx = (int)src_i;
+                                    
+                                    if (open) {
+                                        ImGui::TableNextRow();
+                                        ImGui::TableSetColumnIndex(0);
+                                        ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, ImGui::GetColorU32(ImGuiCol_FrameBg)); // Darker bg
+                                        
+                                        // Per-Source Settings
+                                        ImGui::Indent();
+                                        ImGui::TextDisabled("Transformation Rules:");
+                                        ImGui::DragFloatRange2("Scale Rng", &src.settings.scale_min, &src.settings.scale_max, 0.01f, 0.01f, 10.0f);
+                                        ImGui::DragFloat("Rot Rand Y", &src.settings.rotation_random_y, 1.0f, 0.0f, 360.0f);
+                                        ImGui::DragFloat("Rot Rand XZ", &src.settings.rotation_random_xz, 0.1f, 0.0f, 45.0f);
+                                        ImGui::DragFloatRange2("Y Offset", &src.settings.y_offset_min, &src.settings.y_offset_max, 0.01f, -2.0f, 2.0f);
+                                        ImGui::Checkbox("Align Normal", &src.settings.align_to_normal);
+                                        if (src.settings.align_to_normal) ImGui::SliderFloat("Infl.", &src.settings.normal_influence, 0.0f, 1.0f);
+                                        ImGui::Unindent();
+                                        
+                                        ImGui::TreePop();
+                                    }
+                                    ImGui::PopID();
+                                }
+                                ImGui::EndTable();
+                                
+                                if (remove_idx >= 0) {
+                                    foliageGroup->sources.erase(foliageGroup->sources.begin() + remove_idx);
+                                }
+                            }
+                            
+                            ImGui::Spacing();
+                            
+                            // 4. GENERATION ACTION
+                            if (ImGui::Button("Generate (Scatter)")) {
+                                // Procedural Scatter Implementation
+                                if (foliageGroup->sources.empty()) {
+                                    SCENE_LOG_ERROR("No source meshes! Add a source first.");
+                                } else {
+                                    int count = 5000; // Default count or expose param
+                                    // Expose count param
+                                }
+                            }
+                            // Quick param for density
+                            static int genCount = 1000;
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(100);
+                            ImGui::InputInt("Count", &genCount);
+                            
+                            // Scatter Function
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of instances to attempt spawning");
+                            
+                            if (ImGui::Button("Run Scatter")) {
+                                std::mt19937 rng(1234 + i * 99);
+                                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                                int spawned = 0;
+                                int max_attempts = genCount * 5;
+                                
+                                for (int attempt = 0; attempt < max_attempts && spawned < genCount; attempt++) {
+                                    float u = dist(rng);
+                                    float v = dist(rng);
+                                    
+                                    // Mask Check
+                                    bool maskPass = false;
+                                    if (t->splatMap && t->splatMap->is_loaded()) {
+                                        Vec3 col = t->splatMap->get_color(u, v);
+                                        float val = 0.0f;
+                                        if (i == 0) val = col.x;
+                                        else if (i == 1) val = col.y;
+                                        else if (i == 2) val = col.z;
+                                        else val = t->splatMap->get_alpha(u, v);
+                                        
+                                        if (val > 0.2f) maskPass = true; // Hardcoded threshold
+                                    } else {
+                                        // If no splatmap, maybe allow everywhere? or just error
+                                        if (i == 0) maskPass = true; // Base layer
+                                    }
+                                    
+                                    if (!maskPass) continue;
+                                    
+                                    // Height sample
+                                    // float h = t->sampleHeight(u, v); // Need world pos conversion
+                                    float tx = (u - 0.5f) * t->heightmap.scale_xz;
+                                    float tz = (v - 0.5f) * t->heightmap.scale_xz;
+                                    // Grid coords
+                                    int gx = u * (t->heightmap.width-1);
+                                    int gy = v * (t->heightmap.height-1);
+                                    float h = t->heightmap.getHeight(gx, gy); // Fast sample
+                                    
+                                    // Filter Slope/Height rules?
+                                    // Assuming calculateNormal is available
+                                    // Vec3 normal = t->calculateNormal(gx, gy);
+                                    // float slope = acos(normal.y) * 180.0f/3.14159f;
+                                    // if (slope > foliageGroup->brush_settings.slope_max) continue;
+                                    // if (h < foliageGroup->brush_settings.height_min || h > foliageGroup->brush_settings.height_max) continue;
+                                    
+                                    // Position for transform generation
+                                    Vec3 surfacePos(tx, h, tz);
+                                    
+                                    // Generate
+                                    InstanceTransform inst = foliageGroup->generateRandomTransform(surfacePos);
+                                    
+                                    // Add
+                                    foliageGroup->addInstance(inst);
+                                    spawned++;
+                                }
+                                
+                                // Sync
+                                SceneUI::syncInstancesToScene(ctx, *foliageGroup, false);
+                                g_optix_rebuild_pending = true;
+                                ctx.renderer.resetCPUAccumulation();
+                                SCENE_LOG_INFO("Scatter complete: " + std::to_string(spawned));
+                            }
+                        }
+                    }
+                    
+                    // DISABLE LEGACY UI
+                    if (false) {
                         auto& fLayer = t->foliageLayers[i];
                         
                         ImGui::Checkbox("Enable Foliage", &fLayer.enabled);
@@ -370,28 +635,48 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                     }
                                 }
                                 
-                                // Build unique node names from scene
-                                std::set<std::string> nodeNames;
-                                for (const auto& obj : ctx.scene.world.objects) {
-                                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                    if (tri) {
-                                        std::string name = tri->getNodeName();
-                                        // Skip terrain and scatter instances
-                                        if (!name.empty() && 
-                                            name.find("Terrain") == std::string::npos &&
-                                            name.find("_inst_") == std::string::npos &&
-                                            name.find("Foliage_") == std::string::npos) {
-                                            nodeNames.insert(name);
+                                // Build unique node names from scene (Cached for performance)
+                                static std::vector<std::string> cachedNodeNames;
+                                static size_t lastObjectCount = 0;
+                                static float cacheTimer = 0.0f;
+                                
+                                // Auto-invalidate cache if object count changes or periodically
+                                bool cacheInvalid = (ctx.scene.world.objects.size() != lastObjectCount);
+                                
+                                // Force refresh every 2 seconds to catch name changes or other non-size updates
+                                cacheTimer += ImGui::GetIO().DeltaTime;
+                                if (cacheTimer > 2.0f) {
+                                    cacheInvalid = true;
+                                    cacheTimer = 0.0f;
+                                }
+
+                                if (cacheInvalid || cachedNodeNames.empty()) {
+                                    std::set<std::string> uniqueNames;
+                                    for (const auto& obj : ctx.scene.world.objects) {
+                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                        if (tri) {
+                                            std::string name = tri->getNodeName();
+                                            // Skip terrain, scatter instances, and baked geometry
+                                            if (!name.empty() && 
+                                                name.find("Terrain") == std::string::npos &&
+                                                name.find("_inst_") == std::string::npos &&
+                                                name.find("_BAKED") == std::string::npos && 
+                                                name.find("Foliage_") == std::string::npos) {
+                                                uniqueNames.insert(name);
+                                            }
                                         }
                                     }
+                                    cachedNodeNames.assign(uniqueNames.begin(), uniqueNames.end());
+                                    lastObjectCount = ctx.scene.world.objects.size();
+                                    // SCENE_LOG_INFO("[UI] Refreshed object list cache");
                                 }
                                 
-                                for (const auto& nodeName : nodeNames) {
+                                for (const auto& nodeName : cachedNodeNames) {
                                     bool is_selected = (fLayer.meshPath == nodeName);
                                     if (ImGui::Selectable(nodeName.c_str(), is_selected)) {
                                         // Capture all triangles with this node name
                                         fLayer.meshPath = nodeName;
-                                        fLayer.sourceTriangles.clear();
+                                        fLayer.sourceTriangles.clear(); // Clear old sources (important!)
                                         
                                         for (const auto& obj : ctx.scene.world.objects) {
                                             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
@@ -410,7 +695,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 }
                                 
                                 if (nodeNames.empty()) {
-                                    ImGui::TextDisabled("No objects in scene (load a model first)");
+                                    ImGui::TextDisabled("No objects in scene (import a model first)");
                                 }
                                 
                                 ImGui::EndCombo();
@@ -422,18 +707,23 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             
                             ImGui::DragFloat2("Scale Range", &fLayer.scaleRange.x, 0.01f, 0.1f, 5.0f);
                             ImGui::DragFloat2("Rot Range (Y)", &fLayer.rotationRange.x, 1.0f, 0.0f, 360.0f);
+                            ImGui::DragFloat2("Y-Offset Range", &fLayer.yOffsetRange.x, 0.05f, -10.0f, 10.0f);
                             
                             ImGui::Spacing();
                             ImGui::Separator();
                             
                             // === BRUSH MODE ===
-                            bool brushActive = foliage_brush.enabled && foliage_brush.active_layer_name == fLayer.name;
+                            // Note: active_layer_name was removed. This legacy section is largely superseded by "Foliage System" below.
+                            // We map it loosely or disable it.
+                            bool brushActive = foliage_brush.enabled && foliage_brush.active_group_id != -1; // Looser check for legacy
                             
                             ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Paint Mode");
                             if (ImGui::Checkbox("Enable Brush", &brushActive)) {
                                 if (brushActive) {
                                     foliage_brush.enabled = true;
-                                    foliage_brush.active_layer_name = fLayer.name;
+                                    foliage_brush.active_group_id = -1; // Cannot map Name -> ID easily here. Brush logic relies on ID now.
+                                    // This legacy button will just enable the brush but not bind to a valid group!
+                                    // To fix properly, user should use the new UI below.
                                     
                                     // Ensure source is captured
                                     if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
@@ -461,6 +751,9 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 
                                 const char* modes[] = { "Add", "Remove" };
                                 ImGui::Combo("Mode", &foliage_brush.mode, modes, 2);
+                                
+                                ImGui::Checkbox("Lazy Update (Wait for Release)", &foliage_brush.lazy_update);
+                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("If enabled, instances appear only when mouse is released.\nUseful for weak GPUs to prevent lag.");
                             }
                             
                             ImGui::Spacing();
@@ -507,6 +800,19 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                     if (!group) {
                                         int newId = im.createGroup(groupName, fLayer.meshPath, fLayer.sourceTriangles);
                                         group = im.getGroup(newId);
+                                    } else {
+                                        // Update existing group source if it changed (Fix for Cube issue)
+                                        // This ensures we don't get stuck with old sources
+                                        if (group->source_node_name != fLayer.meshPath) {
+                                            group->source_node_name = fLayer.meshPath;
+                                            group->source_triangles = fLayer.sourceTriangles;
+                                            
+                                            // Also update the detailed sources list
+                                            group->sources.clear();
+                                            group->sources.push_back(ScatterSource(fLayer.meshPath, fLayer.sourceTriangles));
+                                            
+                                            SCENE_LOG_INFO("[Foliage] Updated group source to '" + fLayer.meshPath + "'");
+                                        }
                                     }
                                     
                                     if (group) {
@@ -517,6 +823,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                         group->brush_settings.scale_min = fLayer.scaleRange.x;
                                         group->brush_settings.scale_max = fLayer.scaleRange.y;
                                         group->brush_settings.rotation_random_y = (fLayer.rotationRange.y - fLayer.rotationRange.x);
+                                        group->brush_settings.y_offset_min = fLayer.yOffsetRange.x;
+                                        group->brush_settings.y_offset_max = fLayer.yOffsetRange.y;
 
                                         // Scatter Parameters
                                         int targetCount = fLayer.density;
@@ -552,6 +860,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                             float terrainX = (u - 0.5f) * t->heightmap.scale_xz;
                                             float terrainZ = (v - 0.5f) * t->heightmap.scale_xz;
                                             float terrainY = t->heightmap.getHeight(gx, gy);
+                                            
+                                            // Apply Y-Offset
+                                            float yOffset = fLayer.yOffsetRange.x + (fLayer.yOffsetRange.y - fLayer.yOffsetRange.x) * dist(rng);
+                                            terrainY += yOffset;
                                             
                                             float x = terrainX;
                                             float y = terrainY;
@@ -614,8 +926,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                             }
                         }
-                        ImGui::TreePop();
-                    }
+                    */ }
                     
                     ImGui::Separator();
                     ImGui::PopID();
@@ -624,14 +935,559 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
             ImGui::Spacing();
 
+            // ===============================================================
+            // 4. CENTRALIZED FOLIAGE SYSTEM
+            // ===============================================================
+            UIWidgets::ColoredHeader("Foliage System", ImVec4(0.3f, 0.9f, 0.4f, 1.0f));
+            
+            InstanceManager& im = InstanceManager::getInstance();
+            static char newFolGroupName[64] = "New Foliage Layer";
+            ImGui::InputText("##NewFolName", newFolGroupName, 64);
+            ImGui::SameLine();
+            if (ImGui::Button("Create Foliage Layer")) {
+                std::string gName = std::string(newFolGroupName);
+                if (gName.find("Foliage") == std::string::npos) gName = "Foliage_" + gName;
+                
+                // Fix: Explicit empty vector type
+                int newId = im.createGroup(gName, "", std::vector<std::shared_ptr<Triangle>>{});
+                InstanceGroup* g = im.getGroup(newId);
+                if (g) g->brush_settings.splat_map_channel = -1; // Default to None so it works immediately
+                SCENE_LOG_INFO("Created Foliage Layer: " + gName);
+            }
+            
+            ImGui::Spacing();
+            ImGui::TextDisabled("Existing Layers:");
+            ImGui::Separator();
+            
+            int fol_remove_id = -1;
+            auto& groups = im.getGroups();
+            for (size_t g_idx = 0; g_idx < groups.size(); g_idx++) {
+                auto& group = groups[g_idx];
+                if (group.name.find("Foliage") == std::string::npos && group.name.find("Scatter") == std::string::npos) continue; 
+                
+                ImGui::PushID((int)group.id);
+                // Display Name + Count. Use ### to separate ID from changing label.
+                std::string headerLabel = group.name + " (" + std::to_string(group.instances.size()) + ")###Header";
+                if (ImGui::TreeNode(headerLabel.c_str())) {                   
+                    
+                    // SOURCES
+                     ImGui::Separator();
+                     ImGui::Text("Sources:");
+                     if (ImGui::Button("+ Add Selection")) {
+                         if (ctx.selection.hasSelection()) {
+                             std::string n = ctx.selection.selected.name;
+                             std::vector<std::shared_ptr<Triangle>> tris;
+                             for (auto& obj : ctx.scene.world.objects) {
+                                 auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                                 if (tri && tri->getNodeName() == n) tris.push_back(tri);
+                             }
+                             if (!tris.empty()) {
+                                 group.sources.emplace_back(n, tris);
+                             } else {
+                                  SCENE_LOG_WARN("Selection invalid.");
+                             }
+                         }
+                     }
+                     
+                     ImGui::SameLine();
+                     if (ImGui::Button("Pick from List")) {
+                         ImGui::OpenPopup("ObjPicker");
+                     }
+                     
+                     if (ImGui::BeginPopup("ObjPicker")) {
+                         static char filter[64] = "";
+                         ImGui::InputText("Filter", filter, 64);
+                         ImGui::Separator();
+                         
+                         ImGui::BeginChild("ObjList", ImVec2(300, 250));
+                         // Sort or just list? List is fine.
+                         // Use set to dedup names if multiple objects share name?
+                         // Scene objects usually unique per mesh instance?
+                         // We want to select by "Node Name".
+                         std::set<std::string> listed_names;
+                         
+                         // OPTIMIZATION: Use mesh_cache instead of iterating all objects
+                         // mesh_cache keys are unique node names (std::map<std::string, ...>)
+                         
+                         if (mesh_cache.empty()) {
+                             rebuildMeshCache(ctx.scene.world.objects);
+                         }
+
+                         for (const auto& [name, tris_list] : mesh_cache) {
+                             if (name.empty() || name.find("_inst_") == 0) continue;
+                             if (filter[0] != '\0' && name.find(filter) == std::string::npos) continue;
+                             
+                             if (ImGui::Selectable(name.c_str())) {
+                                 // Add all triangles associated with this name
+                                 std::vector<std::shared_ptr<Triangle>> source_tris;
+                                 source_tris.reserve(tris_list.size());
+                                 
+                                 for (const auto& pair : tris_list) {
+                                     source_tris.push_back(pair.second);
+                                 }
+                                 
+                                 if (!source_tris.empty()) {
+                                     group.sources.emplace_back(name, source_tris);
+                                 }
+                                 ImGui::CloseCurrentPopup();
+                             }
+                         }
+                         ImGui::EndChild();
+                         ImGui::EndPopup();
+                     }
+                     
+                     // List Sources
+                     for (int s_i=0; s_i<group.sources.size(); s_i++) {
+                         ImGui::PushID(s_i);
+                         auto& src = group.sources[s_i];
+                         ImGui::Text("%s (W: %.1f)", src.name.c_str(), src.weight);
+                         ImGui::SameLine();
+                         if (ImGui::SmallButton("Edit")) ImGui::OpenPopup("SrcEdit");
+                         
+                         if (ImGui::BeginPopup("SrcEdit")) {
+                             ImGui::DragFloat("Weight", &src.weight, 0.1f);
+                             ImGui::DragFloatRange2("Scale", &src.settings.scale_min, &src.settings.scale_max, 0.01f, 0.001f, 1000.0f);
+                             ImGui::DragFloatRange2("Y-Off", &src.settings.y_offset_min, &src.settings.y_offset_max, 0.01f);
+                             ImGui::EndPopup();
+                         }
+                         
+                         ImGui::SameLine();
+                         if (ImGui::SmallButton("X")) {
+                             group.sources.erase(group.sources.begin() + s_i);
+                             s_i--;
+                         }
+                         ImGui::PopID();
+                     }
+                     
+                     ImGui::Separator();
+                     // ACTIONS
+                     ImGui::Text("Scatter Settings:");
+                     ImGui::DragInt("Total Count", &group.brush_settings.target_count, 100, 1, 10000000);
+                     ImGui::InputInt("Seed", &group.brush_settings.seed);
+                     ImGui::DragFloat("Min Distance", &group.brush_settings.min_distance, 0.1f, 0.0f, 50.0f);
+                     
+                     // Helper helper for brush state
+                     bool is_active_group = (foliage_brush.active_group_id == group.id);
+                     bool is_painting = foliage_brush.enabled && is_active_group && foliage_brush.mode == 0;
+                     bool is_erasing = foliage_brush.enabled && is_active_group && foliage_brush.mode == 1;
+
+                     // Paint Button
+                     if (is_painting) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+                     if (ImGui::Button("Paint##Fol")) {
+                         if (is_painting) {
+                             foliage_brush.enabled = false;
+                             foliage_brush.active_group_id = -1;
+                         } else {
+                             foliage_brush.enabled = true;
+                             foliage_brush.active_group_id = group.id;
+                             foliage_brush.mode = 0; // ADD
+                         }
+                     }
+                     if (is_painting) ImGui::PopStyleColor();
+                     
+                     ImGui::SameLine();
+                     
+                     // Erase Button
+                     if (is_erasing) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
+                     if (ImGui::Button("Erase##Fol")) {
+                         if (is_erasing) {
+                             foliage_brush.enabled = false;
+                             foliage_brush.active_group_id = -1;
+                         } else {
+                             foliage_brush.enabled = true;
+                             foliage_brush.active_group_id = group.id;
+                             foliage_brush.mode = 1; // REMOVE
+                         }
+                     }
+                     if (is_erasing) ImGui::PopStyleColor();
+
+                     // Show Brush Settings if active
+                     if (is_active_group && foliage_brush.enabled) {
+                        ImGui::SameLine();
+                        ImGui::TextDisabled("(Active)");
+                        ImGui::DragFloat("radius##br", &foliage_brush.radius, 0.1f, 0.1f, 100.0f, "%.1f m");
+                        if (is_painting) {
+                            ImGui::DragInt("density##br", &foliage_brush.density, 1, 1, 20);
+                        }
+                        ImGui::Checkbox("Lazy Update", &foliage_brush.lazy_update);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Update scene only on mouse release (Better performance for large terrains)");
+                     }
+                     
+                     ImGui::Separator();
+
+                        ImGui::Text("Placement Rules");
+                        // Height Range
+                        ImGui::DragFloatRange2("Height Range", &group.brush_settings.height_min, &group.brush_settings.height_max, 1.0f, -500.0f, 2000.0f, "Min: %.1f m", "Max: %.1f m");
+                        
+                        // Slope Limit
+                        ImGui::DragFloat("Max Slope", &group.brush_settings.slope_max, 1.0f, 0.0f, 90.0f, "%.1f deg");
+                        
+                        // Curvature (Flow/Ridge detection)
+                        ImGui::TextDisabled("Curvature Filter:");
+                        ImGui::SameLine();
+                        ImGui::SetNextItemWidth(80);
+                        ImGui::DragInt("Scale", &group.brush_settings.curvature_step, 0.1f, 1, 20, "%d px");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Feature Scale (Step Size)\nIncrease to detect larger features like river beds or ignore noise.\n1 = Micro/Pixel details\n5+ = Macro/Terrain features");
+                        
+                        // Line 1: Ridges
+                        ImGui::Checkbox("Ridges", &group.brush_settings.allow_ridges);
+                        if (group.brush_settings.allow_ridges) {
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(80);
+                            SceneUI::DrawSmartFloat("##RThresh", "", &group.brush_settings.curvature_min, -50.0f, -0.1f, "< %.1f", false, nullptr, 0); // 0 label width as label is empty
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Threshold: Values below this are considered Ridges");
+                        }
+
+                        // Line 2: Gullies
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Gullies", &group.brush_settings.allow_gullies);
+                         if (group.brush_settings.allow_gullies) {
+                            ImGui::SameLine();
+                            ImGui::SetNextItemWidth(80);
+                            SceneUI::DrawSmartFloat("##GThresh", "", &group.brush_settings.curvature_max, 0.1f, 50.0f, "> %.1f", false, nullptr, 0);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Threshold: Values above this are considered Gullies/Channels");
+                        }
+
+                        // Line 3: Flats (Middle)
+                        ImGui::Checkbox("Flats", &group.brush_settings.allow_flats);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Allow areas between Ridge and Gully thresholds");
+                        
+                        // Splat Map Channel
+                        const char* channels[] = { "None", "Red (Grass/Flat)", "Green (Slope)", "Blue (Height/Cliff)", "Alpha (Flow/Mask)" };
+                        int current_idx = group.brush_settings.splat_map_channel + 1; // Map -1 to 0, 0 to 1, etc.
+                        if (ImGui::Combo("Mask Channel", &current_idx, channels, 5)) {
+                            group.brush_settings.splat_map_channel = current_idx - 1;
+                        }
+
+                        if (group.brush_settings.splat_map_channel != -1) {
+                             if (!t->splatMap || !t->splatMap->is_loaded()) {
+                                 ImGui::TextColored(ImVec4(1,0,0,1), "No Splat Map Loaded!");
+                             }
+                        }
+                        
+                        // Exclusion Mask UI
+                        int ex_idx = group.brush_settings.exclusion_channel + 1;
+                        if (ImGui::Combo("Exclude Channel", &ex_idx, channels, 5)) {
+                            group.brush_settings.exclusion_channel = ex_idx - 1;
+                        }
+                        if (group.brush_settings.exclusion_channel != -1) {
+                             ImGui::SameLine();
+                             ImGui::SetNextItemWidth(80);
+                             ImGui::DragFloat("Thresh##Ex", &group.brush_settings.exclusion_threshold, 0.05f, 0.0f, 1.0f);
+                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Values in this channel ABOVE this threshold will be excluded.");
+                        }
+
+                        if (ImGui::Button("Scatter Procedurally")) {
+                        // Clear existing instances to ensure fresh generation (Replace vs Append)
+                        group.clearInstances();
+
+                        int count = group.brush_settings.target_count;
+                        std::mt19937 rng(group.brush_settings.seed);
+                        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                        int spawned = 0;
+                        
+                        // Overlap Check (Simple Grid)
+                        float min_dist_sq = group.brush_settings.min_distance * group.brush_settings.min_distance;
+                        bool check_overlap = group.brush_settings.min_distance > 0.01f;
+                        std::map<std::pair<int, int>, std::vector<Vec3>> grid;
+                        float cell_size = group.brush_settings.min_distance > 0.1f ? group.brush_settings.min_distance : 1.0f;
+                        
+                        // New: Safety Counter
+                        int attempts = 0;
+                        int max_attempts = count * 100;
+
+                        // Pre-calculate slope factors same as AutoMask
+                        float scale = t->heightmap.scale_xz;
+                        float hmCellSizeX = scale / (float)(std::max(1, t->heightmap.width - 1));
+                        float hmCellSizeZ = scale / (float)(std::max(1, t->heightmap.height - 1));
+
+                        while (spawned < count && attempts < max_attempts) {
+                            attempts++;
+                            
+                            float r1 = dist(rng);
+                            float r2 = dist(rng);
+                            
+                            // Splat Map Mask Check (Importance Sampling Rejection)
+                            if (group.brush_settings.splat_map_channel >= 0 && t->splatMap && t->splatMap->is_loaded() && !t->splatMap->pixels.empty()) {
+                                float u = r1;
+                                float v = r2;
+                                // Sample splat map
+                                Vec3 maskVal = t->splatMap->get_color(u, 1.0f - v); // UV flip?
+                                float val = 0.0f;
+                                if (group.brush_settings.splat_map_channel == 0) val = maskVal.x;
+                                else if (group.brush_settings.splat_map_channel == 1) val = maskVal.y;
+                                else if (group.brush_settings.splat_map_channel == 2) val = maskVal.z;
+                                else if (group.brush_settings.splat_map_channel == 3) {
+                                    // Manual Alpha Access
+                                    int texW = t->splatMap->width;
+                                    int texH = t->splatMap->height;
+                                    int tx = (int)(u * texW) % texW;
+                                    int ty = (int)((1.0f - v) * texH) % texH;
+                                    int pIdx = ty * texW + tx;
+                                    if(pIdx < t->splatMap->pixels.size()) {
+                                        val = t->splatMap->pixels[pIdx].a / 255.0f;
+                                    }
+                                }
+                                
+                                if (val < 0.2f) continue; // Skip if mask is black
+                                if (dist(rng) > val) continue; // Probabilistic skip
+                            }
+
+                            // Exclusion Check
+                            if (group.brush_settings.exclusion_channel >= 0 && t->splatMap && t->splatMap->is_loaded() && !t->splatMap->pixels.empty()) {
+                                float u = r1;
+                                float v = r2;
+                                int texW = t->splatMap->width;
+                                int texH = t->splatMap->height;
+                                int tx = (int)(u * texW) % texW;
+                                int ty = (int)((1.0f - v) * texH) % texH;
+                                int pIdx = ty * texW + tx;
+                                
+                                float exVal = 0.0f;
+                                if (pIdx < t->splatMap->pixels.size()) {
+                                     const auto& p = t->splatMap->pixels[pIdx];
+                                     if(group.brush_settings.exclusion_channel == 0) exVal = p.r / 255.0f;
+                                     else if(group.brush_settings.exclusion_channel == 1) exVal = p.g / 255.0f;
+                                     else if(group.brush_settings.exclusion_channel == 2) exVal = p.b / 255.0f;
+                                     else if(group.brush_settings.exclusion_channel == 3) exVal = p.a / 255.0f;
+                                }
+                                
+                                if (exVal > group.brush_settings.exclusion_threshold) continue; // Excluded!
+                            }
+                            
+                            // 2. Coordinate Mapping & Height Sampling
+                            float tx = r1 * t->heightmap.scale_xz;
+                            float tz = r2 * t->heightmap.scale_xz;
+                            
+                            // Bilinear Height Sampling
+                            float grid_x = r1 * (t->heightmap.width - 1);
+                            float grid_z = r2 * (t->heightmap.height - 1);
+                            int x0 = (int)grid_x;
+                            int z0 = (int)grid_z;
+                            int x1 = std::min(x0 + 1, t->heightmap.width - 1);
+                            int z1 = std::min(z0 + 1, t->heightmap.height - 1);
+                            float fx = grid_x - x0;
+                            float fz = grid_z - z0;
+                            
+                            float h00 = t->heightmap.getHeight(x0, z0);
+                            float h10 = t->heightmap.getHeight(x1, z0);
+                            float h01 = t->heightmap.getHeight(x0, z1);
+                            float h11 = t->heightmap.getHeight(x1, z1);
+                            
+                            float h_interp = (h00 * (1.0f - fx) + h10 * fx) * (1.0f - fz) + 
+                                             (h01 * (1.0f - fx) + h11 * fx) * fz;
+                                             
+                            // 3. World Height Check (vs Min/Max)
+                            float worldHeight = h_interp;
+                            if (t->transform) worldHeight += t->transform->position.y;
+                            
+                            if (worldHeight < group.brush_settings.height_min || worldHeight > group.brush_settings.height_max) {
+                                continue;
+                            }
+
+                            // 4. Slope Check (vs Max Slope)
+                            // Approximate slope at this location using same neighbors
+                            // Need 4 neighbors from grid.
+                            // We are inside grid quad (x0, z0)
+                            // Slope ~ max derivative.
+                            float dX = (h10 - h00) / hmCellSizeX; // Slope across X in this cell
+                            float dZ = (h01 - h00) / hmCellSizeZ; // Slope across Z in this cell
+                            // This is a rough approximation for random point.
+                            // Better: Interpolated normals?
+                            // Let's use simple finite diff at nearest integer for speed/robustness match with AutoMask
+                            // Clamp sx, sz to valid range for step size
+                            int step = group.brush_settings.curvature_step;
+                            if (step < 1) step = 1;
+                            
+                            // Ensure terrain is large enough for step
+                            if (t->heightmap.width <= step * 2 || t->heightmap.height <= step * 2) continue;
+
+                            int sx = (int)(grid_x + 0.5f);
+                            int sz = (int)(grid_z + 0.5f);
+                            sx = std::clamp(sx, step, t->heightmap.width - 1 - step);
+                            sz = std::clamp(sz, step, t->heightmap.height - 1 - step);
+                            
+                            // Sample neighbors with step
+                            float hl = t->heightmap.getHeight(sx - step, sz);
+                            float hr = t->heightmap.getHeight(sx + step, sz);
+                            float hu = t->heightmap.getHeight(sx, sz - step);
+                            float hd = t->heightmap.getHeight(sx, sz + step);
+                            
+                            float slopeRunX = 2.0f * hmCellSizeX;
+                            float slopeRunZ = 2.0f * hmCellSizeZ;
+                            
+                            float dX_central = fabsf(hr - hl) / slopeRunX;
+                            float dZ_central = fabsf(hd - hu) / slopeRunZ;
+                            float slopeTan = sqrtf(dX_central*dX_central + dZ_central*dZ_central);
+                            float slopeDeg = atan(slopeTan) * 57.2958f;
+                            
+                            if (slopeDeg > group.brush_settings.slope_max) {
+                                continue;
+                            }
+                            
+                            // 5. Curvature Check (Laplacian)
+                            // (Left + Right + Up + Down - 4*Center)
+                            // Positive = Concave (Bowl/Valley)
+                            // Negative = Convex (Hill/Ridge)
+                            // NOTE: Neighbors (hl, hr, hu, hd) and center (h_center) MUST be sampled from the same grid indices used for slope.
+                            // We used neighbors of (sx, sz) for slope. We need h_center at (sx, sz).
+                            float h_center = t->heightmap.getHeight(sx, sz);
+                            
+                            float laplacian = (hl + hr + hu + hd) - 4.0f * h_center;
+                            
+                            bool is_ridge = laplacian < group.brush_settings.curvature_min;
+                            bool is_gully = laplacian > group.brush_settings.curvature_max;
+                            bool is_flat = !is_ridge && !is_gully;
+
+                            if (is_ridge && !group.brush_settings.allow_ridges) continue;
+                            if (is_gully && !group.brush_settings.allow_gullies) continue;
+                            if (is_flat && !group.brush_settings.allow_flats) continue;
+
+                            // Local Position (Y is now precise interpolated height)
+                            Vec3 localPos(tx, h_interp, tz);
+                            Vec3 worldPos = localPos;
+                            
+                            // Apply Full World Transform (Fix for Rotation/Scale issues)
+                            if (t->transform) {
+                                t->transform->updateFinal(); // Ensure matrix is current
+                                worldPos = t->transform->final.transform_point(localPos); 
+                            }
+
+
+                            if (check_overlap) {
+                                  // Grid check uses World or Local? 
+                                  // Using Local aligned grid is safer for checking relative spacing
+                                  // But if we want consistent world spacing... use World.
+                                  // Let's use WorldPos for the grid to be safe
+                                  int cx = (int)std::floor(worldPos.x / cell_size);
+                                  int cz = (int)std::floor(worldPos.z / cell_size);
+                                  bool collision = false;
+                                  
+                                  // Check 3x3
+                                  for (int dx = -1; dx <= 1; dx++) {
+                                      for (int dz = -1; dz <= 1; dz++) {
+                                           auto it = grid.find({cx+dx, cz+dz});
+                                           if (it != grid.end()) {
+                                               for (const auto& p : it->second) {
+                                                   if ((p - worldPos).length_squared() < min_dist_sq) {
+                                                       collision = true; break;
+                                                   }
+                                               }
+                                           }
+                                           if (collision) break;
+                                      }
+                                      if (collision) break;
+                                  }
+                                  if (collision) continue;
+                                  
+                                  grid[{cx, cz}].push_back(worldPos);
+                             }
+                            
+                            // Generate Instance (World Space)
+                            InstanceTransform inst = group.generateRandomTransform(worldPos, Vec3(0, 1, 0));
+                            group.addInstance(inst);
+                            spawned++;
+                        }
+                        SceneUI::syncInstancesToScene(ctx, group, false);
+                        g_optix_rebuild_pending = true;
+                        ctx.renderer.resetCPUAccumulation();
+                     }
+                     ImGui::SameLine();
+                     if (ImGui::Button("Clear Instances")) {
+                         group.clearInstances();
+                         SceneUI::syncInstancesToScene(ctx, group, true);
+                         g_optix_rebuild_pending = true;
+                         ctx.renderer.resetCPUAccumulation();
+                     }
+                     ImGui::SameLine();
+                     if (ImGui::Button("Delete Layer")) {
+                         fol_remove_id = group.id;
+                     }
+                    
+                    ImGui::Separator();
+                    if (ImGui::TreeNode("Wind Animation")) {
+                        bool enabled = group.wind_settings.enabled;
+                        if (ImGui::Checkbox("Enable Wind", &enabled)) {
+                            group.wind_settings.enabled = enabled;
+                            if (!enabled) {
+                                // Restore Rest Pose to remove bent state
+                                if (!group.initial_instances.empty() && group.initial_instances.size() == group.instances.size()) {
+                                    group.instances = group.initial_instances;
+                                }
+                            }
+                            group.gpu_dirty = true; 
+                            
+                            // Force Update
+                            ctx.renderer.resetCPUAccumulation();
+                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            g_optix_rebuild_pending = true; // Must ensure this is handled in Main loop!
+                        }
+                        
+                        if (group.wind_settings.enabled) {
+                            bool changed = false;
+                            changed |= ImGui::DragFloat("Speed", &group.wind_settings.speed, 0.05f, 0.0f, 10.0f);
+                            changed |= ImGui::DragFloat("Strength", &group.wind_settings.strength, 0.1f, 0.0f, 45.0f, "%.1f deg");
+                            changed |= ImGui::DragFloat("Turbulence", &group.wind_settings.turbulence, 0.05f, 0.0f, 5.0f);
+                            changed |= ImGui::DragFloat("Wave Size", &group.wind_settings.wave_size, 1.0f, 1.0f, 500.0f);
+                            
+                            // Direction Logic
+                            float current_angle = atan2(group.wind_settings.direction.z, group.wind_settings.direction.x) * 57.2958f;
+                            if (ImGui::DragFloat("Direction", &current_angle, 1.0f, -180.0f, 180.0f, "%.0f deg")) {
+                                float rad = current_angle / 57.2958f;
+                                group.wind_settings.direction = Vec3(cos(rad), 0, sin(rad));
+                                changed = true;
+                            }
+                            
+                            if (changed) {
+                                // Real-time preview requires reset
+                                ctx.renderer.resetCPUAccumulation();
+                                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                
+                                // Since logic is time-based, just setting dirty might not be enough if time is paused.
+                                // But Renderer::updateWind reads these values every frame.
+                            }
+                        }
+                        ImGui::TreePop(); 
+                    }
+                    
+                    ImGui::TreePop(); 
+                }
+                ImGui::PopID();
+            }
+            
+            if (fol_remove_id != -1) {
+                 // Correct logic: use deleteGroup(id)
+                 InstanceGroup* g = im.getGroup(fol_remove_id);
+                 if (g) {
+                    // Safety: If deleting the active brush group, disable brush first
+                    if (foliage_brush.active_group_id == fol_remove_id) {
+                        foliage_brush.active_group_id = -1;
+                        foliage_brush.enabled = false;
+                    }
+
+                    // CRITICAL: Stop rendering to prevent crash when modifying object list
+                    ctx.renderer.stopRendering();
+                    // Small sleep to ensure render threads exit loop
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+                    SceneUI::syncInstancesToScene(ctx, *g, true); // Clear from scene
+                    im.deleteGroup(fol_remove_id);
+                    
+                    ctx.renderer.resumeRendering();
+
+                    g_optix_rebuild_pending = true;
+                    ctx.renderer.resetCPUAccumulation();
+                 }
+            }
+
             // Auto Mask
             UIWidgets::ColoredHeader("Procedural Auto-Mask", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
             static float am_height_min = 5.0f;
             static float am_height_max = 20.0f;
             static float am_slope = 5.0f;
 
-            if (SceneUI::DrawSmartFloat("mhmin", "Height Start", &am_height_min, 0.0f, 50.0f, "%.1f", false, nullptr, 12)) {}
-            if (SceneUI::DrawSmartFloat("mhmax", "Height End", &am_height_max, 0.0f, 50.0f, "%.1f", false, nullptr, 12)) {}
+            if (SceneUI::DrawSmartFloat("mhmin", "Height Start", &am_height_min, 0.0f, 500.0f, "%.1f", false, nullptr, 12)) {}
+            if (SceneUI::DrawSmartFloat("mhmax", "Height End", &am_height_max, 0.0f, 500.0f, "%.1f", false, nullptr, 12)) {}
             if (SceneUI::DrawSmartFloat("mslope", "Slope Steep", &am_slope, 1.0f, 20.0f, "%.1f", false, nullptr, 12)) {}
 
             if (ImGui::Button("Generate Mask")) {
@@ -641,6 +1497,100 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 g_optix_rebuild_pending = true;
                 SCENE_LOG_INFO("Auto-mask generated for: " + t->name);
             }
+            
+            ImGui::SameLine();
+            ImGui::SameLine();
+            static float bake_flow_threshold = 25.0f;
+            if (ImGui::Button("Bake Flow to Alpha")) {
+                if (t->splatMap && t->splatMap->is_loaded()) {
+                    // Simple Flow Accumulation Logic (Single Pass Downhill)
+                    // 1. Compute Flow
+                    std::vector<float> flow(t->heightmap.width * t->heightmap.height, 1.0f); // Init with 1 (rain)
+                    
+                    // Iterate by height (highest first) - approximate by just grid iteration? 
+                    // No, for flow we really need sorted height. But for UI tool, maybe a simpler local slope accumulation?
+                    // Let's do a simple multi-pass accumulation.
+                    
+                    int w = t->heightmap.width;
+                    int h = t->heightmap.height;
+                    
+                    // Create indices and sort by height (descending)
+                    std::vector<std::pair<float, int>> sorted_idx;
+                    sorted_idx.reserve(w * h);
+                    for(int z=0; z<h; z++) {
+                        for(int x=0; x<w; x++) {
+                            sorted_idx.push_back({t->heightmap.getHeight(x, z), z*w + x});
+                        }
+                    }
+                    std::sort(sorted_idx.rbegin(), sorted_idx.rend()); // High to Low
+                    
+                    // Propagate Flow
+                    for(const auto& pair : sorted_idx) {
+                        int idx = pair.second;
+                        int x = idx % w;
+                        int z = idx / w;
+                        float currentH = pair.first;
+                        float water = flow[idx];
+                        
+                        // Find lowest neighbor
+                        float minH = currentH;
+                        int targetIdx = -1;
+                        
+                        int neighbors[8][2] = {{-1,-1}, {0,-1}, {1,-1}, {-1,0}, {1,0}, {-1,1}, {0,1}, {1,1}};
+                        for(auto& n : neighbors) {
+                            int nx = x + n[0];
+                            int nz = z + n[1];
+                            if(nx >=0 && nx < w && nz >=0 && nz < h) {
+                                float nh = t->heightmap.getHeight(nx, nz);
+                                if(nh < minH) {
+                                    minH = nh;
+                                    targetIdx = nz * w + nx;
+                                }
+                            }
+                        }
+                        
+                        if(targetIdx != -1) {
+                            flow[targetIdx] += water;
+                        }
+                    }
+                    
+                    // Log-scale and Normalize
+                    float maxFlow = 0.0f;
+                    for(float v : flow) if(v > maxFlow) maxFlow = v;
+                    
+                    for(int i=0; i<w*h; i++) {
+                         float f = flow[i];
+                         
+                         // Threshold filtering
+                         if (f < bake_flow_threshold) {
+                             f = 0.0f;
+                         }
+                         
+                         // Log scale for better visibility of channels
+                         float val = 0.0f;
+                         if (f > 0.0f) {
+                             val = log(f) / log(maxFlow > 1 ? maxFlow : 2.0f);
+                             val = std::pow(val, 0.5f); // Gamma correct usually helps flow maps
+                             if(val > 1.0f) val = 1.0f;
+                         }
+                         
+                         // Write to Alpha (Channel 3)
+                         // Texture uses std::vector<CompactVec4> pixels.
+                         if (i < t->splatMap->pixels.size()) {
+                             t->splatMap->pixels[i].a = static_cast<uint8_t>(std::clamp(val * 255.0f, 0.0f, 255.0f));
+                         }
+                    }
+                    
+                    t->splatMap->upload_to_gpu(); // Important!
+                    SCENE_LOG_INFO("Flow baked to Splat Map Alpha channel.");
+                } else {
+                    SCENE_LOG_ERROR("No Splat Map loaded/generated to bake flow into.");
+                }
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(100);
+            ImGui::DragFloat("Flow Thresh", &bake_flow_threshold, 1.0f, 1.0f, 500.0f, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum flow accumulation to be written to Alpha.\nIncrease this to ignore flat areas/rain and keep only rivers.");
             
             ImGui::SameLine();
             if (ImGui::Button("Export Splat Map")) {
@@ -987,11 +1937,19 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
     if (!terrain) return;
     
     // Check intersection with terrain mesh
-    if (ctx.scene.world.hit(r, 0.001f, 1e9f, rec)) {
-        bool is_terrain = (rec.materialID == terrain->material_id);
+    // USE TERRAIN-ONLY RAYCAST (Prevents hitting foliage/instances)
+    float t_hit = 0.0f;
+    Vec3 normal_hit;
+    
+    if (TerrainManager::getInstance().intersectRay(terrain, r, t_hit, normal_hit)) {
+        // Construct Hit Point
+        Vec3 hitPoint = r.at(t_hit);
+        
+        // For compatibility with rest of code (though we ignore material check now as intersectRay ONLY checks this terrain)
+        bool is_terrain = true;
         
         if (is_terrain) {
-            Vec3 hitPoint = rec.point;
+            // hitPoint is set above
             
             // DRAW PREVIEW
             if (terrain_brush.show_preview) {
@@ -1087,7 +2045,9 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      ctx.renderer.resetCPUAccumulation();
                      
                      if (ctx.optix_gpu_ptr && g_hasOptix && ctx.render_settings.use_optix) {
-                         ctx.optix_gpu_ptr->updateTLASGeometry(ctx.scene.world.objects);
+                         // OPTIMIZATION: Only update the terrain mesh BLAS
+                         // Does NOT trigger full scene rebuild, just BLAS upload + TLAS refit
+                         ctx.optix_gpu_ptr->updateMeshBLASFromTriangles(terrain->name, terrain->mesh_triangles);
                      }
                      g_bvh_rebuild_pending = true;
                  }
@@ -1096,201 +2056,6 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// TERRAIN FOLIAGE BRUSH - Paint to add/remove foliage instances
-// ═══════════════════════════════════════════════════════════════════════════════
 
-void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
-    if (!foliage_brush.enabled) return;
-    if (ImGui::GetIO().WantCaptureMouse) return;
-    
-    // Get active terrain
-    auto& terrains = TerrainManager::getInstance().getTerrains();
-    if (terrains.empty()) return;
-    
-    TerrainObject* t = nullptr;
-    TerrainFoliageLayer* activeLayer = nullptr;
-    
-    // Find active terrain and layer by name
-    for (auto& terrain : terrains) {
-        for (auto& fLayer : terrain.foliageLayers) {
-            if (fLayer.name == foliage_brush.active_layer_name) {
-                t = &terrain;
-                activeLayer = &fLayer;
-                break;
-            }
-        }
-        if (t) break;
-    }
-    
-    if (!t || !activeLayer) return;
-    auto& fLayer = *activeLayer;
-    
-    // Auto-capture source if missing but meshPath is set
-    // This fixes the issue where user enables brush but hasn't clicked "Scatter Now" yet
-    if (fLayer.sourceTriangles.empty() && !fLayer.meshPath.empty()) {
-        for (const auto& obj : ctx.scene.world.objects) {
-             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-             if (tri && tri->getNodeName() == fLayer.meshPath) {
-                 fLayer.sourceTriangles.push_back(tri);
-             }
-        }
-        if (!fLayer.sourceTriangles.empty()) {
-             fLayer.calculateMeshCenter();
-        }
-    }
-    
-    if (!fLayer.hasValidSource()) return;
-    
-    // Check for mouse click on terrain
-    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
-    
-    // Throttle painting (paint every 200ms)
-    static float last_paint_time = 0.0f;
-    float current_time = static_cast<float>(ImGui::GetTime());
-    if (current_time - last_paint_time < 0.2f) return;
-    last_paint_time = current_time;
-    
-    // Get mouse position and raycast to terrain
-    ImVec2 mp = ImGui::GetMousePos();
-    
-    // Use globals for width/height
-    extern int image_width, image_height;
-    int width = image_width;
-    int height = image_height;
-    
-    float u = mp.x / width;
-    float v = mp.y / height;
-    
-    Ray ray;
-    if (ctx.scene.camera) {
-        ray = ctx.scene.camera->get_ray(u, 1.0f - v);
-    } else {
-        return;
-    }
-    
-    HitRecord hit;
-    if (!ctx.scene.bvh || !ctx.scene.bvh->hit(ray, 0.001f, 10000.0f, hit)) return;
-    
-    // Check if we hit terrain
-    if (!hit.triangle) return;
-    std::string hitName = hit.triangle->getNodeName();
-    // Simplified check: checking for "Terrain" string might fail if user renamed object.
-    // Since we are raycasting against the whole scene, we assume if user clicks on something while 
-    // aiming at terrain, they intend to paint. 
-    // Ideally we would check if hit object is the active terrain, but we don't have easy pointer comparison here 
-    // without iterating objects.
-    
-    Vec3 hitPoint = hit.point;
-    
-    // Declarations for flags
-    extern bool g_bvh_rebuild_pending;
-    extern bool g_optix_rebuild_pending;
-    
-    // Verify InstanceGroup exists for this layer
-    std::string groupName = "Foliage_" + t->name + "_" + fLayer.name;
-    InstanceManager& im = InstanceManager::getInstance();
-    InstanceGroup* group = im.findGroupByName(groupName);
-
-    if (!group) {
-        // Create new group if missing
-        int newId = im.createGroup(groupName, fLayer.meshPath, fLayer.sourceTriangles);
-        group = im.getGroup(newId);
-    }
-
-    if (group) {
-        // Sync settings
-        group->brush_settings.scale_min = fLayer.scaleRange.x;
-        group->brush_settings.scale_max = fLayer.scaleRange.y;
-        group->brush_settings.rotation_random_y = (fLayer.rotationRange.y - fLayer.rotationRange.x);
-
-        if (foliage_brush.mode == 0) {
-            // ADD MODE - Add instances to group
-            std::random_device rd;
-            std::mt19937 rng(rd());
-            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-            
-            int added = 0;
-            for (int i = 0; i < foliage_brush.density; ++i) {
-                // Random offset within brush radius
-                float angle = dist(rng) * 6.28318f;
-                float r = dist(rng) * foliage_brush.radius;
-                float offsetX = cosf(angle) * r;
-                float offsetZ = sinf(angle) * r;
-                
-                // Position (XZ)
-                float x = hitPoint.x + offsetX;
-                float z = hitPoint.z + offsetZ;
-                
-                // Get Y from heightmap
-                float scale = t->heightmap.scale_xz;
-                float u_pos = (x / scale) + 0.5f;
-                float v_pos = (z / scale) + 0.5f;
-                u_pos = std::clamp(u_pos, 0.0f, 1.0f);
-                v_pos = std::clamp(v_pos, 0.0f, 1.0f);
-                
-                int gx = (int)(u_pos * (t->heightmap.width - 1));
-                int gy = (int)(v_pos * (t->heightmap.height - 1));
-                float y = t->heightmap.getHeight(gx, gy);
-                
-                // Properties
-                float instanceScale = fLayer.scaleRange.x + (fLayer.scaleRange.y - fLayer.scaleRange.x) * dist(rng);
-                float rotY_deg = fLayer.rotationRange.x + (fLayer.rotationRange.y - fLayer.rotationRange.x) * dist(rng);
-                
-                InstanceTransform inst;
-                inst.position = Vec3(x, y, z);
-                inst.scale = Vec3(instanceScale, instanceScale, instanceScale);
-                inst.rotation = Vec3(0, rotY_deg, 0); 
-                
-                group->addInstance(inst);
-                added++;
-            }
-            
-            if (added > 0) {
-                hud_captured_mouse = true;
-                
-                // Sync group to scene (updates renderable objects)
-                SceneUI::syncInstancesToScene(ctx, *group, false);
-                
-                // Rebuild acceleration structures
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                
-                g_bvh_rebuild_pending = true;
-                g_optix_rebuild_pending = true;
-                
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                
-                SCENE_LOG_INFO("[Foliage Brush] Added " + std::to_string(added) + " instances to " + groupName);
-            }
-        }
-        else if (foliage_brush.mode == 1) {
-            // REMOVE MODE
-            size_t before = group->getInstanceCount();
-            group->removeInstancesInRadius(hitPoint, foliage_brush.radius);
-            size_t after = group->getInstanceCount();
-            
-            if (before != after) {
-                hud_captured_mouse = true;
-                
-                // Sync group to scene
-                SceneUI::syncInstancesToScene(ctx, *group, false);
-                
-                // Rebuild
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                
-                g_bvh_rebuild_pending = true;
-                g_optix_rebuild_pending = true;
-                
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                
-                SCENE_LOG_INFO("[Foliage Brush] Removed " + std::to_string(before - after) + " instances");
-            }
-        }
-    }
-}
 
 #endif

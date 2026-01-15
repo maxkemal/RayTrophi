@@ -2,6 +2,7 @@
 #include <HittableList.h>
 #include <AssimpLoader.h>
 #include "KeyframeSystem.h"
+#include "VDBVolume.h"
 
 #include <string>
 
@@ -112,6 +113,47 @@ struct SceneData {
     std::vector<ImportedModelContext> importedModelContexts;
 
     // =========================================================================
+    // VDB Volume Objects (Industry-Standard Volumetrics)
+    // =========================================================================
+    std::vector<std::shared_ptr<VDBVolume>> vdb_volumes;
+    
+    // Add a VDB volume to the scene
+    void addVDBVolume(std::shared_ptr<VDBVolume> vol) {
+        if (vol) {
+            vdb_volumes.push_back(vol);
+        }
+    }
+    
+    // Remove a VDB volume from the scene
+    bool removeVDBVolume(std::shared_ptr<VDBVolume> vol) {
+        auto it = std::find(vdb_volumes.begin(), vdb_volumes.end(), vol);
+        if (it != vdb_volumes.end()) {
+            vdb_volumes.erase(it);
+            return true;
+        }
+        return false;
+    }
+    
+    // Find VDB volume by name
+    std::shared_ptr<VDBVolume> findVDBVolumeByName(const std::string& name) const {
+        for (const auto& vol : vdb_volumes) {
+            if (vol && vol->name == name) {
+                return vol;
+            }
+        }
+        return nullptr;
+    }
+    
+    // Update VDB volumes from timeline (for animation)
+    void updateVDBVolumesFromTimeline(int frame) {
+        for (auto& vol : vdb_volumes) {
+            if (vol && vol->isLinkedToTimeline()) {
+                vol->updateFromTimeline(frame);
+            }
+        }
+    }
+
+    // =========================================================================
     // Clear all scene data
     // =========================================================================
     void clear() {
@@ -122,6 +164,7 @@ struct SceneData {
         boneData.clear();              // Clear bone hierarchy
         timeline.clear();              // Clear keyframes
         importedModelContexts.clear(); // Clear model contexts (releases aiScene memory)
+        vdb_volumes.clear();           // Clear VDB volumes
         camera = nullptr;
         active_camera_index = 0;
         bvh = nullptr;

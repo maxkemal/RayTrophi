@@ -443,111 +443,153 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 return;
             }
 
-            if (hit && rec.triangle && (rec.t < closest_t)) {
-                std::shared_ptr<Triangle> found_tri = nullptr;
-                int index = -1;
+            if (hit && (rec.t < closest_t)) {
 
-                // Ensure cache is valid
-                if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+                // --- VDB VOLUME SELECTION ---
+                if (rec.vdb_volume) {
+                    std::shared_ptr<VDBVolume> found_vdb = nullptr;
+                    int index = -1;
 
-                bool found = false;
-                for (auto& [name, list] : mesh_cache) {
-                    for (auto& pair : list) {
-                        if (pair.second.get() == rec.triangle) {
-                            found_tri = pair.second;
-                            index = pair.first;
-                            found = true;
+                    // Find shared_ptr for this VDB
+                    for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
+                        if (ctx.scene.world.objects[i].get() == rec.vdb_volume) {
+                            found_vdb = std::dynamic_pointer_cast<VDBVolume>(ctx.scene.world.objects[i]);
+                            index = (int)i;
                             break;
                         }
                     }
-                    if (found) break;
+
+                    if (found_vdb) {
+                        if (ctrl_held) {
+                            // Multi-selection
+                            SelectableItem item;
+                            item.type = SelectableType::VDBVolume;
+                            item.vdb_volume = found_vdb;
+                            item.vdb_index = index;
+                            item.name = "VDB_Volume"; // Name could be improved
+
+                            if (ctx.selection.isSelected(item)) {
+                                ctx.selection.removeFromSelection(item);
+                            }
+                            else {
+                                ctx.selection.addToSelection(item);
+                            }
+                        }
+                        else {
+                            // Single selection
+                            ctx.selection.selectVDBVolume(found_vdb, index, "VDB_Volume");
+                            SCENE_LOG_INFO("Selected VDB Volume via viewport");
+                        }
+                    }
                 }
 
-                if (found_tri) {
+                // --- TRIANGLE SELECTION ---
+                else if (rec.triangle) {
+                    std::shared_ptr<Triangle> found_tri = nullptr;
+                    int index = -1;
+
+                    // Ensure cache is valid
+                    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+                    bool found = false;
+                    for (auto& [name, list] : mesh_cache) {
+                        for (auto& pair : list) {
+                            if (pair.second.get() == rec.triangle) {
+                                found_tri = pair.second;
+                                index = pair.first;
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (found) break;
+                    }
+
+                    if (found_tri) {
+                        if (ctrl_held) {
+                            // Multi-selection: Toggle object in selection list
+                            SelectableItem item;
+                            item.type = SelectableType::Object;
+                            item.object = found_tri;
+                            item.object_index = index;
+                            item.name = found_tri->nodeName;
+
+                            if (ctx.selection.isSelected(item)) {
+                                ctx.selection.removeFromSelection(item);
+                                // SCENE_LOG_INFO("Multi-select: Removed '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
+                            }
+                            else {
+                                ctx.selection.addToSelection(item);
+                                // SCENE_LOG_INFO("Multi-select: Added '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
+                            }
+                        }
+                        else {
+                            // Single selection: Replace selection
+                            ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+
+                            // TERRAIN CONNECTION: Check if this is a terrain chunk
+                            std::string tName = found_tri->nodeName;
+                            if (tName.find("Terrain_") == 0) {
+                                size_t chunkPos = tName.find("_Chunk");
+                                if (chunkPos != std::string::npos) {
+                                    tName = tName.substr(0, chunkPos);
+                                }
+                                auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                                if (terrain) {
+                                    terrain_brush.active_terrain_id = terrain->id;
+                                    show_terrain_tab = true;
+                                    tab_to_focus = "Terrain";
+                                    SCENE_LOG_INFO("Terrain selected via viewport: " + tName);
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        SCENE_LOG_WARN("Selection: Object found but not in cache.");
+                    }
+                }
+                else if (closest_camera && closest_camera_t < closest_t) {
+                    // Camera is closer than light
                     if (ctrl_held) {
-                        // Multi-selection: Toggle object in selection list
                         SelectableItem item;
-                        item.type = SelectableType::Object;
-                        item.object = found_tri;
-                        item.object_index = index;
-                        item.name = found_tri->nodeName;
+                        item.type = SelectableType::Camera;
+                        item.camera = closest_camera;
+                        item.name = "Camera";
 
                         if (ctx.selection.isSelected(item)) {
                             ctx.selection.removeFromSelection(item);
-                            // SCENE_LOG_INFO("Multi-select: Removed '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
                         }
                         else {
                             ctx.selection.addToSelection(item);
-                            // SCENE_LOG_INFO("Multi-select: Added '" + item.name + "' (Total: " + std::to_string(ctx.selection.multi_selection.size()) + ")");
                         }
                     }
                     else {
-                        // Single selection: Replace selection
-                        ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
-                        
-                        // TERRAIN CONNECTION: Check if this is a terrain chunk
-                        std::string tName = found_tri->nodeName;
-                        if (tName.find("Terrain_") == 0) {
-                            size_t chunkPos = tName.find("_Chunk");
-                            if (chunkPos != std::string::npos) {
-                                tName = tName.substr(0, chunkPos);
-                            }
-                            auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
-                            if (terrain) {
-                                terrain_brush.active_terrain_id = terrain->id;
-                                show_terrain_tab = true;
-                                tab_to_focus = "Terrain";
-                                SCENE_LOG_INFO("Terrain selected via viewport: " + tName);
-                            }
+                        ctx.selection.selectCamera(closest_camera);
+                    }
+                }
+                else if (closest_light) {
+                    if (ctrl_held) {
+                        SelectableItem item;
+                        item.type = SelectableType::Light;
+                        item.light = closest_light;
+                        item.light_index = closest_light_index;
+                        item.name = "Light";
+
+                        if (ctx.selection.isSelected(item)) {
+                            ctx.selection.removeFromSelection(item);
+                        }
+                        else {
+                            ctx.selection.addToSelection(item);
                         }
                     }
-                }
-                else {
-                    SCENE_LOG_WARN("Selection: Object found but not in cache.");
-                }
-            }
-            else if (closest_camera && closest_camera_t < closest_t) {
-                // Camera is closer than light
-                if (ctrl_held) {
-                    SelectableItem item;
-                    item.type = SelectableType::Camera;
-                    item.camera = closest_camera;
-                    item.name = "Camera";
-
-                    if (ctx.selection.isSelected(item)) {
-                        ctx.selection.removeFromSelection(item);
-                    }
                     else {
-                        ctx.selection.addToSelection(item);
+                        ctx.selection.selectLight(closest_light);
                     }
                 }
                 else {
-                    ctx.selection.selectCamera(closest_camera);
-                }
-            }
-            else if (closest_light) {
-                if (ctrl_held) {
-                    SelectableItem item;
-                    item.type = SelectableType::Light;
-                    item.light = closest_light;
-                    item.light_index = closest_light_index;
-                    item.name = "Light";
-
-                    if (ctx.selection.isSelected(item)) {
-                        ctx.selection.removeFromSelection(item);
+                    // Clicked on empty space - clear selection only if Ctrl is not held
+                    if (!ctrl_held) {
+                        ctx.selection.clearSelection();
                     }
-                    else {
-                        ctx.selection.addToSelection(item);
-                    }
-                }
-                else {
-                    ctx.selection.selectLight(closest_light);
-                }
-            }
-            else {
-                // Clicked on empty space - clear selection only if Ctrl is not held
-                if (!ctrl_held) {
-                    ctx.selection.clearSelection();
                 }
             }
         }
@@ -563,15 +605,48 @@ void SceneUI::triggerDelete(UIContext& ctx) {
 
     // Collect all items to delete (supports multi-selection)
     std::vector<SelectableItem> items_to_delete = ctx.selection.multi_selection;
-
-    // Build mesh cache once if needed
-    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
-
+    
     // OPTIMIZATION: Collect ALL hittable pointers to delete into a single set for O(1) lookup
     // Using Hittable* (base class) for type safety
     std::unordered_set<Hittable*> objects_to_delete;
     std::vector<std::string> deleted_names;
     std::vector<std::pair<std::string, std::vector<std::shared_ptr<Triangle>>>> undo_data;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // VDB VOLUME DELETION
+    // ═══════════════════════════════════════════════════════════════════════════
+    bool vdb_deleted = false;
+    for (const auto& item : items_to_delete) {
+        if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
+            // Unload GPU resources
+            item.vdb_volume->unload();
+            
+            // Remove from Scene VDB list
+            if (ctx.scene.removeVDBVolume(item.vdb_volume)) {
+                vdb_deleted = true;
+                SCENE_LOG_INFO("Deleted VDB Volume: " + item.vdb_volume->name);
+            }
+            
+            // Also ensure it is removed from world.objects (Hittable list)
+            // This is handled generically below if we add it to objects_to_delete, 
+            // OR we can explicitly remove it here.
+            // Since VDBVolume is a Hittable, forcing it into objects_to_delete is safest.
+            objects_to_delete.insert(item.vdb_volume.get());
+        }
+    }
+
+    if (vdb_deleted) {
+        // Sync empty/reduced list to GPU immediately to prevent invalid memory access
+        if (ctx.optix_gpu_ptr) {
+            syncVDBVolumesToGPU(ctx);
+            // Also reset accumulation as scene changed
+            ctx.optix_gpu_ptr->resetAccumulation();
+        }
+        ctx.renderer.resetCPUAccumulation();
+    }
+
+    // Build mesh cache once if needed
+    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
     // First pass: Collect all triangles to delete
     for (const auto& item : items_to_delete) {

@@ -32,6 +32,7 @@ struct TerrainFoliageLayer {
     Vec2 scaleRange = Vec2(0.8f, 1.2f);
     Vec2 rotationRange = Vec2(0.0f, 360.0f); // Y-axis rotation in degrees
     float alignToNormal = 0.0f;  // 0.0 = Up(Y), 1.0 = Align to Surface Normal
+    Vec2 yOffsetRange = Vec2(0.0f, 0.0f); // Y-axis offset range (min, max)
     
     // Runtime data
     std::vector<int> instanceIds; // IDs of spawned instances in OptixAccelManager

@@ -8,6 +8,7 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "AABB.h"
+#include "VDBVolume.h"
 #include <algorithm>
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -75,6 +76,14 @@ void SceneSelection::updatePositionFromSelection() {
                 }
             }
             break;
+
+        case SelectableType::VDBVolume:
+            if (selected.vdb_volume) {
+                selected.position = selected.vdb_volume->getPosition();
+                selected.rotation = selected.vdb_volume->getRotation();
+                selected.scale = selected.vdb_volume->getScale();
+            }
+            break;
             
         default:
             break;
@@ -133,6 +142,22 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
                 }
             }
             break;
+
+        case SelectableType::VDBVolume:
+            if (item.vdb_volume) {
+                Matrix4x4 current = item.vdb_volume->getTransform();
+                Matrix4x4 new_transform = delta_transform * current;
+                
+                Vec3 p, r, s;
+                new_transform.decompose(p, r, s);
+                
+                item.vdb_volume->setPosition(p);
+                item.vdb_volume->setRotation(r);
+                item.vdb_volume->setScale(s);
+                
+                item.position = p;
+            }
+            break;
             
         default:
             break;
@@ -189,6 +214,12 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
                 }
             }
             break;
+
+        case SelectableType::VDBVolume:
+            if (selected.vdb_volume) {
+                result = selected.vdb_volume->getTransform();
+            }
+            break;
             
         default:
             break;
@@ -230,7 +261,10 @@ bool SceneSelection::isSelected(const SelectableItem& item) const {
             if (s.light == item.light) return true;
         }
         else if (s.type == SelectableType::Camera || s.type == SelectableType::CameraTarget) {
-            if (s.camera == item.camera) return true;
+                if (s.camera == item.camera) return true;
+        }
+        else if (s.type == SelectableType::VDBVolume) {
+            if (s.vdb_volume == item.vdb_volume) return true;
         }
     }
     return false;
@@ -265,6 +299,9 @@ void SceneSelection::removeFromSelection(const SelectableItem& item) {
             }
             else if (s.type == SelectableType::Camera || s.type == SelectableType::CameraTarget) {
                 return s.camera == item.camera;
+            }
+            else if (s.type == SelectableType::VDBVolume) {
+                return s.vdb_volume == item.vdb_volume;
             }
             return false;
         });
@@ -306,6 +343,16 @@ void SceneSelection::selectLight(std::shared_ptr<Light> light, int index, const 
     item.type = SelectableType::Light;
     item.light = light;
     item.light_index = index;
+    item.name = name;
+    addToSelection(item);
+}
+
+void SceneSelection::selectVDBVolume(std::shared_ptr<VDBVolume> vdb, int index, const std::string& name) {
+    clearSelection();
+    SelectableItem item;
+    item.type = SelectableType::VDBVolume;
+    item.vdb_volume = vdb;
+    item.vdb_index = index;
     item.name = name;
     addToSelection(item);
 }

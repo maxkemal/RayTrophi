@@ -261,6 +261,9 @@
     <ClInclude Include="source\include\TerrainFFT.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\VDBVolumeManager.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -482,6 +485,18 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\RiverManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\SceneExporter.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\VDBVolumeManager.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\VDBVolume.cpp">
+      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\scene_ui_vdb.cpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClCompile>
   </ItemGroup>

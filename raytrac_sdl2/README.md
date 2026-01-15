@@ -1,78 +1,87 @@
-# RayTrophi - Advanced OptiX Ray Tracing Engine
+# RayTrophi - Advanced OptiX & Hybrid Ray Tracing Engine
 
-A high-performance modular ray tracing engine built with NVIDIA OptiX 7, SDL2, and ImGui. Features real-time path tracing, volumetric clouds, and a comprehensive scene editor.
+RayTrophi is a high-performance, modular ray tracing engine built with **NVIDIA OptiX 7**, **SDL2**, **ImGui**, and **OpenVDB (NanoVDB)**. It bridges the gap between real-time preview and offline path tracing, offering advanced features like volumetric rendering, node-based terrain generation, and a complete animation timeline.
+
+![RayTrophi](RayTrophi_image.png)
 
 ## 🚀 Key Features
 
-### 🎨 Rendering Core
-- **Hybrid Rendering:** CPU (Embree/Parallel BVH) and GPU (OptiX 7) support.
-- **Materials:** Principled BSDF with support for Albedo, Metallic, Roughness, Normal, Transmission, and Emission maps.
-- **Volumetrics:** 
-  - Advanced parametric cloud system with dual layers.
-  - 3D Noise-based volumetric fog and clouds.
-  - Accurate light absorption and scattering.
-- **Lighting:** Area, Spot, Point, and Directional lights with soft shadows.
-- **Denoiser:** Integrated OIDN (Open Image Denoise) for clean previews.
+### 🔥 Volumetric Rendering (VDB)
+- **OpenVDB / NanoVDB Support:** Import standard `.vdb` files and sequences.
+- **Sequence Playback:** Real-time playback of volumetric animations (explosions, smoke, fire).
+- **GPU Path Tracing:** Fully accelerated volumetric rendering on NVIDIA GPUs.
+- **Blackbody Emission:** Physically accurate temperature-based emission (Fire/Explosion).
+- **Hybrid Support:** Falls back to CPU rendering if GPU is unavailable.
 
-### 🛠️ Scene Editor (New!)
-- **Manipulators:** Modern 3D Gizmos for Translate, Rotate, Scale.
-- **Undo/Redo System:** 
-  - Robust history stack for **Object Deletion**, **Duplication**, and **Transformations**.
-  - Smart memory management (limits separate for heavy geometry vs. lightweight transforms).
-  - Shortcuts: `Ctrl+Z` (Undo), `Ctrl+Y` (Redo).
-- **Object Management:**
-  - Shift+Drag to Duplicate objects safely.
-  - Delete objects with `Del` or `X`.
-  - Hierarchy and Outliner panels.
+### 🎬 Animation System
+- **Timeline & Keyframing:** Animate Objects, Lights, Cameras, and World properties.
+- **Graph Editor:** Node-based animation control.
+- **Animation Render Mode:** Batch render image sequences with `render_Animation` loop.
+- **Skinned Mesh Support:** Basic character animation (CPU skinning -> GPU upload).
+
+### 🌍 Terrain & Environment
+- **Terrain Node System (V2):** 
+  - Graph-based terrain generation (Perlin, Erosion, Hydraulic, Thermal).
+  - **AutoSplat:** Slope/Height based texturing.
+  - **Splat Maps:** Export generated masks to PNG.
+- **Water System:**
+  - **FFT Ocean:** Real-time deep ocean simulation.
+  - **Gerstner Waves:** Shoreline/Lake wave simulation.
+  - **River Editor:** Bezier-spline based river placement tools.
+- **Atmosphere:**
+  - Nishita Sky Model (Spectral Day/Night Cycle).
+  - Volumetric Fog & God Rays.
+  - Dual-Lobe Cumulus Clouds.
+
+### 🖌️ Scene Editor & Tools
+- **Scatter Brush:** Paint foliage/instances directly onto terrain surfaces.
+- **Terrain Brush:** Sculpt and paint terrain height/features in real-time.
+- **Gizmos:** Blender-style 3D manipulators (Translate, Rotate, Scale).
+- **Undo/Redo:** Robust command history for all scene operations.
+- **Asset Management:** GLTF/GLB import support with materials.
+
+### 🎨 Rendering Core
+- **Hybrid Engine:** 
+  - **GPU:** OptiX 7 (RTX Accelerated) Path Tracing.
+  - **CPU:** Intel Embree / Parallel BVH Fallback.
+- **Materials:** Principled BSDF (Disney), Glass, Metal, Emission, Volumetric.
+- **Denoiser:** OIDN (Open Image Denoise) integration.
 
 ## 🎮 Controls
 
-### Camera
+### Viewport Navigation
 - **Orbit:** Middle Mouse Drag
 - **Pan:** Shift + Middle Mouse Drag
 - **Zoom:** Mouse Wheel or Ctrl + Middle Mouse Drag
-- **Move:** Arrow Keys & PageUp/PageDown
+- **Focus:** `F` (Focus on selected object)
 
-### Scene Manipulation
+### Tools & Edit
 - **Select:** Left Click
-- **Gizmo Modes:**
-  - `G` or `W`: Translate
-  - `R`: Rotate
-  - `S`: Scale
-- **Actions:**
-  - `Shift + Drag`: Duplicate Object
-  - `Del` or `X`: Delete Object
-  - `Ctrl + Z`: Undo
-  - `Ctrl + Y`: Redo
-  - `F12`: Trigger Final Render
+- **Gizmo Modes:** `G` (Grab), `R` (Rotate), `S` (Scale)
+- **Duplicate:** `Shift + Drag`
+- **Delete:** `Del` or `X`
+- **Undo/Redo:** `Ctrl+Z` / `Ctrl+Y`
+- **Play Animation:** `Space`
 
-## 📦 Recent Updates
-- **Terrain Node System 2.0:** 
-  - Geo-based procedural texturing (AutoSplat) based on height & slope.
-  - New Node Types: `AutoSplat`, `MaskPaint`, `MaskImage`, `SplatOutput`.
-  - Export Splat Maps directly to PNG.
-- **Advanced Sky System:**
-  - "RayTrophi Spectral Sky" (Nishita model) with Day/Night cycle.
-  - Volumetric Fog, God Rays, and Multi-Scattering support.
-  - Dual-Lobe Cumulus Clouds with height-based density.
-- **Animation Timeline:**
-  - Keyframe support for Objects, Lights, Cameras, and World properties.
-  - Interpolated rendering for smooth animations.
-- **GPU Acceleration:**
-  - Fully GPU-accelerated Hydraulic & Wind Erosion.
-  - Real-time Gerstner Water Waves calculation on GPU.
-
-### Previous Updates
-- **Full Undo/Redo Implementation:** Command Pattern for scene state reversal.
-- **Smart History:** Optimized memory usage for undo sizing.
-- **Crash Fixes & OptiX Sync:** Improved stability during object deletion.
-
+### Rendering
+- **Final Render:** `F12`
+- **Animation Render:** (Via Render Panel)
 
 ## 🔧 Build Instructions
-1. Open `raytrac_sdl2.sln` in Visual Studio 2022.
-2. Ensure NVIDIA OptiX 7.x SDK and CUDA Toolkit are installed.
-3. Build in `Release` mode for optimal performance.
-4. Run `raytracing_render_code.exe`.
+1. **Requirements:**
+   - Visual Studio 2022
+   - NVIDIA Driver (Latest)
+   - CUDA Toolkit 11.x or 12.x
+   - OptiX 7.x SDK
+2. **Setup:**
+   - Open `raytrac_sdl2.sln`
+   - Ensure `vcpkg` dependencies are installed (SDL2, ImGui, Assimp, OIDN, OpenVDB/NanoVDB).
+3. **Build:**
+   - Select `Release` configuration.
+   - Build Solution (`Ctrl+Shift+B`).
+4. **Run:**
+   - Launch `raytracing_render_code.exe` (or from VS Debugger).
 
 ## 📜 License
+Developed by **Kemal DEMİRTAŞ**.
 This project is for educational and portfolio purposes.

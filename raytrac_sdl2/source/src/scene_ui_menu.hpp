@@ -11,6 +11,7 @@
 #include "OptixWrapper.h"
 #include "TerrainManager.h"
 #include "scene_ui_animgraph.hpp"  // For AnimGraphUIState
+#include "SceneExporter.h" // For GLTF Export
 #include <filesystem>
 #ifdef _WIN32
 #include <windows.h>
@@ -62,7 +63,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      
                      std::thread save_thread([this, current_path, &ctx]() {
                          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                         bool result = ProjectManager::getInstance().saveProject(current_path, ctx.scene, ctx.render_settings,
+                         bool result = ProjectManager::getInstance().saveProject(current_path, ctx.scene, ctx.render_settings, ctx.renderer,
                             [this](int p, const std::string& s) {
                                 // Background save - no progress bar needed
                             });
@@ -128,7 +129,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          
                          std::thread save_thread([this, filepath, &ctx]() {
                              std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                             bool result = ProjectManager::getInstance().saveProject(filepath, ctx.scene, ctx.render_settings,
+                             bool result = ProjectManager::getInstance().saveProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer,
                                 [this](int p, const std::string& s) {});
                              
                              if (result) {
@@ -199,7 +200,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      
                      std::thread save_thread([this, filepath, &ctx]() {
                          std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                         bool result = ProjectManager::getInstance().saveProject(filepath, ctx.scene, ctx.render_settings,
+                         bool result = ProjectManager::getInstance().saveProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer,
                             [this](int p, const std::string& s) {});
                          
                          if (result) {
@@ -305,9 +306,23 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 #endif
             }
             
-            if (ImGui::MenuItem("Export Scene (.glb)...", nullptr)) {
-                 // TODO: Export Logic using tinygltf or assimp export
-                 SCENE_LOG_WARN("Export not yet implemented.");
+            if (ImGui::MenuItem("Export Scene (.glb/.gltf)...", nullptr)) {
+                 SceneExporter::getInstance().show_export_popup = true;
+            }
+
+            ImGui::Separator();
+            
+            // ================================================================
+            // VDB VOLUME IMPORT (Industry-Standard Volumetrics)
+            // ================================================================
+            if (ImGui::BeginMenu("Import VDB")) {
+                if (ImGui::MenuItem("VDB Volume (.vdb)", nullptr)) {
+                    importVDBVolume(ctx);
+                }
+                if (ImGui::MenuItem("VDB Sequence (folder)...", nullptr)) {
+                    importVDBSequence(ctx);
+                }
+                ImGui::EndMenu();
             }
 
             ImGui::Separator();
@@ -462,6 +477,9 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             }
             if (ImGui::MenuItem("Terrain Tab", nullptr, &show_terrain_tab)) { 
                 if (show_terrain_tab) tab_to_focus = "Terrain"; 
+            }
+            if (ImGui::MenuItem("VDB Tab (Volumes)", nullptr, &show_vdb_tab)) { 
+                if (show_vdb_tab) tab_to_focus = "VDB"; 
             }
             ImGui::Separator();
             if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
