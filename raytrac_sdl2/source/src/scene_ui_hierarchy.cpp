@@ -17,6 +17,7 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "Volumetric.h"
+#include "VDBVolume.h"
 
 #include <unordered_set>
 #include "TerrainManager.h"
@@ -203,6 +204,56 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // VDB VOLUMES
+    // ─────────────────────────────────────────────────────────────────────────
+    if (ImGui::TreeNode("VDB Volumes")) {
+        
+        for (size_t i = 0; i < ctx.scene.vdb_volumes.size(); ++i) {
+            auto& vdb = ctx.scene.vdb_volumes[i];
+            if (!vdb) continue;
+            
+            ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+            
+            bool is_selected = (
+                ctx.selection.selected.type == SelectableType::VDBVolume && 
+                ctx.selection.selected.vdb_volume == vdb
+            );
+            
+            if (is_selected) {
+                flags |= ImGuiTreeNodeFlags_Selected;
+            }
+            
+            std::string label = "[VOL] " + vdb->name;
+            
+            ImGui::TreeNodeEx((void*)(intptr_t)vdb.get(), flags, label.c_str());
+            
+            if (ImGui::IsItemClicked()) {
+                bool multi_select = ImGui::GetIO().KeyCtrl;
+                if (multi_select) {
+                    SelectableItem item;
+                    item.type = SelectableType::VDBVolume;
+                    item.vdb_volume = vdb;
+                    item.vdb_index = (int)i;
+                    item.name = vdb->name;
+                    
+                    if (ctx.selection.isSelected(item))
+                        ctx.selection.removeFromSelection(item);
+                    else
+                        ctx.selection.addToSelection(item);
+                } else {
+                    ctx.selection.selectVDBVolume(vdb, (int)i, vdb->name);
+                    
+                    // Auto-open VDB tab
+                    show_vdb_tab = true;
+                    tab_to_focus = "VDB";
+                }
+            }
+        }
+        
+        ImGui::TreePop();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // OBJECTS LIST (HIERARCHY)
     // ─────────────────────────────────────────────────────────────────────────
     if (ImGui::TreeNode("Objects")) {
@@ -312,8 +363,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
                             if (terrain) {
                                 terrain_brush.active_terrain_id = terrain->id;
-                                show_terrain_tab = true;
-                                tab_to_focus = "Terrain";
+                                // show_terrain_tab = true;  // <--- USER REQUEST: Don't auto-focus
+                                // tab_to_focus = "Terrain"; // <--- USER REQUEST: Don't auto-switch
                                 SCENE_LOG_INFO("Terrain selected: " + tName);
                             }
                         }
@@ -824,11 +875,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 }
                                 cam.update_camera_vectors(); 
                                 
-                                if (ctx.optix_gpu_ptr && g_hasOptix) {
-                                    ctx.optix_gpu_ptr->setCameraParams(cam);
-                                    ctx.optix_gpu_ptr->resetAccumulation();
-                                }
-                                ctx.renderer.resetCPUAccumulation();
+                                cam.markDirty();
                             }
                         }
                         if (is_selected) ImGui::SetItemDefaultFocus();
@@ -889,10 +936,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 cam.focal_length_mm = preset.focal_mm;
                              }
                              cam.update_camera_vectors();
-                             if (ctx.optix_gpu_ptr && g_hasOptix) {
-                                ctx.optix_gpu_ptr->setCameraParams(cam);
-                                ctx.optix_gpu_ptr->resetAccumulation();
-                             }
+                             cam.markDirty();
                          }
                          if (is_selected) ImGui::SetItemDefaultFocus();
                          
@@ -924,16 +968,10 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     cam.fov = fov;
                     cam.update_camera_vectors();
                     selected_lens = 0; // Reset to Custom
-                    if (ctx.optix_gpu_ptr && g_hasOptix) {
-                        ctx.optix_gpu_ptr->setCameraParams(cam);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
+                    cam.markDirty();
                 }
                 
-                    if (ctx.optix_gpu_ptr && g_hasOptix) {
-                        ctx.optix_gpu_ptr->setCameraParams(cam);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
+
                 
 
                 ImGui::Separator();
@@ -982,11 +1020,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             }
                             cam.update_camera_vectors();
                             
-                            if (ctx.optix_gpu_ptr && g_hasOptix) {
-                                ctx.optix_gpu_ptr->setCameraParams(cam);
-                                ctx.optix_gpu_ptr->resetAccumulation();
-                            }
-                            ctx.renderer.resetCPUAccumulation();
+                            cam.markDirty();
                         }
                         if (is_selected) ImGui::SetItemDefaultFocus();
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s (f/%.1f)", CameraPresets::FSTOP_PRESETS[i].description, f_val);
@@ -1014,11 +1048,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     cam.aperture = (calc_f_mm / current_f) * 0.01f; 
                     cam.lens_radius = cam.aperture * 0.5f;
 
-                    if (ctx.optix_gpu_ptr && g_hasOptix) {
-                        ctx.optix_gpu_ptr->setCameraParams(cam);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
-                    ctx.renderer.resetCPUAccumulation();
+                    cam.markDirty();
                 }
 
                 // Lens & Aperture Shape Settings
@@ -1033,11 +1063,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     else ImGui::TextDisabled("Shape: %d-sided Polygon (Vintage / Cinema)", cam.blade_count);
 
                     if (blades_changed) {
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
-                        }
-                        ctx.renderer.resetCPUAccumulation();
+                        cam.markDirty();
                     }
 
                     // 2. Physical Lens Settings (mm)
@@ -1083,11 +1109,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
 
                     if (mb_changed) {
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
-                        }
-                        ctx.renderer.resetCPUAccumulation();
+                        cam.markDirty();
                     }
 
                     // Logic to update FOV from Lens settings
@@ -1099,11 +1121,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         cam.fov = cam.vfov;
 
                         cam.update_camera_vectors();
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
-                        }
-                        ctx.renderer.resetCPUAccumulation();
+                        cam.markDirty();
                     }
                     ImGui::TreePop();
                 }

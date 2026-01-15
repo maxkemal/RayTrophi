@@ -32,7 +32,7 @@ bool HittableList::hit(const Ray& r, float t_min, float t_max, HitRecord& rec) c
         auto closest_so_far = t_max;
 
         for (const auto& object : objects) {
-            if (object->hit(r, t_min, closest_so_far, temp_rec)) {
+            if (object && object->hit(r, t_min, closest_so_far, temp_rec)) {
                 hit_anything = true;
                 closest_so_far = temp_rec.t;
                 rec = temp_rec;
@@ -50,6 +50,7 @@ bool HittableList::bounding_box(float time0, float time1, AABB& output_box) cons
     bool first_box = true;
 
     for (const auto& object : objects) {
+        if (!object) continue;
         if (!object->bounding_box(time0, time1, temp_box)) return false;
         output_box = first_box ? temp_box : surrounding_box(output_box, temp_box);
         first_box = false;

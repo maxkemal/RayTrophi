@@ -74,6 +74,8 @@ public:
              const Vec2& ta, const Vec2& tb, const Vec2& tc,
              std::shared_ptr<Material> m);
 
+    inline uint16_t getMaterialID() const { return materialID; }
+
     // ========================================================================
     // Vertex Access Methods (replace direct member access)
     // ========================================================================
@@ -105,7 +107,7 @@ public:
     // Material Access (ID-based)
     // ========================================================================
     
-    inline uint16_t getMaterialID() const { return materialID; }
+  
     inline void setMaterialID(uint16_t id) { materialID = id; }
     
     // Legacy compatibility - fetches from MaterialManager

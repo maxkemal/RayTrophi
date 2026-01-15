@@ -4,7 +4,8 @@
 #include "OptixWrapper.h"
 #include "AssimpLoader.h"
 #include "Triangle.h"
-#include "MaterialManager.h"
+#include "OptixAccelManager.h"
+#include "InstanceManager.h"
 #include "PrincipledBSDF.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
@@ -198,10 +199,31 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
 // Project Lifecycle
 // ============================================================================
 
-void ProjectManager::newProject() {
+// ============================================================================
+// Project Lifecycle
+// ============================================================================
+
+void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     g_project.clear();
     m_package_files.clear();
+    
+    // Reset Globals
+    // Reset Globals
+    bool was_optix = render_settings.use_optix;
+    bool was_denoiser = render_settings.use_denoiser;
+    
+    render_settings = RenderSettings(); // Default constructor resets to defaults
+    
+    // Restore Device Preference
+    render_settings.use_optix = was_optix;
+    render_settings.use_denoiser = was_denoiser;
+
+    renderer.world.reset();             // Reset Atmosphere/Godrays
+    
+    // Clear Subsystems
     RiverManager::getInstance().clear();
+    TerrainManager::getInstance().removeAllTerrains(scene); 
+    
     SCENE_LOG_INFO("New project created.");
 }
 
@@ -209,16 +231,16 @@ void ProjectManager::newProject() {
 // NEW SAVE PROJECT (Self-Contained with Geometry)
 // ============================================================================
 
-bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings,
+bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings, Renderer& renderer,
                                   std::function<void(int, const std::string&)> progress_callback) {
     if (g_project.current_file_path.empty()) {
         SCENE_LOG_ERROR("No file path set. Use saveProject(filepath, scene, settings) instead.");
         return false;
     }
-    return saveProject(g_project.current_file_path, scene, settings, progress_callback);
+    return saveProject(g_project.current_file_path, scene, settings, renderer, progress_callback);
 }
 
-bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings, Renderer& renderer,
                                   std::function<void(int, const std::string&)> progress_callback) {
     if (progress_callback) progress_callback(0, "Preparing to save...");
 
@@ -399,6 +421,12 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             root["animationDataList"] = j_animations;
             SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.animationDataList.size()) + " animation clips.");
         }
+
+        // World Settings (Atmosphere, Godrays, etc.)
+        if (progress_callback) progress_callback(82, "Saving world settings...");
+        json j_world;
+        renderer.world.serialize(j_world);
+        root["world"] = j_world;
         
         // Water System
         if (progress_callback) progress_callback(83, "Saving water surfaces...");
@@ -415,6 +443,16 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         if (progress_callback) progress_callback(84, "Saving river system...");
         root["rivers"] = RiverManager::getInstance().serialize();
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
+        
+        // Foliage System
+        if (progress_callback) progress_callback(84, "Saving foliage system...");
+        root["instances"] = InstanceManager::getInstance().serialize();
+        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(InstanceManager::getInstance().getGroups().size()) + " foliage groups.");
+        
+        // VDB Volumes
+        if (progress_callback) progress_callback(84, "Saving VDB volumes...");
+        root["vdb_volumes"] = serializeVDBVolumes(scene.vdb_volumes);
+        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.vdb_volumes.size()) + " VDB volumes.");
         
         // UI Settings (Pro Camera, Viewport, etc.)
         if (!scene.ui_settings_json_str.empty()) {
@@ -520,7 +558,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // (rendering_stopped_* flags are set by caller before this function)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     
-    newProject();
+    newProject(scene, renderer);
     TerrainManager::getInstance().removeAllTerrains(scene);
     scene.clear();
     
@@ -611,9 +649,16 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 
             if (progress_callback) progress_callback(70, "Loading render settings...");
 
+
             // Load Render Settings
             if (root.contains("render_settings")) {
                 deserializeRenderSettings(root["render_settings"], settings);
+            }
+
+            // Load World Settings (Atmosphere, Godrays)
+            if (root.contains("world")) {
+                 renderer.world.deserialize(root["world"]);
+                 SCENE_LOG_INFO("World settings loaded from project.");
             }
 
             // Load Water Surfaces
@@ -636,6 +681,22 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 RiverManager::getInstance().clear();
                 RiverManager::getInstance().deserialize(root["rivers"], scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
+            }
+            
+            // Load Foliage System
+            if (root.contains("instances")) {
+                if (progress_callback) progress_callback(77, "Loading foliage system...");
+                InstanceManager::getInstance().deserialize(root["instances"], scene);
+                // Rebuild visual objects from data
+                InstanceManager::getInstance().rebuildSceneObjects(scene);
+                SCENE_LOG_INFO("[ProjectManager] Loaded foliage system.");
+            }
+            
+            // Load VDB Volumes
+            if (root.contains("vdb_volumes")) {
+                if (progress_callback) progress_callback(78, "Loading VDB volumes...");
+                deserializeVDBVolumes(root["vdb_volumes"], scene); // Use helper, not Manager (VDB Manager manages data, not scene objects per se)
+                SCENE_LOG_INFO("[ProjectManager] Loaded VDB volumes.");
             }
             
             // Load Timeline/Animation (keyframes) - AFTER Objects are created
@@ -793,10 +854,31 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // THREAD SAFETY: DO NOT call OptiX rebuild from thread!
     // Set flags and let Main loop handle GPU operations on main thread.
     // =========================================================================
-    g_needs_geometry_rebuild = true;
-    g_needs_optix_sync = (optix_gpu != nullptr);
+    // =========================================================================
+    // GPU SYNCHRONIZATION: Explicit Rebuild
+    // =========================================================================
+    // Instead of relying on g_needs_geometry_rebuild which waits for next frame,
+    // we force a rebuild immediately to ensure foliage/instances are uploaded correctly.
+    // This fixes the issue where instances appeared rotated until a scene update occurred.
+    if (optix_gpu) {
+        if (progress_callback) progress_callback(95, "Uploading to GPU...");
+        
+        // Full rebuild to handle new geometry/instances
+        renderer.rebuildOptiXGeometry(scene, optix_gpu);
+        
+        // Update auxiliary params
+        optix_gpu->setLightParams(scene.lights);
+        if (scene.camera) {
+            optix_gpu->setCameraParams(*scene.camera);
+        }
+        optix_gpu->resetAccumulation();
+    }
     
-    // Mark dirty flags for complete refresh
+    // Legacy flags - still useful for other systems but GPU is done
+    g_needs_geometry_rebuild = true; // CPU BVH needed for Autofocus/Picking
+    g_needs_optix_sync = false;       // We just did it
+    
+    // Mark dirty flags for other subsystems (e.g. hierarchy UI)
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
@@ -1026,9 +1108,9 @@ bool ProjectManager::readZipPackage(const std::string& filepath) {
 // GEOMETRY SERIALIZATION (Self-Contained Project)
 // ============================================================================
 
-// Binary format magic number and version (v4 adds skinning data)
-static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '4'};
-static constexpr uint32_t RTP_VERSION = 4;
+// Binary format magic number and version (v5 adds transform components)
+static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '5'};
+static constexpr uint32_t RTP_VERSION = 5;
 
 bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& scene) {
     // Write header
@@ -1054,6 +1136,9 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             // Skip terrain chunks
             if (terrain_triangles.count(tri)) continue;
+            
+            // Skip foliage instances (they are serialized via InstanceManager)
+            if (tri->nodeName.find("_inst_") != std::string::npos) continue;
 
             triangles.push_back(tri);
             
@@ -1072,6 +1157,10 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
     
     for (const auto& tr : transforms) {
         out.write(reinterpret_cast<const char*>(&tr->base), sizeof(Matrix4x4));
+        // v5: Write components
+        out.write(reinterpret_cast<const char*>(&tr->position), sizeof(Vec3));
+        out.write(reinterpret_cast<const char*>(&tr->rotation), sizeof(Vec3));
+        out.write(reinterpret_cast<const char*>(&tr->scale), sizeof(Vec3));
     }
     
     // Write triangle count
@@ -1144,20 +1233,21 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
     }
     
     SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(tri_count) + " triangles, " + 
-                   std::to_string(transform_count) + " transforms to binary.");
+                   std::to_string(transform_count) + " transforms to binary (v5).");
     return true;
 }
 
 bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
-    // Read and validate header (accept both RTP3 and RTP4 formats)
+    // Read and validate header (accept RTP3, RTP4, RTP5 formats)
     char magic[4];
     in.read(magic, 4);
     
-    // Check for valid magic (RTP3 or RTP4)
+    // Check for valid magic
     bool is_v3 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '3');
     bool is_v4 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '4');
+    bool is_v5 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '5');
     
-    if (!is_v3 && !is_v4) {
+    if (!is_v3 && !is_v4 && !is_v5) {
         SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
         return false;
     }
@@ -1178,6 +1268,21 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     for (uint32_t i = 0; i < transform_count; ++i) {
         auto tr = std::make_shared<Transform>();
         in.read(reinterpret_cast<char*>(&tr->base), sizeof(Matrix4x4));
+        
+        if (version >= 5) {
+            // Read components
+            in.read(reinterpret_cast<char*>(&tr->position), sizeof(Vec3));
+            in.read(reinterpret_cast<char*>(&tr->rotation), sizeof(Vec3));
+            in.read(reinterpret_cast<char*>(&tr->scale), sizeof(Vec3));
+        } else {
+            // v4 or older (or if components missing): Decompose base matrix to restore components
+            // This prevents "Identity Reset" when UI updates the matrix
+            tr->base.decompose(tr->position, tr->rotation, tr->scale);
+        }
+        
+        // Ensure dirty or final is updated?
+        tr->markDirty(); 
+        
         transforms.push_back(tr);
     }
     
@@ -1259,10 +1364,9 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
             // CRITICAL FIX: DO NOT call updateTransformedVertices for skinned meshes!
             // Skinned mesh vertices are computed by the animation system using bone matrices.
             // Applying the object transform here would cause double transformation or incorrect positioning.
-            // Non-skinned meshes still need their transforms applied.
-            if (!has_skin_data) {
-                tri->updateTransformedVertices();
-            }
+            // Enable updateTransformedVertices for ALL meshes to ensure valid BVH for picking/AF immediately after load.
+            // Skinned meshes will effectively be in bind pose * world transform until animation system updates them.
+            tri->updateTransformedVertices();
             // Note: Skinned meshes will be updated when animation system runs
         }
         
@@ -1699,4 +1803,117 @@ void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, c
     }
     SCENE_LOG_INFO("[ProjectManager] Cached " + std::to_string(m_embedded_texture_cache.size()) + 
                    " embedded textures in memory (no temp files).");
+}
+
+// ============================================================================
+// VDB SERIALIZATION
+// ============================================================================
+
+json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVolume>>& vdb_volumes) {
+    json arr = json::array();
+    
+    for (size_t i = 0; i < vdb_volumes.size(); ++i) {
+        const auto& vdb = vdb_volumes[i];
+        json j;
+        
+        j["id"] = i;
+        j["name"] = vdb->name;
+        j["filepath"] = vdb->getFilePath();
+        j["transform"] = mat4ToJson(vdb->getTransform());
+        j["density_scale"] = vdb->density_scale;
+        
+        // Animation
+        j["is_sequence"] = vdb->isAnimated();
+        j["current_frame"] = vdb->getCurrentFrame();
+        j["timeline_linked"] = vdb->isLinkedToTimeline();
+        j["frame_offset"] = vdb->getFrameOffset();
+        
+        // Shader
+        if (auto shader = vdb->volume_shader) {
+             json s;
+             s["name"] = shader->name;
+             s["density"] = shader->density.toJson();
+             s["scattering"] = shader->scattering.toJson();
+             s["absorption"] = shader->absorption.toJson();
+             s["emission"] = shader->emission.toJson();
+             s["quality"] = shader->quality.toJson();
+             
+             // Motion blur manual
+             s["motion_blur"] = {
+                 {"enabled", shader->motion_blur.enabled},
+                 {"velocity_channel", shader->motion_blur.velocity_channel},
+                 {"scale", shader->motion_blur.scale}
+             };
+             
+             j["shader"] = s;
+        }
+        
+        arr.push_back(j);
+    }
+    
+    return arr;
+}
+
+void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) {
+    // VDB volumes are stored in scene.vdb_volumes AND scene.world.objects
+    // We must ensure they are added to both!
+    
+    for (const auto& j : j_arr) {
+        std::string filepath = j.value("filepath", "");
+        if (filepath.empty()) continue;
+        
+        auto vdb = std::make_shared<VDBVolume>();
+        
+        bool is_sequence = j.value("is_sequence", false);
+        
+        if (is_sequence) {
+            if (vdb->loadVDBSequence(filepath)) {
+                // Success
+                if (!vdb->uploadToGPU()) SCENE_LOG_WARN("Failed to upload VDB sequence to GPU: " + filepath);
+            } else {
+                 SCENE_LOG_WARN("Failed to load VDB sequence: " + filepath);
+                 continue;
+            }
+        } else {
+             if (vdb->loadVDB(filepath)) {
+                 // Success
+                 if (!vdb->uploadToGPU()) SCENE_LOG_WARN("Failed to upload VDB to GPU: " + filepath);
+             } else {
+                 SCENE_LOG_WARN("Failed to load VDB file: " + filepath);
+                 continue;
+             }
+        }
+        
+        vdb->name = j.value("name", "VDB Volume");
+        if (j.contains("transform")) vdb->setTransform(jsonToMat4(j["transform"]));
+        vdb->density_scale = j.value("density_scale", 1.0f);
+        
+        vdb->setCurrentFrame(j.value("current_frame", 0));
+        vdb->setLinkedToTimeline(j.value("timeline_linked", true));
+        vdb->setFrameOffset(j.value("frame_offset", 0));
+        
+        // Shader
+        if (j.contains("shader")) {
+            auto j_shader = j["shader"];
+            auto shader = std::make_shared<VolumeShader>();
+            shader->name = j_shader.value("name", "Volume Shader");
+            
+            if (j_shader.contains("density")) shader->density.fromJson(j_shader["density"]);
+            if (j_shader.contains("scattering")) shader->scattering.fromJson(j_shader["scattering"]);
+            if (j_shader.contains("absorption")) shader->absorption.fromJson(j_shader["absorption"]);
+            if (j_shader.contains("emission")) shader->emission.fromJson(j_shader["emission"]);
+            if (j_shader.contains("quality")) shader->quality.fromJson(j_shader["quality"]);
+            
+             if (j_shader.contains("motion_blur")) {
+                 shader->motion_blur.enabled = j_shader["motion_blur"].value("enabled", false);
+                 shader->motion_blur.velocity_channel = j_shader["motion_blur"].value("velocity_channel", "vel");
+                 shader->motion_blur.scale = j_shader["motion_blur"].value("scale", 1.0f);
+             }
+            
+            vdb->setShader(shader);
+        }
+        
+        scene.addVDBVolume(vdb);
+        scene.world.objects.push_back(vdb);
+    }
 }

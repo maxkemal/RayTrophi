@@ -9,20 +9,24 @@ echo ========================================
 echo.
 
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
--ptx "E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\raygen.cu" ^
--o "E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\raygen.ptx" ^
+-ptx "E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\raygen.cu" ^
+-o "E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\raygen.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
--I"E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
+-I"E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
+-I"E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\include" ^
+-I"E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
 --ptxas-options=-v ^
 --maxrregcount=64 ^
 --use_fast_math ^
 -gencode=arch=compute_50,code=compute_50
 
 "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
--ptx "E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\erosion_kernels.cu" ^
--o "E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\erosion_kernels.ptx" ^
+-ptx "E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\erosion_kernels.cu" ^
+-o "E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\erosion_kernels.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
--I"E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
+-I"E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
+-I"E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\include" ^
+-I"E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
 --ptxas-options=-v ^
 --maxrregcount=64 ^
 --use_fast_math ^

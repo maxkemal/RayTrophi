@@ -36,15 +36,15 @@ public:
     // ========================================================================
     
     // Create a new empty project
-    void newProject();
+    void newProject(SceneData& scene, Renderer& renderer);
     
     // Save current project to .rtp file (NEW: includes geometry, lights, cameras)
     // Returns true on success
-    bool saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings,
+    bool saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings, Renderer& renderer,
                      std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // Save without dialog if path already known
-    bool saveProject(SceneData& scene, RenderSettings& settings,
+    bool saveProject(SceneData& scene, RenderSettings& settings, Renderer& renderer,
                      std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // Synchronize ProjectData with live SceneData (Captures moves, deletes, etc.)
@@ -143,6 +143,10 @@ private:
     nlohmann::json serializeRenderSettings(const RenderSettings& settings);
     void deserializeRenderSettings(const nlohmann::json& j, RenderSettings& settings);
     
+    // Serialize VDB Volumes
+    nlohmann::json serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVolume>>& vdb_volumes);
+    void deserializeVDBVolumes(const nlohmann::json& j, SceneData& scene);
+
     // Serialize textures (with embed option)
     nlohmann::json serializeTextures(std::ofstream& bin_out, bool embed_textures);
     void deserializeTextures(const nlohmann::json& j, std::ifstream& bin_in, const std::string& project_dir);

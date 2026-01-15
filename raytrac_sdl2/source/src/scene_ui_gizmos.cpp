@@ -21,8 +21,6 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
-    if (!sel.hasSelection() || !ctx.scene.camera) return;
-
     Camera& cam = *ctx.scene.camera;
     ImGuiIO& io = ImGui::GetIO();
     float screen_w = io.DisplaySize.x;
@@ -95,95 +93,122 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         draw_list->AddLine(screen_pts[3], screen_pts[7], color, thickness);
         };
 
-    // Draw bounding box for each selected item (multi-selection support)
-    for (size_t idx = 0; idx < sel.multi_selection.size(); ++idx) {
-        auto& item = sel.multi_selection[idx];
+    // ─────────────────────────────────────────────────────────────────────────
+    // DRAW VDB GHOST BOUNDS (Always visible)
+    // ─────────────────────────────────────────────────────────────────────────
+    for (const auto& vdb : ctx.scene.vdb_volumes) {
+        // Skip if this VDB is currently selected (will be drawn with highlight)
+        if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume == vdb) continue;
+        
+        AABB bounds = vdb->getWorldBounds();
+        // Ghost outline - visible but not obtrusive (Alpha 100)
+        DrawBoundingBox(bounds.min, bounds.max, IM_COL32(180, 180, 180, 100), 1.0f);
+    }
 
-        // Primary selection (last one) gets a brighter color
-        bool is_primary = (idx == sel.multi_selection.size() - 1);
-        ImU32 color = is_primary ? IM_COL32(0, 255, 128, 255) : IM_COL32(0, 200, 100, 180);
-        float thickness = is_primary ? 2.0f : 1.5f;
+    // ─────────────────────────────────────────────────────────────────────────
+    // DRAW SELECTION HIGHLIGHTS
+    // ─────────────────────────────────────────────────────────────────────────
+    if (sel.hasSelection()) {
+        // Draw bounding box for each selected item (multi-selection support)
+        for (size_t idx = 0; idx < sel.multi_selection.size(); ++idx) {
+            auto& item = sel.multi_selection[idx];
 
-        Vec3 bb_min, bb_max;
-        bool has_bounds = false;
+            // Primary selection (last one) gets a brighter color
+            bool is_primary = (idx == sel.multi_selection.size() - 1);
+            ImU32 color = is_primary ? IM_COL32(0, 255, 128, 255) : IM_COL32(0, 200, 100, 180);
+            float thickness = is_primary ? 2.0f : 1.5f;
 
-        if (item.type == SelectableType::Object && item.object) {
-            std::string selectedName = item.object->nodeName;
-            if (selectedName.empty()) selectedName = "Unnamed";
+            Vec3 bb_min, bb_max;
+            bool has_bounds = false;
 
-            if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+            if (item.type == SelectableType::Object && item.object) {
+                std::string selectedName = item.object->nodeName;
+                if (selectedName.empty()) selectedName = "Unnamed";
 
-            // USE CACHED BOUNDING BOX (O(1) lookup instead of O(N) triangle scan!)
-            auto bbox_it = bbox_cache.find(selectedName);
-            if (bbox_it != bbox_cache.end()) {
-                Vec3 cached_min = bbox_it->second.first;
-                Vec3 cached_max = bbox_it->second.second;
-                
-                // TRANSFORM THE BOUNDING BOX by object's current transform matrix
-                // This ensures bbox follows the object in TLAS mode where CPU vertices aren't updated
-                auto transform = item.object->getTransformHandle();
-                if (transform) {
-                    Matrix4x4& m = transform->base;
-                    
-                    // Transform all 8 corners and find new AABB
-                    Vec3 corners[8] = {
-                        Vec3(cached_min.x, cached_min.y, cached_min.z),
-                        Vec3(cached_max.x, cached_min.y, cached_min.z),
-                        Vec3(cached_min.x, cached_max.y, cached_min.z),
-                        Vec3(cached_max.x, cached_max.y, cached_min.z),
-                        Vec3(cached_min.x, cached_min.y, cached_max.z),
-                        Vec3(cached_max.x, cached_min.y, cached_max.z),
-                        Vec3(cached_min.x, cached_max.y, cached_max.z),
-                        Vec3(cached_max.x, cached_max.y, cached_max.z)
-                    };
-                    
-                    bb_min = Vec3(1e10f, 1e10f, 1e10f);
-                    bb_max = Vec3(-1e10f, -1e10f, -1e10f);
-                    
-                    for (int c = 0; c < 8; c++) {
-                        Vec3 p = corners[c];
-                        // Apply transform: p' = M * p
-                        Vec3 tp(
-                            m.m[0][0]*p.x + m.m[0][1]*p.y + m.m[0][2]*p.z + m.m[0][3],
-                            m.m[1][0]*p.x + m.m[1][1]*p.y + m.m[1][2]*p.z + m.m[1][3],
-                            m.m[2][0]*p.x + m.m[2][1]*p.y + m.m[2][2]*p.z + m.m[2][3]
-                        );
-                        bb_min.x = fminf(bb_min.x, tp.x);
-                        bb_min.y = fminf(bb_min.y, tp.y);
-                        bb_min.z = fminf(bb_min.z, tp.z);
-                        bb_max.x = fmaxf(bb_max.x, tp.x);
-                        bb_max.y = fmaxf(bb_max.y, tp.y);
-                        bb_max.z = fmaxf(bb_max.z, tp.z);
+                if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+                // USE CACHED BOUNDING BOX (O(1) lookup instead of O(N) triangle scan!)
+                auto bbox_it = bbox_cache.find(selectedName);
+                if (bbox_it != bbox_cache.end()) {
+                    Vec3 cached_min = bbox_it->second.first;
+                    Vec3 cached_max = bbox_it->second.second;
+
+                    // TRANSFORM THE BOUNDING BOX by object's current transform matrix
+                    // This ensures bbox follows the object in TLAS mode where CPU vertices aren't updated
+                    auto transform = item.object->getTransformHandle();
+                    if (transform) {
+                        Matrix4x4& m = transform->base;
+
+                        // Transform all 8 corners and find new AABB
+                        Vec3 corners[8] = {
+                            Vec3(cached_min.x, cached_min.y, cached_min.z),
+                            Vec3(cached_max.x, cached_min.y, cached_min.z),
+                            Vec3(cached_min.x, cached_max.y, cached_min.z),
+                            Vec3(cached_max.x, cached_max.y, cached_min.z),
+                            Vec3(cached_min.x, cached_min.y, cached_max.z),
+                            Vec3(cached_max.x, cached_min.y, cached_max.z),
+                            Vec3(cached_min.x, cached_max.y, cached_max.z),
+                            Vec3(cached_max.x, cached_max.y, cached_max.z)
+                        };
+
+                        bb_min = Vec3(1e10f, 1e10f, 1e10f);
+                        bb_max = Vec3(-1e10f, -1e10f, -1e10f);
+
+                        for (int c = 0; c < 8; c++) {
+                            Vec3 p = corners[c];
+                            // Apply transform: p' = M * p
+                            Vec3 tp(
+                                m.m[0][0] * p.x + m.m[0][1] * p.y + m.m[0][2] * p.z + m.m[0][3],
+                                m.m[1][0] * p.x + m.m[1][1] * p.y + m.m[1][2] * p.z + m.m[1][3],
+                                m.m[2][0] * p.x + m.m[2][1] * p.y + m.m[2][2] * p.z + m.m[2][3]
+                            );
+                            bb_min.x = fminf(bb_min.x, tp.x);
+                            bb_min.y = fminf(bb_min.y, tp.y);
+                            bb_min.z = fminf(bb_min.z, tp.z);
+                            bb_max.x = fmaxf(bb_max.x, tp.x);
+                            bb_max.y = fmaxf(bb_max.y, tp.y);
+                            bb_max.z = fmaxf(bb_max.z, tp.z);
+                        }
                     }
-                } else {
-                    // No transform - use cached values directly
-                    bb_min = cached_min;
-                    bb_max = cached_max;
+                    else {
+                        // No transform - use cached values directly
+                        bb_min = cached_min;
+                        bb_max = cached_max;
+                    }
+                    has_bounds = true;
                 }
+            }
+            else if (item.type == SelectableType::Light && item.light) {
+                Vec3 lightPos = item.light->position;
+                float boxSize = 0.15f; // Küçültüldü: 0.5 -> 0.15
+                bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
+                bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
                 has_bounds = true;
+                color = is_primary ? IM_COL32(255, 255, 100, 255) : IM_COL32(200, 200, 80, 180);
+            }
+            else if (item.type == SelectableType::Camera && item.camera) {
+                Vec3 camPos = item.camera->lookfrom;
+                float boxSize = 0.5f;
+                bb_min = Vec3(camPos.x - boxSize, camPos.y - boxSize, camPos.z - boxSize);
+                bb_max = Vec3(camPos.x + boxSize, camPos.y + boxSize, camPos.z + boxSize);
+                has_bounds = true;
+                color = is_primary ? IM_COL32(100, 200, 255, 255) : IM_COL32(80, 160, 200, 180);
+            }
+            else if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
+                AABB bounds = item.vdb_volume->getWorldBounds();
+                bb_min = bounds.min;
+                bb_max = bounds.max;
+                has_bounds = true;
+                // Orange for VDB
+                color = is_primary ? IM_COL32(255, 128, 0, 255) : IM_COL32(200, 100, 0, 180);
+            }
+
+            if (has_bounds) {
+                DrawBoundingBox(bb_min, bb_max, color, thickness);
             }
         }
-        else if (item.type == SelectableType::Light && item.light) {
-            Vec3 lightPos = item.light->position;
-            float boxSize = 0.15f; // Küçültüldü: 0.5 -> 0.15
-            bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
-            bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
-            has_bounds = true;
-            color = is_primary ? IM_COL32(255, 255, 100, 255) : IM_COL32(200, 200, 80, 180);
-        }
-        else if (item.type == SelectableType::Camera && item.camera) {
-            Vec3 camPos = item.camera->lookfrom;
-            float boxSize = 0.5f;
-            bb_min = Vec3(camPos.x - boxSize, camPos.y - boxSize, camPos.z - boxSize);
-            bb_max = Vec3(camPos.x + boxSize, camPos.y + boxSize, camPos.z + boxSize);
-            has_bounds = true;
-            color = is_primary ? IM_COL32(100, 200, 255, 255) : IM_COL32(80, 160, 200, 180);
-        }
-
-        if (has_bounds) {
-            DrawBoundingBox(bb_min, bb_max, color, thickness);
-        }
     }
+    // VDB debug bounds removed (User Request)
 }
 
 void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
@@ -582,7 +607,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
     // Check global drag state
     bool is_using_gizmo_now = ImGuizmo::IsUsing();
-
+    // auto transform = ... (Removed unsafe access)
     if (is_mixed_group) {
         // PERISISTENT GIZMO STATE for Mixed Groups
         // Prevents Gizmo from snapping back to Identity Rotation every frame which causes explosion
@@ -602,9 +627,20 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         objectMatrix[8] = mixed_gizmo_matrix.m[0][2]; objectMatrix[9] = mixed_gizmo_matrix.m[1][2]; objectMatrix[10] = mixed_gizmo_matrix.m[2][2]; objectMatrix[11] = mixed_gizmo_matrix.m[3][2];
         objectMatrix[12] = mixed_gizmo_matrix.m[0][3]; objectMatrix[13] = mixed_gizmo_matrix.m[1][3]; objectMatrix[14] = mixed_gizmo_matrix.m[2][3]; objectMatrix[15] = mixed_gizmo_matrix.m[3][3];
     }
+    
     else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
         // Single Object (or Homogeneous Group) - Lock to Object Transform
         auto transform = sel.selected.object->getTransformHandle();
+        if (transform) {
+            Matrix4x4 mat = transform->base;
+            objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
+            objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
+            objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
+            objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
+        }
+    }
+    else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+        auto transform = sel.selected.vdb_volume->getTransformHandle();
         if (transform) {
             Matrix4x4 mat = transform->base;
             objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
@@ -891,6 +927,56 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     }
                 }
                 // TODO: Add support for duplicating Lights? (Currently UI usually handles lights separately)
+            }
+            
+            // Allow VDB Duplication
+             for (const auto& item : itemsToDuplicate) {
+                if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
+                    auto oldVDB = item.vdb_volume;
+                    
+                    // Create new VDB Object
+                    auto newVDB = std::make_shared<VDBVolume>();
+                    
+                    // 1. Load Data (Manager handles caching, so this is fast)
+                    if (oldVDB->isAnimated()) {
+                         // Attempt to reload sequence (assuming manual management for now or re-use path)
+                         // For now, duplicate standard loaded file. 
+                         // Note: Sequence logic stores pattern in internal structure not exposed directly via single getFilePath?
+                         // Let's assume single file for now or fallback to base path
+                         newVDB->loadVDB(oldVDB->getFilePath());
+                         // If it was animated, we might need to copy sequence settings manually if not fully exposed
+                         // But VDBVolume currently encapsulates this. 
+                         // Ideally we'd have a clone() method, but this suffices for static volumes.
+                    } else {
+                        newVDB->loadVDB(oldVDB->getFilePath());
+                    }
+                    
+                    // 2. Copy Transform
+                    newVDB->setTransform(oldVDB->getTransform());
+                    
+                    // 3. Copy Shader (Deep Copy for independent editing)
+                    auto oldShader = oldVDB->getShader();
+                    if (oldShader) {
+                        auto newShader = std::make_shared<VolumeShader>(*oldShader);
+                        newShader->name = oldShader->name + " (Copy)";
+                        newVDB->setShader(newShader);
+                    }
+                    
+                    // 4. Name
+                    newVDB->name = oldVDB->name + "_Copy";
+                    
+                    // 5. Add to Scene
+                    ctx.scene.addVDBVolume(newVDB);
+                    ctx.scene.world.add(newVDB);
+                    
+                    // 6. Select New
+                    SelectableItem newSel;
+                    newSel.type = SelectableType::VDBVolume;
+                    newSel.vdb_volume = newVDB;
+                    newSel.position = newVDB->getPosition(); // Updates Gizmo pivot
+                    newSelectionList.push_back(newSel); // Add to new selection list
+                    anyDuplicated = true;
+                }
             }
 
             if (anyDuplicated) {
@@ -1224,6 +1310,34 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
         }
+        else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+             Matrix4x4 newMat;
+             newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
+             newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
+             newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
+             newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+
+             sel.selected.vdb_volume->setTransform(newMat);
+             
+             // Update Selection struct to match new transform
+             Vec3 p, r, s;
+             newMat.decompose(p, r, s);
+             sel.selected.position = p;
+             sel.selected.rotation = r;
+             sel.selected.scale = s;
+             
+             // VDB uses BVH, so we need a rebuild/refit
+             // Since it's a box, refit is usually enough, but rebuild is safer for topology changes (though box just moves)
+             extern bool g_bvh_rebuild_pending;
+             g_bvh_rebuild_pending = true;
+             
+             ctx.renderer.resetCPUAccumulation();
+             
+             if (ctx.optix_gpu_ptr) {
+                 SceneUI::syncVDBVolumesToGPU(ctx);
+                 ctx.optix_gpu_ptr->resetAccumulation();
+             }
+        }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             // SINGLE SELECTION or Rotate/Scale operations
             // (Multi-select TRANSLATE is handled above)
@@ -1265,26 +1379,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         // Only use GPU path if both: OptiX enabled AND using TLAS mode
                         bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
                         if (using_gpu_tlas) {
-                            // Support multi-material instances (one object name -> multiple instances)
-                            std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(targetName);
-                            
-                            if (!inst_ids.empty()) {
-                                float t[12];
-                                // Convert 4x4 -> 3x4 (row-major)
-                                t[0] = newMat.m[0][0]; t[1] = newMat.m[0][1]; t[2] = newMat.m[0][2]; t[3] = newMat.m[0][3];
-                                t[4] = newMat.m[1][0]; t[5] = newMat.m[1][1]; t[6] = newMat.m[1][2]; t[7] = newMat.m[1][3];
-                                t[8] = newMat.m[2][0]; t[9] = newMat.m[2][1]; t[10] = newMat.m[2][2]; t[11] = newMat.m[2][3];
-                                
-                                // Update ALL instances belonging to this object
-                                for (int inst_id : inst_ids) {
-                                    ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
-                                }
-                                
-                                ctx.optix_gpu_ptr->rebuildTLAS(); // Very fast (~0.01ms)
-                                ctx.optix_gpu_ptr->resetAccumulation();
-                            }
-                            // NOTE: TLAS mode - NO CPU vertex update needed! Transform is applied via instance matrix.
-                            // This saves 2M function calls per frame for large objects!
+                             // Use unified update method
+                             ctx.optix_gpu_ptr->updateObjectTransform(targetName, newMat);
                         }
                         else {
                             // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
@@ -1336,20 +1432,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
                                 // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
                                 if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
-                                    std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(targetName);
-                                    if (!inst_ids.empty()) {
-                                        float t[12];
-                                        Matrix4x4 finalMat = th->base; // Get the newly calculated base
-                                        
-                                        t[0] = finalMat.m[0][0]; t[1] = finalMat.m[0][1]; t[2] = finalMat.m[0][2]; t[3] = finalMat.m[0][3];
-                                        t[4] = finalMat.m[1][0]; t[5] = finalMat.m[1][1]; t[6] = finalMat.m[1][2]; t[7] = finalMat.m[1][3];
-                                        t[8] = finalMat.m[2][0]; t[9] = finalMat.m[2][1]; t[10] = finalMat.m[2][2]; t[11] = finalMat.m[2][3];
-                                        
-                                        for (int inst_id : inst_ids) {
-                                            ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
-                                        }
-                                        // Auto-rebuild TLAS periodically or on release
-                                    }
+                                    // Use unified update method
+                                    ctx.optix_gpu_ptr->updateObjectTransform(targetName, th->base);
                                 } else {
                                     // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
                                     tri->updateTransformedVertices();

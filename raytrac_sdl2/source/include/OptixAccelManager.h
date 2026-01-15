@@ -180,6 +180,9 @@ public:
     // Get BLAS by mesh_id
     const MeshBLAS* getBLAS(int mesh_id) const;
     
+    // Find BLAS ID by name and material (returns -1 if not found)
+    int findBLAS(const std::string& name, int material_id) const;
+    
     // Static helper: Group triangles by nodeName for per-mesh BLAS building
     static std::vector<MeshData> groupTrianglesByMesh(
         const std::vector<std::shared_ptr<Triangle>>& triangles);
@@ -264,6 +267,7 @@ public:
 
     size_t getMeshCount() const { return mesh_blas_list.size(); }
     size_t getInstanceCount() const { return instances.size(); }
+    const std::vector<SceneInstance>& getInstances() const { return instances; }
     bool isBuilt() const { return tlas_handle != 0; }
     
     // Callback for HUD messages

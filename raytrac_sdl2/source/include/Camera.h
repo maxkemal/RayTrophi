@@ -120,7 +120,7 @@ public:
     float lens_quality = 0.7f;
     
     // Auto-calculate lens characteristics (true = physics-based, false = manual)
-    bool auto_lens_characteristics = true;
+    bool auto_lens_characteristics = false;
     
     // Chromatic Aberration (Renk Sapması)
     bool enable_chromatic_aberration = false;
@@ -331,7 +331,21 @@ public:
     Vec3 camera_velocity;              // Current velocity (m/s)
     Vec3 camera_angular_velocity;      // Current angular velocity (rad/s)
     
+    // ═══════════════════════════════════════════════════════════════════════════
+    // STATE MANAGEMENT (Dirty Flag Architecture)
+    // ═══════════════════════════════════════════════════════════════════════════
+    bool is_dirty = false;
     
+    void markDirty() {
+        is_dirty = true;
+    }
+
+    bool checkDirty() {
+        bool was_dirty = is_dirty;
+        is_dirty = false;
+        return was_dirty;
+    }
+
 private:
     // Initial state for reset
     Vec3 init_lookfrom;

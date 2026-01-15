@@ -799,6 +799,9 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
                     // Noise position
                     Vec3 noisePos = offsetPos * scale;
                     
+
+
+                    
                     // GPU cloud_shape ile aynı noise
                     float rawDensity = CPUCloudNoise::cloud_shape(noisePos, coverage);
                     float density = rawDensity * heightGradient;
@@ -912,5 +915,137 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
         }
 
     return to_vec3(L);
+}
+
+
+// Reset to defaults
+void World::reset() {
+    // Re-run constructor logic
+    *this = World(); 
+}
+
+// Serialization
+void World::serialize(nlohmann::json& j) const {
+    j["mode"] = data.mode;
+    
+    // Color Mode
+    j["color"] = { data.color.x, data.color.y, data.color.z };
+    j["color_intensity"] = data.color_intensity;
+    
+    // HDRI
+    j["hdri_path"] = hdri_path;
+    j["env_rotation"] = getHDRIRotation();
+    j["env_intensity"] = data.env_intensity;
+    
+    // Nishita
+    nlohmann::json n;
+    n["sun_elevation"] = data.nishita.sun_elevation;
+    n["sun_azimuth"] = data.nishita.sun_azimuth;
+    n["sun_intensity"] = data.nishita.sun_intensity;
+    n["sun_size"] = data.nishita.sun_size;
+    
+    n["air_density"] = data.nishita.air_density;
+    n["dust_density"] = data.nishita.dust_density;
+    n["ozone_density"] = data.nishita.ozone_density; 
+    n["altitude"] = data.nishita.altitude;
+    
+    n["fog_enabled"] = data.nishita.fog_enabled;
+    n["fog_density"] = data.nishita.fog_density;
+    n["fog_height"] = data.nishita.fog_height;
+    n["fog_falloff"] = data.nishita.fog_falloff;
+    n["fog_distance"] = data.nishita.fog_distance;
+    n["fog_color"] = { data.nishita.fog_color.x, data.nishita.fog_color.y, data.nishita.fog_color.z };
+    n["fog_sun_scatter"] = data.nishita.fog_sun_scatter;
+    
+    n["godrays_enabled"] = data.nishita.godrays_enabled;
+    n["godrays_intensity"] = data.nishita.godrays_intensity;
+    n["godrays_density"] = data.nishita.godrays_density;
+    n["godrays_decay"] = data.nishita.godrays_decay;
+    
+    n["multi_scatter_enabled"] = data.nishita.multi_scatter_enabled;
+    n["multi_scatter_factor"] = data.nishita.multi_scatter_factor;
+    
+    n["clouds_enabled"] = data.nishita.clouds_enabled;
+    n["cloud_coverage"] = data.nishita.cloud_coverage;
+    n["cloud_density"] = data.nishita.cloud_density;
+    
+    n["env_overlay_path"] = env_overlay_path;
+    n["env_overlay_enabled"] = data.nishita.env_overlay_enabled;
+    n["env_overlay_intensity"] = data.nishita.env_overlay_intensity;
+    n["env_overlay_rotation"] = data.nishita.env_overlay_rotation;
+    n["env_overlay_blend_mode"] = data.nishita.env_overlay_blend_mode;
+
+    j["nishita"] = n;
+}
+
+void World::deserialize(const nlohmann::json& j) {
+    if (j.contains("mode")) data.mode = j["mode"];
+    
+    if (j.contains("color")) {
+        auto c = j["color"];
+        data.color = make_float3(c[0], c[1], c[2]);
+    }
+    if (j.contains("color_intensity")) data.color_intensity = j["color_intensity"];
+    
+    if (j.contains("hdri_path")) {
+        std::string path = j["hdri_path"];
+        if (!path.empty()) setHDRI(path);
+    }
+    if (j.contains("env_rotation")) setHDRIRotation(j["env_rotation"]);
+    if (j.contains("env_intensity")) data.env_intensity = j["env_intensity"];
+    
+    if (j.contains("nishita")) {
+        auto n = j["nishita"];
+        data.nishita.sun_elevation = n.value("sun_elevation", 15.0f);
+        data.nishita.sun_azimuth = n.value("sun_azimuth", 170.0f);
+        data.nishita.sun_intensity = n.value("sun_intensity", 10.0f);
+        data.nishita.sun_size = n.value("sun_size", 0.545f);
+        
+        data.nishita.air_density = n.value("air_density", 1.0f);
+        data.nishita.dust_density = n.value("dust_density", 1.0f);
+        data.nishita.ozone_density = n.value("ozone_density", 1.0f);
+        data.nishita.altitude = n.value("altitude", 0.0f);
+        
+        data.nishita.fog_enabled = n.value("fog_enabled", 0);
+        data.nishita.fog_density = n.value("fog_density", 0.01f);
+        data.nishita.fog_height = n.value("fog_height", 500.0f);
+        data.nishita.fog_falloff = n.value("fog_falloff", 0.003f);
+        data.nishita.fog_distance = n.value("fog_distance", 10000.0f);
+        if (n.contains("fog_color")) {
+             auto fc = n["fog_color"];
+             data.nishita.fog_color = make_float3(fc[0], fc[1], fc[2]);
+        }
+        data.nishita.fog_sun_scatter = n.value("fog_sun_scatter", 0.5f);
+        
+        data.nishita.godrays_enabled = n.value("godrays_enabled", 0);
+        data.nishita.godrays_intensity = n.value("godrays_intensity", 0.5f);
+        data.nishita.godrays_density = n.value("godrays_density", 0.1f);
+        data.nishita.godrays_decay = n.value("godrays_decay", 0.95f);
+        
+        data.nishita.multi_scatter_enabled = n.value("multi_scatter_enabled", 0);
+        data.nishita.multi_scatter_factor = n.value("multi_scatter_factor", 0.3f);
+        
+        data.nishita.clouds_enabled = n.value("clouds_enabled", 0);
+        data.nishita.cloud_coverage = n.value("cloud_coverage", 0.5f);
+        data.nishita.cloud_density = n.value("cloud_density", 1.0f);
+        
+        if (n.contains("env_overlay_path")) {
+            std::string path = n["env_overlay_path"];
+            if (!path.empty()) setNishitaEnvOverlay(path);
+        }
+        data.nishita.env_overlay_enabled = n.value("env_overlay_enabled", 0);
+        data.nishita.env_overlay_intensity = n.value("env_overlay_intensity", 1.0f);
+        data.nishita.env_overlay_rotation = n.value("env_overlay_rotation", 0.0f);
+        data.nishita.env_overlay_blend_mode = n.value("env_overlay_blend_mode", 0);
+        
+        // Update Sun Direction
+        float elevRad = data.nishita.sun_elevation * 3.14159265f / 180.0f;
+        float azimRad = data.nishita.sun_azimuth * 3.14159265f / 180.0f;
+        data.nishita.sun_direction = normalize(make_float3(
+            cosf(elevRad) * sinf(azimRad), 
+            sinf(elevRad), 
+            cosf(elevRad) * cosf(azimRad)
+        ));
+    }
 }
 

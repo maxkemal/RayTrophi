@@ -1,10 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include "InstanceGroup.h"
 #include <vector>
 #include <memory>
 #include <functional>
-
+#include <json.hpp>
 class OptixWrapper;
 class SceneData;
 
@@ -59,6 +59,9 @@ public:
     // GPU SYNCHRONIZATION
     // ─────────────────────────────────────────────────────────────────────────
     
+    // Update Wind Animation for all groups
+    void updateWind(float time, SceneData& scene);
+    
     // Sync all dirty groups to GPU
     void syncToGPU(OptixWrapper* optix);
     
@@ -81,6 +84,15 @@ public:
     // ─────────────────────────────────────────────────────────────────────────
     
     void clearAll();
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // SERIALIZATION
+    // ─────────────────────────────────────────────────────────────────────────
+
+
+    nlohmann::json serialize();
+    void deserialize(const nlohmann::json& j, SceneData& scene);
+    void rebuildSceneObjects(SceneData& scene);
     
 private:
     InstanceManager() = default;

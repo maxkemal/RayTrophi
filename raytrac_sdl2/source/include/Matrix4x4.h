@@ -113,6 +113,10 @@ public:
     Matrix4x4(Vec3 tangent, Vec3 bitangent, Vec3 normal);
     // Matrix4x4(); // Varsayılan yapıcı
      // Vec3 ile Matrix4x4 çarpma operatörünü arkadaş fonksiyon olarak tanımlayın
+    Vec3 getTranslation() const {
+        return Vec3(m[0][3], m[1][3], m[2][3]);
+    }
+
     void setRow(int row, const Vec4& v) {
         m[row][0] = v.x;
         m[row][1] = v.y;

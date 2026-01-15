@@ -669,6 +669,10 @@ extern "C" __global__ void __closesthit__ch() {
     payload->vol_light_steps = hgd->vol_light_steps;
     payload->vol_shadow_strength = hgd->vol_shadow_strength;
     
+    // NanoVDB grid (for VDB-based volumetrics)
+    payload->nanovdb_grid = hgd->nanovdb_grid;
+    payload->has_nanovdb = hgd->has_nanovdb;
+    
     // Mesafeyi kaydet (Beer's Law için gerekli)
     payload->t = optixGetRayTmax();
 }

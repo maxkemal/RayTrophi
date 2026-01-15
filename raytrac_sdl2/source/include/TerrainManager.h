@@ -174,10 +174,14 @@ public:
 
     TerrainObject* getTerrain(int id);
     TerrainObject* getTerrainByName(const std::string& name);
+
+    // ===========================================================================
+    // HEIGHT SAMPLING & RAYCAST
+    // ===========================================================================
     
-    // ===========================================================================
-    // HEIGHT SAMPLING (for River System, Foliage, etc.)
-    // ===========================================================================
+    // Ray-Terrain Intersection (Ignores all other objects, perfect for sculpting/painting)
+    // Returns true if hit, populates t_out and normal_out
+    bool intersectRay(TerrainObject* terrain, const Ray& r, float& t_out, Vec3& normal_out, float t_min = 0.001f, float t_max = 1e9f);
     
     // Check if any terrain exists
     bool hasActiveTerrain() const { return !terrains.empty(); }

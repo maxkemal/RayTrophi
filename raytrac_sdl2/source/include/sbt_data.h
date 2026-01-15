@@ -85,4 +85,9 @@ struct __align__(16) HitGroupData
     // Object AABB bounds (for volumetric ray marching)
     float3 aabb_min = {0,0,0};    // Bounding box minimum
     float3 aabb_max = {0,0,0};    // Bounding box maximum
+    
+    // NanoVDB GPU Grid pointer (for VDB-based volumetrics)
+    void* nanovdb_grid = nullptr; // Device pointer to NanoVDB grid
+    int has_nanovdb = 0;          // 1 = use NanoVDB grid, 0 = use procedural noise
+    int vdb_pad = 0;              // Alignment padding
 };

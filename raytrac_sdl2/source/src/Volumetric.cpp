@@ -7,6 +7,9 @@
 #include "unified_converters.h"
 #include "Triangle.h"
 #include "AABB.h"
+#include "VDBVolumeManager.h"
+
+
 
 Volumetric::Volumetric(const Vec3& a, float d, float ap, float sf, const Vec3& e, std::shared_ptr<Perlin> noiseGen)
     : albedo(a), density(d), absorption_probability(ap), scattering_factor(sf), emission(e), noise(noiseGen) 
@@ -19,7 +22,19 @@ Volumetric::Volumetric(const Vec3& a, float d, float ap, float sf, const Vec3& e
 }
 
 float Volumetric::calculate_density(const Vec3& point) const {
-    // Defines shared density logic (procedural noise) for parity
+    // Check if using VDB density source
+    if (density_source == 1 && vdb_volume_id >= 0) {
+        // Sample from VDB volume
+        float vdb_density = VDBVolumeManager::getInstance().sampleDensityCPU(
+            vdb_volume_id, 
+            static_cast<float>(point.x), 
+            static_cast<float>(point.y), 
+            static_cast<float>(point.z)
+        );
+        return vdb_density * density;  // Apply density multiplier
+    }
+    
+    // Fallback to procedural noise (existing behavior)
     UnifiedVolumeParams params;
     params.density_multiplier = density;
     params.noise_scale = noise_scale;

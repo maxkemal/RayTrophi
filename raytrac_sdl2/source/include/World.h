@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "Vec3.h"
 #include <cuda_runtime.h>
+#include "json.hpp"
 
 
 // GPU-Compatible Enum
@@ -207,5 +208,13 @@ private:
    
    // Internal helper for Nishita
    Vec3 calculateNishitaSky(const Vec3& ray_dir);
+
+public:
+    // Reset to default settings
+    void reset();
+
+    // Serialization
+    void serialize(nlohmann::json& j) const;
+    void deserialize(const nlohmann::json& j);
 };
 #endif

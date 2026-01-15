@@ -15,6 +15,7 @@
 #include <scene_ui.h>
 
 #include "EmbreeBVH.h"
+#include "ParallelBVHNode.h"
 #include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
 #include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
@@ -45,6 +46,7 @@
 #define NOMINMAX
 #define TINYEXR_IMPLEMENTATION
 #include "tinyexr.h"
+#include <InstanceManager.h>
 
 bool SaveSurface(SDL_Surface* surface, const char* file_path) {
     SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
@@ -108,7 +110,7 @@ bool quit = false;
 bool apply_tonemap = false;
 bool reset_tonemap = false;
 bool mouse_control_enabled = true;
-float mouse_sensitivity = 0.1f;
+float mouse_sensitivity = 0.4f;
 bool camera_moved = false;
 bool use_denoiser = false;
 bool camera_moved_recently = false;
@@ -275,6 +277,13 @@ void reset_render_resolution(int w, int h)
     // Always resize OptiX buffers if available
     if (g_hasOptix) { optix_gpu.resetBuffers(w, h); }
     color_processor.resize(w, h);
+
+    // CRITICAL: Ensure Camera aspect ratio matches new resolution for correct ray generation (AF, Picking)
+    if (scene.camera) {
+        scene.camera->aspect_ratio = aspect_ratio;
+        scene.camera->update_camera_vectors();
+        if (g_hasOptix) { optix_gpu.setCameraParams(*scene.camera); }
+    }
 
     SCENE_LOG_INFO("Render resolution updated: " + std::to_string(w) + "x" + std::to_string(h));
 }
@@ -479,7 +488,7 @@ int main(int argc, char* argv[]) {
 
      // Create main window
     if (splashOk) { splash.setStatus("Creating main window..."); splash.render(); }
-     window = SDL_CreateWindow("RayTrophi",
+     window = SDL_CreateWindow("RayTrophi Studio",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         image_width,
@@ -552,10 +561,13 @@ int main(int argc, char* argv[]) {
     if (scene.camera) scene.camera->update_camera_vectors();
 
     // ===========================================================================
-    // SPLASH COMPLETE - Wait for user click to continue
+    // SPLASH COMPLETE - Auto-close with fade out (no more waiting for click)
     // ===========================================================================
     if (splashOk) {
-        splash.waitForClick();
+        splash.setStatus("Ready!");
+        splash.render();
+        SDL_Delay(300);  // Brief pause to show "Ready!" status
+        splash.fadeOut(400);  // Quick fade out animation
         splash.close();
     }
     
@@ -672,18 +684,52 @@ int main(int argc, char* argv[]) {
              WaterManager::getInstance().update(dt);
              
              // Update OptiX Time
-             if (g_hasOptix) {
                   // Use frame count from timeline (24 FPS assumption or settings)
                   float time_seconds = ui.timeline.getCurrentFrame() / 24.0f;
+
+                  // Calculate wind transforms on CPU
+                  InstanceManager::getInstance().updateWind(time_seconds, scene);
+
+                  // Update OptiX Time
                   optix_gpu.setTime(time_seconds, time_seconds);
                   
+                  // Efficiently update instance transforms on GPU (no full rebuild)
+                  optix_gpu.updateTLASMatricesOnly(scene.world.objects);
+                  
+                  // VDB update moved outside of timeline_playing block (see below)
+
                   // Force redraw (break accumulation)
                   start_render = true;
                   g_needs_optix_sync = true; // Signal that params changed
-             }
+             
         } else {
              // Static update (for editor changes)
              WaterManager::getInstance().update(0.0f);
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════
+        // VDB SEQUENCE UPDATE (Always check, even when not playing)
+        // ═══════════════════════════════════════════════════════════════════
+        static int last_vdb_frame = -1;
+        int current_vdb_frame = ui.timeline.getCurrentFrame();
+        
+        if (current_vdb_frame != last_vdb_frame) {
+            bool vdb_needs_sync = false;
+            for (auto& vdb : scene.vdb_volumes) {
+                if (vdb->isAnimated() && vdb->isLinkedToTimeline()) {
+                    vdb->updateFromTimeline(current_vdb_frame);
+                    vdb_needs_sync = true;
+                }
+            }
+            
+            if (vdb_needs_sync) {
+                ui.syncVDBVolumesToGPU(ui_ctx);
+                if (use_optix) {
+                    optix_gpu.resetAccumulation();
+                }
+                ray_renderer.resetCPUAccumulation();
+            }
+            last_vdb_frame = current_vdb_frame;
         }
 
         ImGui_ImplSDLRenderer2_NewFrame();
@@ -768,6 +814,31 @@ int main(int argc, char* argv[]) {
         }
         
         ui.draw(ui_ctx);
+        
+        // ===========================================================================
+        // CENTRALIZED CAMERA UPDATE (PHASE 1)
+        // Checks if UI changed camera or if continuous effects (Shake/AF-C) are active
+        // ===========================================================================
+        if (scene.camera) {
+            bool is_dirty = scene.camera->checkDirty();
+            
+            // Continuous effects require per-frame updates
+            bool is_shaking = scene.camera->enable_camera_shake;
+            bool is_af_c = (ui.viewport_settings.focus_mode == 2);
+            
+            if (is_dirty || is_shaking || is_af_c) {
+                 // Ensure vectors are up to date
+                 scene.camera->update_camera_vectors();
+                 
+                 if (g_hasOptix) {
+                    optix_gpu.setCameraParams(*scene.camera);
+                    optix_gpu.resetAccumulation();
+                 }
+                 ray_renderer.resetCPUAccumulation();
+                 
+                 start_render = true;
+            }
+        }
         // NOTE: handleMouseSelection is now called inside ui.draw() - removed duplicate call here
         
         // Scene Hierarchy panel now called inside ui.draw()
@@ -944,8 +1015,9 @@ int main(int argc, char* argv[]) {
                         }
                         else {
                             // ORBIT / ROTATION (Middle Mouse only)
-                            yaw += dx * mouse_sensitivity;
-                            pitch -= dy * mouse_sensitivity;
+                            // Rotation speed reduced by factor of 0.2 for better control
+                            yaw += dx * mouse_sensitivity * 0.2f;
+                            pitch -= dy * mouse_sensitivity * 0.2f;
                             pitch = std::clamp(pitch, -89.9f, 89.9f);
 
                             float rad_yaw = yaw * 3.14159265f / 180.0f;
@@ -977,7 +1049,7 @@ int main(int argc, char* argv[]) {
                 // Eğer mouse ImGui üzerinde değilse
                 if (!ImGui::GetIO().WantCaptureMouse) {
                     float scroll_amount = e.wheel.y;  // yukarı: pozitif, aşağı: negatif
-                    float move_speed = 1.5f; // İstersen ayarlanabilir yap
+                    float move_speed = 1.5f * mouse_sensitivity; // Apply Mouse Sensitivity to Zoom
                     Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                     scene.camera->lookfrom += forward * scroll_amount * move_speed;
                     scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
@@ -1006,28 +1078,31 @@ int main(int argc, char* argv[]) {
             Vec3 up = scene.camera->vup;
 
             // Arrow Keys for Camera Movement (avoids conflict with G/R/S gizmo shortcuts)
+            // Apply sensitivity to base movement speed
+            float effective_speed = move_speed * (mouse_sensitivity * 5.0f); // Scale up a bit as sensitivity is usually low (0.1)
+
             if (key_state[SDL_SCANCODE_UP]) {
-                scene.camera->lookfrom += forward * move_speed;
+                scene.camera->lookfrom += forward * effective_speed;
                 camera_moved = true;
             }
             if (key_state[SDL_SCANCODE_DOWN]) {
-                scene.camera->lookfrom -= forward * move_speed;
+                scene.camera->lookfrom -= forward * effective_speed;
                 camera_moved = true;
             }
             if (key_state[SDL_SCANCODE_LEFT]) {
-                scene.camera->lookfrom -= right * move_speed;
+                scene.camera->lookfrom -= right * effective_speed;
                 camera_moved = true;
             }
             if (key_state[SDL_SCANCODE_RIGHT]) {
-                scene.camera->lookfrom += right * move_speed;
+                scene.camera->lookfrom += right * effective_speed;
                 camera_moved = true;
             }
             if (key_state[SDL_SCANCODE_PAGEUP]) {
-                scene.camera->lookfrom += up * move_speed;
+                scene.camera->lookfrom += up * effective_speed;
                 camera_moved = true;
             }
             if (key_state[SDL_SCANCODE_PAGEDOWN]) {
-                scene.camera->lookfrom -= up * move_speed;
+                scene.camera->lookfrom -= up * effective_speed;
                 camera_moved = true;
             }
 
@@ -1048,7 +1123,7 @@ int main(int argc, char* argv[]) {
 
         }
 
-             
+        bool wind_active = false; // Declared here for wider scope
         auto now = std::chrono::steady_clock::now();
         auto delta_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_camera_move_time).count();
         camera_moved_recently = (delta_ms < 50);
@@ -1127,7 +1202,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-
+           
             // 2. Handle Interactive Render (One Frame / Progressive)
             // ONLY if no background rendering is happening
             if (start_render) {
@@ -1162,6 +1237,26 @@ int main(int argc, char* argv[]) {
                         if (current_f != last_anim_frame && has_file_animations) {
                             geometry_updated = ray_renderer.updateAnimationState(scene, time);
                             last_anim_frame = current_f;
+                        }
+
+                        // WIND ANIMATION (Independent of FBX animations)
+                        // Checks if any InstanceGroup has wind enabled and updates matrices
+                        static float last_wind_time = -1.0f;
+                        
+
+                        if (std::abs(time - last_wind_time) > 0.001f) {
+                            ray_renderer.updateWind(scene, time);
+                            
+                            // Check if wind actually modified anything
+                            for(const auto& group : InstanceManager::getInstance().getGroups()) {
+                                if(group.gpu_dirty) { wind_active = true; break; }
+                            }
+                            
+                            if (wind_active) {
+                                // geometry_updated = true; // REMOVED: Managed by updateWind (Direct Instance Update + Refit)
+                                // This prevents expensive updateTLASGeometry (BLAS Rebuild/Skinning) for simple wind sway
+                            }
+                            last_wind_time = time;
                         }
                         
                         if (geometry_updated) {
@@ -1237,12 +1332,29 @@ int main(int argc, char* argv[]) {
                         
                         // Single pass render (1 sample) - fast, no UI blocking
                         auto sample_start = std::chrono::high_resolution_clock::now();
-                        
+                       if (g_hasOptix && render_settings.use_optix) {
+                     // Check if we are playing animation
+                     int loop_count = 1;
+                     if (timeline_playing) {
+                         loop_count = std::max(1, render_settings.animation_samples_per_frame);
+                     }
+                     
+                     for (int i = 0; i < loop_count; ++i) {
+                         optix_gpu.launch_random_pixel_mode_progressive(
+                             surface, window, renderer, 
+                             image_width, image_height, 
+                             framebuffer, raytrace_texture
+                         );
+                     }
+                     // Debug Log (Temporary)
+                     // if (timeline_playing) SCENE_LOG_INFO("Preview Loop: " + std::to_string(loop_count));
+                } else {
                         optix_gpu.launch_random_pixel_mode_progressive(
                             surface, window, renderer, 
                             image_width, image_height, 
                             framebuffer, raytrace_texture
                         );
+                }
                         
                         auto sample_end = std::chrono::high_resolution_clock::now();
                         float sample_time_ms = std::chrono::duration<float, std::milli>(sample_end - sample_start).count();
@@ -1459,6 +1571,9 @@ int main(int argc, char* argv[]) {
                         // PERFORMANCE: Only update geometry if file-based animations modified it
                         if (has_file_animations) {
                             optix_gpu.updateGeometry(scene.world.objects);
+                        } else if (wind_active) {
+                            // FAST PATH: Wind only updates matrices, not vertex geometry.
+                            optix_gpu.updateTLASMatricesOnly(scene.world.objects);
                         } else if (has_manual_keyframes) {
                             // PERFORMANCE CRITICAL: 
                             // updateTLASMatricesOnly calls syncInstanceTransforms which iterates ALL 2M objects!
@@ -1645,9 +1760,12 @@ int main(int argc, char* argv[]) {
                      if (use_embree) {
                          auto bvh = std::make_shared<EmbreeBVH>();
                          bvh->build(objs);
-                         return bvh;
+                         return std::dynamic_pointer_cast<Hittable>(bvh);
+                     } else {
+                         // Fallback to ParallelBVH (CPU)
+                         // Note: 0.0, 1.0 are time parameters for motion blur (shutter open/close)
+                         return std::make_shared<ParallelBVHNode>(objs, 0, objs.size(), 0.0, 1.0, 0);
                      } 
-                     return nullptr; 
                 });
             }
             g_bvh_rebuild_pending = false; 

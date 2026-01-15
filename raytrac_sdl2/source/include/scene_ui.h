@@ -9,14 +9,14 @@ class SceneSelection;
 struct RenderSettings;
 class Texture;
 struct InstanceGroup;
+class VDBVolume;
 
 #include "ui_modern.h"  // Modern UI sistemi
 #include "SceneHistory.h"  // Undo/Redo system
 #include "SceneCommand.h"  // TransformState struct
 #include "TimelineWidget.h"  // Timeline animation widget
 #include "CameraPresets.h"   // Camera body, lens, ISO, shutter presets
-#include "TimelineWidget.h"  // Timeline animation widget
-#include "CameraPresets.h"   // Camera body, lens, ISO, shutter presets
+
 #include "TerrainNodesV2.h" // Terrain node graph V2 system
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
 #include <fstream>
@@ -24,6 +24,7 @@ struct InstanceGroup;
 #include <set> // For lazy CPU sync
 #include <atomic> // For thread-safe flags
 #include "Vec3.h" // For bbox_cache
+#include "instancegroup.h" 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HEADER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -90,12 +91,16 @@ public:
     bool show_system_tab = false;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
     bool show_anim_graph = false;     // Animation node editor panel
+    bool show_vdb_tab = true;         // VDB Volumes tab (Default open)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Static Helpers (Shared across modules)
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
     static std::string saveFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const wchar_t* defExt = L"rts");
     static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
+    static void syncVDBVolumesToGPU(UIContext& ctx);
+
+    void appendInstancesToScene(UIContext& ctx, InstanceGroup& group, size_t start_index);
     
     // ═══════════════════════════════════════════════════════════
     // GLOBAL UI WIDGETS (Themable)
@@ -268,6 +273,10 @@ public:
          int brush_mode = 0;             // 0=Add, 1=Remove, 2=Adjust
          bool show_brush_preview = true; // Show brush circle in viewport
          std::string target_surface_name; // Which mesh to paint on (empty = any)
+         
+         // Lazy Update Logic
+         std::vector<InstanceTransform> pending_instances; // Instances waiting to be committed
+         int pending_group_id = -1;      // ID of the group getting pending instances
      };
      ScatterBrushSettings scatter_brush;
      
@@ -301,11 +310,16 @@ public:
     // Terrain Foliage Brush Settings (Paint to add/remove foliage)
     struct FoliageBrushSettings {
         bool enabled = false;           // Foliage brush mode active
-        std::string active_layer_name;  // Which foliage layer to paint (by name)
+        int active_group_id = -1;       // Which foliage layer to paint (by ID)
         float radius = 5.0f;            // Brush size in world units
         int density = 3;                // Instances per stroke
-        int mode = 0;                   // 0=Add, 1=Remove
+        int mode = 0;                   // 0=Add, 1=Remove     
         bool show_preview = true;       // Show brush circle in viewport
+        bool lazy_update = false;       // If true, waits for mouse release to spawn instances (Better for weak GPUs)
+        
+        // Lazy Update Logic
+        std::vector<InstanceTransform> pending_instances; 
+        int pending_group_id = -1;
     };
     FoliageBrushSettings foliage_brush;
 
@@ -317,7 +331,18 @@ public:
     void handleTerrainBrush(UIContext& ctx);
     void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
     void tickProgressiveVertexSync(); // Called each frame to process a chunk
-    void updateAutofocus(UIContext& ctx);  // Run autofocus logic (raycast center)rlay (focal, FOV, aperture)
+    void updateAutofocus(UIContext& ctx);  // Run autofocus logic (raycast center)
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // VDB VOLUME UI (Industry-Standard Volumetrics)
+    // ═══════════════════════════════════════════════════════════════════════════
+    void drawVDBVolumePanel(UIContext& ctx);       // VDB volumes list and properties
+    void drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb);  // Single VDB properties
+    void importVDBVolume(UIContext& ctx);          // Import single VDB file
+    void importVDBSequence(UIContext& ctx);        // Import VDB Sequence
+    void drawVDBImportMenu(UIContext& ctx);        // Import menu items
+   
+
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
