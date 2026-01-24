@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ProjectManager.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include "ProjectData.h"
@@ -150,6 +160,14 @@ private:
     // Serialize textures (with embed option)
     nlohmann::json serializeTextures(std::ofstream& bin_out, bool embed_textures);
     void deserializeTextures(const nlohmann::json& j, std::ifstream& bin_in, const std::string& project_dir);
+
+    // Serialize Gas Volumes
+    nlohmann::json serializeGasVolumes(const std::vector<std::shared_ptr<GasVolume>>& gas_volumes);
+    void deserializeGasVolumes(const nlohmann::json& j, SceneData& scene);
+
+    // Serialize Force Fields
+    nlohmann::json serializeForceFields(const Physics::ForceFieldManager& ffm);
+    void deserializeForceFields(const nlohmann::json& j, SceneData& scene);
     
     // Temporary storage for package contents during editing
     struct PackageFile {
@@ -194,3 +212,4 @@ public:
 
 // Convenience macro
 #define g_ProjectManager ProjectManager::getInstance()
+

@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Mesh.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include <vector>
 #include <memory>
@@ -49,6 +59,10 @@ struct Mesh {
             uint32_t i0 = triIndices[0];
             uint32_t i1 = triIndices[1];
             uint32_t i2 = triIndices[2];
+            if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+                std::cerr << "[Mesh] Error: Index out of bounds in mesh " << meshName << std::endl;
+                continue; // Skip invalid triangles instead of crashing
+            }
 
             const Vertex& v0 = vertices[i0];
             const Vertex& v1 = vertices[i1];
@@ -86,3 +100,4 @@ struct Mesh {
         return tris;
     }
 };
+

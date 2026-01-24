@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SequencerAdapter.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 #include "../external/ImSequencer.h"
 #include "KeyframeSystem.h"
@@ -60,3 +70,4 @@ private:
     int frame_min = 0;
     int frame_max = 250;
 };
+

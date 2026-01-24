@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_types.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 /**
  * @file unified_types.h
  * @brief Platform-agnostic unified types for CPU/GPU rendering parity
@@ -401,3 +411,4 @@ struct UnifiedHitResult {
         has_transmission_tex(false)
     {}
 };
+

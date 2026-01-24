@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SplashScreen.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include <SDL.h>
@@ -64,3 +74,4 @@ private:
     // Simple bitmap font rendering (no SDL_ttf dependency)
     void drawText(const std::string& text, int x, int y, SDL_Color color);
 };
+

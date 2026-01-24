@@ -1,8 +1,20 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          scene_data.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include <HittableList.h>
 #include <AssimpLoader.h>
 #include "KeyframeSystem.h"
 #include "VDBVolume.h"
+#include "GasVolume.h"
+#include "ForceField.h"
 
 #include <string>
 
@@ -45,6 +57,21 @@ struct SceneData {
     Vec3 background_color = Vec3(0.2f, 0.2f, 0.2f);
     bool initialized = false;
     ColorProcessor color_processor;
+    
+    // =========================================================================
+    // Object Grouping System
+    // =========================================================================
+    struct SceneGroup {
+        std::string name;
+        std::vector<std::string> member_names;  // nodeName list of grouped objects
+        bool expanded = true;                    // UI expand state
+        
+        bool contains(const std::string& obj_name) const {
+            return std::find(member_names.begin(), member_names.end(), obj_name) 
+                   != member_names.end();
+        }
+    };
+    std::vector<SceneGroup> object_groups;
     
     // Keyframe animation system
     TimelineManager timeline;
@@ -154,6 +181,101 @@ struct SceneData {
     }
 
     // =========================================================================
+    // Gas Simulation Volumes (Real-time/Baked Gas/Smoke)
+    // =========================================================================
+    std::vector<std::shared_ptr<GasVolume>> gas_volumes;
+    
+    // Add a gas volume to the scene
+    void addGasVolume(std::shared_ptr<GasVolume> gas) {
+        if (gas) {
+            static int gas_id_counter = 0;
+            gas->id = gas_id_counter++;
+            
+            // LINK TO FORCE FIELDS: Critical for simulation to respond to fields
+            gas->getSimulator().setExternalForceFieldManager(&this->force_field_manager);
+            
+            gas_volumes.push_back(gas);
+        }
+    }
+    
+    // Remove a gas volume from the scene
+    bool removeGasVolume(std::shared_ptr<GasVolume> gas) {
+        auto it = std::find(gas_volumes.begin(), gas_volumes.end(), gas);
+        if (it != gas_volumes.end()) {
+            gas_volumes.erase(it);
+            return true;
+        }
+        return false;
+    }
+    
+    // Find gas volume by name
+    std::shared_ptr<GasVolume> findGasVolumeByName(const std::string& name) const {
+        for (const auto& gas : gas_volumes) {
+            if (gas && gas->name == name) {
+                return gas;
+            }
+        }
+        return nullptr;
+    }
+    
+    // Update all gas volumes (call from main loop)
+    void updateGasVolumes(float dt) {
+        for (auto& gas : gas_volumes) {
+            if (gas) {
+                // Keep linkage updated (useful if manager pointer ever changes or during reload)
+                gas->getSimulator().setExternalForceFieldManager(&this->force_field_manager);
+                gas->update(dt);
+            }
+        }
+    }
+    
+    // Update all gas volumes from timeline (for animation sync)
+    void updateGasVolumesFromTimeline(int frame) {
+        for (auto& gas : gas_volumes) {
+            if (gas && gas->isLinkedToTimeline()) {
+                gas->updateFromTimeline(frame);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Force Fields (Universal Physics System)
+    // =========================================================================
+    Physics::ForceFieldManager force_field_manager;
+    
+    // Add a force field to the scene
+    int addForceField(std::shared_ptr<Physics::ForceField> field) {
+        return force_field_manager.addForceField(field);
+    }
+    
+    // Remove a force field from the scene
+    bool removeForceField(std::shared_ptr<Physics::ForceField> field) {
+        return force_field_manager.removeForceField(field);
+    }
+    
+    // Find force field by name
+    std::shared_ptr<Physics::ForceField> findForceFieldByName(const std::string& name) const {
+        return force_field_manager.findByName(name);
+    }
+    
+    // Evaluate all force fields at a position (for physics simulations)
+    Vec3 evaluateForceFieldsAt(const Vec3& world_pos, float time, 
+                               const Vec3& velocity) const {
+        return force_field_manager.evaluateAt(world_pos, time, velocity);
+    }
+    
+    // Evaluate all force fields at a position (simplified - no velocity)
+    Vec3 evaluateForceFieldsAt(const Vec3& world_pos, float time) const {
+        return force_field_manager.evaluateAt(world_pos, time, Vec3(0,0,0));
+    }
+    
+    // Evaluate force fields for specific system type
+    Vec3 evaluateForceFieldsForGas(const Vec3& world_pos, float time, 
+                                   const Vec3& velocity) const {
+        return force_field_manager.evaluateAtFiltered(world_pos, time, velocity, true, false, false, false);
+    }
+
+    // =========================================================================
     // Clear all scene data
     // =========================================================================
     void clear() {
@@ -165,9 +287,12 @@ struct SceneData {
         timeline.clear();              // Clear keyframes
         importedModelContexts.clear(); // Clear model contexts (releases aiScene memory)
         vdb_volumes.clear();           // Clear VDB volumes
+        gas_volumes.clear();           // Clear gas volumes
+        force_field_manager.clear();   // Clear force fields
         camera = nullptr;
         active_camera_index = 0;
         bvh = nullptr;
         initialized = false;
     }
 };
+

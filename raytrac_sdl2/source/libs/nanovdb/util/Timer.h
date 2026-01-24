@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Timer.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -97,3 +107,4 @@ using CpuTimer [[deprecated("Use nanovdb::util::Timer instead")]] = util::Timer;
 } // namespace nanovdb
 
 #endif // NANOVDB_UTIL_TIMER_HAS_BEEN_INCLUDED
+

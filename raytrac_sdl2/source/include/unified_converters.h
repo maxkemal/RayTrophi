@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_converters.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 /**
  * @file unified_converters.h
  * @brief Conversion functions between legacy CPU types and unified types
@@ -233,3 +243,4 @@ inline UnifiedLight fromGpuLight(const LightGPU& gpu) {
 }
 
 #endif // __CUDACC__
+

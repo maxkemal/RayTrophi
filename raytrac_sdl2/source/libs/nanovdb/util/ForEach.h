@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ForEach.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -114,3 +124,4 @@ inline void forEach(const ContainerT<T...> &c, size_t grainSize, const FuncT& fu
 }// namespace nanovdb
 
 #endif // NANOVDB_UTIL_FOREACH_H_HAS_BEEN_INCLUDED
+

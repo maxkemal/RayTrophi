@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          TerrainNodesV2.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 /**
  * @file TerrainNodesV2.h
@@ -1641,3 +1651,4 @@ namespace TerrainNodesV2 {
     };
 
 } // namespace TerrainNodesV2
+

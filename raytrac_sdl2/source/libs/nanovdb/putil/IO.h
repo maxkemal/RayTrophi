@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          IO.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -779,3 +789,4 @@ PNANOVDB_IO_INLINE void pnanovdb_io_print_slice(pnanovdb_io_buf_t* src_nanovdb, 
 #endif
 
 #endif // end of NANOVDB_PUTILS_IO_H_HAS_BEEN_INCLUDED
+

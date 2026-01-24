@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          GridChecksum.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -425,3 +435,4 @@ inline void updateGridCount(GridData *data, uint32_t gridIndex, uint32_t gridCou
 } // namespace nanovdb ====================================================================
 
 #endif // NANOVDB_TOOLS_GRIDCHECKSUM_H_HAS_BEEN_INCLUDED
+

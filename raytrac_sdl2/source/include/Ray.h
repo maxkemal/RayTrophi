@@ -1,10 +1,20 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Ray.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #ifndef RAY_H
 #define RAY_H
 
 #ifdef __CUDACC__  // CUDA derleyicisiyle derleniyorsa
 #include <cuda_runtime.h>
 #include "vec3_utils.cuh"
-#include "random_utils.cuh" // curand tabanl� random_float()
+#include "random_utils.cuh" // curand tabanlı random_float()
 
 struct Ray {
     float3 origin;
@@ -35,3 +45,4 @@ public:
 #endif  // __CUDACC__
 
 #endif  // RAY_H
+

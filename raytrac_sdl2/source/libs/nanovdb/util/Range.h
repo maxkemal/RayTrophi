@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Range.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -156,3 +166,4 @@ using Range3D [[deprecated("Use nanovdb::util::Range3D instead")]] = util::Range
 }// namespace nanovdb
 
 #endif // NANOVDB_UTIL_RANGE_H_HAS_BEEN_INCLUDED
+

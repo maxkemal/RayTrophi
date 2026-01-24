@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          OptixWrapper.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include <optix.h>
 #include <cuda_runtime.h>
@@ -35,6 +45,7 @@ struct OptixGeometryData {
     std::vector<float3> normals;
     std::vector<float3> tangents;
     std::vector<float2> uvs;
+    std::vector<float3> colors; // Vertex colors
     std::vector<GpuMaterial> materials;
     std::vector<int> material_indices;
 
@@ -80,8 +91,13 @@ struct OptixGeometryData {
         float3 aabb_max = {1.0f, 1.0f, 1.0f};
         
         // NanoVDB GPU grid pointer
+        // NanoVDB GPU grid pointer
         void* nanovdb_grid = nullptr;
         int has_nanovdb = 0;
+        
+        // 3D Density Texture (GasVolume)
+        cudaTextureObject_t vol_density_texture = 0;
+        int has_vol_texture = 0;
     };
 
     std::vector<TextureBundle> textures;
@@ -135,6 +151,7 @@ public:
 
     void setLightParams(const std::vector<std::shared_ptr<Light>>& lights);
     void setTime(float time, float water_time);
+    void setWindParams(const Vec3& direction, float strength, float speed, float time);
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
     void resetBuffers(int width, int height);
     
@@ -142,6 +159,9 @@ public:
     bool isAccumulationComplete() const;
     int getAccumulatedSamples() const { return accumulated_samples; }
     void resetAccumulation();  // Reset accumulation for new frame (animation)
+    
+    // Stream access for synchronized GPU updates
+    CUstream getStream() const { return stream; }
     
     // ═══════════════════════════════════════════════════════════════════════════
     // OPTIMIZED MATERIAL UPDATES (No Geometry Rebuild)
@@ -180,6 +200,11 @@ public:
     }
     void updateInstanceTransform(int instance_id, const float transform[12]);
     
+    // Set visibility by node name (uses OptiX visibility masks)
+    void setVisibilityByNodeName(const std::string& nodeName, bool visible);
+    void updateInstanceVisibility(int instance_id, bool visible);
+    void showAllInstances();
+
     // Targeted BLAS Update for Terrain Sculpting (Avoids full scene rebuild)
     void updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
 
@@ -196,7 +221,8 @@ public:
     
     // Get AccelManager for advanced operations
     OptixAccelManager* getAccelManager() { return accel_manager.get(); }
-    
+    // Updates Gas Volume buffer for GPU ray marching
+    void updateGasVolumeBuffer(const std::vector<GpuGasVolume>& volumes);
 private:
     std::function<void(const std::string&, int)> m_accelStatusCallback;
     
@@ -291,6 +317,13 @@ private:
     // VDB Volume Objects (independent objects with NanoVDB grids)
     GpuVDBVolume* d_vdb_volumes = nullptr;
     size_t d_vdb_volumes_capacity = 0;
+    
+    // Gas Volume Objects (Dense 3D Textures)
+    GpuGasVolume* d_gas_volumes = nullptr;
+    size_t d_gas_volumes_capacity = 0;
+    
+   
+
     float* d_accumulation_buffer = nullptr;
     float* d_variance_buffer = nullptr;
     int* d_sample_count_buffer = nullptr;
@@ -347,3 +380,4 @@ private:
     bool params_dirty = true;
     size_t d_temp_buffer_size = 0; // Usage tracking for temp buffer optimization
 };
+

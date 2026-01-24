@@ -1,4 +1,14 @@
-﻿#ifndef LIGHT_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Light.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef LIGHT_H
 #define LIGHT_H
 
 #include "Vec3.h"
@@ -13,6 +23,7 @@ enum class LightType : int {
 class Light {
 public:
     std::string nodeName;
+    bool visible = true;
     Vec3 position;
     Vec3 direction;
     Vec3 initialDirection;
@@ -45,4 +56,5 @@ public:
 
 
 #endif // LIGHT_H
+
 

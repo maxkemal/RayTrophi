@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          OptixAccelManager.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include <optix.h>
 #include <cuda_runtime.h>
@@ -36,6 +46,7 @@ struct MeshGeometry {
     std::vector<float3> normals;
     std::vector<float2> uvs;
     std::vector<float3> tangents;
+    std::vector<float3> colors;
     int material_id = 0;
     std::string mesh_name;
     
@@ -56,11 +67,14 @@ struct MeshData {
 // Per-mesh Bottom-Level Acceleration Structure
 struct MeshBLAS {
     OptixTraversableHandle handle = 0;      // BLAS traversable handle
-    CUdeviceptr d_vertices = 0;             // GPU vertex buffer
+    CUdeviceptr d_vertices = 0;             // GPU vertex buffer (Deformed/Current)
+    CUdeviceptr d_vertices_rest = 0;        // GPU vertex buffer (Rest Pose - Original)
     CUdeviceptr d_indices = 0;              // GPU index buffer
     CUdeviceptr d_normals = 0;              // GPU normal buffer
-    CUdeviceptr d_uvs = 0;                  // GPU UV buffer
+    CUdeviceptr d_uvs = 0;                  // GPU UV buffer  
     CUdeviceptr d_tangents = 0;             // GPU tangent buffer
+    CUdeviceptr d_vertex_colors = 0;        // GPU Vertex colors (RGB)
+    bool has_vertex_colors = false;
     CUdeviceptr d_gas_output = 0;           // GAS output buffer
     size_t gas_output_size = 0;             // GAS output buffer size (for refit)
     size_t vertex_count = 0;
@@ -69,6 +83,11 @@ struct MeshBLAS {
     int material_id = 0;                    // Material ID for this mesh
     std::string mesh_name;                  // Unique name (e.g. "Car_mat_0")
     std::string original_name;              // Base node name (e.g. "Car")
+    
+    // Foliage Properties
+    bool is_foliage = false;
+    float mesh_height = 0.0f;
+    float3 mesh_pivot = {0.0f, 0.0f, 0.0f};
     
     // GPU Skinning Buffers
     CUdeviceptr d_bindPoses = 0;            // Original Bind Pose Vertices
@@ -79,10 +98,13 @@ struct MeshBLAS {
     
     void cleanup() {
         if (d_vertices) { cudaFree(reinterpret_cast<void*>(d_vertices)); d_vertices = 0; }
+        if (d_vertices_rest) { cudaFree(reinterpret_cast<void*>(d_vertices_rest)); d_vertices_rest = 0; }
         if (d_indices) { cudaFree(reinterpret_cast<void*>(d_indices)); d_indices = 0; }
         if (d_normals) { cudaFree(reinterpret_cast<void*>(d_normals)); d_normals = 0; }
         if (d_uvs) { cudaFree(reinterpret_cast<void*>(d_uvs)); d_uvs = 0; }
+        if (d_uvs) { cudaFree(reinterpret_cast<void*>(d_uvs)); d_uvs = 0; }
         if (d_tangents) { cudaFree(reinterpret_cast<void*>(d_tangents)); d_tangents = 0; }
+        if (d_vertex_colors) { cudaFree(reinterpret_cast<void*>(d_vertex_colors)); d_vertex_colors = 0; }
         if (d_gas_output) { cudaFree(reinterpret_cast<void*>(d_gas_output)); d_gas_output = 0; }
         
         // Free Skinning Buffers
@@ -209,7 +231,7 @@ public:
     
     // Show instance (restore visibility)
     void showInstance(int instance_id);
-    
+    void showAllInstances();
     // Hide all instances with matching node name
     void hideInstancesByNodeName(const std::string& nodeName);
     
@@ -242,6 +264,9 @@ public:
     void buildSBT(const std::vector<GpuMaterial>& materials,
                   const std::vector<OptixGeometryData::TextureBundle>& textures,
                   const std::vector<OptixGeometryData::VolumetricInfo>& volumetrics);
+                 
+    // Apply wind deformation to foliage meshes (Kernel Launch + BLAS Refit)
+    void applyWindDeformation(int mesh_id, const Vec3& direction, float strength, float speed, float time);
     
     // Get SBT for rendering
     const OptixShaderBindingTable& getSBT() const { return sbt; }
@@ -251,6 +276,9 @@ public:
     
     // Upload modified hitgroup records to GPU
     void uploadHitGroupRecords();
+    
+    // Initialize PTX module
+    void initFoliageKernel();
     
     // ═══════════════════════════════════════════════════════════════════════
     // CLEANUP
@@ -303,6 +331,11 @@ private:
     std::vector<SbtRecord<HitGroupData>> hitgroup_records;
     CUdeviceptr d_hitgroup_records = 0;
     
+    // Foliage Deformation PTX Module
+    CUmodule foliage_module = 0;
+    CUfunction foliage_kernel = 0;
+    bool foliage_kernel_initialized = false;
+    
     // Global Bone Matrices (Persistent buffer to avoid per-frame allocation)
     CUdeviceptr d_globalBoneMatrices = 0;
     size_t globalBoneMatrices_capacity = 0; // In bytes
@@ -315,3 +348,4 @@ private:
         size_t& output_size
     );
 };
+

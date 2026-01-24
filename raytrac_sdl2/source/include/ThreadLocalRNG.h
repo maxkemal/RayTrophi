@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ThreadLocalRNG.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #ifndef THREAD_LOCAL_RNG_H
 #define THREAD_LOCAL_RNG_H
 
@@ -15,3 +25,4 @@ public:
 };
 
 #endif // THREAD_LOCAL_RNG_H
+

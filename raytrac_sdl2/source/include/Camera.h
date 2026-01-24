@@ -1,4 +1,14 @@
-﻿#ifndef CAMERA_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Camera.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef CAMERA_H
 #define CAMERA_H
 
 #include <vector>
@@ -35,6 +45,7 @@ private:
 public:
     Vec3 initialLookDirection;
     std::string nodeName;
+    bool visible = true;
     int blade_count = 6;
     float aperture = 0.0f;
     float focus_dist = 10.0f;
@@ -54,6 +65,7 @@ public:
     Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
     Camera();
     Ray get_ray(float s, float t) const;
+    void get_ray_packet(__m256 s, __m256 t, class RayPacket& rp) const;
 
     int random_int(int min, int max) const;
 
@@ -364,6 +376,7 @@ private:
 };
 
 #endif // CAMERA_H
+
 
 
 

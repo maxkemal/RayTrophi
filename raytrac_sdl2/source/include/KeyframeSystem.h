@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          KeyframeSystem.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include <vector>
 #include <map>
 #include <string>
@@ -399,23 +409,46 @@ struct WorldKeyframe {
     bool has_air_density = false;
     bool has_dust_density = false;
     bool has_ozone_density = false;
+    bool has_humidity = false;
+    bool has_temperature = false;
+    bool has_ozone_absorption_scale = false;
     bool has_altitude = false;
     bool has_mie_anisotropy = false;
     
-    // Cloud properties
+    // Cloud properties (Layer 1)
     bool has_cloud_density = false;
     bool has_cloud_coverage = false;
     bool has_cloud_scale = false;
-    bool has_cloud_offset = false;  // For offset_x and offset_z together
+    bool has_cloud_offset = false;
+    bool has_cloud_quality = false;
+    bool has_cloud_detail = false;
+
+    // Cloud properties (Layer 2)
+    bool has_cloud_layer2 = false;
+    bool has_cloud_layer2_params = false; // Coverage, Density, Scale
+    bool has_cloud_layer2_heights = false;
+
+    // Cloud Lighting
+    bool has_cloud_lighting = false; // Steps, Shadow, Ambient, Silver, Absorption
     
-    // Other groups (kept as groups for now, can be expanded if needed)
+    // Atmospheric Effects
     bool has_fog = false;
+    bool has_fog_params = false; // Density, Height, Falloff, Distance, Color, Scatter
+    bool has_godrays = false;
+    bool has_godrays_params = false; // Intensity, Density, Decay, Samples, Clip, Stochastic
+
+    // Advanced Environment
+    bool has_multi_scatter = false;
+    bool has_aerial_perspective = false;
+    bool has_aerial_params = false; // Min/Max distance
     bool has_overlay = false;
+    bool has_overlay_params = false; // Intensity, Rotation, Mode
     
     // Property values
     Vec3 background_color = Vec3(0.5, 0.7, 1.0);
     float background_strength = 1.0f;
     float hdri_rotation = 0.0f;
+    float hdri_intensity = 1.0f;
     
     float sun_elevation = 15.0f;
     float sun_azimuth = 0.0f;
@@ -425,14 +458,72 @@ struct WorldKeyframe {
     float air_density = 1.0f;
     float dust_density = 1.0f;
     float ozone_density = 1.0f;
+    float humidity = 0.1f;
+    float temperature = 15.0f;
+    float ozone_absorption_scale = 1.0f;
     float altitude = 0.0f;
     float mie_anisotropy = 0.76f;
     
+    // Cloud L1
     float cloud_density = 0.5f;
     float cloud_coverage = 0.5f;
     float cloud_scale = 1.0f;
     float cloud_offset_x = 0.0f;
     float cloud_offset_z = 0.0f;
+    float cloud_quality = 1.0f;
+    float cloud_detail = 1.0f;
+    int cloud_base_steps = 48;
+    float cloud_height_min = 500.0f;
+    float cloud_height_max = 2000.0f;
+
+    // Cloud L2
+    int cloud_layer2_enabled = 0;
+    float cloud2_coverage = 0.3f;
+    float cloud2_density = 0.3f;
+    float cloud2_scale = 8.0f;
+    float cloud2_height_min = 6000.0f;
+    float cloud2_height_max = 7000.0f;
+
+    // Cloud Lighting
+    int cloud_light_steps = 0;
+    float cloud_shadow_strength = 1.0f;
+    float cloud_ambient_strength = 1.0f;
+    float cloud_silver_intensity = 1.0f;
+    float cloud_absorption = 1.0f;
+    float cloud_anisotropy = 0.85f;
+    float cloud_anisotropy_back = -0.3f;
+    float cloud_lobe_mix = 0.5f;
+    float cloud_emissive_intensity = 0.0f;
+    Vec3 cloud_emissive_color = Vec3(1.0, 1.0, 1.0);
+
+    // Fog
+    int fog_enabled = 0;
+    float fog_density = 0.01f;
+    float fog_height = 500.0f;
+    float fog_falloff = 0.003f;
+    float fog_distance = 10000.0f;
+    Vec3 fog_color = Vec3(0.7, 0.8, 0.9);
+    float fog_sun_scatter = 0.5f;
+
+    // God Rays
+    int godrays_enabled = 0;
+    float godrays_intensity = 0.5f;
+    float godrays_density = 0.1f;
+    int godrays_samples = 16;
+    float godrays_decay = 0.95f;
+    float godrays_density_clip_bias = 0.0f;
+    float godrays_stochastic_threshold = 0.01f;
+
+    // Advanced
+    int multi_scatter_enabled = 1;
+    float multi_scatter_factor = 0.3f;
+    int aerial_perspective = 1;
+    float aerial_min_distance = 10.0f;
+    float aerial_max_distance = 5000.0f;
+    int env_overlay_enabled = 0;
+    float env_overlay_intensity = 1.0f;
+    float env_overlay_rotation = 0.0f;
+    int env_overlay_blend_mode = 0;
     
     WorldKeyframe() = default;
     
@@ -464,10 +555,11 @@ struct WorldKeyframe {
         result.has_hdri_rotation = a.has_hdri_rotation || b.has_hdri_rotation;
         if (a.has_hdri_rotation && b.has_hdri_rotation) {
             result.hdri_rotation = a.hdri_rotation + (b.hdri_rotation - a.hdri_rotation) * t;
+            result.hdri_intensity = a.hdri_intensity + (b.hdri_intensity - a.hdri_intensity) * t;
         } else if (a.has_hdri_rotation) {
-            result.hdri_rotation = a.hdri_rotation;
+            result.hdri_rotation = a.hdri_rotation; result.hdri_intensity = a.hdri_intensity;
         } else if (b.has_hdri_rotation) {
-            result.hdri_rotation = b.hdri_rotation;
+            result.hdri_rotation = b.hdri_rotation; result.hdri_intensity = b.hdri_intensity;
         }
 
         // ===== SUN PROPERTIES =====
@@ -531,15 +623,36 @@ struct WorldKeyframe {
         } else if (b.has_dust_density) {
             result.dust_density = b.dust_density;
         }
+
+        // Humidity
+        result.has_humidity = a.has_humidity || b.has_humidity;
+        if (a.has_humidity && b.has_humidity) {
+            result.humidity = a.humidity + (b.humidity - a.humidity) * t;
+        } else if (a.has_humidity) {
+            result.humidity = a.humidity;
+        } else if (b.has_humidity) {
+            result.humidity = b.humidity;
+        }
+
+        // Temperature
+        result.has_temperature = a.has_temperature || b.has_temperature;
+        if (a.has_temperature && b.has_temperature) {
+            result.temperature = a.temperature + (b.temperature - a.temperature) * t;
+        } else if (a.has_temperature) {
+            result.temperature = a.temperature;
+        } else if (b.has_temperature) {
+            result.temperature = b.temperature;
+        }
         
-        // Ozone Density
+        // Ozone Density & Strength
         result.has_ozone_density = a.has_ozone_density || b.has_ozone_density;
         if (a.has_ozone_density && b.has_ozone_density) {
             result.ozone_density = a.ozone_density + (b.ozone_density - a.ozone_density) * t;
+            result.ozone_absorption_scale = a.ozone_absorption_scale + (b.ozone_absorption_scale - a.ozone_absorption_scale) * t;
         } else if (a.has_ozone_density) {
-            result.ozone_density = a.ozone_density;
+            result.ozone_density = a.ozone_density; result.ozone_absorption_scale = a.ozone_absorption_scale;
         } else if (b.has_ozone_density) {
-            result.ozone_density = b.ozone_density;
+            result.ozone_density = b.ozone_density; result.ozone_absorption_scale = b.ozone_absorption_scale;
         }
         
         // Altitude
@@ -562,7 +675,7 @@ struct WorldKeyframe {
             result.mie_anisotropy = b.mie_anisotropy;
         }
         
-        // ===== CLOUD PROPERTIES =====
+        // ===== CLOUD PROPERTIES (L1) =====
         // Cloud Density
         result.has_cloud_density = a.has_cloud_density || b.has_cloud_density;
         if (a.has_cloud_density && b.has_cloud_density) {
@@ -605,6 +718,141 @@ struct WorldKeyframe {
             result.cloud_offset_x = b.cloud_offset_x;
             result.cloud_offset_z = b.cloud_offset_z;
         }
+        
+        // Quality & Detail
+        result.has_cloud_quality = a.has_cloud_quality || b.has_cloud_quality;
+        if (a.has_cloud_quality && b.has_cloud_quality) {
+            result.cloud_quality = a.cloud_quality + (b.cloud_quality - a.cloud_quality) * t;
+            result.cloud_detail = a.cloud_detail + (b.cloud_detail - a.cloud_detail) * t;
+            result.cloud_base_steps = (t < 0.5f) ? a.cloud_base_steps : b.cloud_base_steps;
+        } else if (a.has_cloud_quality) {
+            result.cloud_quality = a.cloud_quality; result.cloud_detail = a.cloud_detail; result.cloud_base_steps = a.cloud_base_steps;
+        } else if (b.has_cloud_quality) {
+            result.cloud_quality = b.cloud_quality; result.cloud_detail = b.cloud_detail; result.cloud_base_steps = b.cloud_base_steps;
+        }
+
+        // ===== CLOUD LAYER 2 =====
+        result.has_cloud_layer2 = a.has_cloud_layer2 || b.has_cloud_layer2;
+        if (result.has_cloud_layer2) {
+            result.cloud_layer2_enabled = (t < 0.5f) ? a.cloud_layer2_enabled : b.cloud_layer2_enabled;
+        }
+        result.has_cloud_layer2_params = a.has_cloud_layer2_params || b.has_cloud_layer2_params;
+        if (a.has_cloud_layer2_params && b.has_cloud_layer2_params) {
+            result.cloud2_coverage = a.cloud2_coverage + (b.cloud2_coverage - a.cloud2_coverage) * t;
+            result.cloud2_density = a.cloud2_density + (b.cloud2_density - a.cloud2_density) * t;
+            result.cloud2_scale = a.cloud2_scale + (b.cloud2_scale - a.cloud2_scale) * t;
+        } else if (a.has_cloud_layer2_params) {
+            result.cloud2_coverage = a.cloud2_coverage; result.cloud2_density = a.cloud2_density; result.cloud2_scale = a.cloud2_scale;
+        } else if (b.has_cloud_layer2_params) {
+            result.cloud2_coverage = b.cloud2_coverage; result.cloud2_density = b.cloud2_density; result.cloud2_scale = b.cloud2_scale;
+        }
+
+        // ===== CLOUD LIGHTING =====
+        result.has_cloud_lighting = a.has_cloud_lighting || b.has_cloud_lighting;
+        if (a.has_cloud_lighting && b.has_cloud_lighting) {
+            result.cloud_light_steps = (t < 0.5f) ? a.cloud_light_steps : b.cloud_light_steps;
+            result.cloud_shadow_strength = a.cloud_shadow_strength + (b.cloud_shadow_strength - a.cloud_shadow_strength) * t;
+            result.cloud_ambient_strength = a.cloud_ambient_strength + (b.cloud_ambient_strength - a.cloud_ambient_strength) * t;
+            result.cloud_silver_intensity = a.cloud_silver_intensity + (b.cloud_silver_intensity - a.cloud_silver_intensity) * t;
+            result.cloud_absorption = a.cloud_absorption + (b.cloud_absorption - a.cloud_absorption) * t;
+            result.cloud_anisotropy = a.cloud_anisotropy + (b.cloud_anisotropy - a.cloud_anisotropy) * t;
+            result.cloud_anisotropy_back = a.cloud_anisotropy_back + (b.cloud_anisotropy_back - a.cloud_anisotropy_back) * t;
+            result.cloud_lobe_mix = a.cloud_lobe_mix + (b.cloud_lobe_mix - a.cloud_lobe_mix) * t;
+            result.cloud_emissive_intensity = a.cloud_emissive_intensity + (b.cloud_emissive_intensity - a.cloud_emissive_intensity) * t;
+            result.cloud_emissive_color = a.cloud_emissive_color + (b.cloud_emissive_color - a.cloud_emissive_color) * t;
+        } else if (a.has_cloud_lighting) {
+            result.cloud_light_steps = a.cloud_light_steps; result.cloud_shadow_strength = a.cloud_shadow_strength;
+            result.cloud_ambient_strength = a.cloud_ambient_strength; result.cloud_silver_intensity = a.cloud_silver_intensity;
+            result.cloud_absorption = a.cloud_absorption; result.cloud_anisotropy = a.cloud_anisotropy;
+            result.cloud_anisotropy_back = a.cloud_anisotropy_back; result.cloud_lobe_mix = a.cloud_lobe_mix;
+            result.cloud_emissive_intensity = a.cloud_emissive_intensity; result.cloud_emissive_color = a.cloud_emissive_color;
+        } else if (b.has_cloud_lighting) {
+            result.cloud_light_steps = b.cloud_light_steps; result.cloud_shadow_strength = b.cloud_shadow_strength;
+            result.cloud_ambient_strength = b.cloud_ambient_strength; result.cloud_silver_intensity = b.cloud_silver_intensity;
+            result.cloud_absorption = b.cloud_absorption; result.cloud_anisotropy = b.cloud_anisotropy;
+            result.cloud_anisotropy_back = b.cloud_anisotropy_back; result.cloud_lobe_mix = b.cloud_lobe_mix;
+            result.cloud_emissive_intensity = b.cloud_emissive_intensity; result.cloud_emissive_color = b.cloud_emissive_color;
+        }
+
+        // ===== FOG =====
+        result.has_fog = a.has_fog || b.has_fog;
+        if (result.has_fog) {
+            result.fog_enabled = (t < 0.5f) ? a.fog_enabled : b.fog_enabled;
+        }
+        result.has_fog_params = a.has_fog_params || b.has_fog_params;
+        if (a.has_fog_params && b.has_fog_params) {
+            result.fog_density = a.fog_density + (b.fog_density - a.fog_density) * t;
+            result.fog_height = a.fog_height + (b.fog_height - a.fog_height) * t;
+            result.fog_falloff = a.fog_falloff + (b.fog_falloff - a.fog_falloff) * t;
+            result.fog_distance = a.fog_distance + (b.fog_distance - a.fog_distance) * t;
+            result.fog_color = a.fog_color + (b.fog_color - a.fog_color) * t;
+            result.fog_sun_scatter = a.fog_sun_scatter + (b.fog_sun_scatter - a.fog_sun_scatter) * t;
+        } else if (a.has_fog_params) {
+            result.fog_density = a.fog_density; result.fog_height = a.fog_height; result.fog_falloff = a.fog_falloff;
+            result.fog_distance = a.fog_distance; result.fog_color = a.fog_color; result.fog_sun_scatter = a.fog_sun_scatter;
+        } else if (b.has_fog_params) {
+            result.fog_density = b.fog_density; result.fog_height = b.fog_height; result.fog_falloff = b.fog_falloff;
+            result.fog_distance = b.fog_distance; result.fog_color = b.fog_color; result.fog_sun_scatter = b.fog_sun_scatter;
+        }
+
+        // ===== GOD RAYS =====
+        result.has_godrays = a.has_godrays || b.has_godrays;
+        if (result.has_godrays) {
+            result.godrays_enabled = (t < 0.5f) ? a.godrays_enabled : b.godrays_enabled;
+        }
+        result.has_godrays_params = a.has_godrays_params || b.has_godrays_params;
+        if (a.has_godrays_params && b.has_godrays_params) {
+            result.godrays_intensity = a.godrays_intensity + (b.godrays_intensity - a.godrays_intensity) * t;
+            result.godrays_density = a.godrays_density + (b.godrays_density - a.godrays_density) * t;
+            result.godrays_decay = a.godrays_decay + (b.godrays_decay - a.godrays_decay) * t;
+            result.godrays_density_clip_bias = a.godrays_density_clip_bias + (b.godrays_density_clip_bias - a.godrays_density_clip_bias) * t;
+            result.godrays_stochastic_threshold = a.godrays_stochastic_threshold + (b.godrays_stochastic_threshold - a.godrays_stochastic_threshold) * t;
+        } else if (a.has_godrays_params) {
+            result.godrays_intensity = a.godrays_intensity; result.godrays_density = a.godrays_density; result.godrays_decay = a.godrays_decay;
+            result.godrays_density_clip_bias = a.godrays_density_clip_bias; result.godrays_stochastic_threshold = a.godrays_stochastic_threshold;
+        } else if (b.has_godrays_params) {
+            result.godrays_intensity = b.godrays_intensity; result.godrays_density = b.godrays_density; result.godrays_decay = b.godrays_decay;
+            result.godrays_density_clip_bias = b.godrays_density_clip_bias; result.godrays_stochastic_threshold = b.godrays_stochastic_threshold;
+        }
+
+        // ===== ADVANCED =====
+        result.has_aerial_perspective = a.has_aerial_perspective || b.has_aerial_perspective;
+        if (result.has_aerial_perspective) {
+            result.aerial_perspective = (t < 0.5f) ? a.aerial_perspective : b.aerial_perspective;
+        }
+        result.has_aerial_params = a.has_aerial_params || b.has_aerial_params;
+        if (a.has_aerial_params && b.has_aerial_params) {
+            result.aerial_min_distance = a.aerial_min_distance + (b.aerial_min_distance - a.aerial_min_distance) * t;
+            result.aerial_max_distance = a.aerial_max_distance + (b.aerial_max_distance - a.aerial_max_distance) * t;
+        } else if (a.has_aerial_params) {
+            result.aerial_min_distance = a.aerial_min_distance; result.aerial_max_distance = a.aerial_max_distance;
+        } else if (b.has_aerial_params) {
+            result.aerial_min_distance = b.aerial_min_distance; result.aerial_max_distance = b.aerial_max_distance;
+        }
+
+        result.has_multi_scatter = a.has_multi_scatter || b.has_multi_scatter;
+        if (a.has_multi_scatter && b.has_multi_scatter) {
+            result.multi_scatter_factor = a.multi_scatter_factor + (b.multi_scatter_factor - a.multi_scatter_factor) * t;
+        } else if (a.has_multi_scatter) {
+            result.multi_scatter_factor = a.multi_scatter_factor;
+        } else if (b.has_multi_scatter) {
+            result.multi_scatter_factor = b.multi_scatter_factor;
+        }
+
+        result.has_overlay = a.has_overlay || b.has_overlay;
+        if (result.has_overlay) {
+            result.env_overlay_enabled = (t < 0.5f) ? a.env_overlay_enabled : b.env_overlay_enabled;
+        }
+        result.has_overlay_params = a.has_overlay_params || b.has_overlay_params;
+        if (a.has_overlay_params && b.has_overlay_params) {
+            result.env_overlay_intensity = a.env_overlay_intensity + (b.env_overlay_intensity - a.env_overlay_intensity) * t;
+            result.env_overlay_rotation = a.env_overlay_rotation + (b.env_overlay_rotation - a.env_overlay_rotation) * t;
+        } else if (a.has_overlay_params) {
+            result.env_overlay_intensity = a.env_overlay_intensity; result.env_overlay_rotation = a.env_overlay_rotation;
+        } else if (b.has_overlay_params) {
+            result.env_overlay_intensity = b.env_overlay_intensity; result.env_overlay_rotation = b.env_overlay_rotation;
+        }
+
         
         return result;
     }
@@ -685,6 +933,120 @@ struct TerrainKeyframe {
             result.splat_width = b.splat_width;
             result.splat_height = b.splat_height;
             result.splatData = b.splatData;
+        }
+        
+        return result;
+    }
+};
+
+// ============================================================================
+// EMITTER KEYFRAME - Gas/Smoke emitter animation (Fuel, Density, Temperature)
+// ============================================================================
+struct EmitterKeyframe {
+    // Per-property flags - which properties are keyed
+    bool has_fuel_rate = false;
+    bool has_density_rate = false;
+    bool has_temperature = false;
+    bool has_velocity = false;
+    bool has_position = false;
+    bool has_enabled = false;
+    bool has_size = false;          // NEW
+    bool has_radius = false;        // NEW
+    
+    // Property values
+    float fuel_rate = 0.0f;          // Fuel injection rate
+    float density_rate = 10.0f;       // Density injection rate
+    float temperature = 500.0f;       // Temperature in Kelvin
+    Vec3 velocity = Vec3(0, 2, 0);   // Emission velocity
+    Vec3 position = Vec3(0, 0, 0);   // Emitter position
+    Vec3 size = Vec3(1, 1, 1);       // Emitter size/extents (NEW)
+    float radius = 1.0f;             // Emitter radius (NEW)
+    bool enabled = true;              // On/Off state
+    
+    EmitterKeyframe() = default;
+    
+    // Lerp only interpolates properties that are keyed in BOTH keyframes
+    static EmitterKeyframe lerp(const EmitterKeyframe& a, const EmitterKeyframe& b, float t) {
+        EmitterKeyframe result;
+        
+        // Fuel Rate
+        result.has_fuel_rate = a.has_fuel_rate || b.has_fuel_rate;
+        if (a.has_fuel_rate && b.has_fuel_rate) {
+            result.fuel_rate = a.fuel_rate + (b.fuel_rate - a.fuel_rate) * t;
+        } else if (a.has_fuel_rate) {
+            result.fuel_rate = a.fuel_rate;
+        } else if (b.has_fuel_rate) {
+            result.fuel_rate = b.fuel_rate;
+        }
+        
+        // Density Rate
+        result.has_density_rate = a.has_density_rate || b.has_density_rate;
+        if (a.has_density_rate && b.has_density_rate) {
+            result.density_rate = a.density_rate + (b.density_rate - a.density_rate) * t;
+        } else if (a.has_density_rate) {
+            result.density_rate = a.density_rate;
+        } else if (b.has_density_rate) {
+            result.density_rate = b.density_rate;
+        }
+        
+        // Temperature
+        result.has_temperature = a.has_temperature || b.has_temperature;
+        if (a.has_temperature && b.has_temperature) {
+            result.temperature = a.temperature + (b.temperature - a.temperature) * t;
+        } else if (a.has_temperature) {
+            result.temperature = a.temperature;
+        } else if (b.has_temperature) {
+            result.temperature = b.temperature;
+        }
+        
+        // Velocity
+        result.has_velocity = a.has_velocity || b.has_velocity;
+        if (a.has_velocity && b.has_velocity) {
+            result.velocity = a.velocity + (b.velocity - a.velocity) * t;
+        } else if (a.has_velocity) {
+            result.velocity = a.velocity;
+        } else if (b.has_velocity) {
+            result.velocity = b.velocity;
+        }
+        
+        // Position
+        result.has_position = a.has_position || b.has_position;
+        if (a.has_position && b.has_position) {
+            result.position = a.position + (b.position - a.position) * t;
+        } else if (a.has_position) {
+            result.position = a.position;
+        } else if (b.has_position) {
+            result.position = b.position;
+        }
+        
+        // Enabled (boolean - snap at t=0.5)
+        result.has_enabled = a.has_enabled || b.has_enabled;
+        if (a.has_enabled && b.has_enabled) {
+            result.enabled = (t < 0.5f) ? a.enabled : b.enabled;
+        } else if (a.has_enabled) {
+            result.enabled = a.enabled;
+        } else if (b.has_enabled) {
+            result.enabled = b.enabled;
+        }
+        
+        // Size
+        result.has_size = a.has_size || b.has_size;
+        if (a.has_size && b.has_size) {
+            result.size = a.size + (b.size - a.size) * t;
+        } else if (a.has_size) {
+            result.size = a.size;
+        } else if (b.has_size) {
+            result.size = b.size;
+        }
+
+        // Radius
+        result.has_radius = a.has_radius || b.has_radius;
+        if (a.has_radius && b.has_radius) {
+            result.radius = a.radius + (b.radius - a.radius) * t;
+        } else if (a.has_radius) {
+            result.radius = a.radius;
+        } else if (b.has_radius) {
+            result.radius = b.radius;
         }
         
         return result;
@@ -947,6 +1309,8 @@ struct Keyframe {
     
     TerrainKeyframe terrain;
     WaterKeyframe water;        // NEW
+    bool has_emitter = false;   // NEW: Gas Emitter support
+    EmitterKeyframe emitter;    // NEW
     
     Keyframe() = default;
     Keyframe(int f) : frame(f) {}
@@ -993,6 +1357,10 @@ struct ObjectAnimationTrack {
             if (kf.has_water) {
                 it->water = kf.water;
                 it->has_water = true;
+            }
+            if (kf.has_emitter) {
+                it->emitter = kf.emitter;
+                it->has_emitter = true;
             }
         } else {
             keyframes.insert(it, kf);
@@ -1266,6 +1634,23 @@ struct ObjectAnimationTrack {
             result.has_water = true;
         }
         
+        // --- EMITTER ---
+        const Keyframe* p_emitter = findPrev([](const auto& k){ return k.has_emitter; });
+        const Keyframe* n_emitter = findNext([](const auto& k){ return k.has_emitter; });
+        
+        if (p_emitter && n_emitter) {
+            float range = (float)(n_emitter->frame - p_emitter->frame);
+            float t = (range > 0) ? (float)(current_frame - p_emitter->frame) / range : 0.0f;
+            result.emitter = EmitterKeyframe::lerp(p_emitter->emitter, n_emitter->emitter, t);
+            result.has_emitter = true;
+        } else if (p_emitter) {
+            result.emitter = p_emitter->emitter;
+            result.has_emitter = true;
+        } else if (n_emitter) {
+            result.emitter = n_emitter->emitter;
+            result.has_emitter = true;
+        }
+        
         return result;
     }
 };
@@ -1404,6 +1789,31 @@ inline void from_json(const json& j, LightKeyframe& l) {
     }
 }
 
+// EmitterKeyframe
+inline void to_json(json& j, const EmitterKeyframe& e) {
+    j = json{
+        {"ffr", e.has_fuel_rate}, {"fdr", e.has_density_rate}, {"ftmp", e.has_temperature},
+        {"fvel", e.has_velocity}, {"fpos", e.has_position}, {"fen", e.has_enabled},
+        {"fsz", e.has_size}, {"frad", e.has_radius},
+        {"fr", e.fuel_rate}, {"dr", e.density_rate}, {"tp", e.temperature},
+        {"vel", e.velocity}, {"pos", e.position}, {"sz", e.size}, {"rad", e.radius}, {"en", e.enabled}
+    };
+}
+
+inline void from_json(const json& j, EmitterKeyframe& e) {
+    e.has_fuel_rate = j.value("ffr", false); e.has_density_rate = j.value("fdr", false);
+    e.has_temperature = j.value("ftmp", false); e.has_velocity = j.value("fvel", false);
+    e.has_position = j.value("fpos", false); e.has_enabled = j.value("fen", false);
+    e.has_size = j.value("fsz", false); e.has_radius = j.value("frad", false);
+    
+    e.fuel_rate = j.value("fr", 0.0f); e.density_rate = j.value("dr", 10.0f);
+    e.temperature = j.value("tp", 500.0f); e.enabled = j.value("en", true);
+    e.radius = j.value("rad", 1.0f);
+    if(j.contains("vel")) j.at("vel").get_to(e.velocity);
+    if(j.contains("pos")) j.at("pos").get_to(e.position);
+    if(j.contains("sz")) j.at("sz").get_to(e.size);
+}
+
 // CameraKeyframe
 inline void to_json(json& j, const CameraKeyframe& c) {
     j = json{
@@ -1436,14 +1846,38 @@ inline void to_json(json& j, const WorldKeyframe& w) {
         {"fbgc", w.has_background_color}, {"fbgs", w.has_background_strength}, {"fhr", w.has_hdri_rotation},
         {"fse", w.has_sun_elevation}, {"fsa", w.has_sun_azimuth}, {"fsi", w.has_sun_intensity}, {"fss", w.has_sun_size},
         {"fad", w.has_air_density}, {"fdd", w.has_dust_density}, {"fod", w.has_ozone_density},
+        {"fhum", w.has_humidity}, {"ftmp", w.has_temperature}, {"fozs", w.has_ozone_absorption_scale},
         {"falt", w.has_altitude}, {"fma", w.has_mie_anisotropy},
         {"fcd", w.has_cloud_density}, {"fcc", w.has_cloud_coverage}, {"fcs", w.has_cloud_scale}, {"fco", w.has_cloud_offset},
-        {"bgc", w.background_color}, {"bgs", w.background_strength}, {"hr", w.hdri_rotation},
+        {"fcq", w.has_cloud_quality}, {"fcdt", w.has_cloud_detail},
+        {"fcl2", w.has_cloud_layer2}, {"fcl2p", w.has_cloud_layer2_params}, {"fcl2h", w.has_cloud_layer2_heights},
+        {"fcll", w.has_cloud_lighting}, {"ffog", w.has_fog}, {"ffogp", w.has_fog_params},
+        {"fgr", w.has_godrays}, {"fgrp", w.has_godrays_params},
+        {"fms", w.has_multi_scatter}, {"fap", w.has_aerial_perspective}, {"fapp", w.has_aerial_params},
+        {"fovr", w.has_overlay}, {"fovrp", w.has_overlay_params},
+
+        {"bgc", w.background_color}, {"bgs", w.background_strength}, {"hr", w.hdri_rotation}, {"hint", w.hdri_intensity},
         {"se", w.sun_elevation}, {"sa", w.sun_azimuth}, {"si", w.sun_intensity}, {"ss", w.sun_size},
         {"ad", w.air_density}, {"dd", w.dust_density}, {"od", w.ozone_density},
+        {"hum", w.humidity}, {"tmp", w.temperature}, {"ozs", w.ozone_absorption_scale},
         {"alt", w.altitude}, {"ma", w.mie_anisotropy},
         {"cd", w.cloud_density}, {"cc", w.cloud_coverage}, {"cs", w.cloud_scale},
-        {"cox", w.cloud_offset_x}, {"coz", w.cloud_offset_z}
+        {"cox", w.cloud_offset_x}, {"coz", w.cloud_offset_z},
+        {"cq", w.cloud_quality}, {"cdt", w.cloud_detail}, {"cbs", w.cloud_base_steps},
+        {"cmn", w.cloud_height_min}, {"cmx", w.cloud_height_max},
+
+        {"cl2e", w.cloud_layer2_enabled}, {"ccov2", w.cloud2_coverage}, {"cden2", w.cloud2_density}, {"cscl2", w.cloud2_scale},
+        {"cmnh2", w.cloud2_height_min}, {"cmxh2", w.cloud2_height_max},
+
+        {"cstl", w.cloud_light_steps}, {"cshd", w.cloud_shadow_strength}, {"camb", w.cloud_ambient_strength}, {"csil", w.cloud_silver_intensity}, {"cabs", w.cloud_absorption},
+        {"cani", w.cloud_anisotropy}, {"canib", w.cloud_anisotropy_back}, {"clmx", w.cloud_lobe_mix}, {"cemi", w.cloud_emissive_intensity}, {"cemc", w.cloud_emissive_color},
+
+        {"fge", w.fog_enabled}, {"fgd", w.fog_density}, {"fgh", w.fog_height}, {"fgf", w.fog_falloff}, {"fgds", w.fog_distance}, {"fgc", w.fog_color}, {"fgs", w.fog_sun_scatter},
+
+        {"gre", w.godrays_enabled}, {"gri", w.godrays_intensity}, {"grd", w.godrays_density}, {"grs", w.godrays_samples}, {"grdy", w.godrays_decay}, {"grcb", w.godrays_density_clip_bias}, {"grst", w.godrays_stochastic_threshold},
+
+        {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, {"apmin", w.aerial_min_distance}, {"apmax", w.aerial_max_distance},
+        {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode}
     };
 }
 
@@ -1453,21 +1887,70 @@ inline void from_json(const json& j, WorldKeyframe& w) {
     w.has_sun_elevation = j.value("fse", false); w.has_sun_azimuth = j.value("fsa", false);
     w.has_sun_intensity = j.value("fsi", false); w.has_sun_size = j.value("fss", false);
     w.has_air_density = j.value("fad", false); w.has_dust_density = j.value("fdd", false);
-    w.has_ozone_density = j.value("fod", false); w.has_altitude = j.value("falt", false);
-    w.has_mie_anisotropy = j.value("fma", false);
+    w.has_ozone_density = j.value("fod", false); 
+    w.has_humidity = j.value("fhum", false); w.has_temperature = j.value("ftmp", false);
+    w.has_ozone_absorption_scale = j.value("fozs", false);
+    w.has_altitude = j.value("falt", false); w.has_mie_anisotropy = j.value("fma", false);
     w.has_cloud_density = j.value("fcd", false); w.has_cloud_coverage = j.value("fcc", false);
     w.has_cloud_scale = j.value("fcs", false); w.has_cloud_offset = j.value("fco", false);
+    w.has_cloud_quality = j.value("fcq", false); w.has_cloud_detail = j.value("fcdt", false);
+    w.has_cloud_layer2 = j.value("fcl2", false); w.has_cloud_layer2_params = j.value("fcl2p", false);
+    w.has_cloud_layer2_heights = j.value("fcl2h", false);
+    w.has_cloud_lighting = j.value("fcll", false);
+    w.has_fog = j.value("ffog", false); w.has_fog_params = j.value("ffogp", false);
+    w.has_godrays = j.value("fgr", false); w.has_godrays_params = j.value("fgrp", false);
+    w.has_multi_scatter = j.value("fms", false); w.has_aerial_perspective = j.value("fap", false);
+    w.has_aerial_params = j.value("fapp", false);
+    w.has_overlay = j.value("fovr", false); w.has_overlay_params = j.value("fovrp", false);
 
     if(j.contains("bgc")) j.at("bgc").get_to(w.background_color);
-    w.background_strength = j.value("bgs", 1.0f); w.hdri_rotation = j.value("hr", 0.0f);
+    w.background_strength = j.value("bgs", 1.0f); 
+    w.hdri_rotation = j.value("hr", 0.0f); w.hdri_intensity = j.value("hint", 1.0f);
     w.sun_elevation = j.value("se", 15.0f); w.sun_azimuth = j.value("sa", 0.0f);
     w.sun_intensity = j.value("si", 1.0f); w.sun_size = j.value("ss", 0.545f);
     w.air_density = j.value("ad", 1.0f); w.dust_density = j.value("dd", 1.0f);
-    w.ozone_density = j.value("od", 1.0f); w.altitude = j.value("alt", 0.0f);
+    w.ozone_density = j.value("od", 1.0f); 
+    w.humidity = j.value("hum", 0.1f); w.temperature = j.value("tmp", 15.0f);
+    w.ozone_absorption_scale = j.value("ozs", 1.0f);
+    w.altitude = j.value("alt", 0.0f);
     w.mie_anisotropy = j.value("ma", 0.76f);
     w.cloud_density = j.value("cd", 0.5f); w.cloud_coverage = j.value("cc", 0.5f);
     w.cloud_scale = j.value("cs", 1.0f);
     w.cloud_offset_x = j.value("cox", 0.0f); w.cloud_offset_z = j.value("coz", 0.0f);
+    w.cloud_quality = j.value("cq", 1.0f); w.cloud_detail = j.value("cdt", 1.0f);
+    w.cloud_base_steps = j.value("cbs", 48);
+    w.cloud_height_min = j.value("cmn", 500.0f); w.cloud_height_max = j.value("cmx", 2000.0f);
+
+    w.cloud_layer2_enabled = j.value("cl2e", 0);
+    w.cloud2_coverage = j.value("ccov2", 0.3f); w.cloud2_density = j.value("cden2", 0.3f);
+    w.cloud2_scale = j.value("cscl2", 8.0f);
+    w.cloud2_height_min = j.value("cmnh2", 6000.0f); w.cloud2_height_max = j.value("cmxh2", 7000.0f);
+
+    w.cloud_light_steps = j.value("cstl", 0);
+    w.cloud_shadow_strength = j.value("cshd", 1.0f); w.cloud_ambient_strength = j.value("camb", 1.0f);
+    w.cloud_silver_intensity = j.value("csil", 1.0f); w.cloud_absorption = j.value("cabs", 1.0f);
+    w.cloud_anisotropy = j.value("cani", 0.85f); w.cloud_anisotropy_back = j.value("canib", -0.3f);
+    w.cloud_lobe_mix = j.value("clmx", 0.5f); w.cloud_emissive_intensity = j.value("cemi", 0.0f);
+    if(j.contains("cemc")) j.at("cemc").get_to(w.cloud_emissive_color);
+
+    w.fog_enabled = j.value("fge", 0);
+    w.fog_density = j.value("fgd", 0.01f); w.fog_height = j.value("fgh", 500.0f);
+    w.fog_falloff = j.value("fgf", 0.003f); w.fog_distance = j.value("fgds", 10000.0f);
+    if(j.contains("fgc")) j.at("fgc").get_to(w.fog_color);
+    w.fog_sun_scatter = j.value("fgs", 0.5f);
+
+    w.godrays_enabled = j.value("gre", 0);
+    w.godrays_intensity = j.value("gri", 0.5f); w.godrays_density = j.value("grd", 0.1f);
+    w.godrays_samples = j.value("grs", 16); w.godrays_decay = j.value("grdy", 0.95f);
+    w.godrays_density_clip_bias = j.value("grcb", 0.0f); w.godrays_stochastic_threshold = j.value("grst", 0.01f);
+
+    w.multi_scatter_enabled = j.value("mse", 1); w.multi_scatter_factor = j.value("msf", 0.3f);
+    w.aerial_perspective = j.value("ape", 1);
+    w.aerial_min_distance = j.value("apmin", 10.0f); w.aerial_max_distance = j.value("apmax", 5000.0f);
+
+    w.env_overlay_enabled = j.value("ove", 0);
+    w.env_overlay_intensity = j.value("ovi", 1.0f); w.env_overlay_rotation = j.value("ovr", 0.0f);
+    w.env_overlay_blend_mode = j.value("ovm", 0);
 }
 
 // TerrainKeyframe
@@ -1521,7 +2004,7 @@ inline void to_json(json& j, const Keyframe& k) {
         {"fr", k.frame},
         {"ftr", k.has_transform}, {"fmat", k.has_material},
         {"fli", k.has_light}, {"fcam", k.has_camera},
-        {"fwor", k.has_world}, {"fter", k.has_terrain}
+        {"fwor", k.has_world}, {"fter", k.has_terrain}, {"femi", k.has_emitter}
     };
     if(k.has_transform) j["tr"] = k.transform;
     if(k.has_material) j["mat"] = k.material;
@@ -1529,6 +2012,7 @@ inline void to_json(json& j, const Keyframe& k) {
     if(k.has_camera) j["cam"] = k.camera;
     if(k.has_world) j["wor"] = k.world;
     if(k.has_terrain) j["ter"] = k.terrain;
+    if(k.has_emitter) j["emi"] = k.emitter;
 }
 
 inline void from_json(const json& j, Keyframe& k) {
@@ -1541,6 +2025,7 @@ inline void from_json(const json& j, Keyframe& k) {
     k.has_camera = j.value("fcam", j.contains("cam"));
     k.has_world = j.value("fwor", j.contains("wor"));
     k.has_terrain = j.value("fter", j.contains("ter"));
+    k.has_emitter = j.value("femi", j.contains("emi"));
     
     if(k.has_transform && j.contains("tr")) j.at("tr").get_to(k.transform);
     if(k.has_material && j.contains("mat")) j.at("mat").get_to(k.material);
@@ -1548,6 +2033,7 @@ inline void from_json(const json& j, Keyframe& k) {
     if(k.has_camera && j.contains("cam")) j.at("cam").get_to(k.camera);
     if(k.has_world && j.contains("wor")) j.at("wor").get_to(k.world);
     if(k.has_terrain && j.contains("ter")) j.at("ter").get_to(k.terrain);
+    if(k.has_emitter && j.contains("emi")) j.at("emi").get_to(k.emitter);
 }
 
 // ObjectAnimationTrack
@@ -1582,4 +2068,5 @@ inline void TimelineManager::deserialize(const json& j) {
     current_frame = j.value("fr", 0);
     if(j.contains("tracks")) j.at("tracks").get_to(tracks);
 }
+
 

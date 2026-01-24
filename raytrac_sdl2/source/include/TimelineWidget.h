@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          TimelineWidget.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "KeyframeSystem.h"
@@ -17,7 +27,8 @@ enum class TrackGroup {
     Cameras,
     World,
     Terrain,  // For terrain morphing animation
-    Water     // For water wave parameter animation
+    Water,    // For water wave parameter animation
+    Gas       // For gas/smoke emitter animation
 };
 
 
@@ -74,6 +85,20 @@ public:
     void setCurrentFrame(int frame) { current_frame = frame; }
     bool isPlaying() const { return is_playing; }
     std::string selected_track;
+
+    // Reset timeline state for new projects
+    void reset() {
+        current_frame = 0;
+        is_playing = false;
+        tracks.clear();
+        tracks_dirty = true;
+        zoom = 1.0f;
+        pan_offset = 0.0f;
+        selected_track = "";
+        selected_keyframe_frame = -1;
+        is_dragging_keyframe = false;
+    }
+
 private:
     // ===== DRAWING FUNCTIONS =====
     void drawPlaybackControls(UIContext& ctx);
@@ -137,6 +162,7 @@ private:
     bool group_world_expanded = true;
     bool group_terrain_expanded = true;
     bool group_water_expanded = true;   // NEW: Water track group
+    bool group_gas_expanded = true;     // NEW: Gas/Emitter track group
     
     // Colors
     static constexpr ImU32 COLOR_TRANSFORM = IM_COL32(100, 150, 255, 255);  // Blue
@@ -146,7 +172,9 @@ private:
     static constexpr ImU32 COLOR_WORLD = IM_COL32(255, 150, 200, 255);      // Pink
     static constexpr ImU32 COLOR_TERRAIN = IM_COL32(139, 90, 43, 255);      // Brown (terrain)
     static constexpr ImU32 COLOR_WATER = IM_COL32(64, 164, 223, 255);       // Ocean Blue (water)
+    static constexpr ImU32 COLOR_GAS = IM_COL32(255, 140, 60, 255);         // Fire Orange (gas/flame)
     static constexpr ImU32 COLOR_SELECTED = IM_COL32(255, 255, 255, 255);   // White
     static constexpr ImU32 COLOR_GRID = IM_COL32(60, 60, 60, 255);
     static constexpr ImU32 COLOR_CURRENT_FRAME = IM_COL32(255, 80, 80, 200);
 };
+

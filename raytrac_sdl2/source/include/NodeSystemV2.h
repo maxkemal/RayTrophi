@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          NodeSystemV2.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 /**
  * @file NodeSystemV2.h
  * @brief Single include for new node system V2
@@ -17,3 +27,4 @@
 
 // Terrain domain V2 nodes
 #include "TerrainNodesV2.h"
+

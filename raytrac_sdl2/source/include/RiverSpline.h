@@ -1,4 +1,14 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          RiverSpline.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+// ═══════════════════════════════════════════════════════════════════════════════
 // RIVER SYSTEM - Bezier Spline Based Rivers and Streams
 // ═══════════════════════════════════════════════════════════════════════════════
 // Uses the generic BezierSpline system for path definition
@@ -302,3 +312,4 @@ private:
     std::vector<RiverSpline> rivers;
     int next_id = 1;
 };
+

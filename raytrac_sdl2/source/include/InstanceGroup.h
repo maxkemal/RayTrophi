@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          InstanceGroup.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include "Vec3.h"
 #include "Matrix4x4.h"
@@ -168,3 +178,4 @@ struct InstanceGroup {
     // Generate random transform based on brush settings
     InstanceTransform generateRandomTransform(const Vec3& position, const Vec3& normal) const;
 };
+

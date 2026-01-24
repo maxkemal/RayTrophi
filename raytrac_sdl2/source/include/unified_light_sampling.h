@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_light_sampling.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 /**
  * @file unified_light_sampling.h
  * @brief Unified light sampling functions for CPU/GPU parity
@@ -151,11 +161,12 @@ UNIFIED_FUNC bool sample_light_direction(
             // Disk sample
             float r = sqrtf(rand_u) * light.radius;
             float phi = 2.0f * UnifiedConstants::PI * rand_v;
-            Vec3f offset = (tangent * cosf(phi) + bitangent * sinf(phi)) * r;
+            Vec2f disk_p(cosf(phi) * r, sinf(phi) * r);
             
-            // Match GPU: treat radius as angular spread (tan(theta))
-            // This ensures 0.05f radius means ~3 degrees on both CPU and GPU
-            wi = normalize(L + offset);
+            // Match GPU: treat radius as angular spread via 1000-unit distance offset
+            // Reference: sample_directional_light in ray_color.cuh
+            Vec3f light_pos = L * 1000.0f + tangent * disk_p.x + bitangent * disk_p.y;
+            wi = normalize(light_pos);
             attenuation = 1.0f;  // No falloff for directional
             distance = 1e8f;
             break;
@@ -373,3 +384,4 @@ UNIFIED_FUNC int pick_smart_light_unified(
     // Safety fallback
     return static_cast<int>(random_val * light_count) % light_count;
 }
+

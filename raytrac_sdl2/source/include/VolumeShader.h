@@ -1,4 +1,14 @@
-﻿/**
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          VolumeShader.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+/**
  * @file VolumeShader.h
  * @brief Industry-standard Volume Shader for VDB rendering
  * 
@@ -86,12 +96,22 @@ struct GpuVolumeShaderData {
     float shadow_strength = 0.8f;
     
     // ─────────────────────────────────────────────────────────────────────────
+    // COLOR RAMP
+    // ─────────────────────────────────────────────────────────────────────────
+    int color_ramp_enabled = 0;
+    int ramp_stop_count = 0;
+    float ramp_positions[8];
+    float ramp_colors_r[8];
+    float ramp_colors_g[8];
+    float ramp_colors_b[8];
+    
+    // ─────────────────────────────────────────────────────────────────────────
     // MOTION BLUR
     // ─────────────────────────────────────────────────────────────────────────
     int motion_blur_enabled = 0;
     float velocity_scale = 1.0f;
-    float quality_pad1 = 0.0f;
-    float quality_pad2 = 0.0f;
+    float motion_pad1 = 0.0f;
+    float motion_pad2 = 0.0f;
 };
 
 /**
@@ -394,21 +414,24 @@ public:
         auto shader = std::make_shared<VolumeShader>();
         shader->name = "Explosion";
         
-        shader->density.multiplier = 3.0f;
-        shader->scattering.color = Vec3(0.3f, 0.25f, 0.2f);  // Dark smoke
-        shader->scattering.coefficient = 2.0f;
-        shader->scattering.anisotropy = 0.5f;
-        shader->scattering.multi_scatter = 0.5f;
-        shader->absorption.coefficient = 0.8f;
-        shader->absorption.color = Vec3(0.1f, 0.05f, 0.02f);
+        shader->density.multiplier = 10.0f;
+        shader->scattering.color = Vec3(0.5f, 0.45f, 0.4f);  // Thick grey smoke
+        shader->scattering.coefficient = 4.0f;
+        shader->scattering.anisotropy = 0.65f;
+        shader->scattering.multi_scatter = 0.6f;
+        shader->absorption.coefficient = 1.5f;
+        shader->absorption.color = Vec3(0.15f, 0.12f, 0.1f);
         
         shader->emission.mode = VolumeEmissionMode::Blackbody;
         shader->emission.temperature_channel = "temperature";
-        shader->emission.temperature_scale = 1.5f;
-        shader->emission.blackbody_intensity = 25.0f;
+        shader->emission.temperature_scale = 1.2f;
+        shader->emission.blackbody_intensity = 35.0f;
         
-        shader->quality.max_steps = 384;
-        shader->quality.shadow_steps = 8;
+        // High quality rendering for explosions
+        shader->quality.step_size = 0.05f; 
+        shader->quality.max_steps = 512;
+        shader->quality.shadow_steps = 12;
+        shader->quality.shadow_strength = 0.9f;
         
         return shader;
     }
@@ -443,6 +466,38 @@ public:
         std::string velocity_channel = "vel";
         float scale = 1.0f;                ///< Velocity multiplier
     } motion_blur;
+    
+    // Serialization
+    json toJson() const {
+        json j;
+        j["name"] = name;
+        j["density"] = density.toJson();
+        j["scattering"] = scattering.toJson();
+        j["absorption"] = absorption.toJson();
+        j["emission"] = emission.toJson();
+        j["quality"] = quality.toJson();
+        j["motion_blur"] = {
+            {"enabled", motion_blur.enabled},
+            {"velocity_channel", motion_blur.velocity_channel},
+            {"scale", motion_blur.scale}
+        };
+        return j;
+    }
+
+    void fromJson(const json& j) {
+        if (j.contains("name")) name = j["name"];
+        if (j.contains("density")) density.fromJson(j["density"]);
+        if (j.contains("scattering")) scattering.fromJson(j["scattering"]);
+        if (j.contains("absorption")) absorption.fromJson(j["absorption"]);
+        if (j.contains("emission")) emission.fromJson(j["emission"]);
+        if (j.contains("quality")) quality.fromJson(j["quality"]);
+        if (j.contains("motion_blur")) {
+            auto mb = j["motion_blur"];
+            motion_blur.enabled = mb.value("enabled", false);
+            motion_blur.velocity_channel = mb.value("velocity_channel", "vel");
+            motion_blur.scale = mb.value("scale", 1.0f);
+        }
+    }
     
     // ═══════════════════════════════════════════════════════════════════════════
     // GPU EXPORT
@@ -491,6 +546,16 @@ public:
         gpu.shadow_steps = quality.shadow_steps;
         gpu.shadow_strength = quality.shadow_strength;
         
+        // Color Ramp
+        gpu.color_ramp_enabled = emission.color_ramp.enabled ? 1 : 0;
+        gpu.ramp_stop_count = static_cast<int>(std::min(emission.color_ramp.stops.size(), static_cast<size_t>(8)));
+        for (int i = 0; i < gpu.ramp_stop_count; ++i) {
+            gpu.ramp_positions[i] = emission.color_ramp.stops[i].position;
+            gpu.ramp_colors_r[i] = static_cast<float>(emission.color_ramp.stops[i].color.x);
+            gpu.ramp_colors_g[i] = static_cast<float>(emission.color_ramp.stops[i].color.y);
+            gpu.ramp_colors_b[i] = static_cast<float>(emission.color_ramp.stops[i].color.z);
+        }
+
         // Motion blur
         gpu.motion_blur_enabled = motion_blur.enabled ? 1 : 0;
         gpu.velocity_scale = motion_blur.scale;
@@ -543,3 +608,4 @@ public:
 };
 
 #endif // VOLUME_SHADER_H
+

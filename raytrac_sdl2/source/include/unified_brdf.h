@@ -1,4 +1,14 @@
-﻿/**
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_brdf.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+/**
  * @file unified_brdf.h
  * @brief Shared BRDF functions for CPU and GPU rendering parity
  * 
@@ -169,7 +179,8 @@ UNIFIED_FUNC Vec3f evaluate_brdf_unified(
     Vec3f k_d = (Vec3f(1.0f) - F_avg) * (1.0f - metallic_sampled);
     
     // Lambertian diffuse
-    Vec3f diffuse = k_d * albedo;
+    // Lambertian diffuse (renormalized to albedo / PI)
+    Vec3f diffuse = k_d * albedo * (1.0f / UnifiedConstants::PI);
     
     // GPU-matching transmission handling:
     // When transmission >= 0.01, stochastically choose diffuse or specular
@@ -356,3 +367,4 @@ UNIFIED_FUNC float background_factor(int bounce) {
         1.0f / (1.0f + bounce * UnifiedConstants::BG_FALLOFF_RATE)
     );
 }
+

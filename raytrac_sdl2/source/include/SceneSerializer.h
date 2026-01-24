@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SceneSerializer.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include <string>
@@ -12,10 +22,11 @@ class OptixWrapper;
 
 class SceneSerializer {
 public:
-    // Sahne verilerini ve ayarları .rts (JSON) dosyasına kaydeder
+    // Sahne verilerini ve ayarlarÄ± .rts (JSON) dosyasÄ±na kaydeder
     static void Serialize(const SceneData& scene, const RenderSettings& settings, const std::string& filepath);
 
-    // .rts dosyasından sahneyi yükler
-    // Önce modeli yükler (eğer varsa), sonra ayarları uygular
+    // .rts dosyasÄ±ndan sahneyi yÃ¼kler
+    // Ã–nce modeli yÃ¼kler (eÄŸer varsa), sonra ayarlarÄ± uygular
     static bool Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, OptixWrapper* optix_gpu, const std::string& filepath);
 };
+

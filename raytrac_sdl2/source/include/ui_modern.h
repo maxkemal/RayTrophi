@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ui_modern.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 /*
  * RayTrophi Modern UI System
  * ==========================
@@ -201,5 +211,6 @@ public:
 private:
     std::unordered_map<std::string, PanelState> states_;
 };
+
 
 

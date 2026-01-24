@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          MaterialManager.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #ifndef MATERIAL_MANAGER_H
 #define MATERIAL_MANAGER_H
 
@@ -132,3 +142,4 @@ private:
 };
 
 #endif // MATERIAL_MANAGER_H
+

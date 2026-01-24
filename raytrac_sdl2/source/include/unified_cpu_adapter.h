@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_cpu_adapter.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 /**
  * @file unified_cpu_adapter.h
  * @brief Adapter to use unified functions with existing CPU code
@@ -218,3 +228,4 @@ inline Vec3f compute_direct_lighting_unified(
 
 // Note: This header doesn't use include guards since it's meant to be 
 // included once per translation unit and relies on #pragma once
+

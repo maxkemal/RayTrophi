@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Math.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -2245,3 +2255,4 @@ using BBoxR [[deprecated("Use Vec3dBBox instead.")]] = math::BBox<Vec3d>;
 } // namespace nanovdb ===================================================================
 
 #endif // end of NANOVDB_MATH_MATH_H_HAS_BEEN_INCLUDED
+

@@ -108,9 +108,12 @@ set(SOURCES_CPP
     "source/src/InstanceGroup.cpp"
     "source/src/InstanceManager.cpp"
     "source/src/RiverManager.cpp"
-    # VDB Volume System (Industry-Standard)
     "source/src/VDBVolume.cpp"
     "source/src/scene_ui_vdb.cpp"
+    # Gas Simulation
+    "source/src/GasSimulator.cpp"
+    "source/src/VDBVolumeManager.cpp"
+    "source/src/gas_kernels.cu"
 )
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
 file(GLOB HEADERS "source/include/*.h" "source/external/imgui/*.h")

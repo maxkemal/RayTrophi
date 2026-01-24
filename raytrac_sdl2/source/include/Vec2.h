@@ -1,4 +1,14 @@
-﻿#ifndef VEC2_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Vec2.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef VEC2_H
 #define VEC2_H
 
 #include <iostream>
@@ -70,9 +80,14 @@ public:
     }
     // Stream insertion operator for easy printing
     friend std::ostream& operator<<(std::ostream& os, const Vec2& vec);
+
 };
 
 // Non-member operator overloads
-Vec2 operator*(float scalar, const Vec2& vec);
+inline Vec2 operator*(float scalar, const Vec2& vec) {
+    return vec * scalar;
+}
+
+
 
 #endif // VEC2_H

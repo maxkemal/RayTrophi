@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          PrefixSum.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -88,3 +98,4 @@ T prefixSum(std::vector<T> &vec, bool threaded = true, OpT op = OpT())
 }// namespace nanovdb
 
 #endif // NANOVDB_UTIL_PREFIX_SUM_H_HAS_BEEN_INCLUDED
+

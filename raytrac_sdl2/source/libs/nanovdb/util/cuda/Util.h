@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Util.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -329,3 +339,4 @@ __global__ void cudaLambdaKernel(const size_t numItems, Func func, Args... args)
 #endif// __CUDACC__
 
 #endif// NANOVDB_UTIL_CUDA_UTIL_H_HAS_BEEN_INCLUDED
+

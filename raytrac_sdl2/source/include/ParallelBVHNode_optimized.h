@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ParallelBVHNode_optimized.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 #include <algorithm>
 #include <future>
@@ -47,5 +57,6 @@ public:
     bool use_optix;
    
 
-     bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const ;
+     bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const ;
 };
+

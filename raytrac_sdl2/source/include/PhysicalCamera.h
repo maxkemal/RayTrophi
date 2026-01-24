@@ -1,18 +1,28 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          PhysicalCamera.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PHYSICAL CAMERA SYSTEM - RayTrophi Engine
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// Tam fiziksel kamera simülasyonu:
-//   - Gerçek lens optiği (distortion, CA, vignette, flare, breathing)
-//   - Fiziksel sensör modeli (exposure, dynamic range, noise davranışı)
-//   - Fizik tabanlı kamera hareketleri (atalet, sönümleme, sarsıntı)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// Tam fiziksel kamera simÃ¼lasyonu:
+//   - GerÃ§ek lens optiÄŸi (distortion, CA, vignette, flare, breathing)
+//   - Fiziksel sensÃ¶r modeli (exposure, dynamic range, noise davranÄ±ÅŸÄ±)
+//   - Fizik tabanlÄ± kamera hareketleri (atalet, sÃ¶nÃ¼mleme, sarsÄ±ntÄ±)
 //   - Sinematik rig sistemleri (dolly, crane, steadicam)
 //
-// Tasarım felsefesi:
-//   - ISO noise EKLEMEZ, var olan Monte Carlo varyansını görünür yapar
+// TasarÄ±m felsefesi:
+//   - ISO noise EKLEMEZ, var olan Monte Carlo varyansÄ±nÄ± gÃ¶rÃ¼nÃ¼r yapar
 //   - Shutter speed motion blur'u kontrol eder (temporal sampling)
-//   - Tüm hareketler fizik yasalarına uygun (F=ma, sönümleme)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//   - TÃ¼m hareketler fizik yasalarÄ±na uygun (F=ma, sÃ¶nÃ¼mleme)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #include "Vec3.h"
 #include <cmath>
@@ -24,12 +34,12 @@
 
 namespace PhysicalCameraSystem {
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PHYSICAL CONSTANTS (SI Units)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 namespace Constants {
     constexpr float SPEED_OF_LIGHT = 299792458.0f;      // m/s
-    constexpr float PLANCK_CONSTANT = 6.62607e-34f;    // J·s
+    constexpr float PLANCK_CONSTANT = 6.62607e-34f;    // JÂ·s
     
     // Film/Sensor reference sizes (mm)
     constexpr float FULL_FRAME_WIDTH = 36.0f;
@@ -41,21 +51,21 @@ namespace Constants {
     
     // Reference exposure (ISO 100, f/8, 1/125s = EV 13, sunny daylight)
     constexpr float REFERENCE_EV = 13.0f;
-    constexpr float REFERENCE_LUMINANCE = 1000.0f;  // cd/m² for EV 13
+    constexpr float REFERENCE_LUMINANCE = 1000.0f;  // cd/mÂ² for EV 13
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // CAMERA MODE - Auto, Pro, Cinema
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 enum class CameraMode {
-    Auto,       // Otomatik - basit kullanım, kısıtlı kontrol
+    Auto,       // Otomatik - basit kullanÄ±m, kÄ±sÄ±tlÄ± kontrol
     Pro,        // Profesyonel - manuel kontrol, temiz render
-    Cinema      // Sinematik - tam fiziksel simülasyon, tüm kusurlar
+    Cinema      // Sinematik - tam fiziksel simÃ¼lasyon, tÃ¼m kusurlar
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SENSOR TYPE
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 enum class SensorType {
     FullFrame,          // 36x24mm - crop 1.0x
     Super35,            // 24.89x18.66mm - crop 1.39x (Cinema standard)
@@ -67,9 +77,9 @@ enum class SensorType {
     IMAX                // 70.4x52.6mm - crop 0.48x
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PHYSICAL SENSOR
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct PhysicalSensor {
     // === Fiziksel Boyutlar ===
     SensorType type = SensorType::FullFrame;
@@ -77,17 +87,17 @@ struct PhysicalSensor {
     float height_mm = 24.0f;
     float crop_factor = 1.0f;
     
-    // === Elektriksel Özellikler ===
-    int native_iso = 100;               // Sensörün doğal ISO'su
-    float dynamic_range_stops = 14.0f;  // Toplam dinamik aralık
+    // === Elektriksel Ã–zellikler ===
+    int native_iso = 100;               // SensÃ¶rÃ¼n doÄŸal ISO'su
+    float dynamic_range_stops = 14.0f;  // Toplam dinamik aralÄ±k
     float max_well_capacity = 60000.0f; // Maksimum elektron kapasitesi (full well)
-    float read_noise_electrons = 3.0f;  // Okuma gürültüsü (elektron)
-    float dark_current = 0.01f;         // Karanlık akım (elektron/piksel/saniye)
+    float read_noise_electrons = 3.0f;  // Okuma gÃ¼rÃ¼ltÃ¼sÃ¼ (elektron)
+    float dark_current = 0.01f;         // KaranlÄ±k akÄ±m (elektron/piksel/saniye)
     
     // === Quantization ===
-    int bit_depth = 14;                 // ADC bit derinliği
+    int bit_depth = 14;                 // ADC bit derinliÄŸi
     
-    // === Hesaplanan Değerler ===
+    // === Hesaplanan DeÄŸerler ===
     float getPixelPitch(int resolution_width) const {
         return width_mm * 1000.0f / resolution_width; // mikrometreler
     }
@@ -96,7 +106,7 @@ struct PhysicalSensor {
         return sqrtf(width_mm * width_mm + height_mm * height_mm);
     }
     
-    // Crop factor'e göre sensör tipini ayarla
+    // Crop factor'e gÃ¶re sensÃ¶r tipini ayarla
     void setFromType(SensorType t) {
         type = t;
         switch (t) {
@@ -120,62 +130,62 @@ struct PhysicalSensor {
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PHYSICAL LENS
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct PhysicalLens {
     // === Temel Optik Parametreler ===
-    float focal_length_mm = 50.0f;          // Odak uzunluğu
-    float max_aperture = 1.4f;              // Maksimum açıklık (f/1.4)
-    float min_aperture = 22.0f;             // Minimum açıklık (f/22)
+    float focal_length_mm = 50.0f;          // Odak uzunluÄŸu
+    float max_aperture = 1.4f;              // Maksimum aÃ§Ä±klÄ±k (f/1.4)
+    float min_aperture = 22.0f;             // Minimum aÃ§Ä±klÄ±k (f/22)
     float current_aperture = 2.8f;          // Mevcut f-stop
     float min_focus_distance_m = 0.45f;     // Minimum odak mesafesi
     float max_focus_distance_m = 10000.0f;  // Sonsuz odak (pratik limit)
-    int aperture_blades = 9;                // Diyafram yaprak sayısı
+    int aperture_blades = 9;                // Diyafram yaprak sayÄ±sÄ±
     
     // === Cinema Lens (T-Stop) ===
-    bool use_tstop = false;                 // T-stop kullanımı (sinema lensleri için)
-    float light_transmission = 0.95f;       // Işık geçirgenliği (T = f / sqrt(transmission))
+    bool use_tstop = false;                 // T-stop kullanÄ±mÄ± (sinema lensleri iÃ§in)
+    float light_transmission = 0.95f;       // IÅŸÄ±k geÃ§irgenliÄŸi (T = f / sqrt(transmission))
     
     // === Optik Kusurlar ===
     // Distortion (Brown-Conrady Model)
     float distortion_k1 = 0.0f;             // Radyal distortion (1. derece)
     float distortion_k2 = 0.0f;             // Radyal distortion (2. derece)
     float distortion_k3 = 0.0f;             // Radyal distortion (3. derece)
-    float distortion_p1 = 0.0f;             // Teğetsel distortion
-    float distortion_p2 = 0.0f;             // Teğetsel distortion
+    float distortion_p1 = 0.0f;             // TeÄŸetsel distortion
+    float distortion_p2 = 0.0f;             // TeÄŸetsel distortion
     
     // Chromatic Aberration
-    float lateral_ca = 0.0f;                // Yanal renk sapması (0-1)
-    float longitudinal_ca = 0.0f;           // Eksenel renk sapması
+    float lateral_ca = 0.0f;                // Yanal renk sapmasÄ± (0-1)
+    float longitudinal_ca = 0.0f;           // Eksenel renk sapmasÄ±
     
     // Vignetting (Natural + Mechanical)
-    float natural_vignette = 0.0f;          // cos^4 düşüşü (0-1)
+    float natural_vignette = 0.0f;          // cos^4 dÃ¼ÅŸÃ¼ÅŸÃ¼ (0-1)
     float mechanical_vignette = 0.0f;       // Lens barrel engellemesi
-    float vignette_falloff = 2.0f;          // Düşüş eğrisi üssü
+    float vignette_falloff = 2.0f;          // DÃ¼ÅŸÃ¼ÅŸ eÄŸrisi Ã¼ssÃ¼
     
     // === Lens Flare ===
-    float flare_threshold = 0.9f;           // Flare başlangıç parlaklığı
-    float flare_intensity = 0.5f;           // Flare yoğunluğu
-    float ghost_intensity = 0.3f;           // Ghost (yansıma) yoğunluğu
-    int flare_elements = 6;                 // İç yansıma element sayısı
+    float flare_threshold = 0.9f;           // Flare baÅŸlangÄ±Ã§ parlaklÄ±ÄŸÄ±
+    float flare_intensity = 0.5f;           // Flare yoÄŸunluÄŸu
+    float ghost_intensity = 0.3f;           // Ghost (yansÄ±ma) yoÄŸunluÄŸu
+    int flare_elements = 6;                 // Ä°Ã§ yansÄ±ma element sayÄ±sÄ±
     bool anamorphic_flare = false;          // Anamorfik yatay flare
     
     // === Focus Breathing ===
-    bool enable_breathing = false;          // Odak soluması
-    float breathing_amount = 0.05f;         // FOV değişim oranı (odak değişiminde)
+    bool enable_breathing = false;          // Odak solumasÄ±
+    float breathing_amount = 0.05f;         // FOV deÄŸiÅŸim oranÄ± (odak deÄŸiÅŸiminde)
     
     // === Bokeh Karakteri ===
     float spherical_aberration = 0.0f;      // Sferikal sapma (-1 = busy, 0 = neutral, +1 = bubble)
-    float cats_eye_amount = 0.0f;           // Kenar bokeh ovalliği
-    float swirl_amount = 0.0f;              // Helios-tarzı döngü bokeh
-    float onion_ring = 0.0f;                // Soğan halkaları (asferik lenslerde)
+    float cats_eye_amount = 0.0f;           // Kenar bokeh ovalliÄŸi
+    float swirl_amount = 0.0f;              // Helios-tarzÄ± dÃ¶ngÃ¼ bokeh
+    float onion_ring = 0.0f;                // SoÄŸan halkalarÄ± (asferik lenslerde)
     
     // === Coating ===
     float coating_quality = 0.9f;           // Lens kaplama kalitesi (0 = flare dolu, 1 = temiz)
     
     // === Hesaplamalar ===
-    // Efektif T-stop (ışık geçirgenliğini hesaba katar)
+    // Efektif T-stop (Ä±ÅŸÄ±k geÃ§irgenliÄŸini hesaba katar)
     float getEffectiveTStop() const {
         if (use_tstop) {
             return current_aperture / sqrtf(light_transmission);
@@ -183,12 +193,12 @@ struct PhysicalLens {
         return current_aperture;
     }
     
-    // Fiziksel açıklık çapı (mm)
+    // Fiziksel aÃ§Ä±klÄ±k Ã§apÄ± (mm)
     float getApertureDiameter() const {
         return focal_length_mm / current_aperture;
     }
     
-    // Sensöre bağlı FOV hesaplama
+    // SensÃ¶re baÄŸlÄ± FOV hesaplama
     float getVerticalFOV(float sensor_height_mm) const {
         return 2.0f * atanf(sensor_height_mm / (2.0f * focal_length_mm)) * 180.0f / (float)M_PI;
     }
@@ -197,19 +207,19 @@ struct PhysicalLens {
         return 2.0f * atanf(sensor_width_mm / (2.0f * focal_length_mm)) * 180.0f / (float)M_PI;
     }
     
-    // Focal length'e göre otomatik distortion hesapla
+    // Focal length'e gÃ¶re otomatik distortion hesapla
     void calculateAutoDistortion() {
         if (focal_length_mm < 24.0f) {
-            // Ultra geniş açı - belirgin varil distorsiyonu
+            // Ultra geniÅŸ aÃ§Ä± - belirgin varil distorsiyonu
             float ratio = (24.0f - focal_length_mm) / 24.0f;
             distortion_k1 = -0.3f * ratio * ratio;
             distortion_k2 = -0.05f * ratio;
         } else if (focal_length_mm < 50.0f) {
-            // Geniş açı - hafif varil
+            // GeniÅŸ aÃ§Ä± - hafif varil
             float ratio = (50.0f - focal_length_mm) / 26.0f;
             distortion_k1 = -0.1f * ratio;
         } else if (focal_length_mm > 85.0f) {
-            // Telefoto - hafif yastık distorsiyonu
+            // Telefoto - hafif yastÄ±k distorsiyonu
             float ratio = std::min((focal_length_mm - 85.0f) / 200.0f, 1.0f);
             distortion_k1 = 0.02f * ratio;
         } else {
@@ -218,75 +228,75 @@ struct PhysicalLens {
         }
     }
     
-    // Aperture'a göre vignetting hesapla
+    // Aperture'a gÃ¶re vignetting hesapla
     void calculateAutoVignette() {
-        // Geniş aperture = daha fazla vignette
+        // GeniÅŸ aperture = daha fazla vignette
         float aperture_factor = 1.0f - ((current_aperture - max_aperture) / (min_aperture - max_aperture));
         natural_vignette = 0.3f * aperture_factor;
         
-        // Geniş açı lensler daha fazla vignette yapar
+        // GeniÅŸ aÃ§Ä± lensler daha fazla vignette yapar
         if (focal_length_mm < 35.0f) {
             natural_vignette += 0.2f * (35.0f - focal_length_mm) / 35.0f;
         }
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PHYSICAL SHUTTER
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct PhysicalShutter {
     // === Shutter Tipi ===
     enum class Type {
         MechanicalFocalPlane,   // DSLR/Mirrorless - vertikal/horizontal travel
-        MechanicalLeaf,         // Medium format - merkezi deklanşör
+        MechanicalLeaf,         // Medium format - merkezi deklanÅŸÃ¶r
         Electronic,             // Tamamen elektronik (rolling shutter olabilir)
-        GlobalElectronic        // Global shutter (tüm sensör aynı anda)
+        GlobalElectronic        // Global shutter (tÃ¼m sensÃ¶r aynÄ± anda)
     };
     Type type = Type::MechanicalFocalPlane;
     
-    // === Exposure Süresi ===
+    // === Exposure SÃ¼resi ===
     float shutter_speed_seconds = 1.0f / 250.0f;    // 1/250s
-    float shutter_angle_degrees = 180.0f;           // Cinema: 180° = %50 duty cycle
+    float shutter_angle_degrees = 180.0f;           // Cinema: 180Â° = %50 duty cycle
     
-    // === Motion Blur Kontrolü ===
+    // === Motion Blur KontrolÃ¼ ===
     bool enable_motion_blur = true;
-    int motion_blur_samples = 8;                     // Temporal sample sayısı
+    int motion_blur_samples = 8;                     // Temporal sample sayÄ±sÄ±
     
     // === Mekanik Etkileri ===
-    float shutter_shock = 0.0f;                      // Deklanşör titreşimi
-    float curtain_travel_time_ms = 3.0f;             // Perde hareket süresi
+    float shutter_shock = 0.0f;                      // DeklanÅŸÃ¶r titreÅŸimi
+    float curtain_travel_time_ms = 3.0f;             // Perde hareket sÃ¼resi
     
     // === Rolling Shutter ===
     bool rolling_shutter = false;
-    float rolling_shutter_skew = 0.0f;               // Eğrilik miktarı
+    float rolling_shutter_skew = 0.0f;               // EÄŸrilik miktarÄ±
     
     // === Hesaplamalar ===
-    // Cinema: Shutter angle'dan exposure süresini hesapla
+    // Cinema: Shutter angle'dan exposure sÃ¼resini hesapla
     float getExposureFromAngle(float fps) const {
         return (shutter_angle_degrees / 360.0f) / fps;
     }
     
-    // Motion blur için temporal sample aralığı
+    // Motion blur iÃ§in temporal sample aralÄ±ÄŸÄ±
     float getSampleTimeStep() const {
         return shutter_speed_seconds / (float)motion_blur_samples;
     }
     
-    // Motion blur yoğunluğu (normalize)
+    // Motion blur yoÄŸunluÄŸu (normalize)
     float getMotionBlurFactor() const {
         // 1/1000s = minimal blur, 1/15s = heavy blur
         return std::clamp(shutter_speed_seconds * 60.0f, 0.0f, 1.0f);
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// PHYSICAL EXPOSURE (Exposure Üçgeni)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// PHYSICAL EXPOSURE (Exposure ÃœÃ§geni)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct PhysicalExposure {
     // === ISO ===
     int iso = 100;
     int native_iso = 100;
-    bool dual_native_iso = false;           // Dual native ISO desteği
-    int second_native_iso = 800;            // İkinci native ISO
+    bool dual_native_iso = false;           // Dual native ISO desteÄŸi
+    int second_native_iso = 800;            // Ä°kinci native ISO
     
     // === Auto Exposure ===
     bool auto_exposure = false;
@@ -295,111 +305,111 @@ struct PhysicalExposure {
     
     // === Metering ===
     enum class MeteringMode {
-        Matrix,         // Tüm kare
-        CenterWeighted, // Merkez ağırlıklı
-        Spot,           // Nokta ölçüm
+        Matrix,         // TÃ¼m kare
+        CenterWeighted, // Merkez aÄŸÄ±rlÄ±klÄ±
+        Spot,           // Nokta Ã¶lÃ§Ã¼m
         Highlight       // Highlight koruma
     };
     MeteringMode metering = MeteringMode::Matrix;
     
     // === Hesaplamalar ===
-    // ISO amplifikasyon faktörü (noise'u da çarpar!)
+    // ISO amplifikasyon faktÃ¶rÃ¼ (noise'u da Ã§arpar!)
     float getISOGain() const {
         return (float)iso / (float)native_iso;
     }
     
-    // Dual ISO modunda hangi native'e yakınsak o kullanılır
+    // Dual ISO modunda hangi native'e yakÄ±nsak o kullanÄ±lÄ±r
     int getEffectiveNativeISO() const {
         if (!dual_native_iso) return native_iso;
-        // İkisinin ortasına yakınsa hangisi daha yakınsa
+        // Ä°kisinin ortasÄ±na yakÄ±nsa hangisi daha yakÄ±nsa
         int mid = (native_iso + second_native_iso) / 2;
         return (iso < mid) ? native_iso : second_native_iso;
     }
     
     // Exposure Value (EV) hesaplama
-    // EV = log2(N² / t) - log2(ISO/100)
+    // EV = log2(NÂ² / t) - log2(ISO/100)
     float calculateEV(float aperture, float shutter_seconds) const {
         float ev = log2f((aperture * aperture) / shutter_seconds);
         ev -= log2f((float)iso / 100.0f);
         return ev + ev_compensation;
     }
     
-    // Sahne parlaklığı için gerekli exposure multiplier
-    // Bu değer render sonucunu ÇARPAR (sinyali + varyansı birlikte)
+    // Sahne parlaklÄ±ÄŸÄ± iÃ§in gerekli exposure multiplier
+    // Bu deÄŸer render sonucunu Ã‡ARPAR (sinyali + varyansÄ± birlikte)
     float getExposureMultiplier(float aperture, float shutter_seconds) const {
-        // Fiziksel exposure = Işık toplama kapasitesi
-        // Aperture: Işık miktarı ∝ 1/N²
-        // Shutter: Işık miktarı ∝ süre
+        // Fiziksel exposure = IÅŸÄ±k toplama kapasitesi
+        // Aperture: IÅŸÄ±k miktarÄ± âˆ 1/NÂ²
+        // Shutter: IÅŸÄ±k miktarÄ± âˆ sÃ¼re
         // ISO: Amplifikasyon
         
         float aperture_factor = 1.0f / (aperture * aperture);          // f/1.4 = 0.51, f/8 = 0.016
         float shutter_factor = shutter_seconds / (1.0f / 250.0f);       // 1/250s referans
         float iso_factor = getISOGain();
         
-        // Toplam exposure (referans ayarlı)
-        const float reference_scale = 2.5f; // Sahne parlaklığına göre ayarlanabilir
+        // Toplam exposure (referans ayarlÄ±)
+        const float reference_scale = 2.5f; // Sahne parlaklÄ±ÄŸÄ±na gÃ¶re ayarlanabilir
         return aperture_factor * shutter_factor * iso_factor * reference_scale;
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// CAMERA BODY PHYSICS (Fiziksel Kütle ve Hareket)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// CAMERA BODY PHYSICS (Fiziksel KÃ¼tle ve Hareket)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct CameraBodyPhysics {
-    // === Fiziksel Kütle ===
-    float body_mass_kg = 0.8f;              // Gövde kütlesi
-    float lens_mass_kg = 0.5f;              // Lens kütlesi
+    // === Fiziksel KÃ¼tle ===
+    float body_mass_kg = 0.8f;              // GÃ¶vde kÃ¼tlesi
+    float lens_mass_kg = 0.5f;              // Lens kÃ¼tlesi
     float total_mass_kg() const { return body_mass_kg + lens_mass_kg; }
     
-    Vec3 center_of_gravity = Vec3(0, 0, 0.05f); // Ağırlık merkezi (lensten ötürü önde)
+    Vec3 center_of_gravity = Vec3(0, 0, 0.05f); // AÄŸÄ±rlÄ±k merkezi (lensten Ã¶tÃ¼rÃ¼ Ã¶nde)
     
-    // === Atalet Momenti (döndürme direnci) ===
-    float inertia_x = 0.01f;                // Pitch (yukarı-aşağı) atalet
-    float inertia_y = 0.01f;                // Yaw (sağ-sol) atalet
+    // === Atalet Momenti (dÃ¶ndÃ¼rme direnci) ===
+    float inertia_x = 0.01f;                // Pitch (yukarÄ±-aÅŸaÄŸÄ±) atalet
+    float inertia_y = 0.01f;                // Yaw (saÄŸ-sol) atalet
     float inertia_z = 0.005f;               // Roll ataleti
     
-    // === Hareket Durumu (Simülasyon tarafından güncellenir) ===
-    Vec3 linear_velocity = Vec3(0);         // Doğrusal hız (m/s)
-    Vec3 angular_velocity = Vec3(0);        // Açısal hız (rad/s)
-    Vec3 linear_acceleration = Vec3(0);     // Doğrusal ivme
-    Vec3 angular_acceleration = Vec3(0);    // Açısal ivme
+    // === Hareket Durumu (SimÃ¼lasyon tarafÄ±ndan gÃ¼ncellenir) ===
+    Vec3 linear_velocity = Vec3(0);         // DoÄŸrusal hÄ±z (m/s)
+    Vec3 angular_velocity = Vec3(0);        // AÃ§Ä±sal hÄ±z (rad/s)
+    Vec3 linear_acceleration = Vec3(0);     // DoÄŸrusal ivme
+    Vec3 angular_acceleration = Vec3(0);    // AÃ§Ä±sal ivme
     
-    // === Sönümleme (Damping) ===
-    float linear_damping = 5.0f;            // Doğrusal sönümleme
-    float angular_damping = 10.0f;          // Açısal sönümleme
+    // === SÃ¶nÃ¼mleme (Damping) ===
+    float linear_damping = 5.0f;            // DoÄŸrusal sÃ¶nÃ¼mleme
+    float angular_damping = 10.0f;          // AÃ§Ä±sal sÃ¶nÃ¼mleme
     
     // === Stabilizasyon (IBIS/OIS) ===
     bool ibis_enabled = false;              // In-Body Image Stabilization
-    float ibis_effectiveness_stops = 5.0f;  // Stabilizasyon etkinliği
-    float ibis_response_rate = 0.1f;        // Tepki hızı (düşük = yumuşak)
+    float ibis_effectiveness_stops = 5.0f;  // Stabilizasyon etkinliÄŸi
+    float ibis_response_rate = 0.1f;        // Tepki hÄ±zÄ± (dÃ¼ÅŸÃ¼k = yumuÅŸak)
     
-    // === Fizik Güncellemesi ===
+    // === Fizik GÃ¼ncellemesi ===
     void update(float dt, const Vec3& applied_force, const Vec3& applied_torque) {
         // F = ma -> a = F/m
         linear_acceleration = applied_force / total_mass_kg();
         
-        // τ = Iα -> α = τ/I (her eksen için ayrı)
+        // Ï„ = IÎ± -> Î± = Ï„/I (her eksen iÃ§in ayrÄ±)
         angular_acceleration.x = applied_torque.x / inertia_x;
         angular_acceleration.y = applied_torque.y / inertia_y;
         angular_acceleration.z = applied_torque.z / inertia_z;
         
-        // Hız güncelle (yarı-implicit Euler)
+        // HÄ±z gÃ¼ncelle (yarÄ±-implicit Euler)
         linear_velocity = linear_velocity + linear_acceleration * dt;
         angular_velocity = angular_velocity + angular_acceleration * dt;
         
-        // Sönümleme uygula
+        // SÃ¶nÃ¼mleme uygula
         linear_velocity = linear_velocity * expf(-linear_damping * dt);
         angular_velocity = angular_velocity * expf(-angular_damping * dt);
         
         // IBIS kompanzasyonu
         if (ibis_enabled) {
             float compensation = 1.0f / powf(2.0f, ibis_effectiveness_stops);
-            // Angular velocity'yi yavaşça sıfıra çek
+            // Angular velocity'yi yavaÅŸÃ§a sÄ±fÄ±ra Ã§ek
             angular_velocity = angular_velocity * (1.0f - ibis_response_rate);
         }
     }
     
-    // Pozisyon ve rotasyon değişimi al
+    // Pozisyon ve rotasyon deÄŸiÅŸimi al
     Vec3 getPositionDelta(float dt) const {
         return linear_velocity * dt;
     }
@@ -409,20 +419,20 @@ struct CameraBodyPhysics {
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
-// HANDHELD SIMULATION (El Sarsıntısı Fiziği)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// HANDHELD SIMULATION (El SarsÄ±ntÄ±sÄ± FiziÄŸi)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct HandheldSimulation {
     bool enabled = false;
     
-    // === Sarsıntı Parametreleri ===
-    float shake_intensity = 1.0f;           // Genel yoğunluk çarpanı
+    // === SarsÄ±ntÄ± Parametreleri ===
+    float shake_intensity = 1.0f;           // Genel yoÄŸunluk Ã§arpanÄ±
     
-    // El titremesi (yüksek frekans)
-    float hand_tremor_frequency = 8.0f;     // Hz (doğal el titremesi 8-12 Hz)
+    // El titremesi (yÃ¼ksek frekans)
+    float hand_tremor_frequency = 8.0f;     // Hz (doÄŸal el titremesi 8-12 Hz)
     float hand_tremor_amplitude = 0.001f;   // metre
     
-    // Vücut sallanması (düşük frekans)
+    // VÃ¼cut sallanmasÄ± (dÃ¼ÅŸÃ¼k frekans)
     float body_sway_frequency = 0.5f;       // Hz
     float body_sway_amplitude = 0.005f;     // metre
     
@@ -430,16 +440,16 @@ struct HandheldSimulation {
     float breathing_frequency = 0.25f;      // Hz (~15 nefes/dakika)
     float breathing_amplitude = 0.003f;     // metre (dikey hareket)
     
-    // Kalp atışı
+    // Kalp atÄ±ÅŸÄ±
     float heartbeat_frequency = 1.2f;       // Hz (~72 bpm)
     float heartbeat_amplitude = 0.0005f;    // metre
     
-    // === Operatör Becerisi ===
+    // === OperatÃ¶r Becerisi ===
     enum class OperatorSkill {
-        Amateur,        // Amatör - maksimum sarsıntı
-        Intermediate,   // Orta - %60 sarsıntı
-        Professional,   // Profesyonel - %30 sarsıntı
-        Expert          // Uzman (sniper eğitimi) - %10 sarsıntı
+        Amateur,        // AmatÃ¶r - maksimum sarsÄ±ntÄ±
+        Intermediate,   // Orta - %60 sarsÄ±ntÄ±
+        Professional,   // Profesyonel - %30 sarsÄ±ntÄ±
+        Expert          // Uzman (sniper eÄŸitimi) - %10 sarsÄ±ntÄ±
     };
     OperatorSkill skill = OperatorSkill::Professional;
     
@@ -453,12 +463,12 @@ struct HandheldSimulation {
         }
     }
     
-    // === Duruş Pozisyonu ===
+    // === DuruÅŸ Pozisyonu ===
     enum class Stance {
-        Standing,       // Ayakta - maksimum sarsıntı
-        Kneeling,       // Diz çökmüş - %60
+        Standing,       // Ayakta - maksimum sarsÄ±ntÄ±
+        Kneeling,       // Diz Ã§Ã¶kmÃ¼ÅŸ - %60
         Sitting,        // Oturarak - %40
-        Prone,          // Yere yatmış - %20
+        Prone,          // Yere yatmÄ±ÅŸ - %20
         Braced          // Destekli (duvar/tripod) - %10
     };
     Stance stance = Stance::Standing;
@@ -474,8 +484,8 @@ struct HandheldSimulation {
         }
     }
     
-    // === Perlin Noise tabanlı sarsıntı hesaplama ===
-    // Not: noise3D fonksiyonu harici olarak sağlanmalıdır
+    // === Perlin Noise tabanlÄ± sarsÄ±ntÄ± hesaplama ===
+    // Not: noise3D fonksiyonu harici olarak saÄŸlanmalÄ±dÄ±r
     Vec3 calculateShake(float time) const {
         if (!enabled) return Vec3(0);
         
@@ -485,13 +495,13 @@ struct HandheldSimulation {
         
         Vec3 shake(0);
         
-        // El titremesi (yüksek frekans, düşük amplitüd)
+        // El titremesi (yÃ¼ksek frekans, dÃ¼ÅŸÃ¼k amplitÃ¼d)
         float tremor_phase = time * hand_tremor_frequency;
         shake.x += sinf(tremor_phase * 1.0f) * hand_tremor_amplitude;
         shake.y += sinf(tremor_phase * 1.3f + 1.5f) * hand_tremor_amplitude;
         shake.z += sinf(tremor_phase * 0.7f + 3.0f) * hand_tremor_amplitude * 0.3f;
         
-        // Vücut sallanması (düşük frekans, yüksek amplitüd)
+        // VÃ¼cut sallanmasÄ± (dÃ¼ÅŸÃ¼k frekans, yÃ¼ksek amplitÃ¼d)
         float sway_phase = time * body_sway_frequency;
         shake.x += sinf(sway_phase * 1.0f) * body_sway_amplitude;
         shake.y += sinf(sway_phase * 0.7f + 2.0f) * body_sway_amplitude * 0.5f;
@@ -500,20 +510,20 @@ struct HandheldSimulation {
         float breath_phase = time * breathing_frequency * 2.0f * (float)M_PI;
         shake.y += sinf(breath_phase) * breathing_amplitude;
         
-        // Kalp atışı (hızlı, küçük)
+        // Kalp atÄ±ÅŸÄ± (hÄ±zlÄ±, kÃ¼Ã§Ã¼k)
         float heart_phase = time * heartbeat_frequency * 2.0f * (float)M_PI;
         shake += Vec3(sinf(heart_phase), cosf(heart_phase), 0) * heartbeat_amplitude;
         
         return shake * total_mult;
     }
     
-    // Açısal sarsıntı (rotasyon)
+    // AÃ§Ä±sal sarsÄ±ntÄ± (rotasyon)
     Vec3 calculateAngularShake(float time) const {
         if (!enabled) return Vec3(0);
         
         float total_mult = shake_intensity * getSkillMultiplier() * getStanceMultiplier();
         
-        // Açısal sarsıntı (radyan cinsinden)
+        // AÃ§Ä±sal sarsÄ±ntÄ± (radyan cinsinden)
         float angular_scale = 0.005f; // ~0.3 derece maksimum
         
         float phase = time * hand_tremor_frequency;
@@ -526,18 +536,18 @@ struct HandheldSimulation {
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // CAMERA RIG SYSTEM (Sinematik Hareket Sistemleri)
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct CameraRig {
     enum class RigType {
         Static,         // Sabit tripod
-        Handheld,       // El ile (shake simülasyonu)
-        Dolly,          // Ray üzerinde lineer hareket
+        Handheld,       // El ile (shake simÃ¼lasyonu)
+        Dolly,          // Ray Ã¼zerinde lineer hareket
         Crane,          // Jib kolu
-        Orbit,          // Hedef etrafında yörünge
+        Orbit,          // Hedef etrafÄ±nda yÃ¶rÃ¼nge
         Steadicam,      // Stabilize hareket
-        Drone,          // Hava çekimi (6 DoF)
+        Drone,          // Hava Ã§ekimi (6 DoF)
         Cablecam,       // Kablo sistemi
         Gimbal          // Motorlu gimbal
     };
@@ -547,18 +557,18 @@ struct CameraRig {
     struct DollyParams {
         Vec3 track_start = Vec3(0);
         Vec3 track_end = Vec3(5, 0, 0);
-        float position = 0.0f;              // 0-1 arası track pozisyonu
+        float position = 0.0f;              // 0-1 arasÄ± track pozisyonu
         float speed = 1.0f;                 // m/s
-        bool smooth_start_stop = true;      // Yumuşak başla/dur
-        float acceleration = 2.0f;          // m/s²
+        bool smooth_start_stop = true;      // YumuÅŸak baÅŸla/dur
+        float acceleration = 2.0f;          // m/sÂ²
     } dolly;
     
     // === Crane/Jib Parametreleri ===
     struct CraneParams {
         Vec3 pivot_point = Vec3(0);
-        float arm_length = 3.0f;            // Kol uzunluğu (m)
-        float arm_angle = 0.0f;             // Yatay açı (derece)
-        float boom_angle = 0.0f;            // Dikey açı (derece)
+        float arm_length = 3.0f;            // Kol uzunluÄŸu (m)
+        float arm_angle = 0.0f;             // Yatay aÃ§Ä± (derece)
+        float boom_angle = 0.0f;            // Dikey aÃ§Ä± (derece)
         float max_boom_up = 45.0f;
         float max_boom_down = 30.0f;
         float rotation_speed = 30.0f;       // derece/s
@@ -566,9 +576,9 @@ struct CameraRig {
     
     // === Orbit Parametreleri ===
     struct OrbitParams {
-        Vec3 target = Vec3(0);              // Yörünge merkezi
-        float radius = 5.0f;                // Yörünge yarıçapı
-        float angle = 0.0f;                 // Mevcut açı (derece)
+        Vec3 target = Vec3(0);              // YÃ¶rÃ¼nge merkezi
+        float radius = 5.0f;                // YÃ¶rÃ¼nge yarÄ±Ã§apÄ±
+        float angle = 0.0f;                 // Mevcut aÃ§Ä± (derece)
         float height_offset = 0.0f;         // Dikey offset
         float angular_speed = 30.0f;        // derece/s
         bool look_at_target = true;         // Hedefe bak
@@ -576,13 +586,13 @@ struct CameraRig {
     
     // === Steadicam Parametreleri ===
     struct SteadicamParams {
-        float smoothing_position = 0.9f;    // Pozisyon yumuşatma (0-1)
-        float smoothing_rotation = 0.95f;   // Rotasyon yumuşatma (0-1)
+        float smoothing_position = 0.9f;    // Pozisyon yumuÅŸatma (0-1)
+        float smoothing_rotation = 0.95f;   // Rotasyon yumuÅŸatma (0-1)
         Vec3 filtered_position = Vec3(0);
         Vec3 filtered_rotation = Vec3(0);
-        float boom_height = 1.7f;           // Operatör göğüs yüksekliği
+        float boom_height = 1.7f;           // OperatÃ¶r gÃ¶ÄŸÃ¼s yÃ¼ksekliÄŸi
         
-        // Yumuşatılmış pozisyon hesapla
+        // YumuÅŸatÄ±lmÄ±ÅŸ pozisyon hesapla
         Vec3 smooth(const Vec3& target_pos, float dt) {
             float alpha = 1.0f - powf(1.0f - smoothing_position, dt * 60.0f);
             filtered_position = filtered_position + (target_pos - filtered_position) * alpha;
@@ -593,9 +603,9 @@ struct CameraRig {
     // === Drone Parametreleri ===
     struct DroneParams {
         float max_speed = 15.0f;            // m/s
-        float max_acceleration = 5.0f;      // m/s²
+        float max_acceleration = 5.0f;      // m/sÂ²
         float altitude = 10.0f;             // Mevcut irtifa
-        float gimbal_pitch = 0.0f;          // Gimbal açısı
+        float gimbal_pitch = 0.0f;          // Gimbal aÃ§Ä±sÄ±
         float gimbal_smoothing = 0.9f;      // Gimbal stabilizasyonu
         bool gps_stabilized = true;         // GPS pozisyon kilidi
     } drone;
@@ -607,8 +617,8 @@ struct CameraRig {
         float max_pitch = 90.0f;
         float max_roll = 45.0f;
         float max_yaw = 180.0f;
-        float motor_strength = 0.9f;        // Motor gücü (stabilizasyon)
-        float response_speed = 0.1f;        // Tepki hızı
+        float motor_strength = 0.9f;        // Motor gÃ¼cÃ¼ (stabilizasyon)
+        float response_speed = 0.1f;        // Tepki hÄ±zÄ±
     } gimbal;
     
     // === Rig pozisyonunu hesapla ===
@@ -647,14 +657,14 @@ struct CameraRig {
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // COMPLETE PHYSICAL CAMERA
-// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 struct PhysicalCamera {
     // === Mod ===
     CameraMode mode = CameraMode::Pro;
     
-    // === Ana Bileşenler ===
+    // === Ana BileÅŸenler ===
     PhysicalSensor sensor;
     PhysicalLens lens;
     PhysicalShutter shutter;
@@ -664,9 +674,9 @@ struct PhysicalCamera {
     CameraRig rig;
     
     // === Pozisyon ve Oryantasyon ===
-    Vec3 position = Vec3(0, 1.7f, 5);       // Dünya koordinatları
-    Vec3 rotation = Vec3(0);                 // Euler açıları (pitch, yaw, roll)
-    Vec3 target = Vec3(0);                   // Baktığı nokta
+    Vec3 position = Vec3(0, 1.7f, 5);       // DÃ¼nya koordinatlarÄ±
+    Vec3 rotation = Vec3(0);                 // Euler aÃ§Ä±larÄ± (pitch, yaw, roll)
+    Vec3 target = Vec3(0);                   // BaktÄ±ÄŸÄ± nokta
     bool use_look_at = true;                 // Target'a bak modu
     
     // === Odaklama ===
@@ -678,25 +688,25 @@ struct PhysicalCamera {
     // === Zaman ===
     float simulation_time = 0.0f;
     
-    // === Mod bazlı özellik kontrolü ===
+    // === Mod bazlÄ± Ã¶zellik kontrolÃ¼ ===
     bool isFeatureEnabled(const char* feature) const {
         if (mode == CameraMode::Auto) {
-            // Auto modda minimal özellik
+            // Auto modda minimal Ã¶zellik
             return false;
         } else if (mode == CameraMode::Pro) {
             // Pro modda optik kusurlar opsiyonel
-            return false; // Varsayılan kapalı
+            return false; // VarsayÄ±lan kapalÄ±
         } else { // Cinema
-            // Cinema modda her şey açık
+            // Cinema modda her ÅŸey aÃ§Ä±k
             return true;
         }
     }
     
-    // === Fizik güncellemesi ===
+    // === Fizik gÃ¼ncellemesi ===
     void update(float dt) {
         simulation_time += dt;
         
-        // Body physics güncelle
+        // Body physics gÃ¼ncelle
         Vec3 force(0), torque(0);
         body_physics.update(dt, force, torque);
         
@@ -705,18 +715,18 @@ struct PhysicalCamera {
             Vec3 shake_offset = handheld.calculateShake(simulation_time);
             Vec3 shake_rotation = handheld.calculateAngularShake(simulation_time);
             
-            // Pozisyon ve rotasyona ekle (geçici olarak, render sırasında)
-            // Bu değerler ana pozisyonu DEĞİŞTİRMEZ, sadece render'da eklenir
+            // Pozisyon ve rotasyona ekle (geÃ§ici olarak, render sÄ±rasÄ±nda)
+            // Bu deÄŸerler ana pozisyonu DEÄÄ°ÅTÄ°RMEZ, sadece render'da eklenir
         }
         
-        // Rig pozisyonunu güncelle
+        // Rig pozisyonunu gÃ¼ncelle
         if (rig.type != CameraRig::RigType::Static && 
             rig.type != CameraRig::RigType::Handheld) {
             position = rig.calculatePosition(simulation_time);
         }
     }
     
-    // === Render için efektif değerleri al ===
+    // === Render iÃ§in efektif deÄŸerleri al ===
     Vec3 getEffectivePosition() const {
         Vec3 pos = position;
         
@@ -766,7 +776,7 @@ struct PhysicalCamera {
         return lens.getHorizontalFOV(sensor.width_mm);
     }
     
-    // === Exposure çarpanı (render sonucu bu ile çarpılır) ===
+    // === Exposure Ã§arpanÄ± (render sonucu bu ile Ã§arpÄ±lÄ±r) ===
     float getExposureMultiplier() const {
         return exposure.getExposureMultiplier(
             lens.current_aperture, 
@@ -774,9 +784,9 @@ struct PhysicalCamera {
         );
     }
     
-    // === Recommended sample sayısı (ISO'ya göre) ===
+    // === Recommended sample sayÄ±sÄ± (ISO'ya gÃ¶re) ===
     int getRecommendedSamples(int base_samples = 64) const {
-        // Yüksek ISO = daha fazla sample gerekli
+        // YÃ¼ksek ISO = daha fazla sample gerekli
         float iso_factor = log2f((float)exposure.iso / 100.0f);
         return base_samples * (int)powf(2.0f, std::max(0.0f, iso_factor * 0.5f));
     }
@@ -815,3 +825,4 @@ struct PhysicalCamera {
 };
 
 } // namespace PhysicalCameraSystem
+

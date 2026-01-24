@@ -1,4 +1,14 @@
-﻿#pragma once  
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          material_gpu.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once  
 #include <cuda_runtime.h>  
 #include <functional>
 #include <cmath>
@@ -213,4 +223,5 @@ namespace std {
         }  
     };  
 }
+
 

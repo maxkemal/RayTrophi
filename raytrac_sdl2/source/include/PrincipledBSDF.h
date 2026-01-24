@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          PrincipledBSDF.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include "Material.h"
 #include "Texture.h"
@@ -42,25 +52,24 @@ public:
         const std::shared_ptr<Texture>& opacityTexture = nullptr,
         const TextureTransform& transform = TextureTransform(),
         const Vec3& emission = Vec3(0.0f, 0.0f, 0.0f),
-        const Vec3& subsurfaceColor = Vec3(0.0, 0.0, 0.0),
-        float subsurfaceRadius = 0.0f,
-        float clearcoat = 0.0f,
-        float transmission = 0.0f,  //  yeni parametre
-        float clearcoatRoughness = 0.0f
-    ) : albedoProperty(albedo, 1.0f, albedoTexture),
-        roughnessProperty(Vec3(roughness), 1.0f, roughnessTexture),
-        metallicProperty(Vec3(metallic), metallic, metallicTexture),
-        normalProperty(Vec3(0.5f, 0.5f, 1.0f), 1.0f, normalTexture),
-        opacityProperty(Vec3(1.0f), 1.0f, opacityTexture, 1.0f),
-        // emissionProperty(emission, 0.0f), // REMOVED from init list
-        subsurfaceColor(subsurfaceColor),
-        subsurfaceRadius(subsurfaceRadius),
-        clearcoat(clearcoat),
-        transmission(transmission),  // Eski sabit değer (isteğe bağlı)
-        clearcoatRoughness(clearcoatRoughness),
+        const Vec3& subsurfaceColor_in = Vec3(0.0, 0.0, 0.0),
+        float subsurfaceRadius_in = 0.0f,
+        float clearcoat_in = 0.0f,
+        float transmission_in = 0.0f,
+        float clearcoatRoughness_in = 0.03f
+    ) : subsurfaceColor(subsurfaceColor_in),
+        subsurfaceRadius(Vec3(subsurfaceRadius_in)), 
+        clearcoat(clearcoat_in),
+        transmission(transmission_in),
+        clearcoatRoughness(clearcoatRoughness_in),
         textureTransform(transform)
     {
-        // Initialize base class emissionProperty
+        // Initialize base class properties
+        albedoProperty = MaterialProperty(albedo, 1.0f, albedoTexture);
+        roughnessProperty = MaterialProperty(Vec3(roughness), 1.0f, roughnessTexture);
+        metallicProperty = MaterialProperty(Vec3(metallic), metallic, metallicTexture);
+        normalProperty = MaterialProperty(Vec3(0.5f, 0.5f, 1.0f), 1.0f, normalTexture);
+        opacityProperty = MaterialProperty(Vec3(1.0f), 1.0f, opacityTexture, 1.0f);
         emissionProperty = MaterialProperty(emission, 0.0f);
         
         static std::once_flag flag;
@@ -110,6 +119,7 @@ public:
     bool isEmissive() const;
     virtual float get_opacity(const Vec2& uv) const override;
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
+    virtual __m256 scatter_packet(const RayPacket& r_in, const HitRecordPacket& rec, Vec3Packet& attenuation, RayPacket& scattered) const override;
     float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const override;
     float get_scattering_factor() const override {
         // Example formula incorporating reflectivity and roughness
@@ -123,26 +133,33 @@ public:
         }
         return emissionProperty.color;
     }
-    MaterialProperty albedoProperty;
-    MaterialProperty roughnessProperty;
-    MaterialProperty metallicProperty;
-    MaterialProperty normalProperty;
-    MaterialProperty opacityProperty;
-    Vec2 tilingFactor;
-    TextureTransform textureTransform;
     MaterialProperty specularProperty;
-    MaterialProperty transmissionProperty;
+    TextureTransform textureTransform;
+    // MaterialProperty transmissionProperty; // Shadowing removed
     Vec3 albedoValue;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const;
     Vec3 computeFresnel(const Vec3& F0, float cosTheta) const;
     Vec3 computeClearcoat(const Vec3& R, const Vec3& L, const Vec3& N) const;
+    
+    // Scalar BRDF Helpers
     float DistributionGGX(const Vec3& N, const Vec3& H, float roughness) const;
     float GeometrySchlickGGX(float NdotV, float roughness) const;
     float GeometrySmith(const Vec3& N, const Vec3& V, const Vec3& L, float roughness) const;
     Vec3 fresnelSchlick(float cosTheta, const Vec3& F0) const;
-
     Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
-    float normalStrength = 1.0f;
+
+    // SIMD BRDF Helpers (Phase 3)
+    __m256 DistributionGGX_SIMD(const Vec3SIMD& N_x, const Vec3SIMD& N_y, const Vec3SIMD& N_z,
+                                const Vec3SIMD& H_x, const Vec3SIMD& H_y, const Vec3SIMD& H_z,
+                                const __m256& roughness) const;
+    __m256 GeometrySmith_SIMD(const Vec3SIMD& N_x, const Vec3SIMD& N_y, const Vec3SIMD& N_z,
+                              const Vec3SIMD& V_x, const Vec3SIMD& V_y, const Vec3SIMD& V_z,
+                              const Vec3SIMD& L_x, const Vec3SIMD& L_y, const Vec3SIMD& L_z,
+                              const __m256& roughness) const;
+    void fresnelSchlick_SIMD(const __m256& cosTheta,
+                             const Vec3SIMD& F0_x, const Vec3SIMD& F0_y, const Vec3SIMD& F0_z,
+                             Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z) const;
+    // float normalStrength = 1.0f; // Shadowing removed
     
     // Subsurface Scattering (Random Walk)
     Vec3 subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);     // SSS tint color
@@ -215,3 +232,6 @@ private:
     static void precomputeLUT(); // LUT'yi başlatan fonksiyon
 };
 
+
+
+// Refreshed

@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SceneHistory.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include "SceneCommand.h"
@@ -45,3 +55,4 @@ private:
     std::deque<std::unique_ptr<SceneCommand>> redo_stack_;
     size_t max_history_;
 };
+

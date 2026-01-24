@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          DeviceStreamMap.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -122,3 +132,4 @@ inline size_t DeviceStreamMap::getMinPageSize() const
 }// namespace nanovdb
 
 #endif // end of NANOVDB_CUDA_DEVICESTREAMMAP_H_HAS_BEEN_INCLUDED
+

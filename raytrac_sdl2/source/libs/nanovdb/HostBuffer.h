@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          HostBuffer.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -589,3 +599,4 @@ inline void HostBuffer::resizePool(uint64_t size, void *data)
 } // namespace nanovdb
 
 #endif // end of NANOVDB_HOSTBUFFER_H_HAS_BEEN_INCLUDED
+

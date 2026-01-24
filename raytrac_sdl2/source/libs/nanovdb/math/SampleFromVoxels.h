@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SampleFromVoxels.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -994,3 +1004,4 @@ __hostdev__ math::SampleFromVoxels<TreeOrAccT, Order, UseCache> createSampler(co
 } // namespace nanovdb
 
 #endif // NANOVDB_SAMPLE_FROM_VOXELS_H_HAS_BEEN_INCLUDED
+

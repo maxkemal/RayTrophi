@@ -1,4 +1,14 @@
-﻿#ifndef SPOTLIGHT_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SpotLight.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef SPOTLIGHT_H
 #define SPOTLIGHT_H
 
 #include "Light.h"
@@ -26,4 +36,5 @@ private:
 };
 
 #endif // SPOTLIGHT_H
+
 

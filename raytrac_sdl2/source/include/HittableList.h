@@ -1,4 +1,14 @@
-﻿#ifndef HITTABLELIST_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          HittableList.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef HITTABLELIST_H
 #define HITTABLELIST_H
 
 #include "Hittable.h"
@@ -67,7 +77,8 @@ public:
     // =========================================================================
     // Hit Detection
     // =========================================================================
-    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override;
+    virtual void hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const override;
     virtual bool bounding_box(float time0, float time1, AABB& output_box) const override;
 
     // =========================================================================

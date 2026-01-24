@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          CreatePrimitives.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1750,3 +1760,4 @@ createPointScatter(const NanoGrid<SrcBuildT>& srcGrid, // origin of grid in worl
 } // namespace nanovdb
 
 #endif // NANOVDB_TOOLS_PRIMITIVES_H_HAS_BEEN_INCLUDED
+

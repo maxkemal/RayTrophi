@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Timer.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -163,3 +173,4 @@ using GpuTimer [[deprecated("Use nanovdb::util::cuda::Timer instead")]]= util::c
 } // namespace nanovdb
 
 #endif // NANOVDB_UTIL_CUDA_TIMER_H_HAS_BEEN_INCLUDED
+

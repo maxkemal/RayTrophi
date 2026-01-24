@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          TerrainSystem.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include <vector>
@@ -10,9 +20,9 @@
 #include "FoliageFwd.h"
 #include "WaterSystem.h" // For WaterWaveParams
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // TERRAIN DATA STRUCTURES
-// ═══════════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 // Normal calculation quality levels
 enum class NormalQuality { 
@@ -128,8 +138,14 @@ struct TerrainObject {
     NormalQuality normal_quality = NormalQuality::Sobel;
     float normal_strength = 1.0f;  // Multiplier for normal intensity (0.1 - 3.0)
     
+    // Procedural Auto-Mask Settings (Persistent)
+    float am_height_min = 5.0f;
+    float am_height_max = 20.0f;
+    float am_slope = 5.0f;
+
     // Helper to mark a heightmap cell as dirty
     void markCellDirty(int gridX, int gridZ) {
         dirty_region.markDirty(gridX, gridZ, heightmap.width, heightmap.height);
     }
 };
+

@@ -1,4 +1,14 @@
-﻿#ifndef MATRIX4X4_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Matrix4x4.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef MATRIX4X4_H
 #define MATRIX4X4_H
 
 #include "Vec3.h"  // Vec3 sınıfı için gerekli başlık dosyası
@@ -241,9 +251,9 @@ public:
         scale = Vec3(sx, sy, sz);
         
         // Avoid division by zero
-        if (sx < 0.0001f) sx = 0.0001f;
-        if (sy < 0.0001f) sy = 0.0001f;
-        if (sz < 0.0001f) sz = 0.0001f;
+        if (sx < 1e-8f) sx = 1e-8f;
+        if (sy < 1e-8f) sy = 1e-8f;
+        if (sz < 1e-8f) sz = 1e-8f;
         
         // Extract rotation matrix (remove scale)
         float r00 = m[0][0] / sx, r01 = m[0][1] / sy, r02 = m[0][2] / sz;
@@ -272,6 +282,7 @@ public:
 };
 
 #endif // MATRIX4X4_H
+
 
 
 

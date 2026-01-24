@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Quaternion.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 #include "Vec3.h"
 #include "Matrix4x4.h"
@@ -5,10 +15,10 @@ class Quaternion {
 public:
     float w, x, y, z;
 
-    // Varsayýlan yapýcý
+    // VarsayÃ½lan yapÃ½cÃ½
     Quaternion() : w(1), x(0), y(0), z(0) {}
 
-    // Parametreli yapýcý
+    // Parametreli yapÃ½cÃ½
     Quaternion(float w, float x, float y, float z) : w(w), x(x), y(y), z(z) {}
 
     // Quaternion'u birim yapma (normalize etme)
@@ -24,7 +34,7 @@ public:
         float dot = start.x * end.x + start.y * end.y + start.z * end.z + start.w * end.w;
 
         if (dot < 0.0f) {
-            // Quaternions ters iþaretlenmiþse, bunu düzelt
+            // Quaternions ters iÃ¾aretlenmiÃ¾se, bunu dÃ¼zelt
             result.x = -end.x;
             result.y = -end.y;
             result.z = -end.z;
@@ -35,11 +45,11 @@ public:
             result = end;
         }
 
-        float theta_0 = acos(dot);  // Baþlangýç açýsý
-        float sin_theta_0 = sin(theta_0);  // Sinüs(theta_0)
+        float theta_0 = acos(dot);  // BaÃ¾langÃ½Ã§ aÃ§Ã½sÃ½
+        float sin_theta_0 = sin(theta_0);  // SinÃ¼s(theta_0)
 
         if (fabs(sin_theta_0) > 1e-6) {
-            float theta = theta_0 * t;  // t için interpolasyon açýsý
+            float theta = theta_0 * t;  // t iÃ§in interpolasyon aÃ§Ã½sÃ½
             float sin_theta = sin(theta);
             float s0 = cos(theta) - dot * sin_theta / sin_theta_0;
             float s1 = sin_theta / sin_theta_0;
@@ -49,7 +59,7 @@ public:
             result.w = s0 * start.w + s1 * result.w;
         }
         else {
-            // Eðer açýlar çok yakýnsa, düz interpolasyon yap
+            // EÃ°er aÃ§Ã½lar Ã§ok yakÃ½nsa, dÃ¼z interpolasyon yap
             result.x = (1.0f - t) * start.x + t * result.x;
             result.y = (1.0f - t) * start.y + t * result.y;
             result.z = (1.0f - t) * start.z + t * result.z;
@@ -57,7 +67,7 @@ public:
         }
         return result;
     }
-    // Quaternion ile vektör döndürme
+    // Quaternion ile vektÃ¶r dÃ¶ndÃ¼rme
     Vec3 rotate(const Vec3& v) const {
         Quaternion qv(0, v.x, v.y, v.z);
         Quaternion inv = conjugate();
@@ -70,7 +80,7 @@ public:
         return Quaternion(w, -x, -y, -z);
     }
 
-    // Quaternion çarpýmý
+    // Quaternion Ã§arpÃ½mÃ½
     Quaternion operator*(const Quaternion& other) const {
         return Quaternion(
             w * other.w - x * other.x - y * other.y - z * other.z,
@@ -80,7 +90,7 @@ public:
         );
     }
 
-    // Quaternion'dan dönüþüm matrisi oluþturma
+    // Quaternion'dan dÃ¶nÃ¼Ã¾Ã¼m matrisi oluÃ¾turma
     Matrix4x4 toMatrix() const {
         Matrix4x4 mat;
         mat.m[0][0] = 1 - 2 * (y * y + z * z);
@@ -106,7 +116,7 @@ public:
         return mat;
     }
 
-    // Quaternion'dan euler açýlarý oluþturma
+    // Quaternion'dan euler aÃ§Ã½larÃ½ oluÃ¾turma
     Vec3 toEuler() const {
         Vec3 euler;
         euler.x = atan2f(2.0f * (w * x + y * z), 1.0f - 2.0f * (x * x + y * y));
@@ -115,3 +125,4 @@ public:
         return euler;
     }
 };
+
