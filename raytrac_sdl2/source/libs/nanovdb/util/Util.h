@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Util.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -689,3 +699,4 @@ __hostdev__ inline uint32_t CountOn(uint64_t v){return util::countOn(v);}
 } // namespace nanovdb ===================================================================
 
 #endif // end of NANOVDB_UTIL_UTIL_H_HAS_BEEN_INCLUDED
+

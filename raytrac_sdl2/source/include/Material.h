@@ -1,12 +1,26 @@
-﻿# pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Material.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+# pragma once
 
 #include "Ray.h"
+#include "RayPacket.h"
+#include "HitRecordPacket.h"
 #include "Vec3.h"
+#include "Vec2.h"
+#include "Vec3SIMD.h"
 #include "Hittable.h"
 #include <memory>
 #include "Texture.h"
-#include "ParallelBVHNode.h"
 #include "material_gpu.h"
+class ParallelBVHNode; // Forward declaration if needed
 enum class MaterialType {
     PrincipledBSDF,
     Metal,
@@ -71,8 +85,14 @@ struct MaterialProperty {
 
 };
 
+// Forward declaration
+namespace MaterialNodes { class MaterialNodeGraph; }
+
 class Material {
 public:
+    // Node Graph for procedural generation
+    std::shared_ptr<MaterialNodes::MaterialNodeGraph> nodeGraph;
+    
     virtual float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const {
         // Default: Cosine-weighted hemisphere
         float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0);
@@ -132,17 +152,26 @@ public:
    
 
     virtual ~Material() = default;
-    MaterialProperty shininess;
-    MaterialProperty metallic;
-    MaterialProperty materyalproperty;  
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const = 0;
-    virtual float get_metallic() const { return metallic.getValue(); }
+    
+    // Packet Tracing Interface (Phase 2)
+    // Returns a mask of active lanes where scatter occurred
+    virtual __m256 scatter_packet(
+        const RayPacket& r_in, 
+        const HitRecordPacket& rec, 
+        Vec3Packet& attenuation, 
+        RayPacket& scattered
+    ) const {
+        // Default: No scatter (all lanes inactive)
+        return _mm256_setzero_ps();
+    }
+    virtual float get_metallic() const { return metallicProperty.intensity; }
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
         return emissionProperty.color * emissionProperty.intensity;
     }
     virtual bool isEmissive() const { return false; }
     // Texture handling
-    virtual bool hasTexture() const { return texture != nullptr; }
+    virtual bool hasTexture() const { return getTexture() != nullptr; }
     virtual bool hasOpacityTexture() const {
         return opacityProperty.texture != nullptr;
     }
@@ -150,14 +179,14 @@ public:
         return 1.0f; // Varsayılan olarak tam opak
     }
 
-    void setTexture(std::shared_ptr<Texture> tex) { texture = tex; }
+    void setTexture(std::shared_ptr<Texture> tex) { albedoProperty.texture = tex; }
 
    
     // Material.h (varsayılan baz sınıf)
     virtual float getTransmission(const Vec2& uv) const { return 0.0f; }
 	virtual void setTransmission(float transmission, float ior) {
 		transmissionProperty.intensity = transmission;
-		ior = ior;
+		this->ior = ior;
 	}
     virtual float getIOR() const { return ior; } // Yeni: Kırılma indeksi
     virtual Vec3 getF0() const { return f0; } // Yeni: Fresnel yansıma katsayısı
@@ -168,7 +197,7 @@ public:
         normalStrength = norm;
     }
     virtual float get_shininess() const {
-        return shininess.intensity*128 ;  // veya shininess.intensity
+        return (1.0f - roughnessProperty.intensity) * 128.0f; // Derived from roughness
     }
    
     // Tiling
@@ -190,14 +219,14 @@ public:
     Vec3 albedo;
     float artistic_albedo_response = 0.50f; // default fiziksel
     float ior = 1.5f; // Yeni: Varsayılan kırılma indeksi
-protected:
-   
     float normalStrength = 1.0f;
+protected:   
+   
     float roughness = 0.0f;
    
     Vec3 f0 = Vec3(0.04f); // Yeni: Varsayılan Fresnel yansıma katsayısı
-    std::shared_ptr<Texture> texture;
-    Vec3 emissionColor = 0;
+    
+    Vec3 emissionColor = Vec3(0.0f);
     // Yeni: Malzeme özelliklerini ayarlamak için yardımcı metotlar
     void setAlbedo(const Vec3& a) { albedo = a; }
    // void setMetallic(float m) { metallic = m; }
@@ -205,3 +234,6 @@ protected:
     void setIOR(float i) { ior = i; }
     void setF0(const Vec3& f) { f0 = f; }
 };
+
+
+// Refreshed

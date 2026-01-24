@@ -1,4 +1,14 @@
-﻿// ===== payload.h =====
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          payload.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+// ===== payload.h =====
 #pragma once
 #include <optix.h>
 #include <cuda_runtime.h>
@@ -89,3 +99,4 @@ __device__ __forceinline__ T* unpackPayload(unsigned int p0, unsigned int p1) {
 extern "C" {
     __constant__ RayGenParams optixLaunchParams;
 }
+

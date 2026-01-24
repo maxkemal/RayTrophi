@@ -1,3 +1,13 @@
+ï»¿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          AnimatedObject.h
+* Author:        Kemal DemirtaÃ…Å¸
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include <unordered_map>
@@ -8,7 +18,7 @@
 #include "matrix4x4.h"
 #include "vec3SIMD.h"
 #include "quaternion.h"
-#include "AssimpLoader.h" // AnimationData yapýsýnýn tanýmlandýðý header
+#include "AssimpLoader.h" // AnimationData yapÄ±sÄ±nÄ±n tanÄ±mlandÄ±ÄŸÄ± header
 
 
 class AnimatedObject : public Hittable {
@@ -36,16 +46,16 @@ public:
   
     AnimatedObject(const std::vector<std::shared_ptr<Hittable>>& meshes)
         : m_meshes(meshes) {
-        m_meshTransforms.resize(meshes.size(), Matrix4x4()); // Varsayýlan constructor zaten identity matrix oluþturuyor
+        m_meshTransforms.resize(meshes.size(), Matrix4x4()); // VarsayÄ±lan constructor zaten identity matrix oluÅŸturuyor
     }
 
-    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override {
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override {
         bool hit_anything = false;
         double closest_so_far = t_max;
 
         for (size_t i = 0; i < m_meshes.size(); ++i) {
             HitRecord temp_rec;
-            if (m_meshes[i]->hit(r, t_min, closest_so_far, temp_rec)) {
+            if (m_meshes[i]->hit(r, t_min, closest_so_far, temp_rec, ignore_volumes)) {
                 hit_anything = true;
                 closest_so_far = temp_rec.t;
                 rec = temp_rec;
@@ -73,13 +83,13 @@ public:
     }
 
     void updateTransform(const AnimationData& animation, float current_time) {
-        // Animasyon süresini saniyeye çevir
+        // Animasyon sÃ¼resini saniyeye Ã§evir
         float animationDurationInSeconds = animation.duration / animation.ticksPerSecond;
 
-        // Mevcut zamaný animasyon süresine göre normalize et
+        // Mevcut zamanÄ± animasyon sÃ¼resine gÃ¶re normalize et
         float normalizedTimeInSeconds = std::fmod(current_time, animationDurationInSeconds);
 
-        // Saniye cinsinden zamaný tick'lere çevir
+        // Saniye cinsinden zamanÄ± tick'lere Ã§evir
         double normalizedTimeInTicks = normalizedTimeInSeconds * animation.ticksPerSecond;
 
         std::cout << "Animation Update:"
@@ -90,13 +100,13 @@ public:
             << "\nTicks per second: " << animation.ticksPerSecond
             << "\nDuration (ticks): " << animation.duration << std::endl;
 
-        // Tüm node'lar için güncelleme yap
+        // TÃ¼m node'lar iÃ§in gÃ¼ncelleme yap
         for (const auto& [nodeName, nodeData] : m_nodeHierarchy) {
             Vec3 position = Vec3(0, 0, 0);
             Quaternion rotation = Quaternion(0, 0, 0, 1);
             Vec3 scaling = Vec3(1, 1, 1);
 
-            // Debug için pozisyon deðerlerini yazdýr
+            // Debug iÃ§in pozisyon deÄŸerlerini yazdÄ±r
             if (animation.positionKeys.count(nodeName) > 0) {
                 const auto& keys = animation.positionKeys.at(nodeName);
                 std::cout << "Node: " << nodeName << " has " << keys.size() << " position keys" << std::endl;
@@ -134,10 +144,10 @@ public:
     }
 
 
-    // Quaternion'u Matrix4x4'e çeviren yardýmcý fonksiyon
+    // Quaternion'u Matrix4x4'e Ã§eviren yardÄ±mcÄ± fonksiyon
     Matrix4x4 quaternionToMatrix4x4(const Quaternion& q) {
-        // Bu fonksiyonu Quaternion sýnýfýnýza göre uyarlayýn
-        // Örnek bir implementasyon:
+        // Bu fonksiyonu Quaternion sÄ±nÄ±fÄ±nÄ±za gÃ¶re uyarlayÄ±n
+        // Ã–rnek bir implementasyon:
         float xx = q.x * q.x;
         float xy = q.x * q.y;
         float xz = q.x * q.z;
@@ -162,21 +172,21 @@ public:
         return result;
     }
     void updateNodeTransform(const std::string& nodeName, const Matrix4x4& localTransform) {
-        // Önce local transform'u kaydet
+        // Ã–nce local transform'u kaydet
         m_nodeHierarchy[nodeName].transform = localTransform;
 
         // Global transform'u hesapla
         Matrix4x4 globalTransform = localTransform;
         Node* currentNode = &m_nodeHierarchy[nodeName];
         if (currentNode->parent != nullptr) {
-            // Parent'ýn global transform'unu kullan
+            // Parent'Ä±n global transform'unu kullan
             globalTransform = currentNode->parent->globalTransform * globalTransform;
         }
 
         // Global transform'u kaydet
         m_nodeHierarchy[nodeName].globalTransform = globalTransform;
 
-        // Mesh transform'unu güncelle
+        // Mesh transform'unu gÃ¼ncelle
         if (m_nodeMeshMap.count(nodeName) > 0) {
             size_t meshIndex = m_nodeMeshMap[nodeName];
             m_meshTransforms[meshIndex] = globalTransform;
@@ -257,3 +267,4 @@ public:
 
 
 };
+

@@ -1,4 +1,14 @@
-﻿#ifndef VOLUMETRIC_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Volumetric.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef VOLUMETRIC_H
 #define VOLUMETRIC_H
 
 #include "Material.h"

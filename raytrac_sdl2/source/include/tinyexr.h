@@ -1,4 +1,4 @@
-#ifndef TINYEXR_H_
+﻿#ifndef TINYEXR_H_
 #define TINYEXR_H_
 /*
 Copyright (c) 2014 - 2021, Syoyo Fujita and many contributors.
@@ -9401,3 +9401,5 @@ int SaveEXR(const float *data, int width, int height, int components,
 
 #endif  // TINYEXR_IMPLEMENTATION_DEFINED
 #endif  // TINYEXR_IMPLEMENTATION
+
+

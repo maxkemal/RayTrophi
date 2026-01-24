@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Invoke.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -95,3 +105,4 @@ int invoke(const Func &taskFunc1, Rest... taskFuncN) {
 }// namespace nanovdb
 
 #endif // NANOVDB_UTIL_INVOKE_H_HAS_BEEN_INCLUDED
+

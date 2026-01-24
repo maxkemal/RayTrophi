@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_noise.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 #include "unified_types.h"
 
@@ -53,3 +63,4 @@ UNIFIED_FUNC float fbm(Vec3f p, int octaves) {
     }
     return value;
 }
+

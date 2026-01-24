@@ -1,4 +1,14 @@
-﻿/**
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          VDBVolume.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+/**
  * @file VDBVolume.h
  * @brief VDB Volume Scene Object - Standalone volumetric container
  * 
@@ -85,7 +95,14 @@ public:
      * For VDB volumes, we test against the transformed AABB.
      * Actual ray marching happens during shading, not here.
      */
-    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
+    bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override;
+    void hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const override;
+    
+    /**
+     * @brief Fast occlusion test with Ray Marching support for stochastic transparency.
+     */
+    bool occluded(const Ray& r, float t_min, float t_max) const override;
+    __m256 occluded_packet(const RayPacket& packet, float t_min, __m256 t_max) const override;
     
     /**
      * @brief Get world-space bounding box
@@ -107,6 +124,8 @@ public:
     Vec3 getPosition() const { return position; }
     Vec3 getRotation() const { return rotation_euler; }
     Vec3 getScale() const { return scale_vec; }
+    Vec3 getPivotOffset() const { return pivot_offset; }
+    void setPivotOffset(const Vec3& po) { pivot_offset = po; invalidateWorldBounds(); }
     
     /**
      * @brief Move pivot point to bottom center of bounding box
@@ -238,7 +257,7 @@ public:
      * @brief Update frame from timeline (called by animation system)
      * @param timeline_frame Current frame from main timeline
      */
-    void updateFromTimeline(int timeline_frame);
+    void updateFromTimeline(int timeline_frame, void* stream = nullptr);
     
     void setFrameOffset(int offset) { frame_offset = offset; }
     int getFrameOffset() const { return frame_offset; }
@@ -291,6 +310,9 @@ public:
     
     // Density control
     float density_scale = 1.0f;
+    float voxel_size = 0.1f;
+    float getVoxelSize() const { return voxel_size; }
+    Vec3 pivot_offset = Vec3(0); // Persistent offset for pivot adjustments
 private:
     // VDB data reference
     int vdb_volume_id = -1;
@@ -301,7 +323,7 @@ private:
     Matrix4x4 world_transform;
     Matrix4x4 world_transform_inv;   
     Vec3 position = Vec3(0);
-    Vec3 pivot_offset = Vec3(0); // Persistent offset for pivot adjustments
+  
     Vec3 rotation_euler = Vec3(0);  // Degrees
     Vec3 scale_vec = Vec3(1);
     
@@ -347,3 +369,4 @@ private:
 };
 
 #endif // VDB_VOLUME_H
+

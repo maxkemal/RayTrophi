@@ -1,4 +1,42 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          AssimpLoader.h
+* Author:        Kemal Demirtaş
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+* Description:
+* This file contains the AssimpLoader class, responsible for loading 3D models 
+* and their associated data (meshes, materials, animations, lights, cameras)
+* using the Open Asset Import Library (Assimp).
+*
+* External Dependencies:
+* - Assimp (Open Asset Import Library) - https://github.com/assimp/assimp
+*   Assimp is used under the 3-Clause BSD License.
+*   Copyright (c) 2006-2024, assimp team. All rights reserved.
+* =========================================================================
+* (Turkish Description)
+* Proje:         RayTrophi Studio
+* Dosya:         AssimpLoader.h
+* Yazar:         Kemal Demirtaş
+* Tarih:         Haziran 2024
+* Lisans:        [Lisans Bilgisi - örn. Özel / MIT / vb.]
+* =========================================================================
+* Açıklama:
+* Bu dosya, Open Asset Import Library (Assimp) kullanarak 3D modelleri ve
+* ilişkili verileri (meshler, materyaller, animasyonlar, ışıklar, kameralar)
+* yüklemekten sorumlu AssimpLoader sınıfını içerir.
+*
+* Dış Bağımlılıklar:
+* - Assimp (Open Asset Import Library) - https://github.com/assimp/assimp
+*   Assimp, 3-Maddeli BSD Lisansı altında kullanılmaktadır.
+*   Telif Hakkı (c) 2006-2024, assimp ekibi. Tüm hakları saklıdır.
+* =========================================================================
+*/
+
+#pragma once
 
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
@@ -31,9 +69,9 @@
 #include <thread>
 #include <mutex>
 struct MeshInstance {
-    int meshIndex; // aiMesh ID
-    Matrix4x4 transform;
-    std::string nodeName;
+    int meshIndex; // aiMesh ID (aiMesh Kimliği)
+    Matrix4x4 transform; // Global transform matrix (Global dönüşüm matrisi)
+    std::string nodeName; // Node name in hierarchy (Hiyerarşideki düğüm adı)
 };
 struct AnimationData {
     std::string name;
@@ -43,16 +81,21 @@ struct AnimationData {
     std::map<std::string, std::vector<aiQuatKey>> rotationKeys;
     std::map<std::string, std::vector<aiVectorKey>> scalingKeys;
     
-    // Frame range bilgisi (Blender'dan gelen)
+   
     int startFrame = 0;
     int endFrame = 0;
 
+    // Calculates the interpolated transform matrix for a node at a specific time
+    // Belirli bir andaki node için enterpolasyonlu dönüşüm matrisini hesaplar
     Matrix4x4 calculateAnimationTransform(const AnimationData& animData, float time, const std::string& nodeName, const Matrix4x4& defaultTransform)
         const {
-        // Animasyon süresini normalize et
+      
+        // Calculate normalized animation time within duration
+        // Animasyon süresini normalize et (döngüsel zaman)
         double animationTime = fmod(time * ticksPerSecond, duration);
 
         // Decompose default transform to retrieve Bind Pose values
+        // Bind Pose değerlerini almak için varsayılan transformu ayır
         aiMatrix4x4 aiDef;
         aiDef.a1 = defaultTransform.m[0][0]; aiDef.a2 = defaultTransform.m[0][1]; aiDef.a3 = defaultTransform.m[0][2]; aiDef.a4 = defaultTransform.m[0][3];
         aiDef.b1 = defaultTransform.m[1][0]; aiDef.b2 = defaultTransform.m[1][1]; aiDef.b3 = defaultTransform.m[1][2]; aiDef.b4 = defaultTransform.m[1][3];
@@ -108,7 +151,7 @@ struct AnimationData {
              translationMatrix = Matrix4x4::translation(Vec3(defPos.x, defPos.y, defPos.z));
         }
 
-        // --- ROTATION ---
+        // --- ROTATION (Dönme) ---
         if (hasRot) {
             Quaternion rotation(0, 0, 0, 1);
             const auto& keys = rotationKeys.at(nodeName);
@@ -134,11 +177,12 @@ struct AnimationData {
             rotationMatrix = rotation.toMatrix();
         } else {
              // Fallback to Bind Pose Rotation (Fixes FBX flipped camera issues)
+             // Bind Pose Rotasyonuna dön (FBX ters kamera sorunlarını düzeltir)
              Quaternion defQ(defRot.w, defRot.x, defRot.y, defRot.z);
              rotationMatrix = defQ.toMatrix();
         }
 
-        // --- SCALING ---
+        // --- SCALING (Ölçekleme) ---
         if (hasScl) {
             Vec3 scaling(1, 1, 1);
             const auto& keys = scalingKeys.at(nodeName);
@@ -171,11 +215,13 @@ struct AnimationData {
              scaleMatrix = Matrix4x4::scaling(Vec3(defScale.x, defScale.y, defScale.z));
         }
 
-        // Matrisleri birleştir: Final = Translation * Rotation * Scale
+        // Combine matrices: Final = Translation * Rotation * Scale
+        // Matrisleri birleştir: Final = Çevirme * Dönme * Ölçekleme
         return translationMatrix * rotationMatrix * scaleMatrix;
     }
 };
-// Texture bilgilerini önceden al
+
+// Pre-fetch Texture Info (Doku bilgilerini önceden al)
 struct TextureInfo {
     aiTextureType type;
     std::string path;
@@ -189,10 +235,13 @@ struct BoneData {
     // =========================================================================
     // OPTIMIZATION: Reverse lookup table (bone index -> bone name)
     // Eliminates O(n²) complexity in animation updates
+    // OPTİMİZASYON: Ters arama tablosu (kemik indeksi -> kemik adı)
+    // Animasyon güncellemelerindeki O(n²) karmaşıklığını ortadan kaldırır
     // =========================================================================
     std::vector<std::string> boneIndexToName;
     
     // Rebuild reverse lookup table - call after all bones are added
+    // Ters arama tablosunu yeniden oluştur (tüm kemikler eklendikten sonra çağır)
     void rebuildReverseLookup() {
         if (boneNameToIndex.empty()) {
             boneIndexToName.clear();
@@ -212,6 +261,7 @@ struct BoneData {
     }
     
     // Get bone name by index (O(1) lookup)
+    // İndekse göre kemik adını al (O(1) arama)
     const std::string& getBoneNameByIndex(unsigned int index) const {
         static const std::string empty;
         if (index < boneIndexToName.size()) {
@@ -221,16 +271,17 @@ struct BoneData {
     }
     
     // Check if bone index is valid
+    // Kemik indeksinin geçerli olup olmadığını kontrol et
     bool isValidBoneIndex(unsigned int index) const {
         return index < boneIndexToName.size() && !boneIndexToName[index].empty();
     }
     
-    // Get total bone count
+    // Get total bone count (Toplam kemik sayısı)
     size_t getBoneCount() const {
         return boneNameToIndex.size();
     }
     
-    // Clear all bone data
+    // Clear all bone data (Tüm kemik verilerini temizle)
     void clear() {
         boneNameToIndex.clear();
         boneNameToNode.clear();
@@ -250,33 +301,51 @@ inline Matrix4x4 convert(const aiMatrix4x4& m) {
         m.d1, m.d2, m.d3, m.d4
     );
 }
+// =========================================================================
+// ASSIMP LOADER - CLASS FOR LOADING AND PROCESSING MODELS
+// Assimp Loader - Modelleri Yükleme ve İşleme Sınıfı
+// =========================================================================
+// This class loads 3D models (GLTF, OBJ, FBX, etc.) using the Assimp library.
+// It parses the model, separating it into meshes, triangles, materials, lights, and cameras.
+// It also manages skeletal animations and node hierarchy.
+//
+// Bu sınıf, 3D modelleri (GLTF, OBJ, FBX vb.) Assimp kütüphanesi kullanarak yükler.
+// Modeli analiz eder; mesh'lere, üçgenlere, materyallere, ışıklara ve kameralara ayırır.
+// Ayrıca iskelet animasyonlarını ve hiyerarşiyi yönetir.
+// =========================================================================
+
 class AssimpLoader {
 public:
-    std::string currentImportName; // Added for unique material naming to prevent collisions
+    std::string currentImportName; // Unique material naming to prevent collisions (Çakışma önleyici isim)
+    // NOTE: Uses global ::baseDirectory from globals.h
+    
     std::set<std::string> lightNodeNames;
     std::set<std::string> cameraNodeNames;
     std::vector<std::shared_ptr<Light>> lights;
     std::unordered_map<std::string, std::shared_ptr<Texture>> textureCache;
     std::vector<TextureInfo> textureInfos;
-    std::vector<std::shared_ptr<Camera>> cameras; // Kamera listesi
-    bool isFBX = false; // Track if current file is FBX format
+    std::vector<std::shared_ptr<Camera>> cameras; // Camera list (Kamera listesi)
+    bool isFBX = false; // Track if current file is FBX (FBX formatı kontrolü)
     
-    // Transform cache: Ensures all meshes with the same nodeName share the same Transform
-    // This is critical for gizmo to move all parts of an object together
+    // Transform Cache: Ensures all meshes with the same nodeName share the same Transform.
+    // Critical for Gizmo to move all object parts together.
+    // Transform Önbelleği: Aynı isme sahip node'ların transformunu paylaştırır (Gizmo için kritik).
     std::unordered_map<std::string, std::shared_ptr<Transform>> nodeNameToTransform;
     
     // Clear transform cache (call before each import)
+    // Transform önbelleğini temizle (her yüklemeden önce)
     void clearTransformCache() {
         nodeNameToTransform.clear();
     }
     
     // Get or create shared Transform for a node
+    // Node için paylaşılan Transform'u al veya oluştur
     std::shared_ptr<Transform> getOrCreateNodeTransform(const std::string& nodeName, const Matrix4x4& baseTransform) {
         auto it = nodeNameToTransform.find(nodeName);
         if (it != nodeNameToTransform.end()) {
-            return it->second;  // Return existing transform
+            return it->second;  // Return existing transform (Mevcut olanı döndür)
         }
-        // Create new transform
+        // Create new transform (Yeni oluştur)
         auto sharedTransform = std::make_shared<Transform>();
         sharedTransform->setBase(baseTransform);
         nodeNameToTransform[nodeName] = sharedTransform;
@@ -284,17 +353,23 @@ public:
     }
 
     Assimp::Importer importer;
+
+    // Returns node pointer by name
+    // İsme göre node döndürür
     const aiNode* getNodeByName(const std::string& name) const {
         auto it = nodeMap.find(name);
         return it != nodeMap.end() ? it->second : nullptr;
     }
+
+    // Calculates the global (world space) transform matrix of a node
+    // Node'un global (dünya) transform matrisini hesaplar
     aiMatrix4x4 getGlobalParentTransform(const aiNode* node) const {
         aiMatrix4x4 transform;
         transform.IsIdentity();
 
         if (!node) return transform;
 
-        const aiNode* current = node->mParent; //  Sadece parent'ları alacağız
+        const aiNode* current = node->mParent; // Take parents up to root (En üste kadar ebeveynleri al)
         while (current) {
             transform = current->mTransformation * transform;
             current = current->mParent;
@@ -346,11 +421,21 @@ public:
         );
     }
 
-    // Hem Triangle hem de AnimationData döndüren metod
+    // =========================================================================
+    // FUNCTION TO LOAD MODEL INTO TRIANGLES
+    // Modeli Üçgenlere Yükleme Fonksiyonu
+    // =========================================================================
+    // Loads the model, processes data, and returns a Triangle list for ray tracing.
+    // Modeli yükler, işler ve ray tracing için Üçgen listesi döndürür.
+    //
+    // @param filename: Path of the file to load (Dosya yolu)
+    // @param material: Optional default material (Opsiyonel varsayılan materyal)
+    // @return: Triangles, Animation Data, Bone Data (Üçgenler, Animasyon, Kemik Verileri)
     std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>, BoneData>
         loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr) {
         
-        // Generate unique prefix from filename (ParentDir_Filename) to prevent material name collisions between imports
+        // Generate unique prefix from filename to prevent material collisions
+        // Materyal çakışmasını önlemek için benzersiz ön ek oluştur
         std::filesystem::path p(filename);
         this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
 
@@ -359,6 +444,7 @@ public:
         BoneData boneData;
         
         // Check if file is FBX format
+        // FBX formatı kontrolü
         std::string lowerFilename = filename;
         std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
         this->isFBX = (lowerFilename.find(".fbx") != std::string::npos);
@@ -366,18 +452,18 @@ public:
         if (isFBX) {
             SCENE_LOG_INFO("FBX format detected");
             // Note: Assimp reads unit scale from FBX metadata automatically
-            // We only add aiProcess_GlobalScale to apply it
         }
 
         SCENE_LOG_INFO("Importing file with Assimp...");
         
         unsigned int importFlags = 
-            aiProcess_GenSmoothNormals |
-            aiProcess_JoinIdenticalVertices |
-            aiProcess_Triangulate |
-            aiProcess_CalcTangentSpace;
+            aiProcess_GenSmoothNormals |    // Generate smooth normals (Yumuşak normaller)
+            aiProcess_JoinIdenticalVertices | // Optimization: Join same vertices (Optimizasyon: Vertex birleştir)
+            aiProcess_Triangulate |         // Triangulate all faces (Tüm yüzeyleri üçgenle)
+            aiProcess_CalcTangentSpace;     // Calculate tangent space (Tanjant uzayı hesapla)
         
-        // Add global scale for FBX - Assimp will use the scale from FBX metadata
+        // Add global scale for FBX
+        // FBX için global ölçekleme
         if (isFBX) {
             importFlags |= aiProcess_GlobalScale;
         }
@@ -389,17 +475,12 @@ public:
             return {};
         }
 
-        if (!scene || !scene->mRootNode) {
-            SCENE_LOG_ERROR("Scene or root node is null: " + std::string(importer.GetErrorString()));
-            return {};
-        }
-
         SCENE_LOG_INFO("Assimp file loaded successfully. Processing scene data...");
 
         SCENE_LOG_INFO("Clearing existing cameras, lights, and transform cache...");
         cameras.clear();
         lights.clear();
-        clearTransformCache();  // Clear transform cache to ensure fresh transforms per import
+        clearTransformCache();  // Clear transform cache (Transform önbelleğini temizle)
 
         SCENE_LOG_INFO("Building node map from scene hierarchy...");
         std::function<void(aiNode*)> recurse = [&](aiNode* node) {
@@ -419,7 +500,6 @@ public:
         SCENE_LOG_INFO("Lights processed: " + std::to_string(lights.size()) + " light(s) found.");
 
         SCENE_LOG_INFO("Building Bone Data...");
-      
         buildBoneData(scene, boneData);
 
         std::vector<std::shared_ptr<Triangle>> triangles;
@@ -430,8 +510,7 @@ public:
         SCENE_LOG_INFO("Triangle extraction completed: " + std::to_string(triangles.size()) + " triangles processed.");
 
         // NOTE: Bone weights now assigned inside processNodeToTriangles -> processTriangles
-        // Old processBones call removed.
-
+        
         SCENE_LOG_INFO("Processing animations...");
         std::vector<AnimationData> animationDataList;
 
@@ -456,12 +535,6 @@ public:
                     const aiNodeAnim* channel = animation->mChannels[j];
                     std::string nodeName = channel->mNodeName.C_Str();
 
-                    // [VERBOSE] Animation channel details - disabled to reduce log size
-                    // SCENE_LOG_INFO("  [Channel " + std::to_string(j + 1) + "] Node: " + nodeName +
-                    //     ", Pos Keys: " + std::to_string(channel->mNumPositionKeys) +
-                    //     ", Rot Keys: " + std::to_string(channel->mNumRotationKeys) +
-                    //     ", Scale Keys: " + std::to_string(channel->mNumScalingKeys));
-
                     for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k) {
                         animData.positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
                     }
@@ -478,6 +551,7 @@ public:
                 }
 
                 // Frame range hesapla (tüm keyframe'lerden min/max time bul)
+                // Calculate frame range (find min/max time from all keyframes)
                 double minTime = std::numeric_limits<double>::max();
                 double maxTime = std::numeric_limits<double>::lowest();
                 
@@ -505,7 +579,7 @@ public:
                     }
                 }
                 
-                // Time'ı frame'e çevir
+                // Time'ı frame'e çevir (Time to frame conversion)
                 if (animData.ticksPerSecond > 0) {
                     animData.startFrame = static_cast<int>(std::round(minTime / animData.ticksPerSecond * 24.0)); // Blender default 24 FPS
                     animData.endFrame = static_cast<int>(std::round(maxTime / animData.ticksPerSecond * 24.0));
@@ -534,10 +608,21 @@ public:
         return { triangles, animationDataList, boneData };
     }
 
+    // =========================================================================
+    // FUNCTION TO LOAD MODEL INTO MESHES
+    // Modeli Mesh'lere Yükleme Fonksiyonu
+    // =========================================================================
+    // Loads the model and splits it into Meshes (instead of Triangles).
+    // Used for scenarios where logical mesh separation is needed.
+    //
+    // Modeli yükler ve Mesh'lere ayırır (Triangle listesi yerine).
+    // Mantıksal mesh ayrımının gerektiği senaryolar için kullanılır.
+    // =========================================================================
     std::tuple<std::vector<Mesh>, std::vector<AnimationData>, BoneData>
         loadModelToMeshes(const std::string& filename) {
         Assimp::Importer importer;
 
+        // Flags for high-quality geometry import (Yüksek kaliteli geometri içe aktarımı için bayraklar)
         const aiScene* scene = importer.ReadFile(filename,
             aiProcess_GenSmoothNormals |
             aiProcess_GenNormals |
@@ -549,7 +634,7 @@ public:
             return {};
         }
 
-        // 1. Kamera / Işık / Node Ağacı
+        // 1. Camera / Light / Node Tree (Kamera / Işık / Node Ağacı)
         nodeMap.clear();
         std::function<void(aiNode*)> recurse = [&](aiNode* node) {
             nodeMap[node->mName.C_Str()] = node;
@@ -561,18 +646,25 @@ public:
         processCameras(scene);
         processLights(scene);
 
-        // 2. Materyalleri yükle
+        // 2. Load Materials (Materyalleri yükle)
         std::vector<std::shared_ptr<Material>> materials;
         for (unsigned int i = 0; i < scene->mNumMaterials; ++i)
             materials.push_back(processMaterial(scene->mMaterials[i],scene));
 
-        // 3. Meshleri oluştur
+        // 3. Create Meshes (Meshleri oluştur)
         std::vector<Mesh> meshes;
-        BoneData boneData;
-        processBonesForMeshes(scene, meshes, boneData); // Triangle olmayan loader’da boş triangle listesi verilebilir
+        BoneData boneData; // Will be populated later (Daha sonra doldurulacak)
+        
+        // FIX: processNodeToMeshes creates the meshes first.
+        // DÜZELTME: Önce mesh'ler oluşturulmalı.
         processNodeToMeshes(scene->mRootNode, scene, meshes, boneData, materials);
+        
+        // FIX: Then process bones using the created meshes (and their original indices).
+        // DÜZELTME: Sonra oluşturulan mesh'leri kullanarak kemikleri işle.
+        // This function reconstructs BoneData and assigns weights to mesh vertices.
+        processBonesForMeshes(scene, meshes, boneData); 
 
-        // 4. Animasyonları al
+        // 4. Animasyonları al (Extract animations)
         std::vector<AnimationData> animationDataList;
         if (scene->mNumAnimations > 0) {
             for (unsigned int i = 0; i < scene->mNumAnimations; ++i) {
@@ -722,6 +814,9 @@ public:
                 if (pbsdf->emissionProperty.texture) { texBundle.emission_tex = getCudaTex(pbsdf->emissionProperty.texture); texBundle.has_emission_tex = (texBundle.emission_tex != 0); }
                 if (pbsdf->opacityProperty.texture) { texBundle.opacity_tex = getCudaTex(pbsdf->opacityProperty.texture); texBundle.has_opacity_tex = (texBundle.opacity_tex != 0); }
                 if (pbsdf->transmissionProperty.texture) { texBundle.transmission_tex = getCudaTex(pbsdf->transmissionProperty.texture); texBundle.has_transmission_tex = (texBundle.transmission_tex != 0); }
+                
+                // DEBUG: Trace albedo texture assignment
+                // if (texBundle.has_albedo_tex) SCENE_LOG_INFO("AssimpLoader: Albedo texture assigned for material " + std::to_string(i));
             }
             data.textures[i] = texBundle;
 
@@ -758,6 +853,7 @@ public:
             data.vertices.resize(nTris * 3);
             data.normals.resize(nTris * 3);
             data.uvs.resize(nTris * 3);
+            data.colors.resize(nTris * 3);
             data.indices.resize(nTris);
             data.material_indices.resize(nTris);
 
@@ -787,6 +883,7 @@ public:
                             Vec3 verts[3] = { tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2) };
                             Vec3 norms[3] = { tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2) };
                             Vec2 uvs[3] = { tri->t0, tri->t1, tri->t2 };
+                            Vec3 cols[3] = { tri->getVertexColor(0), tri->getVertexColor(1), tri->getVertexColor(2) };
 
                             size_t base_v_idx = i * 3;
                             uint3 tri_idx_struct;
@@ -797,7 +894,8 @@ public:
                             for (int k = 0; k < 3; ++k) {
                                 data.vertices[base_v_idx + k] = make_float3(verts[k].x, verts[k].y, verts[k].z);
                                 data.normals[base_v_idx + k] = make_float3(norms[k].x, norms[k].y, norms[k].z);
-                                data.uvs[base_v_idx + k] = make_float2(uvs[k].x, uvs[k].y);
+                                data.uvs[base_v_idx + k] = make_float2(uvs[k].u, uvs[k].v);
+                                data.colors[base_v_idx + k] = make_float3(cols[k].x, cols[k].y, cols[k].z);
                             }
                             data.indices[i] = tri_idx_struct;
 
@@ -975,9 +1073,17 @@ private:
             };
         collectNodes(scene->mRootNode);
 
-        // 2. Meshlere göre işle
+        // 2. Meshlere göre işle (Process each mesh)
         for (size_t meshIdx = 0; meshIdx < meshes.size(); ++meshIdx) {
             Mesh& mesh = meshes[meshIdx];
+            
+            // CRITICAL CHECK: Ensure index is valid to prevent crash (Kritik: Çökmeyi önlemek için indeksi kontrol et)
+            if (mesh.originalMeshIndex >= scene->mNumMeshes) {
+                SCENE_LOG_ERROR("Mesh index out of bounds in processBonesForMeshes: " + 
+                    std::to_string(mesh.originalMeshIndex) + " >= " + std::to_string(scene->mNumMeshes));
+                continue;
+            }
+
             aiMesh* ai_mesh = scene->mMeshes[mesh.originalMeshIndex];
             if (!ai_mesh->HasBones()) continue;
 
@@ -1071,10 +1177,21 @@ private:
        aiVector3D transformed = rotation * direction;
        return Vec3(transformed.x, transformed.y, transformed.z);
    }
+    // =========================================================================
+    // RECURSIVE FUNCTION TO EXTRACT MESHES
+    // Mesh Çıkarma İçin Özyinelemeli Fonksiyon
+    // =========================================================================
+    // Recursively traverses the node hierarchy to create Mesh objects.
+    // Mesh nesnelerini oluşturmak için node hiyerarşisini özyinelemeli olarak dolaşır.
+    // =========================================================================
     void processNodeToMeshes(aiNode* node, const aiScene* scene, std::vector<Mesh>& outMeshes, const BoneData& boneData, const std::vector<std::shared_ptr<Material>>& materials) {
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
-            aiMesh* ai_mesh = scene->mMeshes[node->mMeshes[i]];
-            Mesh mesh = processMesh(ai_mesh, node, scene, boneData, materials);
+            unsigned int meshIndex = node->mMeshes[i];
+            aiMesh* ai_mesh = scene->mMeshes[meshIndex];
+            
+            // CRITICAL FIX: Pass meshIndex to ensure valid originalMeshIndex is set (Kritik Düzeltme: meshIndex gönderilmeli)
+            Mesh mesh = processMesh(ai_mesh, node, scene, boneData, materials, meshIndex);
+            
             outMeshes.push_back(std::move(mesh));
         }
         for (unsigned int i = 0; i < node->mNumChildren; i++) {
@@ -1083,26 +1200,37 @@ private:
     }
 
    // std::vector<std::shared_ptr<Camera>> cameras;
-     void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, const BoneData& boneData, OptixGeometryData* geometry_data = nullptr) {
+    // =========================================================================
+    // RECURSIVE FUNCTION TO EXTRACT TRIANGLES
+    // Üçgen Çıkarma İçin Özyinelemeli Fonksiyon
+    // =========================================================================
+    // Extracts triangles for ray tracing, applying global transforms and materials.
+    // Ray tracing için üçgenleri çıkarır, global transform ve materyalleri uygular.
+    // =========================================================================
+    void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, const BoneData& boneData, OptixGeometryData* geometry_data = nullptr) {
         aiMatrix4x4 globalTransform = getGlobalTransform(node);
 
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
             aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
             aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
 
-            // HitGroupData oluştur
+            // Create HitGroupData (HitGroupData oluştur)
             HitGroupData hit_data = {};
 
-            // Material yükle ve textureları hit_data'ya yaz
+            // Convert material and assign texture handles to hit_data
+            // Materyali dönüştür ve texture handle'larını hit_data'ya ata
             auto convertedMaterial = processMaterial(material, scene, &hit_data, geometry_data);
 
-            // Mevcut üçgen sayısını not al
+            // Record current triangle count start
+            // Mevcut üçgen başlangıç sayısını not al
             size_t triangleStart = triangles.size();
 
-            // Mesh'teki üçgenleri ekle
+            // Extract triangles from mesh
+            // Mesh'teki üçgenleri çıkar
             processTriangles(mesh, globalTransform, node->mName.C_Str(), convertedMaterial, triangles, boneData);
 
-            // Yeni eklenen tüm üçgenlere textureBundle kopyala
+            // Copy texture bundle to all newly added triangles
+            // Yeni eklenen tüm üçgenlere texture paketini kopyala
             for (size_t t = triangleStart; t < triangles.size(); ++t) {
                 auto& tri = triangles[t];
                 tri->textureBundle.albedo_tex = hit_data.albedo_tex;
@@ -1121,7 +1249,8 @@ private:
                 tri->textureBundle.has_emission_tex = hit_data.has_emission_tex;
             }
 
-            // OptiX için textureBundle yedekle
+            // Backup TextureBundle for OptiX usage
+            // OptiX kullanımı için TextureBundle yedeği
             if (geometry_data) {
                 OptixGeometryData::TextureBundle tex_bundle = {};
                 tex_bundle.albedo_tex = hit_data.albedo_tex;
@@ -1142,19 +1271,27 @@ private:
             }
         }
 
-        // Çocuk node'ları işle
+        // Process child nodes recursively
+        // Çocuk düğümleri özyinelemeli olarak işle
         for (unsigned int i = 0; i < node->mNumChildren; i++) {
             processNodeToTriangles(node->mChildren[i], scene, triangles, boneData, geometry_data);
         }
     }
-     Mesh processMesh(aiMesh* mesh, aiNode* node, const aiScene* scene, const BoneData& boneData, const std::vector<std::shared_ptr<Material>>& materials) {
+
+    // =========================================================================
+    // PROCESS SINGLE MESH (Tek Mesh İşle)
+    // =========================================================================
+    Mesh processMesh(aiMesh* mesh, aiNode* node, const aiScene* scene, const BoneData& boneData, const std::vector<std::shared_ptr<Material>>& materials, unsigned int meshIndex) {
          Mesh result;
 
          result.meshName = mesh->mName.C_Str();
          result.nodeName = node->mName.C_Str();
          result.localTransform = convertMatrix(node->mTransformation);
+         
+         // CRITICAL SAFEGUARD: Set the original mesh index for bone processing (Kritik Güvenlik: Kemik işleme için orijinal indeks)
+         result.originalMeshIndex = meshIndex;
 
-         // 1. Vertexler
+         // 1. Vertices (Vertexler)
          for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
              Vec3 pos = toVec3(mesh->mVertices[i]);
              Vec3 norm = mesh->HasNormals() ? toVec3(mesh->mNormals[i]) : Vec3(0);
@@ -1162,20 +1299,22 @@ private:
              result.vertices.emplace_back(pos, norm, uv);
          }
 
-         // 2. İndeksler
+         // 2. Indices (İndeksler)
          for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
              const aiFace& face = mesh->mFaces[i];
              if (face.mNumIndices != 3) continue;
              result.indices.push_back({ face.mIndices[0], face.mIndices[1], face.mIndices[2] });
          }
 
-         // 3. Materyal
+         // 3. Material (Materyal)
          if (mesh->mMaterialIndex < materials.size()) {
              result.material = materials[mesh->mMaterialIndex];
              result.materialIndex = mesh->mMaterialIndex;
          }
 
          // 4. Bone Weights
+         // NOTE: This logic is partially redundant with processBonesForMeshes but kept for direct Mesh processing usage
+         // NOT: Bu mantık processBonesForMeshes ile kısmen tekrarlı ama doğrudan Mesh işleme için kullanımı korundu
          if (mesh->HasBones()) {
              result.hasSkinning = true;
              for (unsigned int i = 0; i < mesh->mNumBones; i++) {
@@ -1250,6 +1389,9 @@ private:
                 }
             }
         }
+        // Pre-check Vertex Colors
+        bool hasColors0 = mesh->HasVertexColors(0);
+        bool hasColors1 = mesh->HasVertexColors(1);
         // ---------------------------------------------------
 
         for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
@@ -1259,6 +1401,7 @@ private:
             std::vector<Vec3> vertices;
             std::vector<Vec3> normals;
             std::vector<Vec2> texCoords;
+            std::vector<Vec3> colors;
 
             for (unsigned int j = 0; j < 3; j++) {
                 unsigned int index = face.mIndices[j];
@@ -1282,6 +1425,17 @@ private:
                 else {
                     texCoords.emplace_back(0.0f, 0.0f);
                 }
+
+                // Color
+                if (hasColors0) {
+                    aiColor4D col = mesh->mColors[0][index];
+                    colors.emplace_back(col.r, col.g, col.b);
+                } else if (hasColors1) {
+                    aiColor4D col = mesh->mColors[1][index];
+                    colors.emplace_back(col.r, col.g, col.b);
+                } else {
+                    colors.emplace_back(0.0f, 0.0f, 0.0f);
+                }
             }
 
             // Use optimized constructor with materialID
@@ -1293,17 +1447,27 @@ private:
             );
 
             // Set shared transform (all triangles in this mesh share the same transform)
+            // Paylaşılan transformu ata (bu mesh'teki tüm üçgenler aynı transformu paylaşır)
             triangle->setTransformHandle(sharedTransform);
             
+            // Apply initial transform (for start position)
             // İlk transform'u uygula (başlangıç pozisyonu için)
             triangle->updateTransformedVertices();
 
 
+
             triangle->setNodeName(nodeName);
+            triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
             triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
             triangle->setFaceIndex(static_cast<int>(triangles.size()));
 
+            // Assign Colors
+            triangle->setVertexColor(0, colors[0]);
+            triangle->setVertexColor(1, colors[1]);
+            triangle->setVertexColor(2, colors[2]);
+
             // --- NEW: Assign weights to triangle vertices ---
+            // --- YENİ: Üçgen vertexlerine ağırlıkları ata ---
             if (mesh->HasBones()) {
                 triangle->initializeSkinData();
                 triangle->setSkinBoneWeights(0, meshVertexWeights[face.mIndices[0]]);
@@ -1316,10 +1480,16 @@ private:
         }
     }
 
+    // =========================================================================
+    // PROCESS CAMERAS (Kameraları İşle)
+    // =========================================================================
+    // Extracts and creates Camera objects from the scene.
+    // Sahnedeki kamera nesnelerini çıkarır ve oluşturur.
+    // =========================================================================
     void processCameras(const aiScene* scene) {
         try {
             if (!scene || !scene->HasCameras()) {
-                SCENE_LOG_WARN("Does not include scene cameras...");
+              //  SCENE_LOG_WARN("Does not include scene cameras...");
                 return;
             }
 
@@ -1330,7 +1500,6 @@ private:
                 cameraNodeNames.insert(aiCam->mName.C_Str());
                 aiNode* camNode = scene->mRootNode->FindNode(aiCam->mName.C_Str());
                 if (!camNode) {
-                  //  SCENE_LOG_ERROR("Camera node not found: " + std::basic_string(aiCam->mName.C_Str()));
                     continue;
                 }
 
@@ -1344,28 +1513,20 @@ private:
                 Vec3 lookat = lookfrom + forward;
                 Vec3 vup = rotateVector(Vec3(0, 1, 0), rotation);
 
+                // Fallback if aspect ratio is zero
                 // Aspect oranı sıfırsa fallback uygula
                 double aspect = (aiCam->mAspect > 0.01) ? aiCam->mAspect : 1.0;
                 double hfov_rad = aiCam->mHorizontalFOV;
                 double vfov_rad = 2.0 * atan(tan(hfov_rad / 2.0) / aspect);
                 double vfov = vfov_rad * 180.0 / M_PI;
 
-                // Kamera oluştur
+                // Create camera (Kamera oluştur)
                 auto camera = std::make_shared<Camera>(
                     lookfrom, lookat, vup, (float)vfov, (float)aspect, aperture, focusdistance, 5
                 );
                 camera->nodeName = std::string(aiCam->mName.C_Str());
                 camera->save_initial_state();  // Save initial state for reset functionality
-
                 cameras.push_back(camera);
-                //SCENE_LOG_INFO("---- Camera Loaded: " + std::string(aiCam->mName.C_Str()));
-                //// Loglama
-                //SCENE_LOG_INFO("Pos: " + lookfrom.toString() +
-                //    " | LookAt: " + lookat.toString() +
-                //    " | Up: " + vup.toString() +
-                //    " | Aspect:" + std::to_string(aspect) +
-                //    " | FOV:" + std::to_string(vfov));
-
             }
         }
         catch (const std::exception& e) {
@@ -1386,6 +1547,12 @@ private:
         }
     }
 
+    // =========================================================================
+    // PROCESS LIGHTS (Işıkları İşle)
+    // =========================================================================
+    // Extracts and creates Light objects (Point, Directional, Spot, Area).
+    // Sahnedeki Işık nesnelerini (Noktasal, Yönsel, Spot, Alan) çıkarır ve oluşturur.
+    // =========================================================================
     void processLights(const aiScene* scene) {
         try {
             if (!scene) {
@@ -1431,19 +1598,24 @@ private:
                 aiColor3D col = aiLgt->mColorDiffuse;
                 
                 // Preserve color tones, extract intensity properly
+                // Renk tonlarını koru, yoğunluğu doğru çıkar
                 Vec3 color(col.r, col.g, col.b);
                 float maxComp = std::max({col.r, col.g, col.b});
                 float intensity = 1.0f;
                 
                 if (maxComp > 1.0f) {
                     // HDR: normalize color, keep intensity
+                    // HDR: rengi normalize et, yoğunluğu koru
                     intensity = maxComp;
                     color = color / maxComp;
                 } else if (maxComp > 0.0f) {
                     // LDR: use as-is
+                    // LDR: olduğu gibi kullan
                     intensity = 1.0f;
                     // FIX: Convert sRGB color to Linear space for correct rendering
+                    // DÜZELTME: Doğru render için sRGB rengi Linear uzaya çevir
                     // This prevents colors from looking washed out/dark
+                    // Bu, renklerin soluk/koyu görünmesini önler
                     color.x = powf(color.x, 2.2f);
                     color.y = powf(color.y, 2.2f);
                     color.z = powf(color.z, 2.2f);
@@ -1456,6 +1628,7 @@ private:
                 // Blender exports Watts. 
                 // Dividing by 100 provides a better baseline brightness (100W ~ 1.0 unit)
                 // This fixes the 'too dark' issue compared to Blender
+                // Blender Watt cinsinden çıktı verir. 100'e bölmek daha iyi bir temel parlaklık sağlar.
                 intensity /= 1000.0f;
 
                 std::shared_ptr<Light> light = nullptr;
@@ -1530,18 +1703,27 @@ private:
         }
     }
 
+    // =========================================================================
+    // PROCESS MATERIAL (Materyali İşle)
+    // =========================================================================
+    // Converts Assimp material to internal PrincipledBSDF or Volumetric material.
+    // Handles texture extraction and assignment.
+    //
+    // Assimp materyalini dahili PrincipledBSDF veya Volumetric materyale dönüştürür.
+    // Doku çıkarımı ve atamasını yönetir.
+    // =========================================================================
      std::shared_ptr<Material> processMaterial(
         aiMaterial* aiMat,
         const aiScene* scene,
         HitGroupData* hit_data = nullptr,
-        OptixGeometryData* geometry_data = nullptr // ← ekledik
+        OptixGeometryData* geometry_data = nullptr // ← added (eklendi)
     )
 
     {
        auto material = std::make_shared<PrincipledBSDF>();
        aiString str;
        textureInfos.clear();
-       // Material type check
+       // Material type check (Materyal tipi kontrolü)
        aiString materialName;
       
        aiMat->Get(AI_MATKEY_NAME, materialName);
@@ -1558,6 +1740,7 @@ private:
        for (auto type : textureTypes) {
 
            // Ensure texture count is greater than 0
+           // Texture sayısının 0'dan büyük olduğundan emin ol
            if (aiMat->GetTextureCount(type) > 0) {
                aiString str;
                int count = aiMat->GetTextureCount(type);
@@ -1566,8 +1749,10 @@ private:
                    //     " count=" + std::to_string(count)); // Per-texture log
                }
                // Retrieve the texture, check for success and ensure the texture path is valid
+               // Doku adını al, başarıyı kontrol et ve yolun geçerli olduğundan emin ol
                if (AI_SUCCESS == aiMat->GetTexture(type, 0, &str) && str.length > 0) {
                    // Perform the sanitization and push to textureInfos if the texture name is not empty
+                   // Temizleme işlemini yap ve ad boş değilse textureInfos'a ekle
                    std::string sanitizedName = sanitizeTextureName(str);
                    if (!sanitizedName.empty()) {
                        textureInfos.push_back({ type, sanitizedName });
@@ -1579,27 +1764,29 @@ private:
        aiColor3D color(0.0f, 0.0f, 0.0f);
        aiMat->Get(AI_MATKEY_COLOR_DIFFUSE, color);
        // Convert sRGB to Linear for CPU material property
+       // CPU materyal özelliği için sRGB'den Lineer'e dönüştür
        material->albedoProperty = MaterialProperty(Vec3(powf(color.r, 2.2f), powf(color.g, 2.2f), powf(color.b, 2.2f)), 1.0f);
       
-       // Roughness
+       // Roughness (Pürüzlülük)
        float roughness = 0.0f;
        aiMat->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughness);
        material->roughnessProperty = MaterialProperty( Vec3(std::clamp(roughness, 0.0f, 1.0f)));
 	  
-       // Metallic
+       // Metallic (Metalik)
        aiColor3D colorM(0.0f, 0.0f, 0.0f);
        float metalicFactor = 0.0;
        aiMat->Get(AI_MATKEY_METALLIC_FACTOR, metalicFactor);
        material->metallicProperty = MaterialProperty(Vec3(color.r, color.g, color.b), std::clamp(metalicFactor, 0.0f, 1.0f));
 
-       // Emissive Color
+       // Emissive Color (Yayılan Işık Rengi)
        aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
        aiMat->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor);
 
+       // Use this value if emissiveFactor is greater than zero
        // Eğer `emissiveFactor` sıfırdan büyükse, bu değeri kullan
        float emissiveStrength = std::max({ emissiveColor.r, emissiveColor.g, emissiveColor.b });
 	   
-       // Materyale uygula
+       // Apply to material (Materyale uygula)
        // GPU uses emissiveColor directly (without multiplying by intensity)
        // So CPU's emissionProperty.intensity must be 1.0f for GPU parity
        // The color already contains the emission strength (max component)
@@ -1607,7 +1794,7 @@ private:
        material->emissionProperty = MaterialProperty(Vec3(emissiveColor.r, emissiveColor.g, emissiveColor.b), hasEmission);
 	   //std::cout << "emissiveStrength : " << emissiveStrength << std::endl;
      
-       // Specular Reflection (Glossiness)
+       // Specular Reflection (Glossiness) (Speküler Yansıma)
        aiColor3D specularColor(0.0f, 0.0f, 0.0f);
        aiMat->Get(AI_MATKEY_COLOR_SPECULAR, specularColor);
        material->specularProperty = MaterialProperty(Vec3(specularColor.r, specularColor.g, specularColor.b), 1.0f);
@@ -1664,10 +1851,11 @@ private:
                 const std::string& path = texInfo.path;
                 TextureType ttype = convertToTextureType(texInfo.type);
 
-                // Embedded mı?
+                // Check if embedded texture (Embedded mi?)
                 const aiTexture* emb = scene->GetEmbeddedTexture(path.c_str());
 
                 if (emb) {
+                    // Create unique cache key for embedded texture
                     // Embedded texture için unique cache key oluştur
                     // Format: "embedded_<ImportName>_<pointer_address>_<type>"
                     // Adding currentImportName is CRITICAL to prevent collisions if memory addresses are reused across imports (ABA Problem)
@@ -1676,16 +1864,15 @@ private:
                         std::to_string(reinterpret_cast<uintptr_t>(emb)) + 
                         "_" + std::to_string(static_cast<int>(ttype));
 
-                    // Cache'de var mı kontrol et
+                    // Check if in cache (Cache'de var mı kontrol et)
                     auto cacheIt = textureCache.find(embeddedKey);
                     if (cacheIt != textureCache.end()) {
                         texture = cacheIt->second;
-                        // [VERBOSE] SCENE_LOG_INFO("[EMBEDDED CACHE HIT] Reusing texture: " + path + " | Key: " + embeddedKey);
                     } else {
+                        // Not in cache, create new and add to cache
                         // Cache'de yok, yeni oluştur ve cache'e ekle
                         texture = std::make_shared<Texture>(emb, ttype, embeddedKey);
                         textureCache[embeddedKey] = texture;
-                        // [VERBOSE] SCENE_LOG_INFO("[EMBEDDED CACHE MISS] Created new texture: " + path + " | Key: " + embeddedKey);
                     }
                 }
                 else
@@ -1695,7 +1882,7 @@ private:
                if (!texture || !texture->is_loaded())
                    continue;
 
-               // CPU tarafı materyale her durumda ata (CPU renderer için gerekli)
+               // Assign to CPU material in all cases (CPU tarafı materyale her durumda ata)
                switch (texInfo.type)
                {
                case aiTextureType_DIFFUSE:
@@ -1738,6 +1925,7 @@ private:
                    break;
                }
 
+               // Try GPU upload (only once, skip if already uploaded)
                // GPU yüklemeyi dene (sadece bir kez, zaten is_gpu_uploaded flag'i varsa atla)
                bool gpu_ok = false;
                if (g_hasOptix && !texture->is_gpu_uploaded) {
@@ -1753,6 +1941,7 @@ private:
                    gpu_ok = true;
                }
 
+               // Assign GPU handle to hit_data: ONLY if gpu_ok is true
                // hit_data'ya GPU handle ataması: SADECE gpu_ok true ise
                if (hit_data) {
                    if (gpu_ok) {
@@ -1801,6 +1990,7 @@ private:
                        }
                    }
                    else {
+                       // No GPU/Failed: leave hit_data fields as 0
                        // GPU yok/başarısız: hit_data alanlarını 0 bırak
                        switch (texInfo.type)
                        {
@@ -1850,10 +2040,10 @@ private:
                float absorption_probability = 0.1f;
                Vec3 emission = Vec3(0.0f);           // No emission for clearer smoke visualization
 
-               // Gürültü oluştur
+               // Create noise (Gürültü oluştur)
                auto noise = std::make_shared<Perlin>();
 
-               // Volumetrik materyali oluştur
+               // Create volumetric material (Volumetrik materyali oluştur)
                auto volumetric_material = std::make_shared<Volumetric>(
                    albedo, density, absorption_probability, scattering_factor, emission, noise
                );

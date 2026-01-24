@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          PyPointsToGrid.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 #ifndef NANOVDB_CUDA_PYPOINTSTOGRID_HAS_BEEN_INCLUDED
@@ -14,3 +24,4 @@ template<typename BuildT> void definePointsToGrid(nb::module_& m, const char* na
 } // namespace pynanovdb
 
 #endif
+

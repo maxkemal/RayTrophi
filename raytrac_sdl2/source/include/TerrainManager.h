@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          TerrainManager.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include "TerrainSystem.h"
 #include "json.hpp"
@@ -6,6 +16,7 @@
 #include <string>
 #include <functional>
 #include "FoliageFwd.h"
+#include "Transform.h"
 
 struct SceneData; // Forward decl
 class Material;
@@ -90,6 +101,9 @@ public:
     
     // Internal helper to sync CPU splat data to GPU texture
     void updateSplatMapTexture(TerrainObject* terrain);
+    
+    // Resize splatmap to match heightmap dimensions (bilinear interpolation)
+    void resizeSplatMap(TerrainObject* terrain);
     
     // Export splat map to PNG file
     void exportSplatMap(TerrainObject* terrain, const std::string& filepath);
@@ -186,49 +200,71 @@ public:
     // Check if any terrain exists
     bool hasActiveTerrain() const { return !terrains.empty(); }
     
-    // Sample height at world XZ coordinate (finds appropriate terrain)
+    // Sample height at world XZ coordinate
     float sampleHeight(float worldX, float worldZ) const {
         if (terrains.empty()) return 0.0f;
         
-        // Use first terrain for now (TODO: find terrain containing point)
-        const TerrainObject& terrain = terrains[0];
-        const Heightmap& hm = terrain.heightmap;
-        if (hm.data.empty() || hm.width <= 0 || hm.height <= 0) return 0.0f;
+        // Find terrain containing this point
+        for (const auto& terrain : terrains) {
+            const Heightmap& hm = terrain.heightmap;
+            if (hm.data.empty() || hm.width <= 0 || hm.height <= 0) continue;
+            
+            // 1. Transform World position to Local terrain space
+            Vec3 localPos(worldX, 0, worldZ);
+            if (terrain.transform) {
+                Matrix4x4 inv = terrain.transform->getFinal().inverse();
+                localPos = inv.multiplyVector(Vec4(worldX, 0, worldZ, 1.0f)).xyz();
+            }
+
+            // 2. Check if local position is within terrain bounds [0, scale_xz]
+            if (localPos.x < 0 || localPos.x > hm.scale_xz || localPos.z < 0 || localPos.z > hm.scale_xz) {
+                continue; // Not this terrain
+            }
+
+            // 3. Convert local position to heightmap grid coordinates
+            float normalizedX = localPos.x / hm.scale_xz;
+            float normalizedZ = localPos.z / hm.scale_xz;
+            
+            // Clamp to valid range (redundant due to bounds check but safer)
+            normalizedX = std::clamp(normalizedX, 0.0f, 1.0f);
+            normalizedZ = std::clamp(normalizedZ, 0.0f, 1.0f);
+            
+            // Get grid coordinates
+            float gx = normalizedX * (hm.width - 1);
+            float gz = normalizedZ * (hm.height - 1);
+            
+            int x0 = (int)std::floor(gx);
+            int z0 = (int)std::floor(gz);
+            int x1 = (std::min)(x0 + 1, hm.width - 1);
+            int z1 = (std::min)(z0 + 1, hm.height - 1);
+            
+            float fx = gx - x0;
+            float fz = gz - z0;
+            
+            // Bilinear interpolation
+            float h00 = hm.data[z0 * hm.width + x0];
+            float h10 = hm.data[z0 * hm.width + x1];
+            float h01 = hm.data[z1 * hm.width + x0];
+            float h11 = hm.data[z1 * hm.width + x1];
+            
+            float h0 = h00 * (1.0f - fx) + h10 * fx;
+            float h1 = h01 * (1.0f - fx) + h11 * fx;
+            float local_height = (h0 * (1.0f - fz) + h1 * fz) * hm.scale_y;
+            
+            // 4. Transform local height back to world space
+            if (terrain.transform) {
+                 Vec3 worldPos = terrain.transform->getFinal().multiplyVector(Vec4(localPos.x, local_height, localPos.z, 1.0f)).xyz();
+                 return worldPos.y;
+            }
+            
+            return local_height;
+        }
         
-        // Convert world position to heightmap grid coordinates
-        // Assuming terrain is centered at origin
-        float halfSize = hm.scale_xz * 0.5f;
-        float normalizedX = (worldX + halfSize) / hm.scale_xz;
-        float normalizedZ = (worldZ + halfSize) / hm.scale_xz;
-        
-        // Clamp to valid range
-        normalizedX = std::clamp(normalizedX, 0.0f, 1.0f);
-        normalizedZ = std::clamp(normalizedZ, 0.0f, 1.0f);
-        
-        // Get grid coordinates (with bilinear interpolation)
-        float gx = normalizedX * (hm.width - 1);
-        float gz = normalizedZ * (hm.height - 1);
-        
-        int x0 = (int)std::floor(gx);
-        int z0 = (int)std::floor(gz);
-        int x1 = (std::min)(x0 + 1, hm.width - 1);
-        int z1 = (std::min)(z0 + 1, hm.height - 1);
-        
-        float fx = gx - x0;
-        float fz = gz - z0;
-        
-        // Bilinear interpolation
-        float h00 = hm.data[z0 * hm.width + x0];
-        float h10 = hm.data[z0 * hm.width + x1];
-        float h01 = hm.data[z1 * hm.width + x0];
-        float h11 = hm.data[z1 * hm.width + x1];
-        
-        float h0 = h00 * (1.0f - fx) + h10 * fx;
-        float h1 = h01 * (1.0f - fx) + h11 * fx;
-        float height = h0 * (1.0f - fz) + h1 * fz;
-        
-        return height * hm.scale_y;
+        return 0.0f;
     }
+
+    // Sample normal at world XZ coordinate
+    Vec3 sampleNormal(float worldX, float worldZ) const;
     
     // ===========================================================================
     // RIVER BED CARVING (for River System integration)
@@ -331,3 +367,4 @@ private:
     bool cudaInitialized = false;
     void initCuda();
 };
+

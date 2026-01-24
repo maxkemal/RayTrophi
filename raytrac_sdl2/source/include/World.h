@@ -1,7 +1,21 @@
-﻿#pragma once
-#include "Vec3.h"
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          World.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include <cuda_runtime.h>
+#include <vector_types.h>
+
+#ifndef __CUDACC__
+#include "Vec3.h"
 #include "json.hpp"
+#endif
 
 
 // GPU-Compatible Enum
@@ -9,6 +23,17 @@ enum WorldMode {
     WORLD_MODE_COLOR = 0,
     WORLD_MODE_HDRI = 1,
     WORLD_MODE_NISHITA = 2
+};
+
+// GPU-Compatible Structs
+struct AtmosphereLUTData {
+    cudaTextureObject_t transmittance_lut;     // 2D (ViewAngle, Altitude)
+    cudaTextureObject_t skyview_lut;           // 2D (ViewAngle, SunAltitude)
+    cudaTextureObject_t multi_scattering_lut;  // 2D (SunAltitude, Altitude) - Energy compensation
+    cudaTextureObject_t aerial_perspective_lut; // 3D (X, Y, Distance) - Per-pixel in-scattering
+    
+    // Multi-scattering factor (calculated during precomputation)
+    float3 integrated_multi_scattering;
 };
 
 // GPU-Compatible Structs (Blender-compatible naming)
@@ -25,17 +50,6 @@ struct NishitaSkyParams {
     float ozone_density;     // Blender: Ozone (affects blue saturation)
     float altitude;          // Blender: Altitude (camera height in meters, 0 = sea level)
     
-    // Night sky parameters
-    float stars_intensity;   // Brightness of stars (0 = off)
-    float stars_density;     // How many stars (0-1)
-    
-    // Moon parameters
-    int moon_enabled;        // 1 = show moon, 0 = hide
-    float moon_elevation;    // Moon height in degrees
-    float moon_azimuth;      // Moon horizontal angle
-    float moon_intensity;    // Moon brightness
-    float moon_size;         // Moon angular size in degrees
-    float moon_phase;        // 0 = new moon, 0.5 = full moon, 1 = new moon
     
     // Cloud Layer 1 (Primary) parameters
     int clouds_enabled;      // 1 = show clouds
@@ -61,8 +75,9 @@ struct NishitaSkyParams {
     float cloud2_height_max;      // Top altitude (meters)
     
     // Quality and detail settings
-    float cloud_quality;     // Ray marching quality (0.25 = fast preview, 1.0 = normal, 2.0 = high quality)
+    float cloud_quality;     // Quality multiplier for steps
     float cloud_detail;      // Detail level (0.5 = low, 1.0 = normal, 2.0 = high detail noise)
+    int cloud_base_steps;    // Base number of ray marching steps (e.g., 48)
     
     // Cloud Lighting settings
     int cloud_light_steps;        // Number of light marching steps (0 = disabled, 4-8 recommended)
@@ -70,6 +85,15 @@ struct NishitaSkyParams {
     float cloud_ambient_strength; // Ambient light strength (0.5 = low, 1.0 = normal)
     float cloud_silver_intensity; // Silver lining intensity (0 = off, 1 = normal, 2 = strong)
     float cloud_absorption;       // Light absorption rate (0.5 = thin clouds, 1.0 = normal, 2.0 = thick)
+    
+    // Cloud Advanced Scattering (VDB-like)
+    float cloud_anisotropy;       // Forward scattering g-factor (0.0 to 0.99)
+    float cloud_anisotropy_back;  // Backward scattering g-factor (-0.99 to 0.0)
+    float cloud_lobe_mix;         // Blend between forward and backward lobes (0 to 1)
+    
+    // Cloud Emissive (Experimental)
+    float3 cloud_emissive_color;  // Color of cloud emission
+    float cloud_emissive_intensity; // Intensity of emission
     
     // Physical constants (usually not exposed in UI)
     float planet_radius;
@@ -99,21 +123,33 @@ struct NishitaSkyParams {
     float godrays_density;         // God ray density/thickness
     int godrays_samples;           // Quality (8-32 recommended)
     float godrays_decay;           // Light decay over distance
+    float godrays_density_clip_bias; // Bias for density probe threshold (-0.1 to 0.1)
+    float godrays_stochastic_threshold; // Threshold for hybrid deterministic/stochastic transition (0.0 to 1.0)
     
-    // ═══════════════════════════════════════════════════════════════
-    // MULTI-SCATTERING (Improved atmosphere realism)
-    // ═══════════════════════════════════════════════════════════════
+    // Physical Parameters (Atmosphere Physics)
+    float humidity;                // 0.0 (Dry) to 1.0 (Humid/Hazy)
+    float temperature;             // Celsius (-50 to +50)
+    float ozone_absorption_scale;  // Scales the "Blue Hour" intensity (0.0 to 10.0)
+};
+
+// ═══════════════════════════════════════════════════════════════
+// ATMOSPHERE ADVANCED (Rendering Toggles)
+// ═══════════════════════════════════════════════════════════════
+struct AtmosphereAdvanced {
     int multi_scatter_enabled;     // 1 = enable multi-scattering
     float multi_scatter_factor;    // Multi-scatter intensity (0.0 - 1.0)
+    int aerial_perspective;        // 1 = Physical haze based on distance
     
-    // ═══════════════════════════════════════════════════════════════
-    // ENVIRONMENT TEXTURE OVERLAY (HDR/EXR blending with procedural)
-    // ═══════════════════════════════════════════════════════════════
+    // Aerial Perspective Distance Control (UI adjustable)
+    float aerial_min_distance;     // No haze below this distance (meters, default: 1000)
+    float aerial_max_distance;     // Full haze at this distance (meters, default: 5000)
+    
+    // Environment Texture Overlay (Moved here for better UI grouping)
     int env_overlay_enabled;       // 1 = blend environment texture with Nishita
     cudaTextureObject_t env_overlay_tex;  // HDR/EXR environment texture
     float env_overlay_intensity;   // Texture contribution (0.0 - 2.0)
     float env_overlay_rotation;    // Rotation in degrees (0 - 360)
-    int env_overlay_blend_mode;    // 0 = Add, 1 = Multiply, 2 = Screen, 3 = Replace
+    int env_overlay_blend_mode;    // 0 = Mix, 1 = Multiply, 2 = Screen, 3 = Replace
 };
 
 struct WorldData {
@@ -132,11 +168,14 @@ struct WorldData {
 
     // Nishita Mode
     NishitaSkyParams nishita;
+    AtmosphereAdvanced advanced;
     
     // Camera position for volumetric clouds (updated every frame)
     float camera_y;  // Camera Y position in world space
+    int frame_count; // For stochastic dithering
 
-
+    // Atmosphere LUT (GPU Textures)
+    AtmosphereLUTData lut;
 
     // Volume (Placeholder for later)
     float volume_density;
@@ -147,12 +186,14 @@ struct WorldData {
 #include <optional>
 #include <string>
 #include <vector>
-class Texture;
-
+#include <Texture.h>
+class AtmosphereLUT;
 class World {
 public:
     World();
     ~World();
+
+    void initializeLUT(); // Explicit init if needed
 
     WorldData getGPUData() const;
 
@@ -187,6 +228,8 @@ public:
     void setDustDensity(float density);
     
     NishitaSkyParams getNishitaParams() const;
+    AtmosphereAdvanced getAdvancedParams() const;
+    void setAdvancedParams(const AtmosphereAdvanced& a);
     
     // Environment Texture Overlay for Nishita
     void setNishitaEnvOverlay(const std::string& path);
@@ -198,13 +241,14 @@ public:
 
     // CPU Evaluation (for background missing)
     Vec3 evaluate(const Vec3& ray_dir);
-
+    WorldData data;
 private:
-   WorldData data;
+ 
    std::string hdri_path; // Store path for getter
    std::string env_overlay_path; // Store env overlay path
    Texture* hdri_texture = nullptr;
    Texture* env_overlay_texture = nullptr;
+   AtmosphereLUT* atmosphere_lut = nullptr;
    
    // Internal helper for Nishita
    Vec3 calculateNishitaSky(const Vec3& ray_dir);
@@ -218,3 +262,4 @@ public:
     void deserialize(const nlohmann::json& j);
 };
 #endif
+

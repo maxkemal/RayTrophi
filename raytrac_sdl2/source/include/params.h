@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          params.h
+* Author:        Kemal Demirtas
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include <vector_types.h>
 #include <material_gpu.h>
 #include "World.h"
@@ -195,17 +205,87 @@ struct GpuVDBVolume {
     // RAY MARCHING QUALITY
     // ─────────────────────────────────────────────────────────────────────────
     float step_size;
+    float voxel_size;  // Added for precision
     int max_steps;
     int shadow_steps;
     float shadow_strength;
     
     // ─────────────────────────────────────────────────────────────────────────
-    // MOTION BLUR
+    // PIVOT & ANIMATION
     // ─────────────────────────────────────────────────────────────────────────
+    float pivot_offset[3];
     int motion_blur_enabled;
     float velocity_scale;
     int pad1;
-    int pad2;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU GAS VOLUME (Dense 3D Texture)
+// ═══════════════════════════════════════════════════════════════════════════════
+struct GpuGasVolume {
+    // ─────────────────────────────────────────────────────────────────────────
+    // DENSITY TEXTURE (3D Texture Object)
+    // ─────────────────────────────────────────────────────────────────────────
+    cudaTextureObject_t density_texture;
+    cudaTextureObject_t temperature_texture;
+    cudaTextureObject_t velocity_texture;
+    int has_texture;
+    int pad0;
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRANSFORM (Object → World, row-major 3x4)
+    // ─────────────────────────────────────────────────────────────────────────
+    float transform[12];      // Object to world
+    float inv_transform[12];  // World to object (for ray transform)
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // BOUNDS
+    // ─────────────────────────────────────────────────────────────────────────
+    float3 world_bbox_min;    // World-space bounds
+    float3 world_bbox_max;
+    float3 local_bbox_min;    // Local bounds
+    float3 local_bbox_max;
+    
+    // ─────────────────────────────────────────────────────────────────────────
+    // SHADER PARAMETERS (Matches VDB Volume)
+    // ─────────────────────────────────────────────────────────────────────────
+    float density_multiplier;
+    float density_remap_low;
+    float density_remap_high;
+    float density_pad;
+    
+    // Scattering
+    float3 scatter_color;
+    float scatter_coefficient;
+    float scatter_anisotropy;       // G forward (-1 to 1)
+    float scatter_anisotropy_back;  // G backward
+    float scatter_lobe_mix;         // Forward/back blend
+    float scatter_multi;            // Multi-scatter approximation
+    
+    // Absorption
+    float3 absorption_color;
+    float absorption_coefficient;
+    
+    // Emission (Fire/Explosions)
+    int emission_mode;              // 0=None, 1=Constant, 2=Blackbody, 3=Channel
+    float3 emission_color;
+    float emission_intensity;
+    float temperature_scale;
+    float blackbody_intensity;
+    float emission_pad;
+
+    // Color Ramp (Gradient)
+    int color_ramp_enabled;         // 0=Off, 1=On
+    int ramp_stop_count;            // Number of active stops (max 8)
+    float ramp_positions[8];        // Stop positions (0-1)
+    float3 ramp_colors[8];          // Stop colors
+    float ramp_pad;                 // Padding
+    
+    // Quality
+    float step_size;
+    int max_steps;
+    int shadow_steps;
+    float shadow_strength;
 };
 
 struct RayGenParams {
@@ -232,6 +312,10 @@ struct RayGenParams {
     GpuVDBVolume* vdb_volumes;
     int vdb_volume_count;
     
+    // Gas Volume Objects (Dense 3D Textures)
+    GpuGasVolume* gas_volumes;
+    int gas_volume_count;
+    
     WorldData world;
     // Yeni parametreler
     int min_samples;             // Minimum örnek sayısı
@@ -255,6 +339,14 @@ struct RayGenParams {
     float clip_far;
     float time;            // Global time for animation (updates every frame)
     float water_time;       // Water time - frozen during accumulation passes
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // WIND ANIMATION (Shader-based foliage bending)
+    // ═══════════════════════════════════════════════════════════════════════════
+    float3 wind_direction;    // Normalized wind direction (world space)
+    float wind_strength;      // Wind strength (0-1 normalized)
+    float wind_speed;         // Animation speed multiplier
+    float wind_time;          // Wind animation time (separate from water_time)
     //float4* accumulation_buffer launch_tile_based_progressive için gerektiğinde;
    
 };

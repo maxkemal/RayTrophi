@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          InstanceManager.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include "InstanceGroup.h"
 #include <vector>
@@ -107,3 +117,4 @@ private:
     std::vector<Vec3> generatePoissonPoints(const Vec3& center, float radius, 
                                             float min_distance, int max_attempts = 30);
 };
+

@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          DiffuseLight.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #ifndef DIFFUSELIGHT_H
 #define DIFFUSELIGHT_H
 
@@ -16,3 +26,4 @@ public:
 };
 
 #endif // DIFFUSELIGHT_H
+

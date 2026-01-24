@@ -1,4 +1,14 @@
-﻿#ifndef AREA_LIGHT_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          AreaLight.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef AREA_LIGHT_H
 #define AREA_LIGHT_H
 
 #include "Light.h"
@@ -84,3 +94,4 @@ private:
 };
 
 #endif // AREA_LIGHT_H
+

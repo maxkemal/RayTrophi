@@ -1,4 +1,14 @@
-﻿#ifndef TRIANGLE_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Triangle.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef TRIANGLE_H
 #define TRIANGLE_H
 
 #include <memory>
@@ -15,6 +25,7 @@
 #include "sbt_data.h"
 #include <SDL.h>
 #include <SDL_image.h>
+#include <OptixWrapper.h>
 
 // Forward declarations
 class Material;
@@ -26,10 +37,11 @@ class Texture;
  * 48 bytes vs 108 bytes - 55% savings on vertex data alone
  */
 struct TriangleVertexData {
-    Vec3 position;       // Current/transformed position (used for hit detection)
+    Vec3 position;       // Current/transformed position
     Vec3 original;       // Bind-pose original position
     Vec3 normal;         // Current/transformed normal
     Vec3 originalNormal; // Bind-pose normal
+    Vec3 color;          // Vertex color (e.g. for wind stiffness, 1=Rigid, 0=Flexible)
 };
 
 /**
@@ -94,6 +106,9 @@ public:
     
     inline const Vec3& getOriginalVertexNormal(int i) const { return vertices[i].originalNormal; }
     inline void setOriginalVertexNormal(int i, const Vec3& normal) { vertices[i].originalNormal = normal; }
+    
+    inline const Vec3& getVertexColor(int i) const { return vertices[i].color; }
+    inline void setVertexColor(int i, const Vec3& color) { vertices[i].color = color; }
 
     // Convenience accessors for backward compatibility
     inline Vec3 getV0() const { return vertices[0].position; }
@@ -163,9 +178,13 @@ public:
     // Hit Detection
     // ========================================================================
     
-    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec) const override;
+    virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override;
+    virtual void hit_packet(const RayPacket& packet, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const override;
+    virtual __m256 occluded_packet(const RayPacket& packet, float t_min, __m256 t_max) const override;
     virtual bool bounding_box(float time0, float time1, AABB& output_box) const override;
     
+    virtual bool occluded(const Ray& ray, float t_min, float t_max) const override;
+
     inline bool has_tangent_basis() const { return false; }
 
     // ========================================================================
@@ -239,7 +258,7 @@ private:
     
                      // 32 bytes avg
     int faceIndex = -1;                        // 4 bytes
-    std::array<unsigned int, 3> assimpVertexIndices; // 12 bytes
+    std::array<unsigned int, 3> assimpVertexIndices = { 0, 0, 0 }; // 12 bytes
 
     // AABB Caching
     mutable AABB cachedAABB;                  // 24 bytes
@@ -256,3 +275,4 @@ private:
 };
 
 #endif // TRIANGLE_H
+

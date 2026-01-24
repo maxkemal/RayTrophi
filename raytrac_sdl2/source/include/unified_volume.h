@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          unified_volume.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 #include "unified_types.h"
 
@@ -176,3 +186,4 @@ UNIFIED_FUNC float powder_effect_volume(float density, float cos_theta) {
     float forward_bias = 0.5f + 0.5f * fmaxf(0.0f, cos_theta);
     return powder * forward_bias;
 }
+

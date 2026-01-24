@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          CreateNanoGrid.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -2114,3 +2124,4 @@ inline std::ostream& operator<<(std::ostream& os, const nanovdb::tools::RelDiff&
 }
 
 #endif // NANOVDB_TOOLS_CREATENANOGRID_H_HAS_BEEN_INCLUDED
+

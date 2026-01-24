@@ -1,15 +1,15 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Kaynak Dosyalar">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
     </Filter>
-    <Filter Include="Üst Bilgi Dosyaları">
+    <Filter Include="Ãœst Bilgi DosyalarÄ±">
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
-    <Filter Include="Kaynak Dosyaları">
+    <Filter Include="Kaynak DosyalarÄ±">
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
@@ -22,10 +22,37 @@
     <Filter Include="Kaynak Dosyalar\imgui">
       <UniqueIdentifier>{91843b84-647c-4d46-9aa2-e919801678bb}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Kaynak Dosyalar\Physics">
+      <UniqueIdentifier>322ce010-14c4-451d-9f71-a8f4daa4fc48</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Utils">
+      <UniqueIdentifier>4e535095-0350-48c9-a049-68105869e98a</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Core">
+      <UniqueIdentifier>fcf3bac3-1868-4460-9dee-36b07e44d056</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Render">
+      <UniqueIdentifier>bc47dea9-9c56-493e-b8ca-e1acde8bb390</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\UI">
+      <UniqueIdentifier>72bbba88-2b7d-4cdb-a379-3b20f2615898</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Scene">
+      <UniqueIdentifier>e3b81726-767e-43b4-a9d2-96b8eed56120</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Animation">
+      <UniqueIdentifier>d4a53ae4-a645-4c28-8e97-a27844620741</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Math">
+      <UniqueIdentifier>ff31116e-905c-49eb-9a4c-5007e71a480b</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Device">
+      <UniqueIdentifier>f061b220-55a7-4467-a300-d42b15d827c3</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\AABB.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -175,34 +202,34 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\src\Main.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\ui_modern.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\MaterialManager.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Transform.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\World.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_types.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_brdf.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_light_sampling.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_converters.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_cpu_adapter.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\tinyexr.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -246,20 +273,20 @@
     <ClInclude Include="source\src\scene_ui_terrain.hpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\src\water_shaders.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <ClInclude Include="source\src\Device\water_shaders.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </ClInclude>
-    <ClInclude Include="source\src\CloudNoise.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <ClInclude Include="source\src\Device\CloudNoise.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </ClInclude>
     <ClInclude Include="source\src\scene_ui_nodeeditor.hpp">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\src\fft_ocean.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <ClInclude Include="source\src\Device\fft_ocean.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </ClInclude>
     <ClInclude Include="source\include\TerrainFFT.h">
-      <Filter>Üst Bilgi Dosyaları</Filter>
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
     </ClInclude>
     <ClInclude Include="source\include\VDBVolumeManager.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -267,260 +294,30 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
-      <Filter>Kaynak Dosyaları</Filter>
+      <Filter>Kaynak DosyalarÄ±</Filter>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="source\src\AABB.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\AreaLight.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\AssimpLoader.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Camera.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Dielectric.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\DirectionalLight.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\globals.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\HittableList.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Light.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Main.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Material.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Matrix4x4.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Mesh.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\OptixWrapper.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\ParallelBVHNode.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\PointLight.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\PrincipledBSDF.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Renderer.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SpotLight.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Texture.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\ThreadLocalRNG.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Triangle.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Vec2.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Vec3.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Vec3SIMD.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Volumetric.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\World.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\EmbreeBVH.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui.cpp">
-      <Filter>Kaynak Dosyalar\imgui</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_draw.cpp">
-      <Filter>Kaynak Dosyalar\imgui</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp">
-      <Filter>Kaynak Dosyalar\imgui</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_tables.cpp">
-      <Filter>Kaynak Dosyalar\imgui</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_widgets.cpp">
-      <Filter>Kaynak Dosyalar\imgui</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_impl_sdlrenderer2.cpp">
-      <Filter>Kaynak Dosyalar\imgui</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\ui_modern.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\MaterialManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\unified_converters.cpp">
-      <Filter>Kaynak Dosyalar</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SceneSelection.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\ImGuizmo.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SceneHistory.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SceneCommand.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SceneSerializer.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\ProjectManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_world.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SequencerAdapter.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\TimelineWidget.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SplashScreen.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_camera.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_gizmos.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_hierarchy.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_lights.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_materials.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_selection.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_viewport.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\OptixAccelManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_animation.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_scatter.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\InstanceGroup.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\InstanceManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\WaterManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\TerrainManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\miniz.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\miniz_tdef.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\miniz_tinfl.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\external\miniz_zip.c">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\TerrainNodesV2.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\AnimationController.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\AnimationNodes.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_procamera.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\TerrainFFT.cpp">
-      <Filter>Kaynak Dosyalar</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\RiverManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\SceneExporter.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\VDBVolumeManager.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\VDBVolume.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\scene_ui_vdb.cpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="source\src\raygen.cu">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\raygen.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\trace_ray.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\trace_ray.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\ray_color.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\ray_color.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\random_utils.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\random_utils.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\vec3_utils.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\vec3_utils.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\material_scatter.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\material_scatter.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\gpucamera.cuh">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\gpucamera.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
     <None Include="source\src\scatter_volume_step.h">
       <Filter>Kaynak Dosyalar\Source_file</Filter>
@@ -528,15 +325,254 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="source\resources\RayTrophi_icon.ico">
-      <Filter>Kaynak Dosyaları</Filter>
+      <Filter>Kaynak DosyalarÄ±</Filter>
     </Image>
   </ItemGroup>
   <ItemGroup>
-    <CudaCompile Include="source\src\fft_ocean.cu">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <CudaCompile Include="source\src\Device\fft_ocean.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
-    <CudaCompile Include="source\src\skinning_kernels.cu">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <CudaCompile Include="source\src\Device\skinning_kernels.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
+    <CudaCompile Include="source\src\Device\foliage_deform.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </CudaCompile>
+    <CudaCompile Include="source\src\Device\gas_kernels.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </CudaCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Physics\GasSimulator.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasVolume.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ForceField.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\EmitterSystem.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\CurlNoise.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\WaterManager.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\RiverManager.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainManager.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainFFT.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Volumetric.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\VDBVolume.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\VDBVolumeManager.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\AssimpLoader.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneSerializer.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneExporter.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneHistory.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneCommand.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\Main.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\globals.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\ProjectManager.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\Renderer.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\VolumetricRenderer.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\Camera.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OptixWrapper.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OptixAccelManager.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\ParallelBVHNode.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\EmbreeBVH.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\unified_converters.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\Texture.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\AtmosphereLUT.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ui_modern.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\TimelineWidget.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ImGuizmo.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SplashScreen.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SequencerAdapter.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SceneSelection.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_animation.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_camera.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_gizmos.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_lights.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_materials.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_procamera.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_scatter.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_selection.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_vdb.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_viewport.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_world.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\World.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\HittableList.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Mesh.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Triangle.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AABB.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\InstanceGroup.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\InstanceManager.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Light.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PointLight.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\SpotLight.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\DirectionalLight.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AreaLight.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Material.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PrincipledBSDF.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Dielectric.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\MaterialManager.cpp">
+      <Filter>Kaynak Dosyalar\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\AnimationController.cpp">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\AnimationNodes.cpp">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Vec2.cpp">
+      <Filter>Kaynak Dosyalar\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Vec3.cpp">
+      <Filter>Kaynak Dosyalar\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Vec3SIMD.cpp">
+      <Filter>Kaynak Dosyalar\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Matrix4x4.cpp">
+      <Filter>Kaynak Dosyalar\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz.c">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz_tdef.c">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz_tinfl.c">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\miniz_zip.c">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

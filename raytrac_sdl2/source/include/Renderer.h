@@ -1,4 +1,14 @@
-﻿/* 1.07.20024
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Renderer.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+/* 1.07.20024
 * 
   Ray Tracing Project
 
@@ -99,10 +109,6 @@ public:
     Vec3 adaptive_sample_pixel(int i, int j, const Camera& cam, const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int max_samples_per_pixel, float variance_threshold, int variance_check_interval);
    
     bool SaveSurface(SDL_Surface* surface, const char* file_path);
-    void render_image(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
-        const int total_samples_per_pixel, const int samples_per_pass, SceneData& scene);
-    Matrix4x4 calculateAnimationTransform(const AnimationData& animation, float currentTime);
-   // void updateBVHForAnimatedObjects(ParallelBVHNode& bvh, const std::vector<std::shared_ptr<Hittable>>& animatedObjects);
     void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, 
         const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
         const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
@@ -134,10 +140,18 @@ public:
     // Rebuild OptiX geometry after scene modifications (deletion/addition)
     void rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr);
     
+    // VARIANT: Rebuild OptiX geometry with a specific object list (to avoid race conditions)
+    void rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hittable>>& objects, OptixWrapper* optix_gpu_ptr);
+
+    // Sync all volumetric data (VDB, Gas) to GPU - Moved to VolumetricRenderer
+
     // Update OptiX materials only (fast path - no geometry rebuild)
     // Use when only material properties change (color, roughness, volumetric params, etc.)
     void updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gpu_ptr);
 
+    // Update OptiX Gas Volumes (fast path - no geometry rebuild)
+    // Updates texture handles, transforms, and shader parameters for gas volumes
+    void updateOptiXGasVolumes(SceneData& scene, OptixWrapper* optix_gpu_ptr);
    
     void initializeBuffers(int image_width, int image_height);
     World world;
@@ -191,19 +205,12 @@ private:
    
     Vec3 getColorFromSurface(SDL_Surface* surface, int i, int j);
 
-    void render_worker(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const   Hittable* bvh, const std::shared_ptr<Camera>& camera, const int samples_per_pass, const int current_sample);
 
     void apply_normal_map( HitRecord& rec);
-    void render_chunk_adaptive(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const Hittable* bvh, const std::shared_ptr<Camera>& camera, const int total_samples_per_pixel);
-
-    void render_chunk_fixed_sampling(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const Hittable* bvh, const std::shared_ptr<Camera>& camera, const int total_samples_per_pixel);
   
-    void render_chunk(SDL_Surface* surface, const std::vector<std::pair<int, int>>& shuffled_pixel_list, std::atomic<int>& next_pixel_index, const HittableList& world, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, const   Hittable* bvh, const std::shared_ptr<Camera>& camera, const int samples_per_pass, const int current_sample);
-  
-    Vec3 ray_color(const Ray& r, const   Hittable* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int depth, int sample_index=0);
+    Vec3 ray_color(const Ray& r, const   Hittable* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int depth, int sample_index, const SceneData& scene);
     float radical_inverse(unsigned int bits);
-    Vec3 calculate_volumetric_lighting(const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const HitRecord& rec, const Ray& ray);
-   
+    // God Rays (CPU) - Moved to VolumetricRenderer
 
     float luminance(const Vec3& color);
 
@@ -267,3 +274,4 @@ public:
     
 };
 #endif // RENDERER_H
+

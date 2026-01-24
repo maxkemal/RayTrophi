@@ -1,0 +1,1225 @@
+﻿#include "EmbreeBVH.h"
+#include "HittableInstance.h"
+#include "VDBVolume.h" // Add VDB support
+#include "VDBVolumeManager.h"
+#include <cassert>
+#include <chrono>
+#include <Volumetric.h>
+
+// Static member initialization
+RTCDevice EmbreeBVH::device = nullptr;
+
+EmbreeBVH::EmbreeBVH() {
+    // Lazily create device once
+    if (!device) {
+        device = rtcNewDevice(nullptr);
+        // Error handling?
+        if (!device) {
+             SCENE_LOG_ERROR("Failed to create Embree device!");
+        }
+    }
+    
+    // Create scene (unique per BVH instance)
+    if (device) {
+        scene = rtcNewScene(device);
+        rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM); 
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC); 
+    }
+}
+
+EmbreeBVH::~EmbreeBVH() {
+    if (scene) {
+        rtcReleaseScene(scene);
+        scene = nullptr;
+    }
+    // DO NOT release device here! It is shared.
+}
+
+void EmbreeBVH::shutdown() {
+    if (device) {
+        rtcReleaseDevice(device);
+        device = nullptr;
+    }
+}
+
+void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    auto build_start = std::chrono::high_resolution_clock::now();
+
+    // Reset state
+    clearGeometry(); 
+    triangle_geom_id = RTC_INVALID_GEOMETRY_ID;
+    vdb_geom_id = RTC_INVALID_GEOMETRY_ID;
+    instance_objects.clear();
+    vdb_objects.clear();
+
+    if (!device) {
+        SCENE_LOG_ERROR("[EmbreeBVH::build] Device is null!");
+        return;
+    }
+    
+    // Create new scene if needed (clearGeometry usually does this but let's be safe)
+    if (!scene) {
+        scene = rtcNewScene(device);
+        rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM);
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC | RTC_SCENE_FLAG_ROBUST); // ROBUST important for instancing
+    }
+
+    // 1. Separate objects
+    std::vector<std::shared_ptr<Triangle>> local_triangles;
+    std::vector<std::shared_ptr<HittableInstance>> local_instances;
+    
+    local_triangles.reserve(objects.size());
+    local_instances.reserve(objects.size());
+    vdb_objects.reserve(objects.size());
+
+    for (const auto& obj : objects) {
+        if (!obj->visible) continue; // [FIX] Skip invisible objects (e.g. Gizmos)
+
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            local_triangles.push_back(tri);
+        }
+        else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            local_instances.push_back(inst);
+        }
+        else if (auto vdb = std::dynamic_pointer_cast<VDBVolume>(obj)) {
+            vdb_objects.push_back(vdb.get());
+        }
+    }
+
+    // 2. Build Triangle Geometry (if any)
+    if (!local_triangles.empty()) {
+        size_t tri_count = local_triangles.size();
+        triangle_data.clear();
+        triangle_data.reserve(tri_count);
+
+        RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+
+        Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
+            geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
+            sizeof(Vec3), tri_count * 3
+        );
+        unsigned* index_buffer = (unsigned*)rtcSetNewGeometryBuffer(
+            geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
+            sizeof(unsigned) * 3, tri_count
+        );
+
+        // Fill buffers
+        #pragma omp parallel for
+        for (int i = 0; i < (int)tri_count; ++i) {
+            const auto& tri = local_triangles[i];
+            
+            // Vertices
+            vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
+            vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
+            vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
+
+            // Indices
+            index_buffer[i * 3 + 0] = i * 3 + 0;
+            index_buffer[i * 3 + 1] = i * 3 + 1;
+            index_buffer[i * 3 + 2] = i * 3 + 2;
+        }
+
+        // Fill triangle_data serial (or parallel if safe)
+        for (const auto& tri : local_triangles) {
+            triangle_data.push_back({
+                tri->getVertexPosition(0), tri->getVertexPosition(1), tri->getVertexPosition(2),
+                tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
+                tri->t0, tri->t1, tri->t2,
+                tri->getMaterialID(),
+                tri.get() // Store original pointer
+            });
+        }
+
+        rtcSetGeometryMask(geom, 0x01); // Mask 1 for Surfaces
+        rtcCommitGeometry(geom);
+        triangle_geom_id = rtcAttachGeometry(scene, geom);
+        rtcReleaseGeometry(geom);
+    }
+
+    // 3. Build Instances
+    if (!local_instances.empty()) {
+        for (const auto& inst : local_instances) {
+            auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+            if (!child_bvh) {
+                 continue; 
+            }
+
+            RTCGeometry inst_geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
+            rtcSetGeometryInstancedScene(inst_geom, child_bvh->getRTCScene());
+            
+            // Set Transform (Embree uses column-major float[12] for 3x4 affine)
+            // Matrix4x4 is likely row-major or we need to check.
+            // Matrix4x4 typically: m[row][col]
+            // Embree expects: 
+            // xx yx zx tx
+            // xy yy zy ty
+            // xz yz zz tz
+            
+            // Standard format for rtcSetGeometryTransform:
+            // "The transformation matrix is passed as a pointer to an array of 12 floats in column-major order."
+            
+            float transform[12];
+            // Column 0 (X axis)
+            transform[0] = inst->transform.m[0][0];
+            transform[1] = inst->transform.m[1][0];
+            transform[2] = inst->transform.m[2][0];
+            
+            // Column 1 (Y axis)
+            transform[3] = inst->transform.m[0][1];
+            transform[4] = inst->transform.m[1][1];
+            transform[5] = inst->transform.m[2][1];
+            
+            // Column 2 (Z axis)
+            transform[6] = inst->transform.m[0][2];
+            transform[7] = inst->transform.m[1][2];
+            transform[8] = inst->transform.m[2][2];
+             
+            // Column 3 (Translation)
+            transform[9]  = inst->transform.m[0][3];
+            transform[10] = inst->transform.m[1][3];
+            transform[11] = inst->transform.m[2][3];
+
+            rtcSetGeometryTransform(inst_geom, 0, RTC_FORMAT_FLOAT3X4_COLUMN_MAJOR, transform);
+            
+            rtcSetGeometryMask(inst_geom, 0xFFFFFFFF); // Instances pass everything
+            rtcCommitGeometry(inst_geom);
+            unsigned geomID = rtcAttachGeometry(scene, inst_geom);
+            rtcReleaseGeometry(inst_geom);
+            
+            // Store mapping
+            if (instance_objects.size() <= geomID) {
+                instance_objects.resize(geomID + 1, nullptr);
+            }
+            instance_objects[geomID] = inst.get();
+        }
+    }
+
+    // 4. Build VDB Volumes (User Geometry)
+    if (!vdb_objects.empty()) {
+        RTCGeometry vdb_geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_USER);
+        rtcSetGeometryUserPrimitiveCount(vdb_geom, vdb_objects.size());
+        rtcSetGeometryUserData(vdb_geom, this);
+        
+        rtcSetGeometryBoundsFunction(vdb_geom, userBoundsFunc, nullptr);
+        rtcSetGeometryIntersectFunction(vdb_geom, userIntersectFunc);
+        rtcSetGeometryOccludedFunction(vdb_geom, userOccludedFunc);
+        
+        rtcSetGeometryMask(vdb_geom, 0x02); // Mask 2 for Volumes
+        rtcCommitGeometry(vdb_geom);
+        vdb_geom_id = rtcAttachGeometry(scene, vdb_geom);
+        rtcReleaseGeometry(vdb_geom);
+    }
+
+    rtcCommitScene(scene);
+}
+
+// ... existing methods ...
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EMBREE USER GEOMETRY CALLBACKS (For VDB Volumes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+void EmbreeBVH::userBoundsFunc(const RTCBoundsFunctionArguments* args) {
+    const EmbreeBVH* bvh = (const EmbreeBVH*)args->geometryUserPtr;
+    const VDBVolume* vdb = bvh->vdb_objects[args->primID];
+    
+    AABB bounds = vdb->getWorldBounds();
+    RTCBounds* rtc_bounds = args->bounds_o;
+    
+    rtc_bounds->lower_x = bounds.min.x;
+    rtc_bounds->lower_y = bounds.min.y;
+    rtc_bounds->lower_z = bounds.min.z;
+    rtc_bounds->upper_x = bounds.max.x;
+    rtc_bounds->upper_y = bounds.max.y;
+    rtc_bounds->upper_z = bounds.max.z;
+}
+
+void EmbreeBVH::userIntersectFunc(const RTCIntersectFunctionNArguments* args) {
+    int* valid = args->valid;
+    EmbreeBVH* bvh = (EmbreeBVH*)args->geometryUserPtr;
+    unsigned int primID = args->primID;
+    unsigned int geomID = args->geomID;
+    
+    RTCRayHitN* rayhit = args->rayhit;
+    RTCRayN* ray = RTCRayHitN_RayN(rayhit, args->N);
+    RTCHitN* hit = RTCRayHitN_HitN(rayhit, args->N);
+    
+    // Safety check for context
+    unsigned int instID = RTC_INVALID_GEOMETRY_ID;
+    if (args->context) instID = args->context->instID[0];
+
+    for (unsigned int i=0; i < args->N; i++) {
+        if (!valid[i]) continue;
+        
+        // Retrieve Ray properties via accessors
+        float tfar = RTCRayN_tfar(ray, args->N, i);
+        float tnear = RTCRayN_tnear(ray, args->N, i);
+        
+        Vec3 origin(
+            RTCRayN_org_x(ray, args->N, i),
+            RTCRayN_org_y(ray, args->N, i),
+            RTCRayN_org_z(ray, args->N, i)
+        );
+        Vec3 dir(
+            RTCRayN_dir_x(ray, args->N, i),
+            RTCRayN_dir_y(ray, args->N, i),
+            RTCRayN_dir_z(ray, args->N, i)
+        );
+        
+        Ray r(origin, dir);
+        const VDBVolume* vdb = bvh->vdb_objects[primID];
+        
+        float t_enter, t_exit;
+        // Pass -infinity instead of tnear to detect if we are inside the box (t_enter < tnear)
+        if (vdb->intersectTransformedAABB(r, -std::numeric_limits<float>::infinity(), tfar, t_enter, t_exit)) {
+            
+            float reported_hit = t_enter;
+            if (reported_hit < tnear) reported_hit = tnear;
+            
+            // Check if valid interval exists (exit must be AFTER near plane)
+            bool is_inside_or_enter = (t_exit > tnear);
+
+            if (is_inside_or_enter && reported_hit < tfar) {
+                // Update Ray (shorten to hit)
+                RTCRayN_tfar(ray, args->N, i) = reported_hit;
+                
+                // Update Hit
+                RTCHitN_geomID(hit, args->N, i) = geomID;
+                RTCHitN_primID(hit, args->N, i) = primID;
+                RTCHitN_instID(hit, args->N, i, 0) = instID;
+                
+                // Set geometric normal
+                RTCHitN_Ng_x(hit, args->N, i) = 0.0f;
+                RTCHitN_Ng_y(hit, args->N, i) = 1.0f;
+                RTCHitN_Ng_z(hit, args->N, i) = 0.0f;
+            }
+        }
+    }
+}
+
+void EmbreeBVH::userOccludedFunc(const RTCOccludedFunctionNArguments* args) {
+    int* valid = args->valid;
+    EmbreeBVH* bvh = (EmbreeBVH*)args->geometryUserPtr;
+    unsigned int primID = args->primID;
+    
+    RTCRayN* ray = args->ray;
+    
+    for (unsigned int i=0; i < args->N; i++) {
+        if (!valid[i]) continue;
+        
+        float tfar = RTCRayN_tfar(ray, args->N, i);
+        // Note: For occlusion, tfar is -inf if occluded. 
+        // But incoming ray has valid tfar (dist to light).
+        // If we hit, we set tfar to -inf.
+        if (tfar < 0.0f) continue; // Already occluded
+        
+        float tnear = RTCRayN_tnear(ray, args->N, i);
+        
+        Vec3 origin(
+            RTCRayN_org_x(ray, args->N, i),
+            RTCRayN_org_y(ray, args->N, i),
+            RTCRayN_org_z(ray, args->N, i)
+        );
+        Vec3 dir(
+            RTCRayN_dir_x(ray, args->N, i),
+            RTCRayN_dir_y(ray, args->N, i),
+            RTCRayN_dir_z(ray, args->N, i)
+        );
+        
+        Ray r(origin, dir);
+        const VDBVolume* vdb = bvh->vdb_objects[primID];
+        
+        float t_enter, t_exit;
+        if (vdb->intersectTransformedAABB(r, tnear, tfar, t_enter, t_exit)) {
+            // Stochastic Ray Marching for Shadow
+            float step_size = 0.5f; 
+            if (vdb->volume_shader) step_size = vdb->volume_shader->quality.step_size * 2.0f;
+            
+            const auto& mgr = VDBVolumeManager::getInstance();
+            int vid = vdb->getVDBVolumeID();
+            float density_mult = (vdb->volume_shader ? vdb->volume_shader->density.multiplier : 1.0f) * vdb->density_scale;
+
+            float t = t_enter + ((float)rand() / RAND_MAX) * step_size;
+            float transmittance = 1.0f;
+            // Use local temporary ray for marching to avoid modifying original r
+            // Note: r is already world space
+            
+            while (t < t_exit) {
+                Vec3 pos = r.at(t);
+                Vec3 local_pos = vdb->getInverseTransform().transform_point(pos);
+                
+                float density = mgr.sampleDensityCPU(vid, local_pos.x, local_pos.y, local_pos.z);
+                
+                if (density > 0.001f) {
+                    float sigma_t = density * density_mult;
+                    transmittance *= exp(-sigma_t * step_size);
+                }
+                
+                if (transmittance < 0.01f) break; // Fully blocked
+                t += step_size;
+            }
+
+            // Stochastic Test
+            if (Vec3::random_float() > transmittance) {
+                // Occluded!
+                RTCRayN_tfar(ray, args->N, i) = -INFINITY;
+            } else {
+                // Transparent - Continue (do nothing)
+            }
+            continue; // Move to next potential hit (or finish if we set tfar=-inf, Embree might stop)
+        }
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Clear all geometry from the scene (for full rebuild)
+// ═══════════════════════════════════════════════════════════════════════════
+void EmbreeBVH::clearGeometry() {
+    // Release the current scene and create a new empty one
+    if (scene) {
+        rtcReleaseScene(scene);
+        scene = rtcNewScene(device);
+        rtcSetSceneBuildQuality(scene, RTC_BUILD_QUALITY_MEDIUM);
+        rtcSetSceneFlags(scene, RTC_SCENE_FLAG_DYNAMIC);
+    }
+    triangle_data.clear();
+    
+    // CRITICAL FIX: Clear instance mappings to prevent stale pointers after rebuild
+    instance_objects.clear();
+    triangle_geom_id = 0xFFFFFFFF; // Reset to invalid
+}
+
+void EmbreeBVH::updateGeometryFromTriangles() {
+    // Tek geometry'li yapıdaysak geometry ID sabittir (örneğin 0)
+    RTCGeometry geom = rtcGetGeometry(scene, 0); // ID = 0 çünkü tek sefer attach ettik
+
+    Vec3* vertex_buffer = (Vec3*)rtcGetGeometryBufferData(geom, RTC_BUFFER_TYPE_VERTEX, 0);
+    for (size_t i = 0; i < triangle_data.size(); ++i) {
+        const auto& tri = triangle_data[i];
+        vertex_buffer[i * 3 + 0] = tri.v0;
+        vertex_buffer[i * 3 + 1] = tri.v1;
+        vertex_buffer[i * 3 + 2] = tri.v2;
+    }
+
+    rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
+    rtcCommitGeometry(geom);
+    rtcCommitScene(scene);
+}
+// Bu her karede çağrılır - OPTIMIZE WITH REFIT
+// Bu her karede çağrılır - OPTIMIZE WITH REFIT
+void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    bool geometry_committed = false;
+
+    // 1. Update Triangle Geometry (Deformable)
+    if (triangle_geom_id != RTC_INVALID_GEOMETRY_ID) {
+        RTCGeometry geom = rtcGetGeometry(scene, triangle_geom_id);
+        if (geom) {
+            Vec3* vertex_buffer = (Vec3*)rtcGetGeometryBufferData(geom, RTC_BUFFER_TYPE_VERTEX, 0);
+            if (vertex_buffer) {
+                // RTC_BUILD_QUALITY_REFIT tells Embree to update existing BVH structure
+                rtcSetGeometryBuildQuality(geom, RTC_BUILD_QUALITY_REFIT);
+
+                // FIX: Ensure perfectly aligned indexing between 'objects' and Embree buffer.
+                // Since 'objects' might contain non-Triangle items (which are skipped in build),
+                // we must first extract all valid Triangles to match the dense buffer layout.
+                std::vector<std::shared_ptr<Triangle>> active_triangles;
+                active_triangles.reserve(objects.size());
+                
+                for (const auto& obj : objects) {
+                    if (!obj->visible) continue; // [FIX] Maintain parity with build()
+
+                    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                        active_triangles.push_back(tri);
+                    }
+                }
+                
+                size_t valid_tri_count = active_triangles.size();
+                if (valid_tri_count > 0) {
+                     // Parallelize vertex update on the DENSE list (safe indexing)
+                    #pragma omp parallel for
+                    for (int i = 0; i < (int)valid_tri_count; ++i) {
+                        const auto& tri = active_triangles[i];
+                        
+                        // Direct write to mapped Embree buffer
+                        vertex_buffer[i * 3 + 0] = tri->getVertexPosition(0);
+                        vertex_buffer[i * 3 + 1] = tri->getVertexPosition(1);
+                        vertex_buffer[i * 3 + 2] = tri->getVertexPosition(2);
+
+                        // Update shadow cache in TriangleData if necessary
+                        if (i < triangle_data.size()) {
+                            triangle_data[i].v0 = tri->getVertexPosition(0);
+                            triangle_data[i].v1 = tri->getVertexPosition(1);
+                            triangle_data[i].v2 = tri->getVertexPosition(2);
+
+                            if (triangle_data[i].n0 != Vec3()) {
+                                triangle_data[i].n0 = tri->getVertexNormal(0);
+                                triangle_data[i].n1 = tri->getVertexNormal(1);
+                                triangle_data[i].n2 = tri->getVertexNormal(2);
+                            }
+                        }
+                    }
+
+                    rtcUpdateGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0);
+                    rtcCommitGeometry(geom);
+                    geometry_committed = true;
+                }
+            }
+        }
+    }
+
+    // 2. Update Instance Transforms (Rigid Body)
+    if (!instance_objects.empty()) {
+        // Iterate over stored instances and update their transforms
+        for (size_t geomID = 0; geomID < instance_objects.size(); ++geomID) {
+            const HittableInstance* inst = instance_objects[geomID];
+            if (!inst) continue;
+            
+            // Skip if this slot matches triangle_geom_id (though instance_objects should be null there usually? 
+            // no, instance_objects is sparse or we loop carefully?
+            // current implementation: instance_objects resizes to Max ID.
+            // If triangle_geom_id is 0, instance_objects[0] is likely null/garbage if not initialized carefully?
+            // In build(), we resize instance_objects but only write to instance slots.
+            // Initialize with nullptr.
+            if (geomID == triangle_geom_id) continue;
+
+            RTCGeometry inst_geom = rtcGetGeometry(scene, (unsigned)geomID);
+            if (!inst_geom) continue;
+
+            // Check if it's actually an instance geometry? 
+            // Assume yes based on our tracking.
+
+            // Update Transform
+             float transform[12];
+            // Column 0 (X axis)
+            transform[0] = inst->transform.m[0][0];
+            transform[1] = inst->transform.m[1][0];
+            transform[2] = inst->transform.m[2][0];
+            
+            // Column 1 (Y axis)
+            transform[3] = inst->transform.m[0][1];
+            transform[4] = inst->transform.m[1][1];
+            transform[5] = inst->transform.m[2][1];
+            
+            // Column 2 (Z axis)
+            transform[6] = inst->transform.m[0][2];
+            transform[7] = inst->transform.m[1][2];
+            transform[8] = inst->transform.m[2][2];
+             
+            // Column 3 (Translation)
+            transform[9]  = inst->transform.m[0][3];
+            transform[10] = inst->transform.m[1][3];
+            transform[11] = inst->transform.m[2][3];
+
+            rtcSetGeometryTransform(inst_geom, 0, RTC_FORMAT_FLOAT3X4_COLUMN_MAJOR, transform);
+            rtcCommitGeometry(inst_geom);
+            geometry_committed = true;
+        }
+    }
+
+    if (geometry_committed) {
+         rtcCommitScene(scene);
+    }
+}
+
+bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
+    RTCRayHit rayhit = {};
+    RTCIntersectArguments args;
+    rtcInitIntersectArguments(&args);
+    args.flags = RTC_RAY_QUERY_FLAG_NONE;
+
+    while (true) {
+        rayhit.ray.org_x = ray.origin.x;
+        rayhit.ray.org_y = ray.origin.y;
+        rayhit.ray.org_z = ray.origin.z;
+        rayhit.ray.dir_x = ray.direction.x;
+        rayhit.ray.dir_y = ray.direction.y;
+        rayhit.ray.dir_z = ray.direction.z;
+        rayhit.ray.tnear = t_min;
+        rayhit.ray.tfar = t_max;
+        rayhit.ray.mask = -1;
+        rayhit.ray.flags = 0;
+        rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+
+        rtcIntersect1(scene, &rayhit, &args);
+
+        if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
+
+        // 1. Triangle Alpha Test
+        if (rayhit.hit.geomID == triangle_geom_id || rayhit.hit.geomID < instance_objects.size()) {
+            Material* mat = nullptr;
+            Vec2 uv(0,0);
+            
+            if (rayhit.hit.geomID == triangle_geom_id) {
+                const TriangleData& tri = triangle_data[rayhit.hit.primID];
+                float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
+                uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                mat = tri.getMaterial();
+            } else {
+                const HittableInstance* inst = instance_objects[rayhit.hit.geomID];
+                if (inst) {
+                    auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                    if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
+                        const TriangleData& tri = child_bvh->triangle_data[rayhit.hit.primID];
+                        float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
+                        uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                        mat = tri.getMaterial();
+                    }
+                }
+            }
+
+            if (mat) {
+                float opacity = mat->get_opacity(uv);
+                if (Vec3::random_float() > opacity) {
+                    t_min = rayhit.ray.tfar + 0.001f;
+                    if (t_min >= t_max) return false;
+                    continue; // Skip and check behind
+                }
+            }
+            return true; // Opaque hit
+        } 
+        // 2. Volume Shadowing
+        else if (rayhit.hit.geomID == vdb_geom_id) {
+            unsigned int prim_id = rayhit.hit.primID;
+            if (prim_id < vdb_objects.size()) {
+                const VDBVolume* vdb = vdb_objects[prim_id];
+                float t_enter, t_exit;
+                if (vdb->intersectTransformedAABB(ray, t_min, t_max, t_enter, t_exit)) {
+                    float step_size = 0.5f; 
+                    if (vdb->volume_shader) step_size = vdb->volume_shader->quality.step_size * 2.0f;
+                    auto& mgr = VDBVolumeManager::getInstance();
+                    int vid = vdb->getVDBVolumeID();
+                    Matrix4x4 inv = vdb->getInverseTransform();
+                    float density_mult = (vdb->volume_shader ? vdb->volume_shader->density.multiplier : 1.0f) * vdb->density_scale;
+                    
+                    float t = t_enter + Vec3::random_float() * step_size;
+                    float transmittance = 1.0f;
+                    while (t < t_exit) {
+                        Vec3 local_pos = inv.transform_point(ray.at(t));
+                        float d = mgr.sampleDensityCPU(vid, local_pos.x, local_pos.y, local_pos.z);
+                        if (d > 0.001f) transmittance *= exp(-d * density_mult * step_size);
+                        if (transmittance < 0.01f) break;
+                        t += step_size;
+                    }
+
+                    if (Vec3::random_float() > transmittance) return true; // Blocked
+                    else {
+                        t_min = t_exit + 0.001f;
+                        if (t_min >= t_max) return false;
+                        continue; // Pass through volume
+                    }
+                }
+            }
+        }
+        return true; // Fallback
+    }
+}
+void EmbreeBVH::buildFromTriangleData(const std::vector<TriangleData>& triangles) {
+    triangle_data = triangles; // Store triangle data
+
+    if (triangles.empty()) return;
+
+    RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+
+    // Allocate buffers directly
+    Vec3* vertex_buffer = (Vec3*)rtcSetNewGeometryBuffer(
+        geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3,
+        sizeof(Vec3), triangles.size() * 3
+    );
+
+    unsigned* index_buffer = (unsigned*)rtcSetNewGeometryBuffer(
+        geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3,
+        sizeof(unsigned) * 3, triangles.size()
+    );
+
+    // Write directly to buffers (no intermediate vectors!)
+    for (size_t i = 0; i < triangles.size(); ++i) {
+        const auto& tri = triangles[i];
+        unsigned base_idx = static_cast<unsigned>(i * 3);
+
+        // Vertices
+        vertex_buffer[base_idx + 0] = tri.v0;
+        vertex_buffer[base_idx + 1] = tri.v1;
+        vertex_buffer[base_idx + 2] = tri.v2;
+
+        // Indices
+        index_buffer[i * 3 + 0] = base_idx + 0;
+        index_buffer[i * 3 + 1] = base_idx + 1;
+        index_buffer[i * 3 + 2] = base_idx + 2;
+    }
+
+    rtcCommitGeometry(geom);
+    rtcAttachGeometry(scene, geom);
+    rtcReleaseGeometry(geom);
+
+    rtcCommitScene(scene);
+}
+
+bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bool ignore_volumes) const {
+    RTCRayHit rayhit = {};
+    RTCIntersectArguments args;
+    rtcInitIntersectArguments(&args);
+
+    // STOCHASTIC ALPHA TEST LOOP
+    while (true) {
+        rayhit.ray.org_x = ray.origin.x;
+        rayhit.ray.org_y = ray.origin.y;
+        rayhit.ray.org_z = ray.origin.z;
+        rayhit.ray.dir_x = ray.direction.x;
+        rayhit.ray.dir_y = ray.direction.y;
+        rayhit.ray.dir_z = ray.direction.z;
+        rayhit.ray.tnear = t_min;
+        rayhit.ray.tfar = t_max;
+        rayhit.ray.mask = ignore_volumes ? 0x01 : 0xFFFFFFFF; // Masking handles volumes!
+        rayhit.ray.flags = 0;
+        rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+        rayhit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
+
+        rtcIntersect1(scene, &rayhit, &args);
+
+        if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
+
+        // Check Alpha if it's a triangle
+        Material* mat = nullptr;
+        Vec2 uv(0,0);
+        if (rayhit.hit.geomID == triangle_geom_id) {
+            const TriangleData& tri = triangle_data[rayhit.hit.primID];
+            float u = rayhit.hit.u;
+            float v = rayhit.hit.v;
+            float w = 1.0f - u - v;
+            uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+            mat = tri.getMaterial();
+        } else if (rayhit.hit.geomID < instance_objects.size()) {
+            const HittableInstance* inst = instance_objects[rayhit.hit.geomID];
+            if (inst) {
+                auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
+                    const TriangleData& tri = child_bvh->triangle_data[rayhit.hit.primID];
+                    float u = rayhit.hit.u;
+                    float v = rayhit.hit.v;
+                    float w = 1.0f - u - v;
+                    uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                    mat = tri.getMaterial();
+                }
+            }
+        }
+
+        if (mat) {
+            float opacity = mat->get_opacity(uv);
+            if (Vec3::random_float() > opacity) {
+                // Transparent: continue ray from this point
+                t_min = rayhit.ray.tfar + 0.001f;
+                if (t_min >= t_max) return false;
+                continue;
+            }
+        }
+        
+        break; // Hit is opaque enough or it's a volume
+    }
+
+    if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID) {
+        
+        // [New Logic]
+        if (rayhit.hit.geomID == vdb_geom_id) {
+            // Hit VDB Volume (User Geometry)
+            unsigned int prim_id = rayhit.hit.primID;
+            if (prim_id < vdb_objects.size()) {
+                const VDBVolume* vdb = vdb_objects[prim_id];
+                rec.t = rayhit.ray.tfar;
+                rec.point = ray.at(rec.t);
+                rec.vdb_volume = vdb;
+                rec.normal = Vec3(0.0f, 1.0f, 0.0f); // Dummy normal (not used for volume)
+                rec.set_face_normal(ray, rec.normal);
+                return true;
+            }
+        }
+        else if (rayhit.hit.geomID == triangle_geom_id) {
+            // Hit Local Triangle
+            int prim_id = rayhit.hit.primID;
+            const TriangleData& tri = triangle_data[prim_id];
+
+            float u = rayhit.hit.u;
+            float v = rayhit.hit.v;
+            float w = 1.0f - u - v;
+
+            rec.normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+            rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
+            rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
+            rec.uv = Vec2(rec.u, rec.v); 
+            rec.t = rayhit.ray.tfar;
+            rec.point = ray.at(rec.t); 
+            rec.set_face_normal(ray, rec.normal);
+            rec.material = tri.getMaterialShared();
+            rec.materialID = tri.materialID;
+            rec.is_instance_hit = false; // Local geometry (e.g. Terrain)
+            rec.triangle = tri.original_ptr; // Restore identity
+            return true;
+        } 
+        else if (rayhit.hit.geomID < instance_objects.size()) {
+            // Hit Instance
+            rec.is_instance_hit = true; // Mark as instance for filtering
+            const HittableInstance* inst = instance_objects[rayhit.hit.geomID];
+            if (inst) {
+                // We need to fetch the child data
+                auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                if (child_bvh) {
+                     int prim_id = rayhit.hit.primID;
+                     if (prim_id < child_bvh->triangle_data.size()) {
+                         const TriangleData& tri = child_bvh->triangle_data[prim_id];
+
+                         float u = rayhit.hit.u;
+                         float v = rayhit.hit.v;
+                         float w = 1.0f - u - v;
+                         
+                          // Interpolate Local Normal
+                         Vec3 local_normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+                         
+                         // Transform Normal to World using Instance Transform
+                         // Assuming uniform scale, transform_vector (rotation) is sufficient.
+                         // For non-uniform, use inverse transpose (not easily available without computing it)
+                         // But we can key off inv_transform if available or just use transform_vector
+                         rec.normal = inst->transform.transform_vector(local_normal).normalize();
+
+                         rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
+                         rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
+                         rec.uv = Vec2(rec.u, rec.v); 
+                         rec.t = rayhit.ray.tfar;
+                         rec.point = ray.at(rec.t); 
+                         rec.set_face_normal(ray, rec.normal);
+                         rec.material = tri.getMaterialShared();
+                         rec.materialID = tri.materialID;
+                         rec.triangle = tri.original_ptr; // Restore identity (Source Mesh)
+                         return true;
+                     }
+                }
+            }
+        }
+    }
+    return false;
+}
+void EmbreeBVH::clearAndRebuild(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    rtcReleaseScene(scene);
+    scene = rtcNewScene(device);
+    build(objects);
+}
+
+// OptixGeometryData icin tam donusumlu export metodu
+OptixGeometryData EmbreeBVH::exportToOptixData() const {
+    OptixGeometryData data;
+
+    for (const auto& tri : triangle_data) {
+        uint32_t base_index = static_cast<uint32_t>(data.vertices.size());
+
+        // Vertexler
+        data.vertices.push_back(make_float3(tri.v0.x, tri.v0.y, tri.v0.z));
+        data.vertices.push_back(make_float3(tri.v1.x, tri.v1.y, tri.v1.z));
+        data.vertices.push_back(make_float3(tri.v2.x, tri.v2.y, tri.v2.z));
+
+        // Index
+        data.indices.push_back(make_uint3(base_index, base_index + 1, base_index + 2));
+
+        // Normaller
+        data.normals.push_back(make_float3(tri.n0.x, tri.n0.y, tri.n0.z));
+        data.normals.push_back(make_float3(tri.n1.x, tri.n1.y, tri.n1.z));
+        data.normals.push_back(make_float3(tri.n2.x, tri.n2.y, tri.n2.z));
+
+        // UV
+        data.uvs.push_back(make_float2(tri.t0.x, tri.t0.y));
+        data.uvs.push_back(make_float2(tri.t1.x, tri.t1.y));
+        data.uvs.push_back(make_float2(tri.t2.x, tri.t2.y));
+
+        // Material
+        GpuMaterial gpuMat = {};  // Zero-initialize all fields
+        auto material = tri.getMaterialShared();
+        if (material) {
+            Vec3 albedoColor = material->getPropertyValue(material->albedoProperty, Vec2(0.5f, 0.5f));
+            gpuMat.albedo = make_float3(albedoColor.x, albedoColor.y, albedoColor.z);
+            gpuMat.opacity = material->get_opacity(Vec2(0.5f, 0.5f));
+            gpuMat.roughness = material->getPropertyValue(material->roughnessProperty, Vec2(0.5f, 0.5f)).y;
+            gpuMat.metallic = material->getPropertyValue(material->metallicProperty, Vec2(0.5f, 0.5f)).z;
+            gpuMat.transmission = material->getPropertyValue(material->transmissionProperty, Vec2(0.5f, 0.5f)).x;
+            Vec3 emissionColor = material->getEmission(Vec2(0.5f, 0.5f), Vec3(0,0,0));
+            gpuMat.emission = make_float3(emissionColor.x, emissionColor.y, emissionColor.z);
+            gpuMat.ior = material->getIOR();
+            
+            // SSS defaults (will be overwritten by PrincipledBSDF if available)
+            gpuMat.subsurface = 0.0f;
+            gpuMat.subsurface_color = make_float3(1.0f, 0.8f, 0.6f);
+            gpuMat.subsurface_radius = make_float3(1.0f, 0.2f, 0.1f);
+            gpuMat.subsurface_scale = 0.05f;
+            gpuMat.subsurface_anisotropy = 0.0f;
+            gpuMat.subsurface_ior = 1.4f;
+            
+            // Clear Coat defaults
+            gpuMat.clearcoat = 0.0f;
+            gpuMat.clearcoat_roughness = 0.03f;
+            
+            // Translucent default
+            gpuMat.translucent = 0.0f;
+            
+            // Other defaults
+            gpuMat.anisotropic = 0.0f;
+            gpuMat.sheen = 0.0f;
+            gpuMat.sheen_tint = 0.0f;
+        }
+        else {
+            // Fallback pink material - properly initialize all fields
+            gpuMat.albedo = make_float3(1.0f, 0.0f, 1.0f);
+            gpuMat.opacity = 1.0f;
+            gpuMat.roughness = 0.5f;
+            gpuMat.metallic = 0.0f;
+            gpuMat.transmission = 0.0f;
+            gpuMat.emission = make_float3(0.0f, 0.0f, 0.0f);
+            gpuMat.ior = 1.5f;
+            
+            // SSS defaults
+            gpuMat.subsurface = 0.0f;
+            gpuMat.subsurface_color = make_float3(1.0f, 0.8f, 0.6f);
+            gpuMat.subsurface_radius = make_float3(1.0f, 0.2f, 0.1f);
+            gpuMat.subsurface_scale = 0.05f;
+            gpuMat.subsurface_anisotropy = 0.0f;
+            gpuMat.subsurface_ior = 1.4f;
+            
+            // Clear Coat defaults
+            gpuMat.clearcoat = 0.0f;
+            gpuMat.clearcoat_roughness = 0.03f;
+            
+            // Translucent default
+            gpuMat.translucent = 0.0f;
+            
+            // Other defaults
+            gpuMat.anisotropic = 0.0f;
+            gpuMat.sheen = 0.0f;
+            gpuMat.sheen_tint = 0.0f;
+        }
+
+        // Benzersiz materyal kontrolu (basit ekle, hash'e gerek yok burada)
+        int matIndex = -1;
+        for (int m = 0; m < data.materials.size(); ++m) {
+            if (memcmp(&data.materials[m], &gpuMat, sizeof(GpuMaterial)) == 0) {
+                matIndex = m;
+                break;
+            }
+        }
+        if (matIndex == -1) {
+            data.materials.push_back(gpuMat);
+            matIndex = static_cast<int>(data.materials.size()) - 1;
+        }
+        data.material_indices.push_back(matIndex);
+    }
+
+    return data;
+}
+void EmbreeBVH::hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes) const {
+    alignas(32) int valid[8] = { -1, -1, -1, -1, -1, -1, -1, -1 };
+    alignas(32) float t_near_vals[8];
+    for (int i = 0; i < 8; i++) t_near_vals[i] = t_min;
+    
+    __m256 active_mask = _mm256_set1_ps(-0.0f); // All lanes active initially
+
+    while (true) {
+        RTCRayHit8 rayhit8;
+        bool any_active = false;
+        for (int i = 0; i < 8; i++) {
+            if (_mm256_movemask_ps(active_mask) & (1 << i)) {
+                rayhit8.ray.org_x[i] = r.orig_x.get(i);
+                rayhit8.ray.org_y[i] = r.orig_y.get(i);
+                rayhit8.ray.org_z[i] = r.orig_z.get(i);
+                rayhit8.ray.dir_x[i] = r.dir_x.get(i);
+                rayhit8.ray.dir_y[i] = r.dir_y.get(i);
+                rayhit8.ray.dir_z[i] = r.dir_z.get(i);
+                rayhit8.ray.tnear[i] = t_near_vals[i];
+                rayhit8.ray.tfar[i] = t_max;
+                rayhit8.ray.mask[i] = ignore_volumes ? 0x01 : 0xFFFFFFFF;
+                rayhit8.ray.flags[i] = 0;
+                rayhit8.hit.geomID[i] = RTC_INVALID_GEOMETRY_ID;
+                rayhit8.hit.instID[0][i] = RTC_INVALID_GEOMETRY_ID;
+                valid[i] = -1;
+                any_active = true;
+            } else {
+                valid[i] = 0;
+            }
+        }
+
+        if (!any_active) break;
+
+        RTCIntersectArguments args;
+        rtcInitIntersectArguments(&args);
+        rtcIntersect8(valid, scene, &rayhit8, &args);
+
+        __m256 next_active_mask = _mm256_setzero_ps();
+        bool need_another_pass = false;
+
+        for (int i = 0; i < 8; i++) {
+            if (!((_mm256_movemask_ps(active_mask)) & (1 << i))) continue;
+            if (rayhit8.hit.geomID[i] == RTC_INVALID_GEOMETRY_ID) continue;
+
+            // 1. Check Alpha
+            Material* mat = nullptr;
+            Vec2 uv(0,0);
+            if (rayhit8.hit.geomID[i] == triangle_geom_id) {
+                const TriangleData& tri = triangle_data[rayhit8.hit.primID[i]];
+                float u = rayhit8.hit.u[i], v = rayhit8.hit.v[i], w = 1.0f - u - v;
+                uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                mat = tri.getMaterial();
+            } else if (rayhit8.hit.geomID[i] < instance_objects.size()) {
+                const HittableInstance* inst = instance_objects[rayhit8.hit.geomID[i]];
+                if (inst) {
+                    auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                    if (child_bvh && rayhit8.hit.primID[i] < child_bvh->triangle_data.size()) {
+                        const TriangleData& tri = child_bvh->triangle_data[rayhit8.hit.primID[i]];
+                        float u = rayhit8.hit.u[i], v = rayhit8.hit.v[i], w = 1.0f - u - v;
+                        uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                        mat = tri.getMaterial();
+                    }
+                }
+            }
+
+            if (mat) {
+                float opacity = mat->get_opacity(uv);
+                if (Vec3::random_float() > opacity) {
+                    t_near_vals[i] = rayhit8.ray.tfar[i] + 0.001f;
+                    if (t_near_vals[i] < t_max) {
+                        ((int*)&next_active_mask)[i] = 0xFFFFFFFF;
+                        need_another_pass = true;
+                        continue;
+                    }
+                }
+            }
+
+            // 2. Process Result (Opaque or Volume)
+            HitRecordPacket tr;
+            bool found = false;
+
+        if (rayhit8.hit.geomID[i] == vdb_geom_id) {
+            unsigned int prim_id = rayhit8.hit.primID[i];
+            if (prim_id < vdb_objects.size()) {
+                const VDBVolume* vdb = vdb_objects[prim_id];
+                ((float*)&tr.t.data)[i] = rayhit8.ray.tfar[i];
+                // Point calculation handled below
+                // Volumes have dummy normals
+                ((float*)&tr.normal_z.data)[i] = 0.0f;
+                
+                // [FIX] Populate VDB data so Renderer recognizes it as a volume
+                tr.vdb_volume[i] = vdb; 
+                ((int*)&tr.mat_id)[i] = 0xFFFF; // Special ID for Volume
+
+                found = true;
+            }
+        }
+        else if (rayhit8.hit.geomID[i] == triangle_geom_id) {
+            int prim_id = rayhit8.hit.primID[i];
+            const TriangleData& tri = triangle_data[prim_id];
+
+            float u = rayhit8.hit.u[i];
+            float v = rayhit8.hit.v[i];
+            float w = 1.0f - u - v;
+
+            Vec3 norm = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+            
+            // Flip normal for back-faces
+            Vec3 ray_dir(r.dir_x.get(i), r.dir_y.get(i), r.dir_z.get(i));
+            bool front_face = Vec3::dot(norm, ray_dir) < 0.0f;
+            if (!front_face) norm = -norm;
+            ((int*)&tr.front_face.m256_f32)[i] = front_face ? 0xFFFFFFFF : 0;
+
+            ((float*)&tr.normal_x.data)[i] = norm.x;
+            ((float*)&tr.normal_y.data)[i] = norm.y;
+            ((float*)&tr.normal_z.data)[i] = norm.z;
+            
+            ((float*)&tr.u.data)[i] = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
+            ((float*)&tr.v.data)[i] = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
+            ((float*)&tr.t.data)[i] = rayhit8.ray.tfar[i];
+            ((int*)&tr.mat_id)[i] = tri.materialID;
+            found = true;
+        }
+        else if (rayhit8.hit.geomID[i] < instance_objects.size()) {
+            const HittableInstance* inst = instance_objects[rayhit8.hit.geomID[i]];
+            if (inst) {
+                auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                if (child_bvh) {
+                    int prim_id = rayhit8.hit.primID[i];
+                    if (prim_id < child_bvh->triangle_data.size()) {
+                        const TriangleData& tri = child_bvh->triangle_data[prim_id];
+                        float u = rayhit8.hit.u[i];
+                        float v = rayhit8.hit.v[i];
+                        float w = 1.0f - u - v;
+                        
+                        Vec3 local_normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+                        Vec3 world_normal = inst->transform.transform_vector(local_normal).normalize();
+                        
+                        // Flip normal for back-faces (standard for double-sided materials like leaves)
+                        Vec3 ray_dir(r.dir_x.get(i), r.dir_y.get(i), r.dir_z.get(i));
+                        bool front_face = Vec3::dot(world_normal, ray_dir) < 0.0f;
+                        if (!front_face) world_normal = -world_normal;
+                        ((int*)&tr.front_face.m256_f32)[i] = front_face ? 0xFFFFFFFF : 0;
+
+                        ((float*)&tr.normal_x.data)[i] = world_normal.x;
+                        ((float*)&tr.normal_y.data)[i] = world_normal.y;
+                        ((float*)&tr.normal_z.data)[i] = world_normal.z;
+                        
+                        ((float*)&tr.u.data)[i] = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
+                        ((float*)&tr.v.data)[i] = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
+                        ((float*)&tr.t.data)[i] = rayhit8.ray.tfar[i];
+                        ((int*)&tr.mat_id)[i] = tri.materialID;
+                        found = true;
+                    }
+                }
+            }
+        }
+
+        if (found) {
+            // Calculate hit point for this lane
+            float tt = ((float*)&tr.t.data)[i];
+            ((float*)&tr.p_x.data)[i] = r.orig_x.get(i) + tt * r.dir_x.get(i);
+            ((float*)&tr.p_y.data)[i] = r.orig_y.get(i) + tt * r.dir_y.get(i);
+            ((float*)&tr.p_z.data)[i] = r.orig_z.get(i) + tt * r.dir_z.get(i);
+            
+            // Generate lane mask for this specific hit
+            alignas(32) float lane_mask_arr[8] = {0};
+            lane_mask_arr[i] = -0.0f; // Bitwise all 1s for float
+            __m256 lane_mask = _mm256_load_ps(lane_mask_arr);
+            
+            rec.merge_if_closer(tr, lane_mask);
+            }
+        }
+
+        active_mask = next_active_mask;
+        if (!need_another_pass) break;
+    }
+}
+
+__m256 EmbreeBVH::occluded_packet(const RayPacket& packet, float t_min, __m256 t_max) const {
+    alignas(32) int occluded_mask[8] = {0};
+    alignas(32) float t_near_vals[8];
+    alignas(32) float t_max_vals[8];
+    _mm256_store_ps(t_max_vals, t_max);
+    for (int i = 0; i < 8; i++) t_near_vals[i] = t_min;
+
+    __m256 active_mask = _mm256_set1_ps(-0.0f); // All lanes active initially (bits 31 are 1)
+    
+    RTCIntersectArguments args;
+    rtcInitIntersectArguments(&args);
+
+    while (true) {
+        RTCRayHit8 rayhit8;
+        bool any_active = false;
+        alignas(32) int valid[8];
+
+        for (int i = 0; i < 8; i++) {
+            if (((int*)&active_mask)[i] != 0) {
+                rayhit8.ray.org_x[i] = packet.orig_x.get(i);
+                rayhit8.ray.org_y[i] = packet.orig_y.get(i);
+                rayhit8.ray.org_z[i] = packet.orig_z.get(i);
+                rayhit8.ray.dir_x[i] = packet.dir_x.get(i);
+                rayhit8.ray.dir_y[i] = packet.dir_y.get(i);
+                rayhit8.ray.dir_z[i] = packet.dir_z.get(i);
+                rayhit8.ray.tnear[i] = t_near_vals[i];
+                rayhit8.ray.tfar[i] = t_max_vals[i];
+                rayhit8.ray.mask[i] = -1;
+                rayhit8.ray.flags[i] = 0;
+                rayhit8.hit.geomID[i] = RTC_INVALID_GEOMETRY_ID;
+                rayhit8.hit.instID[0][i] = RTC_INVALID_GEOMETRY_ID;
+                valid[i] = -1;
+                any_active = true;
+            } else {
+                valid[i] = 0;
+            }
+        }
+
+        if (!any_active) break;
+
+        rtcIntersect8(valid, scene, &rayhit8, &args);
+
+        bool need_another_pass = false;
+        for (int i = 0; i < 8; i++) {
+            if (valid[i] == 0 || rayhit8.hit.geomID[i] == RTC_INVALID_GEOMETRY_ID) {
+                ((int*)&active_mask)[i] = 0; // Missed or finished
+                continue;
+            }
+
+            // check alpha
+            Material* mat = nullptr;
+            Vec2 uv(0,0);
+            if (rayhit8.hit.geomID[i] == triangle_geom_id) {
+                const TriangleData& tri = triangle_data[rayhit8.hit.primID[i]];
+                float u = rayhit8.hit.u[i], v = rayhit8.hit.v[i], w = 1.0f - u - v;
+                uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                mat = tri.getMaterial();
+            } else if (rayhit8.hit.geomID[i] < instance_objects.size()) {
+                const HittableInstance* inst = instance_objects[rayhit8.hit.geomID[i]];
+                if (inst) {
+                    auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                    if (child_bvh && rayhit8.hit.primID[i] < child_bvh->triangle_data.size()) {
+                        const TriangleData& tri = child_bvh->triangle_data[rayhit8.hit.primID[i]];
+                        float u = rayhit8.hit.u[i], v = rayhit8.hit.v[i], w = 1.0f - u - v;
+                        uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                        mat = tri.getMaterial();
+                    }
+                }
+            } else if (rayhit8.hit.geomID[i] == vdb_geom_id) {
+                // For VDB in shadows, we do a scalar check for now as it's complex to vectorize within the packet
+                // but can be optimized later.
+                Ray r(Vec3(packet.orig_x.get(i), packet.orig_y.get(i), packet.orig_z.get(i)),
+                      Vec3(packet.dir_x.get(i), packet.dir_y.get(i), packet.dir_z.get(i)));
+                
+                const VDBVolume* vdb = vdb_objects[rayhit8.hit.primID[i]];
+                float t_enter, t_exit;
+                if (vdb->intersectTransformedAABB(r, t_near_vals[i], t_max_vals[i], t_enter, t_exit)) {
+                    float step_size = 0.5f; 
+                    if (vdb->volume_shader) step_size = vdb->volume_shader->quality.step_size * 2.0f;
+                    auto& mgr = VDBVolumeManager::getInstance();
+                    int vid = vdb->getVDBVolumeID();
+                    Matrix4x4 inv = vdb->getInverseTransform();
+                    float density_mult = (vdb->volume_shader ? vdb->volume_shader->density.multiplier : 1.0f) * vdb->density_scale;
+                    float t_march = t_enter + Vec3::random_float() * step_size;
+                    float transmittance = 1.0f;
+                    while (t_march < t_exit) {
+                        Vec3 local_pos = inv.transform_point(r.at(t_march));
+                        float d = mgr.sampleDensityCPU(vid, local_pos.x, local_pos.y, local_pos.z);
+                        if (d > 0.001f) transmittance *= exp(-d * density_mult * step_size);
+                        if (transmittance < 0.01f) break;
+                        t_march += step_size;
+                    }
+
+                    if (Vec3::random_float() > transmittance) {
+                        occluded_mask[i] = 0xFFFFFFFF;
+                        ((int*)&active_mask)[i] = 0;
+                        continue;
+                    } else {
+                        t_near_vals[i] = t_exit + 0.001f;
+                        if (t_near_vals[i] < t_max_vals[i]) {
+                            need_another_pass = true;
+                            continue;
+                        } else {
+                            ((int*)&active_mask)[i] = 0;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if (mat) {
+                float opacity = mat->get_opacity(uv);
+                if (Vec3::random_float() > opacity) {
+                    t_near_vals[i] = rayhit8.ray.tfar[i] + 0.001f;
+                    if (t_near_vals[i] < t_max_vals[i]) {
+                        need_another_pass = true;
+                        continue;
+                    } else {
+                        ((int*)&active_mask)[i] = 0;
+                        continue;
+                    }
+                }
+            }
+
+            // Opaque hit found
+            occluded_mask[i] = 0xFFFFFFFF;
+            ((int*)&active_mask)[i] = 0;
+        }
+
+        if (!need_another_pass) break;
+    }
+
+    return _mm256_load_ps((float*)occluded_mask);
+}

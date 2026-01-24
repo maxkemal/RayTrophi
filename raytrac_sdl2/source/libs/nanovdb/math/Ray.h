@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Ray.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -555,3 +565,4 @@ using Ray [[deprecated("Use nanovdb::math::Ray instead")]] = math::Ray<RealT>;
 } // namespace nanovdb =======================================================
 
 #endif // NANOVDB_MATH_RAY_HAS_BEEN_INCLUDED
+

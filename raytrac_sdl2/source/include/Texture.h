@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Texture.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -621,6 +631,39 @@ public:
         //                " | " + std::to_string(width) + "x" + std::to_string(height) +
         //                " | " + std::to_string(duration.count()) + "ms");
     }
+
+    // ===== Constructor Raw Data (Standard Vectors) =====
+    Texture(int w, int h, int channels, const std::vector<unsigned char>& data, TextureType type, const std::string& textureName = "")
+        : type(type), is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+        
+        width = w;
+        height = h;
+        name = textureName;
+        m_is_loaded = true;
+        is_gpu_uploaded = false;
+        
+        pixels.resize(width * height);
+        
+        if (channels == 4) {
+             #pragma omp parallel for
+             for(int i=0; i<width*height; ++i) {
+                 pixels[i] = CompactVec4(data[i*4+0], data[i*4+1], data[i*4+2], data[i*4+3]);
+                 if(data[i*4+3] < 255) has_alpha = true;
+             }
+        } else if (channels == 3) {
+             #pragma omp parallel for
+             for(int i=0; i<width*height; ++i) {
+                 pixels[i] = CompactVec4(data[i*3+0], data[i*3+1], data[i*3+2], 255);
+             }
+        } else if (channels == 1) {
+             #pragma omp parallel for
+             for(int i=0; i<width*height; ++i) {
+                 uint8_t v = data[i];
+                 pixels[i] = CompactVec4(v, v, v, 255);
+             }
+             is_gray_scale = true;
+        }
+    }
     
     Vec3 get_color(float u, float v) const {
         if (!m_is_loaded) return Vec3(0);
@@ -1097,3 +1140,4 @@ private:
     cudaArray_t cuda_array = nullptr;
     cudaTextureObject_t tex_obj = 0;
 };
+

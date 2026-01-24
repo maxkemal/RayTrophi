@@ -1,3 +1,13 @@
+ï»¿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Vec3SIMD.h
+* Author:        Kemal DemirtaÃ…Å¸
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #ifndef VEC3SIMD_H
 #define VEC3SIMD_H
 
@@ -9,10 +19,10 @@
 #include <algorithm>
 #include <limits>
 
-// M_PI'yi float olarak tanýmla
+// M_PI'yi float olarak tanÄ±mla
 #define M_PI 3.14159265358979323846f
 
-// ÖNEMLÝ: Vec3SIMD, 8 farklý float'ý (örneðin 8 farklý ýþýnýn X bileþenini) tutar.
+// Ã–NEMLÄ°: Vec3SIMD, 8 farklÄ± float'Ä± (Ã¶rneÄŸin 8 farklÄ± Ä±ÅŸÄ±nÄ±n X bileÅŸenini) tutar.
 class Vec3SIMD {
 public:
     __m256 data;
@@ -22,21 +32,21 @@ public:
     Vec3SIMD(__m256 d);
     Vec3SIMD(float val); // set1
 
-    // Tek bir 3D Vektörü AVX'e Yükler (Ýlk 3 bileþeni doldurur, diðerleri 0)
-    // DÝKKAT: Yavaþlamaya neden olabilir, sadece skaler entegrasyon için.
+    // Tek bir 3D VektÃ¶rÃ¼ AVX'e YÃ¼kler (Ä°lk 3 bileÅŸeni doldurur, diÄŸerleri 0)
+    // DÄ°KKAT: YavaÅŸlamaya neden olabilir, sadece skaler entegrasyon iÃ§in.
     Vec3SIMD(float x, float y, float z);
 
     // Array Constructor
     Vec3SIMD(const float arr[8]);
 
-    // --- Access Operators (Yavaþ, Skaler Kod ile Uyum Ýçin Korundu) ---
+    // --- Access Operators (YavaÅŸ, Skaler Kod ile Uyum Ä°Ã§in Korundu) ---
     float x() const;
     float y() const;
     float z() const;
-    float get(int index) const; // Genel indeksli eriþim
-    float operator[](int i) const { return get(i); } // [] operatörü
+    float get(int index) const; // Genel indeksli eriÅŸim
+    float operator[](int i) const { return get(i); } // [] operatÃ¶rÃ¼
 
-    // --- Aritmetik Operatörler (8x Paralel) ---
+    // --- Aritmetik OperatÃ¶rler (8x Paralel) ---
     Vec3SIMD operator-() const;
 
     Vec3SIMD& operator+=(const Vec3SIMD& v);
@@ -52,7 +62,7 @@ public:
     Vec3SIMD operator*(float scalar) const;
     Vec3SIMD operator/(float scalar) const;
 
-    // --- Karþýlaþtýrma Operatörleri (8x Paralel, __m256 Maskesi Döndürür) ---
+    // --- KarÅŸÄ±laÅŸtÄ±rma OperatÃ¶rleri (8x Paralel, __m256 Maskesi DÃ¶ndÃ¼rÃ¼r) ---
     __m256 operator==(const Vec3SIMD& other) const;
     __m256 operator!=(const Vec3SIMD& other) const;
 
@@ -60,60 +70,84 @@ public:
     Vec3SIMD abs() const;
     Vec3SIMD sqrt() const;
 
-    // --- Statik Yardýmcý Metotlar (Paket Tabanlý) ---
+    // --- Statik YardÄ±mcÄ± Metotlar (Paket TabanlÄ±) ---
     static Vec3SIMD set1(float val);
     static Vec3SIMD setZero();
 
-    // Çoðu bu statik metotlarý çaðýrýr, 3 bileþenin hepsini iþler:
+    // Ã‡oÄŸu bu statik metotlarÄ± Ã§aÄŸÄ±rÄ±r, 3 bileÅŸenin hepsini iÅŸler:
 
-    // 8x Nokta Çarpým: Geriye 8 sonucu içeren __m256 döndürür.
+    // 8x Nokta Ã‡arpÄ±m: Geriye 8 sonucu iÃ§eren __m256 dÃ¶ndÃ¼rÃ¼r.
     static __m256 dot_product_8x(const Vec3SIMD& u_x, const Vec3SIMD& u_y, const Vec3SIMD& u_z,
         const Vec3SIMD& v_x, const Vec3SIMD& v_y, const Vec3SIMD& v_z);
 
-    // 8x Uzunluk Karesi: Geriye 8 sonucu içeren __m256 döndürür.
+    // 8x Uzunluk Karesi: Geriye 8 sonucu iÃ§eren __m256 dÃ¶ndÃ¼rÃ¼r.
     static __m256 length_squared_8x(const Vec3SIMD& u_x, const Vec3SIMD& u_y, const Vec3SIMD& u_z);
 
-    // 8x Normalizasyon: Geriye normalize edilmiþ 3 bileþeni döndürür.
+    // 8x Normalizasyon: Geriye normalize edilmiÅŸ 3 bileÅŸeni dÃ¶ndÃ¼rÃ¼r.
     static void normalize_8x(const Vec3SIMD& u_x, const Vec3SIMD& u_y, const Vec3SIMD& u_z,
         Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z);
 
-    // 8x Çapraz Çarpým (Cross Product): Geriye 3 bileþeni döndürür.
+    // 8x Ã‡apraz Ã‡arpÄ±m (Cross Product): Geriye 3 bileÅŸeni dÃ¶ndÃ¼rÃ¼r.
     static void cross_8x(const Vec3SIMD& u_x, const Vec3SIMD& u_y, const Vec3SIMD& u_z,
         const Vec3SIMD& v_x, const Vec3SIMD& v_y, const Vec3SIMD& v_z,
         Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z);
 
-    // 8x Yansýma (Reflect)
+    // 8x YansÄ±ma (Reflect)
     static void reflect_8x(const Vec3SIMD& v_x, const Vec3SIMD& v_y, const Vec3SIMD& v_z,
         const Vec3SIMD& n_x, const Vec3SIMD& n_y, const Vec3SIMD& n_z,
         Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z);
 
-    // 8x Kýrýlma (Refract)
+    // 8x KÄ±rÄ±lma (Refract)
     static void refract_8x(const Vec3SIMD& uv_x, const Vec3SIMD& uv_y, const Vec3SIMD& uv_z,
         const Vec3SIMD& n_x, const Vec3SIMD& n_y, const Vec3SIMD& n_z,
         const Vec3SIMD& etai_over_etat,
         Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z);
 
 
-    // --- Skaler Uyum ve Legacy Metotlar (Yavaþ) ---
-    // Bu metotlar AVX'in performansýný düþürür, sadece tekil test/kullaným için saklanmýþtýr.
+    // --- Skaler Uyum ve Legacy Metotlar (YavaÅŸ) ---
+    // Bu metotlar AVX'in performansÄ±nÄ± dÃ¼ÅŸÃ¼rÃ¼r, sadece tekil test/kullanÄ±m iÃ§in saklanmÄ±ÅŸtÄ±r.
     float length() const;
     float length_squared() const;
-    float dot(const Vec3SIMD& other) const; // Tek bir skaler deðer döndürür (Hadd gerektirir)
-    bool near_zero() const; // Tek bir vektör için kontrol
-    float max_component() const; // Tek bir vektör için kontrol
+    float dot(const Vec3SIMD& other) const; // Tek bir skaler deÄŸer dÃ¶ndÃ¼rÃ¼r (Hadd gerektirir)
+    bool near_zero() const; // Tek bir vektÃ¶r iÃ§in kontrol
+    float max_component() const; // Tek bir vektÃ¶r iÃ§in kontrol
 
-    // --- Skaler-SIMD Uyum Metotlarý ---
+    // --- Skaler-SIMD Uyum MetotlarÄ± ---
     static Vec3SIMD max(const Vec3SIMD& v, float scalar);
+    static Vec3SIMD min(const Vec3SIMD& a, const Vec3SIMD& b); // Added
+    static Vec3SIMD max(const Vec3SIMD& a, const Vec3SIMD& b); // Added
     static Vec3SIMD clamp(const Vec3SIMD& v, float minVal, float maxVal);
     static Vec3SIMD pow(const Vec3SIMD& v, float exponent);
 
-    // --- Skaler Random Metotlar (Yavaþ) ---
+    // --- AVX2 Math Intrinsics (Phase 1 Upgrade) ---
+    // Trigonometry & Power Functions using Polynomial Approximation
+    static __m256 sin_256(const __m256& x);
+    static __m256 cos_256(const __m256& x);
+    static void sincos_256(const __m256& x, __m256* s, __m256* c);
+    static __m256 acos_256(const __m256& x);
+    static __m256 atan2_256(const __m256& y, const __m256& x);
+    static __m256 pow_256(const __m256& x, const __m256& y);
+    static __m256 exp_256(const __m256& x);
+    static __m256 log_256(const __m256& x);
+    // --- MIS & Helpers ---
+    static __m256 power_heuristic_8x(__m256 f, __m256 g);
+
+    // --- Skaler Random Metotlar (YavaÅŸ) ---
     static float random_float();
+    static __m256 random_float_8x();
     static void random_unit_vector_8x(Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z);
 
 private:
-    static std::mt19937 rng;
-    static std::uniform_real_distribution<float> dist;
+    // static std::mt19937 rng; // REMOVED: Thread-unsafe and slow
+    // static std::uniform_real_distribution<float> dist; // REMOVED
+};
+
+// Represents 8 three-dimensional vectors (SoA layout)
+struct Vec3Packet {
+    Vec3SIMD x, y, z;
+    Vec3Packet() = default;
+    Vec3Packet(const Vec3SIMD& _x, const Vec3SIMD& _y, const Vec3SIMD& _z) : x(_x), y(_y), z(_z) {}
+    Vec3Packet(float _x, float _y, float _z) : x(_x), y(_y), z(_z) {}
 };
 
 // --- Friend Fonksiyonlar (8x Paralel) ---

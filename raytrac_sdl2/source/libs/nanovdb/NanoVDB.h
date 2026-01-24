@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          NanoVDB.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -34,7 +44,7 @@
              have public constructors or destructors.
 
     \details Please see the following paper for more details on the data structure:
-          K. Museth, “VDB: High-Resolution Sparse Volumes with Dynamic Topology”,
+          K. Museth, â€œVDB: High-Resolution Sparse Volumes with Dynamic Topologyâ€,
           ACM Transactions on Graphics 32(3), 2013, which can be found here:
           http://www.museth.org/Ken/Publications_files/Museth_TOG13.pdf
 
@@ -6316,3 +6326,4 @@ struct GetNodeInfo
 } // namespace nanovdb ===================================================================
 
 #endif // end of NANOVDB_NANOVDB_H_HAS_BEEN_INCLUDED
+

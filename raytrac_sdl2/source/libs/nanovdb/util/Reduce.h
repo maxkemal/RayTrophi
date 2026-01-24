@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Reduce.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 
@@ -131,3 +141,4 @@ T reduce(const ContainerT<ArgT...> &c, size_t grainSize, const T& identity, cons
 }// namespace nanovdb
 
 #endif // NANOVDB_UTIL_REDUCE_H_HAS_BEEN_INCLUDED
+

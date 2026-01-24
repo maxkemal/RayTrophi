@@ -1,4 +1,14 @@
-﻿#ifndef TRANSFORM_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Transform.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef TRANSFORM_H
 #define TRANSFORM_H
 
 #include "Matrix4x4.h"
@@ -14,7 +24,7 @@ class Transform {
 public:
     Matrix4x4 base;           // Base transform (from model loading)
     Matrix4x4 current;        // Current animation transform
-    Matrix4x4 final;          // Combined: current * base
+    mutable Matrix4x4 final;          // Combined: current * base
     Matrix4x4 normalTransform; // Cached inverse-transpose for normals
     
     // Decomposed Transform Components (for animation/gizmos)
@@ -58,6 +68,7 @@ public:
 
     void setBase(const Matrix4x4& baseTransform) {
         base = baseTransform;
+        base.decompose(position, rotation, scale); // Fix: Synchronize TRS components for serialization
         dirty = true;
     }
 
@@ -66,20 +77,23 @@ public:
         dirty = true;
     }
 
-    void updateFinal() {
+    void updateFinal() const {
         if (dirty) {
-            final = current * base;
-            updateNormalTransform();
-            dirty = false;
+            const_cast<Transform*>(this)->final = current * base;
+            const_cast<Transform*>(this)->updateNormalTransform();
+            const_cast<Transform*>(this)->dirty = false;
         }
     }
 
-    const Matrix4x4& getFinal() {
+    const Matrix4x4& getFinal() const {
         updateFinal();
         return final;
     }
 
-    const Matrix4x4& getNormalTransform() {
+    const Matrix4x4& getMatrix() const { return getFinal(); }
+    Matrix4x4 getInverseMatrix() const { return getFinal().inverse(); }
+
+    const Matrix4x4& getNormalTransform() const {
         updateFinal();
         return normalTransform;
     }
@@ -88,7 +102,7 @@ public:
     void markDirty() { dirty = true; }
 
 private:
-    bool dirty;
+    mutable bool dirty;
 
     void updateNormalTransform() {
         normalTransform = final.inverse().transpose();
@@ -96,3 +110,4 @@ private:
 };
 
 #endif // TRANSFORM_H
+

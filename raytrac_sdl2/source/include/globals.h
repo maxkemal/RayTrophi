@@ -1,4 +1,14 @@
-﻿#ifndef GLOBALS_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          globals.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef GLOBALS_H
 #define GLOBALS_H
 
 #include <mutex>
@@ -17,6 +27,25 @@ enum class QualityPreset {
     Cinematic = 2     // Highest quality, slowest
 };
 
+// Timeline playback quality presets
+enum class TimelineQualityPreset {
+    Draft = 0,        // 1 sample - fastest, for scrubbing
+    Low = 1,          // 4 samples - basic preview
+    Medium = 2,       // 16 samples - balanced
+    High = 3          // 64 samples - high quality preview
+};
+
+// Helper to get sample count from timeline quality preset
+inline int getTimelineSamplesFromPreset(TimelineQualityPreset preset) {
+    switch (preset) {
+        case TimelineQualityPreset::Draft:  return 1;
+        case TimelineQualityPreset::Low:    return 4;
+        case TimelineQualityPreset::Medium: return 16;
+        case TimelineQualityPreset::High:   return 64;
+        default: return 1;
+    }
+}
+
 // Resolution source for final render
 enum class ResolutionSource {
     Native = 0,       // Use current window/viewport size
@@ -32,6 +61,7 @@ struct RenderSettings {
     int samples_per_pixel = 1;
     int samples_per_pass = 1;
     int max_bounces = 10;
+    int transparent_max_bounces = 10;
 
     // Adaptive Sampling
     bool use_adaptive_sampling = true;
@@ -47,11 +77,14 @@ struct RenderSettings {
     // Backend
     bool use_optix = false;
     bool UI_use_embree = true;
+    bool use_vectorized_renderer = false; // SIMD 8-wide packet tracing vs Scalar
     
     // Animation
     float animation_duration = 1.0f;
     int animation_fps = 24;
-    int animation_samples_per_frame = 1; // New: Samples per frame during playbook
+    int animation_samples_per_frame = 1; // Samples per frame during playback (updated by preset)
+    TimelineQualityPreset timeline_quality_preset = TimelineQualityPreset::Draft; // Easy quality selection
+    bool timeline_use_denoiser = false;  // Apply denoiser during timeline playback
     bool start_animation_render = false;
     bool save_image_requested = false;
 	int animation_start_frame = 0;
@@ -87,6 +120,7 @@ struct RenderSettings {
     
     // Viewport Grid Settings
     bool grid_enabled = false;
+    bool show_background = true;       // NEW: Toggle background visibility
     float grid_fade_distance = 500.0f;  // Units where grid fades out completely
     float viewport_near_clip = 0.01f;   // Objects closer than this won't be seen
     float viewport_far_clip = 5000.0f; // Objects further than this won't be seen
@@ -128,14 +162,14 @@ public:
         // UI için hafızaya
         lines.push_back({ msg, level });
 
-        // Konsola
-        std::cout << "[" << prefix << "] " << msg << std::endl;
-
-        // Dosyaya — CRASH olsa bile satır kaybolmaz
+        // Dosyaya — CRASH olsa bile satır kaybolmaz (Öncelikli Yazım)
         if (logFile.is_open()) {
             logFile << "[" << prefix << "] " << msg << std::endl;
             logFile.flush();
         }
+
+        // Konsola (Geliştirici takibi için)
+        std::cout << "[" << prefix << "] " << msg << std::endl;
     }
 
     void clear() {
@@ -206,6 +240,7 @@ extern bool is_normal_map;
 extern  int hitcount;
 extern bool use_embree;
 extern bool g_hasOptix ;
+extern bool g_hasCUDA; // General CUDA availability (independent of OptiX)
 extern float last_render_time_ms;
 extern bool pending_resolution_change;
 extern int pending_width;
@@ -244,5 +279,6 @@ extern bool g_needs_geometry_rebuild;   // Set by loader thread, main loop does 
 extern bool g_needs_optix_sync;         // Set by loader thread, main loop syncs OptiX buffers
 
 #endif // GLOBALS_H
+
 
 

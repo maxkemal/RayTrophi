@@ -1,11 +1,21 @@
-﻿#ifndef DIELECTRIC_H
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Dielectric.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#ifndef DIELECTRIC_H
 #define DIELECTRIC_H
 
 #include "Material.h"
 #include "ParallelBVHNode.h"
 #include <array>
 #include <globals.h>
-
+#include "HitRecordPacket.h"
 class Dielectric : public Material {
 public:
     MaterialType type() const override { return MaterialType::Dielectric; }
@@ -27,6 +37,7 @@ public:
     Vec3 calculate_refracted_attenuation(const Vec3& base_color, double thickness, const Vec3& fresnel_factor, const Vec3& ior) const;
 
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
+    virtual __m256 scatter_packet(const RayPacket& r_in, const HitRecordPacket& rec, Vec3Packet& attenuation, RayPacket& scattered) const override;
     virtual float getIndexOfRefraction() const override;
 
     Vec3 fresnel(const Vec3& incident, const Vec3& normal, const Vec3& ir_values) const;
@@ -54,3 +65,4 @@ private:
 };
 
 #endif // DIELECTRIC_H
+

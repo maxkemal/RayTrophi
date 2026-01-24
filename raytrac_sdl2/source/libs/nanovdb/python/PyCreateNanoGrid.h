@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          PyCreateNanoGrid.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 // Copyright Contributors to the OpenVDB Project
 // SPDX-License-Identifier: Apache-2.0
 #ifndef NANOVDB_PYCREATENANOGRID_HAS_BEEN_INCLUDED
@@ -18,3 +28,4 @@ template<typename BufferT> void defineOpenToNanoVDB(nb::module_& m);
 } // namespace pynanovdb
 
 #endif
+

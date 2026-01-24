@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          sbt_data.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include "material_gpu.h" // GpuMaterial zaten ayrı bir yapıda tanımlı
 #include <cuda_runtime.h>
 
@@ -87,7 +97,21 @@ struct __align__(16) HitGroupData
     float3 aabb_max = {0,0,0};    // Bounding box maximum
     
     // NanoVDB GPU Grid pointer (for VDB-based volumetrics)
+    // NanoVDB GPU Grid pointer (for VDB-based volumetrics)
     void* nanovdb_grid = nullptr; // Device pointer to NanoVDB grid
-    int has_nanovdb = 0;          // 1 = use NanoVDB grid, 0 = use procedural noise
-    int vdb_pad = 0;              // Alignment padding
+    int has_nanovdb = 0;          // 1 = use NanoVDB grid
+    int has_vol_texture = 0;      // 1 = use 3D texture (Dense Float Grid)
+    
+    // Dense 3D Texture (GasVolume)
+    // Replaces NanoVDB when has_vol_texture is 1
+    cudaTextureObject_t vol_density_texture = 0; 
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FOLIAGE WIND (Shader-based vertex displacement)
+    // ═══════════════════════════════════════════════════════════════════════════
+    int is_foliage = 0;           // 1 = Apply shader wind displacement, 0 = Static
+    float foliage_height = 1.0f;  // Mesh bounding box height (for Y-based bending)
+    float3 foliage_pivot = {0,0,0}; // Local pivot point (usually base of tree)
+    int foliage_pad = 0;          // Alignment padding
 };
+

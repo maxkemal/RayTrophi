@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          VDBVolumeManager.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include <string>
@@ -75,7 +85,9 @@ public:
     void unloadAll();
     
     // Update existing volume data (for animation sequences)
-    bool updateVolume(int volume_id, const std::string& filepath);
+    bool updateVolume(int volume_id, const std::string& filepath, void* stream = nullptr);
+
+    int registerOrUpdateLiveVolume(int existing_id, const std::string& name, int res_x, int res_y, int res_z, float voxel_size, const float* density_ptr, const float* temp_ptr, void* stream = nullptr);
     
     // Access
     VDBVolumeData* getVolume(int volume_id);
@@ -84,7 +96,7 @@ public:
     int getVolumeCount() const { return static_cast<int>(volumes.size()); }
     
     // GPU Management
-    bool uploadToGPU(int volume_id);
+    bool uploadToGPU(int volume_id, bool silent = false, void* stream = nullptr);
     void freeGPU(int volume_id);
     void freeAllGPU();
     void* getGPUGrid(int volume_id) const;
@@ -115,3 +127,4 @@ private:
     // Helper to find volume index by ID
     int findVolumeIndex(int volume_id) const;
 };
+

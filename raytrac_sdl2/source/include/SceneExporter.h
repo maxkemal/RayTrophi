@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          SceneExporter.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 #include <string>
 #include <vector>
@@ -70,3 +80,4 @@ private:
     std::vector<aiTexture*> accumulated_textures;
     std::map<std::string, std::string> texture_dedup_map; // Key: Ptr/Path, Value: EmbeddedName ("*0")
 };
+

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -205,7 +205,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -252,8 +252,8 @@
     <ClInclude Include="source\include\unified_volume.h" />
     <ClInclude Include="source\include\unified_volume_sampling.h" />
     <ClInclude Include="source\include\VDBVolumeManager.h" />
-    <ClInclude Include="source\src\CloudNoise.cuh" />
-    <ClInclude Include="source\src\fft_ocean.cuh" />
+    <ClInclude Include="source\src\Device\CloudNoise.cuh" />
+    <ClInclude Include="source\src\Device\fft_ocean.cuh" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
@@ -264,17 +264,17 @@
     <ClInclude Include="source\external\imgui\imgui_impl_sdl2.h" />
     <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h" />
     <ClInclude Include="source\external\imgui\imgui_internal.h" />
-    <ClInclude Include="source\src\scene_ui_nodeeditor.hpp" />
-    <ClInclude Include="source\src\scene_ui_terrain.hpp" />
-    <ClInclude Include="source\src\scene_ui_water.hpp" />
-    <ClInclude Include="source\src\water_shaders.cuh" />
-    <None Include="source\src\scatter_volume_step.h" />
-    <None Include="source\src\material_scatter.cuh" />
-    <None Include="source\src\vec3_utils.cuh" />
-    <None Include="source\src\random_utils.cuh" />
-    <None Include="source\src\ray_color.cuh" />
-    <None Include="source\src\trace_ray.cuh" />
-    <None Include="source\src\gpucamera.cuh" />
+    <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
+    <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
+    <ClInclude Include="source\src\UI\scene_ui_water.hpp" />
+    <ClInclude Include="source\src\Device\water_shaders.cuh" />
+    <None Include="source\src\Device\scatter_volume_step.h" />
+    <None Include="source\src\Device\material_scatter.cuh" />
+    <None Include="source\src\Device\vec3_utils.cuh" />
+    <None Include="source\src\Device\random_utils.cuh" />
+    <None Include="source\src\Device\ray_color.cuh" />
+    <None Include="source\src\Device\trace_ray.cuh" />
+    <None Include="source\src\Device\gpucamera.cuh" />
     <ClInclude Include="source\include\AABB.h" />
     <ClInclude Include="source\include\AnimatedObject.h" />
     <ClInclude Include="source\include\AreaLight.h" />
@@ -335,71 +335,78 @@
     <ClCompile Include="source\external\miniz_tdef.c" />
     <ClCompile Include="source\external\miniz_tinfl.c" />
     <ClCompile Include="source\external\miniz_zip.c" />
-    <ClCompile Include="source\src\AABB.cpp" />
-    <ClCompile Include="source\src\AnimationController.cpp" />
-    <ClCompile Include="source\src\AnimationNodes.cpp" />
-    <ClCompile Include="source\src\AreaLight.cpp" />
-    <ClCompile Include="source\src\AssimpLoader.cpp" />
-    <ClCompile Include="source\src\Camera.cpp" />
-    <ClCompile Include="source\src\Dielectric.cpp" />
-    <ClCompile Include="source\src\DirectionalLight.cpp" />
-    <ClCompile Include="source\src\EmbreeBVH.cpp" />
-    <ClCompile Include="source\src\globals.cpp" />
-    <ClCompile Include="source\src\HittableList.cpp" />
-    <ClCompile Include="source\src\ImGuizmo.cpp" />
-    <ClCompile Include="source\src\InstanceGroup.cpp" />
-    <ClCompile Include="source\src\InstanceManager.cpp" />
-    <ClCompile Include="source\src\Light.cpp" />
-    <ClCompile Include="source\src\Main.cpp" />
-    <ClCompile Include="source\src\Material.cpp" />
-    <ClCompile Include="source\src\Matrix4x4.cpp" />
-    <ClCompile Include="source\src\Mesh.cpp" />
-    <ClCompile Include="source\src\OptixAccelManager.cpp" />
-    <ClCompile Include="source\src\OptixWrapper.cpp" />
-    <ClCompile Include="source\src\ParallelBVHNode.cpp" />
-    <ClCompile Include="source\src\PointLight.cpp" />
-    <ClCompile Include="source\src\PrincipledBSDF.cpp" />
-    <ClCompile Include="source\src\ProjectManager.cpp" />
-    <ClCompile Include="source\src\Renderer.cpp" />
-    <ClCompile Include="source\src\RiverManager.cpp" />
-    <ClCompile Include="source\src\SceneCommand.cpp" />
-    <ClCompile Include="source\src\SceneExporter.cpp" />
-    <ClCompile Include="source\src\SceneHistory.cpp" />
-    <ClCompile Include="source\src\SceneSelection.cpp" />
-    <ClCompile Include="source\src\SceneSerializer.cpp" />
-    <ClCompile Include="source\src\scene_ui.cpp" />
-    <ClCompile Include="source\src\scene_ui_animation.cpp" />
-    <ClCompile Include="source\src\scene_ui_camera.cpp" />
-    <ClCompile Include="source\src\scene_ui_gizmos.cpp" />
-    <ClCompile Include="source\src\scene_ui_hierarchy.cpp" />
-    <ClCompile Include="source\src\scene_ui_lights.cpp" />
-    <ClCompile Include="source\src\scene_ui_materials.cpp" />
-    <ClCompile Include="source\src\scene_ui_procamera.cpp" />
-    <ClCompile Include="source\src\scene_ui_scatter.cpp" />
-    <ClCompile Include="source\src\scene_ui_selection.cpp" />
-    <ClCompile Include="source\src\scene_ui_vdb.cpp" />
-    <ClCompile Include="source\src\scene_ui_viewport.cpp" />
-    <ClCompile Include="source\src\scene_ui_world.cpp" />
-    <ClCompile Include="source\src\SequencerAdapter.cpp" />
-    <ClCompile Include="source\src\SplashScreen.cpp" />
-    <ClCompile Include="source\src\SpotLight.cpp" />
-    <ClCompile Include="source\src\TerrainManager.cpp" />
-    <ClCompile Include="source\src\TerrainNodesV2.cpp" />
-    <ClCompile Include="source\src\TerrainFFT.cpp" />
-    <ClCompile Include="source\src\Texture.cpp" />
-    <ClCompile Include="source\src\ThreadLocalRNG.cpp" />
-    <ClCompile Include="source\src\TimelineWidget.cpp" />
-    <ClCompile Include="source\src\Triangle.cpp" />
-    <ClCompile Include="source\src\ui_modern.cpp" />
-    <ClCompile Include="source\src\VDBVolume.cpp" />
-    <ClCompile Include="source\src\VDBVolumeManager.cpp" />
-    <ClCompile Include="source\src\Vec2.cpp" />
-    <ClCompile Include="source\src\Vec3.cpp" />
-    <ClCompile Include="source\src\Vec3SIMD.cpp" />
-    <ClCompile Include="source\src\Volumetric.cpp" />
-    <ClCompile Include="source\src\WaterManager.cpp" />
-    <ClCompile Include="source\src\World.cpp" />
-    <ClCompile Include="source\src\MaterialManager.cpp" />
+    <ClCompile Include="source\src\Scene\AABB.cpp" />
+    <ClCompile Include="source\src\Animation\AnimationController.cpp" />
+    <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
+    <ClCompile Include="source\src\Scene\AreaLight.cpp" />
+    <ClCompile Include="source\src\Utils\AssimpLoader.cpp" />
+    <ClCompile Include="source\src\Render\AtmosphereLUT.cpp" />
+    <ClCompile Include="source\src\Render\Camera.cpp" />
+    <ClCompile Include="source\src\Physics\CurlNoise.cpp" />
+    <ClCompile Include="source\src\Scene\Dielectric.cpp" />
+    <ClCompile Include="source\src\Scene\DirectionalLight.cpp" />
+    <ClCompile Include="source\src\Render\EmbreeBVH.cpp" />
+    <ClCompile Include="source\src\Physics\EmitterSystem.cpp" />
+    <ClCompile Include="source\src\Physics\ForceField.cpp" />
+    <ClCompile Include="source\src\Physics\GasSimulator.cpp" />
+    <ClCompile Include="source\src\Physics\GasVolume.cpp" />
+    <ClCompile Include="source\src\Core\globals.cpp" />
+    <ClCompile Include="source\src\Scene\HittableList.cpp" />
+    <ClCompile Include="source\src\UI\ImGuizmo.cpp" />
+    <ClCompile Include="source\src\Scene\InstanceGroup.cpp" />
+    <ClCompile Include="source\src\Scene\InstanceManager.cpp" />
+    <ClCompile Include="source\src\Scene\Light.cpp" />
+    <ClCompile Include="source\src\Core\Main.cpp" />
+    <ClCompile Include="source\src\Scene\Material.cpp" />
+    <ClCompile Include="source\src\Math\Matrix4x4.cpp" />
+    <ClCompile Include="source\src\Scene\Mesh.cpp" />
+    <ClCompile Include="source\src\Render\OptixAccelManager.cpp" />
+    <ClCompile Include="source\src\Render\OptixWrapper.cpp" />
+    <ClCompile Include="source\src\Render\ParallelBVHNode.cpp" />
+    <ClCompile Include="source\src\Scene\PointLight.cpp" />
+    <ClCompile Include="source\src\Scene\PrincipledBSDF.cpp" />
+    <ClCompile Include="source\src\Core\ProjectManager.cpp" />
+    <ClCompile Include="source\src\Render\Renderer.cpp" />
+    <ClCompile Include="source\src\Physics\RiverManager.cpp" />
+    <ClCompile Include="source\src\Utils\SceneCommand.cpp" />
+    <ClCompile Include="source\src\Utils\SceneExporter.cpp" />
+    <ClCompile Include="source\src\Utils\SceneHistory.cpp" />
+    <ClCompile Include="source\src\UI\SceneSelection.cpp" />
+    <ClCompile Include="source\src\Utils\SceneSerializer.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_animation.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_camera.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_gizmos.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_lights.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_materials.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_procamera.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_scatter.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_selection.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_vdb.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_viewport.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_world.cpp" />
+    <ClCompile Include="source\src\UI\SequencerAdapter.cpp" />
+    <ClCompile Include="source\src\UI\SplashScreen.cpp" />
+    <ClCompile Include="source\src\Scene\SpotLight.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainManager.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainFFT.cpp" />
+    <ClCompile Include="source\src\Render\Texture.cpp" />
+    <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp" />
+    <ClCompile Include="source\src\UI\TimelineWidget.cpp" />
+    <ClCompile Include="source\src\Scene\Triangle.cpp" />
+    <ClCompile Include="source\src\UI\ui_modern.cpp" />
+    <ClCompile Include="source\src\Physics\VDBVolume.cpp" />
+    <ClCompile Include="source\src\Physics\VDBVolumeManager.cpp" />
+    <ClCompile Include="source\src\Math\Vec2.cpp" />
+    <ClCompile Include="source\src\Math\Vec3.cpp" />
+    <ClCompile Include="source\src\Math\Vec3SIMD.cpp" />
+    <ClCompile Include="source\src\Physics\Volumetric.cpp" />
+    <ClCompile Include="source\src\Render\VolumetricRenderer.cpp" />
+    <ClCompile Include="source\src\Physics\WaterManager.cpp" />
+    <ClCompile Include="source\src\Scene\World.cpp" />
+    <ClCompile Include="source\src\Scene\MaterialManager.cpp" />
     <ClCompile Include="source\external\imgui\imgui.cpp" />
     <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
     <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp" />
@@ -407,10 +414,10 @@
     <ClCompile Include="source\external\imgui\imgui_tables.cpp" />
     <ClCompile Include="source\external\imgui\imgui_widgets.cpp" />
     <!-- Unified Rendering System -->
-    <ClCompile Include="source\src\unified_converters.cpp" />
+    <ClCompile Include="source\src\Render\unified_converters.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="source\src\raygen.cu">
+    <None Include="source\src\Device\raygen.cu">
       <FileType>Document</FileType>
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">--use_fast_math --expt-relaxed-constexpr --expt-extended-lambda
  %(AdditionalOptions)</AdditionalOptions>
@@ -420,8 +427,10 @@
     <Image Include="source\resources\RayTrophi_icon.ico" />
   </ItemGroup>
   <ItemGroup>
-    <CudaCompile Include="source\src\fft_ocean.cu" />
-    <CudaCompile Include="source\src\skinning_kernels.cu" />
+    <CudaCompile Include="source\src\Device\fft_ocean.cu" />
+    <CudaCompile Include="source\src\Device\foliage_deform.cu" />
+    <CudaCompile Include="source\src\Device\skinning_kernels.cu" />
+    <CudaCompile Include="source\src\Device\gas_kernels.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

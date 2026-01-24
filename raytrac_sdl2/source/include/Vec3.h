@@ -1,3 +1,13 @@
+ï»¿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          Vec3.h
+* Author:        Kemal DemirtaÃ…Å¸
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #ifndef VEC3_H
 #define VEC3_H
 
@@ -8,9 +18,9 @@
 #include <string>
 #include <array>
 #include <limits>
-#include <stdexcept> // Hata yönetimi için
+#include <stdexcept> // Hata yÃ¶netimi iÃ§in
 
-// M_PI'yi float olarak tanýmla
+// M_PI'yi float olarak tanÄ±mla
 #define M_PI 3.14159265358979323846f
 
 class Vec3 {
@@ -22,7 +32,8 @@ public:
     Vec3();
     Vec3(float value);
     Vec3(float x, float y, float z);
-    // double constructor'u kaldýrýldý, float array constructor'ý eklenebilir.
+    // double constructor'u kaldÄ±rÄ±ldÄ±, float array constructor'Ä± eklenebilir.
+
 
     // Access operators
     float operator[](int i) const;
@@ -46,7 +57,7 @@ public:
     Vec3& operator*=(const Vec3& v);
     Vec3& operator/=(float t);
 
-    // Comparison operators (Hassasiyet için)
+    // Comparison operators (Hassasiyet iÃ§in)
     bool operator==(const Vec3& other) const;
     bool operator!=(const Vec3& other) const;
 
@@ -80,7 +91,7 @@ public:
     static float dot(const Vec3& v1, const Vec3& v2);
     static Vec3 cross(const Vec3& v1, const Vec3& v2);
     static Vec3 reflect(const Vec3& v, const Vec3& n);
-    // refract metodunu float parametreler kullanacak þekilde düzenle
+    // refract metodunu float parametreler kullanacak ÅŸekilde dÃ¼zenle
     static Vec3 refract(const Vec3& uv, const Vec3& n, float etai_over_etat);
     static Vec3 min(const Vec3& a, const Vec3& b);
     static Vec3 max(const Vec3& a, const Vec3& b);
@@ -108,8 +119,8 @@ public:
     // Random number utilities
     static float random_float(float min = 0.0f, float max = 1.0f); // double -> float
 
-    // Conversion operators (Kaldýrýldý veya float array'e çevrildi)
-    // operator std::array<double, 3>() const; // Kaldýrýldý
+    // Conversion operators (KaldÄ±rÄ±ldÄ± veya float array'e Ã§evrildi)
+    // operator std::array<double, 3>() const; // KaldÄ±rÄ±ldÄ±
 
     // Friend functions
     friend std::ostream& operator<<(std::ostream& os, const Vec3& v);
@@ -119,6 +130,6 @@ public:
 
 // Non-member functions
 Vec3 unit_vector(const Vec3& v);
-// double operatör kaldýrýldý.
+// double operatÃ¶r kaldÄ±rÄ±ldÄ±.
 
 #endif // VEC3_H

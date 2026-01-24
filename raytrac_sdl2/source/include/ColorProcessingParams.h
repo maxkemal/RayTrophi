@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ColorProcessingParams.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 #include <iostream>
 #include "Vec3.h"
 #include "globals.h"
@@ -264,3 +274,4 @@ public:
         return Vec3::clamp(processed_color, 0.0f, 1.0f);
     }
 };
+

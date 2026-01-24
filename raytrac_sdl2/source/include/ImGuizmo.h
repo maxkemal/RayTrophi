@@ -1,4 +1,4 @@
-// https://github.com/CedricGuillemet/ImGuizmo
+﻿// https://github.com/CedricGuillemet/ImGuizmo
 // v1.92.5 WIP
 //
 // The MIT License(MIT)
@@ -304,3 +304,5 @@ namespace IMGUIZMO_NAMESPACE
 
    IMGUI_API Style& GetStyle();
 }
+
+

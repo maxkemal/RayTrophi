@@ -1,4 +1,14 @@
-﻿#pragma once
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          scene_ui.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
+#pragma once
 
 // Forward Declarations
 class Renderer;
@@ -10,6 +20,7 @@ struct RenderSettings;
 class Texture;
 struct InstanceGroup;
 class VDBVolume;
+class GasVolume;
 
 #include "ui_modern.h"  // Modern UI sistemi
 #include "SceneHistory.h"  // Undo/Redo system
@@ -23,6 +34,9 @@ class VDBVolume;
 #include <map>
 #include <set> // For lazy CPU sync
 #include <atomic> // For thread-safe flags
+#include <string>
+#include <memory>
+#include <vector>
 #include "Vec3.h" // For bbox_cache
 #include "instancegroup.h" 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -91,12 +105,18 @@ public:
     bool show_system_tab = false;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
     bool show_anim_graph = false;     // Animation node editor panel
-    bool show_vdb_tab = true;         // VDB Volumes tab (Default open)
+    bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
+    bool show_forcefield_tab = false;   // Force Field tab (Default open)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Static Helpers (Shared across modules)
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
     static std::string saveFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const wchar_t* defExt = L"rts");
+    static std::string selectFolderDialogW(const wchar_t* title = L"Select Folder");
+    
+    // Shared Volumetric UI
+    static bool drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<class VolumeShader> shader, class VDBVolume* vdb = nullptr, class GasVolume* gas = nullptr);
+
     static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
     static void syncVDBVolumesToGPU(UIContext& ctx);
 
@@ -122,8 +142,6 @@ public:
                               const char* format, bool keyed = false, 
                               std::function<void()> onKeyframeClick = nullptr, int segments = 16);
 
-    // SMART SLIDER WRAPPER (Switchable Style)
-    // Uses globalSliderStyle to determine whether to draw LCD or Standard slider
     static bool DrawSmartFloat(const char* id, const char* label, float* value, float min, float max, 
                                const char* format = "%.2f", bool keyed = false, 
                                std::function<void()> onKeyframeClick = nullptr, int segments = 16);
@@ -154,6 +172,7 @@ public:
      void draw(UIContext& ctx);
      void handleMouseSelection(UIContext& ctx); // Publicly accessible for Main loop call
      void triggerDelete(UIContext& ctx); // Trigger delete operation (for Menu and Key)
+     void triggerDuplicate(UIContext& ctx); // Trigger duplicate operation (for Menu and Key)
      void processAnimations(UIContext& ctx); // Apply keyframe data to scene objects
   
      void invalidateCache() { mesh_cache_valid = false; }
@@ -222,7 +241,7 @@ public:
          bool show_gizmos = true;
          
          // Camera HUD (viewport lens controls)
-         bool show_camera_hud = true;      // Master toggle for camera HUD
+         bool show_camera_hud = false;      // Master toggle for camera HUD
          bool show_focus_ring = true;      // Focus ring (DOF control)
          bool show_zoom_ring = true;       // Zoom ring (FOV control)
          
@@ -315,7 +334,7 @@ public:
         int density = 3;                // Instances per stroke
         int mode = 0;                   // 0=Add, 1=Remove     
         bool show_preview = true;       // Show brush circle in viewport
-        bool lazy_update = false;       // If true, waits for mouse release to spawn instances (Better for weak GPUs)
+        bool lazy_update = true;       // If true, waits for mouse release to spawn instances (Better for weak GPUs)
         
         // Lazy Update Logic
         std::vector<InstanceTransform> pending_instances; 
@@ -334,9 +353,9 @@ public:
     void updateAutofocus(UIContext& ctx);  // Run autofocus logic (raycast center)
     
     // ═══════════════════════════════════════════════════════════════════════════
-    // VDB VOLUME UI (Industry-Standard Volumetrics)
+    // VOLUMETRIC UI (Unified VDB & Gas Simulation)
     // ═══════════════════════════════════════════════════════════════════════════
-    void drawVDBVolumePanel(UIContext& ctx);       // VDB volumes list and properties
+    void drawVolumetricPanel(UIContext& ctx);       // Unified list and properties
     void drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb);  // Single VDB properties
     void importVDBVolume(UIContext& ctx);          // Import single VDB file
     void importVDBSequence(UIContext& ctx);        // Import VDB Sequence
@@ -358,6 +377,7 @@ private:
     // --- Overlays & Gizmos ---
     bool drawOverlays(UIContext& ctx);
     void drawLightGizmos(UIContext& ctx, bool& gizmo_hit);
+    void drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit);
     void drawSelectionGizmos(UIContext& ctx);
     void drawFocusIndicator(UIContext& ctx);  // Split-prism focus aid
     void drawZoomRing(UIContext& ctx);        // FOV zoom control
@@ -458,3 +478,4 @@ public:
     TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() { return terrainNodeGraph; }
     const TerrainNodesV2::TerrainNodeGraphV2& getTerrainNodeGraph() const { return terrainNodeGraph; }
 };
+

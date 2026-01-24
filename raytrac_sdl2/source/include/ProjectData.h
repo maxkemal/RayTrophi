@@ -1,3 +1,13 @@
+﻿/*
+* =========================================================================
+* Project:       RayTrophi Studio
+* Repository:    https://github.com/maxkemal/RayTrophi
+* File:          ProjectData.h
+* Author:        Kemal DemirtaÅŸ
+* Date:          June 2024
+* License:       [License Information - e.g. Proprietary / MIT / etc.]
+* =========================================================================
+*/
 #pragma once
 
 #include <string>
@@ -118,3 +128,4 @@ struct ProjectData {
 // Global project instance (similar to Unity's current project)
 // Defined in ProjectManager.cpp
 extern ProjectData g_project;
+
