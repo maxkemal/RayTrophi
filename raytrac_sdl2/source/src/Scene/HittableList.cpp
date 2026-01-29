@@ -44,18 +44,6 @@ bool HittableList::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, b
     }
 }
 
-void HittableList::hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes) const {
-    if (bvh_root) {
-        bvh_root->hit_packet(r, t_min, t_max, rec, ignore_volumes);
-    } else {
-        // Slow fallback: iterate through all objects
-        for (const auto& object : objects) {
-            if (object) {
-                object->hit_packet(r, t_min, t_max, rec, ignore_volumes);
-            }
-        }
-    }
-}
 
 bool HittableList::bounding_box(float time0, float time1, AABB& output_box) const {
     if (objects.empty()) return false;

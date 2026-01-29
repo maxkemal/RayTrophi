@@ -109,15 +109,15 @@ void AtmosphereLUT::initialize() {
 
 // Helper for float3 math in host code
 inline float host_dot(float3 a, float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-inline float3 host_mul(float3 a, float b) { return { a.x * b, a.y * b, a.z * b }; }
-inline float3 host_add(float3 a, float3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
+inline float3 host_mul(float3 a, float b) { return make_float3(a.x * b, a.y * b, a.z * b); }
+inline float3 host_add(float3 a, float3 b) { return make_float3(a.x + b.x, a.y + b.y, a.z + b.z); }
 
 // Helper to compute transmittance analytically during precomputation
 inline float3 compute_transmittance_internal(float3 pos, float3 sunDir, float Rg, float Rt, float rH, float mH, const NishitaSkyParams& params, float3 ozoneExt) {
     float b = 2.0f * host_dot(pos, sunDir);
     float c = host_dot(pos, pos) - Rt * Rt;
     float delta = b * b - 4.0f * c;
-    if (delta < 0.0f) return { 1.0f, 1.0f, 1.0f };
+    if (delta < 0.0f) return make_float3(1.0f, 1.0f, 1.0f);
     
     float dist = (-b + sqrtf(delta)) / 2.0f;
     int numSamples = 40; 
@@ -134,7 +134,7 @@ inline float3 compute_transmittance_internal(float3 pos, float3 sunDir, float Rg
     float3 tau = host_add(host_add(host_mul(params.rayleigh_scattering, params.air_density * oDR), 
                                     host_mul(params.mie_scattering, params.dust_density * 1.1f * oDM)),
                                     host_mul(ozoneExt, oDR));
-    return { expf(-tau.x), expf(-tau.y), expf(-tau.z) };
+    return make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
 }
 
 void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
@@ -146,11 +146,11 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
     float h_scale = t_kelvin / 288.15f;
     float rH = params.rayleigh_density * h_scale;
     float mH = params.mie_density * h_scale;
-    float3 ozoneAbs = { 0.000000650f, 0.000001881f, 0.000000085f };
+    float3 ozoneAbs = make_float3(0.000000650f, 0.000001881f, 0.000000085f);
     float3 ozoneExt = host_mul(ozoneAbs, params.ozone_density * params.ozone_absorption_scale);
 
     // Phase 1: Transmittance LUT (256x64)
-    std::vector<float4> host_trans_data(TRANSMITTANCE_LUT_W * TRANSMITTANCE_LUT_H);
+    host_transmittance.resize(TRANSMITTANCE_LUT_W * TRANSMITTANCE_LUT_H);
     #pragma omp parallel for
     for (int y = 0; y < TRANSMITTANCE_LUT_H; ++y) {
         for (int x = 0; x < TRANSMITTANCE_LUT_W; ++x) {
@@ -158,17 +158,17 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
             float v = (float)y / (TRANSMITTANCE_LUT_H - 1.0f);
             float cosTheta = -0.2f + u * 1.2f; 
             float altitude = v * params.atmosphere_height;
-            float3 sunDir = { sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta)), cosTheta, 0.0f };
-            float3 pos = { 0.0f, Rg + altitude, 0.0f };
+            float3 sunDir = make_float3(sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta)), cosTheta, 0.0f);
+            float3 pos = make_float3(0.0f, Rg + altitude, 0.0f);
 
             float3 transmittance = compute_transmittance_internal(pos, sunDir, Rg, Rt, rH, mH, params, ozoneExt);
-            host_trans_data[y * TRANSMITTANCE_LUT_W + x] = { transmittance.x, transmittance.y, transmittance.z, 1.0f };
+            host_transmittance[y * TRANSMITTANCE_LUT_W + x] = make_float4(transmittance.x, transmittance.y, transmittance.z, 1.0f);
         }
     }
-    cudaMemcpy2DToArray(transmittance_array, 0, 0, host_trans_data.data(), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_H, cudaMemcpyHostToDevice);
+    cudaMemcpy2DToArray(transmittance_array, 0, 0, host_transmittance.data(), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_H, cudaMemcpyHostToDevice);
 
     // Phase 2: Multi-Scattering LUT (32x32)
-    std::vector<float4> host_ms_data(MULTI_SCATTER_LUT_RES * MULTI_SCATTER_LUT_RES);
+    host_multi_scatter.resize(MULTI_SCATTER_LUT_RES * MULTI_SCATTER_LUT_RES);
     #pragma omp parallel for
     for (int y = 0; y < MULTI_SCATTER_LUT_RES; ++y) {
         for (int x = 0; x < MULTI_SCATTER_LUT_RES; ++x) {
@@ -188,13 +188,13 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
             }
             avgTrans /= 8.0f;
             float msFactor = 1.0f / (1.0f - avgTrans);
-            host_ms_data[y * MULTI_SCATTER_LUT_RES + x] = { msFactor * 0.1f, msFactor * 0.12f, msFactor * 0.15f, 1.0f };
+            host_multi_scatter[y * MULTI_SCATTER_LUT_RES + x] = make_float4(msFactor * 0.1f, msFactor * 0.12f, msFactor * 0.15f, 1.0f);
         }
     }
-    cudaMemcpy2DToArray(multi_scatter_array, 0, 0, host_ms_data.data(), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES, cudaMemcpyHostToDevice);
+    cudaMemcpy2DToArray(multi_scatter_array, 0, 0, host_multi_scatter.data(), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES, cudaMemcpyHostToDevice);
 
     // Phase 3: SkyView LUT (256x128)
-    std::vector<float4> host_sky_data(SKYVIEW_LUT_W * SKYVIEW_LUT_H);
+    host_skyview.resize(SKYVIEW_LUT_W * SKYVIEW_LUT_H);
     #pragma omp parallel for
     for (int y = 0; y < SKYVIEW_LUT_H; ++y) {
         for (int x = 0; x < SKYVIEW_LUT_W; ++x) {
@@ -204,11 +204,11 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
             float azimuth = u * 2.0f * 3.14159f;
             float cosTheta = 1.0f - v * 2.0f;
             float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
-            float3 dir = { sinTheta * cosf(azimuth), cosTheta, sinTheta * sinf(azimuth) };
+            float3 dir = make_float3(sinTheta * cosf(azimuth), cosTheta, sinTheta * sinf(azimuth));
             float3 sunDir = params.sun_direction;
-            float3 camPos = { 0.0f, Rg + params.altitude, 0.0f };
+            float3 camPos = make_float3(0.0f, Rg + params.altitude, 0.0f);
 
-            float3 radiance = { 0, 0, 0 };
+            float3 radiance = make_float3(0.0f, 0.0f, 0.0f);
             float b = 2.0f * host_dot(camPos, dir);
             float c = host_dot(camPos, camPos) - Rt * Rt;
             float d = b * b - 4.0f * c;
@@ -217,7 +217,7 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
                 if (dist > 0) {
                     int steps = 128; // Increased from 32 to reduce banding
                     float step = dist / steps;
-                    float3 opticalDepth = { 0, 0, 0 };
+                    float3 opticalDepth = make_float3(0, 0, 0);
                     for (int i = 0; i < steps; ++i) {
                         float3 p = host_add(camPos, host_mul(dir, step * (i + 0.5f)));
                         float h = sqrtf(host_dot(p, p)) - Rg;
@@ -240,19 +240,84 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
                         phaseM = fminf(phaseM, 2.0f); 
                         
                         float3 inScat = host_add(host_mul(scatR, phaseR), host_mul(scatM, phaseM));
-                        float3 stepL = { inScat.x * transSun.x, inScat.y * transSun.y, inScat.z * transSun.z };
+                        float3 stepL = make_float3(inScat.x * transSun.x, inScat.y * transSun.y, inScat.z * transSun.z);
                         
-                        float3 currentTrans = { expf(-opticalDepth.x), expf(-opticalDepth.y), expf(-opticalDepth.z) };
+                        float3 currentTrans = make_float3(expf(-opticalDepth.x), expf(-opticalDepth.y), expf(-opticalDepth.z));
                         radiance = host_add(radiance, host_mul(stepL, step * currentTrans.x)); 
                         
                         opticalDepth.x += (scatR.x + scatM.x) * step;
                         opticalDepth.y += (scatR.y + scatM.y) * step;
-                        opticalDepth.z += (scatR.z + scatM.z) * step;
+                        opticalDepth.z += (scatM.z + scatR.z) * step; // Note: Reusing scats
                     }
                 }
             }
-            host_sky_data[y * SKYVIEW_LUT_W + x] = { radiance.x * params.sun_intensity, radiance.y * params.sun_intensity, radiance.z * params.sun_intensity, 1.0f };
+            host_skyview[y * SKYVIEW_LUT_W + x] = make_float4(radiance.x * params.sun_intensity, radiance.y * params.sun_intensity, radiance.z * params.sun_intensity, 1.0f);
         }
     }
-    cudaMemcpy2DToArray(skyview_array, 0, 0, host_sky_data.data(), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_H, cudaMemcpyHostToDevice);
+    cudaMemcpy2DToArray(skyview_array, 0, 0, host_skyview.data(), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_H, cudaMemcpyHostToDevice);
+}
+
+// ═══════════════════════════════════════════════════════════
+// BILINEAR SAMPLING FOR CPU (Matches GPU tex2D)
+// ═══════════════════════════════════════════════════════════
+float3 AtmosphereLUT::sampleTransmittance(float cosTheta, float altitude, float atmosphereHeight) const {
+    if (host_transmittance.empty()) return make_float3(1.0f, 1.0f, 1.0f);
+    
+    // UV Mapping based on precompute
+    float u = (cosTheta + 0.2f) / 1.2f;
+    float v = altitude / std::max(1.0f, atmosphereHeight); 
+    
+    // Clamp
+    u = std::max(0.0f, std::min(0.999f, u));
+    v = std::max(0.0f, std::min(0.999f, v));
+    
+    float x = u * (TRANSMITTANCE_LUT_W - 1);
+    float y = v * (TRANSMITTANCE_LUT_H - 1);
+    int x0 = (int)x; int x1 = std::min(x0 + 1, TRANSMITTANCE_LUT_W - 1);
+    int y0 = (int)y; int y1 = std::min(y0 + 1, TRANSMITTANCE_LUT_H - 1);
+    float dx = x - x0; float dy = y - y0;
+    
+    auto get = [&](int ix, int iy) {
+        float4 f = host_transmittance[iy * TRANSMITTANCE_LUT_W + ix];
+        return make_float3(f.x, f.y, f.z);
+    };
+    
+    float3 c00 = get(x0, y0); float3 c10 = get(x1, y0);
+    float3 c01 = get(x0, y1); float3 c11 = get(x1, y1);
+    
+    float3 c0 = host_add(host_mul(c00, 1.0f - dx), host_mul(c10, dx));
+    float3 c1 = host_add(host_mul(c01, 1.0f - dx), host_mul(c11, dx));
+    return host_add(host_mul(c0, 1.0f - dy), host_mul(c1, dy));
+}
+
+float3 AtmosphereLUT::sampleSkyView(float3 rayDir, float3 sunDir, float Rg, float Rt) const {
+    if (host_skyview.empty()) return make_float3(0.0f, 0.0f, 0.0f);
+    
+    // Map to Azure/Blender SkyView UV coords
+    float azimuth = atan2f(rayDir.z, rayDir.x);
+    if (azimuth < 0.0f) azimuth += 2.0f * 3.14159f;
+    
+    float u = azimuth / (2.0f * 3.14159f);
+    float v = (1.0f - rayDir.y) * 0.5f; 
+    
+    u = std::max(0.0f, std::min(0.999f, u));
+    v = std::max(0.0f, std::min(0.999f, v));
+    
+    float x = u * (SKYVIEW_LUT_W - 1);
+    float y = v * (SKYVIEW_LUT_H - 1);
+    int x0 = (int)x; int x1 = (x0 + 1) % SKYVIEW_LUT_W; // Azimuth wraps
+    int y0 = (int)y; int y1 = std::min(y0 + 1, SKYVIEW_LUT_H - 1);
+    float dx = x - x0; float dy = y - y0;
+    
+    auto get = [&](int ix, int iy) {
+        float4 f = host_skyview[iy * SKYVIEW_LUT_W + ix];
+        return make_float3(f.x, f.y, f.z);
+    };
+    
+    float3 c00 = get(x0, y0); float3 c10 = get(x1, y0);
+    float3 c01 = get(x0, y1); float3 c11 = get(x1, y1);
+    
+    float3 c0 = host_add(host_mul(c00, 1.0f - dx), host_mul(c10, dx));
+    float3 c1 = host_add(host_mul(c01, 1.0f - dx), host_mul(c11, dx));
+    return host_add(host_mul(c0, 1.0f - dy), host_mul(c1, dy));
 }

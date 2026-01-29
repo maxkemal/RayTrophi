@@ -213,7 +213,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;embree4.lib;tbb12.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;cufft.lib;embree4.lib;tbb12.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\lib;E:\SDL2-2.30.4\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
     </Link>
@@ -240,6 +240,8 @@
   <ItemGroup>
     <ClInclude Include="resource.h" />
     <ClInclude Include="source\external\miniz.h" />
+    <None Include="source\include\gas_kernels.cuh" />
+    <None Include="source\include\gas_fft_solver.cuh" />
     <ClInclude Include="source\include\ImGuizmo.h" />
     <ClInclude Include="source\include\OptixAccelManager.h" />
     <ClInclude Include="source\include\SceneCommand.h" />
@@ -431,6 +433,7 @@
     <CudaCompile Include="source\src\Device\foliage_deform.cu" />
     <CudaCompile Include="source\src\Device\skinning_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_kernels.cu" />
+    <CudaCompile Include="source\src\Device\gas_fft_solver.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

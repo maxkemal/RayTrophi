@@ -30,7 +30,7 @@ public:
     /**
      * @brief Calculate atmospheric volumetric god rays (crepuscular rays)
      */
-    static Vec3 calculateGodRays(const SceneData& scene, const WorldData& world_data, const Ray& ray, float maxDistance, const Hittable* bvh);
+    static Vec3 calculateGodRays(const SceneData& scene, const WorldData& world_data, const Ray& ray, float maxDistance, const Hittable* bvh, class AtmosphereLUT* lut = nullptr);
 
     /**
      * @brief Calculate sun transmittance through solid and volumetric objects
@@ -41,6 +41,11 @@ public:
      * @brief Sync all volumetric data (VDB & Gas) to Optix GPU buffers
      */
     static void syncVolumetricData(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+    
+    /**
+     * @brief Apply atmospheric aerial perspective and height fog to a color based on distance
+     */
+    static Vec3 applyAerialPerspective(const SceneData& scene, const WorldData& world_data, const Vec3& origin, const Vec3& dir, float dist, const Vec3& color, class AtmosphereLUT* lut);
 
 private:
     // Internal helpers

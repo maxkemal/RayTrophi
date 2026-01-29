@@ -3,7 +3,7 @@
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
 * File:          FluidGrid.h
-* Author:        Kemal DemirtaÅŸ
+* Author:        Kemal Demirtas
 * Date:          June 2024
 * License:       [License Information - e.g. Proprietary / MIT / etc.]
 * =========================================================================
@@ -58,14 +58,50 @@ struct GridIndex {
  * - vel_z: stored at (i, j, k+0.5) - Z-face of each cell
  * - density/temperature/pressure: stored at cell centers (i+0.5, j+0.5, k+0.5)
  */
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACTIVE TILES SYSTEM (VDB-style Sparse Grid Optimization)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tiles are 8x8x8 blocks of cells. Only "active" tiles are processed.
+// This can provide 50-90% speedup when smoke occupies small portion of grid.
+
+constexpr int TILE_SIZE = 8;  // 8x8x8 = 512 cells per tile
+
+struct ActiveTile {
+    int tx, ty, tz;        // Tile coordinates
+    int start_x, start_y, start_z;  // Cell start indices
+    float max_density;     // Max density in tile (for LOD)
+    float max_velocity;    // Max velocity in tile (for CFL)
+    bool has_emitter;      // Tile contains an emitter
+    
+    FLUID_FUNC ActiveTile(int _tx = 0, int _ty = 0, int _tz = 0)
+        : tx(_tx), ty(_ty), tz(_tz)
+        , start_x(_tx * TILE_SIZE), start_y(_ty * TILE_SIZE), start_z(_tz * TILE_SIZE)
+        , max_density(0.0f), max_velocity(0.0f), has_emitter(false) {}
+};
+
 class FluidGrid {
 public:
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════════
     // GRID DIMENSIONS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════════
     int nx, ny, nz;           // Number of cells in each dimension
     float voxel_size;         // Size of each voxel in world units
     Vec3 origin;              // World position of grid origin (corner 0,0,0)
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ACTIVE TILES (Sparse Grid Optimization)
+    // ═══════════════════════════════════════════════════════════════════════════
+    int tiles_x, tiles_y, tiles_z;           // Number of tiles in each dimension
+    std::vector<ActiveTile> active_tiles;    // List of currently active tiles
+    std::vector<uint8_t> tile_active_mask;   // Fast lookup: is tile active?
+    bool sparse_mode_enabled = true;         // Enable/disable sparse optimization
+    float sparse_threshold = 0.001f;         // Minimum density to consider tile active
+    
+    // Statistics
+    mutable int total_tiles = 0;
+    mutable int active_tile_count = 0;
+    mutable float sparse_efficiency = 0.0f;  // % of tiles skipped
     
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     // VELOCITY FIELD (Staggered MAC grid)
@@ -122,6 +158,15 @@ public:
         pressure.resize(cell_count, 0.0f);
         divergence.resize(cell_count, 0.0f);
         solid.resize(cell_count, 0);
+        
+        // Initialize tile system
+        tiles_x = (nx + TILE_SIZE - 1) / TILE_SIZE;
+        tiles_y = (ny + TILE_SIZE - 1) / TILE_SIZE;
+        tiles_z = (nz + TILE_SIZE - 1) / TILE_SIZE;
+        total_tiles = tiles_x * tiles_y * tiles_z;
+        tile_active_mask.resize(total_tiles, 0);
+        active_tiles.clear();
+        active_tiles.reserve(total_tiles);
     }
     
     void clear() {
@@ -134,6 +179,156 @@ public:
         std::fill(interaction.begin(), interaction.end(), 0.0f);
         std::fill(pressure.begin(), pressure.end(), 0.0f);
         std::fill(divergence.begin(), divergence.end(), 0.0f);
+        
+        // Clear tile activity
+        std::fill(tile_active_mask.begin(), tile_active_mask.end(), 0);
+        active_tiles.clear();
+        active_tile_count = 0;
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ACTIVE TILE MANAGEMENT (VDB-style Sparse Optimization)
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /// @brief Get tile index from tile coordinates
+    FLUID_FUNC size_t tileIndex(int tx, int ty, int tz) const {
+        return static_cast<size_t>(tx) + static_cast<size_t>(ty) * tiles_x + static_cast<size_t>(tz) * tiles_x * tiles_y;
+    }
+    
+    /// @brief Get tile coordinates from cell indices
+    FLUID_FUNC void cellToTile(int i, int j, int k, int& tx, int& ty, int& tz) const {
+        tx = i / TILE_SIZE;
+        ty = j / TILE_SIZE;
+        tz = k / TILE_SIZE;
+    }
+    
+    /// @brief Check if a tile is active
+    FLUID_FUNC bool isTileActive(int tx, int ty, int tz) const {
+        if (tx < 0 || tx >= tiles_x || ty < 0 || ty >= tiles_y || tz < 0 || tz >= tiles_z) return false;
+        return tile_active_mask[tileIndex(tx, ty, tz)] != 0;
+    }
+    
+    /// @brief Update active tiles based on density/velocity content
+    void updateActiveTiles(float ambient_temp = 293.0f) {
+        if (!sparse_mode_enabled) {
+            // All tiles active when sparse mode disabled
+            active_tiles.clear();
+            for (int tz = 0; tz < tiles_z; ++tz) {
+                for (int ty = 0; ty < tiles_y; ++ty) {
+                    for (int tx = 0; tx < tiles_x; ++tx) {
+                        active_tiles.emplace_back(tx, ty, tz);
+                        tile_active_mask[tileIndex(tx, ty, tz)] = 1;
+                    }
+                }
+            }
+            active_tile_count = total_tiles;
+            sparse_efficiency = 0.0f;
+            return;
+        }
+        
+        active_tiles.clear();
+        std::fill(tile_active_mask.begin(), tile_active_mask.end(), 0);
+        
+        // Scan each tile for activity
+        for (int tz = 0; tz < tiles_z; ++tz) {
+            for (int ty = 0; ty < tiles_y; ++ty) {
+                for (int tx = 0; tx < tiles_x; ++tx) {
+                    bool is_active = scanTileForActivity(tx, ty, tz, ambient_temp);
+                    
+                    if (is_active) {
+                        active_tiles.emplace_back(tx, ty, tz);
+                        tile_active_mask[tileIndex(tx, ty, tz)] = 1;
+                    }
+                }
+            }
+        }
+        
+        // Also activate neighbors of active tiles (for advection/diffusion)
+        std::vector<ActiveTile> expanded;
+        expanded.reserve(active_tiles.size() * 2);
+        
+        for (const auto& tile : active_tiles) {
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        int ntx = tile.tx + dx;
+                        int nty = tile.ty + dy;
+                        int ntz = tile.tz + dz;
+                        
+                        if (ntx >= 0 && ntx < tiles_x && 
+                            nty >= 0 && nty < tiles_y && 
+                            ntz >= 0 && ntz < tiles_z) {
+                            size_t idx = tileIndex(ntx, nty, ntz);
+                            if (tile_active_mask[idx] == 0) {
+                                tile_active_mask[idx] = 1;
+                                expanded.emplace_back(ntx, nty, ntz);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        active_tiles.insert(active_tiles.end(), expanded.begin(), expanded.end());
+        active_tile_count = static_cast<int>(active_tiles.size());
+        sparse_efficiency = total_tiles > 0 ? 100.0f * (1.0f - (float)active_tile_count / total_tiles) : 0.0f;
+    }
+    
+    /// @brief Check if tile has meaningful content
+    bool scanTileForActivity(int tx, int ty, int tz, float ambient_temp) const {
+        int start_i = tx * TILE_SIZE;
+        int start_j = ty * TILE_SIZE;
+        int start_k = tz * TILE_SIZE;
+        int end_i = std::min(start_i + TILE_SIZE, nx);
+        int end_j = std::min(start_j + TILE_SIZE, ny);
+        int end_k = std::min(start_k + TILE_SIZE, nz);
+        
+        for (int k = start_k; k < end_k; ++k) {
+            for (int j = start_j; j < end_j; ++j) {
+                for (int i = start_i; i < end_i; ++i) {
+                    size_t idx = cellIndex(i, j, k);
+                    // Check density, fuel, or temperature above ambient
+                    if (density[idx] > sparse_threshold || 
+                        fuel[idx] > sparse_threshold ||
+                        std::abs(temperature[idx] - ambient_temp) > 10.0f) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    
+    /// @brief Mark tile as active (e.g., for emitters)
+    void activateTile(int tx, int ty, int tz) {
+        if (tx < 0 || tx >= tiles_x || ty < 0 || ty >= tiles_y || tz < 0 || tz >= tiles_z) return;
+        size_t idx = tileIndex(tx, ty, tz);
+        if (tile_active_mask[idx] == 0) {
+            tile_active_mask[idx] = 1;
+            active_tiles.emplace_back(tx, ty, tz);
+            active_tile_count = static_cast<int>(active_tiles.size());
+        }
+    }
+    
+    /// @brief Activate tiles around a world position (for emitters)
+    void activateTilesAroundPosition(const Vec3& world_pos, float radius) {
+        float fi, fj, fk;
+        worldToGrid(world_pos, fi, fj, fk);
+        
+        int radius_cells = static_cast<int>(std::ceil(radius / voxel_size));
+        int radius_tiles = (radius_cells + TILE_SIZE - 1) / TILE_SIZE + 1;
+        
+        int center_tx = static_cast<int>(fi) / TILE_SIZE;
+        int center_ty = static_cast<int>(fj) / TILE_SIZE;
+        int center_tz = static_cast<int>(fk) / TILE_SIZE;
+        
+        for (int dz = -radius_tiles; dz <= radius_tiles; ++dz) {
+            for (int dy = -radius_tiles; dy <= radius_tiles; ++dy) {
+                for (int dx = -radius_tiles; dx <= radius_tiles; ++dx) {
+                    activateTile(center_tx + dx, center_ty + dy, center_tz + dz);
+                }
+            }
+        }
     }
     
     // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -199,6 +394,16 @@ public:
     /// @brief Sample temperature at world position
     float sampleTemperature(const Vec3& world_pos) const {
         return sampleCellCentered(temperature, world_pos);
+    }
+    
+    /// @brief Sample fuel at world position
+    float sampleFuel(const Vec3& world_pos) const {
+        return sampleCellCentered(fuel, world_pos);
+    }
+    
+    /// @brief Sample interaction (flame intensity) at world position
+    float sampleInteraction(const Vec3& world_pos) const {
+        return sampleCellCentered(interaction, world_pos);
     }
     
     /// @brief Sample velocity at world position (interpolated from staggered grid)

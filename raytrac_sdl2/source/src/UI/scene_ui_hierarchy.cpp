@@ -22,6 +22,7 @@
 #include <unordered_set>
 #include "TerrainManager.h"
 #include "ProjectManager.h"
+#include "scene_ui_animgraph.hpp"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE HIERARCHY PANEL (Outliner)
@@ -71,8 +72,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         ImGuiTreeNodeFlags world_flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
         if (world_selected) world_flags |= ImGuiTreeNodeFlags_Selected;
 
-        ImGui::PushStyleColor(ImGuiCol_Text, ctx.render_settings.show_background ? ImVec4(1.0f, 0.7f, 1.0f, 1.0f) : ImVec4(0.5f, 0.35f, 0.5f, 1.0f));
-        ImGui::TreeNodeEx("[W] World", world_flags);
+        ImVec4 worldColor = ctx.render_settings.show_background ? ImVec4(1.0f, 0.7f, 1.0f, 1.0f) : ImVec4(0.5f, 0.35f, 0.5f, 1.0f);
+        
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        UIWidgets::DrawIcon(UIWidgets::IconType::System, pos, 16, ImGui::ColorConvertFloat4ToU32(worldColor));
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+
+        ImGui::PushStyleColor(ImGuiCol_Text, worldColor);
+        ImGui::TreeNodeEx("World / Environment", world_flags);
         ImGui::PopStyleColor();
 
         if (ImGui::IsItemClicked()) {
@@ -91,6 +98,66 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
 
     ImGui::Separator();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHARACTERS / MODELS (Multi-Model Management)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (!ctx.scene.importedModelContexts.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.1f, 0.9f, 0.8f, 1.0f));
+        bool models_expanded = ImGui::TreeNode("Characters / Models");
+        ImGui::PopStyleColor();
+
+        if (models_expanded) {
+            for (size_t i = 0; i < ctx.scene.importedModelContexts.size(); i++) {
+                auto& mctx = ctx.scene.importedModelContexts[i];
+                ImGui::PushID((int)(5000 + i));
+
+                // 1. Visibility Pill Toggle
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
+                if (ImGui::Button(mctx.visible ? "(o)" : "( )")) {
+                    mctx.visible = !mctx.visible;
+                    // Apply visibility to all mesh members belonging to this model
+                    for (auto& member : mctx.members) {
+                        if (member) member->visible = mctx.visible;
+                    }
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                }
+                ImGui::PopStyleColor();
+                ImGui::SameLine();
+
+                // 2. Icon & Label
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                UIWidgets::DrawIcon(UIWidgets::IconType::Timeline, pos, 16, mctx.visible ? 0xFFFFFFFF : 0x88FFFFFF);
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+
+                bool is_selected = (g_animGraphUI.activeCharacter == mctx.importName);
+                ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+                if (is_selected) flags |= ImGuiTreeNodeFlags_Selected;
+
+                if (ImGui::TreeNodeEx(mctx.importName.c_str(), flags)) {
+                    // Quick Settings
+                    ImGui::Checkbox("Use Root Motion", &mctx.useRootMotion);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Object pivot follows the character's root animation (walking, etc.)");
+                    
+                    if (ImGui::Button("Select for AnimGraph")) {
+                        g_animGraphUI.activeCharacter = mctx.importName;
+                        show_anim_graph = true;
+                    }
+                    
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+                    g_animGraphUI.activeCharacter = mctx.importName;
+                }
+
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::Separator();
+    }
 
     // CAMERAS (Multi-camera support)
     if (!ctx.scene.cameras.empty()) {
@@ -124,11 +191,15 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (is_selected) flags |= ImGuiTreeNodeFlags_Selected;
 
                 // Active camera indicator
-                std::string label = is_active ? "[>] Camera #" + std::to_string(i) + " (Active)"
-                    : "[O] Camera #" + std::to_string(i);
+                std::string label = is_active ? "Camera #" + std::to_string(i) + " (Active)"
+                    : "Camera #" + std::to_string(i);
 
                 ImVec4 color = is_active ? ImVec4(0.3f, 1.0f, 0.5f, 1.0f) : ImVec4(0.5f, 0.7f, 1.0f, 1.0f);
                 if (!cam->visible) color.w = 0.5f; // Dim if hidden
+
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                UIWidgets::DrawIcon(UIWidgets::IconType::Camera, pos, 16, ImGui::ColorConvertFloat4ToU32(color));
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
 
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
                 ImGui::TreeNodeEx(label.c_str(), flags);
@@ -233,21 +304,24 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen | ImGuiTreeNodeFlags_SpanAvailWidth;
                 if (is_selected) flags |= ImGuiTreeNodeFlags_Selected;
 
-                // Icon based on light type
-                const char* icon = "[*]";  // Point light default
-                ImVec4 color = ImVec4(1.0f, 0.9f, 0.4f, 1.0f);  // Yellow for lights
-
-                std::string light_type = "Light";
-                switch (light->type()) {
-                case LightType::Point: icon = "[*]"; light_type = "Point"; break;
-                case LightType::Directional: icon = "[>]"; light_type = "Directional"; color = ImVec4(1.0f, 0.7f, 0.3f, 1.0f); break;
-                case LightType::Spot: icon = "[V]"; light_type = "Spot"; break;
-                case LightType::Area: icon = "[#]"; light_type = "Area"; break;
-                }
-
+                ImVec4 color = ImVec4(1.0f, 0.9f, 0.4f, 1.0f); // Default light color
                 if (!light->visible) color.w = 0.5f;
 
-                std::string label = std::string(icon) + " " + light_type + " " + std::to_string(i + 1);
+                std::string light_type = "Light";
+                UIWidgets::IconType icon_type = UIWidgets::IconType::Light;
+
+                switch (light->type()) {
+                    case LightType::Point:       light_type = "Point"; icon_type = UIWidgets::IconType::LightPoint; break;
+                    case LightType::Directional: light_type = "Directional"; color = ImVec4(1.0f, 0.7f, 0.3f, 1.0f); icon_type = UIWidgets::IconType::LightDir; break;
+                    case LightType::Spot:        light_type = "Spot"; icon_type = UIWidgets::IconType::LightSpot; break;
+                    case LightType::Area:        light_type = "Area"; icon_type = UIWidgets::IconType::LightArea; break;
+                }
+
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                UIWidgets::DrawIcon(icon_type, pos, 16.0f, ImGui::ColorConvertFloat4ToU32(color));
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+
+                std::string label = light_type + " " + std::to_string(i + 1);
 
                 ImGui::PushStyleColor(ImGuiCol_Text, color);
                 ImGui::TreeNodeEx(label.c_str(), flags);
@@ -364,9 +438,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 } else {
                     ctx.selection.selectVDBVolume(vdb, (int)i, vdb->name);
                     
-                    // Auto-open VDB tab
-                    
-                    // tab_to_focus = "VDB";
+                    // Auto-open VDB tab removed per user request
                 }
             }
 
@@ -444,9 +516,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             if (ImGui::IsItemClicked()) {
                  ctx.selection.selectGasVolume(gas, (int)i, gas->name);
                  
-                 // Auto-open Gas tab
-              
-                 // tab_to_focus = "Gas";
+                 // Auto-open Gas tab removed per user request
             }
 
             // Context Menu
@@ -816,10 +886,14 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImVec4 textColor = has_skinning ? ImVec4(0.9f, 0.7f, 0.5f, 1.0f) : ImVec4(0.8f, 0.8f, 0.85f, 1.0f);
                 if (!all_visible) textColor.w = 0.5f;
 
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+                UIWidgets::DrawIcon(has_skinning ? UIWidgets::IconType::Physics : UIWidgets::IconType::Mesh, 
+                    pos, 16, ImGui::ColorConvertFloat4ToU32(textColor));
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+
                 ImGui::PushStyleColor(ImGuiCol_Text, textColor);
                 
-                std::string icon = has_skinning ? "[SK] " : "[M] ";
-                std::string displayName = icon + (name.empty() ? "Unnamed Object" : name);
+                std::string displayName = (name.empty() ? "Unnamed Object" : name);
 
                 bool node_open = false;
                 if (is_selected || has_skinning) {
@@ -933,16 +1007,17 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 
                                 for (size_t ai = 0; ai < ctx.scene.animationDataList.size(); ++ai) {
                                     const auto& anim = ctx.scene.animationDataList[ai];
+                                    if (!anim) continue;
                                     ImGui::PushID((int)ai);
                                     
-                                    std::string animName = anim.name.empty() ? "Animation " + std::to_string(ai) : anim.name;
+                                    std::string animName = anim->name.empty() ? "Animation " + std::to_string(ai) : anim->name;
                                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.95f, 0.7f, 1.0f));
                                     
                                     if (ImGui::TreeNode(animName.c_str())) {
                                         ImGui::PopStyleColor();
-                                        ImGui::TextDisabled("Duration: %.2f sec", anim.duration / std::max(1.0, anim.ticksPerSecond));
-                                        ImGui::TextDisabled("Frames: %d - %d", anim.startFrame, anim.endFrame);
-                                        ImGui::TextDisabled("Channels: %zu", anim.positionKeys.size() + anim.rotationKeys.size());
+                                        ImGui::TextDisabled("Duration: %.2f sec", anim->duration / std::max(1.0, anim->ticksPerSecond));
+                                        ImGui::TextDisabled("Frames: %d - %d", anim->startFrame, anim->endFrame);
+                                        ImGui::TextDisabled("Channels: %zu", anim->positionKeys.size() + anim->rotationKeys.size());
                                         ImGui::TreePop();
                                     } else {
                                         ImGui::PopStyleColor();

@@ -28,6 +28,10 @@ public:
 
     bool is_initialized() const { return initialized; }
 
+    // CPU-Side Sampling (Matching GPU logic exactly)
+    float3 sampleTransmittance(float cosTheta, float altitude, float atmosphereHeight) const;
+    float3 sampleSkyView(float3 rayDir, float3 sunDir, float Rg, float Rt) const;
+
 private:
     void cleanup();
     
@@ -36,6 +40,11 @@ private:
     cudaArray_t skyview_array = nullptr;
     cudaArray_t multi_scatter_array = nullptr;
     cudaArray_t aerial_perspective_array = nullptr; // 3D Array
+    
+    // Host-Side Cache (For CPU Rendering Parity)
+    std::vector<float4> host_transmittance;
+    std::vector<float4> host_skyview;
+    std::vector<float4> host_multi_scatter;
     
     AtmosphereLUTData data;
     bool initialized = false;

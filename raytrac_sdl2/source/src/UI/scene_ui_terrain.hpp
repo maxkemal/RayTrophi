@@ -52,28 +52,25 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
     // Assuming single TU or safe.
     ManageTextureGraveyard();
     
-    ImGui::TextColored(ImVec4(0.5f, 0.8f, 0.5f, 1.0f), "TERRAIN SYSTEM");
-    ImGui::Separator();
-
     // -----------------------------------------------------------------------------
     // 1. TERRAIN MANAGEMENT (Create / Import)
     // -----------------------------------------------------------------------------
-    if (ImGui::CollapsingHeader("Manage Terrains", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::BeginSection("Manage Terrains", ImVec4(0.4f, 0.8f, 0.5f, 1.0f), true)) {
+        ImGui::Indent(8.0f);
         static int new_res = 128;
         static float new_size = 100.0f;
         static float import_height = 20.0f;
 
         // Creation Params
         ImGui::PushItemWidth(160.0f);
-        ImGui::InputInt("Resolution", &new_res);
-        ImGui::InputFloat("Size (m)", &new_size);
+        ImGui::DragInt("Resolution", &new_res, 1, 64, 2048);
+        ImGui::DragFloat("Size (m)", &new_size, 10.0f, 10.0f, 100000.0f);
         ImGui::PopItemWidth();
 
-        if (ImGui::Button("Create Grid Terrain")) {
+        if (UIWidgets::PrimaryButton("Create Grid Terrain", ImVec2(-1, 0))) {
             auto t = TerrainManager::getInstance().createTerrain(ctx.scene, new_res, new_size);
             if (t) {
                 terrain_brush.active_terrain_id = t->id;
-                // Don't auto-enable edit tool - let user manually enable if needed
                 SCENE_LOG_INFO("Terrain created: " + t->name);
                 ctx.renderer.resetCPUAccumulation();
                 g_bvh_rebuild_pending = true;
@@ -85,7 +82,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
         // Import Params
         ImGui::PushItemWidth(160.0f);
-        ImGui::InputFloat("Max Height (m)", &import_height);
+        ImGui::DragFloat("Max Height (m)", &import_height, 1.0f, 1.0f, 50000.0f);
 
         static int import_res_idx = 0; // Default 512
         const char* res_items[] = { "512 (Fast)", "1024 (Balanced)", "2048 (High)", "4096 (Extreme)" };
@@ -98,21 +95,16 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
         else if (import_res_idx == 2) target_res = 2048;
         else if (import_res_idx == 3) target_res = 4096;
 
-        if (ImGui::Button("Import Heightmap...")) {
+        if (UIWidgets::SecondaryButton("Import Heightmap...", ImVec2(-1, 0))) {
             std::string path = openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
             if (!path.empty()) {
                 auto t = TerrainManager::getInstance().createTerrainFromHeightmap(ctx.scene, path, new_size, import_height, target_res);
                 if (t) {
                     terrain_brush.active_terrain_id = t->id;
-                    // Don't auto-enable edit tool - let user manually enable if needed
                     SCENE_LOG_INFO("Terrain imported from: " + path);
                     ctx.renderer.resetCPUAccumulation();
                     g_bvh_rebuild_pending = true;
                     g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) {
-                        cudaDeviceSynchronize();
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                    }
                 }
             }
         }
@@ -120,21 +112,17 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
         ImGui::Spacing();
         ImGui::Separator();
 
-        if (ImGui::Button("Clear All Terrains")) {
-            // GPU sync BEFORE removal - ensure OptiX is not using terrain data
-            if (ctx.optix_gpu_ptr) {
-                cudaDeviceSynchronize();
-            }
+        if (UIWidgets::DangerButton("Clear All Terrains", ImVec2(-1, 0))) {
+            if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
             TerrainManager::getInstance().removeAllTerrains(ctx.scene);
             terrain_brush.active_terrain_id = -1;
             SCENE_LOG_INFO("All terrains cleared.");
             ctx.renderer.resetCPUAccumulation();
             g_bvh_rebuild_pending = true;
             g_optix_rebuild_pending = true;
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->resetAccumulation();
-            }
         }
+        ImGui::Unindent(8.0f);
+        UIWidgets::EndSection();
     }
 
     ImGui::Spacing();
@@ -145,7 +133,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
     if (terrain_brush.active_terrain_id != -1) {
         auto* t = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
         if (t) {
-            if (ImGui::CollapsingHeader("Mesh Quality")) {
+            if (UIWidgets::BeginSection("Mesh Quality", ImVec4(0.6f, 1.0f, 0.8f, 1.0f), false)) {
+                ImGui::Indent(8.0f);
                 // Normal Quality Dropdown
                 const char* normalQualityItems[] = { "Fast (4-neighbor)", "Sobel (8-neighbor)", "High Quality" };
                 int nq = (int)t->normal_quality;
@@ -169,17 +158,17 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ctx.renderer.resetCPUAccumulation();
                     g_bvh_rebuild_pending = true;
                     g_optix_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
                     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                 }
                 ImGui::PopItemWidth();
-                UIWidgets::HelpMarker("Adjust normal intensity for shading.\n1.0 = Default\n<1.0 = Flatter appearance\n>1.0 = More pronounced details");
                 
                 // Dirty Sectors Info
                 int dirtySectors = t->dirty_region.countDirtySectors();
                 if (dirtySectors > 0) {
                     ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Dirty Sectors: %d/256", dirtySectors);
                 }
+                ImGui::Unindent(8.0f);
+                UIWidgets::EndSection();
             }
             
             ImGui::Spacing();
@@ -393,567 +382,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     }
                     
                     // FOLIAGE UI INTEGRATION (Disabled - Moved to Central Section)
-                    if (false) { /* LEGACY UI REMOVED
-                    {
-                        InstanceManager& im = InstanceManager::getInstance();
-                        std::string foliageGroupName = "Foliage_" + t->name + "_Layer_" + std::to_string(i);
-                        
-                        // Find or Create
-                        int groupID = im.getGroupIdByName(foliageGroupName);
-                        InstanceGroup* foliageGroup = nullptr;
-                        
-                        if (groupID == -1) {
-                             if (ImGui::Button("Initialize Foliage Layer")) {
-                                 groupID = im.createGroup(foliageGroupName, "", {}); 
-                                 foliageGroup = im.getGroup(groupID);
-                                 foliageGroup->brush_settings.splat_map_channel = i; // Lock channel
-                                 foliageGroup->brush_settings.use_global_settings = false; // Default to per-source
-                                 SCENE_LOG_INFO("[Foliage] Initialized layer: " + foliageGroupName);
-                             }
-                        } else {
-                            foliageGroup = im.getGroup(groupID);
-                        }
-
-                        if (foliageGroup) {
-                            // Enforce Rules
-                            foliageGroup->brush_settings.splat_map_channel = i; 
-
-                            // 1. TOP BAR (Stats & Global Controls)
-                            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.6f, 1.0f), "%zu instances", foliageGroup->instances.size());
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("Clear All")) {
-                                foliageGroup->clearInstances();
-                                SceneUI::syncInstancesToScene(ctx, *foliageGroup, true);
-                                g_optix_rebuild_pending = true;
-                                ctx.renderer.resetCPUAccumulation();
-                            }
-                            
-                            // 2. PLACEMENT RULES (Group Level) - MOVED TO SCATTER SETTINGS
-                            // if (ImGui::TreeNodeEx("Placement Rules", ...)) { ... }
-                            
-                            // 3. SOURCE MESHES LIST
-                            ImGui::Separator();
-                            ImGui::Text("Source Meshes");
-                            ImGui::SameLine();
-                            
-                            // Add Source Button Logic
-                            bool has_selection = ctx.selection.hasSelection();
-                            if (ImGui::Button("+ Add Selected")) {
-                                if (has_selection) {
-                                    std::string node_name = ctx.selection.selected.name;
-                                    // Collect triangles
-                                    std::vector<std::shared_ptr<Triangle>> selected_tris;
-                                    for (auto& obj : ctx.scene.world.objects) {
-                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                        if (tri && tri->getNodeName() == node_name) selected_tris.push_back(tri);
-                                    }
-                                    
-                                    if (!selected_tris.empty()) {
-                                        foliageGroup->sources.emplace_back(node_name, selected_tris);
-                                        // Update BVH for source
-                                        // foliageGroup->updateSourceBVH(); // Handled by instance generation usually? 
-                                        // Actually calculateMeshCenter is needed. ScatterSource constructor does it.
-                                        SCENE_LOG_INFO("Added source: " + node_name);
-                                    } else {
-                                        SCENE_LOG_WARN("Selected object has no triangles or name mismatch.");
-                                    }
-                                } else {
-                                    SCENE_LOG_WARN("Select an object in the viewport first.");
-                                }
-                            }
-                            
-                            // Sources Table
-                            if (ImGui::BeginTable("FolSrcTable", 4, ImGuiTableFlags_BordersInner | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable)) {
-                                ImGui::TableSetupColumn("Object", ImGuiTableColumnFlags_WidthStretch);
-                                ImGui::TableSetupColumn("Wgt", ImGuiTableColumnFlags_WidthFixed, 40.0f);
-                                ImGui::TableSetupColumn("Scale", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-                                ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 20.0f);
-                                ImGui::TableHeadersRow();
-                                
-                                int remove_idx = -1;
-                                for (size_t src_i = 0; src_i < foliageGroup->sources.size(); src_i++) {
-                                    auto& src = foliageGroup->sources[src_i];
-                                    ImGui::PushID((int)src_i);
-                                    ImGui::TableNextRow();
-                                    
-                                    ImGui::TableSetColumnIndex(0);
-                                    bool open = ImGui::TreeNodeEx(src.name.c_str(), ImGuiTreeNodeFlags_SpanFullWidth);
-                                    
-                                    ImGui::TableSetColumnIndex(1);
-                                    ImGui::SetNextItemWidth(-1);
-                                    ImGui::DragFloat("##w", &src.weight, 0.1f, 0.0f, 100.0f, "%.1f");
-                                    
-                                    ImGui::TableSetColumnIndex(2);
-                                    ImGui::Text("%.1f-%.1f", src.settings.scale_min, src.settings.scale_max);
-                                    
-                                    ImGui::TableSetColumnIndex(3);
-                                    if (ImGui::SmallButton("X")) remove_idx = (int)src_i;
-                                    
-                                    if (open) {
-                                        ImGui::TableNextRow();
-                                        ImGui::TableSetColumnIndex(0);
-                                        ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, ImGui::GetColorU32(ImGuiCol_FrameBg)); // Darker bg
-                                        
-                                        // Per-Source Settings
-                                        ImGui::Indent();
-                                        ImGui::TextDisabled("Transformation Rules:");
-                                        ImGui::PushItemWidth(160.0f);
-                                        ImGui::DragFloatRange2("Scale Rng", &src.settings.scale_min, &src.settings.scale_max, 0.01f, 0.01f, 10.0f);
-                                        ImGui::DragFloat("Rot Rand Y", &src.settings.rotation_random_y, 1.0f, 0.0f, 360.0f);
-                                        ImGui::DragFloat("Rot Rand XZ", &src.settings.rotation_random_xz, 0.1f, 0.0f, 45.0f);
-                                        ImGui::DragFloatRange2("Y Offset", &src.settings.y_offset_min, &src.settings.y_offset_max, 0.01f, -2.0f, 2.0f);
-                                        ImGui::Checkbox("Align Normal", &src.settings.align_to_normal);
-                                        if (src.settings.align_to_normal) ImGui::SliderFloat("Infl.", &src.settings.normal_influence, 0.0f, 1.0f);
-                                        ImGui::PopItemWidth();
-                                        ImGui::Unindent();
-                                        
-                                        ImGui::TreePop();
-                                    }
-                                    ImGui::PopID();
-                                }
-                                ImGui::EndTable();
-                                
-                                if (remove_idx >= 0) {
-                                    foliageGroup->sources.erase(foliageGroup->sources.begin() + remove_idx);
-                                }
-                            }
-                            
-                            ImGui::Spacing();
-                            
-                            // 4. GENERATION ACTION
-                            if (ImGui::Button("Generate (Scatter)")) {
-                                // Procedural Scatter Implementation
-                                if (foliageGroup->sources.empty()) {
-                                    SCENE_LOG_ERROR("No source meshes! Add a source first.");
-                                } else {
-                                    int count = 5000; // Default count or expose param
-                                    // Expose count param
-                                }
-                            }
-                            // Quick param for density
-                            static int genCount = 1000;
-                            ImGui::SameLine();
-                            ImGui::SetNextItemWidth(100.0f);
-                            ImGui::InputInt("Count", &genCount);
-                            
-                            // Scatter Function
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of instances to attempt spawning");
-                            
-                            if (ImGui::Button("Run Scatter")) {
-                                std::mt19937 rng(1234 + i * 99);
-                                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-                                int spawned = 0;
-                                int max_attempts = genCount * 5;
-                                
-                                for (int attempt = 0; attempt < max_attempts && spawned < genCount; attempt++) {
-                                    float u = dist(rng);
-                                    float v = dist(rng);
-                                    
-                                    // Mask Check
-                                    bool maskPass = false;
-                                    if (t->splatMap && t->splatMap->is_loaded()) {
-                                        Vec3 col = t->splatMap->get_color(u, v);
-                                        float val = 0.0f;
-                                        if (i == 0) val = col.x;
-                                        else if (i == 1) val = col.y;
-                                        else if (i == 2) val = col.z;
-                                        else val = t->splatMap->get_alpha(u, v);
-                                        
-                                        if (val > 0.2f) maskPass = true; // Hardcoded threshold
-                                    } else {
-                                        // If no splatmap, maybe allow everywhere? or just error
-                                        if (i == 0) maskPass = true; // Base layer
-                                    }
-                                    
-                                    if (!maskPass) continue;
-                                    
-                                    // Height sample
-                                    // float h = t->sampleHeight(u, v); // Need world pos conversion
-                                    float tx = (u - 0.5f) * t->heightmap.scale_xz;
-                                    float tz = (v - 0.5f) * t->heightmap.scale_xz;
-                                    // Grid coords
-                                    int gx = u * (t->heightmap.width-1);
-                                    int gy = v * (t->heightmap.height-1);
-                                    float h = t->heightmap.getHeight(gx, gy); // Fast sample
-                                    
-                                    // Filter Slope/Height rules?
-                                    // Assuming calculateNormal is available
-                                    // Vec3 normal = t->calculateNormal(gx, gy);
-                                    // float slope = acos(normal.y) * 180.0f/3.14159f;
-                                    // if (slope > foliageGroup->brush_settings.slope_max) continue;
-                                    // if (h < foliageGroup->brush_settings.height_min || h > foliageGroup->brush_settings.height_max) continue;
-                                    
-                                    // Position for transform generation
-                                    Vec3 surfacePos(tx, h, tz);
-                                    
-                                    // Generate
-                                    InstanceTransform inst = foliageGroup->generateRandomTransform(surfacePos);
-                                    
-                                    // Add
-                                    foliageGroup->addInstance(inst);
-                                    spawned++;
-                                }
-                                
-                                // Sync
-                                SceneUI::syncInstancesToScene(ctx, *foliageGroup, false);
-                                g_optix_rebuild_pending = true;
-                                ctx.renderer.resetCPUAccumulation();
-                                SCENE_LOG_INFO("Scatter complete: " + std::to_string(spawned));
-                            }
-                        }
-                    }
-                    
-                    // DISABLE LEGACY UI
-                    if (false) {
-                        auto& fLayer = t->foliageLayers[i];
-                        
-                        ImGui::Checkbox("Enable Foliage", &fLayer.enabled);
-                        if (fLayer.enabled) {
-                            // Mesh Selection
-                            std::string meshName = fLayer.meshPath.empty() ? "[No Mesh]" : std::filesystem::path(fLayer.meshPath).filename().string();
-                            ImGui::Text("Mesh: %s", meshName.c_str());
-                            if (ImGui::SameLine(); ImGui::SmallButton("Load Mesh...")) {
-                                std::string path = SceneUI::openFileDialogW(L"Mesh Files\0*.obj;*.fbx;*.glb;*.gltf\0");
-                                if (!path.empty()) {
-                                    fLayer.meshPath = path;
-                                    // Trigger load? For V1 we rely on existing Scene loading or need a dedicated loader.
-                                    // Ideally we load it now into OptixAccelManager blindly? 
-                                    // For now, let's look up if it's already in scene or add it.
-                                    // Using a hack: we need a BLAS ID. 
-                                    // We can try to assume it's loaded as a "FoliageAsset"?
-                                    // For this iteration, we will just store the path. 
-                                    // Backend updateFoliage will handle loading if we improve it, 
-                                    // OR we force user to pick from loaded objects?
-                                    // "Pick from Loaded Objects" is safer for V1.
-                                }
-                            }
-
-                            // Mesh ID (Debug / Manual Override)
-                            // ImGui::InputInt("Mesh BLAS ID", &fLayer.meshId);
-
-                            // TEMPORARY: Pick from existing scene objects to get BLAS ID
-                            // Source Object Selection
-                            // NEW: Select by node name from scene objects (like scatter brush)
-                            // This captures actual triangles for cloning
-                            std::string selectedName = "Select Object...";
-                            if (!fLayer.meshPath.empty() && !fLayer.sourceTriangles.empty()) {
-                                selectedName = fLayer.meshPath + " (" + std::to_string(fLayer.sourceTriangles.size()) + " tris)";
-                            } else if (!fLayer.meshPath.empty()) {
-                                selectedName = fLayer.meshPath + " (no tris)";
-                            }
-                            
-                            if (ImGui::BeginCombo("Source Object", selectedName.c_str())) {
-                                // Auto-recapture: If meshPath is set but sourceTriangles is empty, recapture now
-                                if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
-                                    for (const auto& obj : ctx.scene.world.objects) {
-                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                        if (tri && tri->getNodeName() == fLayer.meshPath) {
-                                            fLayer.sourceTriangles.push_back(tri);
-                                        }
-                                    }
-                                    if (!fLayer.sourceTriangles.empty()) {
-                                        fLayer.calculateMeshCenter();
-                                        SCENE_LOG_INFO("[Foliage] Auto-recaptured '" + fLayer.meshPath + 
-                                                      "' with " + std::to_string(fLayer.sourceTriangles.size()) + " triangles");
-                                    }
-                                }
-                                
-                                // Build unique node names from scene (Cached for performance)
-                                static std::vector<std::string> cachedNodeNames;
-                                static size_t lastObjectCount = 0;
-                                static float cacheTimer = 0.0f;
-                                
-                                // Auto-invalidate cache if object count changes or periodically
-                                bool cacheInvalid = (ctx.scene.world.objects.size() != lastObjectCount);
-                                
-                                // Force refresh every 2 seconds to catch name changes or other non-size updates
-                                cacheTimer += ImGui::GetIO().DeltaTime;
-                                if (cacheTimer > 2.0f) {
-                                    cacheInvalid = true;
-                                    cacheTimer = 0.0f;
-                                }
-
-                                if (cacheInvalid || cachedNodeNames.empty()) {
-                                    std::set<std::string> uniqueNames;
-                                    for (const auto& obj : ctx.scene.world.objects) {
-                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                        if (tri) {
-                                            std::string name = tri->getNodeName();
-                                            // Skip terrain, scatter instances, and baked geometry
-                                            if (!name.empty() && 
-                                                name.find("Terrain") == std::string::npos &&
-                                                name.find("_inst_") == std::string::npos &&
-                                                name.find("_BAKED") == std::string::npos && 
-                                                name.find("Foliage_") == std::string::npos) {
-                                                uniqueNames.insert(name);
-                                            }
-                                        }
-                                    }
-                                    cachedNodeNames.assign(uniqueNames.begin(), uniqueNames.end());
-                                    lastObjectCount = ctx.scene.world.objects.size();
-                                    // SCENE_LOG_INFO("[UI] Refreshed object list cache");
-                                }
-                                
-                                for (const auto& nodeName : cachedNodeNames) {
-                                    bool is_selected = (fLayer.meshPath == nodeName);
-                                    if (ImGui::Selectable(nodeName.c_str(), is_selected)) {
-                                        // Capture all triangles with this node name
-                                        fLayer.meshPath = nodeName;
-                                        fLayer.sourceTriangles.clear(); // Clear old sources (important!)
-                                        
-                                        for (const auto& obj : ctx.scene.world.objects) {
-                                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                            if (tri && tri->getNodeName() == nodeName) {
-                                                fLayer.sourceTriangles.push_back(tri);
-                                            }
-                                        }
-                                        
-                                        // Calculate mesh center for proper placement
-                                        fLayer.calculateMeshCenter();
-                                        
-                                        SCENE_LOG_INFO("[Foliage] Set source '" + nodeName + 
-                                                      "' with " + std::to_string(fLayer.sourceTriangles.size()) + " triangles");
-                                    }
-                                    if (is_selected) ImGui::SetItemDefaultFocus();
-                                }
-                                
-                                if (nodeNames.empty()) {
-                                    ImGui::TextDisabled("No objects in scene (import a model first)");
-                                }
-                                
-                                ImGui::EndCombo();
-                            }
-                            
-                            // Let's implement basic properties first
-                            ImGui::PushItemWidth(160.0f);
-                            ImGui::DragInt("Density", &fLayer.density, 10, 0, 10000);
-                            ImGui::SliderFloat("Threshold", &fLayer.maskThreshold, 0.0f, 1.0f);
-                            
-                            ImGui::DragFloat2("Scale Range", &fLayer.scaleRange.x, 0.01f, 0.1f, 5.0f);
-                            ImGui::DragFloat2("Rot Range (Y)", &fLayer.rotationRange.x, 1.0f, 0.0f, 360.0f);
-                            ImGui::DragFloat2("Y-Offset Range", &fLayer.yOffsetRange.x, 0.05f, -10.0f, 10.0f);
-                            ImGui::PopItemWidth();
-                            
-                            ImGui::Spacing();
-                            ImGui::Separator();
-                            
-                            // === BRUSH MODE ===
-                            // Note: active_layer_name was removed. This legacy section is largely superseded by "Foliage System" below.
-                            // We map it loosely or disable it.
-                            bool brushActive = foliage_brush.enabled && foliage_brush.active_group_id != -1; // Looser check for legacy
-                            
-                            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Paint Mode");
-                            if (ImGui::Checkbox("Enable Brush", &brushActive)) {
-                                if (brushActive) {
-                                    foliage_brush.enabled = true;
-                                    foliage_brush.active_group_id = -1; // Cannot map Name -> ID easily here. Brush logic relies on ID now.
-                                    // This legacy button will just enable the brush but not bind to a valid group!
-                                    // To fix properly, user should use the new UI below.
-                                    
-                                    // Ensure source is captured
-                                    if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
-                                        for (const auto& obj : ctx.scene.world.objects) {
-                                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                            if (tri && tri->getNodeName() == fLayer.meshPath) {
-                                                fLayer.sourceTriangles.push_back(tri);
-                                            }
-                                        }
-                                        if (!fLayer.sourceTriangles.empty()) {
-                                            fLayer.calculateMeshCenter();
-                                        }
-                                    }
-                                } else {
-                                    foliage_brush.enabled = false;
-                                }
-                            }
-                            
-                            if (brushActive) {
-                                ImGui::SameLine();
-                                ImGui::TextDisabled("(Click terrain to paint)");
-                                
-                                ImGui::PushItemWidth(160.0f);
-                                if (SceneUI::DrawSmartFloat("brad", "Radius", &foliage_brush.radius, 1.0f, 50.0f, "%.1f", false, nullptr, 12)) {}
-                                ImGui::SliderInt("Instances/Stroke", &foliage_brush.density, 1, 20);
-                                
-                                const char* modes[] = { "Add", "Remove" };
-                                ImGui::Combo("Mode", &foliage_brush.mode, modes, 2);
-                                ImGui::PopItemWidth();
-                                
-                                ImGui::Checkbox("Lazy Update (Wait for Release)", &foliage_brush.lazy_update);
-                                if (ImGui::IsItemHovered()) ImGui::SetTooltip("If enabled, instances appear only when mouse is released.\nUseful for weak GPUs to prevent lag.");
-                            }
-                            
-                            ImGui::Spacing();
-                            
-                            // === SCATTER NOW (Bulk scatter) ===
-                            if (ImGui::Button("Scatter Now")) {
-                                // Auto-recapture source if needed
-                                if (!fLayer.meshPath.empty() && fLayer.sourceTriangles.empty()) {
-                                    SCENE_LOG_INFO("[Foliage] Trying to recapture source: '" + fLayer.meshPath + "'");
-                                    for (const auto& obj : ctx.scene.world.objects) {
-                                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                        if (tri && tri->getNodeName() == fLayer.meshPath) {
-                                            fLayer.sourceTriangles.push_back(tri);
-                                        }
-                                    }
-                                    if (!fLayer.sourceTriangles.empty()) {
-                                        fLayer.calculateMeshCenter();
-                                        SCENE_LOG_INFO("[Foliage] Auto-recaptured sources.");
-                                    }
-                                }
-                                
-                                if (!fLayer.hasValidSource()) {
-                                    SCENE_LOG_WARN("[Foliage] No valid source - select an object first");
-                                } else {
-                                    // 1. Legacy Cleanup (Remove old non-instanced objects)
-                                    // This cleans up objects from the previous system to prevent duplicates
-                                    std::string legacyPrefix = "Foliage_" + t->name + "_" + fLayer.name + "_";
-                                    auto& objects = ctx.scene.world.objects;
-                                    objects.erase(
-                                        std::remove_if(objects.begin(), objects.end(),
-                                            [&legacyPrefix](const std::shared_ptr<Hittable>& obj) {
-                                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                                if (tri) return tri->getNodeName().find(legacyPrefix) == 0;
-                                                return false;
-                                            }),
-                                        objects.end()
-                                    );
-                                    
-                                    // 2. Instance Group Setup (New System)
-                                    std::string groupName = "Foliage_" + t->name + "_" + fLayer.name;
-                                    InstanceManager& im = InstanceManager::getInstance();
-                                    InstanceGroup* group = im.findGroupByName(groupName);
-                                    
-                                    if (!group) {
-                                        int newId = im.createGroup(groupName, fLayer.meshPath, fLayer.sourceTriangles);
-                                        group = im.getGroup(newId);
-                                    } else {
-                                        // Update existing group source if it changed (Fix for Cube issue)
-                                        // This ensures we don't get stuck with old sources
-                                        if (group->source_node_name != fLayer.meshPath) {
-                                            group->source_node_name = fLayer.meshPath;
-                                            group->source_triangles = fLayer.sourceTriangles;
-                                            
-                                            // Also update the detailed sources list
-                                            group->sources.clear();
-                                            group->sources.push_back(ScatterSource(fLayer.meshPath, fLayer.sourceTriangles));
-                                            
-                                            SCENE_LOG_INFO("[Foliage] Updated group source to '" + fLayer.meshPath + "'");
-                                        }
-                                    }
-                                    
-                                    if (group) {
-                                        // Clear existing instances in the group to restart scatter
-                                        group->clearInstances();
-                                        
-                                        // Sync settings
-                                        group->brush_settings.scale_min = fLayer.scaleRange.x;
-                                        group->brush_settings.scale_max = fLayer.scaleRange.y;
-                                        group->brush_settings.rotation_random_y = (fLayer.rotationRange.y - fLayer.rotationRange.x);
-                                        group->brush_settings.y_offset_min = fLayer.yOffsetRange.x;
-                                        group->brush_settings.y_offset_max = fLayer.yOffsetRange.y;
-
-                                        // Scatter Parameters
-                                        int targetCount = fLayer.density;
-                                        std::mt19937 rng(12345 + t->id);
-                                        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-                                        
-                                        int spawnedCount = 0;
-                                        int maxAttempts = targetCount * 5;
-                                        
-                                        SCENE_LOG_INFO("[Foliage] Starting scatter: " + std::to_string(targetCount) + " instances");
-                                        
-                                        for (int attempt = 0; attempt < maxAttempts && spawnedCount < targetCount; ++attempt) {
-                                            float u = dist(rng);
-                                            float v = dist(rng);
-                                            
-                                            // Check heightmap mask
-                                            int gx = (int)(u * (t->heightmap.width - 1));
-                                            int gy = (int)(v * (t->heightmap.height - 1));
-                                            
-                                            float maskValue = 1.0f;
-                                            if (t->splatMap && t->splatMap->is_loaded()) {
-                                                Vec3 col = t->splatMap->get_color(u, v);
-                                                int ch = fLayer.targetMaskLayerId;
-                                                if (ch == 0) maskValue = col.x;
-                                                else if (ch == 1) maskValue = col.y;
-                                                else if (ch == 2) maskValue = col.z;
-                                                else maskValue = t->splatMap->get_alpha(u, v);
-                                            }
-                                            
-                                            if (maskValue < fLayer.maskThreshold) continue;
-                                            
-                                            // Calculate Position
-                                            float terrainX = (u - 0.5f) * t->heightmap.scale_xz;
-                                            float terrainZ = (v - 0.5f) * t->heightmap.scale_xz;
-                                            float terrainY = t->heightmap.getHeight(gx, gy);
-                                            
-                                            // Apply Y-Offset
-                                            float yOffset = fLayer.yOffsetRange.x + (fLayer.yOffsetRange.y - fLayer.yOffsetRange.x) * dist(rng);
-                                            terrainY += yOffset;
-                                            
-                                            float x = terrainX;
-                                            float y = terrainY;
-                                            float z = terrainZ;
-                                            
-                                            // Random Scale & Rotation
-                                            float scale = fLayer.scaleRange.x + (fLayer.scaleRange.y - fLayer.scaleRange.x) * dist(rng);
-                                            float rotY_deg = fLayer.rotationRange.x + (fLayer.rotationRange.y - fLayer.rotationRange.x) * dist(rng);
-                                            
-                                            // Add Instance
-                                            InstanceTransform inst;
-                                            inst.position = Vec3(x, y, z);
-                                            inst.scale = Vec3(scale, scale, scale);
-                                            inst.rotation = Vec3(0, rotY_deg, 0);
-                                            group->addInstance(inst);
-                                            
-                                            spawnedCount++;
-                                        }
-                                        
-                                        // Sync to Scene
-                                        SceneUI::syncInstancesToScene(ctx, *group, false);
-                                        
-                                        // Rebuild
-                                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                                        ctx.renderer.resetCPUAccumulation();
-                                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                                        
-                                        SCENE_LOG_INFO("[Foliage] Scattered " + std::to_string(spawnedCount) + " instances.");
-                                    }
-                                }
-                            }
-                            ImGui::SameLine();
-                            if (ImGui::Button("Clear")) {
-                                // 1. Legacy Cleanup
-                                std::string legacyPrefix = "Foliage_" + t->name + "_" + fLayer.name + "_";
-                                auto& objects = ctx.scene.world.objects;
-                                objects.erase(
-                                    std::remove_if(objects.begin(), objects.end(),
-                                        [&legacyPrefix](const std::shared_ptr<Hittable>& obj) {
-                                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                            if (tri) return tri->getNodeName().find(legacyPrefix) == 0;
-                                            return false;
-                                        }),
-                                    objects.end()
-                                );
-                                
-                                // 2. InstanceGroup Cleanup
-                                std::string groupName = "Foliage_" + t->name + "_" + fLayer.name;
-                                InstanceGroup* group = InstanceManager::getInstance().findGroupByName(groupName);
-                                if (group) {
-                                    group->clearInstances();
-                                    SceneUI::syncInstancesToScene(ctx, *group, true); // Force remove from scene
-                                }
-                                
-                                // Rebuild
-                                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                                ctx.renderer.resetCPUAccumulation();
-                                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                            }
-                        }
-                    */ }
+                    if (false);
                     
                     ImGui::Separator();
                     ImGui::PopID();

@@ -3,7 +3,7 @@
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
 * File:          scene_ui_river.hpp
-* Author:        Kemal DemirtaÅŸ
+* Author:        Kemal Demirtas
 * Date:          June 2024
 * License:       [License Information - e.g. Proprietary / MIT / etc.]
 * =========================================================================
@@ -38,558 +38,16 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
     // PROCEDURAL OCEAN GENERATOR (High-Quality Terrain-Like Water)
     // ════════════════════════════════════════════════════════════════════════════════
 
-    if (ImGui::CollapsingHeader("Procedural Ocean Generator", ImGuiTreeNodeFlags_DefaultOpen)) {
-        static float new_ocean_size = 500.0f;
-        static int new_ocean_res = 256;      // Explicit Resolution (Grid subdivisions)
-        static float new_ocean_y = 0.0f;
-        
-        // Generative Params
-        static int gen_noise_type = 2;       // Default: Ridge
-        static float gen_wave_height = 5.0f;
-        static float gen_wave_scale = 80.0f;
-        
-        ImGui::Text("Grid & Resolution");
-        ImGui::InputFloat("Size (m)", &new_ocean_size);
-        ImGui::InputFloat("Height (Y)", &new_ocean_y);
-        
-        // Resolution Slider limited to sensible values (32..2048)
-        // 1024x1024 = 1M quads = 2M tris. Beware performance.
-        ImGui::SliderInt("Resolution (Subdivs)", &new_ocean_res, 32, 1024);
-        
-        int total_tris = new_ocean_res * new_ocean_res * 2;
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Total Triangles: %d", total_tris);
-        
-        ImGui::Separator();
-        ImGui::Text("Initial Geometry Pattern");
-        
-        const char* noiseTypeNames[] = { "Perlin", "FBM", "Ridge", "Voronoi (Fake)", "Billow" };
-        ImGui::Combo("Pattern Type", &gen_noise_type, noiseTypeNames, IM_ARRAYSIZE(noiseTypeNames));
-        
-        if (SceneUI::DrawSmartFloat("wamp", "Wave Amplitude", &gen_wave_height, 0.1f, 50.0f, "%.1f", false, nullptr, 16)) {}
-        if (SceneUI::DrawSmartFloat("wscl", "Wave Scale", &gen_wave_scale, 1.0f, 500.0f, "%.1f", false, nullptr, 16)) {}
-        
-        if (ImGui::Button("Generate Sculpted Ocean Mesh", ImVec2(-1, 0))) {
-            // Calculate density: density = segments / size
-            if (new_ocean_size < 1.0f) new_ocean_size = 1.0f;
-            float density = (float)new_ocean_res / new_ocean_size;
-            
-            WaterSurface* surf = WaterManager::getInstance().createWaterPlane(ctx.scene, Vec3(0, new_ocean_y, 0), new_ocean_size, density);
-            
-            if (surf) {
-                 // Apply Procedural Noise Settings
-                 surf->params.use_geometric_waves = true;
-                 surf->params.geo_wave_height = gen_wave_height;
-                 surf->params.geo_wave_scale = gen_wave_scale;
-                 surf->params.geo_noise_type = (WaterWaveParams::NoiseType)gen_noise_type;
-                 
-                 // Default detailing depending on type
-                 surf->params.geo_octaves = 5;
-                 surf->params.geo_lacunarity = 2.0f;
-                 surf->params.geo_persistence = 0.5f;
 
-                 // Enable FFT for micro-details as well (Best of both worlds)
-                 surf->params.use_fft_ocean = true;
-                 surf->params.fft_ocean_size = gen_wave_scale * 0.5f; 
-                 
-                 // Deform the flat mesh
-                 WaterManager::getInstance().updateWaterMesh(surf);
-                 
-                 ctx.renderer.resetCPUAccumulation();
-                 extern bool g_bvh_rebuild_pending;
-                 extern bool g_optix_rebuild_pending;
-                 g_bvh_rebuild_pending = true;
-                 g_optix_rebuild_pending = true; 
-            }
-        }
-        ImGui::Separator();
-        
-        // List Existing Oceans
-        auto& surfaces = WaterManager::getInstance().getWaterSurfaces();
-        static int selected_surf_id = -1;
-        
-        if (surfaces.empty()) {
-            ImGui::TextDisabled("No ocean surfaces created.");
-        } else {
-            ImGui::Text("Active Surfaces:");
-            for (auto& surf : surfaces) {
-                if (surf.type == WaterSurface::Type::River) continue; // Skip rivers (handled below)
-                
-                std::string label = surf.name + "##" + std::to_string(surf.id);
-                bool is_selected = (surf.id == selected_surf_id);
-                if (ImGui::Selectable(label.c_str(), is_selected)) {
-                    selected_surf_id = surf.id;
-                }
-            }
-        }
-        
-        // Selected Surface Editor
-        if (selected_surf_id != -1) {
-            WaterSurface* selSurf = WaterManager::getInstance().getWaterSurface(selected_surf_id);
-            if (selSurf) {
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Properties: %s", selSurf->name.c_str());
-                
-                // Push unique ID for this surface to avoid widget ID conflicts
-                ImGui::PushID(selSurf->id);
-                
-                // Auto-select water track in timeline for keyframe manipulation
-                std::string waterTrackName = "Water_" + std::to_string(selSurf->id);
-                timeline.selected_track = waterTrackName;
-                
-                bool changed = false;
-                WaterWaveParams& wp = selSurf->params;
-                
-                // ═══════════════════════════════════════════════════════════
-                // KEYFRAME SYSTEM FOR WATER
-                // ═══════════════════════════════════════════════════════════
-                
-                // Keyframe diamond button
-                auto KeyframeButton = [&](const char* id, bool keyed, const char* prop_name = nullptr) -> bool {
-                    ImGui::PushID(id);
-                    float s = ImGui::GetFrameHeight();
-                    ImVec2 pos = ImGui::GetCursorScreenPos();
-                    bool clicked = ImGui::InvisibleButton("kbtn", ImVec2(s, s));
-                    
-                    ImU32 bg = keyed ? IM_COL32(100, 180, 255, 255) : IM_COL32(40, 40, 40, 255);
-                    ImU32 border = IM_COL32(180, 180, 180, 255);
-                    
-                    bool hovered = ImGui::IsItemHovered();
-                    if (hovered) {
-                        border = IM_COL32(255, 255, 255, 255);
-                        bg = keyed ? IM_COL32(120, 200, 255, 255) : IM_COL32(70, 70, 70, 255);
-                        
-                        if (prop_name) {
-                            ImGui::SetTooltip(keyed ? "%s: Click to REMOVE keyframe" : "%s: Click to ADD keyframe", prop_name);
-                        } else {
-                            ImGui::SetTooltip(keyed ? "Click to REMOVE keyframe" : "Click to ADD keyframe");
-                        }
-                    }
-                    
-                    ImDrawList* dl = ImGui::GetWindowDrawList();
-                    float cx = pos.x + s * 0.5f;
-                    float cy = pos.y + s * 0.5f;
-                    float r = s * 0.22f;
-                    
-                    ImVec2 p[4] = {
-                        ImVec2(cx, cy - r),
-                        ImVec2(cx + r, cy),
-                        ImVec2(cx, cy + r),
-                        ImVec2(cx - r, cy)
-                    };
-                    
-                    dl->AddQuadFilled(p[0], p[1], p[2], p[3], bg);
-                    dl->AddQuad(p[0], p[1], p[2], p[3], border, 1.0f);
-                    
-                    ImGui::PopID();
-                    return clicked;
-                };
-                
-                // Water property enum
-                enum class WaterProp {
-                    WaveHeight, WaveScale, WindDirection, Choppiness,
-                    Alignment, Damping, SwellAmplitude, Sharpening, DetailStrength
-                };
-                
-                // Check if water property is keyed at current frame
-                auto isWaterKeyed = [&](WaterProp prop) -> bool {
-                    auto it = ctx.scene.timeline.tracks.find(waterTrackName);
-                    if (it == ctx.scene.timeline.tracks.end()) return false;
-                    int cf = ctx.render_settings.animation_current_frame;
-                    for (auto& kf : it->second.keyframes) {
-                        if (kf.frame == cf && kf.has_water) {
-                            switch(prop) {
-                                case WaterProp::WaveHeight: return kf.water.has_wave_height;
-                                case WaterProp::WaveScale: return kf.water.has_wave_scale;
-                                case WaterProp::WindDirection: return kf.water.has_wind_direction;
-                                case WaterProp::Choppiness: return kf.water.has_choppiness;
-                                case WaterProp::Alignment: return kf.water.has_alignment;
-                                case WaterProp::Damping: return kf.water.has_damping;
-                                case WaterProp::SwellAmplitude: return kf.water.has_swell_amplitude;
-                                case WaterProp::Sharpening: return kf.water.has_sharpening;
-                                case WaterProp::DetailStrength: return kf.water.has_detail_strength;
-                            }
-                        }
-                    }
-                    return false;
-                };
-                
-                // Insert/Toggle water keyframe
-                auto insertWaterKey = [&](const std::string& label, WaterProp prop) {
-                    int cf = ctx.render_settings.animation_current_frame;
-                    auto& track = ctx.scene.timeline.tracks[waterTrackName];
-                    
-                    // Helper to check if prop is keyed
-                    auto isPropKeyed = [](const Keyframe& kf, WaterProp p) -> bool {
-                        if (!kf.has_water) return false;
-                        switch(p) {
-                            case WaterProp::WaveHeight: return kf.water.has_wave_height;
-                            case WaterProp::WaveScale: return kf.water.has_wave_scale;
-                            case WaterProp::WindDirection: return kf.water.has_wind_direction;
-                            case WaterProp::Choppiness: return kf.water.has_choppiness;
-                            case WaterProp::Alignment: return kf.water.has_alignment;
-                            case WaterProp::Damping: return kf.water.has_damping;
-                            case WaterProp::SwellAmplitude: return kf.water.has_swell_amplitude;
-                            case WaterProp::Sharpening: return kf.water.has_sharpening;
-                            case WaterProp::DetailStrength: return kf.water.has_detail_strength;
-                        }
-                        return false;
-                    };
-                    
-                    // Helper to clear prop
-                    auto clearProp = [](Keyframe& kf, WaterProp p) {
-                        switch(p) {
-                            case WaterProp::WaveHeight: kf.water.has_wave_height = false; break;
-                            case WaterProp::WaveScale: kf.water.has_wave_scale = false; break;
-                            case WaterProp::WindDirection: kf.water.has_wind_direction = false; break;
-                            case WaterProp::Choppiness: kf.water.has_choppiness = false; break;
-                            case WaterProp::Alignment: kf.water.has_alignment = false; break;
-                            case WaterProp::Damping: kf.water.has_damping = false; break;
-                            case WaterProp::SwellAmplitude: kf.water.has_swell_amplitude = false; break;
-                            case WaterProp::Sharpening: kf.water.has_sharpening = false; break;
-                            case WaterProp::DetailStrength: kf.water.has_detail_strength = false; break;
-                        }
-                    };
-                    
-                    // Find existing keyframe
-                    for (auto it = track.keyframes.begin(); it != track.keyframes.end(); ++it) {
-                        if (it->frame == cf) {
-                            // Toggle: if keyed, remove
-                            if (isPropKeyed(*it, prop)) {
-                                clearProp(*it, prop);
-                                
-                                // Check if keyframe is empty
-                                WaterKeyframe& wk = it->water;
-                                bool hasAnyProp = wk.has_wave_height || wk.has_wave_scale || 
-                                                  wk.has_wind_direction || wk.has_choppiness || 
-                                                  wk.has_alignment || wk.has_damping ||
-                                                  wk.has_swell_amplitude || wk.has_sharpening || 
-                                                  wk.has_detail_strength;
-                                
-                                if (!hasAnyProp) {
-                                    it->has_water = false;
-                                    if (!it->has_transform && !it->has_camera && !it->has_light && 
-                                        !it->has_material && !it->has_world && !it->has_terrain) {
-                                        track.keyframes.erase(it);
-                                    }
-                                }
-                                return;
-                            }
-                            
-                            // Add prop to existing keyframe
-                            it->has_water = true;
-                            it->water.water_surface_id = selSurf->id;
-                            
-                            switch(prop) {
-                                case WaterProp::WaveHeight:
-                                    it->water.has_wave_height = true;
-                                    it->water.wave_height = wp.geo_wave_height;
-                                    break;
-                                case WaterProp::WaveScale:
-                                    it->water.has_wave_scale = true;
-                                    it->water.wave_scale = wp.geo_wave_scale;
-                                    break;
-                                case WaterProp::WindDirection:
-                                    it->water.has_wind_direction = true;
-                                    it->water.wind_direction = wp.geo_swell_direction;
-                                    break;
-                                case WaterProp::Choppiness:
-                                    it->water.has_choppiness = true;
-                                    it->water.choppiness = wp.geo_wave_choppiness;
-                                    break;
-                                case WaterProp::Alignment:
-                                    it->water.has_alignment = true;
-                                    it->water.alignment = wp.geo_alignment;
-                                    break;
-                                case WaterProp::Damping:
-                                    it->water.has_damping = true;
-                                    it->water.damping = wp.geo_damping;
-                                    break;
-                                case WaterProp::SwellAmplitude:
-                                    it->water.has_swell_amplitude = true;
-                                    it->water.swell_amplitude = wp.geo_swell_amplitude;
-                                    break;
-                                case WaterProp::Sharpening:
-                                    it->water.has_sharpening = true;
-                                    it->water.sharpening = wp.geo_sharpening;
-                                    break;
-                                case WaterProp::DetailStrength:
-                                    it->water.has_detail_strength = true;
-                                    it->water.detail_strength = wp.geo_detail_strength;
-                                    break;
-                            }
-                            return;
-                        }
-                    }
-                    
-                    // Create new keyframe
-                    Keyframe kf(cf);
-                    kf.has_water = true;
-                    kf.water.water_surface_id = selSurf->id;
-                    
-                    switch(prop) {
-                        case WaterProp::WaveHeight:
-                            kf.water.has_wave_height = true;
-                            kf.water.wave_height = wp.geo_wave_height;
-                            break;
-                        case WaterProp::WaveScale:
-                            kf.water.has_wave_scale = true;
-                            kf.water.wave_scale = wp.geo_wave_scale;
-                            break;
-                        case WaterProp::WindDirection:
-                            kf.water.has_wind_direction = true;
-                            kf.water.wind_direction = wp.geo_swell_direction;
-                            break;
-                        case WaterProp::Choppiness:
-                            kf.water.has_choppiness = true;
-                            kf.water.choppiness = wp.geo_wave_choppiness;
-                            break;
-                        case WaterProp::Alignment:
-                            kf.water.has_alignment = true;
-                            kf.water.alignment = wp.geo_alignment;
-                            break;
-                        case WaterProp::Damping:
-                            kf.water.has_damping = true;
-                            kf.water.damping = wp.geo_damping;
-                            break;
-                        case WaterProp::SwellAmplitude:
-                            kf.water.has_swell_amplitude = true;
-                            kf.water.swell_amplitude = wp.geo_swell_amplitude;
-                            break;
-                        case WaterProp::Sharpening:
-                            kf.water.has_sharpening = true;
-                            kf.water.sharpening = wp.geo_sharpening;
-                            break;
-                        case WaterProp::DetailStrength:
-                            kf.water.has_detail_strength = true;
-                            kf.water.detail_strength = wp.geo_detail_strength;
-                            break;
-                    }
-                    
-                ctx.scene.timeline.insertKeyframe(waterTrackName, kf);
-                };
-                
-                // Helper to apply preset with optional mesh rebuild
-                auto applyPreset = [&](float height, float scale, float dir, float chop, float align, float damp, float swell, float sharp, float detail, WaterWaveParams::NoiseType type) {
-                    wp.geo_wave_height = height;
-                    wp.geo_wave_scale = scale;
-                    wp.geo_swell_direction = dir;
-                    wp.geo_wave_choppiness = chop;
-                    wp.geo_alignment = align;
-                    wp.geo_damping = damp;
-                    wp.geo_swell_amplitude = swell;
-                    wp.geo_sharpening = sharp;
-                    wp.geo_detail_strength = detail;
-                    wp.geo_noise_type = type;
-                    wp.use_geometric_waves = true;
-                    WaterManager::getInstance().updateWaterMesh(selSurf);
-                    ctx.renderer.resetCPUAccumulation();
-                    extern bool g_bvh_rebuild_pending;
-                    extern bool g_optix_rebuild_pending;
-                    g_bvh_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
-                };
-                
-                bool rebuild_mesh = false;
-                
-                // ═══════════════════════════════════════════════════════════
-                // 🌊 WAVE GENERATION (Main Section - Always Visible)
-                // ═══════════════════════════════════════════════════════════
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Wave Generation");
-                ImGui::Separator();
-                
-                // Wave Type Selection
-                const char* waveTypeNames[] = { "Perlin Noise", "FBM Noise", "Ridge Noise", "Voronoi", "Billow", "Gerstner Waves", "Ocean Spectrum" };
-                int currentType = (int)wp.geo_noise_type;
-                if (ImGui::Combo("Wave Type", &currentType, waveTypeNames, IM_ARRAYSIZE(waveTypeNames))) {
-                    wp.geo_noise_type = (WaterWaveParams::NoiseType)currentType;
-                    rebuild_mesh = true;
-                }
-                
-                ImGui::Spacing();
-                
-                // Main Wave Parameters with Global LCD Sliders
-                bool heightKeyed = isWaterKeyed(WaterProp::WaveHeight);
-                if (SceneUI::DrawSmartFloat("height", "Height", &wp.geo_wave_height, 0.1f, 30.0f, "%.1f", heightKeyed,
-                    [&](){ insertWaterKey("Height", WaterProp::WaveHeight); }, 16)) { rebuild_mesh = true; }
-                
-                bool scaleKeyed = isWaterKeyed(WaterProp::WaveScale);
-                if (SceneUI::DrawSmartFloat("scale", "Scale", &wp.geo_wave_scale, 10.0f, 500.0f, "%.0f", scaleKeyed,
-                    [&](){ insertWaterKey("Scale", WaterProp::WaveScale); }, 16)) { rebuild_mesh = true; }
-                
-                bool chopKeyed = isWaterKeyed(WaterProp::Choppiness);
-                if (SceneUI::DrawSmartFloat("chop", "Chop", &wp.geo_wave_choppiness, 0.0f, 3.0f, "%.2f", chopKeyed,
-                    [&](){ insertWaterKey("Choppiness", WaterProp::Choppiness); }, 16)) { rebuild_mesh = true; }
-                
-                bool wdirKeyed = isWaterKeyed(WaterProp::WindDirection);
-                if (SceneUI::DrawSmartFloat("wind", "Wind", &wp.geo_swell_direction, 0.0f, 360.0f, "%.0f", wdirKeyed,
-                    [&](){ insertWaterKey("Wind Dir", WaterProp::WindDirection); }, 16)) { rebuild_mesh = true; }
-                
-                // ═══════════════════════════════════════════════════════════
-                // 🎨 WATER APPEARANCE (Collapsible)
-                // ═══════════════════════════════════════════════════════════
-                ImGui::Spacing();
-                if (ImGui::CollapsingHeader("Water Appearance", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    ImGui::Indent(10);
-                    
-                    ImGui::ColorEdit3("Deep Color", &wp.deep_color.x);
-                    ImGui::ColorEdit3("Surface Color", &wp.shallow_color.x);
-                    
-                    if (SceneUI::DrawSmartFloat("clty", "Clear", &wp.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {
-                        // Display as percentage
-                    }
-                    
-                    if (SceneUI::DrawSmartFloat("wior", "IOR", &wp.ior, 1.0f, 1.5f, "%.3f", false, nullptr, 12)) {
-                        // Water IOR is typically 1.33
-                    }
-                    ImGui::SameLine(); ImGui::TextDisabled("(?)");
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Real water: 1.333");
-                    
-                    ImGui::Unindent(10);
-                }
-                
-                // ═══════════════════════════════════════════════════════════
-                // ⚙️ ADVANCED SETTINGS (Collapsible, closed by default)
-                // ═══════════════════════════════════════════════════════════
-                if (ImGui::CollapsingHeader("Advanced Settings")) {
-                    ImGui::Indent(10);
-                    
-                    // Wind alignment
-                    bool alignKeyed = isWaterKeyed(WaterProp::Alignment);
-                    if (SceneUI::DrawSmartFloat("align", "Align", &wp.geo_alignment, 0.0f, 1.0f, "%.2f", alignKeyed,
-                         [&](){ insertWaterKey("Alignment", WaterProp::Alignment); }, 12)) { rebuild_mesh = true; }
-                    
-                    // Damping
-                    bool dampKeyed = isWaterKeyed(WaterProp::Damping);
-                    if (SceneUI::DrawSmartFloat("damp", "Damp", &wp.geo_damping, 0.0f, 1.0f, "%.2f", dampKeyed,
-                         [&](){ insertWaterKey("Damping", WaterProp::Damping); }, 12)) { rebuild_mesh = true; }
-                    
-                    // Swell
-                    bool swellKeyed = isWaterKeyed(WaterProp::SwellAmplitude);
-                    if (SceneUI::DrawSmartFloat("swell", "Swell", &wp.geo_swell_amplitude, 0.0f, 1.0f, "%.2f", swellKeyed,
-                         [&](){ insertWaterKey("Swell", WaterProp::SwellAmplitude); }, 12)) { rebuild_mesh = true; }
-                    
-                    // Sharpening
-                    bool sharpKeyed = isWaterKeyed(WaterProp::Sharpening);
-                    if (SceneUI::DrawSmartFloat("sharp", "Sharp", &wp.geo_sharpening, 0.0f, 1.0f, "%.2f", sharpKeyed,
-                         [&](){ insertWaterKey("Sharpening", WaterProp::Sharpening); }, 12)) { rebuild_mesh = true; }
-                    
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Detail Noise:");
-                    
-                    // Detail
-                    bool detailKeyed = isWaterKeyed(WaterProp::DetailStrength);
-                    if (SceneUI::DrawSmartFloat("detail", "Detail", &wp.geo_detail_strength, 0.0f, 0.5f, "%.3f", detailKeyed,
-                         [&](){ insertWaterKey("Detail", WaterProp::DetailStrength); }, 12)) { rebuild_mesh = true; }
-                    
-                    if (SceneUI::DrawSmartFloat("dscale", "DScale", &wp.geo_detail_scale, 1.0f, 10.0f, "%.2f", false, nullptr, 12)) { rebuild_mesh = true; }
-                    
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Mesh Quality:");
-                    
-                    if (ImGui::Checkbox("Smooth Normals", &wp.geo_smooth_normals)) { rebuild_mesh = true; }
-                    ImGui::SameLine(); ImGui::TextDisabled("(?)");
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Calculate per-vertex smooth normals\nSlightly slower but better lighting");
-                    
-                    // Noise octaves (only show for noise-based types)
-                    if (wp.geo_noise_type != WaterWaveParams::NoiseType::Gerstner && 
-                        wp.geo_noise_type != WaterWaveParams::NoiseType::TessendorfSimple) {
-                        ImGui::Separator();
-                        ImGui::TextDisabled("Noise Parameters:");
-                        if (ImGui::SliderInt("Octaves", &wp.geo_octaves, 1, 6)) { rebuild_mesh = true; }
-                        if (SceneUI::DrawSmartFloat("lac", "Lacunarity", &wp.geo_lacunarity, 1.5f, 3.0f, "%.2f", false, nullptr, 16)) { rebuild_mesh = true; }
-                        if (SceneUI::DrawSmartFloat("pers", "Persistence", &wp.geo_persistence, 0.3f, 0.7f, "%.2f", false, nullptr, 16)) { rebuild_mesh = true; }
-                    }
-                    
-                    ImGui::Unindent(10);
-                }
-                
-                // ═══════════════════════════════════════════════════════════
-                // 🎯 PRESETS (Quick Setup)
-                // ═══════════════════════════════════════════════════════════
-                if (ImGui::CollapsingHeader("Quick Presets")) {
-                    ImGui::Indent(10);
-                    
-                    float btnWidth = (ImGui::GetContentRegionAvail().x - 20) / 3.0f;
-                    
-                    if (ImGui::Button("Calm Lake", ImVec2(btnWidth, 0))) {
-                        applyPreset(0.3f, 30.0f, 0.0f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.05f, WaterWaveParams::NoiseType::Perlin);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Ocean Swell", ImVec2(btnWidth, 0))) {
-                        applyPreset(3.0f, 100.0f, 270.0f, 1.0f, 0.7f, 0.3f, 0.5f, 0.3f, 0.1f, WaterWaveParams::NoiseType::TessendorfSimple);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Stormy Sea", ImVec2(btnWidth, 0))) {
-                        applyPreset(8.0f, 60.0f, 315.0f, 2.5f, 0.9f, 0.5f, 0.8f, 0.7f, 0.2f, WaterWaveParams::NoiseType::Gerstner);
-                    }
-                    
-                    if (ImGui::Button("Pool/Tank", ImVec2(btnWidth, 0))) {
-                        applyPreset(0.1f, 10.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.02f, WaterWaveParams::NoiseType::FBM);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("River", ImVec2(btnWidth, 0))) {
-                        applyPreset(0.5f, 20.0f, 90.0f, 0.5f, 1.0f, 0.8f, 0.2f, 0.1f, 0.08f, WaterWaveParams::NoiseType::Ridge);
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Tropical", ImVec2(btnWidth, 0))) {
-                        applyPreset(1.5f, 80.0f, 200.0f, 0.8f, 0.5f, 0.2f, 0.3f, 0.2f, 0.05f, WaterWaveParams::NoiseType::Gerstner);
-                    }
-                    
-                    ImGui::Unindent(10);
-                }
-                
-                // ═══════════════════════════════════════════════════════════
-                // MESH REBUILD
-                // ═══════════════════════════════════════════════════════════
-                if (rebuild_mesh && wp.use_geometric_waves) {
-                    WaterManager::getInstance().updateWaterMesh(selSurf);
-                    ctx.renderer.resetCPUAccumulation();
-                    extern bool g_bvh_rebuild_pending;
-                    extern bool g_optix_rebuild_pending;
-                    g_bvh_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
-                }
-                
-                // Enable geometric waves if any wave param is modified but not enabled
-                if (rebuild_mesh && !wp.use_geometric_waves) {
-                    wp.use_geometric_waves = true;
-                    WaterManager::getInstance().updateWaterMesh(selSurf);
-                    ctx.renderer.resetCPUAccumulation();
-                    extern bool g_bvh_rebuild_pending;
-                    extern bool g_optix_rebuild_pending;
-                    g_bvh_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
-                }
-                
-                // ═══════════════════════════════════════════════════════════
-                // DELETE BUTTON
-                // ═══════════════════════════════════════════════════════════
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.2f, 0.2f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.3f, 0.3f, 1.0f));
-                if (ImGui::Button("Delete This Ocean", ImVec2(-1, 0))) {
-                    WaterManager::getInstance().removeWaterSurface(ctx.scene, selected_surf_id);
-                    selected_surf_id = -1;
-                    ctx.renderer.resetCPUAccumulation();
-                    extern bool g_bvh_rebuild_pending;
-                    extern bool g_optix_rebuild_pending;
-                    g_bvh_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
-                }
-                ImGui::PopStyleColor(2);
-                
-                ImGui::PopID(); // End surface ID scope
-            }
-        }
-        ImGui::Spacing();
-    }
+
+    // Redundant Ocean Generator removed.
+    
+
     
     // ════════════════════════════════════════════════════════════════════════════════
     // RIVER MANAGER
     // ════════════════════════════════════════════════════════════════════════════════
-    if (ImGui::CollapsingHeader("Manage Rivers", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::BeginSection("Manage Rivers", ImVec4(0.5f, 0.7f, 0.9f, 1.0f))) {
         
         // Option to show gizmos even when panel not active
         ImGui::Checkbox("Always Show Gizmos", &riverMgr.showGizmosWhenInactive);
@@ -663,6 +121,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
             
             if (open) ImGui::TreePop();
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -673,7 +132,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
     if (selectedRiver) {
         ImGui::Separator();
         
-        if (ImGui::CollapsingHeader("River Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::BeginSection("River Properties", ImVec4(0.5f, 0.7f, 0.9f, 1.0f))) {
             // Name
             char nameBuf[128];
             strncpy(nameBuf, selectedRiver->name.c_str(), sizeof(nameBuf) - 1);
@@ -703,12 +162,13 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
             ImGui::Text("Default Values (for new points)");
             SceneUI::DrawSmartFloat("rdw", "Default Width", &riverMgr.defaultWidth, 0.5f, 20.0f, "%.1f", false, nullptr, 16);
             SceneUI::DrawSmartFloat("rdd", "Default Depth", &riverMgr.defaultDepth, 0.1f, 5.0f, "%.1f", false, nullptr, 16);
+            UIWidgets::EndSection();
         }
         
         // ─────────────────────────────────────────────────────────────────────
         // FLOW PHYSICS & DYNAMICS
         // ─────────────────────────────────────────────────────────────────────
-        if (ImGui::CollapsingHeader("Flow Physics & Dynamics")) {
+        if (UIWidgets::BeginSection("Flow Physics & Dynamics", ImVec4(0.4f, 0.9f, 1.0f, 1.0f), false)) {
             RiverSpline::PhysicsParams& pp = selectedRiver->physics;
             bool changed = false;
             
@@ -751,12 +211,13 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 }
                 ProjectManager::getInstance().markModified();
             }
+            UIWidgets::EndSection();
         }
         
         // ─────────────────────────────────────────────────────────────────────
         // CONTROL POINTS
         // ─────────────────────────────────────────────────────────────────────
-        if (ImGui::CollapsingHeader("Control Points", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::BeginSection("Control Points", ImVec4(1.0f, 0.6f, 0.6f, 1.0f))) {
             
             // Edit mode toggle
             ImVec4 editColor = riverMgr.isEditing ? ImVec4(0.2f, 0.8f, 0.2f, 1.0f) : ImVec4(0.8f, 0.2f, 0.2f, 1.0f);
@@ -794,6 +255,8 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 
                 if (open) ImGui::TreePop();
             }
+            UIWidgets::EndSection();
+        }
             
             // Selected point properties
             if (riverMgr.selectedControlPoint >= 0 && 
@@ -893,51 +356,57 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
             }
         }
         
-        // ─────────────────────────────────────────────────────────────────────
-        // WATER MATERIAL INFO (Parameters are managed via Water panel)
-        // ─────────────────────────────────────────────────────────────────────
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Water Material");
-        if (selectedRiver->waterSurfaceId >= 0) {
-            ImGui::BulletText("Registered as WaterSurface (ID: %d)", selectedRiver->waterSurfaceId);
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), 
-                "Edit waves, colors, and effects in the Water panel");
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), 
-                "Build mesh to create water surface");
-        }
-        
-        // ─────────────────────────────────────────────────────────────────────
-        // ACTIONS
-        // ─────────────────────────────────────────────────────────────────────
-        ImGui::Separator();
-        
-        if (selectedRiver->needsRebuild) {
-            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Mesh needs rebuild!");
-        }
-        
-        if (ImGui::Button("Rebuild Mesh", ImVec2(-1, 0))) {
-            riverMgr.generateMesh(selectedRiver, ctx.scene);
+        if (selectedRiver) {
+            // ─────────────────────────────────────────────────────────────────────
+            // WATER MATERIAL INFO (Parameters are managed via Water panel)
+            // ─────────────────────────────────────────────────────────────────────
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Water Material");
+            if (selectedRiver->waterSurfaceId >= 0) {
+                ImGui::BulletText("Registered as WaterSurface (ID: %d)", selectedRiver->waterSurfaceId);
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), 
+                    "Edit waves, colors, and effects in the Water panel");
+            } else {
+                ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), 
+                    "Build mesh to create water surface");
+            }
             
-            // Trigger scene rebuild
-            extern bool g_bvh_rebuild_pending;
-            extern bool g_optix_rebuild_pending;
-            g_bvh_rebuild_pending = true;
-            g_optix_rebuild_pending = true;
-            ctx.renderer.resetCPUAccumulation();
+            // ─────────────────────────────────────────────────────────────────────
+            // ACTIONS
+            // ─────────────────────────────────────────────────────────────────────
+            ImGui::Separator();
+            
+            if (selectedRiver->needsRebuild) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Mesh needs rebuild!");
+            }
+            
+            if (ImGui::Button("Rebuild Mesh", ImVec2(-1, 0))) {
+                riverMgr.generateMesh(selectedRiver, ctx.scene);
+                
+                // Trigger scene rebuild
+                extern bool g_bvh_rebuild_pending;
+                extern bool g_optix_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+                g_optix_rebuild_pending = true;
+                ctx.renderer.resetCPUAccumulation();
+            }
         }
         
         // Carve River Bed into terrain
-        if (TerrainManager::getInstance().hasActiveTerrain()) {
-            if (ImGui::CollapsingHeader("Carve Settings")) {
-                SceneUI::DrawSmartFloat("cdm", "Depth Multiplier", &riverMgr.carveDepthMult, 0.1f, 3.0f, "%.1f", false, nullptr, 16);
+        if (ImGui::CollapsingHeader("Carve Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Check for terrain availability only for interactivity/info
+            if (!TerrainManager::getInstance().hasActiveTerrain()) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "No active terrain found! Carve disabled.");
+            }
+            
+            SceneUI::DrawSmartFloat("cdm", "Depth Multiplier", &riverMgr.carveDepthMult, 0.1f, 3.0f, "%.1f", false, nullptr, 16);
                 SceneUI::DrawSmartFloat("csm", "Smoothness", &riverMgr.carveSmoothness, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
                 ImGui::Checkbox("Apply Post-Erosion (Smooth Edges)", &riverMgr.carveAutoPostErosion);
                 if (riverMgr.carveAutoPostErosion) {
                     ImGui::SliderInt("Erosion Iterations", &riverMgr.carveErosionIterations, 5, 30);
                 }
-                
-                ImGui::Separator();
+
+
                 
                 // ═══════════════════════════════════════════════════════════════
                 // NATURAL CAVE SETTINGS (Doğal Nehir Yatağı)
@@ -1021,6 +490,16 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 // Standard Carve Button
                 if (ImGui::Button("Carve River Bed (Simple)", ImVec2(-1, 0))) {
                     if (selectedRiver->spline.pointCount() >= 2) {
+                        // Backup before manual carve
+                        auto& tm = TerrainManager::getInstance();
+                        if (!riverMgr.hasTerrainBackup && !tm.getTerrains().empty()) {
+                            auto& t = tm.getTerrains()[0];
+                            riverMgr.terrainBackupData = t.heightmap.data;
+                            riverMgr.terrainBackupWidth = t.heightmap.width;
+                            riverMgr.terrainBackupHeight = t.heightmap.height;
+                            riverMgr.hasTerrainBackup = true;
+                        }
+
                         // Sample many points along spline
                         std::vector<Vec3> samplePoints;
                         std::vector<float> sampleWidths;
@@ -1075,6 +554,16 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.7f, 0.5f, 1.0f));
                 if (ImGui::Button("Carve Natural Riverbed", ImVec2(-1, 0))) {
                     if (selectedRiver->spline.pointCount() >= 2) {
+                         // Backup before manual carve
+                        auto& tm = TerrainManager::getInstance();
+                        if (!riverMgr.hasTerrainBackup && !tm.getTerrains().empty()) {
+                            auto& t = tm.getTerrains()[0];
+                            riverMgr.terrainBackupData = t.heightmap.data;
+                            riverMgr.terrainBackupWidth = t.heightmap.width;
+                            riverMgr.terrainBackupHeight = t.heightmap.height;
+                            riverMgr.hasTerrainBackup = true;
+                        }
+
                         // Sample many points along spline
                         std::vector<Vec3> samplePoints;
                         std::vector<float> sampleWidths;
@@ -1144,8 +633,46 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
                 
                 ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), 
                     "Natural: Pools, Riffles, Asymmetry, Point Bars");
+                // BACKUP / RESTORE CONTROLS
+                ImGui::Separator();
+                if (riverMgr.hasTerrainBackup) {
+                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "Backup Available");
+                    
+                    if (ImGui::Button("Reset / Undo Carve", ImVec2(140, 0))) {
+                        // Restore from backup
+                        auto& tm = TerrainManager::getInstance();
+                        if (!tm.getTerrains().empty()) {
+                            auto& t = tm.getTerrains()[0]; // Assume first terrain for now
+                            if (t.heightmap.data.size() == riverMgr.terrainBackupData.size()) {
+                                t.heightmap.data = riverMgr.terrainBackupData;
+                                tm.updateTerrainMesh(&t);
+                                
+                                extern bool g_bvh_rebuild_pending;
+                                extern bool g_optix_rebuild_pending;
+                                g_bvh_rebuild_pending = true;
+                                g_optix_rebuild_pending = true;
+                                ctx.renderer.resetCPUAccumulation();
+                                ProjectManager::getInstance().markModified();
+                                SCENE_LOG_INFO("Terrain restored from backup.");
+                            }
+                        }
+                    }
+                    
+                    ImGui::SameLine();
+                    if (ImGui::Button("Commit", ImVec2(80, 0))) {
+                        riverMgr.hasTerrainBackup = false;
+                        riverMgr.terrainBackupData.clear();
+                        SCENE_LOG_INFO("Carve changes committed.");
+                    }
+                    ImGui::SameLine(); 
+                    ImGui::TextDisabled("(?)");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Commit: Clears backup, making current state the new baseline.\nReset: Reverts to original state before first carve.");
+                } else {
+                     ImGui::TextDisabled("Backup logic active (Backup created on first Carve)");
+                }
+                
+                // UIWidgets::EndSection();
             }
-        }
         
         if (ImGui::Button("Clear All Points", ImVec2(-1, 0))) {
             // Remove existing mesh from scene
@@ -1168,7 +695,7 @@ inline void SceneUI::drawRiverPanel(UIContext& ctx) {
             
             ProjectManager::getInstance().markModified();
         }
-    }
+    
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1199,22 +726,36 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
     float tan_half_fov = tanf(fov_rad * 0.5f);
     float aspect = io.DisplaySize.x / io.DisplaySize.y;
     
-    auto Project = [&](const Vec3& p) -> ImVec2 {
-        Vec3 to_point = p - cam.lookfrom;
-        float depth = to_point.dot(cam_forward);
-        if (depth <= 0.1f) return ImVec2(-10000, -10000);
-        
-        float local_x = to_point.dot(cam_right);
-        float local_y = to_point.dot(cam_up);
-        
-        float half_h = depth * tan_half_fov;
-        float half_w = half_h * aspect;
-        
-        return ImVec2(
-            ((local_x / half_w) * 0.5f + 0.5f) * io.DisplaySize.x,
-            (0.5f - (local_y / half_h) * 0.5f) * io.DisplaySize.y
-        );
-    };
+        // Calculate Viewport offsets and sizes
+        float left_off = showSidePanel ? side_panel_width : 0.0f;
+        float top_off = 19.0f; // Menu bar height estimate
+        bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph);
+        float bottom_off = show_bottom ? (bottom_panel_height + 24.0f) : 24.0f;
+
+        float v_width = io.DisplaySize.x - left_off;
+        float v_height = io.DisplaySize.y - top_off - bottom_off;
+
+        auto Project = [&](const Vec3& p) -> ImVec2 {
+            Vec3 dir = (p - cam.lookfrom);
+            float dist = dir.length();
+            dir = dir.normalize();
+
+            Vec3 forward = (cam.lookat - cam.lookfrom).normalize();
+            float depth = Vec3::dot(p - cam.lookfrom, forward);
+
+            if (depth <= 0.01f) return ImVec2(-1, -1);
+
+            float local_y = Vec3::dot(p - cam.lookfrom, cam.v);
+            float local_x = Vec3::dot(p - cam.lookfrom, cam.u);
+
+            float half_h = depth * tan_half_fov;
+            float half_w = half_h * aspect;
+
+            return ImVec2(
+                left_off + ((local_x / half_w) * 0.5f + 0.5f) * v_width,
+                top_off + (0.5f - (local_y / half_h) * 0.5f) * v_height
+            );
+        };
     
     auto IsOnScreen = [](const ImVec2& v) { return v.x > -5000; };
     
@@ -1391,6 +932,16 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
                     
                     // AUTO-CARVE ON MOVE
                     if (riverMgr.autoCarveOnMove && TerrainManager::getInstance().hasActiveTerrain()) {
+                        // Backup before auto-carve if not exists
+                        auto& tm = TerrainManager::getInstance();
+                        if (!riverMgr.hasTerrainBackup && !tm.getTerrains().empty()) {
+                            auto& t = tm.getTerrains()[0];
+                            riverMgr.terrainBackupData = t.heightmap.data;
+                            riverMgr.terrainBackupWidth = t.heightmap.width;
+                            riverMgr.terrainBackupHeight = t.heightmap.height;
+                            riverMgr.hasTerrainBackup = true;
+                        }
+
                         // Sample many points along spline
                         std::vector<Vec3> samplePoints;
                         std::vector<float> sampleWidths;
@@ -1453,42 +1004,52 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
     if (editingRiver && riverMgr.isEditing && !gizmo_hit && !ImGuizmo::IsOver()) {
         if (ImGui::IsMouseClicked(0) && !ImGui::GetIO().WantCaptureMouse) {
             // Raycast to terrain
-            Vec3 rayOrigin, rayDir;
             float mx = io.MousePos.x;
             float my = io.MousePos.y;
+
+            // Calculate Viewport offsets and sizes
+            float left_off = showSidePanel ? side_panel_width : 0.0f;
+            float top_off = 19.0f; // Menu bar height estimate
+            bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph);
+            float bottom_off = show_bottom ? (bottom_panel_height + 24.0f) : 24.0f;
+
+            float v_width = io.DisplaySize.x - left_off;
+            float v_height = io.DisplaySize.y - top_off - bottom_off;
+
+            // Normalize mouse position relative to viewport
+            float u = (mx - left_off) / v_width;
+            float v = 1.0f - ((my - top_off) / v_height);
+
+            // Use Camera's own ray generation for perfect consistency
+            Ray cameraRay = cam.get_ray(u, v);
+            Vec3 rayDir = cameraRay.direction;
+            Vec3 rayOrigin = cameraRay.origin;
             
-            // Calculate ray from camera
-            float ndc_x = (mx / io.DisplaySize.x) * 2.0f - 1.0f;
-            float ndc_y = 1.0f - (my / io.DisplaySize.y) * 2.0f;
-            
-            Vec3 forward = (cam.lookat - cam.lookfrom).normalize();
-            Vec3 right = forward.cross(cam.vup).normalize();
-            Vec3 up = right.cross(forward).normalize();
-            
-            float half_h = tan_half_fov;
-            float half_w = half_h * aspect;
-            
-            rayDir = (forward + right * (ndc_x * half_w) + up * (ndc_y * half_h)).normalize();
-            rayOrigin = cam.lookfrom;
-            
-            // Simple ground plane intersection for now
-            // TODO: Proper terrain raycast
-            float groundY = 0.0f;
+            // Perform accurate terrain raycast
             if (TerrainManager::getInstance().hasActiveTerrain()) {
-                // Intersect with approximate ground plane
-                if (rayDir.y < -0.01f) {
-                    float t = (groundY - rayOrigin.y) / rayDir.y;
-                    if (t > 0) {
-                        Vec3 hitPoint = rayOrigin + rayDir * t;
-                        // Get actual terrain height at hit point
-                        hitPoint.y = TerrainManager::getInstance().sampleHeight(hitPoint.x, hitPoint.z);
-                        
-                        // Add control point
-                        editingRiver->addControlPoint(hitPoint, riverMgr.defaultWidth, riverMgr.defaultDepth);
-                        riverMgr.selectedControlPoint = (int)editingRiver->controlPointCount() - 1;
-                        ProjectManager::getInstance().markModified();
-                        gizmo_hit = true;
+                float closest_t = 1e20f;
+                Vec3 hitPoint;
+                bool found_terrain = false;
+                
+                auto& terrains = TerrainManager::getInstance().getTerrains();
+                for (auto& terrain : terrains) {
+                    float t_out;
+                    Vec3 n_out;
+                    if (TerrainManager::getInstance().intersectRay(&terrain, cameraRay, t_out, n_out)) {
+                        if (t_out < closest_t) {
+                            closest_t = t_out;
+                            hitPoint = cameraRay.origin + cameraRay.direction * t_out;
+                            found_terrain = true;
+                        }
                     }
+                }
+                
+                if (found_terrain) {
+                    // Add control point
+                    editingRiver->addControlPoint(hitPoint, riverMgr.defaultWidth, riverMgr.defaultDepth);
+                    riverMgr.selectedControlPoint = (int)editingRiver->controlPointCount() - 1;
+                    ProjectManager::getInstance().markModified();
+                    gizmo_hit = true;
                 }
             } else {
                 // No terrain - intersect with Y=0 plane

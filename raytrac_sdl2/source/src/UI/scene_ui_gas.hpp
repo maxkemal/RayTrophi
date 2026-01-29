@@ -25,6 +25,7 @@
 
 #include "scene_ui.h"
 #include "GasVolume.h"
+#include "VolumeShader.h"
 #include <memory>
 #include <string>
 
@@ -56,8 +57,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
     // ─────────────────────────────────────────────────────────────────────────
     // PLAYBACK CONTROLS
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Playback & Timeline", ImGuiTreeNodeFlags_DefaultOpen)) {
-        // ... (rest of playback section)
+    if (UIWidgets::BeginSection("Playback & Timeline", ImVec4(0.4f, 1.0f, 0.4f, 1.0f))) {
         // Timeline Integration
         bool linked = gas->isLinkedToTimeline();
         if (ImGui::Checkbox("Link to Timeline", &linked)) {
@@ -112,48 +112,85 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         ImGui::Text("Active Voxels: %d", gas->getActiveVoxelCount());
         ImGui::Text("Max Density: %.2f", gas->getMaxDensity());
         ImGui::Text("Step Time: %.2f ms", gas->getLastStepTime());
+
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
     // GRID & DOMAIN SETTINGS
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Domain / Grid", ImGuiTreeNodeFlags_DefaultOpen)) {
-        bool needs_reinit = false;
-        
+    if (UIWidgets::BeginSection("Domain / Grid", ImVec4(0.4f, 0.8f, 1.0f, 1.0f))) {
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Physical Dimensions (Bounding Box)");
         float grid_size[3] = { settings.grid_size.x, settings.grid_size.y, settings.grid_size.z };
         if (ImGui::DragFloat3("Grid Size", grid_size, 0.1f, 0.1f, 100.0f, "%.1f m")) {
             settings.grid_size = Vec3(grid_size[0], grid_size[1], grid_size[2]);
-            needs_reinit = true;
+            
+            // Auto-pause when grid size changes (affects voxel calculations)
+            if (gas->isPlaying()) {
+                gas->pause();
+            }
         }
         
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "Resolution (Detail)");
         
+        static bool link_res = true;
+        
         int res[3] = { settings.resolution_x, settings.resolution_y, settings.resolution_z };
+        int old_res[3] = { res[0], res[1], res[2] };
+        
         if (ImGui::DragInt3("Resolution", res, 1, 8, 1024)) {
+            // Clamp values
+            res[0] = std::clamp(res[0], 8, 1024);
+            res[1] = std::clamp(res[1], 8, 1024);
+            res[2] = std::clamp(res[2], 8, 1024);
+            
+            if (link_res) {
+                // Determine which axis changed and use it as master
+                float ratio_y = settings.grid_size.y / settings.grid_size.x;
+                float ratio_z = settings.grid_size.z / settings.grid_size.x;
+                float ratio_x_from_y = settings.grid_size.x / settings.grid_size.y;
+                float ratio_z_from_y = settings.grid_size.z / settings.grid_size.y;
+                float ratio_x_from_z = settings.grid_size.x / settings.grid_size.z;
+                float ratio_y_from_z = settings.grid_size.y / settings.grid_size.z;
+                
+                if (res[0] != old_res[0]) {
+                    // X changed - adjust Y and Z
+                    res[1] = std::clamp((int)(res[0] * ratio_y), 8, 1024);
+                    res[2] = std::clamp((int)(res[0] * ratio_z), 8, 1024);
+                } else if (res[1] != old_res[1]) {
+                    // Y changed - adjust X and Z
+                    res[0] = std::clamp((int)(res[1] * ratio_x_from_y), 8, 1024);
+                    res[2] = std::clamp((int)(res[1] * ratio_z_from_y), 8, 1024);
+                } else if (res[2] != old_res[2]) {
+                    // Z changed - adjust X and Y
+                    res[0] = std::clamp((int)(res[2] * ratio_x_from_z), 8, 1024);
+                    res[1] = std::clamp((int)(res[2] * ratio_y_from_z), 8, 1024);
+                }
+            }
+            
             settings.resolution_x = res[0];
             settings.resolution_y = res[1];
             settings.resolution_z = res[2];
-            needs_reinit = true;
+            
+            // CRITICAL: Auto-stop simulation when resolution changes to prevent buffer overflow
+            // User must click RESTART to apply new resolution safely
+            if (gas->isPlaying()) {
+                gas->pause();
+            }
         }
         
-        static bool link_res = true;
         ImGui::Checkbox("Link Resolution Proportions", &link_res);
-        if (link_res && ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Recommended: Adjusts resolution axes to match Grid Size proportions for square voxels.");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("When enabled, changing one resolution axis will proportionally adjust the others based on Grid Size.");
         }
-
-        if (link_res && (ImGui::IsItemDeactivatedAfterEdit() || needs_reinit)) {
-            // Adjust resolution axes to match Grid Size proportions for square voxels.
-            float max_dim = std::max({settings.grid_size.x, settings.grid_size.y, settings.grid_size.z});
-            float master_res = (float)settings.resolution_x; // Use X as master
-            
-            // Re-calculate based on master resolution and physical proportions
+        
+        // When checkbox is enabled, sync all axes to match proportions (use X as master)
+        if (link_res && ImGui::IsItemDeactivatedAfterEdit()) {
             float ratio_y = settings.grid_size.y / settings.grid_size.x;
             float ratio_z = settings.grid_size.z / settings.grid_size.x;
-            settings.resolution_y = std::max(8, (int)(master_res * ratio_y));
-            settings.resolution_z = std::max(8, (int)(master_res * ratio_z));
+            settings.resolution_y = std::clamp((int)(settings.resolution_x * ratio_y), 8, 1024);
+            settings.resolution_z = std::clamp((int)(settings.resolution_x * ratio_z), 8, 1024);
         }
 
         ImGui::Spacing();
@@ -175,62 +212,160 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         ImGui::EndColumns();
         ImGui::EndChild();
         
-        if (needs_reinit) {
+        // Check mismatch between settings and allocated grid (use fresh grid reference)
+        const auto& current_grid = gas->getSimulator().getGrid();
+        bool needs_restart = (settings.resolution_x != current_grid.nx || 
+                              settings.resolution_y != current_grid.ny || 
+                              settings.resolution_z != current_grid.nz);
+        
+        // Show restart button only when there's a real resolution mismatch
+        if (needs_restart) {
             ImGui::Spacing();
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
+                "Current grid: %dx%dx%d | New settings: %dx%dx%d",
+                current_grid.nx, current_grid.ny, current_grid.nz,
+                settings.resolution_x, settings.resolution_y, settings.resolution_z);
+            
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.1f, 0.1f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
             
-            if (ImGui::Button("!!! RESTART SIMULATION TO APPLY NEW RESOLUTION !!!", ImVec2(-1, 40))) {
+            if (ImGui::Button("Apply New Resolution (Restart Simulation)", ImVec2(-1, 35))) {
                 gas->stop();
                 gas->initialize();
-                gas->play();
-                SceneUI::syncVDBVolumesToGPU(ui_ctx); // Ensure OptiX gets new pointers/params
+                // Don't auto-play - let user start manually
+                // Note: syncVDBVolumesToGPU will be called on next render frame automatically
                 if (ui_ctx.optix_gpu_ptr) ui_ctx.optix_gpu_ptr->resetAccumulation();
             }
             ImGui::PopStyleVar();
             ImGui::PopStyleColor(2);
             
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Changes to Grid Size or Resolution require re-allocating memory and restarting the solver.");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to reallocate buffers with new resolution. Simulation data will be cleared.");
             
-            ImGui::TextColored(ImVec4(1, 1, 0, 1), "Warning: Restarting will clear all current simulation data.");
+            ImGui::TextColored(ImVec4(1, 1, 0, 1), "Simulation paused - click button above to apply changes.");
         }
         
-        // Sync Logic: If using CUDA and this tab is open/stats are visible, download data for UI feedback
-        // Otherwise counters will be 0 because grid.density is empty on CPU.
-        if (settings.backend == FluidSim::SolverBackend::CUDA && gas->isInitialized()) {
-             // Only do this expensive download if we really want to see the numbers
-             // Or maybe just show "GPU Mode" instead of 0? 
-             // Let's force download for now so user trusts it works.
-             // But do it only once per few frames to save performance? 
-             // For now, raw download.
-             gas->getSimulator().downloadFromGPU();
-        }
+        // Sync Logic: If using CUDA, stats will show GPU-side values after downloadFromGPU
+        // which is called in uploadToGPU for VDB path. Don't force download here every frame
+        // as it's very slow and can cause hangs.
+        // The stats shown are from last frame's download.
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
     // SIMULATION PARAMETERS
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Simulation")) {
-        ImGui::DragFloat("Timestep", &settings.timestep, 0.001f, 0.001f, 0.1f, "%.4f");
+    if (UIWidgets::BeginSection("Simulation", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+        // CFL Adaptive Timestep
+        ImGui::Checkbox("Adaptive Timestep (CFL)", &settings.adaptive_timestep);
+        UIWidgets::HelpMarker("Automatically adjust timestep based on maximum velocity for stability.");
+        
+        if (settings.adaptive_timestep) {
+            ImGui::Indent();
+            ImGui::DragFloat("CFL Number", &settings.cfl_number, 0.05f, 0.1f, 1.0f, "%.2f");
+            UIWidgets::HelpMarker("Lower = more stable (0.5 recommended). Higher = faster but may be unstable.");
+            ImGui::DragFloat("Min Timestep", &settings.min_timestep, 0.0001f, 0.0001f, 0.01f, "%.4f");
+            ImGui::DragFloat("Max Timestep", &settings.max_timestep, 0.001f, 0.01f, 0.1f, "%.3f");
+            ImGui::Unindent();
+        } else {
+            ImGui::DragFloat("Timestep", &settings.timestep, 0.001f, 0.001f, 0.1f, "%.4f");
+        }
+        
         ImGui::DragInt("Substeps", &settings.substeps, 1, 1, 10);
+        
+        ImGui::DragFloat("Time Scale", &settings.time_scale, 0.1f, 0.1f, 10.0f, "%.1fx");
+        UIWidgets::HelpMarker("Simulation speed multiplier. 1.0 = realtime, 2.0 = 2x faster, 0.5 = slow motion.");
+        
+        // Pressure Solver Mode
+        const char* pressure_solvers[] = { "Gauss-Seidel", "SOR (Faster)", "Multigrid", "FFT (Fastest)" };
+        int current_solver = static_cast<int>(settings.pressure_solver);
+        if (ImGui::Combo("Pressure Solver", &current_solver, pressure_solvers, 4)) {
+            settings.pressure_solver = static_cast<FluidSim::GasSimulationSettings::PressureSolverMode>(current_solver);
+        }
+        UIWidgets::HelpMarker("FFT solver is 10-50x faster than iterative methods for grids > 64^3. Requires CUDA. SOR converges 2-3x faster than Gauss-Seidel.");
+        
+        if (settings.pressure_solver == FluidSim::GasSimulationSettings::PressureSolverMode::SOR) {
+            ImGui::Indent();
+            ImGui::DragFloat("SOR Omega", &settings.sor_omega, 0.05f, 1.0f, 1.95f, "%.2f");
+            UIWidgets::HelpMarker("Relaxation factor. 1.0 = Gauss-Seidel. Optimal ~1.7 for 3D. Higher = faster but may diverge.");
+            ImGui::Unindent();
+        }
+        
         ImGui::DragInt("Pressure Iterations", &settings.pressure_iterations, 1, 10, 100);
         
         ImGui::Spacing();
-        ImGui::Text("Dissipation");
-        ImGui::DragFloat("Density", &settings.density_dissipation, 0.001f, 0.9f, 1.0f, "%.4f");
-        ImGui::DragFloat("Velocity", &settings.velocity_dissipation, 0.001f, 0.9f, 1.0f, "%.4f");
-        ImGui::DragFloat("Temperature", &settings.temperature_dissipation, 0.001f, 0.9f, 1.0f, "%.4f");
-        ImGui::DragFloat("Fuel", &settings.fuel_dissipation, 0.001f, 0.9f, 1.0f, "%.4f");
+        ImGui::Text("Dissipation (per second)");
+        UIWidgets::HelpMarker("How much remains after 1 second. 0.9 = fast decay, 0.99 = slow decay, 1.0 = no decay.");
+        ImGui::DragFloat("Density", &settings.density_dissipation, 0.005f, 0.5f, 1.0f, "%.3f");
+        ImGui::DragFloat("Velocity", &settings.velocity_dissipation, 0.005f, 0.5f, 1.0f, "%.3f");
+        ImGui::DragFloat("Temperature", &settings.temperature_dissipation, 0.005f, 0.5f, 1.0f, "%.3f");
+        ImGui::DragFloat("Fuel", &settings.fuel_dissipation, 0.005f, 0.5f, 1.0f, "%.3f");
+        
+        ImGui::Spacing();
+        
+        // Sparse Grid Optimization
+        ImGui::Checkbox("Sparse Mode (VDB-style)", &settings.sparse_mode);
+        UIWidgets::HelpMarker("Only process tiles with active content. Can provide 50-90%% speedup on large grids.");
+        
+        if (settings.sparse_mode) {
+            ImGui::Indent();
+            ImGui::DragFloat("Sparse Threshold", &settings.sparse_threshold, 0.0001f, 0.0001f, 0.01f, "%.4f");
+            UIWidgets::HelpMarker("Minimum density to consider a tile active.");
+            
+            // Show sparse stats
+            if (gas) {
+                const auto& grid = gas->getSimulator().getGrid();
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), 
+                    "Active Tiles: %d / %d (%.1f%% skipped)", 
+                    grid.active_tile_count, grid.total_tiles, grid.sparse_efficiency);
+            }
+            ImGui::Unindent();
+        }
+        
+        ImGui::Spacing();
+        
+        // Stability Limits
+        if (ImGui::TreeNode("Stability Limits")) {
+            ImGui::DragFloat("Max Velocity", &settings.max_velocity, 10.0f, 50.0f, 2000.0f, "%.0f");
+            UIWidgets::HelpMarker("Maximum velocity clamp in grid units/s. Prevents numerical explosions.");
+            ImGui::DragFloat("Max Temperature", &settings.max_temperature, 100.0f, 500.0f, 10000.0f, "%.0f K");
+            UIWidgets::HelpMarker("Maximum temperature in Kelvin. Fire is typically 1000-2000K.");
+            ImGui::DragFloat("Max Density", &settings.max_density, 1.0f, 5.0f, 200.0f, "%.0f");
+            UIWidgets::HelpMarker("Maximum smoke density. Prevents infinite accumulation.");
+            ImGui::TreePop();
+        }
         
         ImGui::Spacing();
         
         // Backend selection
         const char* backends[] = { "CPU", "CUDA" };
         int current_backend = static_cast<int>(settings.backend);
+        
+        bool cuda_detected = false;
+        int device_count = 0;
+        if (cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0) cuda_detected = true;
+        else cudaGetLastError(); // Clear error
+
         if (ImGui::Combo("Backend", &current_backend, backends, 2)) {
-            settings.backend = static_cast<FluidSim::SolverBackend>(current_backend);
+            FluidSim::SolverBackend new_backend = static_cast<FluidSim::SolverBackend>(current_backend);
+            if (new_backend != settings.backend) {
+                settings.backend = new_backend;
+                if (gas->isInitialized()) {
+                    gas->stop();
+                    gas->initialize(); 
+                    gas->play();
+                    SceneUI::syncVDBVolumesToGPU(ui_ctx);
+                    if (ui_ctx.optix_gpu_ptr) ui_ctx.optix_gpu_ptr->resetAccumulation();
+                }
+            }
         }
+        
+        if (cuda_detected) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "  [GPU Found: CUDA Supported]");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  [No CUDA GPU detected]");
+        }
+        UIWidgets::HelpMarker("Developers can switch between CPU/GPU for debugging. CUDA is highly recommended for performance.");
         
         // Mode selection
         const char* modes[] = { "Real-time", "Baked" };
@@ -238,28 +373,27 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         if (ImGui::Combo("Mode", &current_mode, modes, 2)) {
             settings.mode = static_cast<FluidSim::SimulationMode>(current_mode);
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
     // COMBUSTION (Fire, Flame)
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Combustion (Fire)")) {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Flame / Fire Parameters");
-        
+    if (UIWidgets::BeginSection("Combustion (Fire)", ImVec4(1.0f, 0.5f, 0.0f, 1.0f))) {
         ImGui::DragFloat("Ignition Temperature", &settings.ignition_temperature, 10.0f, 200.0f, 1000.0f, "%.0f K");
         UIWidgets::HelpMarker("Fuel will start burning when temperature exceeds this value.");
         
-        ImGui::DragFloat("Burn Rate", &settings.burn_rate, 0.1f, 0.0f, 10.0f);
-        UIWidgets::HelpMarker("How fast fuel is consumed when burning.");
+        ImGui::DragFloat("Burn Rate", &settings.burn_rate, 0.5f, 0.0f, 20.0f);
+        UIWidgets::HelpMarker("How fast fuel is consumed. Higher = faster flames. Try 3-5 for fire, 10+ for explosion.");
         
-        ImGui::DragFloat("Heat Release", &settings.heat_release, 10.0f, 0.0f, 2000.0f);
-        UIWidgets::HelpMarker("Temperature increase per unit of burned fuel.");
+        ImGui::DragFloat("Heat Release", &settings.heat_release, 50.0f, 0.0f, 5000.0f);
+        UIWidgets::HelpMarker("Temperature boost per unit fuel burned. Higher = hotter flames. Try 500+ for fire.");
         
         ImGui::DragFloat("Smoke Generation", &settings.smoke_generation, 0.1f, 0.0f, 5.0f);
         UIWidgets::HelpMarker("Density (smoke) generated per unit of burned fuel.");
         
-        ImGui::DragFloat("Expansion", &settings.expansion_strength, 1.0f, 0.0f, 50.0f);
-        UIWidgets::HelpMarker("Outward pressure force from combustion (explosion effect).");
+        ImGui::DragFloat("Expansion", &settings.expansion_strength, 1.0f, 0.0f, 100.0f);
+        UIWidgets::HelpMarker("Outward pressure force from combustion. High values (50+) for explosions.");
         
         ImGui::Spacing();
         ImGui::Separator();
@@ -267,31 +401,63 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         
         // PRESETS
         ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.6f, 1.0f), "Quick Presets");
+        UIWidgets::HelpMarker("These presets configure ALL simulation AND shader parameters for realistic effects!");
         
         if (ImGui::Button("Fire", ImVec2(80, 0))) {
             gas->getSimulator().applyPreset("Fire");
+            gas->setShader(VolumeShader::createFirePreset());
         }
         ImGui::SameLine();
         if (ImGui::Button("Smoke", ImVec2(80, 0))) {
             gas->getSimulator().applyPreset("Smoke");
+            gas->setShader(VolumeShader::createSmokePreset());
         }
         ImGui::SameLine();
         if (ImGui::Button("Explosion", ImVec2(80, 0))) {
             gas->getSimulator().applyPreset("Explosion");
+            gas->setShader(VolumeShader::createExplosionPreset());
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
     // FORCES
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Forces", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::BeginSection("Forces", ImVec4(1.0f, 0.9f, 0.2f, 1.0f))) {
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Internal Physics");
-        ImGui::DragFloat("Buoyancy Density", &settings.buoyancy_density, 0.01f, -2.0f, 2.0f);
-        ImGui::DragFloat("Heat Rise (Buoyancy)", &settings.buoyancy_temperature, 0.01f, 0.0f, 5.0f);
+        
+        // Gravity
+        float grav[3] = { settings.gravity.x, settings.gravity.y, settings.gravity.z };
+        if (ImGui::DragFloat3("Gravity", grav, 0.1f, -20.0f, 20.0f)) {
+            settings.gravity = Vec3(grav[0], grav[1], grav[2]);
+        }
+        UIWidgets::HelpMarker("Global gravity force. Default (0, -9.81, 0) for Earth gravity. Set to 0 for space.");
+        
+        ImGui::Spacing();
+        ImGui::DragFloat("Buoyancy Density", &settings.buoyancy_density, 0.05f, -5.0f, 5.0f);
+        UIWidgets::HelpMarker("Negative = dense smoke sinks. Positive = smoke rises regardless of temperature.");
+        ImGui::DragFloat("Heat Rise (Buoyancy)", &settings.buoyancy_temperature, 0.1f, 0.0f, 10.0f);
+        UIWidgets::HelpMarker("How strongly hot gas rises. Higher = faster rising flames/smoke. Try 2-4 for fire.");
         ImGui::DragFloat("Ambient Temp (K)", &settings.ambient_temperature, 1.0f, 200.0f, 400.0f);
         
         ImGui::Spacing();
-        ImGui::DragFloat("Turbulence (Vorticity)", &settings.vorticity_strength, 0.01f, 0.0f, 2.0f);
+        ImGui::DragFloat("Vorticity Confinement", &settings.vorticity_strength, 0.1f, 0.0f, 5.0f);
+        UIWidgets::HelpMarker("Adds swirling detail to smoke/fire. Higher = more turbulent. Try 1-3 for fire.");
+        
+        ImGui::DragFloat("Curl Noise Strength", &settings.turbulence_strength, 0.05f, 0.0f, 2.0f);
+        UIWidgets::HelpMarker("Adds additional procedural turbulence for organic detail.");
+        ImGui::DragFloat("Curl Noise Scale", &settings.turbulence_scale, 0.1f, 0.5f, 10.0f);
+        
+        // Advanced turbulence settings
+        if (ImGui::TreeNode("Turbulence Details")) {
+            ImGui::SliderInt("Octaves", &settings.turbulence_octaves, 1, 8);
+            UIWidgets::HelpMarker("Number of noise layers. More = finer detail but slower.");
+            ImGui::DragFloat("Lacunarity", &settings.turbulence_lacunarity, 0.1f, 1.0f, 4.0f);
+            UIWidgets::HelpMarker("Frequency multiplier per octave. 2.0 is standard.");
+            ImGui::DragFloat("Persistence", &settings.turbulence_persistence, 0.05f, 0.1f, 1.0f);
+            UIWidgets::HelpMarker("Amplitude decay per octave. 0.5 is standard.");
+            ImGui::TreePop();
+        }
         
         ImGui::Spacing();
         ImGui::Separator();
@@ -301,7 +467,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         ImGui::TextWrapped("Gas simulation is now automatically affected by global Force Fields (Wind, Vortex, Noise, etc.).");
         
         if (ImGui::Button("Manage Force Fields", ImVec2(-1, 0))) {
-           // ui_ctx.tab_to_focus = "Force Fields";
+           // Action handled by showing force fields tab elsewhere or user switching
         }
         
         // Hide legacy local wind to prevent confusion, but keep it in data for compat
@@ -312,12 +478,35 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             }
             ImGui::TreePop();
         }
+        UIWidgets::EndSection();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SOLVER & ADVECTION (Advanced Detail Control)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Solver & Details", ImVec4(0.5f, 0.5f, 1.0f, 1.0f))) {
+        // Advection Mode
+        const char* advect_modes[] = { "Semi-Lagrangian (Soft)", "MacCormack (Sharp)", "BFECC (Crisp)" };
+        int current_advect = static_cast<int>(settings.advection_mode);
+        if (ImGui::Combo("Advection Mode", &current_advect, advect_modes, 3)) {
+            settings.advection_mode = static_cast<FluidSim::GasSimulationSettings::AdvectionMode>(current_advect);
+        }
+        UIWidgets::HelpMarker("MacCormack/BFECC preserve much more detail and turbulence but can be less stable.");
+
+        ImGui::DragInt("Pressure Iterations", &settings.pressure_iterations, 1, 4, 128);
+        UIWidgets::HelpMarker("Higher = more accurate incompressible flow. Default 20-40.");
+
+        ImGui::Checkbox("Adaptive Timestep (CFL)", &settings.adaptive_timestep);
+        if (settings.adaptive_timestep) {
+            ImGui::SliderFloat("CFL Number", &settings.cfl_number, 0.1f, 2.0f);
+        }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
     // EMITTERS
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Emitters", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (UIWidgets::BeginSection("Emitters", ImVec4(0.3f, 1.0f, 0.3f, 1.0f))) {
         auto& emitters = gas->getEmitters();
         
         if (ImGui::Button("+ Add Emitter")) {
@@ -544,12 +733,13 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             
             ImGui::PopID();
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
     // EXPORT & BAKING
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Export & Baking")) {
+    if (UIWidgets::BeginSection("Export & Baking", ImVec4(1.0f, 0.5f, 0.2f, 1.0f), false)) { // Closed by default
         static char export_dir[256] = "";
         static bool export_success = false;
         static bool export_error = false;
@@ -636,6 +826,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         } else if (export_error) {
             ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%s", export_message.c_str());
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -656,7 +847,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
     // ─────────────────────────────────────────────────────────────────────────
     // TRANSFORM
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Transform")) {
+    if (UIWidgets::BeginSection("Transform", ImVec4(0.5f, 0.7f, 0.8f, 1.0f))) {
         Vec3 pos = gas->getPosition();
         float p[3] = { pos.x, pos.y, pos.z };
         if (ImGui::DragFloat3("Position##transform", p, 0.1f)) {
@@ -677,6 +868,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             gas->setScale(Vec3(s[0], s[1], s[2]));
             if (gas->render_path == GasVolume::VolumeRenderPath::VDBUnified) SceneUI::syncVDBVolumesToGPU(ui_ctx);
         }
+        UIWidgets::EndSection();
     }
 }
 

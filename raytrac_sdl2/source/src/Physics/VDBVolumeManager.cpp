@@ -486,7 +486,7 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
     vol.has_density = (density_ptr != nullptr);
     vol.has_temperature = (temp_ptr != nullptr);
     vol.voxel_size = voxel_size;
-
+    
     try {
         // 1. Create OpenVDB FloatGrid from raw array
         // We use a dense pointer but OpenVDB handles it as a coordinate mapping
@@ -627,6 +627,12 @@ const VDBVolumeData* VDBVolumeManager::getVolume(int volume_id) const {
 
 bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr) {
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+    
+    // CRITICAL FIX: Synchronize and clear any prior CUDA errors at the very start
+    // This prevents error accumulation from previous frames/operations
+    cudaDeviceSynchronize();
+    cudaGetLastError(); // Clear sticky error flag
+    
     int idx = findVolumeIndex(volume_id);
     if (idx < 0) {
         last_error = "Volume not found: " + std::to_string(volume_id);
@@ -686,7 +692,7 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
          return false;
     }
     
-    // Copy to GPU (Asynchronous on the specified stream for zero flickering)
+    // Copy to GPU (use synchronous copy for safety)
     void* host_ptr = handle->data();
     if (!host_ptr) {
         last_error = "NanoVDB handle.data() is NULL";
@@ -694,11 +700,16 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
         return false;
     }
 
-    if (stream) {
-        err = cudaMemcpyAsync(vol.d_nano_grid, host_ptr, required_size, cudaMemcpyHostToDevice, (cudaStream_t)stream);
-    } else {
-        err = cudaMemcpy(vol.d_nano_grid, host_ptr, required_size, cudaMemcpyHostToDevice);
+    // Sanity checks and logging to help diagnose illegal memory accesses.
+    if (required_size == 0 || required_size > (size_t)1024 * 1024 * 1024) { // >1GB suspicious
+        last_error = "Suspicious NanoVDB buffer size: " + std::to_string(required_size);
+        SCENE_LOG_WARN(last_error);
     }
+
+    // NOTE: Diagnostic logging removed to improve performance
+    // The cudaDeviceSynchronize and pointer attribute checks were causing frame drops
+
+    err = cudaMemcpy(vol.d_nano_grid, host_ptr, required_size, cudaMemcpyHostToDevice);
     
     if (err != cudaSuccess) {
         last_error = std::string("CUDA memcpy failed: ") + cudaGetErrorString(err) + 
@@ -727,11 +738,15 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
             if (vol.d_nano_temperature != nullptr) {
                 void* t_host_ptr = temp_handle->data();
                 if (t_host_ptr) {
-                    if (stream) {
-                        cudaMemcpyAsync(vol.d_nano_temperature, t_host_ptr, temp_required_size, cudaMemcpyHostToDevice, (cudaStream_t)stream);
-                    } else {
-                        cudaMemcpy(vol.d_nano_temperature, t_host_ptr, temp_required_size, cudaMemcpyHostToDevice);
+                    // Log and perform synchronous copy for safety
+                    if (temp_required_size == 0 || temp_required_size > (size_t)1024 * 1024 * 1024) {
+                        SCENE_LOG_WARN("Suspicious NanoVDB temperature buffer size: " + std::to_string(temp_required_size));
                     }
+                    SCENE_LOG_INFO("VDB temp upload: Dst=" + std::to_string((unsigned long long)vol.d_nano_temperature) +
+                                   ", Src=" + std::to_string((unsigned long long)t_host_ptr) +
+                                   ", Size=" + std::to_string(temp_required_size));
+
+                    cudaMemcpy(vol.d_nano_temperature, t_host_ptr, temp_required_size, cudaMemcpyHostToDevice);
                 }
             }
         }
@@ -741,8 +756,10 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     // before the CPU continues and potentially deletes the HostBuffer 
     // in the next simulation frame / update call.
     // (Optimization: In a future update, we can use a pinned deferred release queue)
+    // Synchronous copy already completed at this point. If a stream was provided
+    // the caller may still want to synchronize for ordering with other GPU ops.
     if (stream) {
-        cudaStreamSynchronize(stream);
+        cudaStreamSynchronize((cudaStream_t)stream);
     }
     
     vol.gpu_uploaded = true;
@@ -767,15 +784,38 @@ void VDBVolumeManager::freeGPU(int volume_id) {
     
     VDBVolumeData& vol = volumes[idx];
     
+    // Check if there's anything to free first
+    if (!vol.d_nano_grid && !vol.d_nano_temperature) {
+        return;
+    }
+    
+    // Clear any sticky CUDA errors first
+    cudaGetLastError();
+    
+    // Check if CUDA is available before sync
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    if (err == cudaSuccess && device_count > 0) {
+        // CRITICAL: Sync device before freeing to ensure no async operations use these pointers
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            SCENE_LOG_INFO("[VDBVolumeManager] cudaDeviceSynchronize failed in freeGPU: " + 
+                           std::string(cudaGetErrorString(err)));
+            cudaGetLastError(); // Clear error
+        }
+    }
+    
     if (vol.d_nano_grid) {
         cudaFree(vol.d_nano_grid);
         vol.d_nano_grid = nullptr;
+        vol.gpu_buffer_size = 0; // Reset size so next upload reallocates
         vol.gpu_uploaded = false; // Mark false only if main grid freed
         // GPU memory freed
     }
     if (vol.d_nano_temperature) {
         cudaFree(vol.d_nano_temperature);
         vol.d_nano_temperature = nullptr;
+        vol.gpu_temp_buffer_size = 0; // Reset size
     }
 }
 
@@ -823,7 +863,7 @@ float VDBVolumeManager::sampleDensityCPU(int volume_id, float x, float y, float 
     }
     
     float density = sampler.wsSample(world_pos);
-    return density * vol->density_scale;
+    return density;
 }
 
 float VDBVolumeManager::sampleTemperatureCPU(int volume_id, float x, float y, float z) const {

@@ -9,10 +9,6 @@
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
       <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
     </Filter>
-    <Filter Include="Kaynak DosyalarÄ±">
-      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
-    </Filter>
     <Filter Include="Kaynak Dosyalar\header_file">
       <UniqueIdentifier>{a178f398-6f42-4b10-b004-c04e1c92beb4}</UniqueIdentifier>
     </Filter>
@@ -48,6 +44,10 @@
     </Filter>
     <Filter Include="Kaynak Dosyalar\Device">
       <UniqueIdentifier>f061b220-55a7-4467-a300-d42b15d827c3</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Kaynak Dosyaları">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -267,20 +267,11 @@
     <ClInclude Include="source\include\OptixAccelManager.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\src\scene_ui_water.hpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClInclude>
-    <ClInclude Include="source\src\scene_ui_terrain.hpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
-    </ClInclude>
     <ClInclude Include="source\src\Device\water_shaders.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </ClInclude>
     <ClInclude Include="source\src\Device\CloudNoise.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
-    </ClInclude>
-    <ClInclude Include="source\src\scene_ui_nodeeditor.hpp">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
     </ClInclude>
     <ClInclude Include="source\src\Device\fft_ocean.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
@@ -291,10 +282,19 @@
     <ClInclude Include="source\include\VDBVolumeManager.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp">
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\UI\scene_ui_terrain.hpp">
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\UI\scene_ui_water.hpp">
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
-      <Filter>Kaynak DosyalarÄ±</Filter>
+      <Filter>Kaynak Dosyaları</Filter>
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
@@ -319,13 +319,19 @@
     <None Include="source\src\Device\gpucamera.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
-    <None Include="source\src\scatter_volume_step.h">
-      <Filter>Kaynak Dosyalar\Source_file</Filter>
+    <None Include="source\src\Device\scatter_volume_step.h">
+      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+    </None>
+    <None Include="source\include\gas_kernels.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </None>
+    <None Include="source\include\gas_fft_solver.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
     <Image Include="source\resources\RayTrophi_icon.ico">
-      <Filter>Kaynak DosyalarÄ±</Filter>
+      <Filter>Kaynak Dosyaları</Filter>
     </Image>
   </ItemGroup>
   <ItemGroup>
@@ -339,6 +345,9 @@
       <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
     <CudaCompile Include="source\src\Device\gas_kernels.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </CudaCompile>
+    <CudaCompile Include="source\src\Device\gas_fft_solver.cu">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </CudaCompile>
   </ItemGroup>
@@ -572,6 +581,24 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\external\miniz_zip.c">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\imgui\imgui.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\imgui\imgui_draw.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\imgui\imgui_impl_sdlrenderer2.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\imgui\imgui_tables.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\external\imgui\imgui_widgets.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
   </ItemGroup>

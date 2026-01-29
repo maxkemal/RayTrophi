@@ -146,6 +146,15 @@ public:
         }
         return result;
     }
+
+    bool operator==(const Matrix4x4& other) const {
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                if (std::abs(m[i][j] - other.m[i][j]) > 1e-6f) return false;
+            }
+        }
+        return true;
+    }
     // SIMD optimizasyonu için
 #ifdef __SSE__
     __m128 getRowSIMD(int row) const {

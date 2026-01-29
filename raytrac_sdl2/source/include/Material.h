@@ -11,11 +11,8 @@
 # pragma once
 
 #include "Ray.h"
-#include "RayPacket.h"
-#include "HitRecordPacket.h"
 #include "Vec3.h"
 #include "Vec2.h"
-#include "Vec3SIMD.h"
 #include "Hittable.h"
 #include <memory>
 #include "Texture.h"
@@ -154,17 +151,6 @@ public:
     virtual ~Material() = default;
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const = 0;
     
-    // Packet Tracing Interface (Phase 2)
-    // Returns a mask of active lanes where scatter occurred
-    virtual __m256 scatter_packet(
-        const RayPacket& r_in, 
-        const HitRecordPacket& rec, 
-        Vec3Packet& attenuation, 
-        RayPacket& scattered
-    ) const {
-        // Default: No scatter (all lanes inactive)
-        return _mm256_setzero_ps();
-    }
     virtual float get_metallic() const { return metallicProperty.intensity; }
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
         return emissionProperty.color * emissionProperty.intensity;

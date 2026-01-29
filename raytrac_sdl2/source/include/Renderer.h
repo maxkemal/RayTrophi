@@ -135,7 +135,7 @@ public:
    
     void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
         std::function<void(int progress, const std::string& stage)> progress_callback = nullptr,
-        bool append = false);  // If true, don't clear scene before loading
+        bool append = false, const std::string& import_prefix = "");  // If true, don't clear scene before loading
 
     // Rebuild OptiX geometry after scene modifications (deletion/addition)
     void rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr);
@@ -237,12 +237,21 @@ private:
     // Boyut değişmedikçe buffer'lar yeniden kullanılır
     oidn::BufferRef oidnColorBuffer;
     oidn::BufferRef oidnOutputBuffer;
-    std::vector<float> oidnColorData;    // CPU tarafı color buffer cache
+    std::vector<float> oidnColorData;      // CPU tarafı color buffer cache
+    std::vector<float> oidnOriginalData;   // Original pixel cache (blend için, double-read eliminasyonu)
     int oidnCachedWidth = 0;
     int oidnCachedHeight = 0;
 
     void initOIDN(); // Helper to init device
     float lastAnimationUpdateTime = -1.0f; // Track animation time
+    struct AnimatableGroup {
+        std::string nodeName;
+        bool isSkinned;
+        std::shared_ptr<Transform> transformHandle;
+        std::vector<std::shared_ptr<Triangle>> triangles;
+    };
+    std::vector<AnimatableGroup> animation_groups;
+    bool animation_groups_dirty = true;
     SDL_Window* window;
    
 public:
@@ -254,6 +263,13 @@ public:
     int cpu_accumulated_samples = 0;
     uint64_t cpu_last_camera_hash = 0;
     bool cpu_accumulation_valid = false;
+    
+    // Variance buffer for adaptive sampling (tracks per-pixel noise level)
+    std::vector<float> cpu_variance_buffer;
+    
+    // Cached pixel list for progressive rendering (avoids per-pass allocation + shuffle)
+    std::vector<std::pair<int, int>> cpu_cached_pixel_list;
+    bool cpu_pixel_list_valid = false;  // Reset when resolution or camera changes
     
     // Progressive render functions
     void render_progressive_pass(SDL_Surface* surface, SDL_Window* window, SceneData& scene, int samples_this_pass = 1, int override_target_samples = 0);

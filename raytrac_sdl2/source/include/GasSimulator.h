@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -37,15 +37,21 @@
 #include <atomic>
 #include <thread>
 
+// Forward declare FFT solver (avoid CUDA header in pure C++ headers)
+namespace FluidSim {
+    struct FFTPressureSolver;
+    struct GPUAdvancedEmitter;
+}
+
 // Forward declarations
 namespace openvdb { template<typename T> class Grid; }
 namespace Physics { class ForceFieldManager; }
 
 namespace FluidSim {
 
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// ═══════════════════════════════════════════════════════════════════════════════
 // ENUMS AND SETTINGS
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// ═══════════════════════════════════════════════════════════════════════════════
 
 enum class SimulationMode {
     RealTime,   // Simulate each frame on-the-fly
@@ -72,18 +78,18 @@ struct Emitter {
     Vec3 size = Vec3(1, 1, 1);      // Radius for sphere, half-extents for box
     float radius = 1.0f;            // For sphere
     
-    float density_rate = 10.0f;      // Density injection per second
-    float fuel_rate = 0.0f;         // Fuel injection per second
-    float temperature = 500.0f;      // Temperature in Kelvin
+    float density_rate = 5.0f;       // Density injection per second (was 10)
+    float fuel_rate = 0.0f;          // Fuel injection per second
+    float temperature = 400.0f;      // Temperature in Kelvin (was 500, lower for stability)
     Vec3 velocity = Vec3(0, 2, 0);  // Initial velocity of emitted smoke
     
     bool enabled = true;
     std::string name = "Emitter";
     uint32_t uid = 0;               // Unique ID for animation tracks (NEW)
     
-    // ═════════════════════════════════════════════════════════════════════════
+    // =========================================================================
     // KEYFRAME ANIMATION SUPPORT
-    // ═════════════════════════════════════════════════════════════════════════
+    // =========================================================================
     std::map<int, ::EmitterKeyframe> keyframes;  // frame -> keyframe data
     
     /// @brief Get interpolated values at specific time/frame
@@ -101,9 +107,9 @@ struct Emitter {
  * @brief Complete simulation settings
  */
 struct GasSimulationSettings {
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     // Grid settings
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     int resolution_x = 64;
     int resolution_y = 64;
     int resolution_z = 64;
@@ -111,48 +117,89 @@ struct GasSimulationSettings {
     float voxel_size = 0.1f;        // Calculated automatically: grid_size / resolution
     Vec3 grid_offset = Vec3(0, 0, 0); // Grid origin in world space
     
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     // Simulation parameters
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     float timestep = 0.016f;         // Simulation timestep (default ~60 FPS)
     int substeps = 1;                // Substeps per frame for stability
+    float time_scale = 1.0f;         // Simulation speed multiplier (1.0 = realtime, 2.0 = 2x faster)
     int pressure_iterations = 40;    // Jacobi iterations (more = more accurate)
     
-    float density_dissipation = 0.995f;    // Density decay per second (0.99 = slow)
-    float velocity_dissipation = 0.998f;   // Velocity damping
-    float temperature_dissipation = 0.99f; // Temperature cooling
-    float fuel_dissipation = 0.99f;        // Fuel decay per second
+    // CFL Adaptive Timestep (Industry Standard)
+    bool adaptive_timestep = true;   // Enable automatic timestep adjustment
+    float cfl_number = 0.5f;         // CFL condition (0.5-1.0, lower = more stable)
+    float min_timestep = 0.001f;     // Minimum timestep (prevents simulation halt)
+    float max_timestep = 0.05f;      // Maximum timestep (prevents too large steps)
+    
+    float density_dissipation = 0.99f;     // Density decay per second (0.9 = fast, 0.99 = slow)
+    float velocity_dissipation = 0.98f;    // Velocity damping (lower = more drag)
+    float temperature_dissipation = 0.98f; // Temperature cooling (slower = smoke rises longer)
+    float fuel_dissipation = 0.98f;        // Fuel decay per second
 
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     // Combustion parameters
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     float ignition_temperature = 400.0f;   // Temp at which fuel starts burning
     float burn_rate = 1.0f;                // Speed of fuel consumption
-    float heat_release = 100.0f;           // Temperature added per unit fuel burned
+    float heat_release = 30.0f;            // Temperature added per unit fuel burned (was 100, too hot!)
     float expansion_strength = 2.0f;       // Expansion (pressure) from fire
     float smoke_generation = 0.5f;         // Smoke generated per unit fuel burned
     float soot_generation = 0.1f;          // Density generated from burning
     
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     // Physical forces
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     float buoyancy_density = -0.5f;       // Density buoyancy (negative = sink)
-    float buoyancy_temperature = 1.0f;    // Temperature buoyancy (hot rises)
-    float ambient_temperature = 293.0f;   // Ambient temp in Kelvin (~20Â°C)
+    float buoyancy_temperature = 5.0f;    // Temperature buoyancy (hot rises) - STRONG default
+    float ambient_temperature = 293.0f;   // Ambient temp in Kelvin (~20°C)
     
     float vorticity_strength = 0.5f;      // Vorticity confinement (detail)
+    float turbulence_strength = 0.2f;     // Added turbulence noise strength
+    float turbulence_scale = 1.0f;        // Turbulence noise scale
+    int   turbulence_octaves = 3;         // FBM octaves (1-8, more = more detail)
+    float turbulence_lacunarity = 2.0f;   // Frequency multiplier per octave
+    float turbulence_persistence = 0.5f;  // Amplitude decay per octave
+    
+    enum class AdvectionMode {
+        SemiLagrangian,
+        MacCormack,
+        BFECC
+    };
+    AdvectionMode advection_mode = AdvectionMode::MacCormack;
+    
+    // Pressure Solver Mode (Industry Standard)
+    enum class PressureSolverMode {
+        GaussSeidel,      // Basic Red-Black Gauss-Seidel
+        SOR,              // Successive Over-Relaxation (2-3x faster convergence)
+        Multigrid,        // Multigrid V-cycle (future implementation)
+        FFT               // Spectral solver using cuFFT (10-50x faster!)
+    };
+    PressureSolverMode pressure_solver = PressureSolverMode::SOR;
+    float sor_omega = 1.7f;  // SOR relaxation factor (optimal ~1.7 for 3D Poisson)
+
     Vec3 gravity = Vec3(0, -9.81f, 0);
     Vec3 wind = Vec3(0, 0, 0);
+
+    // Sparse Grid Settings (VDB-style optimization)
+    bool sparse_mode = true;          // Enable sparse tile processing
+    float sparse_threshold = 0.001f;  // Minimum density to consider tile active
     
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stability Limits (GPU clamping)
+    // ─────────────────────────────────────────────────────────────────────────
+    float max_velocity = 300.0f;      // Maximum velocity (grid units/s)
+    float max_temperature = 6000.0f;  // Maximum temperature (K) - Support white-hot
+    float max_density = 40.0f;        // Maximum density
+    
+    // ─────────────────────────────────────────────────────────────────────────
     // Mode settings
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     SimulationMode mode = SimulationMode::RealTime;
-    SolverBackend backend = SolverBackend::CPU;
+    SolverBackend backend = SolverBackend::CUDA;  // Prioritize GPU if available
     
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     // Baking settings
-    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ─────────────────────────────────────────────────────────────────────────
     std::string cache_directory = "";
     int bake_start_frame = 0;
     int bake_end_frame = 100;
@@ -184,9 +231,9 @@ public:
     GasSimulator();
     ~GasSimulator();
     
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     // LIFECYCLE
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     
     /// @brief Initialize with settings
     void initialize(const GasSimulationSettings& settings);
@@ -200,9 +247,9 @@ public:
     /// @brief Cleanup resources
     void shutdown();
     
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     // EMITTERS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     
     /// @brief Add an emitter
     int addEmitter(const Emitter& emitter);
@@ -214,9 +261,9 @@ public:
     std::vector<Emitter>& getEmitters() { return emitters; }
     const std::vector<Emitter>& getEmitters() const { return emitters; }
     
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     // GRID ACCESS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     
     /// @brief Get the fluid grid (for rendering/export)
     FluidGrid& getGrid() { return grid; }
@@ -236,9 +283,9 @@ public:
         return external_force_field_manager;
     }
     
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     // SAMPLING (for rendering)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     
     /// @brief Sample density at world position
     float sampleDensity(const Vec3& world_pos) const;
@@ -246,12 +293,18 @@ public:
     /// @brief Sample temperature at world position  
     float sampleTemperature(const Vec3& world_pos) const;
     
+    /// @brief Sample flame intensity (combustion/interaction) at world position
+    float sampleFlameIntensity(const Vec3& world_pos) const;
+    
+    /// @brief Sample fuel at world position
+    float sampleFuel(const Vec3& world_pos) const;
+    
     /// @brief Sample velocity at world position
     Vec3 sampleVelocity(const Vec3& world_pos) const;
     
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     // BAKING
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     
     /// @brief Start baking simulation to cache
     void startBake(int start_frame, int end_frame, const std::string& cache_dir, const Matrix4x4& world_matrix = Matrix4x4::identity());
@@ -312,28 +365,36 @@ public:
     void downloadFromGPU();
 
 private:
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     // SIMULATION STEPS (CPU)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════════════════════════
     
     void advectVelocity(float dt);
     void advectScalars(float dt);
     void applyForces(float dt, const Matrix4x4& world_matrix);
+    void applyGravity(float dt);               // Gravity from settings.gravity
     void applyBuoyancy(float dt);
     void applyVorticity(float dt);
+    void applyCurlNoiseTurbulence(float dt);   // Industry-standard curl noise turbulence
     void applyWind(float dt);
-    void applyExternalForceFields(float dt, const Matrix4x4& world_matrix); // UPDATED: Accept world transform
+    void applyVelocityClamping();              // Stability limit: settings.max_velocity
+    void applyExternalForceFields(float dt, const Matrix4x4& world_matrix); // Accept world transform
     void solvePressure();
     void project();
     void applyEmitters(float dt);
     void applyDissipation(float dt);
-    void processCombustion(float dt); // NEW: Fuel + Heat -> Fire
+    void processCombustion(float dt); // Fuel + Heat -> Fire
     void enforceBoundaries();
+    
+    // CFL Adaptive Timestep (Industry Standard)
+    float computeCFLTimestep(float requested_dt);  // Returns stable timestep based on max velocity
+    float computeMaxVelocity();                    // Scans grid for maximum velocity magnitude
    
     
     void stepCUDA(float dt, const Matrix4x4& world_matrix);
     void initCUDA();
     void freeCUDA();
+    void clearGPU();  // Clear GPU buffers without reallocating
    
     
     FluidGrid grid;
@@ -369,11 +430,40 @@ private:
     void* d_vort_x = nullptr;
     void* d_vort_y = nullptr;
     void* d_vort_z = nullptr;
+    void* d_tmp1 = nullptr;    // Temporary GPU buffer for advection/pressure
+    void* d_tmp2 = nullptr;    // Temporary GPU buffer
+    void* d_tmp3 = nullptr;    // Temporary GPU buffer
     bool gpu_data_valid = false;
     bool cuda_initialized = false;
     
+    // GPU Force Field resources
+    void* d_force_fields = nullptr;  // GPU force field buffer
+    int gpu_force_field_count = 0;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FFT PRESSURE SOLVER (10-50x faster than iterative for large grids)
+    // ═══════════════════════════════════════════════════════════════════════════
+    FFTPressureSolver* fft_solver = nullptr;  // Spectral Poisson solver
+    bool use_fft_solver = false;              // Auto-enabled when mode=FFT
+    
+    void initFFTSolver();
+    void cleanupFFTSolver();
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU ADVANCED EMITTERS
+    // ═══════════════════════════════════════════════════════════════════════════
+    GPUAdvancedEmitter* d_advanced_emitters = nullptr;
+    int gpu_advanced_emitter_count = 0;
+    
+    void uploadAdvancedEmittersToGPU();
+    void freeGPUAdvancedEmitters();
+    
     // CPU persistent buffers to avoid allocations
     std::vector<Vec3> persistent_vorticity;
+    
+    // Helper: Upload force fields to GPU for current frame
+    void uploadForceFieldsToGPU();
+    void freeGPUForceFields();
     
 };
 

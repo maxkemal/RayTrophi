@@ -77,8 +77,7 @@ struct RenderSettings {
     // Backend
     bool use_optix = false;
     bool UI_use_embree = true;
-    bool use_vectorized_renderer = false; // SIMD 8-wide packet tracing vs Scalar
-    
+  
     // Animation
     float animation_duration = 1.0f;
     int animation_fps = 24;

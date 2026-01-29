@@ -1,6 +1,7 @@
 ﻿#include "GasVolume.h"
 #include "Ray.h"
 #include "VDBVolumeManager.h"
+#include "globals.h" // For SCENE_LOG_*
 #include <cmath>
 #include <algorithm>
 
@@ -11,12 +12,13 @@
 GasVolume::GasVolume() {
     transform = std::make_shared<Transform>();
     
-    // Default settings
-    settings.resolution_x = 64;
-    settings.resolution_y = 64;
-    settings.resolution_z = 64;
-    settings.grid_size = Vec3(5, 5, 5); // 5 meter cube default
-    settings.voxel_size = 5.0f / 64.0f;
+    // Default settings - use getSettings() to access simulator's settings directly
+    auto& s = getSettings();
+    s.resolution_x = 64;
+    s.resolution_y = 64;
+    s.resolution_z = 64;
+    s.grid_size = Vec3(5, 5, 5); // 5 meter cube default
+    s.voxel_size = 5.0f / 64.0f;
 }
 
 GasVolume::GasVolume(const std::string& n) : GasVolume() {
@@ -104,6 +106,7 @@ void GasVolume::setScale(const Vec3& s) {
     }
     
     // Sync physical domain size with object scale
+    auto& settings = getSettings();
     settings.grid_size = s;
     
     // Update voxel_size metrics based on new scale
@@ -126,7 +129,7 @@ void GasVolume::applyTransform() {
     // Note: Since we use Transform matrix for raytracing, 
     // the simulation internal grid should remain at local (0,0,0).
     // The world position is handled by the object transform matrix.
-    settings.grid_offset = Vec3(0, 0, 0); 
+    getSettings().grid_offset = Vec3(0, 0, 0); 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -163,7 +166,7 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
             cudaExtent extent = make_cudaExtent(width, height, depth);
             cudaError_t err = cudaMalloc3DArray((cudaArray**)d_array, &channelDesc, extent);
             if (err != cudaSuccess) {
-                printf("GasVolume::uploadToGPU Error: Failed to allocate 3D array (%s)\n", cudaGetErrorString(err));
+                SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to allocate 3D array - " + std::string(cudaGetErrorString(err)));
                 return;
             }
         }
@@ -189,7 +192,7 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
         }
         
         if (copyErr != cudaSuccess) {
-            printf("GasVolume::uploadToGPU Error: Failed to copy data (%s)\n", cudaGetErrorString(copyErr));
+            SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to copy data - " + std::string(cudaGetErrorString(copyErr)));
         }
         
         // 3. Create Texture Object (if not exists)
@@ -220,8 +223,9 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
         uploadTexture(simulator.getGPUTemperaturePtr(), grid.temperature.data(), &temperature_array, temperature_texture);
     }
 
+    // Only sync stream if explicitly provided (async operation)
     if (stream) {
-        cudaStreamSynchronize(stream);
+        cudaStreamSynchronize((cudaStream_t)stream);
     }
     
     // Upload Velocity (if motion blur is likely used)
@@ -232,17 +236,9 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
     // -------------------------------------------------------------------------
     // VDB UNIFIED PIPELINE SYNC
     // -------------------------------------------------------------------------
-    // -------------------------------------------------------------------------
-    // VDB UNIFIED PIPELINE SYNC
-    // -------------------------------------------------------------------------
     if (render_path == VolumeRenderPath::VDBUnified) {
-        
-        // Critical: If running on CUDA backend, the simulation data resides on GPU (d_density).
-        // However, VDBVolumeManager current implementation expects CPU data (grid.density) 
-        // to convert it to NanoVDB. We MUST download it here.
-        // NOTE: Ideally VDBVolumeManager should accept GPU pointers to avoid this round-trip,
-        // but for now this fixes the "No Quality Change" issue.
-        if (settings.backend == FluidSim::SolverBackend::CUDA) {
+        // Download from GPU if using CUDA backend
+        if (getSettings().backend == FluidSim::SolverBackend::CUDA) {
              simulator.downloadFromGPU();
         }
 
@@ -254,7 +250,7 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
             grid.voxel_size,
             grid.density.data(),
             (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) ? grid.temperature.data() : nullptr,
-            stream
+            nullptr // Use synchronous host copy on default stream to avoid racing OptiX stream
         );
         
         // Also ensure individual volume data has the correct transform
@@ -266,6 +262,39 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
 }
 
 void GasVolume::freeGPUResources() {
+    // Only do CUDA operations if we actually have resources to free
+    bool has_resources = (density_texture != 0 || density_array != nullptr ||
+                          temperature_texture != 0 || temperature_array != nullptr ||
+                          velocity_texture != 0 || velocity_array != nullptr);
+    
+    if (!has_resources) {
+        // No GPU resources, just reset tracking
+        gpu_res_x = gpu_res_y = gpu_res_z = 0;
+        return;
+    }
+    
+    // Clear any sticky errors first
+    cudaGetLastError();
+    
+    // Check if CUDA is usable before sync
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    if (err != cudaSuccess || device_count == 0) {
+        // CUDA not available, just reset tracking
+        density_texture = temperature_texture = velocity_texture = 0;
+        density_array = temperature_array = velocity_array = nullptr;
+        gpu_res_x = gpu_res_y = gpu_res_z = 0;
+        return;
+    }
+    
+    // Sync with timeout protection - use non-blocking query first
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        SCENE_LOG_INFO("[GasVolume] cudaDeviceSynchronize failed in freeGPUResources: " + 
+                       std::string(cudaGetErrorString(err)));
+        cudaGetLastError(); // Clear error
+    }
+    
     auto freeResources = [&](unsigned long long& tex_obj, void** d_array) {
         if (tex_obj != 0) {
             cudaDestroyTextureObject((cudaTextureObject_t)tex_obj);
@@ -280,10 +309,15 @@ void GasVolume::freeGPUResources() {
     freeResources(density_texture, &density_array);
     freeResources(temperature_texture, &temperature_array);
     freeResources(velocity_texture, &velocity_array);
+    
+    // Reset resolution tracking
+    gpu_res_x = gpu_res_y = gpu_res_z = 0;
 }
 
 void GasVolume::initialize() {
     // Ensure our transform scale matches the physical grid_size from settings
+    auto& settings = getSettings();
+    
     scale = settings.grid_size;
     if (transform) {
         transform->scale = scale;
@@ -291,13 +325,23 @@ void GasVolume::initialize() {
         transform->rotation = rotation;
     }
     
+    // NOTE: Do NOT free GPU resources here - it can cause CUDA driver deadlock
+    // when resolution changes. Instead, reset tracking so next upload will reallocate.
+    // The old resources will be freed when new ones are allocated (or on destruction).
+    gpu_res_x = gpu_res_y = gpu_res_z = 0; // Force reallocation on next upload
+    
+    // Keep live_vdb_id - registerOrUpdateLiveVolume will update the existing entry
+    // and reallocate GPU buffer if needed. This avoids memory leaks and deadlocks.
+    
     settings.grid_offset = Vec3(0, 0, 0); 
+    
     simulator.initialize(settings);
+    
     initialized = true;
     bounds_dirty = true;
     
-    // Initial GPU upload
-    uploadToGPU();
+    // Skip initial GPU upload - it will happen on first stepFrame/update
+    // This prevents potential race conditions during initialization
 }
 
 void GasVolume::stop() {
@@ -329,6 +373,7 @@ void GasVolume::update(float dt, void* stream) {
             // If scale changed, we must also update physical grid size
             if (scale != transform->scale) {
                 scale = transform->scale;
+                auto& settings = getSettings();
                 settings.grid_size = scale;
                 
                 // CRITICAL: Update voxel_size metrics so rendering follows scale
@@ -345,28 +390,12 @@ void GasVolume::update(float dt, void* stream) {
     }
 
     if (is_playing && initialized && !simulator.isBaking()) {
-        // SYNC LIVE SETTINGS: Push modified UI settings to internal simulator 
-        // to avoid requiring a full simulation reset for non-resolution parameters.
-        auto& sim_settings = simulator.getSettings();
-        sim_settings.timestep = settings.timestep;
-        sim_settings.substeps = settings.substeps;
-        sim_settings.pressure_iterations = settings.pressure_iterations;
-        sim_settings.density_dissipation = settings.density_dissipation;
-        sim_settings.velocity_dissipation = settings.velocity_dissipation;
-        sim_settings.temperature_dissipation = settings.temperature_dissipation;
-        sim_settings.fuel_dissipation = settings.fuel_dissipation;
-        sim_settings.buoyancy_density = settings.buoyancy_density;
-        sim_settings.buoyancy_temperature = settings.buoyancy_temperature;
-        sim_settings.ambient_temperature = settings.ambient_temperature;
-        sim_settings.vorticity_strength = settings.vorticity_strength;
-        sim_settings.wind = settings.wind;
-        sim_settings.ignition_temperature = settings.ignition_temperature;
-        sim_settings.burn_rate = settings.burn_rate;
-        sim_settings.heat_release = settings.heat_release;
-        sim_settings.expansion_strength = settings.expansion_strength;
-        sim_settings.smoke_generation = settings.smoke_generation;
-        
+        // No longer need manual sync - getSettings() now returns simulator's settings directly
         simulator.step(dt, transform ? transform->base : Matrix4x4::identity());
+        
+        // Note: Removed diagnostic cudaDeviceSynchronize - was causing freezes
+        // Errors will be caught at next CUDA operation if any
+        
         uploadToGPU(stream); // Upload new frame data to GPU
     }
     else if (!is_playing && bounds_dirty) {
@@ -400,6 +429,7 @@ void GasVolume::updateFromTimeline(int timeline_frame, void* stream) {
         }
     }
     
+    const auto& settings = getSettings();
     if (settings.mode == FluidSim::SimulationMode::Baked) {
         if (target_frame != simulator.getCurrentFrame()) {
             simulator.loadBakedFrame(target_frame);
@@ -428,7 +458,7 @@ void GasVolume::updateFromTimeline(int timeline_frame, void* stream) {
 
 void GasVolume::setFrame(int frame) {
     // For baked simulations, load the specific frame
-    if (settings.mode == FluidSim::SimulationMode::Baked) {
+    if (getSettings().mode == FluidSim::SimulationMode::Baked) {
         simulator.loadBakedFrame(frame + frame_offset);
     }
 }
@@ -464,6 +494,7 @@ std::shared_ptr<VolumeShader> GasVolume::getOrCreateShader() {
 float GasVolume::sampleDensity(const Vec3& world_pos) const {
     if (!initialized) return 0.0f;
     
+    const auto& settings = getSettings();
     Vec3 local_pos = world_pos;
     if (transform) {
         transform->updateMatrix();
@@ -482,6 +513,7 @@ float GasVolume::sampleDensity(const Vec3& world_pos) const {
 }
 
 float GasVolume::sampleTemperature(const Vec3& world_pos) const {
+    const auto& settings = getSettings();
     if (!initialized) return settings.ambient_temperature;
     
     Vec3 local_pos = world_pos;
@@ -498,9 +530,46 @@ float GasVolume::sampleTemperature(const Vec3& world_pos) const {
     return simulator.sampleTemperature(local_pos);
 }
 
+float GasVolume::sampleFlameIntensity(const Vec3& world_pos) const {
+    if (!initialized) return 0.0f;
+    
+    const auto& settings = getSettings();
+    Vec3 local_pos = world_pos;
+    if (transform) {
+        transform->updateMatrix();
+        Matrix4x4 inv_mat = transform->base.inverse();
+
+        float x = inv_mat.m[0][0] * world_pos.x + inv_mat.m[0][1] * world_pos.y + inv_mat.m[0][2] * world_pos.z + inv_mat.m[0][3];
+        float y = inv_mat.m[1][0] * world_pos.x + inv_mat.m[1][1] * world_pos.y + inv_mat.m[1][2] * world_pos.z + inv_mat.m[1][3];
+        float z = inv_mat.m[2][0] * world_pos.x + inv_mat.m[2][1] * world_pos.y + inv_mat.m[2][2] * world_pos.z + inv_mat.m[2][3];
+
+        local_pos = Vec3(x * settings.grid_size.x, y * settings.grid_size.y, z * settings.grid_size.z);
+    }
+    return simulator.sampleFlameIntensity(local_pos);
+}
+
+float GasVolume::sampleFuel(const Vec3& world_pos) const {
+    if (!initialized) return 0.0f;
+    
+    const auto& settings = getSettings();
+    Vec3 local_pos = world_pos;
+    if (transform) {
+        transform->updateMatrix();
+        Matrix4x4 inv_mat = transform->base.inverse();
+
+        float x = inv_mat.m[0][0] * world_pos.x + inv_mat.m[0][1] * world_pos.y + inv_mat.m[0][2] * world_pos.z + inv_mat.m[0][3];
+        float y = inv_mat.m[1][0] * world_pos.x + inv_mat.m[1][1] * world_pos.y + inv_mat.m[1][2] * world_pos.z + inv_mat.m[1][3];
+        float z = inv_mat.m[2][0] * world_pos.x + inv_mat.m[2][1] * world_pos.y + inv_mat.m[2][2] * world_pos.z + inv_mat.m[2][3];
+
+        local_pos = Vec3(x * settings.grid_size.x, y * settings.grid_size.y, z * settings.grid_size.z);
+    }
+    return simulator.sampleFuel(local_pos);
+}
+
 Vec3 GasVolume::sampleVelocity(const Vec3& world_pos) const {
     if (!initialized) return Vec3(0, 0, 0);
     
+    const auto& settings = getSettings();
     Vec3 local_pos = world_pos;
     if (transform) {
         transform->updateMatrix();
@@ -571,7 +640,7 @@ void GasVolume::updateBounds() const {
 
 void GasVolume::startBake(int start_frame, int end_frame) {
     Matrix4x4 world_mat = transform ? transform->base : Matrix4x4::identity();
-    simulator.startBake(start_frame, end_frame, settings.cache_directory, world_mat);
+    simulator.startBake(start_frame, end_frame, getSettings().cache_directory, world_mat);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -604,7 +673,7 @@ nlohmann::json GasVolume::toJson() const {
     j["scale"] = {scale.x, scale.y, scale.z};
     
     // Settings
-    j["settings"] = settings.toJson();
+    j["settings"] = getSettings().toJson();
     
     // Emitters
     nlohmann::json emitters_json = nlohmann::json::array();
@@ -653,7 +722,7 @@ void GasVolume::fromJson(const nlohmann::json& j) {
     
     // Settings
     if (j.contains("settings")) {
-        settings.fromJson(j["settings"]);
+        getSettings().fromJson(j["settings"]);
     }
     
     // Initialize after loading settings

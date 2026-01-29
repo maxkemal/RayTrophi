@@ -36,6 +36,7 @@
 #include <string>
 #include <functional>
 #include <assimp/anim.h>  // For aiVectorKey, aiQuatKey
+#include <json.hpp>
 
 namespace AnimationGraph {
 
@@ -67,6 +68,7 @@ namespace AnimationGraph {
         std::vector<Matrix4x4> boneTransforms;
         std::vector<std::string> boneNames;  // For debugging
         float blendWeight = 1.0f;
+        float normalizedTime = 0.0f;        // 0-1 playback progress
         
         bool isValid() const { return !boneTransforms.empty(); }
         size_t boneCount() const { return boneTransforms.size(); }
@@ -111,8 +113,11 @@ namespace AnimationGraph {
         // Bone data reference
         const BoneData* boneData = nullptr;
         
+        // Graph back-reference for connection traversal
+        class AnimationNodeGraph* graph = nullptr;
+
         // Animation clips (from scene)
-        std::vector<AnimationClip>* clips = nullptr;
+        const std::vector<AnimationClip>* clipsPtr = nullptr;
         
         // Parameters (from user/gameplay)
         std::unordered_map<std::string, float> floatParams;
@@ -180,6 +185,10 @@ namespace AnimationGraph {
             // Animation nodes use computePose instead
             return NodeSystem::PinValue{};
         }
+        
+        // Serialization hooks
+        virtual void onSave(nlohmann::json& j) const {}
+        virtual void onLoad(const nlohmann::json& j) {}
     };
     
     // ============================================================================
@@ -224,6 +233,18 @@ namespace AnimationGraph {
         void play() { isPlaying = true; }
         void pause() { isPlaying = false; }
         void reset() { currentTime = startTime; }
+        
+        void onSave(nlohmann::json& j) const override {
+            j["clipName"] = clipName;
+            j["speed"] = playbackSpeed;
+            j["loop"] = loop;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+            clipName = j.value("clipName", "");
+            playbackSpeed = j.value("speed", 1.0f);
+            loop = j.value("loop", true);
+        }
     };
     
     /**
@@ -249,6 +270,16 @@ namespace AnimationGraph {
         void drawContent() override;
         
         std::string getTypeId() const override { return "AnimParameter"; }
+        
+        void onSave(nlohmann::json& j) const override {
+            j["paramName"] = parameterName;
+            j["paramType"] = (int)paramType;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+            parameterName = j.value("paramName", "New Param");
+            paramType = (ParamType)j.value("paramType", 0);
+        }
     };
     
     /**
@@ -306,6 +337,17 @@ namespace AnimationGraph {
         
     private:
         PoseData blendPoses(const PoseData& a, const PoseData& b, float t);
+        
+    public:
+        void onSave(nlohmann::json& j) const override {
+             j["alpha"] = alpha;
+             j["useInputAlpha"] = useInputAlpha;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             alpha = j.value("alpha", 0.5f);
+             useInputAlpha = j.value("useInputAlpha", true);
+        }
     };
     
     /**
@@ -329,6 +371,14 @@ namespace AnimationGraph {
         void drawContent() override;
         
         std::string getTypeId() const override { return "AdditiveBlend"; }
+        
+        void onSave(nlohmann::json& j) const override {
+             j["alpha"] = alpha;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             alpha = j.value("alpha", 1.0f);
+        }
     };
     
     /**
@@ -355,6 +405,16 @@ namespace AnimationGraph {
         void drawContent() override;
         
         std::string getTypeId() const override { return "LayeredBlend"; }
+        
+        void onSave(nlohmann::json& j) const override {
+             j["alpha"] = alpha;
+             j["bones"] = affectedBones;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             alpha = j.value("alpha", 1.0f);
+             if(j.contains("bones")) affectedBones = j["bones"].get<std::vector<std::string>>();
+        }
     };
     
     /**
@@ -420,6 +480,10 @@ namespace AnimationGraph {
             std::string toState;
             float blendTime = 0.3f;
             
+            // Unity-like Exit Time support
+            bool hasExitTime = true;
+            float exitTime = 0.9f;     // Normalized (0-1)
+            
             // Condition
             std::string parameterName;
             enum class ConditionType { Bool, FloatGreater, FloatLess, Trigger };
@@ -432,6 +496,68 @@ namespace AnimationGraph {
         std::vector<State> states;
         std::vector<Transition> transitions;
         std::string currentStateName;
+        
+        void onSave(nlohmann::json& j) const override {
+             j["currentState"] = currentStateName;
+             
+             // States
+             nlohmann::json statesJson = nlohmann::json::array();
+             for(const auto& s : states) {
+                 statesJson.push_back({
+                     {"name", s.name},
+                     {"nodeId", s.nodeId},
+                     {"isDefault", s.isDefault}
+                 });
+             }
+             j["states"] = statesJson;
+             
+             // Transitions
+             nlohmann::json transJson = nlohmann::json::array();
+             for(const auto& t : transitions) {
+                 transJson.push_back({
+                     {"from", t.fromState},
+                     {"to", t.toState},
+                     {"blendTime", t.blendTime},
+                     {"hasExitTime", t.hasExitTime},
+                     {"exitTime", t.exitTime},
+                     {"param", t.parameterName},
+                     {"condType", (int)t.conditionType},
+                     {"val", t.compareValue}
+                 });
+             }
+             j["transitions"] = transJson;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             currentStateName = j.value("currentState", "");
+             
+             if(j.contains("states")) {
+                 states.clear();
+                 for(const auto& s : j["states"]) {
+                     State state;
+                     state.name = s.value("name", "State");
+                     state.nodeId = s.value("nodeId", 0u);
+                     state.isDefault = s.value("isDefault", false);
+                     states.push_back(state);
+                 }
+             }
+             
+             if(j.contains("transitions")) {
+                 transitions.clear();
+                 for(const auto& t : j["transitions"]) {
+                     Transition trans;
+                     trans.fromState = t.value("from", "");
+                     trans.toState = t.value("to", "");
+                     trans.blendTime = t.value("blendTime", 0.3f);
+                     trans.hasExitTime = t.value("hasExitTime", true);
+                     trans.exitTime = t.value("exitTime", 0.9f);
+                     trans.parameterName = t.value("param", "");
+                     trans.conditionType = (Transition::ConditionType)t.value("condType", 0);
+                     trans.compareValue = t.value("val", 0.0f);
+                     transitions.push_back(trans);
+                 }
+             }
+        }
         std::string targetStateName;  // For transitions
         float transitionProgress = 0.0f;
         bool isTransitioning = false;
@@ -474,6 +600,16 @@ namespace AnimationGraph {
         void drawContent() override;
         
         std::string getTypeId() const override { return "PoseSwitch"; }
+        
+        void onSave(nlohmann::json& j) const override {
+             j["activeIndex"] = activeIndex;
+             j["poseCount"] = poseCount;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             activeIndex = j.value("activeIndex", 0);
+             poseCount = j.value("poseCount", 2);
+        }
     };
     
     /**
@@ -496,6 +632,18 @@ namespace AnimationGraph {
         void drawContent() override;
         
         std::string getTypeId() const override { return "AnimCondition"; }
+        
+        void onSave(nlohmann::json& j) const override {
+             j["param"] = parameterName;
+             j["type"] = (int)compareType;
+             j["val"] = compareValue;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             parameterName = j.value("param", "");
+             compareType = (CompareType)j.value("type", 0);
+             compareValue = j.value("val", 0.0f);
+        }
     };
     
     // ============================================================================
@@ -564,6 +712,14 @@ namespace AnimationGraph {
         void drawContent() override;
         
         std::string getTypeId() const override { return "AnimSpeed"; }
+        
+        void onSave(nlohmann::json& j) const override {
+             j["speed"] = speed;
+        }
+        
+        void onLoad(const nlohmann::json& j) override {
+             speed = j.value("speed", 1.0f);
+        }
     };
     
     /**

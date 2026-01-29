@@ -136,9 +136,10 @@ public:
     // SETTINGS & SIMULATOR ACCESS
     // ═══════════════════════════════════════════════════════════════════════
     
-    /// @brief Get simulation settings
-    FluidSim::GasSimulationSettings& getSettings() { return settings; }
-    const FluidSim::GasSimulationSettings& getSettings() const { return settings; }
+    /// @brief Get simulation settings - returns SIMULATOR's settings directly
+    /// This ensures UI changes are immediately reflected in simulation
+    FluidSim::GasSimulationSettings& getSettings() { return simulator.getSettings(); }
+    const FluidSim::GasSimulationSettings& getSettings() const { return simulator.getSettings(); }
     
     /// @brief Get simulator (for advanced access)
     FluidSim::GasSimulator& getSimulator() { return simulator; }
@@ -158,6 +159,8 @@ public:
     std::vector<FluidSim::Emitter>& getEmitters() { return simulator.getEmitters(); }
     const std::vector<FluidSim::Emitter>& getEmitters() const { return simulator.getEmitters(); }
     
+    /// @brief Get colliders
+   
     // ═══════════════════════════════════════════════════════════════════════
     // SHADER
     // ═══════════════════════════════════════════════════════════════════════
@@ -180,6 +183,12 @@ public:
     
     /// @brief Sample temperature at world position
     float sampleTemperature(const Vec3& world_pos) const;
+    
+    /// @brief Sample flame/fire intensity at world position (combustion interaction field)
+    float sampleFlameIntensity(const Vec3& world_pos) const;
+    
+    /// @brief Sample fuel at world position
+    float sampleFuel(const Vec3& world_pos) const;
     
     /// @brief Sample velocity at world position
     Vec3 sampleVelocity(const Vec3& world_pos) const;
@@ -282,7 +291,7 @@ public:
     int id = -1;                    // Unique ID in scene
     bool visible = true;            // Render visibility
     bool selected = false;          // Selection state
-    FluidSim::GasSimulationSettings settings;
+    // NOTE: Use getSettings() to access simulation settings - they are stored in simulator
     bool linked_to_timeline = true;
     
     enum class VolumeRenderPath {

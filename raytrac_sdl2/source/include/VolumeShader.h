@@ -309,6 +309,8 @@ public:
         std::string temperature_channel = "temperature";  ///< VDB grid for temp
         float temperature_scale = 1.0f;       ///< Temperature multiplier
         float blackbody_intensity = 10.0f;    ///< Blackbody emission strength
+        float temperature_min = 0.0f;         ///< Min temperature for ramp (Kelvin above ambient)
+        float temperature_max = 1500.0f;      ///< Max temperature for ramp (Kelvin above ambient)
         
         // Channel-driven mode
         std::string emission_channel = "emission";  ///< Custom emission grid
@@ -325,6 +327,8 @@ public:
             j["temperature_channel"] = temperature_channel;
             j["temperature_scale"] = temperature_scale;
             j["blackbody_intensity"] = blackbody_intensity;
+            j["temperature_min"] = temperature_min;
+            j["temperature_max"] = temperature_max;
             j["emission_channel"] = emission_channel;
 
             // Manual ramp serialization (ColorRamp is outside struct scope, annoying. 
@@ -355,6 +359,8 @@ public:
             if (j.contains("temperature_channel")) temperature_channel = j["temperature_channel"];
             if (j.contains("temperature_scale")) temperature_scale = j["temperature_scale"];
             if (j.contains("blackbody_intensity")) blackbody_intensity = j["blackbody_intensity"];
+            if (j.contains("temperature_min")) temperature_min = j["temperature_min"];
+            if (j.contains("temperature_max")) temperature_max = j["temperature_max"];
             if (j.contains("emission_channel")) emission_channel = j["emission_channel"];
             
             if (j.contains("color_ramp")) {
@@ -426,6 +432,8 @@ public:
         shader->emission.temperature_channel = "temperature";
         shader->emission.temperature_scale = 1.2f;
         shader->emission.blackbody_intensity = 35.0f;
+        shader->emission.temperature_min = 100.0f;   // Explosions start hotter
+        shader->emission.temperature_max = 2000.0f;  // Higher max for white-hot core
         
         // High quality rendering for explosions
         shader->quality.step_size = 0.05f; 
@@ -601,6 +609,8 @@ public:
         shader->emission.temperature_channel = "temperature";
         shader->emission.temperature_scale = 1.0f;
         shader->emission.blackbody_intensity = 15.0f;
+        shader->emission.temperature_min = 50.0f;    // Start showing color at 50K above ambient
+        shader->emission.temperature_max = 1200.0f;  // Full white at 1200K above ambient
         
         return shader;
     }

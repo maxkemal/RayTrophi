@@ -44,11 +44,30 @@ namespace TerrainNodesV2 {
         int width = 0;
         int height = 0;
         
+        // Scale values - preserved throughout evaluation
+        float scale_xz = 100.0f;
+        float scale_y = 10.0f;
+        
+        // Default resolution when terrain is not yet initialized
+        static constexpr int DEFAULT_RESOLUTION = 256;
+        static constexpr float DEFAULT_SCALE_XZ = 100.0f;
+        static constexpr float DEFAULT_SCALE_Y = 10.0f;
+        
         TerrainContext() = default;
         explicit TerrainContext(TerrainObject* t) : terrain(t) {
             if (t) {
                 width = t->heightmap.width;
                 height = t->heightmap.height;
+                scale_xz = t->heightmap.scale_xz;
+                scale_y = t->heightmap.scale_y;
+                
+                // CRITICAL FIX: If terrain dimensions are invalid (0 or very small),
+                // use a sensible default. This prevents issues when modifier nodes
+                // are placed in the graph before the first direct Height→Output evaluation.
+                if (width < 2) width = DEFAULT_RESOLUTION;
+                if (height < 2) height = DEFAULT_RESOLUTION;
+                if (scale_xz < 1.0f) scale_xz = DEFAULT_SCALE_XZ;
+                if (scale_y < 0.1f) scale_y = DEFAULT_SCALE_Y;
             }
         }
     };

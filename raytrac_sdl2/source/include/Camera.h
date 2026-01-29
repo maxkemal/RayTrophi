@@ -65,7 +65,6 @@ public:
     Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, float aperture, float focus_dist, int blade_count);
     Camera();
     Ray get_ray(float s, float t) const;
-    void get_ray_packet(__m256 s, __m256 t, class RayPacket& rp) const;
 
     int random_int(int min, int max) const;
 

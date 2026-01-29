@@ -626,7 +626,7 @@ void SceneUI::drawResolutionPanel(UIContext& ctx)
 
         UIWidgets::ColoredHeader("Resolution", ImVec4(0.7f, 0.9f, 0.8f, 1.0f));
         
-        if (ImGui::TreeNodeEx("Display Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::BeginSection("Display Settings", ImVec4(0.5f, 0.5f, 0.6f, 1.0f))) {
             if (ImGui::Combo("Presets", &preset_index,
                 [](void* data, int idx, const char** out_text) {
                     *out_text = ((ResolutionPreset*)data)[idx].name;
@@ -677,7 +677,7 @@ void SceneUI::drawResolutionPanel(UIContext& ctx)
                 last_applied_aspect_h = aspect_h;
             }
             
-            ImGui::TreePop();
+            UIWidgets::EndSection();
         }
 
         UIWidgets::EndSection();
@@ -760,8 +760,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     ImGui::SetNextWindowPos(ImVec2(0, menu_height), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(side_panel_width, target_height), ImGuiCond_FirstUseEver);
 
-    // Remove NoResize flag, allow collapse for minimizing panel
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    // Remove TitleBar and Resize for a seamless docked look
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
 
     // Add frame styling
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
@@ -769,470 +769,342 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
     if (ImGui::Begin("Properties", nullptr, flags))
     {
+        ImDrawList* parent_dl = ImGui::GetWindowDrawList();
+        ImVec2 win_pos = ImGui::GetWindowPos();
+        ImVec2 win_size = ImGui::GetWindowSize();
         // Update width if user resized
         side_panel_width = ImGui::GetWindowWidth();
 
-        if (ImGui::BeginTabBar("MainPropertiesTabs"))
-        {
-            // -------------------------------------------------------------
-            // TAB: SCENE EDIT (Hierarchy) - MOVED TO FIRST
-            // -------------------------------------------------------------
-            ImGuiTabItemFlags scene_flags = 0;
-            if (focus_scene_edit_tab || tab_to_focus == "Scene Edit") {
-                scene_flags = ImGuiTabItemFlags_SetSelected;
-                focus_scene_edit_tab = false;
-                if (tab_to_focus == "Scene Edit") tab_to_focus = "";
-            }
-            if (ImGui::BeginTabItem("Scene Edit", nullptr, scene_flags)) {
-                drawSceneHierarchy(ctx);
-                ImGui::EndTabItem();
-            }
+        // ─────────────────────────────────────────────────────────────────────────
+        // MODERN VERTICAL TAB NAVIGATION
+        // ─────────────────────────────────────────────────────────────────────────
 
-            // -------------------------------------------------------------
-            // TAB: RENDER (Render Controls & Settings)
-            // -------------------------------------------------------------
-            ImGuiTabItemFlags render_flags = 0;
-            if (tab_to_focus == "Render") { render_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-            if (ImGui::BeginTabItem("Render", nullptr, render_flags)) {
-                
-                // Scene Status (File menu handles loading now)
-                UIWidgets::ColoredHeader("Scene Status", ImVec4(1.0f, 0.8f, 0.6f, 1.0f));
-                
-                if (ctx.scene.initialized) {
-                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Scene Active");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("| %d Objects | %d Lights", 
-                        (int)ctx.scene.world.objects.size(), 
-                        (int)ctx.scene.lights.size());
-                    
-                    ImGui::TextDisabled("File: %s", active_model_path.c_str());
-                } else {
-                    ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "No Scene Loaded");
-                    ImGui::TextDisabled("Use File > Import Model or Open Project");
-                }
+        // Sync tab_to_focus with vertical tabs
+        if (tab_to_focus == "Scene Edit") { active_properties_tab = 0; tab_to_focus = ""; }
+        if (tab_to_focus == "Render")     { active_properties_tab = 1; tab_to_focus = ""; }
+        if (tab_to_focus == "Terrain")    { active_properties_tab = 2; tab_to_focus = ""; }
+        if (tab_to_focus == "Water")      { active_properties_tab = 3; tab_to_focus = ""; }
+        if (tab_to_focus == "Volumetric" || tab_to_focus == "VDB" || tab_to_focus == "Gas") { active_properties_tab = 4; tab_to_focus = ""; }
+        if (tab_to_focus == "Force Field"){ active_properties_tab = 5; tab_to_focus = ""; }
+        if (tab_to_focus == "World")      { active_properties_tab = 6; tab_to_focus = ""; }
+        if (tab_to_focus == "System")     { active_properties_tab = 7; tab_to_focus = ""; }
 
-                // ---------------------------------------------------------
-                // RENDER CONFIGURATION & SAMPLING
-                // ---------------------------------------------------------
-                UIWidgets::Divider();
-                UIWidgets::ColoredHeader("Render Engine & Quality", ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+        float sidebar_width = 46.0f;
+        
+        // --- 1. SIDEBAR (Fixed Width) ---
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 8));
+        
+        // Sidebar background: slightly darker than main window for contrast
+        ImVec4 sidebarBg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+        sidebarBg.x *= 0.85f; sidebarBg.y *= 0.85f; sidebarBg.z *= 0.85f;
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, sidebarBg);
+        
+        ImGui::BeginChild("PropSidebar", ImVec2(sidebar_width, 0), false, ImGuiWindowFlags_NoScrollbar);
+        
+        // Add a vertical line to separate sidebar - Use Parent DL to avoid clipping
+        parent_dl->AddLine(
+            ImVec2(win_pos.x + sidebar_width - 1, win_pos.y),
+            ImVec2(win_pos.x + sidebar_width - 1, win_pos.y + win_size.y),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, 0.08f)) // Faint border
+        );
 
-                // 1. Backend Selection
-                if (ImGui::TreeNodeEx("Backend & Acceleration", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    // GPU Selection
-                    bool optix_available = g_hasOptix;
-                    if (!optix_available) ImGui::BeginDisabled();
-                    if (ImGui::Checkbox("Use OptiX (GPU)", &ctx.render_settings.use_optix)) {
-                         // Trigger CPU data sync when switching from GPU to CPU
-                         if (!ctx.render_settings.use_optix) {
-                             extern bool g_cpu_sync_pending;
-                             g_cpu_sync_pending = true;
-                         }
-                         ctx.start_render = true; // Trigger restart
-                    }
-                    if (!optix_available) { 
-                        ImGui::EndDisabled();
-                        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) 
-                            ImGui::SetTooltip("No NVIDIA RTX GPU detected.");
-                    }
+        auto drawTabButton = [&](int index, UIWidgets::IconType icon, const char* tooltip) {
+            bool is_active = (active_properties_tab == index);
+            ImGui::PushID(index);
+            
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+            float size = 36.0f; // Slightly smaller buttons
+            float margin = (sidebar_width - size) * 0.5f;
 
-                    // CPU Selection (Embree)
-                    if (!ctx.render_settings.use_optix) {
-                        ImGui::Indent();
+            ImGui::SetCursorPosX(margin);
+            
+            if (is_active) {
+                // Connection Bridge: Use Parent DL to bleed across the child border
+                parent_dl->AddRectFilled(
+                    ImVec2(pos.x - margin, pos.y), 
+                    ImVec2(pos.x + sidebar_width + 2, pos.y + size), 
+                    ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)),
+                    0.0f
+                );
 
-                        // SIMD Toggle
-                        // Vectorized renderer frozen for now
-                        /*
-                        if (ImGui::Checkbox("Use Vectorized Engine (SIMD)", &ctx.render_settings.use_vectorized_renderer)) {
-                            ctx.renderer.resetCPUAccumulation();
-                            SCENE_LOG_INFO(ctx.render_settings.use_vectorized_renderer ? "Vectorized Engine Enabled" : "Vectorized Engine Disabled");
-                        }
-                        */
-                        UIWidgets::HelpMarker("8-wide AVX2 SIMD packet tracing. Significantly faster but may have minor visual differences.");
-                        ImGui::Spacing();
-                        
-                        // BVH Mode Selection (Combo Box)
-                        const char* bvh_items[] = { "RayTrophi BVH (Custom)", "Embree BVH (Intel)" };
-                        int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
-                        
-                        ImGui::PushItemWidth(200);
-                        if (ImGui::Combo("CPU BVH Mode", &current_bvh, bvh_items, IM_ARRAYSIZE(bvh_items))) {
-                            ctx.render_settings.UI_use_embree = (current_bvh == 1);
-                            
-                            // Sync global variable
-                            extern bool use_embree;
-                            use_embree = ctx.render_settings.UI_use_embree; 
-                            
-                            // Rebuild BVH immediately
-                            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                            ctx.renderer.resetCPUAccumulation();
-                            
-                            SCENE_LOG_INFO("Switched CPU BVH to: " + std::string(bvh_items[current_bvh]));
-                        }
-                        ImGui::PopItemWidth();
-                        
-                        ImGui::SameLine();
-                        UIWidgets::HelpMarker("Select the acceleration structure backend for CPU rendering.\\nEmbree is faster for complex scenes but requires rebuilding.");
-                        
-                        // Informational Message
-                        if (ctx.render_settings.UI_use_embree) {
-                             ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Embree Active: High Performance");
-                        } else {
-                             ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "RayTrophi BVH Active");
-                        }
-                        
-                        ImGui::Unindent();
-                    }
-                    ImGui::TreePop();
-                }
+                // Indicator on the right edge of the sidebar
+                parent_dl->AddRectFilled(
+                    ImVec2(win_pos.x + sidebar_width - 3, pos.y + 4), 
+                    ImVec2(win_pos.x + sidebar_width, pos.y + size - 4), 
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(0.05f, 0.75f, 0.65f, 1.0f)),
+                    2.0f
+                );
 
-                // 2. Settings Tabs (Viewport vs Final)
-                ImGui::Spacing();
-                if (ImGui::BeginTabBar("RenderSettingsTabs")) {
-                    
-                    // --- VIEWPORT TAB ---
-                    if (ImGui::BeginTabItem("Viewport")) {
-                        ImGui::TextDisabled("Realtime Preview Settings");
-                        ImGui::Separator();
-                        ImGui::Spacing();
-                        
-                        // Sampling
-                        if (ImGui::TreeNodeEx("Viewport Sampling", ImGuiTreeNodeFlags_DefaultOpen)) {
-                            ImGui::PushItemWidth(150);
-                            ImGui::SliderInt("Max Samples", &ctx.render_settings.max_samples, 1, 128);
-                            ImGui::PopItemWidth();
-                            UIWidgets::HelpMarker("Viewport accumulation limit. Set high for continuous refinement.");
-                            ImGui::TreePop();
-                        }
-
-                        ImGui::Spacing();
-                        
-                        // Denoising
-                        if (ImGui::TreeNodeEx("Viewport Denoising", ImGuiTreeNodeFlags_DefaultOpen)) {
-                            ImGui::Checkbox("Enable Denoising", &ctx.render_settings.use_denoiser);
-                            
-                            if (ctx.render_settings.use_denoiser) {
-                                ImGui::Spacing();
-                                ImGui::PushItemWidth(150);
-                                if (SceneUI::DrawSmartFloat("denoise_blend", "Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {}
-                                ImGui::PopItemWidth();
-                                UIWidgets::HelpMarker("0.0 = original, 1.0 = fully denoised");
-                            }
-                            ImGui::TreePop();
-                        }
-                        
-                        ImGui::EndTabItem();
-                    }
-
-                    // --- FINAL RENDER TAB ---
-                    if (ImGui::BeginTabItem("Final Render")) {
-                        ImGui::TextDisabled("Output Settings");
-                        ImGui::Separator();
-                        ImGui::Spacing();
-                        
-                        // === RESOLUTION GROUP ===
-                        if (ImGui::TreeNodeEx("Output Resolution", ImGuiTreeNodeFlags_DefaultOpen)) {
-                                // Resolution Source dropdown
-                                const char* source_names[] = { "Native (Window)", "Custom", "From Aspect Ratio" };
-                                int source_idx = (int)ctx.render_settings.resolution_source;
-                                
-                                ImGui::PushItemWidth(200);
-                                if (ImGui::Combo("Source", &source_idx, source_names, 3)) {
-                                    ctx.render_settings.resolution_source = (ResolutionSource)source_idx;
-                                }
-                                ImGui::PopItemWidth();
-                                
-                                ImGui::Spacing();
-                                
-                                if (ctx.render_settings.resolution_source == ResolutionSource::Native) {
-                                    // Native - use current window size
-                                    extern int image_width, image_height;
-                                    ctx.render_settings.final_render_width = image_width;
-                                    ctx.render_settings.final_render_height = image_height;
-                                    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), 
-                                        "Output: %d x %d (current viewport)", image_width, image_height);
-                                }
-                                else if (ctx.render_settings.resolution_source == ResolutionSource::Custom) {
-                                    // Custom - manual input
-                                    const char* res_items[] = { "1280x720 (HD)", "1920x1080 (FHD)", "2560x1440 (2K)", "3840x2160 (4K)", "Custom" };
-                                    static int current_res_item = 1; // Default 1080p
-                                    
-                                    ImGui::PushItemWidth(200);
-                                    if (ImGui::Combo("Preset", &current_res_item, res_items, IM_ARRAYSIZE(res_items))) {
-                                        if (current_res_item == 0) { ctx.render_settings.final_render_width = 1280; ctx.render_settings.final_render_height = 720; }
-                                        if (current_res_item == 1) { ctx.render_settings.final_render_width = 1920; ctx.render_settings.final_render_height = 1080; }
-                                        if (current_res_item == 2) { ctx.render_settings.final_render_width = 2560; ctx.render_settings.final_render_height = 1440; }
-                                        if (current_res_item == 3) { ctx.render_settings.final_render_width = 3840; ctx.render_settings.final_render_height = 2160; }
-                                    }
-                                    ImGui::PopItemWidth();
-                                    
-                                    ImGui::PushItemWidth(100);
-                                    if (ImGui::InputInt("Width", &ctx.render_settings.final_render_width)) current_res_item = 4;
-                                    if (ImGui::InputInt("Height", &ctx.render_settings.final_render_height)) current_res_item = 4;
-                                    ImGui::PopItemWidth();
-                                }
-                                else if (ctx.render_settings.resolution_source == ResolutionSource::FromAspect) {
-                                    // From Aspect Ratio - calculate width from height and aspect
-                                    ImGui::PushItemWidth(200);
-                                    if (ImGui::BeginCombo("Aspect Ratio", 
-                                        CameraPresets::ASPECT_RATIOS[ctx.render_settings.aspect_ratio_index].name)) 
-                                    {
-                                        for (size_t i = 0; i < CameraPresets::ASPECT_RATIO_COUNT; ++i) {
-                                            bool is_selected = (ctx.render_settings.aspect_ratio_index == (int)i);
-                                            std::string label = std::string(CameraPresets::ASPECT_RATIOS[i].name) + 
-                                                " - " + CameraPresets::ASPECT_RATIOS[i].usage;
-                                            if (ImGui::Selectable(label.c_str(), is_selected)) {
-                                                ctx.render_settings.aspect_ratio_index = (int)i;
-                                            }
-                                            if (is_selected) ImGui::SetItemDefaultFocus();
-                                        }
-                                        ImGui::EndCombo();
-                                    }
-                                    ImGui::PopItemWidth();
-                                    
-                                    // Base height input
-                                    ImGui::PushItemWidth(100);
-                                    ImGui::InputInt("Base Height", &ctx.render_settings.aspect_base_height);
-                                    ctx.render_settings.aspect_base_height = std::clamp(ctx.render_settings.aspect_base_height, 480, 8192);
-                                    ImGui::PopItemWidth();
-                                    
-                                    // Calculate final dimensions
-                                    float ratio = CameraPresets::ASPECT_RATIOS[ctx.render_settings.aspect_ratio_index].ratio;
-                                    if (ratio > 0.01f) {
-                                        ctx.render_settings.final_render_width = (int)(ctx.render_settings.aspect_base_height * ratio);
-                                        ctx.render_settings.final_render_height = ctx.render_settings.aspect_base_height;
-                                    } else {
-                                        // Native ratio - use base_height as height, calculate natural aspect
-                                        extern int image_width, image_height;
-                                        float native_ratio = (float)image_width / (float)image_height;
-                                        ctx.render_settings.final_render_width = (int)(ctx.render_settings.aspect_base_height * native_ratio);
-                                        ctx.render_settings.final_render_height = ctx.render_settings.aspect_base_height;
-                                    }
-                                    
-                                    // Display calculated resolution
-                                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.7f, 1.0f), 
-                                        "Output: %d x %d", 
-                                        ctx.render_settings.final_render_width, 
-                                        ctx.render_settings.final_render_height);
-                                }
-                                
-                                ImGui::TextDisabled("(Viewport unaffected until render starts)");
-                                ImGui::TreePop();
-                        }
-
-                        ImGui::Spacing();
-                        
-                        // === QUALITY GROUP ===
-                        if (ImGui::TreeNodeEx("Render Quality", ImGuiTreeNodeFlags_DefaultOpen)) {
-                                ImGui::PushItemWidth(150);
-                                ImGui::DragInt("Target Samples", &ctx.render_settings.final_render_samples, 16, 16, 65536);
-                                ImGui::PopItemWidth();
-                                
-                                ImGui::Spacing();
-                                ImGui::Checkbox("Render Denoising", &ctx.render_settings.render_use_denoiser);
-                                // ImGui::Checkbox("Vectorized Rendering (SIMD)", &ctx.render_settings.use_vectorized_renderer);
-                                // UIWidgets::HelpMarker("Enable 8-wide packet tracing for CPU rendering. Significant speed boost but experimental.");
-                                ImGui::TreePop();
-                        }
-                        
-                        ImGui::Spacing();
-                        ImGui::Separator();
-                        ImGui::Spacing();
-                        
-                        // === START RENDER BUTTON (CENTERED) ===
-                        float button_width = 180.0f;
-                        float offset = (ImGui::GetContentRegionAvail().x - button_width) * 0.5f;
-                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
-                        
-                        if (UIWidgets::PrimaryButton("Start Final Render (F12)", ImVec2(button_width, 28))) {
-                             extern bool show_render_window;
-                             show_render_window = true;
-                             ctx.render_settings.is_final_render_mode = true;
-                             ctx.start_render = true;
-                        }
-
-                        ImGui::Spacing();
-                        ImGui::Separator();
-                        ImGui::Spacing();
-                        
-                        // === ANIMATION SEQUENCE GROUP (VERTICAL) ===
-                        if (ImGui::TreeNodeEx("Animation Sequence", ImGuiTreeNodeFlags_DefaultOpen)) {
-                                ImGui::PushItemWidth(150);
-                                ImGui::InputInt("Start Frame", &ctx.render_settings.animation_start_frame);
-                                ImGui::InputInt("End Frame", &ctx.render_settings.animation_end_frame);
-                                ImGui::InputInt("FPS", &ctx.render_settings.animation_fps);
-                                ImGui::DragInt("Preview Samples", &ctx.render_settings.animation_samples_per_frame, 0.1f, 1, 64);
-                                UIWidgets::HelpMarker("Samples per frame during playback (Higher = Better Quality, Lower FPS)");
-                                ImGui::PopItemWidth();
-                                
-                                ImGui::Spacing();
-                                
-                                // Center button like Final Render
-                                float anim_button_width = 180.0f;
-                                float anim_offset = (ImGui::GetContentRegionAvail().x - anim_button_width) * 0.5f;
-                                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + anim_offset);
-                                
-                                extern std::atomic<bool> rendering_in_progress;
-                                extern std::atomic<bool> rendering_stopped_cpu;
-                                extern std::atomic<bool> rendering_stopped_gpu;
-
-                                if (rendering_in_progress && ctx.is_animation_mode) {
-                                    if (UIWidgets::DangerButton("Stop Animation", ImVec2(anim_button_width, 28))) {
-                                        rendering_stopped_cpu = true;
-                                        rendering_stopped_gpu = true;
-                                    }
-                                }
-                                else {
-                                    if (UIWidgets::PrimaryButton("Render Animation", ImVec2(anim_button_width, 28))) {
-                                         ctx.render_settings.start_animation_render = true;
-                                         ctx.is_animation_mode = true; 
-                                         // Restore Window Visibility
-                                         extern bool show_render_window;
-                                         show_render_window = true;
-                                         ctx.show_animation_preview = true; 
-                                    }
-                                }
-                                ImGui::Spacing();
-                                ImGui::TreePop();
-                        }
-                        
-                        ImGui::EndTabItem();
-                    }
-                    
-                    ImGui::EndTabBar();
-                }
-
-                // 3. Global Settings (Path Tracing)
-                ImGui::Spacing();
-                if (ImGui::TreeNodeEx("Light Paths & Optimization", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::PushItemWidth(150);
-                        ImGui::SliderInt("Max Bounces", &ctx.render_settings.max_bounces, 1, 32);
-                        ImGui::SliderInt("Transparent Max Bounces", &ctx.render_settings.transparent_max_bounces, 1, 100);
-                        ImGui::PopItemWidth();
-                        UIWidgets::HelpMarker("Max Bounces: Total ray depth for GI.\nTransparent: Max depth for clear parts (leaves/glass) without costing a bounce.");
-                        
-                        ImGui::Spacing();
-                        ImGui::Checkbox("Adaptive Sampling", &ctx.render_settings.use_adaptive_sampling);
-                        if (ctx.render_settings.use_adaptive_sampling) {
-                            ImGui::Spacing();
-                            ImGui::PushItemWidth(150);
-                            if (SceneUI::DrawSmartFloat("noise_thresh", "Noise Thresh", &ctx.render_settings.variance_threshold, 0.0001f, 1.0f, "%.4f", false, nullptr, 16)) {}
-                            UIWidgets::HelpMarker("Stop sampling when pixel variance is below this value");
-                            ImGui::DragInt("Min Samples", &ctx.render_settings.min_samples, 1, 1, 64);
-                            UIWidgets::HelpMarker("Minimum samples per pixel before adaptive sampling kicks in");
-                            ImGui::PopItemWidth();
-                        }
-                    ImGui::TreePop();
-                }
-
-                // NOTE: Progress bar and control buttons removed
-                // Sample count is now shown in Viewport HUD (Blender-style)
-                // Use F12 or "Start Final Render" in Final Render tab for production renders
-                
-                ImGui::Spacing();
-                ImGui::TextDisabled("Sample progress shown in Viewport HUD");
-
-                ImGui::EndTabItem();
-            }
-
-            // -------------------------------------------------------------
-            // TAB: TERRAIN
-            // -------------------------------------------------------------
-            // -------------------------------------------------------------
-            // TAB: TERRAIN
-            // -------------------------------------------------------------
-            if (show_terrain_tab) {
-                ImGuiTabItemFlags terrain_flags = 0;
-                if(tab_to_focus == "Terrain") { terrain_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-                
-                bool is_active = ImGui::BeginTabItem("Terrain", &show_terrain_tab, terrain_flags);
-                
-                // Auto-Focus Logic Removed per user request
-                // Was hiding bottom panels and resizing them.
-                
-                if (is_active) {
-                    drawTerrainPanel(ctx);
-                    ImGui::EndTabItem();
-                } else {
-                    // USER REQUEST: If not in Terrain tab, forcibly disable brush
-                    terrain_brush.enabled = false;
-                }
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1,1,1, 0.05f));
             } else {
-                 // Also disable if tab is closed completely
-                 terrain_brush.enabled = false;
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0)); 
             }
 
-
-
-            // -------------------------------------------------------------
-            // TAB: WATER (Water Planes + Rivers)
-            // -------------------------------------------------------------
-            if (show_water_tab) {
-                ImGuiTabItemFlags water_flags = 0;
-                if(tab_to_focus == "Water") { water_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-                if (ImGui::BeginTabItem("Water", &show_water_tab, water_flags)) {
-                    drawWaterPanel(ctx);
-                    ImGui::Separator();
-                    drawRiverPanel(ctx);  // Bezier spline river editor
-                    ImGui::EndTabItem();
-                }
-            }
-
-            // -------------------------------------------------------------
-            // TAB: VOLUMETRICS (VDB & Gas Simulation)
-            // -------------------------------------------------------------
-            if (show_volumetric_tab) {
-                ImGuiTabItemFlags vol_flags = 0;
-                if(tab_to_focus == "Volumetric" || tab_to_focus == "VDB" || tab_to_focus == "Gas") { 
-                    vol_flags = ImGuiTabItemFlags_SetSelected; 
-                    tab_to_focus = ""; 
-                }
-                
-                size_t total_vols = ctx.scene.vdb_volumes.size() + ctx.scene.gas_volumes.size();
-                std::string vol_label = "Volumetrics";
-                if (total_vols > 0) {
-                    vol_label += " (" + std::to_string(total_vols) + ")";
-                }
-                
-                if (ImGui::BeginTabItem(vol_label.c_str(), &show_volumetric_tab, vol_flags)) {
-                    drawVolumetricPanel(ctx);
-                    ImGui::EndTabItem();
-                }
+            if (ImGui::Button("##tab", ImVec2(size, size))) {
+                active_properties_tab = index;
             }
             
-            // -------------------------------------------------------------
-            // TAB: FORCE FIELDS (Wind/Vortex/Turbulence)
-            // -------------------------------------------------------------
-            if (show_forcefield_tab) {
-                ImGuiTabItemFlags ff_flags = 0;
-                if(tab_to_focus == "Force Field") { ff_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-                
-                std::string ff_label = "Force Fields";
-                if (!ctx.scene.force_field_manager.force_fields.empty()) {
-                    ff_label += " (" + std::to_string(ctx.scene.force_field_manager.force_fields.size()) + ")";
-                }
-                
-                if (ImGui::BeginTabItem(ff_label.c_str(), &show_forcefield_tab, ff_flags)) {
-                    ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene);
-                    ImGui::EndTabItem();
-                }
-            }
+            // Draw Icon
+            ImU32 iconCol = is_active ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.55f, 0.55f, 0.6f, 1.0f));
+            UIWidgets::DrawIcon(icon, ImVec2(pos.x + (size-20)*0.5f, pos.y + (size-20)*0.5f), 20.0f, iconCol, 1.5f);
 
-            // -------------------------------------------------------------
-            // TAB: SYSTEM (App settings)
-            // -------------------------------------------------------------
-            if (show_system_tab) {
-                ImGuiTabItemFlags system_flags = 0;
-                if(tab_to_focus == "System") { system_flags = ImGuiTabItemFlags_SetSelected; tab_to_focus = ""; }
-                if (ImGui::BeginTabItem("System", &show_system_tab, system_flags)) {
-                    drawThemeSelector();
-                    drawResolutionPanel(ctx);
-                    ImGui::EndTabItem();
-                }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(tooltip);
+                ImGui::EndTooltip();
             }
+            
+            ImGui::PopStyleColor(1);
+            ImGui::PopID();
+        };
 
-            ImGui::EndTabBar();
+        ImGui::Spacing(); // Top spacing
+        drawTabButton(0, UIWidgets::IconType::Scene,      "Scene / Hierarchy");
+        drawTabButton(1, UIWidgets::IconType::Render,     "Render Settings");
+        if (show_terrain_tab)    drawTabButton(2, UIWidgets::IconType::Terrain,    "Terrain Editor");
+        if (show_water_tab)      drawTabButton(3, UIWidgets::IconType::Water,      "Water & Rivers");
+        if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
+        if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Force Fields");
+        if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
+        if (show_system_tab)     drawTabButton(7, UIWidgets::IconType::System,     "System & UI");
+        
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+        
+        ImGui::SameLine(0, 0);
+        
+        // --- 2. CONTENT AREA (Inspector Style) ---
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)); // Base background
+        
+        ImGui::BeginChild("PropContentArea", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
+        
+        // ── TAB HEADER (Sticky & Flush) ──
+        const char* tab_names[] = { "SCENE HIERARCHY", "RENDER SETTINGS", "TERRAIN EDITOR", "WATER & RIVERS", "VOLUMETRICS", "FORCE FIELDS", "WORLD & SKY", "SYSTEM & UI" };
+        UIWidgets::IconType tab_icons[] = { 
+            UIWidgets::IconType::Scene, UIWidgets::IconType::Render, UIWidgets::IconType::Terrain, 
+            UIWidgets::IconType::Water, UIWidgets::IconType::Volumetric, UIWidgets::IconType::Force, 
+            UIWidgets::IconType::World, UIWidgets::IconType::System 
+        };
+
+        ImGui::BeginChild("TabHeader", ImVec2(0, 42), false, ImGuiWindowFlags_NoScrollbar);
+        
+        ImVec2 headerPos = ImGui::GetCursorScreenPos();
+        // Background for the sticky header
+        ImGui::GetWindowDrawList()->AddRectFilled(headerPos, ImVec2(headerPos.x + ImGui::GetContentRegionAvail().x, headerPos.y + 42), 
+            ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1, 0.02f)));
+
+        ImGui::SetCursorPos(ImVec2(12, 11)); // Precise alignment
+        UIWidgets::DrawIcon(tab_icons[active_properties_tab], ImGui::GetCursorScreenPos(), 20, ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)));
+        
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 30);
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 1.0f, 1.0f), "%s", tab_names[active_properties_tab]);
+        
+        // Solid separation line
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(ImGui::GetWindowPos().x, ImGui::GetWindowPos().y + 41),
+            ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth(), ImGui::GetWindowPos().y + 41),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1, 0.12f))
+        );
+        
+        ImGui::EndChild();
+
+        // ── MAIN CONTENT (Flush Scroll Area) ──
+        ImGui::BeginChild("PropScrollArea", ImVec2(0, 0), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0)); // FLUSH LEFT
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 12));
+        
+        // Start Global Indent for controls (leaving headers flush)
+        ImGui::Indent(8.0f); 
+        ImGui::Spacing();
+        ImGui::Unindent(8.0f);
+
+        switch (active_properties_tab) {
+            case 0: drawSceneHierarchy(ctx); break;
+            case 1: 
+                {
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // ENGINE & BACKEND
+                    // ─────────────────────────────────────────────────────────────────────────
+                    if (UIWidgets::BeginSection("Render Engine", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+                        if (ImGui::Checkbox("Use OptiX (GPU Acceleration)", &ctx.render_settings.use_optix)) {
+                            if (!ctx.render_settings.use_optix) { extern bool g_cpu_sync_pending; g_cpu_sync_pending = true; }
+                            ctx.start_render = true;
+                        }
+                        
+                        if (!ctx.render_settings.use_optix) {
+                            const char* bvh_items[] = { "Custom RayTrophi BVH", "Intel Embree (Recommended)" };
+                            int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
+                            if (ImGui::Combo("CPU BVH Type", &current_bvh, bvh_items, 2)) {
+                                ctx.render_settings.UI_use_embree = (current_bvh == 1);
+                                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                                ctx.start_render = true;
+                            }
+                          
+                        }
+                        UIWidgets::EndSection();
+                    }
+
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // SAMPLING (Cycles Style)
+                    // ─────────────────────────────────────────────────────────────────────────
+                    if (UIWidgets::BeginSection("Sampling", ImVec4(0.5f, 0.9f, 0.6f, 1.0f))) {
+                        UIWidgets::ColoredHeader("Viewport", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                        ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
+                        if (ctx.render_settings.use_adaptive_sampling) {
+                            ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.5f, "%.3f");
+                            ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
+                        }
+                        ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
+                        
+                        UIWidgets::Divider();
+                        UIWidgets::ColoredHeader("Final Render (F12)", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
+                        ImGui::DragInt("Samples##final", &ctx.render_settings.final_render_samples, 1, 1, 100000);
+                        ImGui::Checkbox("Apply Denoiser##final", &ctx.render_settings.render_use_denoiser);
+                        
+                        UIWidgets::EndSection();
+                    }
+
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // LIGHT PATHS (Bounces)
+                    // ─────────────────────────────────────────────────────────────────────────
+                    if (UIWidgets::BeginSection("Light Paths", ImVec4(1.0f, 0.8f, 0.3f, 1.0f))) {
+                        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 0, 64);
+                        ImGui::DragInt("Transparent Bounces", &ctx.render_settings.transparent_max_bounces, 1, 0, 64);
+                        
+                        UIWidgets::HelpMarker("Higher bounces increase realism for glass and interiors but slow down rendering.");
+                        UIWidgets::EndSection();
+                    }
+
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // DENOISING
+                    // ─────────────────────────────────────────────────────────────────────────
+                    if (UIWidgets::BeginSection("Denoising", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
+                        ImGui::Checkbox("Enable Viewport Denoising", &ctx.render_settings.use_denoiser);
+                        if (ctx.render_settings.use_denoiser) {
+                            ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
+                        }
+                        UIWidgets::EndSection();
+                    }
+
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // FORMAT & OUTPUT (Previously in System)
+                    // ─────────────────────────────────────────────────────────────────────────
+                    if (UIWidgets::BeginSection("Resolution & Output", ImVec4(0.9f, 0.4f, 0.5f, 1.0f))) {
+                        // Presets
+                        if (ImGui::Combo("Resolution Preset", &preset_index,
+                            [](void* data, int idx, const char** out_text) {
+                                *out_text = ((ResolutionPreset*)data)[idx].name;
+                                return true;
+                            }, presets, IM_ARRAYSIZE(presets)))
+                        {
+                            if (preset_index != 0) {
+                                new_width = presets[preset_index].w;
+                                new_height = presets[preset_index].h;
+                                aspect_w = presets[preset_index].bw;
+                                aspect_h = presets[preset_index].bh;
+                            }
+                        }
+
+                        ImGui::DragInt("Width", &new_width, 1, 1, 8192);
+                        ImGui::DragInt("Height", &new_height, 1, 1, 8192);
+                        
+                        ImGui::PushItemWidth(80);
+                        ImGui::DragInt("Aspect W", &aspect_w, 1, 1, 100); ImGui::SameLine();
+                        ImGui::DragInt("Aspect H", &aspect_h, 1, 1, 100);
+                        ImGui::PopItemWidth();
+
+                        bool resolution_changed = (new_width != last_applied_width) || (new_height != last_applied_height);
+                        
+                        if (UIWidgets::PrimaryButton("Apply Settings", ImVec2(-1, 30), resolution_changed)) {
+                            float ar = aspect_h ? float(aspect_w) / aspect_h : 1.0f;
+                            pending_aspect_ratio = ar;
+                            pending_width = new_width;
+                            pending_height = new_height;
+                            aspect_ratio = ar;
+                            pending_resolution_change = true;
+                            last_applied_width = new_width; last_applied_height = new_height;
+                        }
+
+                        UIWidgets::Divider();
+                        if (UIWidgets::SecondaryButton("Open Dedicated Render Window", ImVec2(-1, 30))) {
+                            extern bool show_render_window;
+                            show_render_window = true;
+                        }
+                        UIWidgets::EndSection();
+                    }
+
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // ANIMATION RENDER (Sequence Export)
+                    // ─────────────────────────────────────────────────────────────────────────
+                    if (UIWidgets::BeginSection("Animation Render", ImVec4(1.0f, 0.4f, 0.7f, 1.0f))) {
+                        UIWidgets::ColoredHeader("Frame Range & Speed", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                        ImGui::PushItemWidth(80);
+                        ImGui::DragInt("Start", &ctx.render_settings.animation_start_frame, 1, 0, ctx.render_settings.animation_end_frame);
+                        ImGui::SameLine();
+                        ImGui::DragInt("End", &ctx.render_settings.animation_end_frame, 1, ctx.render_settings.animation_start_frame, 10000);
+                        ImGui::SameLine();
+                        ImGui::DragInt("FPS", &ctx.render_settings.animation_fps, 1, 1, 120);
+                        ImGui::PopItemWidth();
+                        
+                        UIWidgets::Divider();
+                        UIWidgets::ColoredHeader("Quality", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                        ImGui::DragInt("Samples Per Frame", &ctx.render_settings.animation_samples_per_frame, 1, 1, 10000);
+                        
+                        UIWidgets::Divider();
+                        UIWidgets::ColoredHeader("Output Style (PNG Sequence)", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                        
+                        // Output Path Display & Browse
+                        ImGui::PushItemWidth(-50); // Leave room for browse button
+                        char folder_buf[512];
+                        strncpy(folder_buf, ctx.render_settings.animation_output_folder.c_str(), 511);
+                        if (ImGui::InputText("##outdir", folder_buf, 512)) {
+                            ctx.render_settings.animation_output_folder = folder_buf;
+                        }
+                        ImGui::PopItemWidth();
+                        ImGui::SameLine();
+                        if (ImGui::Button("...##browse")) {
+                            std::string path = selectFolderDialogW(L"Select Animation Output Folder");
+                            if (!path.empty()) ctx.render_settings.animation_output_folder = path;
+                        }
+                        
+                        ImGui::Spacing();
+                        bool can_render = !ctx.render_settings.animation_output_folder.empty();
+                        if (UIWidgets::PrimaryButton("RENDER ANIMATION SEQUENCE", ImVec2(-1, 36), can_render)) {
+                            ctx.render_settings.start_animation_render = true;
+                            SCENE_LOG_INFO("Animation render sequence triggered...");
+                        }
+                        
+                        if (!can_render) {
+                            ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1.0f), "Set output folder to enable rendering.");
+                        } else {
+                            int total_frames = ctx.render_settings.animation_end_frame - ctx.render_settings.animation_start_frame + 1;
+                            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Total: %d frames", total_frames);
+                        }
+
+                        UIWidgets::EndSection();
+                    }
+                }
+                break;
+            case 2: if (show_terrain_tab) drawTerrainPanel(ctx); break;
+            case 3: if (show_water_tab) { drawWaterPanel(ctx); ImGui::Separator(); drawRiverPanel(ctx); } break;
+            case 4: if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
+            case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene); break;
+            case 6: if (show_world_tab) drawWorldContent(ctx); break;
+            case 7: drawThemeSelector(); drawResolutionPanel(ctx); break;
         }
+
+        // Safety: Disable brushes if tab changed
+        if (active_properties_tab != 2) terrain_brush.enabled = false;
+        
+        ImGui::PopStyleVar(2);  // WindowPadding, ItemSpacing
+        ImGui::EndChild();      // End PropScrollArea
+        ImGui::EndChild();      // End PropContentArea
+        ImGui::PopStyleColor(); // ChildBg
+        ImGui::PopStyleVar();   // ChildRounding
     }
     ImGui::End();
     ImGui::PopStyleColor(); // Border
@@ -1495,89 +1367,80 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoBringToFrontOnFocus))
     {
-        bool anim_active = show_animation_panel;
-
-        if (UIWidgets::StateButton(
-            anim_active ? "[Timeline]" : "Timeline",
-            anim_active,
-            ImVec4(0.3f, 0.6f, 1.0f, 1.0f),
-            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
-            ImVec2(80, 20)))
+        ImGui::SetCursorPosX(8); // Small left margin
+        
+        if (UIWidgets::HorizontalTab("Timeline", UIWidgets::IconType::Timeline, show_animation_panel))
         {
             show_animation_panel = !show_animation_panel;
             if (show_animation_panel) show_scene_log = false;
         }
 
-        ImGui::SameLine();
-
-        bool log_active = show_scene_log;
-        if (UIWidgets::StateButton(
-            log_active ? "[Console]" : "Console",
-            log_active,
-            ImVec4(0.3f, 0.6f, 1.0f, 1.0f),
-            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
-            ImVec2(80, 20)))
+        if (UIWidgets::HorizontalTab("Console", UIWidgets::IconType::Console, show_scene_log))
         {
             show_scene_log = !show_scene_log;
-            if (show_scene_log) { show_animation_panel = false; show_terrain_graph = false; }
+            if (show_scene_log) { 
+                show_animation_panel = false; 
+                show_terrain_graph = false; 
+            }
         }
-
-        ImGui::SameLine();
         
-        bool graph_active = show_terrain_graph;
-        if (UIWidgets::StateButton(
-            graph_active ? "[Graph]" : "Graph",
-            graph_active,
-            ImVec4(0.5f, 0.8f, 0.5f, 1.0f),  // Green for terrain
-            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
-            ImVec2(60, 20)))
+        if (UIWidgets::HorizontalTab("Graph", UIWidgets::IconType::Graph, show_terrain_graph))
         {
             show_terrain_graph = !show_terrain_graph;
-            if (show_terrain_graph) { show_animation_panel = false; show_scene_log = false; }
+            if (show_terrain_graph) {
+                show_scene_log = false;
+                show_animation_panel = false;
+                show_anim_graph = false;
+            }
+        }
+        
+        if (UIWidgets::HorizontalTab("AnimGraph", UIWidgets::IconType::AnimGraph, show_anim_graph))
+        {
+            show_anim_graph = !show_anim_graph;
+            if (show_anim_graph) {
+                show_scene_log = false;
+                show_animation_panel = false;
+                show_terrain_graph = false;
+            }
         }
 
         ImGui::SameLine();
         
-        // Animation Graph Editor button (bottom panel mode)
-        bool animgraph_active = show_anim_graph;
-        if (UIWidgets::StateButton(
-            animgraph_active ? "[AnimGraph]" : "AnimGraph",
-            animgraph_active,
-            ImVec4(0.8f, 0.5f, 0.8f, 1.0f),  // Purple for animation
-            ImVec4(0.2f, 0.2f, 0.2f, 1.0f),
-            ImVec2(80, 20)))
-        {
-            show_anim_graph = !show_anim_graph;
-            if (show_anim_graph) { show_animation_panel = false; show_scene_log = false; show_terrain_graph = false; }
-        }
 
         ImGui::SameLine();
         ImGui::TextDisabled("|");
         ImGui::SameLine();
 
         if (ctx.scene.initialized) {
-            // Use mesh_cache size for logical object count instead of primitive count
-            int obj_count = (int)mesh_cache.size();
-            // If cache not ready (e.g. startup), show primitive count but indicate it
-            if (obj_count == 0 && !ctx.scene.world.objects.empty()) {
-                ImGui::Text("Scene: %d Primitives", (int)ctx.scene.world.objects.size());
-            } else {
-                ImGui::Text("Scene: %d Objects", obj_count);
-            }
-            
-            ImGui::SameLine();
-            ImGui::Text("%d Lights", (int)ctx.scene.lights.size());
-            
-            ImGui::SameLine();
-            ImGui::TextDisabled("|");
-            ImGui::SameLine();
+            auto drawPill = [&](const char* label, const ImVec4& color, bool highlight = false) {
+                ImVec2 p = ImGui::GetCursorScreenPos();
+                ImVec2 textSize = ImGui::CalcTextSize(label);
+                ImVec2 pillSize = ImVec2(textSize.x + 16, 18);
+                ImDrawList* dlist = ImGui::GetWindowDrawList();
+                
+                // Pill Background
+                dlist->AddRectFilled(p, ImVec2(p.x + pillSize.x, p.y + pillSize.y), highlight ? IM_COL32(26, 230, 204, 40) : IM_COL32(255, 255, 255, 15), 9.0f);
+                if (highlight) dlist->AddRect(p, ImVec2(p.x + pillSize.x, p.y + pillSize.y), IM_COL32(26, 230, 204, 80), 9.0f);
 
-            // Show selected item name
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2);
+                ImGui::TextColored(highlight ? ImVec4(0.1f, 0.9f, 0.8f, 1.0f) : ImVec4(0.8f, 0.8f, 0.85f, 1.0f), "%s", label);
+                
+                ImGui::SetCursorScreenPos(ImVec2(p.x + pillSize.x + 6, p.y));
+            };
+
+            // Scene Info Pills
+            int obj_count = (int)mesh_cache.size();
+            std::string obj_str = "Scene: " + std::to_string(obj_count) + " Objects";
+            drawPill(obj_str.c_str(), ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+            
+            std::string light_str = std::to_string(ctx.scene.lights.size()) + " Lights";
+            drawPill(light_str.c_str(), ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+            
+            // Selection Pill
             if (ctx.selection.hasSelection()) {
-                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), 
-                    "Selected: %s", ctx.selection.selected.name.c_str());
-            } else {
-                ImGui::TextDisabled("No Selection");
+                std::string sel_str = "Selected: " + ctx.selection.selected.name;
+                drawPill(sel_str.c_str(), ImVec4(0.4f, 0.8f, 1.0f, 1.0f), true);
             }
         }
         else {
@@ -2541,6 +2404,9 @@ void SceneUI::performNewProject(UIContext& ctx) {
 
      pending_action = PendingAction::None;
      show_exit_confirmation = false;
+     
+     // Reset Animation Graph UI
+     g_animGraphUI = AnimGraphUIState();
 }
 
 void SceneUI::performOpenProject(UIContext& ctx) {
@@ -2563,7 +2429,11 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         history.clear();
         timeline.reset();
         active_messages.clear();
+        active_messages.clear();
         invalidateCache();
+        
+        // Reset Animation Graph UI
+        g_animGraphUI = AnimGraphUIState();
 
 
         g_scene_loading_in_progress = true;
@@ -2714,7 +2584,10 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     // ─────────────────────────────────────────────────────────────────────────
     // DENSITY
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Density", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // DENSITY
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Density", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
         ImGui::Indent();
         // Channel Selection
         std::vector<std::string> grids;
@@ -2736,12 +2609,16 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         if (ImGui::SliderFloat("Edge Falloff", &shader->density.edge_falloff, 0.0f, 2.0f)) changed = true;
         
         ImGui::Unindent();
+        UIWidgets::EndSection();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // SCATTERING & ABSORPTION
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Scattering & Absorption")) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // SCATTERING & ABSORPTION
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Scattering & Absorption", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
         ImGui::Indent();
         float col[3] = { shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z };
         if (ImGui::ColorEdit3("Scattering Color", col)) {
@@ -2766,12 +2643,16 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             ImGui::TreePop();
         }
         ImGui::Unindent();
+        UIWidgets::EndSection();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // EMISSION (FIRE CONTROLS)
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Emission / Fire", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // EMISSION (FIRE CONTROLS)
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Emission / Fire", ImVec4(1.0f, 0.5f, 0.2f, 1.0f))) {
         ImGui::Indent();
         const char* modes[] = { "None", "Constant", "Blackbody", "Channel" };
         int mode = static_cast<int>(shader->emission.mode);
@@ -2805,6 +2686,16 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             
             if (ImGui::SliderFloat("Temp Scale", &shader->emission.temperature_scale, 0.1f, 10.0f)) changed = true;
             if (ImGui::SliderFloat("Blackbody Intensity", &shader->emission.blackbody_intensity, 0.0f, 100.0f)) changed = true;
+            
+            // Temperature range for color mapping
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Temperature Range (K above ambient)");
+            if (ImGui::DragFloat("Temp Min", &shader->emission.temperature_min, 10.0f, 0.0f, 2000.0f, "%.0f K")) changed = true;
+            if (ImGui::DragFloat("Temp Max", &shader->emission.temperature_max, 50.0f, 100.0f, 5000.0f, "%.0f K")) changed = true;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Fire typically ranges 500-1500K above ambient.\nExplosions can reach 2000-3000K.");
+            }
+            ImGui::Separator();
             
             // ═══════════════════════════════════════════════════════════════
             // INTERACTIVE COLOR RAMP EDITOR (Now Shared!)
@@ -2871,29 +2762,27 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             }
         }
         ImGui::Unindent();
+        UIWidgets::EndSection();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // RAY MARCHING QUALITY
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Ray Marching Quality")) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // RAY MARCHING QUALITY
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Ray Marching Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
         ImGui::Indent();
         if (ImGui::SliderFloat("Step Size", &shader->quality.step_size, 0.001f, 1.0f, "%.3f")) changed = true;
         if (ImGui::SliderInt("Max Steps", &shader->quality.max_steps, 8, 4096)) changed = true;
         if (ImGui::SliderInt("Shadow Steps", &shader->quality.shadow_steps, 0, 128)) changed = true;
         if (ImGui::SliderFloat("Shadow Strength", &shader->quality.shadow_strength, 0.0f, 1.0f)) changed = true;
         ImGui::Unindent();
+        UIWidgets::EndSection();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // SHADER PRESETS
-    // ─────────────────────────────────────────────────────────────────────────
-    ImGui::Separator();
-    if (ImGui::Button("Smoke Preset")) { *shader = *VolumeShader::createSmokePreset(); changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("Fire Preset")) { *shader = *VolumeShader::createFirePreset(); changed = true; }
-    ImGui::SameLine();
-    if (ImGui::Button("Explosion")) { *shader = *VolumeShader::createExplosionPreset(); changed = true; }
+    // NOTE: Shader presets moved to Gas Simulation panel (scene_ui_gas.hpp)
+    // The "Quick Presets" there configure BOTH simulation AND shader for best results
 
     ImGui::PopID();
 

@@ -1103,7 +1103,11 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         // SUBSURFACE SCATTERING (Random Walk)
         // ═══════════════════════════════════════════════════════════════════════
         ImGui::Separator();
-        if (ImGui::TreeNode("Subsurface Scattering")) {
+        // ═══════════════════════════════════════════════════════════════════════
+        // SUBSURFACE SCATTERING (Random Walk)
+        // ═══════════════════════════════════════════════════════════════════════
+        ImGui::Separator();
+        if (UIWidgets::BeginSection("Subsurface Scattering", ImVec4(1.0f, 0.7f, 0.4f, 1.0f))) {
             
             // SSS Amount
             float sss_amount = pbsdf->subsurface;
@@ -1186,13 +1190,16 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 changed = true;
             }
             
-            ImGui::TreePop();
+            UIWidgets::EndSection();
         }
 
         // ═══════════════════════════════════════════════════════════════════════
         // CLEAR COAT (Car paint lacquer layer)
         // ═══════════════════════════════════════════════════════════════════════
-        if (ImGui::TreeNode("Clear Coat")) {
+        // ═══════════════════════════════════════════════════════════════════════
+        // CLEAR COAT (Car paint lacquer layer)
+        // ═══════════════════════════════════════════════════════════════════════
+        if (UIWidgets::BeginSection("Clear Coat", ImVec4(0.8f, 0.2f, 0.8f, 1.0f))) {
             
             float cc_amount = pbsdf->clearcoat;
             if (SceneUI::DrawSmartFloat("cc", "ClearCt", &cc_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
@@ -1216,13 +1223,16 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 changed = true;
             }
             
-            ImGui::TreePop();
+            UIWidgets::EndSection();
         }
 
         // ═══════════════════════════════════════════════════════════════════════
         // TRANSLUCENT (Thin surface light pass-through)
         // ═══════════════════════════════════════════════════════════════════════
-        if (ImGui::TreeNode("Translucent")) {
+        // ═══════════════════════════════════════════════════════════════════════
+        // TRANSLUCENT (Thin surface light pass-through)
+        // ═══════════════════════════════════════════════════════════════════════
+        if (UIWidgets::BeginSection("Translucent", ImVec4(0.5f, 0.9f, 0.9f, 1.0f))) {
             
             float trans = pbsdf->translucent;
             if (SceneUI::DrawSmartFloat("trns", "Transl", &trans, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
@@ -1231,12 +1241,12 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             }
             UIWidgets::HelpMarker("Thin surface light pass-through (leaves, paper, fabric, curtains)");
             
-            ImGui::TreePop();
+            UIWidgets::EndSection();
         }
 
 
         // ─── TEXTURES UI ─────────────────────────────────────────────────────
-        if (ImGui::TreeNodeEx("Texture Maps", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (UIWidgets::BeginSection("Texture Maps", ImVec4(0.4f, 1.0f, 0.6f, 1.0f))) {
 
             // Texture Clipboard (Static to persist across frames/slots)
             static std::shared_ptr<Texture> texture_clipboard = nullptr;
@@ -1344,7 +1354,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission);
             DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity);
 
-            ImGui::TreePop();
+            UIWidgets::EndSection();
         }
 
         if (changed || texture_changed) {

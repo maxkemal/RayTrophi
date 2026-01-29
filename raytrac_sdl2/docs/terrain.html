@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Terrain</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link active">Terrain System</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Terrain & Foliage</h1>
+
+            <div class="screenshot-area">
+                <img src="images/terrain_foliage_header.jpg" alt="Terrain Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    ⛰️ Please save a Terrain Render as <code>docs/images/terrain_foliage_header.jpg</code>
+                </div>
+            </div>
+
+            <p>GPU-accelerated heightmap engine with hydraulic erosion and vegetation painting.</p>
+
+            <h2 id="erosion">1. Hydraulic Erosion</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/terrain_erosion.jpg" alt="Erosion UI"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Erosion UI</div>
+                </div>
+                <div>
+                    <p>Simulates water droplets dissolving and transporting soil.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Rain Amount</td>
+                            <td>Droplets per cycle.</td>
+                        </tr>
+                        <tr>
+                            <td>Solubility</td>
+                            <td>How easily soil dissolves.</td>
+                        </tr>
+                        <tr>
+                            <td>Sediment Capacity</td>
+                            <td>Max soil carried by water.</td>
+                        </tr>
+                        <tr>
+                            <td>Evaporation</td>
+                            <td>Drying rate.</td>
+                        </tr>
+                        <tr>
+                            <td>Gravity</td>
+                            <td>Speed of droplet descent (affects pit formation).</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="foliage">2. Foliage System (New)</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/terrain_foliage.jpg" alt="Foliage UI"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Foliage / Brush UI</div>
+                </div>
+                <div>
+                    <p>Paint vegetation directly onto the terrain mesh.</p>
+                    <h3>Brush Settings</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Action</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Left Click</td>
+                            <td>Paint instances within radius.</td>
+                        </tr>
+                        <tr>
+                            <td>Shift + Click</td>
+                            <td>Erase instances within radius (or use Erase Mode).</td>
+                        </tr>
+                    </table>
+
+                    <h3>Parameters</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Radius</td>
+                            <td>Size of the brush cursor.</td>
+                        </tr>
+                        <tr>
+                            <td>Density</td>
+                            <td>Number of instances spawned per brush stroke.</td>
+                        </tr>
+                        <tr>
+                            <td>Align to Normal</td>
+                            <td>If checked, trees point perpendicular to the slope.</td>
+                        </tr>
+                        <tr>
+                            <td>Random Rot</td>
+                            <td>Adds random Y-rotation for variety.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>

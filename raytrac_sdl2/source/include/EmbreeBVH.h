@@ -58,10 +58,8 @@ public:
     void updateGeometryFromTriangles();
     void updateGeometryFromTrianglesFromSource(const std::vector<std::shared_ptr<Hittable>>& objects);
     bool occluded(const Ray& ray, float t_min, float t_max) const override;
-    __m256 occluded_packet(const RayPacket& packet, float t_min, __m256 t_max) const override;
     void buildFromTriangleData(const std::vector<TriangleData>& triangles);
     bool hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override;
-    void hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const override;
     void clearAndRebuild(const std::vector<std::shared_ptr<Hittable>>& objects);
     OptixGeometryData exportToOptixData() const;
     

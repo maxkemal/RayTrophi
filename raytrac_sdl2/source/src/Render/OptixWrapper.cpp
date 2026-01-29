@@ -216,6 +216,34 @@ void OptixWrapper::clearScene() {
     SCENE_LOG_INFO("[OptiX] Scene cleared (Handle=0)");
 }
 
+// Overload for internal use (clean render launch)
+void OptixWrapper::launch(int w, int h) {
+    // 4. Parametreleri hazýrla ve kopyala
+    params.image_width = w;
+    params.image_height = h;
+    params.handle = traversable_handle;
+    params.framebuffer = d_framebuffer;
+    params.accumulation_buffer = d_accumulation_buffer;
+    params.variance_buffer = d_variance_buffer;
+    params.sample_count_buffer = d_sample_count_buffer;
+    params.materials = d_materials;
+    
+    // OPTIMIZATION: Only upload if params changed (dirty flag)
+    // Logic layer (World, Animation, Loaders) is now responsible for ensuring
+    // GPU params are dirty/updated when they change.
+    if (params_dirty) {
+        CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice));
+        params_dirty = false;
+    }
+
+    OPTIX_CHECK(optixLaunch(pipeline, stream, d_params, sizeof(RayGenParams), &sbt, w, h, 1));
+}
+
+// Original signature for compatibility
+void OptixWrapper::launch(SDL_Surface* surface, SDL_Window* window, int w, int h) {
+    launch(w, h);
+}
+
 void OptixWrapper::cleanup() {
     if (d_vertices) {
         cudaFree(reinterpret_cast<void*>(d_vertices));
@@ -244,9 +272,11 @@ void OptixWrapper::cleanup() {
     if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
     if (d_variance_buffer) cudaFree(d_variance_buffer);
     if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
+    if (d_converged_count) cudaFree(d_converged_count);
     if (d_framebuffer) cudaFree(d_framebuffer);
     if (d_accumulation_float4) cudaFree(d_accumulation_float4);
     d_accumulation_float4 = nullptr;
+    d_converged_count = nullptr;
     traversable_handle = 0;
     
     // ===========================================================================
@@ -957,14 +987,30 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         accumulation_valid = true;
     }
 
+    // Variance buffer for adaptive sampling (float: per-pixel noise estimate)
+    if (!d_variance_buffer || prev_width != width || prev_height != height) {
+        if (d_variance_buffer) cudaFree(d_variance_buffer);
+        cudaMalloc(&d_variance_buffer, pixel_count * sizeof(float));
+        cudaMemset(d_variance_buffer, 0, pixel_count * sizeof(float));
+    }
+    
+    // Converged count buffer for adaptive sampling debug
+    if (!d_converged_count) {
+        cudaMalloc(&d_converged_count, sizeof(int));
+    }
+    cudaMemset(d_converged_count, 0, sizeof(int));  // Reset each pass
+
     // ------------------ CAMERA CHANGE DETECTION -----------------------
     uint64_t current_camera_hash = computeCameraHash();
     bool camera_changed = (current_camera_hash != last_camera_hash);
     bool is_first_render = (last_camera_hash == 0);
 
     if (camera_changed) {
-        // Camera moved - reset accumulation
+        // Camera moved - reset accumulation and variance
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
+        if (d_variance_buffer) {
+            cudaMemset(d_variance_buffer, 0, pixel_count * sizeof(float));
+        }
         accumulated_samples = 0;
 
         // Log only when actually moving camera, not initial state
@@ -1006,7 +1052,10 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.max_samples = render_settings.max_samples;
     params.variance_threshold = render_settings.variance_threshold;
     params.max_depth = render_settings.max_bounces;
-    params.use_adaptive_sampling = false; // Progressive mode handles this differently
+    params.use_adaptive_sampling = render_settings.use_adaptive_sampling;
+    params.use_denoiser = render_settings.use_denoiser || render_settings.render_use_denoiser;  // OIDN-aware adaptive sampling
+    params.variance_buffer = d_variance_buffer;  // Pass variance buffer to GPU
+    params.converged_count = d_converged_count;  // Debug counter for converged pixels
 
     // Frame number is the accumulated sample count (for random seed variation)
     params.frame_number = accumulated_samples + 1;
@@ -1112,6 +1161,23 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     // Update accumulated sample count
     accumulated_samples += samples_this_pass;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADAPTIVE SAMPLING DEBUG - Read converged pixel count
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (render_settings.use_adaptive_sampling && d_converged_count) {
+        int converged_count = 0;
+        cudaMemcpy(&converged_count, d_converged_count, sizeof(int), cudaMemcpyDeviceToHost);
+        
+        float converged_percent = (float)converged_count / (float)pixel_count * 100.0f;
+        
+        // Log only occasionally to avoid spam (every 4 samples)
+        if (accumulated_samples % 4 == 0 || converged_percent > 50.0f) {
+          /*  SCENE_LOG_INFO("[Adaptive] Sample " + std::to_string(accumulated_samples) + 
+                          ": " + std::to_string(converged_count) + "/" + std::to_string(pixel_count) +
+                          " pixels converged (" + std::to_string((int)converged_percent) + "%)");*/
+        }
+    }
 
     // ------------------ COPY BACK & DISPLAY -----------------------
     partial_framebuffer.resize(pixel_count);
@@ -1256,6 +1322,7 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.motion_blur_enabled = cpuCamera.enable_motion_blur ? 1 : 0;
     
     params.camera.exposure_factor = exposure_factor;
+    params_dirty = true; // Trigger GPU upload
     
     // ═══════════════════════════════════════════════════════════════════════════
     // CINEMA MODE - Physical Lens Imperfections
@@ -1488,6 +1555,7 @@ void OptixWrapper::resetBuffers(int width, int height) {
         if (d_accumulation_buffer) { cudaFree(d_accumulation_buffer); d_accumulation_buffer = nullptr; }
         if (d_variance_buffer) { cudaFree(d_variance_buffer); d_variance_buffer = nullptr; }
         if (d_sample_count_buffer) { cudaFree(d_sample_count_buffer); d_sample_count_buffer = nullptr; }
+        if (d_converged_count) { cudaFree(d_converged_count); d_converged_count = nullptr; }
         
         // Critical Fix: Also free float4 accumulation buffer to prevent crash on resize
         if (d_accumulation_float4) { cudaFree(d_accumulation_float4); d_accumulation_float4 = nullptr; }
@@ -1529,6 +1597,10 @@ void OptixWrapper::resetAccumulation() {
     // Reset the Cycles-style accumulation buffer for new frame
     if (d_accumulation_float4 && prev_width > 0 && prev_height > 0) {
         cudaMemset(d_accumulation_float4, 0, prev_width * prev_height * sizeof(float4));
+    }
+    // Reset variance buffer for adaptive sampling
+    if (d_variance_buffer && prev_width > 0 && prev_height > 0) {
+        cudaMemset(d_variance_buffer, 0, prev_width * prev_height * sizeof(float));
     }
     accumulated_samples = 0;
     last_camera_hash = 0;  // Force re-hash on next render
@@ -2216,6 +2288,23 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                 geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
                 geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
                 
+                // SKINNING DATA
+                if (tri->hasSkinData()) {
+                    for (int k = 0; k < 3; ++k) {
+                        const auto& weights = tri->getSkinBoneWeights(k);
+                        int4 bi = make_int4(-1, -1, -1, -1);
+                        float4 bw = make_float4(0, 0, 0, 0);
+                        for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
+                            if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                            else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                            else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                            else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                        }
+                        geom.boneIndices.push_back(bi);
+                        geom.boneWeights.push_back(bw);
+                    }
+                }
+                
                 // INDICES (0-based local)
                 geom.indices.push_back(make_uint3(v_off, v_off+1, v_off+2));
                 v_off += 3;
@@ -2241,7 +2330,8 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                      transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
                  }
 
-                 int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, geom.mesh_name);
+                                   int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, geom.mesh_name, (void*)(mesh.triangle_indices.empty() ? nullptr : static_triangles[mesh.triangle_indices[0]].get()));
+
                  
                  if (inst_id >= 0) {
                      node_to_instance[geom.mesh_name].push_back(inst_id);
@@ -2334,6 +2424,23 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                         geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
                         geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
 
+                        // SKINNING DATA
+                        if (tri->hasSkinData()) {
+                            for (int k = 0; k < 3; ++k) {
+                                const auto& weights = tri->getSkinBoneWeights(k);
+                                int4 bi = make_int4(-1, -1, -1, -1);
+                                float4 bw = make_float4(0, 0, 0, 0);
+                                for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
+                                    if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                                    else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                                    else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                                    else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                                }
+                                geom.boneIndices.push_back(bi);
+                                geom.boneWeights.push_back(bw);
+                            }
+                        }
+
                         // Copy indices as 0..N
                         uint32_t base_v = (uint32_t)geom.vertices.size() - 3;
                         geom.indices.push_back(make_uint3(base_v, base_v+1, base_v+2));
@@ -2360,7 +2467,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             if (blas) {
                 // Node Name: Propagate original instance node name (e.g. "Tree_Instance_5")
                 // but maybe we should append material suffix? No, usually not needed for hit.
-                int inst_id = accel_manager->addInstance(mid, transform, blas->material_id, inst->node_name);
+                int inst_id = accel_manager->addInstance(mid, transform, blas->material_id, inst->node_name, inst.get());
                 if (inst_id >= 0) {
                      node_to_instance[inst->node_name].push_back(inst_id);
                      instance_to_node[inst_id] = inst->node_name;
@@ -2564,6 +2671,9 @@ void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable
     // Update all BLAS vertex buffers and refit (GPU Skinning happens here if boneMatrices provided)
     accel_manager->updateAllBLASFromTriangles(objects, boneMatrices);
     
+    // Sync instance transforms (Ensures Gizmo moves are reflected during animation)
+    accel_manager->syncInstanceTransforms(objects);
+
     // Rebuild TLAS (instances point to updated BLAS handles)
     accel_manager->updateTLAS();
     traversable_handle = accel_manager->getTraversableHandle();

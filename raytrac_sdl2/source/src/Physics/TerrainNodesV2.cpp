@@ -491,6 +491,11 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
         
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        // This ensures consistent scale throughout the entire node chain
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
         // ALWAYS apply input to terrain - handle size mismatch
         if (inputHeight.width != terrain->heightmap.width || 
             inputHeight.height != terrain->heightmap.height) {
@@ -499,6 +504,10 @@ namespace TerrainNodesV2 {
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
         terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context (guaranteed valid)
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
         terrain->dirty_mesh = true;
         
         // Get optional mask
@@ -552,6 +561,10 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
         
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
         // ALWAYS apply input to terrain - handle size mismatch
         if (inputHeight.width != terrain->heightmap.width || 
             inputHeight.height != terrain->heightmap.height) {
@@ -560,6 +573,10 @@ namespace TerrainNodesV2 {
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
         terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
         terrain->dirty_mesh = true;
         
         // Get optional mask
@@ -604,6 +621,10 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
         
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
         // ALWAYS apply input to terrain - handle size mismatch
         if (inputHeight.width != terrain->heightmap.width || 
             inputHeight.height != terrain->heightmap.height) {
@@ -612,6 +633,10 @@ namespace TerrainNodesV2 {
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
         terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
         terrain->dirty_mesh = true;
         
         // Get optional mask
@@ -658,6 +683,10 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
         
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
         // ALWAYS apply input to terrain - handle size mismatch
         if (inputHeight.width != terrain->heightmap.width || 
             inputHeight.height != terrain->heightmap.height) {
@@ -666,6 +695,10 @@ namespace TerrainNodesV2 {
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
         terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
         terrain->dirty_mesh = true;
         
         // Get optional mask
@@ -1135,6 +1168,10 @@ namespace TerrainNodesV2 {
             cachedMask = *maskInput.data;
         }
         
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
         // 1. ALWAYS SYNC & RESET TERRAIN (Initialization)
         // Ensure dimensions match
         if (inputHeight.width != terrain->heightmap.width || 
@@ -1146,6 +1183,10 @@ namespace TerrainNodesV2 {
         
         // Reset terrain data from input (Start Fresh)
         terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
         
         // 2. AUTO-START SIMULATION
         isSimulating = true;
@@ -1301,6 +1342,11 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
         
+        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        // This ensures consistent scale throughout the entire node chain
+        float preserved_scale_xz = tctx->scale_xz;
+        float preserved_scale_y = tctx->scale_y;
+        
         // Resize terrain if dimensions changed
         if (inputHeight.width != terrain->heightmap.width || 
             inputHeight.height != terrain->heightmap.height) {
@@ -1311,6 +1357,11 @@ namespace TerrainNodesV2 {
         
         // Apply heightmap data
         terrain->heightmap.data = *inputHeight.data;
+        
+        // Apply scale from context (guaranteed valid)
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        
         terrain->dirty_mesh = true;
         terrain->dirty_region.markAllDirty();
         mgr.updateTerrainMesh(terrain);
@@ -2847,6 +2898,20 @@ namespace TerrainNodesV2 {
     void TerrainNodeGraphV2::evaluateTerrain(TerrainObject* terrain, SceneData& scene) {
         if (!terrain) return;
         
+        // CRITICAL FIX: Preserve AND RESTORE scale values at the START
+        // If terrain is in a "broken" state from a previous failed evaluation,
+        // we need to fix it immediately. Don't just preserve - actively repair.
+        float preserved_scale_xz = terrain->heightmap.scale_xz;
+        float preserved_scale_y = terrain->heightmap.scale_y;
+        
+        // Force valid scale values immediately - repair broken terrain state
+        if (preserved_scale_xz < 1.0f) preserved_scale_xz = 100.0f;
+        if (preserved_scale_y < 0.1f) preserved_scale_y = 10.0f;
+        
+        // IMMEDIATELY apply valid scales to terrain (repair before evaluation)
+        terrain->heightmap.scale_xz = preserved_scale_xz;
+        terrain->heightmap.scale_y = preserved_scale_y;
+        
         // Use the proper constructor that sets width/height from terrain
         TerrainContext tctx(terrain);
         
@@ -2906,6 +2971,11 @@ namespace TerrainNodesV2 {
             
             // Copy data directly to terrain
             terrain->heightmap.data = *heightData.data;
+            
+            // CRITICAL FIX: Restore scale values after node graph evaluation
+            // This ensures terrain physical dimensions remain constant regardless of node chain
+            terrain->heightmap.scale_xz = preserved_scale_xz;
+            terrain->heightmap.scale_y = preserved_scale_y;
             
             // Update mesh visualization (Rebuild if resized, Update if content changed)
             if (resized) {

@@ -408,32 +408,33 @@ bool SceneExporter::exportScene(const std::string& filepath, SceneData& scene, c
         ai_scene->mAnimations = new aiAnimation*[ai_scene->mNumAnimations];
         for (size_t i = 0; i < scene.animationDataList.size(); i++) {
             const auto& srcAnim = scene.animationDataList[i];
+            if (!srcAnim) continue;
             aiAnimation* dstAnim = new aiAnimation();
-            dstAnim->mName = srcAnim.name;
-            dstAnim->mDuration = srcAnim.duration;
-            dstAnim->mTicksPerSecond = srcAnim.ticksPerSecond;
+            dstAnim->mName = srcAnim->name;
+            dstAnim->mDuration = srcAnim->duration;
+            dstAnim->mTicksPerSecond = srcAnim->ticksPerSecond;
             std::vector<aiNodeAnim*> channels;
             std::unordered_set<std::string> animatedNodes;
-            for(auto& p : srcAnim.positionKeys) animatedNodes.insert(p.first);
-            for(auto& p : srcAnim.rotationKeys) animatedNodes.insert(p.first);
-            for(auto& p : srcAnim.scalingKeys) animatedNodes.insert(p.first);
+            for(auto& p : srcAnim->positionKeys) animatedNodes.insert(p.first);
+            for(auto& p : srcAnim->rotationKeys) animatedNodes.insert(p.first);
+            for(auto& p : srcAnim->scalingKeys) animatedNodes.insert(p.first);
             for (const auto& nodeName : animatedNodes) {
                 aiNodeAnim* channel = new aiNodeAnim();
                 channel->mNodeName = nodeName;
-                if (srcAnim.positionKeys.count(nodeName)) {
-                    const auto& keys = srcAnim.positionKeys.at(nodeName);
+                if (srcAnim->positionKeys.count(nodeName)) {
+                    const auto& keys = srcAnim->positionKeys.at(nodeName);
                     channel->mNumPositionKeys = (unsigned int)keys.size();
                     channel->mPositionKeys = new aiVectorKey[channel->mNumPositionKeys];
                     std::copy(keys.begin(), keys.end(), channel->mPositionKeys);
                 }
-                if (srcAnim.rotationKeys.count(nodeName)) {
-                     const auto& keys = srcAnim.rotationKeys.at(nodeName);
+                if (srcAnim->rotationKeys.count(nodeName)) {
+                     const auto& keys = srcAnim->rotationKeys.at(nodeName);
                      channel->mNumRotationKeys = (unsigned int)keys.size();
                      channel->mRotationKeys = new aiQuatKey[channel->mNumRotationKeys];
                      std::copy(keys.begin(), keys.end(), channel->mRotationKeys);
                 }
-                if (srcAnim.scalingKeys.count(nodeName)) {
-                     const auto& keys = srcAnim.scalingKeys.at(nodeName);
+                if (srcAnim->scalingKeys.count(nodeName)) {
+                     const auto& keys = srcAnim->scalingKeys.at(nodeName);
                      channel->mNumScalingKeys = (unsigned int)keys.size();
                      channel->mScalingKeys = new aiVectorKey[channel->mNumScalingKeys];
                      std::copy(keys.begin(), keys.end(), channel->mScalingKeys);

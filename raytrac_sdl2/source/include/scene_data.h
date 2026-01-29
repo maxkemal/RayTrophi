@@ -11,12 +11,17 @@
 #pragma once
 #include <HittableList.h>
 #include <AssimpLoader.h>
+#include "AnimationController.h"
 #include "KeyframeSystem.h"
 #include "VDBVolume.h"
 #include "GasVolume.h"
 #include "ForceField.h"
 
 #include <string>
+
+namespace AnimationGraph {
+    class AnimationNodeGraph;
+}
 
 /**
  * @brief Central container for all scene data.
@@ -43,7 +48,7 @@ struct SceneData {
     // =========================================================================
     // Animation Data
     // =========================================================================
-    std::vector<AnimationData> animationDataList;          // File-based animations
+    std::vector<std::shared_ptr<AnimationData>> animationDataList; // File-based animations
     BoneData boneData;                                     // Bone hierarchy and matrices
     
     // Multi-camera support
@@ -135,7 +140,19 @@ struct SceneData {
     struct ImportedModelContext {
         std::shared_ptr<class AssimpLoader> loader; // Keep loader alive (owns aiScene)
         std::string importName;
-        bool hasAnimation = false; // True if this model has animation data
+        bool hasAnimation = false;                  // True if this model has animation data
+        Matrix4x4 globalInverseTransform;           // Matrix to correct FBX axis/scale (from Root node)
+        
+        // --- Multi-Animator Logic ---
+        std::shared_ptr<class AnimationController> animator;  // Per-model animator state
+        std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph; // Per-model AnimGraph
+        bool useAnimGraph = false;                  // Toggle between Controller and Node Graph
+        bool useRootMotion = false;                 // Move object transform with character
+        bool visible = true;                        // Visibility toggle for the whole model
+        
+        // Link to scene world objects (Triangles/Meshes) belonging to this model
+        // This allows applying root motion to the correct TransformHandle
+        std::vector<std::shared_ptr<class Hittable>> members; 
     };
     std::vector<ImportedModelContext> importedModelContexts;
 
@@ -285,7 +302,19 @@ struct SceneData {
         animationDataList.clear();
         boneData.clear();              // Clear bone hierarchy
         timeline.clear();              // Clear keyframes
+        
+        // Clear per-model animator caches BEFORE clearing the vector
+        for (auto& ctx : importedModelContexts) {
+            if (ctx.animator) {
+                ctx.animator->clear();
+            }
+            if (ctx.graph) {
+                ctx.graph.reset();
+            }
+            ctx.members.clear();
+        }
         importedModelContexts.clear(); // Clear model contexts (releases aiScene memory)
+        
         vdb_volumes.clear();           // Clear VDB volumes
         gas_volumes.clear();           // Clear gas volumes
         force_field_manager.clear();   // Clear force fields

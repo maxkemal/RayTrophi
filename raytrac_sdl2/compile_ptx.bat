@@ -84,10 +84,23 @@ echo.
 --use_fast_math ^
 -gencode=arch=compute_50,code=compute_50
 
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" ^
+-ptx "%DEVICE_DIR%\gas_fft_solver.cu" ^
+-o "%OUTPUT_DIR%gas_fft_solver.ptx" ^
+-I"%OPTIX_INCLUDE%" ^
+-I"%INCLUDE_ROOT%" ^
+-I"%VCPKG_INCLUDE%" ^
+-I"%SRC_ROOT%" ^
+-I"%DEVICE_DIR%" ^
+--ptxas-options=-v ^
+--maxrregcount=64 ^
+--use_fast_math ^
+-gencode=arch=compute_50,code=compute_50
+
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo [SUCCESS] PTX compiled successfully!
-    echo Output: raygen.ptx
+    echo Output: raygen.ptx, gas_kernels.ptx, gas_fft_solver.ptx
 ) else (
     echo.
     echo [ERROR] PTX compilation failed!

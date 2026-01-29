@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Camera</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link active">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Physical Camera</h1>
+
+            <div class="screenshot-area">
+                <img src="images/camera_header.jpg" alt="Camera Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">🎥 Camera Header</div>
+            </div>
+
+            <div class="split-layout">
+                <div>
+                    <h2>Lens</h2>
+                    <table class="param-table">
+                        <tr>
+                            <th>Param</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Focal Length</td>
+                            <td>Zoom (mm).</td>
+                        </tr>
+                        <tr>
+                            <td>Aperture</td>
+                            <td>f-stop (Depth of Field).</td>
+                        </tr>
+                        <tr>
+                            <td>Focus Dist</td>
+                            <td>Sharpness distance.</td>
+                        </tr>
+                    </table>
+                </div>
+                <div>
+                    <h2>Exposure</h2>
+                    <table class="param-table">
+                        <tr>
+                            <th>Param</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>ISO</td>
+                            <td>Sensitivity.</td>
+                        </tr>
+                        <tr>
+                            <td>Shutter</td>
+                            <td>Exposure time (Motion Blur).</td>
+                        </tr>
+                        <tr>
+                            <td>Tonemap</td>
+                            <td>ACES / Reinhard.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>

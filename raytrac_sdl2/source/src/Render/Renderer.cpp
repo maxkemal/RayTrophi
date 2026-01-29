@@ -33,6 +33,8 @@
 #include "HittableList.h"
 #include "ParallelBVHNode.h"
 #include "AnimatedObject.h"
+#include "AnimationController.h"
+#include "AnimationNodes.h"
 #include "scene_data.h"
 
 // Unified rendering system for CPU/GPU parity
@@ -94,13 +96,31 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
     size_t pixelCount = static_cast<size_t>(width) * height;
     size_t bufferSize = pixelCount * 3;
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PERFORMANCE CONSTANTS
+    // ═══════════════════════════════════════════════════════════════════════════
+    constexpr float inv255 = 1.0f / 255.0f;  // Precomputed for multiplication
+    const float blend_inv = 1.0f - blend;    // Precomputed inverse blend
+    
+    // Detect pixel format for direct access (bypass SDL_GetRGB)
+    // Most common formats: ARGB8888, RGBA8888, BGRA8888
+    const SDL_PixelFormat* fmt = surface->format;
+    const bool is_direct_format = (fmt->BytesPerPixel == 4);
+    const Uint32 r_mask = fmt->Rmask;
+    const Uint32 g_mask = fmt->Gmask;
+    const Uint32 b_mask = fmt->Bmask;
+    const Uint8 r_shift = fmt->Rshift;
+    const Uint8 g_shift = fmt->Gshift;
+    const Uint8 b_shift = fmt->Bshift;
+
     // ===== BUFFER CACHE OPTIMIZATION =====
     // Boyut değiştiyse buffer'ları yeniden oluştur
     bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
 
     if (sizeChanged) {
-        // CPU buffer'ı resize et
+        // CPU buffer'ları resize et
         oidnColorData.resize(bufferSize);
+        oidnOriginalData.resize(bufferSize);  // Original için cache
 
         // OIDN buffer'larını yeniden oluştur
         try {
@@ -127,14 +147,47 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
         }
     }
 
-    // ===== PIXEL DATA TRANSFER =====
-    // Surface'den color buffer'a aktar (bu her zaman gerekli)
-    for (size_t i = 0; i < pixelCount; ++i) {
-        Uint8 r, g, b;
-        SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
-        oidnColorData[i * 3] = r / 255.0f;
-        oidnColorData[i * 3 + 1] = g / 255.0f;
-        oidnColorData[i * 3 + 2] = b / 255.0f;
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OPTIMIZED PIXEL READ - Direct access, no SDL_GetRGB calls
+    // Also caches original values for blend (eliminates second read loop)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (is_direct_format) {
+        // Fast path: Direct bit manipulation (no function calls)
+        for (size_t i = 0; i < pixelCount; ++i) {
+            Uint32 pixel = pixels[i];
+            float r = ((pixel & r_mask) >> r_shift) * inv255;
+            float g = ((pixel & g_mask) >> g_shift) * inv255;
+            float b = ((pixel & b_mask) >> b_shift) * inv255;
+            
+            size_t idx = i * 3;
+            oidnColorData[idx]     = r;
+            oidnColorData[idx + 1] = g;
+            oidnColorData[idx + 2] = b;
+            
+            // Cache original for blend (avoid second read)
+            oidnOriginalData[idx]     = r;
+            oidnOriginalData[idx + 1] = g;
+            oidnOriginalData[idx + 2] = b;
+        }
+    } else {
+        // Fallback: Use SDL_GetRGB for non-standard formats
+        for (size_t i = 0; i < pixelCount; ++i) {
+            Uint8 r, g, b;
+            SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
+            
+            size_t idx = i * 3;
+            float rf = r * inv255;
+            float gf = g * inv255;
+            float bf = b * inv255;
+            
+            oidnColorData[idx]     = rf;
+            oidnColorData[idx + 1] = gf;
+            oidnColorData[idx + 2] = bf;
+            
+            oidnOriginalData[idx]     = rf;
+            oidnOriginalData[idx + 1] = gf;
+            oidnOriginalData[idx + 2] = bf;
+        }
     }
 
     try {
@@ -157,21 +210,44 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
         return;
     }
 
-    // ===== RESULT BLENDING =====
-    // Sonucu karıştır ve geri yaz
-    for (size_t i = 0; i < pixelCount; ++i) {
-        Uint8 r_orig, g_orig, b_orig;
-        SDL_GetRGB(pixels[i], surface->format, &r_orig, &g_orig, &b_orig);
-
-        float r_denoised = std::clamp(oidnColorData[i * 3], 0.0f, 1.0f);
-        float g_denoised = std::clamp(oidnColorData[i * 3 + 1], 0.0f, 1.0f);
-        float b_denoised = std::clamp(oidnColorData[i * 3 + 2], 0.0f, 1.0f);
-
-        Uint8 r = static_cast<Uint8>((r_denoised * blend + r_orig / 255.0f * (1 - blend)) * 255);
-        Uint8 g = static_cast<Uint8>((g_denoised * blend + g_orig / 255.0f * (1 - blend)) * 255);
-        Uint8 b = static_cast<Uint8>((b_denoised * blend + b_orig / 255.0f * (1 - blend)) * 255);
-
-        pixels[i] = SDL_MapRGB(surface->format, r, g, b);
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OPTIMIZED BLEND & WRITE - Single pass, no second pixel read
+    // Uses cached original values, direct pixel write
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (is_direct_format) {
+        // Fast path: Direct bit manipulation
+        for (size_t i = 0; i < pixelCount; ++i) {
+            size_t idx = i * 3;
+            
+            // Blend: denoised * blend + original * (1 - blend)
+            float r_final = oidnColorData[idx]     * blend + oidnOriginalData[idx]     * blend_inv;
+            float g_final = oidnColorData[idx + 1] * blend + oidnOriginalData[idx + 1] * blend_inv;
+            float b_final = oidnColorData[idx + 2] * blend + oidnOriginalData[idx + 2] * blend_inv;
+            
+            // Clamp and convert to 8-bit
+            Uint8 r = static_cast<Uint8>(std::clamp(r_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+            Uint8 g = static_cast<Uint8>(std::clamp(g_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+            Uint8 b = static_cast<Uint8>(std::clamp(b_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+            
+            // Direct pixel write (preserve alpha if present)
+            Uint32 alpha = pixels[i] & fmt->Amask;
+            pixels[i] = alpha | (r << r_shift) | (g << g_shift) | (b << b_shift);
+        }
+    } else {
+        // Fallback: Use SDL_MapRGB
+        for (size_t i = 0; i < pixelCount; ++i) {
+            size_t idx = i * 3;
+            
+            float r_final = oidnColorData[idx]     * blend + oidnOriginalData[idx]     * blend_inv;
+            float g_final = oidnColorData[idx + 1] * blend + oidnOriginalData[idx + 1] * blend_inv;
+            float b_final = oidnColorData[idx + 2] * blend + oidnOriginalData[idx + 2] * blend_inv;
+            
+            Uint8 r = static_cast<Uint8>(std::clamp(r_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+            Uint8 g = static_cast<Uint8>(std::clamp(g_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+            Uint8 b = static_cast<Uint8>(std::clamp(b_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+            
+            pixels[i] = SDL_MapRGB(surface->format, r, g, b);
+        }
     }
 }
 
@@ -212,6 +288,9 @@ void Renderer::resetResolution(int w, int h) {
     // OIDN cache invalidate - buffer'lar bir sonraki denoise'da yeniden oluşturulacak
     oidnCachedWidth = 0;
     oidnCachedHeight = 0;
+    
+    // Pixel list cache invalidate - resolution changed
+    cpu_pixel_list_valid = false;
 }
 
 
@@ -275,45 +354,105 @@ static int directional_pick_count = 0;
 // ============================================================================
 
 void Renderer::initializeAnimationSystem(SceneData& scene) {
-    auto& animCtrl = AnimationController::getInstance();
-
-    // Register all animation clips from the scene
-    if (!scene.animationDataList.empty()) {
-        animCtrl.registerClips(scene.animationDataList);
-
-        SCENE_LOG_INFO("[AnimSystem] Initialized with " +
-            std::to_string(scene.animationDataList.size()) + " animation clips.");
-
-        // Auto-play first clip if available
-        const auto& clips = animCtrl.getAllClips();
-        if (!clips.empty()) {
-            animCtrl.play(clips[0].name, 0.0f);  // Instant start
-            SCENE_LOG_INFO("[AnimSystem] Auto-playing: " + clips[0].name);
+    // Initialize per-model animators
+    for (auto& ctx : scene.importedModelContexts) {
+        if (ctx.hasAnimation && !ctx.animator) {
+            ctx.animator = std::make_shared<AnimationController>();
+            
+            // Filter clips for this model
+            std::vector<std::shared_ptr<AnimationData>> modelClips;
+            for (auto& anim : scene.animationDataList) {
+                if (anim && (anim->modelName == ctx.importName || (anim->modelName.empty() && scene.importedModelContexts.size() == 1))) {
+                    modelClips.push_back(anim);
+                }
+            }
+            
+            ctx.animator->registerClips(modelClips);
+            
+            if (!modelClips.empty()) {
+                ctx.animator->play(modelClips[0]->name, 0.0f);
+                SCENE_LOG_INFO("[Renderer] Created animator for model: " + ctx.importName + " (Clips: " + std::to_string(modelClips.size()) + ")");
+            }
         }
     }
 }
 
 bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool apply_cpu_skinning) {
-    auto& animCtrl = AnimationController::getInstance();
-
-    // Update animation controller
-    bool changed = animCtrl.update(deltaTime, scene.boneData);
-
-    if (!changed) {
-        return false;
+    bool anyChanged = false;
+    
+    // Resize internal matrix buffer to match scene total bone count
+    size_t totalBones = scene.boneData.boneNameToIndex.size();
+    if (this->finalBoneMatrices.size() != totalBones) {
+        this->finalBoneMatrices.assign(totalBones, Matrix4x4::identity());
     }
 
-    // Get computed bone matrices from animation controller
-    const auto& matrices = animCtrl.getFinalBoneMatrices();
-
-    // Resize our matrices if needed
-    if (this->finalBoneMatrices.size() != matrices.size()) {
-        this->finalBoneMatrices.resize(matrices.size());
+    // Update each model context independently
+    for (auto& ctx : scene.importedModelContexts) {
+        if (ctx.useAnimGraph && ctx.graph) {
+            // EVALUATE NODE GRAPH (Unity/Unreal style)
+            // Passes deltaTime and clips to the graph for full logic execution
+            if (ctx.animator) {
+                ctx.graph->evalContext.clipsPtr = &ctx.animator->getAllClips();
+            }
+            AnimationGraph::PoseData pose = ctx.graph->evaluate(deltaTime, scene.boneData);
+            
+            if (pose.isValid()) {
+                anyChanged = true;
+                for (size_t i = 0; i < pose.boneTransforms.size() && i < this->finalBoneMatrices.size(); ++i) {
+                    if (!(pose.boneTransforms[i] == Matrix4x4::identity())) {
+                        this->finalBoneMatrices[i] = pose.boneTransforms[i];
+                    }
+                }
+            }
+        }
+        else if (ctx.animator) {
+             // Sync UI toggle to animator state
+             if (ctx.useRootMotion) {
+                 std::string activeClip = ctx.animator->getCurrentClipName();
+                 std::string bestRoot = ctx.animator->findBestRootMotionBone(activeClip);
+                 ctx.animator->setRootMotionEnabled(true, bestRoot);
+             } else {
+                 ctx.animator->setRootMotionEnabled(false);
+             }
+             
+             bool changed = ctx.animator->update(deltaTime, scene.boneData);
+             if (changed) {
+                 anyChanged = true;
+                 
+                 // Merge model matrices into global buffer
+                 const auto& modelMatrices = ctx.animator->getFinalBoneMatrices();
+                 for (size_t i = 0; i < modelMatrices.size() && i < this->finalBoneMatrices.size(); ++i) {
+                     // MERGE LOGIC: copy only non-identity values or use bone prefix check
+                     // Here we use identity check as a simple heuristic because bone indices are unique per model
+                     if (!(modelMatrices[i] == Matrix4x4::identity())) {
+                         this->finalBoneMatrices[i] = modelMatrices[i];
+                     }
+                 }
+                 
+                 // --- ROOT MOTION (Pivot movement) ---
+                 if (ctx.useRootMotion) {
+                     RootMotionDelta delta = ctx.animator->consumeRootMotion();
+                     if (delta.hasPosition && !ctx.members.empty()) {
+                         std::vector<Transform*> processed;
+                         for (auto& member : ctx.members) {
+                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
+                                 auto h = tri->getTransformHandle();
+                                 if (h && std::find(processed.begin(), processed.end(), h.get()) == processed.end()) {
+                                     h->position = h->position + delta.positionDelta;
+                                     h->updateMatrix(); h->markDirty();
+                                     processed.push_back(h.get());
+                                 }
+                             }
+                         }
+                     }
+                 }
+             }
+        }
     }
 
-    // Copy matrices
-    for (size_t i = 0; i < matrices.size(); ++i) {
-        this->finalBoneMatrices[i] = matrices[i];
+    if (!anyChanged && !this->finalBoneMatrices.empty()) {
+        // Even if no clip changed, we might need initial matrices
+        // Check if we need to return early or re-pose
     }
 
     // Apply skinning to triangles if CPU skinning is requested
@@ -321,13 +460,8 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
         for (auto& obj : scene.world.objects) {
             auto tri = std::dynamic_pointer_cast<Triangle>(obj);
             if (tri && tri->hasSkinData()) {
-                // Disable transform handle for skinned meshes
-                auto transformHandle = tri->getTransformHandle();
-                if (transformHandle) {
-                    transformHandle->setBase(Matrix4x4::identity());
-                    transformHandle->setCurrent(Matrix4x4::identity());
-                }
-
+                // No longer forcing identity here! 
+                // The TransformHandle stores the model's root placement.
                 tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(this->finalBoneMatrices));
             }
         }
@@ -336,8 +470,12 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
     // Reset CPU accumulation since geometry changed
     resetCPUAccumulation();
 
-    // Clear dirty flag in controller
-    animCtrl.clearDirtyFlag();
+    // Clear dirty flags for all animators
+    for (auto& ctx : scene.importedModelContexts) {
+        if (ctx.animator) {
+            ctx.animator->clearDirtyFlag();
+        }
+    }
 
     return true;  // Geometry changed
 }
@@ -362,33 +500,34 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     lastAnimationUpdateTime = current_time;
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // FALLBACK: Use AnimationController when importedModelContexts is empty
-    // ═══════════════════════════════════════════════════════════════════════════
-    // This happens after project load - loaders are not serialized but animation
-    // data is. Use the AnimationController-based system in this case.
-    // ═══════════════════════════════════════════════════════════════════════════
-    bool useAnimationController = scene.importedModelContexts.empty() &&
-        !scene.animationDataList.empty() &&
-        !scene.boneData.boneNameToIndex.empty();
+    // Unified Animation Check: If we have clips and bones, use the Controller
+    bool useAnimationController = !scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty();
 
     if (useAnimationController) {
-        // Use REAL wall-clock deltaTime instead of timeline time
-        // This ensures animation plays continuously regardless of timeline state
-        static auto lastRealTime = std::chrono::high_resolution_clock::now();
-        auto nowTime = std::chrono::high_resolution_clock::now();
-        float deltaTime = std::chrono::duration<float>(nowTime - lastRealTime).count();
-        lastRealTime = nowTime;
+        static float last_sim_time = -1.0f;
+        float deltaTime = (last_sim_time >= 0.0f) ? (current_time - last_sim_time) : (1.0f / 60.0f);
+        if (deltaTime < 0.0f || deltaTime > 0.5f) deltaTime = 0.0f; 
+        last_sim_time = current_time;
 
-        // Clamp deltaTime to reasonable bounds
-        if (deltaTime < 0.0f || deltaTime > 0.5f) deltaTime = 1.0f / 60.0f;
+        // Drive the animation
 
         // Use the new AnimationController system
+        // ALWAYS use this if animations exist, legacy path is too unreliable
         geometry_changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning);
+        
+        // Return result
+        return geometry_changed;
     }
 
     // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
     std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
+
+    // Ensure bone matrices buffer is large enough for all bones in the scene
+    if (!scene.boneData.boneNameToIndex.empty()) {
+        if (this->finalBoneMatrices.size() < scene.boneData.boneNameToIndex.size()) {
+            this->finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+        }
+    }
 
     // Iterate over ALL imported models to update their respective hierarchies
     for (const auto& modelCtx : scene.importedModelContexts) {
@@ -397,186 +536,158 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         // ═══════════════════════════════════════════════════════════════════════════
         // CRITICAL FIX: Skip models without animation data
         // ═══════════════════════════════════════════════════════════════════════════
-        // Calling calculateAnimatedNodeTransformsRecursive on non-animated models:
-        // 1. Recalculates node hierarchy with FBX root transform (Z-up to Y-up)
-        // 2. Overwrites existing user transforms (translations applied via gizmo)
-        // 3. Causes static rigged objects to "jump" to bind pose at world origin
-        // ═══════════════════════════════════════════════════════════════════════════
         if (!modelCtx.hasAnimation) {
             continue; // Skip non-animated models - preserve their transforms
         }
 
-        // Restore context (names, etc.) - implicitly handled by using the specific loader instance
-        Matrix4x4 identityParentTransform = Matrix4x4::identity();
-
         // Build lookups for THIS model's animations
-        std::map<std::string, const AnimationData*> animationLookupMap;
+        std::map<std::string, std::shared_ptr<AnimationData>> animationLookupMap;
         for (const auto& anim : scene.animationDataList) {
-            for (const auto& pair : anim.positionKeys) animationLookupMap[pair.first] = &anim;
-            for (const auto& pair : anim.rotationKeys) animationLookupMap[pair.first] = &anim;
-            for (const auto& pair : anim.scalingKeys) animationLookupMap[pair.first] = &anim;
+            if (!anim) continue;
+            for (const auto& pair : anim->positionKeys) animationLookupMap[pair.first] = anim;
+            for (const auto& pair : anim->rotationKeys) animationLookupMap[pair.first] = anim;
+            for (const auto& pair : anim->scalingKeys) animationLookupMap[pair.first] = anim;
         }
+
+        // Temporary map for THIS model's node transforms
+        std::unordered_map<std::string, Matrix4x4> modelNodeTransforms;
 
         modelCtx.loader->calculateAnimatedNodeTransformsRecursive(
             modelCtx.loader->getScene()->mRootNode,
-            identityParentTransform,
+            Matrix4x4::identity(),
             animationLookupMap,
             current_time,
-            animatedGlobalNodeTransforms // Accumulate into global map
+            modelNodeTransforms
         );
-    }
 
-    // --- 1.5. PRE-CALCULATE GLOBAL BONE MATRICES (Optimization) ---
-    // Instead of recalculating per-mesh (which causes massive slowdown), do it once globally.
-    if (!scene.boneData.boneNameToIndex.empty()) {
-        // Ensure vector is large enough for the largest index
-        // Since indices are 0-based, size needs to be max_index + 1. 
-        // Using map size is usually correct unless there are gaps/overlaps. 
-        // We'll trust map size but verify inside loop.
-        if (this->finalBoneMatrices.size() < scene.boneData.boneNameToIndex.size()) {
-            this->finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size());
+        // Merge into global map (for later use by non-bone animated objects)
+        for (const auto& pair : modelNodeTransforms) {
+            animatedGlobalNodeTransforms[pair.first] = pair.second;
         }
 
+        // --- PRE-CALCULATE GLOBAL BONE MATRICES for THIS model ---
         for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
-            // Robustness: Handle out-of-bounds indices due to potential merges
-            if (boneIndex >= finalBoneMatrices.size()) {
-                finalBoneMatrices.resize(boneIndex + 1);
-            }
+            // Only process bones that belong to THIS model context
+            if (boneName.find(modelCtx.importName + "_") == 0) {
+                if (modelNodeTransforms.count(boneName) > 0 && scene.boneData.boneOffsetMatrices.count(boneName) > 0) {
+                    Matrix4x4 animatedBoneGlobal = modelNodeTransforms[boneName];
+                    Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
 
-            if (animatedGlobalNodeTransforms.count(boneName) > 0 && scene.boneData.boneOffsetMatrices.count(boneName) > 0) {
-                Matrix4x4 animatedBoneGlobal = animatedGlobalNodeTransforms[boneName];
-                Matrix4x4 offsetMatrix = scene.boneData.boneOffsetMatrices[boneName];
-                finalBoneMatrices[boneIndex] = animatedBoneGlobal * offsetMatrix;
-            }
-            else {
-                // Fallback to identity to prevent explosions, though this usually implies broken rig or missing update
-                finalBoneMatrices[boneIndex] = Matrix4x4::identity();
-            }
-        }
-    }
-
-    // --- 2. Adım: Üçgenleri Animasyon Türüne Göre Güncelle ---
-    for (auto& obj : scene.world.objects) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (!tri) continue;
-
-        std::string nodeName = tri->getNodeName();
-        bool isSkinnedMesh = tri->hasSkinData();
-
-        if (isSkinnedMesh) {
-            // ═══════════════════════════════════════════════════════════════════════════
-            // Check if this mesh belongs to an animated model
-            // ═══════════════════════════════════════════════════════════════════════════
-            // animatedGlobalNodeTransforms only contains nodes from models with animation.
-            // If NONE of this mesh's bones are in the map, the mesh is from a non-animated
-            // model and should be skipped to preserve its transform.
-            // ═══════════════════════════════════════════════════════════════════════════
-            bool meshBelongsToAnimatedModel = false;
-            const auto& boneWeights = tri->getSkinBoneWeights(0);
-            for (const auto& [boneIdx, weight] : boneWeights) {
-                if (weight < 0.001f) continue;
-
-                // OPTIMIZATION: O(1) reverse lookup instead of O(n) map traversal
-                const std::string& boneName = scene.boneData.getBoneNameByIndex(static_cast<unsigned int>(boneIdx));
-                if (!boneName.empty() && animatedGlobalNodeTransforms.count(boneName) > 0) {
-                    meshBelongsToAnimatedModel = true;
-                    break;
+                    // P_world = model_globalInv * animGlobal * offset
+                    finalBoneMatrices[boneIndex] = modelCtx.globalInverseTransform * animatedBoneGlobal * offsetMatrix;
+                } else {
+                    // Fallback to identity for missing keys in this model's rigged hierarchy
+                    if (boneIndex < finalBoneMatrices.size()) {
+                        finalBoneMatrices[boneIndex] = Matrix4x4::identity();
+                    }
                 }
             }
+        }
+    }
+    
 
-            // Skip meshes from non-animated models
-            if (!meshBelongsToAnimatedModel) {
-                continue; // Preserve transform for non-animated rigged objects
+    // Ensure finalBoneMatrices is sized correctly for any remaining bones
+    if (finalBoneMatrices.size() < scene.boneData.boneNameToIndex.size()) {
+        finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+    }
+
+    // --- 0. Adım: Performans Önbelleği Hazırlığı ---
+    if (animation_groups_dirty || animation_groups.empty()) {
+        animation_groups.clear();
+        std::unordered_map<void*, size_t> transformToGroup;
+
+        for (auto& obj : scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (!tri) continue;
+
+            void* transformKey = tri->getTransformHandle().get();
+            if (transformToGroup.find(transformKey) == transformToGroup.end()) {
+                transformToGroup[transformKey] = animation_groups.size();
+                AnimatableGroup newGroup;
+                newGroup.nodeName = tri->getNodeName();
+                newGroup.isSkinned = tri->hasSkinData();
+                newGroup.transformHandle = tri->getTransformHandle();
+                animation_groups.push_back(newGroup);
             }
+            animation_groups[transformToGroup[transformKey]].triangles.push_back(tri);
+        }
+        animation_groups_dirty = false;
+        SCENE_LOG_INFO("Animation groups rebuilt: " + std::to_string(animation_groups.size()) + " groups.");
+    }
 
-            // Disable transform handle for animated skinned meshes
-            auto transformHandle = tri->getTransformHandle();
-            if (transformHandle) {
-                transformHandle->setBase(Matrix4x4::identity());
-                transformHandle->setCurrent(Matrix4x4::identity());
-            }
+    // --- 2. Adım: Grupları Animasyon Türüne Göre Güncelle ---
+    for (auto& group : animation_groups) {
+        if (group.triangles.empty()) continue;
 
-            // Geometry changes (either on GPU or CPU), so flag it.
-            // This ensures GPU update is triggered even if CPU skinning is skipped.
+        if (group.isSkinned) {
+            // Skeleton animation modifies geometry
             geometry_changed = true;
-
-            // Only apply CPU skinning if requested (skip for GPU rendering to save perf)
             if (apply_cpu_skinning) {
-                // Now just use the pre-calculated finalBoneMatrices
-                tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(finalBoneMatrices));
+                for (auto& tri : group.triangles) {
+                    tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(finalBoneMatrices));
+                }
             }
         }
         else {
+            // --- RIGID ANIMATION ---
             bool nodeHasAnimation = false;
             for (const auto& anim : scene.animationDataList) {
-                if (anim.positionKeys.count(nodeName) > 0 ||
-                    anim.rotationKeys.count(nodeName) > 0 ||
-                    anim.scalingKeys.count(nodeName) > 0) {
+                if (!anim) continue;
+                if (anim->positionKeys.count(group.nodeName) > 0 ||
+                    anim->rotationKeys.count(group.nodeName) > 0 ||
+                    anim->scalingKeys.count(group.nodeName) > 0) {
                     nodeHasAnimation = true;
                     break;
                 }
             }
 
-            if (nodeHasAnimation && animatedGlobalNodeTransforms.count(nodeName) > 0) {
-                Matrix4x4 animTransform = animatedGlobalNodeTransforms[nodeName];
-                auto transformHandle = tri->getTransformHandle();
-                if (transformHandle) {
-                    transformHandle->setBase(animTransform);
-                    transformHandle->setCurrent(Matrix4x4::identity());
-                    tri->updateTransformedVertices();
-                    geometry_changed = true;  // File-based animation modifies vertex positions
+            if (nodeHasAnimation && animatedGlobalNodeTransforms.count(group.nodeName) > 0) {
+                Matrix4x4 animTransform = animatedGlobalNodeTransforms[group.nodeName];
+                if (group.transformHandle) {
+                    group.transformHandle->setBase(animTransform);
+                    group.transformHandle->setCurrent(Matrix4x4::identity());
+                    if (apply_cpu_skinning) {
+                        for (auto& tri : group.triangles) tri->updateTransformedVertices();
+                    }
+                    geometry_changed = true; 
                 }
             }
             else {
-                if (animatedGlobalNodeTransforms.count(nodeName) > 0) {
-                    Matrix4x4 staticTransform = animatedGlobalNodeTransforms[nodeName];
-                    auto transformHandle = tri->getTransformHandle();
-                    if (transformHandle) {
-                        transformHandle->setBase(staticTransform);
-                        transformHandle->setCurrent(Matrix4x4::identity());
-                        tri->updateTransformedVertices();
-                        geometry_changed = true;  // Static transform from hierarchy modifies vertex positions
+                if (animatedGlobalNodeTransforms.count(group.nodeName) > 0) {
+                    Matrix4x4 staticTransform = animatedGlobalNodeTransforms[group.nodeName];
+                    if (group.transformHandle) {
+                        group.transformHandle->setBase(staticTransform);
+                        group.transformHandle->setCurrent(Matrix4x4::identity());
+                        if (apply_cpu_skinning) {
+                            for (auto& tri : group.triangles) tri->updateTransformedVertices();
+                        }
+                        geometry_changed = true; 
                     }
                 }
 
-                // --- MANUAL KEYFRAME SUPPORT (NEW!) ---
-                // Apply Timeline keyframes for objects NOT animated by file data
+                // --- MANUAL KEYFRAME SUPPORT ---
                 if (!nodeHasAnimation && !scene.timeline.tracks.empty()) {
-                    // Convert current_time to frame number (assuming standard FPS)
                     extern RenderSettings render_settings;
                     int current_frame = static_cast<int>(current_time * render_settings.animation_fps);
-
-                    // Check if this object has keyframes
-                    auto track_it = scene.timeline.tracks.find(nodeName);
+                    auto track_it = scene.timeline.tracks.find(group.nodeName);
                     if (track_it != scene.timeline.tracks.end() && !track_it->second.keyframes.empty()) {
-                        // Evaluate keyframe at current frame
                         Keyframe kf = track_it->second.evaluate(current_frame);
-
                         if (kf.has_transform) {
-                            // Build transform matrix from keyframe
                             Matrix4x4 translation = Matrix4x4::translation(kf.transform.position);
-
-                            // Convert Euler angles to rotation matrix (deg to rad)
                             float rx = kf.transform.rotation.x * (3.14159265f / 180.0f);
                             float ry = kf.transform.rotation.y * (3.14159265f / 180.0f);
                             float rz = kf.transform.rotation.z * (3.14159265f / 180.0f);
-
-                            Matrix4x4 rotation = Matrix4x4::rotationZ(rz) *
-                                Matrix4x4::rotationY(ry) *
-                                Matrix4x4::rotationX(rx);
-
+                            Matrix4x4 rotation = Matrix4x4::rotationZ(rz) * Matrix4x4::rotationY(ry) * Matrix4x4::rotationX(rx);
                             Matrix4x4 scale = Matrix4x4::scaling(kf.transform.scale);
-
-                            // Combine: T * R * S
                             Matrix4x4 final_transform = translation * rotation * scale;
 
-                            // Apply to triangle
-                            auto transformHandle = tri->getTransformHandle();
-                            if (transformHandle) {
-                                transformHandle->setBase(final_transform);
-                                transformHandle->setCurrent(Matrix4x4::identity());
-                                tri->updateTransformedVertices();
-                                geometry_changed = true;  // Keyframe transform modifies vertex positions
+                            if (group.transformHandle) {
+                                group.transformHandle->setBase(final_transform);
+                                group.transformHandle->setCurrent(Matrix4x4::identity());
+                                if (apply_cpu_skinning) {
+                                    for (auto& tri : group.triangles) tri->updateTransformedVertices();
+                                }
+                                geometry_changed = true;
                             }
                         }
                     }
@@ -591,9 +702,10 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     for (auto& light : scene.lights) {
         bool lightHasAnimation = false;
         for (const auto& anim : scene.animationDataList) {
-            if (anim.positionKeys.count(light->nodeName) > 0 ||
-                anim.rotationKeys.count(light->nodeName) > 0 ||
-                anim.scalingKeys.count(light->nodeName) > 0) {
+            if (!anim) continue;
+            if (anim->positionKeys.count(light->nodeName) > 0 ||
+                anim->rotationKeys.count(light->nodeName) > 0 ||
+                anim->scalingKeys.count(light->nodeName) > 0) {
                 lightHasAnimation = true;
                 break;
             }
@@ -607,8 +719,10 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             }
 
             // Link Nishita Sun to first Directional Light
+            // Link Nishita Sun to first Directional Light
             if (light->type() == LightType::Directional) {
                 world.setSunDirection(-light->direction);
+                world.setSunIntensity(light->intensity);
             }
         }
 
@@ -639,6 +753,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
                             if (light->type() == LightType::Directional) {
                                 world.setSunDirection(-light->direction);
+                                world.setSunIntensity(light->intensity);
                             }
                         }
                     }
@@ -651,9 +766,10 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     bool cameraHasAnimation = false;
     if (scene.camera) {
         for (const auto& anim : scene.animationDataList) {
-            if (anim.positionKeys.count(scene.camera->nodeName) > 0 ||
-                anim.rotationKeys.count(scene.camera->nodeName) > 0 ||
-                anim.scalingKeys.count(scene.camera->nodeName) > 0) {
+            if (!anim) continue;
+            if (anim->positionKeys.count(scene.camera->nodeName) > 0 ||
+                anim->rotationKeys.count(scene.camera->nodeName) > 0 ||
+                anim->scalingKeys.count(scene.camera->nodeName) > 0) {
                 cameraHasAnimation = true;
                 break;
             }
@@ -903,8 +1019,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 
     if (start_frame == 0 && end_frame == 0 && !scene.animationDataList.empty()) {
         auto& anim = scene.animationDataList[0];
-        start_frame = anim.startFrame;
-        end_frame = anim.endFrame;
+        if (anim) {
+            start_frame = anim->startFrame;
+            end_frame = anim->endFrame;
+        }
         SCENE_LOG_INFO("Settings range invalid, using animation frame range from file: " + std::to_string(start_frame) + " - " + std::to_string(end_frame));
     }
     else {
@@ -964,14 +1082,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         render_settings.animation_playback_frame = frame;
         scene.timeline.current_frame = frame;
 
-        // --- UPDATE ANIMATION ---
         // Returns true if geometry changed
-        // Returns true if geometry changed
-        // --- UPDATE ANIMATION ---
         // Disable CPU skinning if running on OptiX to save performance and prevent crashes
-        // UPDATE (Fix GPU T-Pose): Re-enable CPU skinning so we can upload deformed vertices to GPU
-        // Foliage (Fast) is not skinned, so it won't be affected.
-        bool geometry_changed = this->updateAnimationState(scene, current_time, true); // Always calc CPU skinning for now
+        // We only need CPU skinning for CPU rendering or if we need to update CPU BVH
+        bool geometry_changed = this->updateAnimationState(scene, current_time, !run_optix); 
 
         // --- WIND ANIMATION ---
         // Apply wind simulation for this frame
@@ -1231,7 +1345,7 @@ void Renderer::updateBVH(SceneData& scene, bool use_embree) {
 
 void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
     std::function<void(int progress, const std::string& stage)> progress_callback,
-    bool append) {
+    bool append, const std::string& import_prefix) {
 
     // Helper lambda for progress updates
     auto update_progress = [&](int progress, const std::string& stage) {
@@ -1252,6 +1366,22 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         scene.lights.clear();
         scene.animationDataList.clear();
         scene.boneData.clear();
+        
+        // ---- 1b. Clear per-model animator caches (prevents bone corruption) ----
+        for (auto& ctx : scene.importedModelContexts) {
+            if (ctx.animator) {
+                ctx.animator->clear();
+            }
+            if (ctx.graph) {
+                ctx.graph.reset();
+            }
+            ctx.members.clear();
+        }
+        scene.importedModelContexts.clear();
+        
+        // ---- 1c. Clear renderer's cached bone matrices ----
+        this->finalBoneMatrices.clear();
+        
         scene.camera = nullptr;
         scene.bvh = nullptr;
         scene.initialized = false;
@@ -1300,13 +1430,14 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
 
     // Create a dedicated loader for this import to keep the aiScene alive
     auto newLoader = std::make_shared<AssimpLoader>();
-    auto [loaded_triangles, loaded_animations, loaded_bone_data] = newLoader->loadModelToTriangles(model_path);
+    auto [loaded_triangles, loaded_animations, loaded_bone_data] = newLoader->loadModelToTriangles(model_path, nullptr, import_prefix);
 
     // Store the context
     SceneData::ImportedModelContext modelCtx;
     modelCtx.loader = newLoader;
     modelCtx.importName = newLoader->currentImportName;
     modelCtx.hasAnimation = (newLoader->getScene() && newLoader->getScene()->mNumAnimations > 0);
+    modelCtx.globalInverseTransform = loaded_bone_data.globalInverseTransform;
     scene.importedModelContexts.push_back(modelCtx);
 
     update_progress(40, "Processing triangles...");
@@ -1355,6 +1486,9 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
             // Merge Offset Matrices and Node Pointers
             scene.boneData.boneOffsetMatrices.insert(loaded_bone_data.boneOffsetMatrices.begin(), loaded_bone_data.boneOffsetMatrices.end());
             scene.boneData.boneNameToNode.insert(loaded_bone_data.boneNameToNode.begin(), loaded_bone_data.boneNameToNode.end());
+            scene.boneData.perModelInverses.insert(loaded_bone_data.perModelInverses.begin(), loaded_bone_data.perModelInverses.end());
+            scene.boneData.boneParents.insert(loaded_bone_data.boneParents.begin(), loaded_bone_data.boneParents.end());
+            scene.boneData.boneDefaultTransforms.insert(loaded_bone_data.boneDefaultTransforms.begin(), loaded_bone_data.boneDefaultTransforms.end());
 
             // Only set global inverse if it's the first model or handle separately? 
             // It seems unused for skinning (offset matrix handles it), so valid to leave or overwrite.
@@ -1382,10 +1516,19 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
 
     // Add triangles to scene - animation is handled via TransformHandle and skinning
     // NOTE: AnimatedObject wrappers removed (were unused, wasted memory)
+    // Add triangles to scene and model context members
     for (const auto& tri : loaded_triangles) {
         scene.world.add(tri);
+        modelCtx.members.push_back(tri);
     }
-    SCENE_LOG_INFO("Added " + std::to_string(loaded_triangles.size()) + " triangles to scene.");
+    SCENE_LOG_INFO("Added " + std::to_string(loaded_triangles.size()) + " triangles to scene member list.");
+
+    // Initialize animation system for the new model
+    if (modelCtx.hasAnimation) {
+        initializeAnimationSystem(scene);
+        // Settle bone matrices for frame 0, applying per-model inverses
+        updateAnimationWithGraph(scene, 0.0f, true);
+    }
 
     // ---- 2. Kamera ve ışık verisi ----
     update_progress(55, "Loading camera & lights...");
@@ -1454,6 +1597,22 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         scene.lights = new_lights;
         SCENE_LOG_INFO("Loaded lights: " + std::to_string(scene.lights.size()));
     }
+
+    // CRITICAL: Sync World Sun with first Directional Light from import/new project
+    if (!append) { // Only force sync on new scene load, not append
+        for (const auto& light : scene.lights) {
+            if (light->type() == LightType::Directional) {
+                // FORCE Default Sun Intensity to 10.0 (Override file default which is often too low, e.g. 2.4/pi)
+                // Also ensures World Sun and Directional Light are coupled at start.
+                light->intensity = 10.0f; 
+                
+                world.setSunDirection(-light->direction);
+                world.setSunIntensity(light->intensity);
+                SCENE_LOG_INFO("World Sun synced with imported Directional Light (Forced Intensity: 10.0).");
+                break; // Only sync to the first one
+            }
+        }
+    }
     // ...
     // Note: OptiX conversion below (in original code) referenced 'assimpLoader' which was the member.
     // We must update that block too, but replacing only up to line 1335 handles the loading/merging logic.
@@ -1466,6 +1625,13 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     // However, it's safer to use `newLoader`.
 
     // I will replace up to line 1400.
+
+    // Force initial animation synchronization (poses correctly + updates CPU vertices)
+    // CRITICAL: Must happen BEFORE BVH build so BVH sees correctly posed vertices!
+    if (!scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty()) {
+        SCENE_LOG_INFO("[SceneCreation] Forcing initial pose sync for " + std::to_string(scene.boneData.getBoneCount()) + " bones.");
+        updateAnimationWithGraph(scene, 0.0f, true); // true = apply_cpu_skinning
+    }
 
     //  Selectable BVH (Embree or in-house BVH)
     update_progress(60, "Building BVH structure...");
@@ -2158,6 +2324,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     Vec3f throughput(1.0f);
     Ray current_ray = r;
     int transparent_hits = 0;
+    float first_hit_t = -1.0f;
+    float vol_trans_accum = 1.0f;
+    float first_vol_t = -1.0f;
 
     int light_count = static_cast<int>(lights.size());
 
@@ -2177,16 +2346,19 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         HitRecord solid_rec;
         bool hit_solid = false;
 
-        // 1. First Pass: Find anything (including volumes)
         bool hit_any = false;
         if (bvh) {
             hit_any = bvh->hit(current_ray, 0.01f, std::numeric_limits<float>::infinity(), rec, false);
         }
 
+        if (bounce == 0 && hit_any) {
+            first_hit_t = rec.t;
+        }
+
         // --- God Rays (Bounce 0 only) ---
         if (bounce == 0 && world.data.mode == WORLD_MODE_NISHITA && world.data.nishita.godrays_enabled && world.data.nishita.godrays_intensity > 0.0f) {
             float hit_dist = hit_any ? rec.t : world.data.nishita.fog_distance * 0.5f;
-            Vec3 god_rays = VolumetricRenderer::calculateGodRays(scene, world.data, current_ray, hit_dist, bvh);
+            Vec3 god_rays = VolumetricRenderer::calculateGodRays(scene, world.data, current_ray, hit_dist, bvh, world.getLUT());
 
             // Check for NaNs/Infs to prevent black screen
             if (std::isfinite(god_rays.x) && std::isfinite(god_rays.y) && std::isfinite(god_rays.z)) {
@@ -2329,31 +2501,85 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             }
 
             if (t_exit > t_enter) {
-                float step_size = 0.1f;
+                auto shader = rec.gas_volume->getShader();
+                
+                // Step size from shader or default (FASTER rendering with larger steps)
+                float step_size = shader ? shader->quality.step_size : 0.15f;
+                int max_steps = shader ? shader->quality.max_steps : 64;
+                
                 float t = t_enter;
                 float current_transmittance = 1.0f;
+                Vec3f accumulated_emission(0.0f);
                 t += ((float)rand() / RAND_MAX) * step_size;
 
-                auto shader = rec.gas_volume->getShader();
                 float density_scale = 1.0f;
                 float absorption_coeff = 0.1f;
+                float blackbody_intensity = 10.0f;
+                float temperature_scale_shader = 1.0f;
+                bool use_blackbody = false;
 
                 if (shader) {
                     density_scale = shader->density.multiplier;
                     absorption_coeff = shader->absorption.coefficient;
+                    blackbody_intensity = shader->emission.blackbody_intensity;
+                    temperature_scale_shader = shader->emission.temperature_scale;
+                    use_blackbody = (shader->emission.mode == VolumeEmissionMode::Blackbody);
                 }
 
-                while (t < t_exit) {
+                float ambient_temp = rec.gas_volume->getSettings().ambient_temperature;
+                int steps = 0;
+
+                while (t < t_exit && steps < max_steps) {
                     Vec3 pos = current_ray.at(t);
                     float density = rec.gas_volume->sampleDensity(pos);
+                    
                     if (density > 0.001f) {
                         float sigma_t = (density * density_scale) * (1.0f + absorption_coeff);
-                        current_transmittance *= exp(-sigma_t * step_size);
+                        float step_trans = exp(-sigma_t * step_size);
+                        
+                        // Emission from temperature (fire/flame)
+                        if (use_blackbody) {
+                            float temperature = rec.gas_volume->sampleTemperature(pos);
+                            float flame = rec.gas_volume->sampleFlameIntensity(pos);
+                            
+                            // Use temperature directly in Kelvin for blackbody
+                            // Apply temperature_scale as multiplier
+                            float temp_k = (temperature - ambient_temp) * temperature_scale_shader;
+                            temp_k = std::max(100.0f, std::min(temp_k + 500.0f, 10000.0f)); // +500 baseline for visible color
+                            float tk = temp_k / 100.0f;
+                            float r, g, b;
+                            
+                            if (tk <= 66.0f) {
+                                r = 255.0f;
+                                g = std::max(0.0f, 99.4708f * logf(tk) - 161.12f);
+                                b = (tk <= 19.0f) ? 0.0f : std::max(0.0f, 138.52f * logf(tk - 10.0f) - 305.04f);
+                            } else {
+                                r = 329.7f * powf(tk - 60.0f, -0.133f);
+                                g = 288.12f * powf(tk - 60.0f, -0.0755f);
+                                b = 255.0f;
+                            }
+                            
+                            Vec3f bb_color(r/255.0f, g/255.0f, b/255.0f);
+                            bb_color.x = std::max(0.0f, std::min(bb_color.x, 1.0f));
+                            bb_color.y = std::max(0.0f, std::min(bb_color.y, 1.0f));
+                            bb_color.z = std::max(0.0f, std::min(bb_color.z, 1.0f));
+                            
+                            float flame_boost = 1.0f + flame * 5.0f;
+                            float brightness = density * density_scale * blackbody_intensity * flame_boost;
+                            Vec3f emission = bb_color * brightness;
+                            
+                            accumulated_emission += emission * (1.0f - step_trans) * current_transmittance;
+                        }
+                        
+                        current_transmittance *= step_trans;
                     }
                     if (current_transmittance < 0.01f) break;
                     t += step_size;
+                    steps++;
                 }
 
+                // Apply emission to color
+                color = color + Vec3f(accumulated_emission.x, accumulated_emission.y, accumulated_emission.z);
                 throughput *= current_transmittance;
                 if (current_transmittance < 0.01f) break;
             }
@@ -2452,9 +2678,17 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 Vec3f emission_color = toVec3f(emission_color_raw);
                 float emission_intensity = shader ? shader->emission.intensity : 0.0f;
 
-                // ═══════════════════════════════════════════════════════════════
+                // ════════════════════════════──────────────────────────────────────────
+                // Density and Remapping Properties
+                // ════════════════════════════──────────────────────────────────────────
+                float remap_low = shader ? shader->density.remap_low : 0.0f;
+                float remap_high = shader ? shader->density.remap_high : 1.0f;
+                float remap_range = std::max(1e-5f, remap_high - remap_low);
+                float shadow_strength = shader ? shader->quality.shadow_strength : 1.0f;
+
+                // ─────────────────────────────────────────────────────────────────────────
                 // Anisotropy (Henyey-Greenstein phase function G parameter)
-                // ═══════════════════════════════════════════════════════════════
+                // ─────────────────────────────────────────────────────────────────────────
                 float anisotropy_g = shader ? shader->scattering.anisotropy : 0.0f;
 
                 float current_transparency = 1.0f;
@@ -2502,10 +2736,21 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         }
                     }
 
-                    if (density > 0.001f) {  // GPU-matching threshold to filter float noise
+                    // --- GPU-MATCHING DENSITY REMAPPING ---
+                    float d_remapped = std::max(0.0f, (density - remap_low) / remap_range);
+
+                    if (d_remapped > 0.001f) {
+                        float d = d_remapped * density_scale; // Combined Multiplier (Shader * Volume)
+                        
+                        // NEW: Update depth for fogging calculation only when we hit substance
+                        // Threshold 0.05 is chosen to prevent very thin noise from jumping fog forward
+                        if (bounce == 0 && first_vol_t < 0.0f && d > 0.05f) {
+                            first_vol_t = t;
+                        }
+
                         // Physical coefficients: sigma_t = sigma_s + sigma_a
-                        float sigma_s = density * density_scale * scattering_intensity;
-                        float sigma_a = density * absorption_coeff;
+                        float sigma_s = d * scattering_intensity;
+                        float sigma_a = d * absorption_coeff;
                         float sigma_t = sigma_s + sigma_a;
 
                         // Beer-Lambert Transmittance for this step
@@ -2578,8 +2823,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                                 Vec3 slocal_p = inv_transform.transform_point(sp);
                                                 float s_density = mgr.sampleDensityCPU(live_vol_id, slocal_p.x, slocal_p.y, slocal_p.z);
 
-                                                if (s_density > 1e-4f) {
-                                                    float s_sigma_t = s_density * (density_scale * scattering_intensity + absorption_coeff);
+                                                // GPU-matching Shadow Remapping
+                                                float s_remapped = std::max(0.0f, (s_density - remap_low) / remap_range);
+
+                                                if (s_remapped > 1e-4f) {
+                                                    float sd = s_remapped * density_scale;
+                                                    float s_sigma_t = sd * (scattering_intensity + absorption_coeff) * shadow_strength;
                                                     shadow_transmittance *= exp(-s_sigma_t * shadow_march_step);
                                                 }
                                                 if (shadow_transmittance < 0.01f) break;
@@ -2632,9 +2881,22 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             float temperature_scale = shader ? shader->emission.temperature_scale : 1.0f;
                             float blackbody_intensity = shader ? shader->emission.blackbody_intensity : 10.0f;
 
-                            // Sample real temperature grid if available (GPU-matching)
+                            // Sample temperature - prefer GasVolume live simulation data
                             float temperature = 0.0f;
-                            if (mgr.hasTemperatureGrid(live_vol_id)) {
+                            float flame_intensity = 0.0f;
+                            
+                            if (rec.gas_volume) {
+                                // Live Gas Simulation: sample temperature and flame directly
+                                temperature = rec.gas_volume->sampleTemperature(p);
+                                flame_intensity = rec.gas_volume->sampleFlameIntensity(p);
+                                
+                                // Keep temperature in Kelvin, subtract ambient only
+                                // Will be scaled later by temperature_scale
+                                float ambient_temp = rec.gas_volume->getSettings().ambient_temperature;
+                                temperature = std::max(0.0f, temperature - ambient_temp);
+                            }
+                            else if (mgr.hasTemperatureGrid(live_vol_id)) {
+                                // VDB file with temperature grid
                                 temperature = mgr.sampleTemperatureCPU(live_vol_id, local_p.x, local_p.y, local_p.z);
                             }
                             else {
@@ -2644,19 +2906,28 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                             Vec3f blackbody_color(0.0f);
 
+                            // Get temperature range from shader
+                            float temp_min = shader ? shader->emission.temperature_min : 0.0f;
+                            float temp_max = shader ? shader->emission.temperature_max : 1500.0f;
+                            float temp_range = std::max(1.0f, temp_max - temp_min);
+
                             // Check if ColorRamp is enabled
                             bool use_color_ramp = shader && shader->emission.color_ramp.enabled;
 
                             if (use_color_ramp) {
-                                // GPU-matching: Use temperature for ramp (not density)
-                                float ramp_t = temperature * temperature_scale;
+                                // Normalize temperature to 0-1 using shader's temp range
+                                float ramp_t = (temperature - temp_min) / temp_range;
                                 ramp_t = std::max(0.0f, std::min(ramp_t, 1.0f));
                                 Vec3 ramp_color = shader->emission.color_ramp.sample(ramp_t);
                                 blackbody_color = toVec3f(ramp_color);
                             }
                             else {
                                 // Physical blackbody calculation
-                                float temp_k = temperature * temperature_scale * 1500.0f;
+                                // Map temperature through shader's range to Kelvin
+                                // temp_min → 500K (dark red), temp_max → 2000K+ (white)
+                                float normalized = (temperature - temp_min) / temp_range;
+                                normalized = std::max(0.0f, std::min(normalized, 1.0f));
+                                float temp_k = 500.0f + normalized * 1500.0f * temperature_scale; // 500-2000K range
                                 temp_k = std::max(100.0f, std::min(temp_k, 10000.0f));
                                 float t = temp_k / 100.0f;
                                 float r, g, b;
@@ -2685,7 +2956,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             // GPU-matching: linear brightness formula
                             // density is already scaled by sampleDensityCPU, apply shader multiplier
                             float scaled_density = density * (shader ? shader->density.multiplier : 1.0f);
-                            float brightness = scaled_density * blackbody_intensity;
+                            
+                            // Flame intensity boost: if combustion is happening, emission is stronger
+                            float flame_boost = 1.0f + flame_intensity * 5.0f;  // flame_intensity from live sim
+                            float brightness = scaled_density * blackbody_intensity * flame_boost;
                             step_emission = blackbody_color * brightness;
                         }
 
@@ -2707,8 +2981,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 }
 
                 // Apply volumetric result to path tracer state
-                // Both accumulated_vol_color and throughput are Vec3f now
                 color += throughput * accumulated_vol_color;
+                if (bounce == 0) {
+                    vol_trans_accum *= current_transparency;
+                }
                 throughput *= current_transparency;
 
                 if (hit_solid_inside) {
@@ -2960,6 +3236,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             }
 
             color += throughput * accumulated_vol_color;
+            if (bounce == 0) {
+                // For mesh volumes, we use the entry point if we hit density
+                // (Mesh volumes are usually dense throughout, but we could add a check here too)
+                if (first_vol_t < 0.0f && (1.0f - current_transparency) > 0.01f) {
+                    first_vol_t = t_vol_enter;
+                }
+                vol_trans_accum *= current_transparency;
+            }
             throughput *= current_transparency;
 
             // ---------------------------------------------------------
@@ -3282,6 +3566,29 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         current_ray = scattered;
     }
 
+    // --- Post-Process: Aerial Perspective (Matches GPU) ---
+    if (world.data.mode == WORLD_MODE_NISHITA) {
+        float ap_dist = first_hit_t;
+        
+        // --- WEIGHTED FOG DISTANCE (Ghost Box Protection) ---
+        // Match GPU: lerp between background distance and volume distance based on opacity
+        if (first_vol_t > 0.0f) {
+            float background_t = (first_hit_t > 0.0f) ? first_hit_t : 10000.0f;
+            float weight = 1.0f - vol_trans_accum;
+            ap_dist = background_t * (1.0f - weight) + first_vol_t * weight;
+        }
+        else if (ap_dist <= 0.0f) {
+            ap_dist = 10000.0f;
+        }
+        
+        Vec3 final_c = VolumetricRenderer::applyAerialPerspective(scene, world.data, r.origin, r.direction, ap_dist, toVec3(color), world.getLUT());
+        color = toVec3f(final_c);
+    }
+    else if (world.data.nishita.fog_enabled && world.data.nishita.fog_density > 0.0f) {
+        // Fallback for simple height fog on other modes
+        // ... (Optional: could add simple fog here too if needed, but Nishita Parity is the main goal)
+    }
+
     // --- Final NaN/Inf check and clamp (matching GPU) ---
     // GPU: color.x = isfinite(color.x) ? fminf(fmaxf(color.x, 0.0f), 100.0f) : 0.0f;
     if (!color.is_valid()) {
@@ -3324,8 +3631,13 @@ void Renderer::resetCPUAccumulation() {
     cpu_accumulated_samples = 0;
     cpu_accumulation_valid = false;
     cpu_last_camera_hash = 0;  // Reset camera hash for animation frames
+    cpu_pixel_list_valid = false;  // Force pixel list rebuild + shuffle on next pass
     if (!cpu_accumulation_buffer.empty()) {
         std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    // Reset variance buffer for adaptive sampling
+    if (!cpu_variance_buffer.empty()) {
+        std::fill(cpu_variance_buffer.begin(), cpu_variance_buffer.end(), 0.0f);
     }
 }
 
@@ -3360,6 +3672,11 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         cpu_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
         cpu_accumulation_valid = true;
     }
+    
+    // Ensure variance buffer is allocated for adaptive sampling
+    if (cpu_variance_buffer.size() != pixel_count) {
+        cpu_variance_buffer.resize(pixel_count, 0.0f);
+    }
 
     // Camera change detection
     if (scene.camera) {
@@ -3367,9 +3684,11 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         bool is_first = (cpu_last_camera_hash == 0);
 
         if (current_hash != cpu_last_camera_hash) {
-            // Camera changed - reset accumulation
+            // Camera changed - reset accumulation and variance
             std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+            std::fill(cpu_variance_buffer.begin(), cpu_variance_buffer.end(), 0.0f);
             cpu_accumulated_samples = 0;
+            cpu_pixel_list_valid = false;  // Force pixel list rebuild + shuffle
 
             if (!is_first) {
                 // SCENE_LOG_INFO("CPU: Camera changed - resetting accumulation");
@@ -3409,17 +3728,29 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
     std::vector<std::thread> threads;
 
-    // Build pixel list
-    std::vector<std::pair<int, int>> pixel_list;
-    pixel_list.reserve(pixel_count);
-    for (int j = 0; j < image_height; ++j) {
-        for (int i = 0; i < image_width; ++i) {
-            pixel_list.emplace_back(i, j);
+    // ═══════════════════════════════════════════════════════════════════════════
+    // OPTIMIZATION: Cache pixel list - only rebuild + shuffle when necessary
+    // This avoids O(n) allocation + O(n) shuffle on EVERY pass
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (!cpu_pixel_list_valid || cpu_cached_pixel_list.size() != pixel_count) {
+        // Rebuild pixel list (resolution changed or first time)
+        cpu_cached_pixel_list.clear();
+        cpu_cached_pixel_list.reserve(pixel_count);
+        for (int j = 0; j < image_height; ++j) {
+            for (int i = 0; i < image_width; ++i) {
+                cpu_cached_pixel_list.emplace_back(i, j);
+            }
         }
+        
+        // Shuffle ONCE for visual distribution (random device seeded)
+        std::shuffle(cpu_cached_pixel_list.begin(), cpu_cached_pixel_list.end(), 
+                     std::mt19937(std::random_device{}()));
+        
+        cpu_pixel_list_valid = true;
     }
 
-    // Shuffle for better cache and visual distribution
-    std::shuffle(pixel_list.begin(), pixel_list.end(), std::mt19937(std::random_device{}()));
+    // Use cached pixel list (no per-pass allocation or shuffle!)
+    const auto& pixel_list = cpu_cached_pixel_list;
 
     // Sparse progressive: First few samples render fewer pixels for faster preview
     // Sample 1: 1/16 pixels, Sample 2: 1/8, Sample 3: 1/4, Sample 5+: all
@@ -3454,6 +3785,64 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             int j = pixel_list[idx].second;
             int pixel_index = j * image_width + i;
 
+            // ═══════════════════════════════════════════════════════════════════
+            // ADAPTIVE SAMPLING - Early exit for converged pixels
+            // Same logic as GPU: skip if variance is below threshold AND we have enough samples
+            // ═══════════════════════════════════════════════════════════════════
+            // ADAPTIVE SAMPLING - Coefficient of Variation (CV = σ/μ) based convergence
+            // Industry standard: relative error is consistent across all brightness levels
+            // ═══════════════════════════════════════════════════════════════════
+            if (render_settings.use_adaptive_sampling) {
+                Vec4& accum_check = cpu_accumulation_buffer[pixel_index];
+                float prev_samples_check = accum_check.w;
+                float current_variance = cpu_variance_buffer[pixel_index];
+                
+                // Compute mean luminance for CV calculation
+                float mean_lum_check = 0.2126f * accum_check.x + 0.7152f * accum_check.y + 0.0722f * accum_check.z;
+                
+                // Coefficient of Variation: CV = σ / μ (relative standard deviation)
+                // This gives consistent convergence across dark and bright regions
+                float cv = (mean_lum_check > 0.001f) ? std::sqrt(current_variance) / mean_lum_check : 1.0f;
+                
+                // OIDN-aware threshold: if denoiser is enabled, we can be more aggressive
+                // OIDN handles low-frequency noise well, so we can stop earlier
+                float effective_threshold = render_settings.variance_threshold;
+                if (render_settings.use_denoiser) {
+                    effective_threshold *= 2.0f;  // OIDN will clean up remaining noise
+                }
+                
+                // Check convergence: enough samples AND low relative variance (CV)
+                if (prev_samples_check >= render_settings.min_samples && 
+                    current_variance > 0.0f &&  // Variance must be computed
+                    cv < effective_threshold) {
+                    // Pixel has converged - skip ray tracing but still write existing color to surface
+                    // This ensures the display stays updated even when pixels are skipped
+                    Vec3 cached_color(accum_check.x, accum_check.y, accum_check.z);
+                    
+                    // Tone mapping for display (same as below)
+                    auto toSRGB_fast = [](float c) {
+                        return (c <= 0.0031308f) ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
+                    };
+                    
+                    float exp_factor = scene.camera ? (scene.camera->auto_exposure ? 
+                        std::pow(2.0f, scene.camera->ev_compensation) : 1.0f) : 1.0f;
+                    Vec3 exposed = cached_color * exp_factor;
+                    exposed.x = exposed.x / (exposed.x + 1.0f);
+                    exposed.y = exposed.y / (exposed.y + 1.0f);
+                    exposed.z = exposed.z / (exposed.z + 1.0f);
+                    
+                    int r = static_cast<int>(255 * std::clamp(toSRGB_fast(std::max(0.0f, exposed.x)), 0.0f, 1.0f));
+                    int g = static_cast<int>(255 * std::clamp(toSRGB_fast(std::max(0.0f, exposed.y)), 0.0f, 1.0f));
+                    int b = static_cast<int>(255 * std::clamp(toSRGB_fast(std::max(0.0f, exposed.z)), 0.0f, 1.0f));
+                    
+                    Uint32* pixels_ptr = static_cast<Uint32*>(surface->pixels);
+                    int screen_idx = (surface->h - 1 - j) * (surface->pitch / 4) + i;
+                    pixels_ptr[screen_idx] = SDL_MapRGB(surface->format, r, g, b);
+                    
+                    continue;  // Skip to next pixel - FAST PATH!
+                }
+            }
+
             Vec3 color_sum(0.0f);
 
             // Render samples for this pass in 8-wide packets
@@ -3472,18 +3861,19 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             // Accumulate with previous samples
             Vec4& accum = cpu_accumulation_buffer[pixel_index];
             float prev_samples = accum.w;
+            Vec3 blended_color = new_color;
+            float new_total_samples = float(samples_this_pass);
 
             if (prev_samples > 0.0f) {
                 // Progressive blend
-                float new_total = prev_samples + samples_this_pass;
+                new_total_samples = prev_samples + samples_this_pass;
                 Vec3 prev_color(accum.x, accum.y, accum.z);
-                Vec3 blended = (prev_color * prev_samples + new_color * samples_this_pass) / new_total;
+                blended_color = (prev_color * prev_samples + new_color * samples_this_pass) / new_total_samples;
 
-                accum.x = blended.x;
-                accum.y = blended.y;
-                accum.z = blended.z;
-                accum.w = new_total;
-                new_color = blended;
+                accum.x = blended_color.x;
+                accum.y = blended_color.y;
+                accum.z = blended_color.z;
+                accum.w = new_total_samples;
             }
             else {
                 // First sample
@@ -3492,6 +3882,40 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 accum.z = new_color.z;
                 accum.w = float(samples_this_pass);
             }
+            
+            // ═══════════════════════════════════════════════════════════════════
+            // ADAPTIVE SAMPLING - Variance calculation for next pass decision
+            // ═══════════════════════════════════════════════════════════════════
+            // ADAPTIVE SAMPLING - Welford's Online Variance Algorithm
+            // More numerically stable than naive variance calculation
+            // Stores variance (σ²), CV is computed at check time as σ/μ
+            // ═══════════════════════════════════════════════════════════════════
+            if (render_settings.use_adaptive_sampling) {
+                // Compute luminance (Rec.709 weights)
+                auto compute_luminance = [](const Vec3& c) {
+                    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+                };
+                
+                // new_color = this pass's raw result, blended_color = accumulated mean
+                float new_lum = compute_luminance(new_color);
+                float mean_lum = compute_luminance(blended_color);
+                
+                // Welford's online algorithm for running variance
+                // More stable than naive E[X²] - E[X]² approach
+                float diff = new_lum - mean_lum;
+                float prev_variance = cpu_variance_buffer[pixel_index];
+                
+                // Incremental variance update: Var_n = Var_{n-1} + (x - μ)² / n - Var_{n-1} / n
+                // Simplified: exponential moving average with decreasing alpha
+                float alpha = 1.0f / std::max(new_total_samples, 2.0f);
+                float updated_variance = prev_variance * (1.0f - alpha) + (diff * diff) * alpha;
+                
+                // Clamp to prevent numerical issues (very bright fireflies)
+                cpu_variance_buffer[pixel_index] = std::clamp(updated_variance, 0.0f, 100.0f);
+            }
+            
+            // Use blended color for display
+            new_color = blended_color;
 
             // Write to surface with tone mapping
             auto toSRGB = [](float c) {

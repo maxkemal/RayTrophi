@@ -122,9 +122,6 @@ struct NishitaSkyParams {
     float godrays_intensity;       // God ray brightness (0.0 - 2.0)
     float godrays_density;         // God ray density/thickness
     int godrays_samples;           // Quality (8-32 recommended)
-    float godrays_decay;           // Light decay over distance
-    float godrays_density_clip_bias; // Bias for density probe threshold (-0.1 to 0.1)
-    float godrays_stochastic_threshold; // Threshold for hybrid deterministic/stochastic transition (0.0 to 1.0)
     
     // Physical Parameters (Atmosphere Physics)
     float humidity;                // 0.0 (Dry) to 1.0 (Humid/Hazy)
@@ -238,6 +235,8 @@ public:
     // Camera position for volumetric clouds
     void setCameraY(float y) { data.camera_y = y; }
     float getCameraY() const { return data.camera_y; }
+
+    AtmosphereLUT* getLUT() const { return atmosphere_lut; }
 
     // CPU Evaluation (for background missing)
     Vec3 evaluate(const Vec3& ray_dir);

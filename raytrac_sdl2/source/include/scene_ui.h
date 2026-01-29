@@ -98,15 +98,17 @@ class SceneUI {
 public:   
     // UI State
     int pivot_mode = 0; // 0=Median Point (Group), 1=Individual Origins
+    int active_properties_tab = 0; // NEW: Vertical side tab index
     bool show_animation_panel = true; // Default open
     bool show_foliage_tab = false;    // Default closed (User preference)
     bool show_water_tab = true;       // DEFAULT OPEN
     bool show_terrain_tab = true;     // DEFAULT OPEN
-    bool show_system_tab = false;     // Default closed
+    bool show_system_tab = true;     // Default closed
     bool show_terrain_graph = false;  // Terrain node editor panel
     bool show_anim_graph = false;     // Animation node editor panel
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
-    bool show_forcefield_tab = false;   // Force Field tab (Default open)
+    bool show_forcefield_tab = true;   // Force Field tab (Default open)
+    bool show_world_tab = true;        // World & Sky tab (Default open)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Static Helpers (Shared across modules)
