@@ -6,46 +6,42 @@ RayTrophi, **NVIDIA OptiX 7**, **SDL2**, **ImGui** ve **OpenVDB (NanoVDB)** ile 
 
 ## 🚀 Temel Özellikler
 
-### 🔥 Hacimsel Render (VDB) (YENİ)
-- **OpenVDB / NanoVDB Desteği:** Standart `.vdb` dosyalarını ve sequence'ları (dizi) içe aktarın.
-- **Sequence Oynatma:** Patlama, duman ve ateş gibi hacimsel animasyonları gerçek zamanlı oynatın.
-- **GPU Path Tracing:** NVIDIA GPU hızlandırmalı tam hacimsel render.
-- **Blackbody Işıması:** Fiziksel tabanlı, sıcaklığa (Temperature) göre ateş/patlama ışıklandırması.
-- **Hibrit Destek:** GPU yoksa veya yetersizse otomatik CPU render moduna geçiş.
+### 🌪️ Gaz & Akışkan Simülasyonu (YENİ)
+- **Fiziksel Gaz Çözücü:** GPU hızlandırmalı sıvı/duman simülasyonu, gerçek zamanlı geri bildirim.
+- **Kuvvet Alanları (Force Fields):** Point, Directional, Vortex, Turbulence ve Drag kuvvetleri ile simülasyonu yönlendirin.
+- **Hacimsel Render (Volumetric):** Gerçekçi ateş ve patlamalar için Dual-Lobe Phase, Multi-Scattering ve Blackbody ışınımı.
+- **OpenVDB / NanoVDB Desteği:** Karmaşık hacimsel veriler için standart `.vdb` dosyalarını yükleyin.
 
-### 🎬 Animasyon Sistemi
-- **Timeline & Keyframe:** Objeler, Işıklar, Kameralar ve Dünya (World) özellikleri için animasyon.
-- **Graph Editor:** Node (düğüm) tabanlı animasyon kontrolü.
-- **Animasyon Render Modu:** `render_Animation` döngüsü ile kare kare animasyon çıktısı (Image Sequence).
-- **Skinning:** Temel karakter animasyonu desteği (CPU skinning -> GPU upload).
+### 🎬 Gelişmiş Animasyon Sistemi
+- **Animasyon Grafiği (AnimGraph):** Karakter mantığı için Durum Makinesi (State Machine) (Idle -> Walk -> Run).
+- **Blend Spaces:** Parametrelere göre animasyonlar arası pürüzsüz geçiş (Örn: Hız, Yön).
+- **Timeline & Keyframe:** Objeler, Işıklar, Kameralar ve Dünya özellikleri (Gökyüzü, Bulut Yoğunluğu vb.) için tam animasyon.
+- **Skinning Desteği:** Karakter meshleri için GPU hızlandırmalı skinning.
 
-### 🌍 Arazi & Çevre (Terrain & Environment)
+### 🌍 Arazi & Bitki Örtüsü (Foliage)
+- **Foliage Boyama:** Milyonlarca ağaç, çim ve kaya örneğini GPU optimizasyonu ile araziye boyayın. Fırça yarıçapı, yoğunluk ve yüzey hizalama kontrolleri içerir.
 - **Terrain Node Sistemi (V2):** 
-  - Grafik tabanlı arazi üretimi (Perlin, Erozyon, Hidrolik Aşınma).
-  - **AutoSplat:** Eğim ve Yüksekliğe göre otomatik kaplama/doku.
-  - **Splat Haritaları:** Maskeleri PNG olarak dışa aktarma.
+  - Hidrolik Erozyon simülasyonu.
+  - Prosedürel gürültü nodları (Perlin, Worley).
 - **Su Sistemi:**
-  - **FFT Okyanus:** Gerçek zamanlı derin okyanus simülasyonu.
-  - **Gerstner Dalgaları:** Kıyı ve göl dalga efektleri.
-  - **Nehir Editörü:** Bezier eğrileri (spline) ile nehir yatağı çizim aracı.
+  - **FFT Okyanus:** Beyaz köpük (foam) efektli gerçek zamanlı derin okyanus.
+  - **Nehir Aracı:** Akış haritaları ve türbülans efektleri ile Bezier eğrileri üzerinden nehir oluşturma.
 - **Atmosfer:**
   - Nishita Gökyüzü Modeli (Spektral Gece/Gündüz Döngüsü).
-  - Hacimsel Sis (Fog) ve God Ray efektleri.
-  - Yüksekliğe göre yoğunlaşan Çift Katmanlı (Dual-Lobe) Bulutlar.
+  - Hacimsel Sis ve Hüzme Işıkları (God Rays).
 
 ### 🖌️ Sahne Editörü & Araçlar
-- **Scatter Fırçası:** Çimen, ağaç ve diğer objeleri doğrudan arazi üzerine boyayarak yerleştirin.
-- **Terrain Fırçası:** Araziyi (Heightmap) gerçek zamanlı olarak şekillendirin ve boyayın.
-- **Gizmolar:** Blender tarzı Translasyon, Rotasyon ve Ölçekleme araçları.
-- **Undo/Redo (Geri/İleri Al):** Tüm sahne işlemleri için gelişmiş komut geçmişi.
-- **Varlık Yönetimi:** GLTF/GLB modellerini materyalleriyle birlikte içeri aktarın.
+- **Modern Arayüz (UI):** World, Terrain, Water ve Animation panelleri için modernize edilmiş, karanlık temalı ve düzenli arayüz.
+- **Etkileşimli Gizmolar:** Taşıma, Döndürme ve Ölçekleme için Blender tarzı 3D manipülatörler.
+- **Varlık Yönetimi:** Güçlü GLTF/GLB içe aktarma desteği.
+- **Dokümantasyon:** Modern web arayüzüne sahip entegre çevrimdışı dokümantasyon.
 
 ### 🎨 Render Çekirdeği
 - **Hibrit Motor:** 
-  - **GPU:** OptiX 7 (RTX Hızlandırmalı) Path Tracing.
-  - **CPU:** Intel Embree / Paralel BVH Fallback (Yedek).
+  - **GPU:** OptiX 7 (RTX Hızlandırmalı) Path Tracing ve Instancing desteği.
+  - **CPU:** Intel Embree / Paralel BVH Fallback.
 - **Materyaller:** Principled BSDF (Disney), Cam, Metal, Emisyon, Volumetric.
-- **Denoiser:** Entegre OIDN (Open Image Denoise) ile temiz önizlemeler.
+- **Denoiser:** Temiz önizlemeler için Intel OIDN entegrasyonu.
 
 ## 🎮 Kontroller
 

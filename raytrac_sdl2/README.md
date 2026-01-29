@@ -6,46 +6,42 @@ RayTrophi is a high-performance, modular ray tracing engine built with **NVIDIA 
 
 ## 🚀 Key Features
 
-### 🔥 Volumetric Rendering (VDB)
-- **OpenVDB / NanoVDB Support:** Import standard `.vdb` files and sequences.
-- **Sequence Playback:** Real-time playback of volumetric animations (explosions, smoke, fire).
-- **GPU Path Tracing:** Fully accelerated volumetric rendering on NVIDIA GPUs.
-- **Blackbody Emission:** Physically accurate temperature-based emission (Fire/Explosion).
-- **Hybrid Support:** Falls back to CPU rendering if GPU is unavailable.
+### 🌪️ Gas & Fluid Simulation (NEW)
+- **Physical Gas Solver:** GPU-accelerated fluid simulation (Smoke, Fire) with real-time feedback.
+- **Force Fields:** Interact with simulations using Point, Directional, Vortex, Turbulence, and Drag forces.
+- **Volumetric Rendering:** Dual-Lobe Phase function, Multi-Scattering, and Blackbody radiation for realistic fire/explosions.
+- **OpenVDB / NanoVDB Support:** Import standard `.vdb` files and sequences for complex volumetric data.
 
-### 🎬 Animation System
-- **Timeline & Keyframing:** Animate Objects, Lights, Cameras, and World properties.
-- **Graph Editor:** Node-based animation control.
-- **Animation Render Mode:** Batch render image sequences with `render_Animation` loop.
-- **Skinned Mesh Support:** Basic character animation (CPU skinning -> GPU upload).
+### 🎬 Advanced Animation System
+- **Animation Graph (AnimGraph):** State Machine based character animation logic (Idle -> Walk -> Run).
+- **Blend Spaces:** Smoothly blend between animations based on parameters (e.g., Speed, Direction).
+- **Timeline & Keyframing:** Animate Objects, Lights, Cameras, and World properties (Sky, Cloud Density, etc.).
+- **Skinned Mesh Support:** GPU-accelerated skinning for character meshes.
 
-### 🌍 Terrain & Environment
+### 🌍 Terrain & Foliage
+- **Foliage Painting:** Paint millions of instanced objects (trees, grass, rocks) with optimized GPU Performance. Features brush radius, density, and alignment controls.
 - **Terrain Node System (V2):** 
-  - Graph-based terrain generation (Perlin, Erosion, Hydraulic, Thermal).
-  - **AutoSplat:** Slope/Height based texturing.
-  - **Splat Maps:** Export generated masks to PNG.
+  - Hydraulic Erosion simulation.
+  - Generative noise nodes (Perlin, Worley).
 - **Water System:**
-  - **FFT Ocean:** Real-time deep ocean simulation.
-  - **Gerstner Waves:** Shoreline/Lake wave simulation.
-  - **River Editor:** Bezier-spline based river placement tools.
+  - **FFT Ocean:** Real-time deep ocean simulation with whitecaps.
+  - **River Tool:** Create flowing rivers using cubic bezier splines with flow maps and turbulence.
 - **Atmosphere:**
   - Nishita Sky Model (Spectral Day/Night Cycle).
   - Volumetric Fog & God Rays.
-  - Dual-Lobe Cumulus Clouds.
 
 ### 🖌️ Scene Editor & Tools
-- **Scatter Brush:** Paint foliage/instances directly onto terrain surfaces.
-- **Terrain Brush:** Sculpt and paint terrain height/features in real-time.
-- **Gizmos:** Blender-style 3D manipulators (Translate, Rotate, Scale).
-- **Undo/Redo:** Robust command history for all scene operations.
-- **Asset Management:** GLTF/GLB import support with materials.
+- **Modern UI Overhaul:** Refined dark theme with organized panels for World, Terrain, Water, and Animation.
+- **Interactive Gizmos:** Blender-style 3D manipulators for Translate, Rotate, and Scale.
+- **Asset Management:** robust GLTF/GLB import support.
+- **Documentation:** Built-in offline documentation with modern web interface.
 
 ### 🎨 Rendering Core
 - **Hybrid Engine:** 
-  - **GPU:** OptiX 7 (RTX Accelerated) Path Tracing.
+  - **GPU:** OptiX 7 (RTX Accelerated) Path Tracing with Instancing support.
   - **CPU:** Intel Embree / Parallel BVH Fallback.
 - **Materials:** Principled BSDF (Disney), Glass, Metal, Emission, Volumetric.
-- **Denoiser:** OIDN (Open Image Denoise) integration.
+- **Denoiser:** Intel OIDN integration for noise-free previews.
 
 ## 🎮 Controls
 
