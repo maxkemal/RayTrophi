@@ -4,62 +4,49 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RayTrophi Manual - World & Environment</title>
+    <title>RayTrophi Manual - World & Sky</title>
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0;">RayTrophi</h2>
+        <h2>RayTrophi</h2>
         <a href="index.html" class="nav-link">Home / Overview</a>
         <a href="world.html" class="nav-link active">World & Sky</a>
         <a href="water.html" class="nav-link">Water System</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="river.html" class="nav-link">River Tool</a>
-        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="animation.html" class="nav-link">Animation</a>
-        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
         <a href="camera.html" class="nav-link">Pro Camera</a>
         <a href="system.html" class="nav-link">System & File</a>
     </div>
 
     <div id="content">
         <div class="container">
-            <a href="index.html" class="back-btn">← Back to Home</a>
-
             <h1>World & Environment</h1>
 
-            <!-- HEADER IMAGE (Full Width) -->
-            <div class="screenshot-area" style="border:none; background:none; padding:0; margin-bottom:30px;">
-                <img src="images/world_header.jpg" alt="World Showcase"
-                    style="width:100%; border-radius:8px; box-shadow: 0 5px 15px rgba(0,0,0,0.5);"
-                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
-                <div class="missing-img"
-                    style="border: 2px dashed #444; border-radius: 8px; display:none; align-items:center; justify-content:center; flex-direction:column; height:200px;">
-                    <div style="font-size:2em; margin-bottom:10px;">🌤️</div>
-                    Please save a showcase render of the Sky/Atmosphere as <code>manual/images/world_header.jpg</code>
+            <div class="screenshot-area">
+                <img src="images/world_header.jpg" alt="Sky Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🌤️ Please save a Sky Render as <code>docs/images/world_header.jpg</code>
                 </div>
             </div>
 
-            <p>The World module controls the global lighting, skybox, atmospheric effects, and volumetric clouds.</p>
+            <p>The World module controls global lighting, atmospheric effects, volumetric clouds, and gas simulations.
+            </p>
 
-            <!-- NISHITA SKY (Split Layout) -->
             <h2 id="nishita">1. Nishita Sky Model</h2>
-            <p>A physically based spectral sky model that simulates Rayleigh and Mie scattering.</p>
-
-            <div class="card split-layout">
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/world_sky.png" alt="Nishita Sky Settings"
+                    <img src="images/world_sky.jpg" alt="Sky Settings"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Sky Settings Panel</strong> as
-                        <code>manual/images/world_sky.png</code>
-                    </div>
+                    <div class="missing-img">Sky Settings UI</div>
                 </div>
-
-                <div class="table-container">
+                <div>
+                    <p>Physically based spectral sky model simulating Rayleigh and Mie scattering.</p>
                     <table class="param-table">
                         <tr>
                             <th>Parameter</th>
@@ -67,47 +54,37 @@
                         </tr>
                         <tr>
                             <td>Sun Elevation</td>
-                            <td>Height of the sun. Determines time of day (Day/Sunset/Night).</td>
-                        </tr>
-                        <tr>
-                            <td>Sun Azimuth</td>
-                            <td>Rotation of the sun around the horizon.</td>
+                            <td>Height of the sun (Day/Night cycle).</td>
                         </tr>
                         <tr>
                             <td>Air Density</td>
-                            <td>Controls Rayleigh scattering. Heavy air makes the sky more blue/cyan.</td>
+                            <td>Controls Rayleigh scattering (Blue/Red sky).</td>
                         </tr>
                         <tr>
                             <td>Dust Density</td>
-                            <td>Controls Mie scattering (pollution/haze). Makes the horizon brighter/whiter.</td>
+                            <td>Controls Mie scattering (Haze/Pollution).</td>
                         </tr>
                         <tr>
                             <td>Ozone Density</td>
-                            <td>Effective absorption filter. Turn up for deep blue zenith.</td>
+                            <td>Absorption filter for deep blue zenith.</td>
                         </tr>
                         <tr>
                             <td>Sun Intensity</td>
-                            <td>Brightness multiplier for the sun disk and atmospheric light.</td>
+                            <td>Brightness multiplier.</td>
                         </tr>
                     </table>
                 </div>
             </div>
 
-            <!-- VOLUMETRIC CLOUDS (Split Layout) -->
             <h2 id="clouds">2. Volumetric Clouds</h2>
-            <p>Ray-marched volumetric clouds with multi-scattering.</p>
-
-            <div class="card split-layout">
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/world_clouds.png" alt="Cloud Settings"
+                    <img src="images/world_clouds.jpg" alt="Cloud Settings"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Volumetric Clouds Panel</strong> as
-                        <code>manual/images/world_clouds.png</code>
-                    </div>
+                    <div class="missing-img">Cloud Settings UI</div>
                 </div>
-
-                <div class="table-container">
+                <div>
+                    <p>Ray-marched volumetric clouds with multi-scattering approximation.</p>
                     <table class="param-table">
                         <tr>
                             <th>Parameter</th>
@@ -115,72 +92,149 @@
                         </tr>
                         <tr>
                             <td>Coverage</td>
-                            <td>Amount of clouds in the sky. (0.0 = Clear, 1.0 = Overcast).</td>
+                            <td>Amount of clouds (0.0=Clear, 1.0=Storm).</td>
                         </tr>
                         <tr>
                             <td>Density</td>
-                            <td>Optical thickness of the clouds. Higher values block more light (darker bottoms).</td>
+                            <td>Thickness of the cloud layer.</td>
                         </tr>
                         <tr>
                             <td>Absorption</td>
-                            <td>How much light is absorbed inside the cloud volume. Controls the "silver lining" effect.
-                            </td>
+                            <td>Light absorption inside clouds (Silver lining).</td>
                         </tr>
                         <tr>
                             <td>Detail Scale</td>
-                            <td>Frequency of the noise used to carve the cloud shapes.</td>
+                            <td>Frequency of the noise texture.</td>
                         </tr>
                         <tr>
                             <td>Wind Speed</td>
-                            <td>Speed of cloud movement across the sky.</td>
+                            <td>Movement speed across the sky.</td>
                         </tr>
                     </table>
                 </div>
             </div>
 
-            <!-- FOG & ATMOSPHERE (Split Layout) -->
-            <h2 id="fog">3. Atmospheric Fog & God Rays</h2>
-
-            <div class="card split-layout">
+            <h2 id="gas">3. Gas & Smoke Simulation</h2>
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/world_fog.png" alt="Fog Settings"
+                    <img src="images/world_gas.jpg" alt="Gas Sim"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Fog / Atmosphere Panel</strong> as
-                        <code>manual/images/world_fog.png</code>
-                    </div>
+                    <div class="missing-img">Gas Simulation UI</div>
                 </div>
+                <div>
+                    <p>A powerful GPU-accelerated fluid solver for smoke, fire, and explosions.</p>
 
-                <div class="table-container">
+                    <h3>Simulation Settings</h3>
                     <table class="param-table">
                         <tr>
                             <th>Parameter</th>
                             <th>Description</th>
                         </tr>
                         <tr>
-                            <td>Fog Density</td>
-                            <td>Base density of the global exponential height fog.</td>
+                            <td>Grid Size</td>
+                            <td>Physical world dimensions of the simulation box.</td>
                         </tr>
                         <tr>
-                            <td>Height Falloff</td>
-                            <td>How quickly the fog thins out with altitude.</td>
+                            <td>Buoyancy</td>
+                            <td>Upward force based on temperature (Hot smoke rises).</td>
                         </tr>
                         <tr>
-                            <td>God Rays</td>
-                            <td>Enable volumetric light shafts (crepuscular rays).</td>
+                            <td>Vorticity</td>
+                            <td>Injects small swirling details to prevent diffusion.</td>
                         </tr>
                         <tr>
-                            <td>Ray Steps</td>
-                            <td>Quality of the god ray integration. Higher steps = smoother rays but slower.</td>
+                            <td>Dissipation</td>
+                            <td>Rate at which smoke/temperature fades over time.</td>
+                        </tr>
+                    </table>
+
+                    <h3>Rendering (Volumetric Shader)</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Scattering</td>
+                            <td>Dual-Lobe Henyey-Greenstein phase function.</td>
+                        </tr>
+                        <tr>
+                            <td>Multi-Scatter</td>
+                            <td>Approximates internal light bounces for realism.</td>
+                        </tr>
+                        <tr>
+                            <td>Blackbody</td>
+                            <td>Emits light based on physical temperature (Fire).</td>
                         </tr>
                     </table>
                 </div>
             </div>
 
-            <div style="height:50px"></div>
+            <h2 id="forces">4. Force Fields</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/world_forces.jpg" alt="Force Fields"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Force Field Settings</div>
+                </div>
+                <div>
+                    <p>Invisible forces that manipulate the motion of Gas and Smoke simulations.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Type</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Point Force</td>
+                            <td>Radial force. Positive pushes out (Explosion), Negative pulls in (Implosion).</td>
+                        </tr>
+                        <tr>
+                            <td>Directional</td>
+                            <td>Uniform force in a specific vector direction (Wind).</td>
+                        </tr>
+                        <tr>
+                            <td>Vortex</td>
+                            <td>Rotational force around a central axis (Tornado).</td>
+                        </tr>
+                        <tr>
+                            <td>Turbulence</td>
+                            <td>Adds curl noise to break up uniform motion and add chaos.</td>
+                        </tr>
+                        <tr>
+                            <td>Drag</td>
+                            <td>Resistance force that slows down fluid velocity over time.</td>
+                        </tr>
+                    </table>
+
+                    <h3>Common Parameters</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Strength</td>
+                            <td>Magnitude of the force.</td>
+                        </tr>
+                        <tr>
+                            <td>Radius</td>
+                            <td>Effective range of the force field.</td>
+                        </tr>
+                        <tr>
+                            <td>Falloff</td>
+                            <td>How quickly the force weakens from the center.</td>
+                        </tr>
+                        <tr>
+                            <td>Position</td>
+                            <td>3D World coordinate of the force center.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
         </div>
     </div>
-
 </body>
 
 </html>

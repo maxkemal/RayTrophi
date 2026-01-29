@@ -4,109 +4,71 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RayTrophi Manual - System & Files</title>
+    <title>RayTrophi Manual - System</title>
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0;">RayTrophi</h2>
+        <h2>RayTrophi</h2>
         <a href="index.html" class="nav-link">Home / Overview</a>
         <a href="world.html" class="nav-link">World & Sky</a>
         <a href="water.html" class="nav-link">Water System</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="river.html" class="nav-link">River Tool</a>
-        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="animation.html" class="nav-link">Animation</a>
-        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
         <a href="camera.html" class="nav-link">Pro Camera</a>
         <a href="system.html" class="nav-link active">System & File</a>
     </div>
 
     <div id="content">
         <div class="container">
-            <a href="index.html" class="back-btn">← Back to Home</a>
+            <h1>System & Shortcuts</h1>
 
-            <h1>System & File Management</h1>
-
-            <!-- HEADER IMAGE -->
-            <div class="screenshot-area" style="border:none; background:none; padding:0; margin-bottom:30px;">
-                <img src="images/system_header.jpg" alt="System Showcase"
-                    style="width:100%; border-radius:8px; box-shadow: 0 5px 15px rgba(0,0,0,0.5);"
-                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                <div class="missing-img" style="border: 2px dashed #444; border-radius: 8px;">
-                    Please save a screenshot of the <strong>Splash Screen or Main Interface</strong> as
-                    <code>manual/images/system_header.jpg</code>
-                </div>
-            </div>
-
-            <!-- PROJECT -->
-            <h2 id="project">1. Project Management</h2>
-            <p>RayTrophi uses a proprietary <code>.rtp</code> (RayTrophi Project) format.</p>
-
+            <h2 id="project">1. Project</h2>
             <div class="card">
-                <h3>File Menu</h3>
                 <ul>
-                    <li><strong>New Project (Ctrl+N)</strong></li>
-                    <li><strong>Open Project (Ctrl+O)</strong></li>
-                    <li><strong>Save Project (Ctrl+S)</strong></li>
-                    <li><strong>Import Model (Ctrl+I)</strong></li>
+                    <li><strong>New:</strong> Ctrl+N</li>
+                    <li><strong>Open:</strong> Ctrl+O</li>
+                    <li><strong>Save:</strong> Ctrl+S</li>
+                    <li><strong>Import:</strong> Ctrl+I</li>
                 </ul>
             </div>
 
-            <!-- SHORTCUTS -->
-            <h2 id="shortcuts">2. Keyboard Shortcuts</h2>
-
+            <h2 id="keys">2. Shortcuts</h2>
             <div class="card">
                 <table class="param-table">
                     <tr>
-                        <th>Context</th>
-                        <th>Shortcut</th>
+                        <th>Key</th>
                         <th>Action</th>
                     </tr>
                     <tr>
-                        <td>View</td>
                         <td>N</td>
-                        <td>Toggle Properties</td>
+                        <td>Properties Panel</td>
                     </tr>
                     <tr>
-                        <td>View</td>
                         <td>F12</td>
-                        <td>Render Final</td>
+                        <td>Render</td>
                     </tr>
                     <tr>
-                        <td>View</td>
-                        <td>F1</td>
-                        <td>Documentation</td>
-                    </tr>
-                    <tr>
-                        <td>Edit</td>
-                        <td>Ctrl+Z</td>
-                        <td>Undo</td>
+                        <td>W/A/S/D</td>
+                        <td>Move Camera</td>
                     </tr>
                 </table>
             </div>
 
-            <!-- LOGS -->
-            <h2 id="log">3. Console & Logs</h2>
-
+            <h2 id="console">3. Console</h2>
             <div class="card">
-                <div class="screenshot-area">
-                    <img src="images/sys_console.png" alt="Console Log"
-                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Bottom Console Panel</strong> as
-                        <code>manual/images/sys_console.png</code>
-                    </div>
-                </div>
+                <p>Check the bottom panel for logs and errors.</p>
+                <img src="images/sys_console.jpg" alt="Console" style="width:100%; margin-top:10px;"
+                    onerror="this.style.display='none'">
             </div>
 
-            <div style="height:50px"></div>
+            <div style="height: 50px;"></div>
         </div>
     </div>
-
 </body>
 
 </html>

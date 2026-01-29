@@ -4,64 +4,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RayTrophi Manual - Terrain System</title>
+    <title>RayTrophi Manual - Terrain</title>
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0;">RayTrophi</h2>
+        <h2>RayTrophi</h2>
         <a href="index.html" class="nav-link">Home / Overview</a>
         <a href="world.html" class="nav-link">World & Sky</a>
         <a href="water.html" class="nav-link">Water System</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="river.html" class="nav-link">River Tool</a>
-        <a href="terrain.html" class="nav-link active">Terrain System</a>
         <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link active">Terrain System</a>
         <a href="animation.html" class="nav-link">Animation</a>
-        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
         <a href="camera.html" class="nav-link">Pro Camera</a>
         <a href="system.html" class="nav-link">System & File</a>
     </div>
 
     <div id="content">
         <div class="container">
-            <a href="index.html" class="back-btn">← Back to Home</a>
+            <h1>Terrain & Foliage</h1>
 
-            <h1>Terrain & Erosion</h1>
-
-            <!-- HEADER IMAGE -->
-            <div class="screenshot-area" style="border:none; background:none; padding:0; margin-bottom:30px;">
-                <img src="images/terrain_header.jpg" alt="Terrain Showcase"
-                    style="width:100%; border-radius:8px; box-shadow: 0 5px 15px rgba(0,0,0,0.5);"
-                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
-                <div class="missing-img"
-                    style="border: 2px dashed #444; border-radius: 8px; display:none; align-items:center; justify-content:center; flex-direction:column; height:200px;">
-                    <div style="font-size:2em; margin-bottom:10px;">⛰️</div>
-                    Please save a showcase render of the Terrain as <code>manual/images/terrain_header.jpg</code>
+            <div class="screenshot-area">
+                <img src="images/terrain_foliage_header.jpg" alt="Terrain Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    ⛰️ Please save a Terrain Render as <code>docs/images/terrain_foliage_header.jpg</code>
                 </div>
             </div>
 
-            <p>RayTrophi features a powerful heightmap-based terrain engine with GPU-accelerated sculpting and hydraulic
-                erosion simulation.</p>
+            <p>GPU-accelerated heightmap engine with hydraulic erosion and vegetation painting.</p>
 
-            <!-- HYDRAULIC EROSION (Split Layout) -->
-            <h2 id="erosion">1. Hydraulic Erosion Simulator</h2>
-            <p>The erosion system simulates thousands of water droplets falling onto the terrain, dissolving soil,
-                transporting it downhill, and depositing it in pools.</p>
-
-            <div class="card split-layout">
+            <h2 id="erosion">1. Hydraulic Erosion</h2>
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/terrain_erosion.png" alt="Erosion Panel"
+                    <img src="images/terrain_erosion.jpg" alt="Erosion UI"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Erosion Panel</strong> as
-                        <code>manual/images/terrain_erosion.png</code>
-                    </div>
+                    <div class="missing-img">Erosion UI</div>
                 </div>
-
-                <div class="table-container">
+                <div>
+                    <p>Simulates water droplets dissolving and transporting soil.</p>
                     <table class="param-table">
                         <tr>
                             <th>Parameter</th>
@@ -69,41 +53,82 @@
                         </tr>
                         <tr>
                             <td>Rain Amount</td>
-                            <td>Number of water droplets to simulate per cycle.</td>
+                            <td>Droplets per cycle.</td>
                         </tr>
                         <tr>
                             <td>Solubility</td>
-                            <td>How easily the terrain soil dissolves into water.</td>
+                            <td>How easily soil dissolves.</td>
                         </tr>
                         <tr>
                             <td>Sediment Capacity</td>
-                            <td>Maximum amount of soil a droplet can carry.</td>
+                            <td>Max soil carried by water.</td>
+                        </tr>
+                        <tr>
+                            <td>Evaporation</td>
+                            <td>Drying rate.</td>
+                        </tr>
+                        <tr>
+                            <td>Gravity</td>
+                            <td>Speed of droplet descent (affects pit formation).</td>
                         </tr>
                     </table>
                 </div>
             </div>
 
-            <!-- TERRAIN GENERATION (Full Width - Graphs are wide) -->
-            <h2 id="nodegraph">2. Node Graph & Generation</h2>
-            <p>Combine multiple heightmaps and procedural noises using the Node Graph editor.</p>
-
-            <div class="card">
+            <h2 id="foliage">2. Foliage System (New)</h2>
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/terrain_nodegraph.png" alt="Terrain Node Graph"
+                    <img src="images/terrain_foliage.jpg" alt="Foliage UI"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Terrain Node Graph</strong> as
-                        <code>manual/images/terrain_nodegraph.png</code>
-                    </div>
+                    <div class="missing-img">Foliage / Brush UI</div>
                 </div>
+                <div>
+                    <p>Paint vegetation directly onto the terrain mesh.</p>
+                    <h3>Brush Settings</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Action</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Left Click</td>
+                            <td>Paint instances within radius.</td>
+                        </tr>
+                        <tr>
+                            <td>Shift + Click</td>
+                            <td>Erase instances within radius (or use Erase Mode).</td>
+                        </tr>
+                    </table>
 
-                <p><strong>Common Nodes:</strong> Perlin Noise, Worley Noise, Mix, Curve, Erosion.</p>
+                    <h3>Parameters</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Radius</td>
+                            <td>Size of the brush cursor.</td>
+                        </tr>
+                        <tr>
+                            <td>Density</td>
+                            <td>Number of instances spawned per brush stroke.</td>
+                        </tr>
+                        <tr>
+                            <td>Align to Normal</td>
+                            <td>If checked, trees point perpendicular to the slope.</td>
+                        </tr>
+                        <tr>
+                            <td>Random Rot</td>
+                            <td>Adds random Y-rotation for variety.</td>
+                        </tr>
+                    </table>
+                </div>
             </div>
 
-            <div style="height:50px"></div>
+            <div style="height: 50px;"></div>
         </div>
     </div>
-
 </body>
 
 </html>

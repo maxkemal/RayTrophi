@@ -1,289 +1,237 @@
-/* RayTrophi Studio - Modern Web Style */
+/* Main Variables */
 :root {
-    --bg-color: #0d0e12;
-    --sidebar-bg: #14161a;
+    --bg-color: #121417;
+    --sidebar-bg: #1a1c20;
+    --text-color: #e0e0e0;
+    --accent-color: #0AC;
+    --accent-hover: #0088aa;
+    --border-color: #333;
+    --code-bg: #222;
     --card-bg: #1e2126;
-    --text-main: #e0e0e0;
-    --text-muted: #a0a0a0;
-    --accent: #00ccff;
-    --accent-hover: #33ddff;
-    --accent-glow: rgba(0, 204, 255, 0.2);
-    --border: #333;
-    --font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
 }
 
 body {
-    margin: 0;
-    padding: 0;
+    font-family: 'Segoe UI', Inter, Roboto, sans-serif;
     background-color: var(--bg-color);
-    color: var(--text-main);
-    font-family: var(--font-family);
+    color: var(--text-color);
+    margin: 0;
     display: flex;
-    min-height: 100vh;
-    overflow-x: hidden;
+    height: 100vh;
+    overflow: hidden;
 }
 
-/* SCROLLBAR */
-::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-}
-
-::-webkit-scrollbar-track {
-    background: var(--bg-color);
-}
-
-::-webkit-scrollbar-thumb {
-    background: #444;
-    border-radius: 5px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-    background: #666;
-}
-
-/* SIDEBAR */
+/* Sidebar */
 #sidebar {
     width: 280px;
     background-color: var(--sidebar-bg);
-    border-right: 1px solid var(--border);
+    padding: 30px;
+    border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
-    position: fixed;
-    height: 100vh;
     overflow-y: auto;
-    padding: 20px 0;
-    z-index: 1000;
-    box-shadow: 5px 0 15px rgba(0, 0, 0, 0.2);
+    flex-shrink: 0;
 }
 
 #sidebar h2 {
-    color: #fff;
-    padding: 0 25px;
-    margin-bottom: 30px;
-    font-size: 1.5em;
-    letter-spacing: 1px;
+    color: var(--accent-color);
     text-transform: uppercase;
-    background: -webkit-linear-gradient(0deg, #fff, #888);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    letter-spacing: 2px;
+    margin-bottom: 40px;
+    font-size: 1.4em;
 }
 
 .nav-link {
     display: block;
-    padding: 12px 25px;
-    color: var(--text-muted);
+    color: #888;
     text-decoration: none;
-    transition: all 0.2s ease;
-    border-left: 3px solid transparent;
-    font-size: 0.95em;
-}
-
-.nav-link:hover {
-    background-color: rgba(255, 255, 255, 0.05);
-    color: #fff;
-}
-
-.nav-link.active {
-    background-color: rgba(0, 204, 255, 0.1);
-    color: var(--accent);
-    border-left-color: var(--accent);
-    font-weight: 600;
-}
-
-/* CONTENT AREA */
-#content {
-    margin-left: 280px;
-    flex: 1;
-    padding: 40px 60px;
-    max-width: 1200px;
-}
-
-.container {
-    max-width: 1100px;
-    margin: 0 auto;
-}
-
-/* TYPOGRAPHY */
-h1 {
-    font-size: 2.5em;
-    margin-bottom: 20px;
-    color: #fff;
-    font-weight: 300;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 15px;
-}
-
-h2 {
-    color: var(--accent);
-    margin-top: 40px;
+    padding: 12px 16px;
+    margin-bottom: 5px;
+    border-radius: 8px;
+    transition: all 0.2s;
     font-weight: 500;
 }
 
+.nav-link:hover {
+    background-color: rgba(0, 170, 204, 0.1);
+    color: var(--accent-color);
+    padding-left: 20px;
+}
+
+.nav-link.active {
+    background-color: var(--accent-color);
+    color: white;
+    box-shadow: 0 4px 15px rgba(0, 170, 204, 0.3);
+}
+
+/* Content Area */
+#content {
+    flex-grow: 1;
+    overflow-y: auto;
+    padding: 40px 60px;
+    scroll-behavior: smooth;
+}
+
+.container {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+h1 {
+    font-size: 3em;
+    margin-bottom: 20px;
+    background: linear-gradient(90deg, #fff, #bbb);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+h2 {
+    margin-top: 50px;
+    font-size: 2em;
+    border-bottom: 2px solid var(--border-color);
+    padding-bottom: 15px;
+    color: white;
+}
+
+h3 {
+    color: var(--accent-color);
+    margin-top: 30px;
+}
+
 p,
-li {
+li,
+td {
     line-height: 1.7;
     color: #ccc;
+    font-size: 1.05em;
 }
 
 a {
-    color: var(--accent);
+    color: var(--accent-color);
     text-decoration: none;
 }
 
-a:hover {
-    text-decoration: underline;
+code {
+    background: rgba(0, 170, 204, 0.1);
+    color: var(--accent-color);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'Consolas', monospace;
 }
 
-.back-btn {
-    display: inline-block;
-    margin-bottom: 20px;
-    font-size: 0.9em;
-    color: #888;
-}
-
-/* CARDS & BOXES */
+/* Cards & Layout */
 .card {
-    background-color: var(--card-bg);
-    border: 1px solid var(--border);
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
     border-radius: 12px;
     padding: 25px;
-    margin-bottom: 30px;
-    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-    transition: transform 0.2s;
+    margin-top: 25px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
 }
 
-.card:hover {
-    border-color: #444;
+.split-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 30px;
+    align-items: start;
 }
 
-.hint {
-    background-color: rgba(0, 204, 255, 0.1);
-    border-left: 4px solid var(--accent);
-    padding: 15px;
-    border-radius: 4px;
-    margin: 20px 0;
-    color: #d0f0ff;
+@media (max-width: 1100px) {
+    .split-layout {
+        grid-template-columns: 1fr;
+    }
 }
 
-/* TABLES */
-.param-table {
+/* Images */
+.screenshot-area img {
+    width: 100%;
+    border-radius: 8px;
+    border: 1px solid #444;
+}
+
+.missing-img {
+    display: none;
+    /* Hidden by default, shown by onerror */
+    background: #151515;
+    color: #888;
+    padding: 40px;
+    text-align: center;
+    border: 2px dashed #444;
+    border-radius: 8px;
+    margin-top: 10px;
+}
+
+/* Tables */
+.table-container {
+    overflow-x: auto;
+}
+
+table {
     width: 100%;
     border-collapse: collapse;
     margin-top: 10px;
 }
 
-.param-table th,
-.param-table td {
-    text-align: left;
+th,
+td {
     padding: 12px 15px;
-    border-bottom: 1px solid var(--border);
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
 }
 
-.param-table th {
-    color: #fff;
+th {
+    color: white;
     font-weight: 600;
-    background-color: rgba(255, 255, 255, 0.03);
 }
 
-.param-table tr:hover {
-    background-color: rgba(255, 255, 255, 0.02);
-}
-
-/* IMAGES & PLACEHOLDERS */
-.screenshot-area {
-    width: 100%;
-    margin: 20px 0;
-    border: 1px solid var(--border);
-    background: #000;
-    border-radius: 8px;
-    overflow: hidden;
-    position: relative;
-    /* Default vertical align is block. In split layout it will be controlled by flex */
-}
-
-.screenshot-area img {
-    width: 100%;
-    display: block;
-}
-
-.missing-img {
-    padding: 40px;
+/* Hero Section */
+.hero {
     text-align: center;
-    color: #666;
-    background: #111;
-    display: none;
-    /* JS will toggle this by removing display:none when OnError fires */
+    padding: 60px 0;
+    margin-bottom: 40px;
 }
 
-/* SPLIT LAYOUT FOR VERTICAL PANELS */
-.split-layout {
-    display: flex;
-    gap: 30px;
-    align-items: flex-start;
-}
-
-.split-layout .screenshot-area {
-    flex: 0 0 320px;
-    /* Fixed width for vertical panels */
+.hero h1 {
+    font-size: 4em;
+    background: linear-gradient(45deg, var(--accent-color), #00ffa3);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
     margin: 0;
-    /* Remove default margin */
 }
 
-.split-layout .table-container {
-    flex: 1;
+.feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+    margin-top: 40px;
 }
 
-/* FOOTER */
-.site-footer {
-    margin-top: 80px;
-    padding-top: 40px;
-    border-top: 1px solid var(--border);
+.feature-box {
+    background: var(--card-bg);
+    padding: 30px;
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    transition: transform 0.2s, border-color 0.2s;
+    cursor: pointer;
     text-align: center;
-    color: #666;
-    font-size: 0.9em;
 }
 
-/* RESPONSIVE */
-@media (max-width: 1000px) {
-    .split-layout {
-        flex-direction: column;
-    }
-
-    .split-layout .screenshot-area {
-        flex: none;
-        width: 100%;
-        max-width: 450px;
-        /* Limit max width on mobile so it doesn't look absurd */
-    }
+.feature-box:hover {
+    transform: translateY(-5px);
+    border-color: var(--accent-color);
 }
 
-@media (max-width: 900px) {
-    #sidebar {
-        width: 70px;
-        overflow: visible;
-        padding: 10px 0;
-    }
+.feature-icon {
+    font-size: 3em;
+    margin-bottom: 15px;
+}
 
-    #sidebar h2 {
-        display: none;
-    }
-
-    .nav-link {
-        text-align: center;
-        padding: 15px 5px;
-        font-size: 0.8em;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-
-    .nav-link span {
-        display: none;
-    }
-
-    #content {
-        margin-left: 70px;
-        padding: 20px;
-    }
+.tag {
+    display: inline-block;
+    background: rgba(0, 170, 204, 0.15);
+    color: var(--accent-color);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    margin-top: 15px;
+    font-weight: 600;
 }

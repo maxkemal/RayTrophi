@@ -4,123 +4,83 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RayTrophi Manual - Pro Camera</title>
+    <title>RayTrophi Manual - Camera</title>
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0;">RayTrophi</h2>
+        <h2>RayTrophi</h2>
         <a href="index.html" class="nav-link">Home / Overview</a>
         <a href="world.html" class="nav-link">World & Sky</a>
         <a href="water.html" class="nav-link">Water System</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="river.html" class="nav-link">River Tool</a>
-        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="animation.html" class="nav-link">Animation</a>
-        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
         <a href="camera.html" class="nav-link active">Pro Camera</a>
         <a href="system.html" class="nav-link">System & File</a>
     </div>
 
     <div id="content">
         <div class="container">
-            <a href="index.html" class="back-btn">← Back to Home</a>
+            <h1>Physical Camera</h1>
 
-            <h1>Pro Camera & Rendering</h1>
-
-            <!-- HEADER IMAGE (Full Width) -->
-            <div class="screenshot-area" style="border:none; background:none; padding:0; margin-bottom:30px;">
-                <img src="images/camera_header.jpg" alt="Camera Lens Showcase"
-                    style="width:100%; border-radius:8px; box-shadow: 0 5px 15px rgba(0,0,0,0.5);"
-                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
-                <div class="missing-img"
-                    style="border: 2px dashed #444; border-radius: 8px; display:none; align-items:center; justify-content:center; flex-direction:column; height:200px;">
-                    <div style="font-size:2em; margin-bottom:10px;">🎥</div>
-                    Please save a showcase render focusing on Depth of Field as
-                    <code>manual/images/camera_header.jpg</code>
-                </div>
+            <div class="screenshot-area">
+                <img src="images/camera_header.jpg" alt="Camera Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">🎥 Camera Header</div>
             </div>
 
-            <p>RayTrophi uses a physically based camera model to simulate real-world optics, including Depth of Field
-                and Exposure.</p>
-
-            <!-- LENS OPTICS (Split Layout) -->
-            <h2 id="lens">1. Physical Lens Settings</h2>
-
-            <div class="card split-layout">
-                <div class="screenshot-area">
-                    <img src="images/camera_lens.png" alt="Camera Settings"
-                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Camera Panel</strong> as
-                        <code>manual/images/camera_lens.png</code>
-                    </div>
-                </div>
-
-                <div class="table-container">
+            <div class="split-layout">
+                <div>
+                    <h2>Lens</h2>
                     <table class="param-table">
                         <tr>
-                            <th>Parameter</th>
+                            <th>Param</th>
                             <th>Description</th>
                         </tr>
                         <tr>
                             <td>Focal Length</td>
-                            <td>Zoom level (mm).</td>
+                            <td>Zoom (mm).</td>
                         </tr>
                         <tr>
-                            <td>Aperture (f-stop)</td>
-                            <td>Controls the size of the lens opening and DoF.</td>
+                            <td>Aperture</td>
+                            <td>f-stop (Depth of Field).</td>
                         </tr>
                         <tr>
-                            <td>Focus Distance</td>
-                            <td>The exact distance where objects appear sharp.</td>
+                            <td>Focus Dist</td>
+                            <td>Sharpness distance.</td>
                         </tr>
                     </table>
                 </div>
-            </div>
-
-            <!-- EXPOSURE (Split Layout) -->
-            <h2 id="post">2. Exposure & Post-Processing</h2>
-
-            <div class="card split-layout">
-                <div class="screenshot-area">
-                    <img src="images/camera_dof.png" alt="Post Processing"
-                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Post Processing Panel</strong> as
-                        <code>manual/images/camera_dof.png</code>
-                    </div>
-                </div>
-
-                <div class="table-container">
+                <div>
+                    <h2>Exposure</h2>
                     <table class="param-table">
                         <tr>
-                            <th>Parameter</th>
+                            <th>Param</th>
                             <th>Description</th>
                         </tr>
                         <tr>
                             <td>ISO</td>
-                            <td>Sensor sensitivity.</td>
+                            <td>Sensitivity.</td>
                         </tr>
                         <tr>
-                            <td>Shutter Speed</td>
-                            <td>Exposure time (1/s).</td>
+                            <td>Shutter</td>
+                            <td>Exposure time (Motion Blur).</td>
                         </tr>
                         <tr>
-                            <td>Tonemapping</td>
-                            <td>Converts High Dynamic Range (HDR) to screen colors.</td>
+                            <td>Tonemap</td>
+                            <td>ACES / Reinhard.</td>
                         </tr>
                     </table>
                 </div>
             </div>
 
-            <div style="height:50px"></div>
+            <div style="height: 50px;"></div>
         </div>
     </div>
-
 </body>
 
 </html>
