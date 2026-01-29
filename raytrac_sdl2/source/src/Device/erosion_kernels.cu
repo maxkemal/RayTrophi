@@ -38,7 +38,8 @@ __device__ float bilinearInterpolate(float* map, int width, int height, float x,
 }
 
 // -----------------------------------------------------------------------
-// Thermal Erosion Kernel
+// Thermal Erosion Kernel - INDUSTRY STANDARD (Weighted Multi-Neighbor Transfer)
+// Based on Musgrave's thermal weathering model with proportional distribution
 // -----------------------------------------------------------------------
 extern "C" __global__ void thermalErosionKernel(float* heightmap, ThermalErosionParamsGPU p) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -50,34 +51,54 @@ extern "C" __global__ void thermalErosionKernel(float* heightmap, ThermalErosion
     int idx = y * p.mapWidth + x;
     float h = heightmap[idx];
     
-    float maxDiff = 0.0f;
-    int maxIdx = -1;
+    // INDUSTRY STANDARD: Weighted multi-neighbor transfer
+    // Instead of transferring only to steepest neighbor, distribute proportionally
+    // to ALL neighbors exceeding talus angle (more realistic, smoother results)
     
-    // Check 8 neighbors
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            
-            int nx = x + dx;
-            int ny = y + dy;
-            int nIdx = ny * p.mapWidth + nx;
-            
-            // Read neighbor directly (Race condition acceptable for thermal noise/diffusion)
-            float diff = h - heightmap[nIdx];
-            if (diff > maxDiff) {
-                maxDiff = diff;
-                maxIdx = nIdx;
-            }
+    float diffs[8];
+    int nIdxs[8];
+    float totalExcess = 0.0f;
+    int neighborCount = 0;
+    
+    // D8 neighbor offsets (dx, dy) and distance weights
+    const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+    const float distWeight[8] = {0.707f, 1.0f, 0.707f, 1.0f, 1.0f, 0.707f, 1.0f, 0.707f}; // 1/sqrt(2) for diagonals
+    
+    // First pass: Calculate all height differences and total excess
+    for (int d = 0; d < 8; d++) {
+        int nx = x + dx[d];
+        int ny = y + dy[d];
+        nIdxs[d] = ny * p.mapWidth + nx;
+        
+        // Adjust talus for diagonal distance (diagonals can be steeper)
+        float adjustedTalus = p.talusAngle * distWeight[d];
+        float diff = h - heightmap[nIdxs[d]];
+        
+        if (diff > adjustedTalus) {
+            diffs[d] = diff - adjustedTalus;
+            totalExcess += diffs[d];
+            neighborCount++;
+        } else {
+            diffs[d] = 0.0f;
         }
     }
     
-    // Apply Thermal Erosion (Slippage)
-    if (maxDiff > p.talusAngle) {
-        float moveAmount = (maxDiff - p.talusAngle) * 0.5f * p.erosionAmount;
+    // Second pass: Distribute material proportionally to all steep neighbors
+    if (totalExcess > 0.0f && neighborCount > 0) {
+        // Total amount to move (half of excess, scaled by erosion rate)
+        float totalMove = totalExcess * 0.5f * p.erosionAmount;
         
-        // Move from center (self) to lowest neighbor
-        atomicAdd(&heightmap[idx], -moveAmount);
-        atomicAdd(&heightmap[maxIdx], moveAmount);
+        // Remove from center
+        atomicAdd(&heightmap[idx], -totalMove);
+        
+        // Distribute to neighbors proportionally
+        for (int d = 0; d < 8; d++) {
+            if (diffs[d] > 0.0f) {
+                float weight = diffs[d] / totalExcess;
+                atomicAdd(&heightmap[nIdxs[d]], totalMove * weight);
+            }
+        }
     }
 }
 
@@ -199,7 +220,9 @@ extern "C" __global__ void fluvialWaterKernel(float* waterMap, float* fluxMap, f
     }
 }
 
-// 4. Erosion / Deposition
+// 4. Erosion / Deposition - INDUSTRY STANDARD (Stream Power Law)
+// Based on E = K * A^m * S^n (simplified as C = Kc * velocity * slope^0.5)
+// Reference: Whipple & Tucker (1999), Howard (1994)
 extern "C" __global__ void fluvialErosionKernel(float* heightMap, float* waterMap, float* velocityMap, float* sedimentMap, FluvialErosionParamsGPU p) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -211,27 +234,41 @@ extern "C" __global__ void fluvialErosionKernel(float* heightMap, float* waterMa
     float vy = velocityMap[idx*2+1];
     float velocity = sqrtf(vx*vx + vy*vy);
     
-    // Tilt angle (slope)
-    // float slope = ... (could compute from gradient)
-    // Simplified: Capacity based on Velocity (Stream Power)
+    // INDUSTRY STANDARD: Stream Power Law with slope term
+    // Calculate local slope from height gradient
+    float dzdx = (heightMap[idx + 1] - heightMap[idx - 1]) / (2.0f * p.cellSize);
+    float dzdy = (heightMap[idx + p.mapWidth] - heightMap[idx - p.mapWidth]) / (2.0f * p.cellSize);
+    float slope = sqrtf(dzdx * dzdx + dzdy * dzdy);
     
-    // C = Kc * v
-    // Or C = Kc * v * slope (better)
+    // Stream Power Law: C = Kc * velocity * slope^n
+    // Using n = 0.5 (common for fluvial systems)
+    // Add small epsilon to prevent zero capacity on flat areas
+    float slopeFactor = sqrtf(slope + 0.001f);
+    float C = p.sedimentCapacityConstant * velocity * slopeFactor;
     
-    float C = p.sedimentCapacityConstant * velocity; 
+    // Water depth factor - deeper water can carry more sediment
+    float waterDepth = waterMap[idx];
+    C *= fminf(1.0f + waterDepth * 0.5f, 2.0f);
     
     float st = sedimentMap[idx];
     float ht = heightMap[idx];
     
     if (C > st) {
-        // Erode (Pick up sediment)
+        // Erode (Pick up sediment) - Stream Power Erosion
         float erode = p.erosionRate * (C - st);
-        erode = fminf(erode, ht); // Can't erode bedrock below 0 (relative) or just protect
+        
+        // Bedrock protection: can't erode more than available height
+        erode = fminf(erode, ht * 0.1f); // Max 10% per step for stability
+        
+        // Slope-dependent erosion boost (steeper = more erosion)
+        erode *= (1.0f + slope * 0.5f);
+        
         heightMap[idx] -= erode;
         sedimentMap[idx] += erode;
     } else {
-        // Deposit
-        float depo = p.depositionRate * (st - C);
+        // Deposit - preferentially in low-velocity, low-slope areas
+        float depositionFactor = 1.0f / (1.0f + velocity * 2.0f); // Slower = more deposition
+        float depo = p.depositionRate * (st - C) * depositionFactor;
         heightMap[idx] += depo;
         sedimentMap[idx] -= depo;
     }
@@ -241,7 +278,9 @@ extern "C" __global__ void fluvialErosionKernel(float* heightMap, float* waterMa
 }
 
 // -----------------------------------------------------------------------
-// Wind Erosion Kernel
+// Wind Erosion Kernel - INDUSTRY STANDARD (Shadow Zone + Saltation Model)
+// Based on Bagnold's aeolian transport theory with wind shadow detection
+// Reference: Bagnold (1941), Werner (1995) dune formation model
 // -----------------------------------------------------------------------
 // WindErosionParamsGPU is defined in erosion_ops.cuh
 
@@ -249,32 +288,94 @@ extern "C" __global__ void windErosionKernel(float* heightMap, WindErosionParams
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     
-    if (x <= 1 || x >= p.mapWidth - 2 || y <= 1 || y >= p.mapHeight - 2) return;
+    if (x <= 2 || x >= p.mapWidth - 3 || y <= 2 || y >= p.mapHeight - 3) return;
     int idx = y * p.mapWidth + x;
     
     float h = heightMap[idx];
     
-    // Calculate slope in wind direction
-    int upwindX = x - (int)p.windDirX;
-    int upwindY = y - (int)p.windDirY;
+    // Normalize wind direction
+    float windLen = sqrtf(p.windDirX * p.windDirX + p.windDirY * p.windDirY);
+    float normWindX = (windLen > 0.001f) ? p.windDirX / windLen : 1.0f;
+    float normWindY = (windLen > 0.001f) ? p.windDirY / windLen : 0.0f;
+    
+    // INDUSTRY STANDARD: Shadow Zone Detection
+    // Ray march upwind to detect if we're in a wind shadow
+    float shadowFactor = 1.0f;
+    const int SHADOW_STEPS = 6;
+    const float SHADOW_ANGLE = 0.15f; // ~8.5 degrees shadow angle (typical for sand)
+    
+    for (int step = 1; step <= SHADOW_STEPS; step++) {
+        int checkX = x - (int)(normWindX * step);
+        int checkY = y - (int)(normWindY * step);
+        
+        // Clamp to bounds
+        checkX = max(0, min(p.mapWidth - 1, checkX));
+        checkY = max(0, min(p.mapHeight - 1, checkY));
+        
+        int checkIdx = checkY * p.mapWidth + checkX;
+        float upwindH = heightMap[checkIdx];
+        
+        // Check if upwind point casts shadow over current point
+        // Shadow extends at SHADOW_ANGLE below upwind peak
+        float shadowHeight = upwindH - step * SHADOW_ANGLE;
+        if (h < shadowHeight) {
+            // We're in the wind shadow - reduce erosion, increase deposition
+            shadowFactor *= 0.3f;
+        }
+    }
+    
+    // Calculate local windward slope
+    int upwindX = x - (int)normWindX;
+    int upwindY = y - (int)normWindY;
     upwindX = max(0, min(p.mapWidth - 1, upwindX));
     upwindY = max(0, min(p.mapHeight - 1, upwindY));
     int upwindIdx = upwindY * p.mapWidth + upwindX;
     
-    int downwindX = x + (int)p.windDirX;
-    int downwindY = y + (int)p.windDirY;
+    int downwindX = x + (int)normWindX;
+    int downwindY = y + (int)normWindY;
     downwindX = max(0, min(p.mapWidth - 1, downwindX));
     downwindY = max(0, min(p.mapHeight - 1, downwindY));
     int downwindIdx = downwindY * p.mapWidth + downwindX;
     
-    float upwindH = heightMap[upwindIdx];
-    // float downwindH = heightMap[downwindIdx]; // Unused variable warning fixed
+    // Further downwind for saltation deposition
+    int farDownwindX = x + (int)(normWindX * 3);
+    int farDownwindY = y + (int)(normWindY * 3);
+    farDownwindX = max(0, min(p.mapWidth - 1, farDownwindX));
+    farDownwindY = max(0, min(p.mapHeight - 1, farDownwindY));
+    int farDownwindIdx = farDownwindY * p.mapWidth + farDownwindX;
     
-    // Windward side: erosion
-    if (h > upwindH) {
-        float diff = (h - upwindH) * p.suspensionRate * p.strength;
-        atomicAdd(&heightMap[idx], -diff);
-        atomicAdd(&heightMap[downwindIdx], diff * p.depositionRate);
+    float upwindH = heightMap[upwindIdx];
+    float downwindH = heightMap[downwindIdx];
+    
+    // Windward slope - exposed to erosion
+    float windwardSlope = h - upwindH;
+    
+    // Leeward slope - sheltered, deposition zone
+    float leewardSlope = h - downwindH;
+    
+    // EROSION: Windward faces (facing into wind)
+    if (windwardSlope > 0.0f && shadowFactor > 0.5f) {
+        // Saltation erosion - stronger on exposed windward slopes
+        float erosionAmount = windwardSlope * p.suspensionRate * p.strength * shadowFactor;
+        
+        // Abrasion increases with slope angle
+        float abrasionBoost = 1.0f + windwardSlope * 2.0f;
+        erosionAmount *= abrasionBoost;
+        
+        atomicAdd(&heightMap[idx], -erosionAmount);
+        
+        // Saltation: material jumps and lands downwind
+        // Split between immediate downwind and further saltation jump
+        atomicAdd(&heightMap[downwindIdx], erosionAmount * p.depositionRate * 0.6f);
+        atomicAdd(&heightMap[farDownwindIdx], erosionAmount * p.depositionRate * 0.4f);
+    }
+    
+    // DEPOSITION: Leeward faces (wind shadow) and shadow zones
+    if (shadowFactor < 0.7f || leewardSlope > 0.0f) {
+        // In shadow zone or on leeward slope - sediment settles
+        // Capture some passing sediment based on how sheltered we are
+        float depositionAmount = (1.0f - shadowFactor) * p.strength * 0.02f;
+        atomicAdd(&heightMap[idx], depositionAmount);
     }
 }
 
@@ -445,7 +546,7 @@ extern "C" __global__ void edgePreservationKernel(float* heightmap, float* origi
 }
 
 // -----------------------------------------------------------------------
-// Thermal Erosion with Hardness Support
+// Thermal Erosion with Hardness Support - INDUSTRY STANDARD (Multi-Neighbor)
 // -----------------------------------------------------------------------
 extern "C" __global__ void thermalErosionWithHardnessKernel(float* heightmap, float* hardnessMap, ThermalErosionParamsGPU p) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -461,38 +562,53 @@ extern "C" __global__ void thermalErosionWithHardnessKernel(float* heightmap, fl
     float hardness = (hardnessMap != nullptr) ? hardnessMap[idx] : 0.0f;
     
     // Hardness modifies effective talus angle
-    // Hard rock can be steeper, soft soil flattens more
     float effectiveTalus = p.talusAngle + hardness * 0.3f;
     
-    float maxDiff = 0.0f;
-    int maxIdx = -1;
+    // D8 neighbor offsets and distance weights
+    const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+    const float distWeight[8] = {0.707f, 1.0f, 0.707f, 1.0f, 1.0f, 0.707f, 1.0f, 0.707f};
     
-    // Check 8 neighbors
-    for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            
-            int nx = x + dx;
-            int ny = y + dy;
-            int nIdx = ny * p.mapWidth + nx;
-            
-            float diff = h - heightmap[nIdx];
-            if (diff > effectiveTalus && diff > maxDiff) {
-                maxDiff = diff;
-                maxIdx = nIdx;
-            }
+    // Calculate all height differences and total excess
+    float diffs[8];
+    int nIdxs[8];
+    float totalExcess = 0.0f;
+    int neighborCount = 0;
+    
+    for (int d = 0; d < 8; d++) {
+        int nx = x + dx[d];
+        int ny = y + dy[d];
+        nIdxs[d] = ny * p.mapWidth + nx;
+        
+        float adjustedTalus = effectiveTalus * distWeight[d];
+        float diff = h - heightmap[nIdxs[d]];
+        
+        if (diff > adjustedTalus) {
+            diffs[d] = diff - adjustedTalus;
+            totalExcess += diffs[d];
+            neighborCount++;
+        } else {
+            diffs[d] = 0.0f;
         }
     }
     
-    // Apply erosion with hardness factor
-    if (maxIdx >= 0) {
-        float moveAmount = (maxDiff - effectiveTalus) * 0.5f * p.erosionAmount;
+    // Distribute material proportionally to all steep neighbors
+    if (totalExcess > 0.0f && neighborCount > 0) {
+        float totalMove = totalExcess * 0.5f * p.erosionAmount;
         
         // Hardness reduces erosion rate
-        moveAmount *= (1.0f - hardness * 0.4f);
+        totalMove *= (1.0f - hardness * 0.4f);
         
-        atomicAdd(&heightmap[idx], -moveAmount);
-        atomicAdd(&heightmap[maxIdx], moveAmount);
+        // Remove from center
+        atomicAdd(&heightmap[idx], -totalMove);
+        
+        // Distribute to neighbors proportionally
+        for (int d = 0; d < 8; d++) {
+            if (diffs[d] > 0.0f) {
+                float weight = diffs[d] / totalExcess;
+                atomicAdd(&heightmap[nIdxs[d]], totalMove * weight);
+            }
+        }
     }
 }
 
@@ -545,7 +661,12 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         float newH = bilinearInterpolate(heightmap, p.mapWidth, p.mapHeight, newPosX, newPosY);
         float deltaHeight = newH - oldH;
         
-        float sedimentCapacity = fmaxf(-deltaHeight * speed * water * p.sedimentCapacity, p.minSlope);
+        // INDUSTRY STANDARD: Stream Power Law sediment capacity
+        // C = Kc * velocity * slope^n * water (n typically 0.5-1.0)
+        // Reference: Whipple & Tucker (1999)
+        float slope = fabsf(deltaHeight); // Local slope approximation
+        float slopeFactor = sqrtf(slope + 0.001f); // slope^0.5 with epsilon
+        float sedimentCapacity = fmaxf(-deltaHeight * speed * water * p.sedimentCapacity * slopeFactor, p.minSlope);
         
         if (deltaHeight > 0) {
             // Uphill: Carve if fast

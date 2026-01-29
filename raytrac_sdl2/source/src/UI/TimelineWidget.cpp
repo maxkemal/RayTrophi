@@ -1817,10 +1817,11 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
         animation_imported = true;
         
         for (const auto& anim : ctx.scene.animationDataList) {
-            double tps = anim.ticksPerSecond > 0 ? anim.ticksPerSecond : 24.0;
+            if (!anim) continue;
+            double tps = anim->ticksPerSecond > 0 ? anim->ticksPerSecond : 24.0;
             
             // Process Position Keys
-            for (const auto& [nodeName, keys] : anim.positionKeys) {
+            for (const auto& [nodeName, keys] : anim->positionKeys) {
                 for (const auto& key : keys) {
                     int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
                     
@@ -1846,7 +1847,7 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
             }
             
             // Process Rotation Keys (Quaternion -> Euler)
-            for (const auto& [nodeName, keys] : anim.rotationKeys) {
+            for (const auto& [nodeName, keys] : anim->rotationKeys) {
                 for (const auto& key : keys) {
                     int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
                     
@@ -1888,7 +1889,7 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
             }
             
             // Process Scale Keys
-            for (const auto& [nodeName, keys] : anim.scalingKeys) {
+            for (const auto& [nodeName, keys] : anim->scalingKeys) {
                 for (const auto& key : keys) {
                     int frame = static_cast<int>(std::round(key.mTime / tps * 24.0));
                     
@@ -1914,8 +1915,8 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
             
             // Set frame range from first animation (only on first import, user can change later)
             if (start_frame == 0 && end_frame == 250) {  // Only if default values
-                start_frame = anim.startFrame;
-                end_frame = std::max(anim.endFrame, 1);  // Ensure at least 1 frame
+                start_frame = anim->startFrame;
+                end_frame = std::max(anim->endFrame, 1);  // Ensure at least 1 frame
             }
         }
         

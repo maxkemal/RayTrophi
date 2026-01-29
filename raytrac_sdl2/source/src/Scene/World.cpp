@@ -111,7 +111,7 @@ public:
     }
     
     // ═══════════════════════════════════════════════════════════
-    // CINEMATIC CLOUD SHAPE - Matches GPU (CloudNoise.cuh)
+    // CINEMATIC CLOUD SHAPE - Matches GPU Exactly (CloudNoise.cuh)
     // ═══════════════════════════════════════════════════════════
     static float cloud_shape(Vec3 p, float coverage) {
         // === LAYER 1: Base Shape ===
@@ -124,11 +124,11 @@ public:
         
         // === LAYER 3: Fine Detail Erosion ===
         float detailNoise = fbm(p * 4.0f, 4);
-        float microDetail = fbm(p * 12.0f, 2) * 0.1f;
+        float microDetail = fbm(p * 12.0f, 2) * 0.15f; // Matched to 0.15
         
         // === COMBINE LAYERS ===
         float combined = baseShape * worlyClouds;
-        combined = combined - detailNoise * 0.25f - microDetail;
+        combined = combined - detailNoise * 0.15f - microDetail; // Matched subtraction
         combined = fmaxf(0.0f, combined);
         
         // === COVERAGE REMAP ===
@@ -141,7 +141,7 @@ public:
         density *= edge;
         
         // === DENSITY BOOST ===
-        density *= 1.5f;
+        density *= 5.0f; // Matched to 5.0 for volume appearance
         
         return density;
     }
@@ -245,7 +245,7 @@ World::World() {
     // ATMOSPHERIC FOG DEFAULTS
     // ═══════════════════════════════════════════════════════════
     data.nishita.fog_enabled = 0;                // Disabled by default
-    data.nishita.fog_density = 0.01f;            // Light fog
+    data.nishita.fog_density = 0.1f;            // Light fog
     data.nishita.fog_height = 500.0f;            // Fog concentrated below 500m
     data.nishita.fog_falloff = 0.003f;           // Gradual falloff
     data.nishita.fog_distance = 10000.0f;        // 10km max distance
@@ -275,9 +275,7 @@ World::World() {
     data.nishita.temperature = 15.0f;
     data.nishita.ozone_absorption_scale = 1.0f;
     data.nishita.godrays_samples = 16;           // Balanced quality
-    data.nishita.godrays_decay = 0.95f;          // Slow decay
-    data.nishita.godrays_density_clip_bias = 0.0f; // Neutral clip bias
-    data.nishita.godrays_stochastic_threshold = 0.01f; // Default stochastic transition threshold
+    data.nishita.godrays_samples = 16;           // Balanced quality
     // Advanced Atmosphere Defaults (Already set above in data.advanced)
     // Removed redundant nishita access
     
@@ -469,7 +467,33 @@ std::string World::getNishitaEnvOverlayPath() const {
 }
 
 void World::setSunDirection(const Vec3& direction) {
-    data.nishita.sun_direction = normalize(to_float3(direction));
+    Vec3 dir = direction.normalize();
+    data.nishita.sun_direction = to_float3(dir);
+    
+    // Back-calculate Elevation & Azimuth for UI consistency
+    // Y is Up (sin(elevation))
+    float asin_y = asinf(fmaxf(-1.0f, fminf(1.0f, dir.y)));
+    data.nishita.sun_elevation = asin_y * (180.0f / 3.14159265f);
+    
+    // X and Z define azimuth
+    // x = cos(elev) * sin(azim)
+    // z = cos(elev) * cos(azim)
+    // atan2(x, z) gives azim
+    float azimRad = atan2f(dir.x, dir.z);
+    
+    // Convert to degrees
+    float azimDeg = azimRad * (180.0f / 3.14159265f);
+    
+    // Normalize to 0-360 if needed, or keep as is.
+    // UI usually expects positive 0-360 or similar, but atan2 returns -180 to 180.
+    if (azimDeg < 0.0f) azimDeg += 360.0f;
+    
+    data.nishita.sun_azimuth = azimDeg;
+    
+    // CRITICAL: Trigger LUT update so change is visible immediately
+    if (atmosphere_lut) {
+        atmosphere_lut->precompute(data.nishita);
+    }
 }
 
 void World::setSunIntensity(float intensity) {
@@ -535,364 +559,148 @@ Vec3 World::evaluate(const Vec3& ray_dir) {
     return Vec3(0);
 }
 
-// Basic Single Scattering Nishita Implementation
-// Adapting from common shader implementations
+// MATCHED TO GPU: High-Quality LUT based Sky radiance
 Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
-    // Setup vectors
     float3 dir = normalize(to_float3(ray_dir));
     float3 sunDir = normalize(data.nishita.sun_direction);
     
-    // Planet/atmosphere dimensions (all in METERS)
-    float Rg = data.nishita.planet_radius;                        // Ground radius (meters)
-    float Rt = Rg + data.nishita.atmosphere_height;               // Top of atmosphere (meters)
-    
-    // Camera position with altitude (altitude now in meters too)
-    float cameraAltitude = data.nishita.altitude;                 // Altitude in meters
-    float3 camPos = make_float3(0, Rg + cameraAltitude, 0);
-    
-    // ... Ray Sphere Intersect ...
-    // Calculate distance to atmosphere top
-    // Ray: P = camPos + t * dir
-    // Sphere: |P|^2 = Rt^2
-    
-    float3 p = camPos;
-    // float b = dot(dir, p); // 2 * dot but simplified
-    // float c = dot(p, p) - Rt*Rt;
-    // float delta = b*b - c; 
-    
-    // Standard analytic ray-sphere intersection
-    float a = dot(dir, dir);
-    float b = 2.0f * dot(dir, p);
-    float c = dot(p, p) - Rt * Rt;
-    float delta = b * b - 4.0f * a * c;
-    
-    if (delta < 0.0f) return Vec3(0);
-    
-    float t1 = (-b - sqrt(delta)) / (2.0f * a);
-    float t2 = (-b + sqrt(delta)) / (2.0f * a);
-    float t = (t1 >= 0.0f) ? t1 : t2;
-    if (t < 0.0f) return Vec3(0);
-    
-    int numSamples = 8; // Low samples for CPU preview
-    float stepSize = t / (float)numSamples;
-    
-    float3 totalRayleigh = make_float3(0, 0, 0);
-    float3 totalMie = make_float3(0, 0, 0);
-    
-    float opticalDepthRayleigh = 0.0f;
-    float opticalDepthMie = 0.0f;
-    
-    // --- PHYSICAL PARAMETER CALCULATION (Matches GPU) ---
-    // 1. Temperature affects scale heights
-    float t_kelvin = data.nishita.temperature + 273.15f;
-    float h_scale = t_kelvin / 288.15f;
-    float rayleighScaleHeight = data.nishita.rayleigh_density * h_scale;
-    float mieScaleHeight = data.nishita.mie_density * h_scale;
+    Vec3 L(0.0f);
 
-    // 2. Humidity affects Mie scattering and anisotropy
-    float humidityFactor = 1.0f + data.nishita.humidity * 8.0f;
-    float mieDensityFactor = data.nishita.dust_density * humidityFactor;
-    float mieG = fminf(0.98f, data.nishita.mie_anisotropy + data.nishita.humidity * 0.15f);
-
-    // 3. Ozone absorption coefficients (Chappuis bands)
-    // Matches GPU: make_float3(0.000000650f, 0.000001881f, 0.000000085f)
-    float3 ozoneAbs = make_float3(0.000000650f, 0.000001881f, 0.000000085f);
-    float3 ozoneExtinction = ozoneAbs * data.nishita.ozone_density * data.nishita.ozone_absorption_scale;
-
-    // Phase functions
-    float mu = dot(dir, sunDir);
-    float phaseR = 3.0f / (16.0f * (float)M_PI) * (1.0f + mu * mu);
-    
-    // Dual-Lobe Mie (CPU Implementation)
-    auto get_phase_hg = [](float cos_theta, float g) {
-        float g2 = g * g;
-        return (1.0f - g2) / (4.0f * 3.14159f * powf(1.0f + g2 - 2.0f * g * cos_theta, 1.5f));
-    };
-    float g_back = -0.3f;
-    float phaseM = get_phase_hg(mu, mieG) * 0.95f + get_phase_hg(mu, g_back) * 0.05f;
-    
-    float currentT = 0.0f;
-    
-    for (int i = 0; i < numSamples; ++i) {
-        float3 samplePos = p + dir * (currentT + stepSize * 0.5f);
-        float height = length(samplePos) - Rg;
-        
-        if (height < 0) height = 0; // clamp
-        
-        float hr = expf(-height / rayleighScaleHeight);
-        float hm = expf(-height / mieScaleHeight);
-        
-        opticalDepthRayleigh += hr * stepSize;
-        opticalDepthMie += hm * stepSize;
-
-        // --- Optical depth to sun ---
-        float b_light = 2.0f * dot(sunDir, samplePos);
-        float c_light = dot(samplePos, samplePos) - Rt * Rt;
-        float delta_light = b_light * b_light - 4.0f * c_light;
-        
-        float lightOpticalRayleigh = 0.0f;
-        float lightOpticalMie = 0.0f;
-
-        if (delta_light >= 0.0f) {
-             float t_light = (-b_light + sqrtf(delta_light)) / 2.0f;
-             int numLightSamples = 4;
-             float lightStepSize = t_light / (float)numLightSamples;
-             
-             for (int j = 0; j < numLightSamples; ++j) {
-                 float3 lightPos = samplePos + sunDir * (lightStepSize * (j + 0.5f));
-                 float lightHeight = length(lightPos) - Rg;
-                 if (lightHeight < 0.0f) lightHeight = 0.0f;
-                 lightOpticalRayleigh += expf(-lightHeight / rayleighScaleHeight) * lightStepSize;
-                 lightOpticalMie += expf(-lightHeight / mieScaleHeight) * lightStepSize;
-             }
-             
-             float3 tau = data.nishita.rayleigh_scattering * (opticalDepthRayleigh + lightOpticalRayleigh) + 
-                          data.nishita.mie_scattering * 1.1f * (opticalDepthMie + lightOpticalMie) +
-                          ozoneExtinction * (opticalDepthRayleigh + lightOpticalRayleigh);
-                          
-             float3 attenuation = make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
-             
-             totalRayleigh += attenuation * hr * stepSize;
-             totalMie += attenuation * hm * stepSize;
-        }
-        
-        currentT += stepSize;
+    if (atmosphere_lut && atmosphere_lut->is_initialized()) {
+        // 1. Sample Background from SkyView LUT
+        float3 radiance = atmosphere_lut->sampleSkyView(dir, sunDir, data.nishita.planet_radius, data.nishita.planet_radius + data.nishita.atmosphere_height);
+        L = to_vec3(radiance);
+    } else {
+        // Fallback to simple gradient if LUT not ready
+        float t = 0.5f * (dir.y + 1.0f);
+        L = Vec3(0.5f, 0.7f, 1.0f) * (1.0f - t) + Vec3(0.1f, 0.2f, 0.5f) * t;
     }
-    float3 rayleighScatter = data.nishita.rayleigh_scattering * data.nishita.air_density;
-    float3 mieScatter = data.nishita.mie_scattering * mieDensityFactor;
-    
-    float3 L = (totalRayleigh * rayleighScatter * phaseR + 
-                totalMie * mieScatter * phaseM) * data.nishita.sun_intensity;
 
-    // Add Sun Disk with Limb Darkening (matches GPU)
-    // Apply horizon magnification effect
+    // --- PROCEDURAL SUN GLOW (Matches GPU Exactly) ---
+    float mu = dot(dir, sunDir);
+    float g_mie = data.nishita.mie_anisotropy;
+    float phaseM = (1.0f - g_mie * g_mie) / (4.0f * 3.14159f * powf(std::max(1.0f + g_mie * g_mie - 2.0f * g_mie * mu, 0.0001f), 1.5f));
+    
+    // Soft halo contribution (excess above clamped LUT phase)
+    float excessPhase = fmaxf(0.0f, phaseM - 2.0f); // Matched to 2.0f LUT clamp
+    
+    if (excessPhase > 0.0f && atmosphere_lut) {
+        float3 transSun = atmosphere_lut->sampleTransmittance(std::max(0.01f, sunDir.y), data.nishita.altitude, data.nishita.atmosphere_height);
+        Vec3 mieScat = to_vec3(data.nishita.mie_scattering) * (data.nishita.mie_density * 0.15f);
+        L += to_vec3(transSun) * (mieScat * excessPhase * data.nishita.sun_intensity);
+    }
+
+    // --- SUN DISK (Matches GPU Exactly) ---
     float sunSizeDeg = data.nishita.sun_size;
     float elevationFactor = 1.0f;
     if (data.nishita.sun_elevation < 15.0f) {
-        elevationFactor = 1.0f + (15.0f - fmaxf(data.nishita.sun_elevation, -10.0f)) * 0.04f;
+        elevationFactor = 1.0f + (15.0f - std::max(data.nishita.sun_elevation, -10.0f)) * 0.04f;
     }
     sunSizeDeg *= elevationFactor;
     
-    float sun_radius = sunSizeDeg * (3.14159265f / 180.0f) * 0.5f; // Half angle in radians
-    float sun_cos = dot(dir, sunDir);
+    float sun_radius = sunSizeDeg * (3.14159265f / 180.0f) * 0.5f;
     float sun_cos_threshold = cosf(sun_radius);
     
-    if (sun_cos > sun_cos_threshold) {
-         // Calculate radial position on sun disk (0 = center, 1 = edge)
-         float angular_dist = acosf(fminf(1.0f, sun_cos));
+    if (mu > sun_cos_threshold) {
+         float angular_dist = acosf(std::min(1.0f, mu));
          float radial_pos = angular_dist / sun_radius;
          
-         // LIMB DARKENING: Sun is brighter at center, darker at edges
-         float u = 0.6f; // Limb darkening coefficient
-         float cosine_mu = sqrtf(fmaxf(0.0f, 1.0f - radial_pos * radial_pos));
-         float limbDarkening = 1.0f - u * (1.0f - cosine_mu);
+         float u_limb = 0.6f;
+         float cosine_mu = sqrtf(std::max(0.0f, 1.0f - radial_pos * radial_pos));
+         float limbDarkening = 1.0f - u_limb * (1.0f - cosine_mu);
          
-         // Smooth edge transition
-         float edge_t = fmaxf(0.0f, fminf(1.0f, (radial_pos - 0.85f) / 0.15f));
+         float edge_t = std::max(0.0f, std::min(1.0f, (radial_pos - 0.85f) / 0.15f));
          float edgeSoftness = 1.0f - edge_t * edge_t * (3.0f - 2.0f * edge_t);
          
-         float3 tau = rayleighScatter * opticalDepthRayleigh + 
-                      mieScatter * 1.1f * opticalDepthMie;
-         float3 transmittance = make_float3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
-         L += transmittance * data.nishita.sun_intensity * 1000.0f * limbDarkening * edgeSoftness;
+         // Transmittance to sun
+         float3 trans = atmosphere_lut->sampleTransmittance(std::max(0.01f, sunDir.y), data.nishita.altitude, data.nishita.atmosphere_height);
+         // Multiplier matched to GPU (80000.0f)
+         L += to_vec3(trans) * data.nishita.sun_intensity * 80000.0f * limbDarkening * edgeSoftness;
     }
-    
 
-        // ═══════════════════════════════════════════════════════════
-        // Volumetric Clouds (Planar Ray Marching) - CPU Implementation
-        // Matches GPU quality settings
-        // ═══════════════════════════════════════════════════════════
-        if (data.nishita.clouds_enabled && dir.y > 0.01f) {
-            float cloudMinY = data.nishita.cloud_height_min;
-            float cloudMaxY = data.nishita.cloud_height_max;
-            
-            // Use actual camera Y position for cloud parallax (matches GPU)
-            float camY = (data.camera_y != 0.0f) ? data.camera_y : data.nishita.altitude;
-            Vec3 camPos(0.0f, camY, 0.0f);
-            Vec3 rayDir = to_vec3(dir);
-            
-            // Simple plane intersection for camera below clouds
-            float t_enter = (cloudMinY - camPos.y) / rayDir.y;
-            float t_exit = (cloudMaxY - camPos.y) / rayDir.y;
-            
-            // Only render if we can see clouds
+    // ═══════════════════════════════════════════════════════════
+    // VOLUMETRIC CLOUDS (CPU Optimized Path)
+    // ═══════════════════════════════════════════════════════════
+    if ((data.nishita.clouds_enabled || data.nishita.cloud_layer2_enabled) && dir.y > 0.001f) {
+        float transmittance = 1.0f;
+        Vec3 accumulatedCloudColor(0.0f);
+        float camY = std::max(0.0f, data.camera_y != 0.0f ? data.camera_y : data.nishita.altitude);
+        Vec3 camPos(0.0f, camY, 0.0f);
+        Vec3 rayDir = to_vec3(dir);
+
+        for (int layer = 0; layer < 2; ++layer) {
+            bool enabled = (layer == 0) ? data.nishita.clouds_enabled : data.nishita.cloud_layer2_enabled;
+            if (!enabled) continue;
+
+            float minH = (layer == 0) ? data.nishita.cloud_height_min : data.nishita.cloud2_height_min;
+            float maxH = (layer == 0) ? data.nishita.cloud_height_max : data.nishita.cloud2_height_max;
+            float coverage = (layer == 0) ? data.nishita.cloud_coverage : data.nishita.cloud2_coverage;
+            float densityMult = (layer == 0) ? data.nishita.cloud_density : data.nishita.cloud2_density;
+            float scale = 0.003f / std::max(0.01f, (layer == 0) ? data.nishita.cloud_scale : data.nishita.cloud2_scale);
+            float t_enter, t_exit;
+            if (camPos.y < minH) {
+                if (rayDir.y <= 0.0f) continue;
+                t_enter = (minH - camPos.y) / rayDir.y;
+                t_exit = (maxH - camPos.y) / rayDir.y;
+            }
+            else if (camPos.y > maxH) {
+                if (rayDir.y >= 0.0f) continue;
+                t_enter = (maxH - camPos.y) / rayDir.y;
+                t_exit = (minH - camPos.y) / rayDir.y;
+            }
+            else {
+                t_enter = 0.0f;
+                t_exit = (rayDir.y > 0.0f) ? (maxH - camPos.y) / rayDir.y : (minH - camPos.y) / rayDir.y;
+            }
+
             if (t_exit > 0.0f && t_exit > t_enter) {
-                if (t_enter < 0.0f) t_enter = 0.0f;
-                
-                // Horizon Fade - smoother transition (matches GPU)
-                float h_t = fmaxf(0.0f, fminf(1.0f, rayDir.y / 0.15f));
+                t_enter = std::max(t_enter, 0.0f);
+
+                float h_t = std::max(0.0f, std::min(1.0f, std::abs(rayDir.y) / 0.008f));
                 float horizonFade = h_t * h_t * (3.0f - 2.0f * h_t);
-                
-                // Quality-based step count (matches GPU)
-                // cloud_quality: 0.25 = fast preview, 0.5 = low, 1.0 = normal, 2.0 = high
-                float quality = fmaxf(0.1f, fminf(3.0f, data.nishita.cloud_quality));
-                int baseSteps = (int)(32.0f * quality);  // CPU uses fewer base steps
-                int numSteps = baseSteps + (int)((float)baseSteps * (1.0f - h_t));
-                
+
+                float quality = std::max(0.1f, std::min(3.0f, data.nishita.cloud_quality));
+                int numSteps = (int)(32.0f * quality);
                 float stepSize = (t_exit - t_enter) / (float)numSteps;
-                Vec3 cloudColor(0.0f, 0.0f, 0.0f);
-                float transmittance = 1.0f;
-                float t = t_enter;
-                
-                // Cloud parameters
-                float scale = 0.003f / fmaxf(0.1f, data.nishita.cloud_scale);
-                float coverage = data.nishita.cloud_coverage;
-                float densityMult = data.nishita.cloud_density * horizonFade;
-                
-                Vec3 sunDirVec = to_vec3(normalize(data.nishita.sun_direction));
-                float g = fmaxf(0.0f, fminf(0.95f, data.nishita.mie_anisotropy));
-                
-                // Ambient sky color (30% of background for soft cloud lighting)
-                Vec3 bgColor = to_vec3(L);
-                Vec3 ambientSky = bgColor * 0.3f;
+
+                float layerTransmittance = 1.0f;
+                Vec3 layerColor(0.0f);
+                float sunMu = dot(sunDir, dir);
 
                 for (int i = 0; i < numSteps; ++i) {
-                    // Jitter
-                    float jitterSeed = (float)i + (rayDir.x * 53.0f + rayDir.z * 91.0f) * 10.0f;
-                    Vec3 pos = camPos + rayDir * (t + stepSize * CPUCloudNoise::hash(jitterSeed));
-                    
-                    // Height Gradient - Anvil Shape (Matches GPU)
-                    float heightFraction = (pos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                    
-                    auto smoothstep = [](float edge0, float edge1, float x) {
-                        float t = fmaxf(0.0f, fminf(1.0f, (x - edge0) / (edge1 - edge0)));
-                        return t * t * (3.0f - 2.0f * t);
-                    };
-                    
-                    // CUMULUS PROFILE (Strict Flat Bottom) - MATCHES GPU
-                    // 1. Sharp rise (0% to 5%)
-                    // 2. Round top (starts at 30%)
-                    float heightGradient = smoothstep(0.0f, 0.05f, heightFraction) * smoothstep(1.0f, 0.3f, heightFraction);
+                    float t_sample = t_enter + stepSize * (i + 0.5f);
+                    Vec3 p = camPos + rayDir * t_sample;
 
-                    // Boost bottom density
-                    if (heightFraction < 0.2f) {
-                        heightGradient = fmaxf(heightGradient, smoothstep(0.0f, 0.02f, heightFraction));
-                    }
-                    
-                    // Wind offset
-                    Vec3 offsetPos = pos + Vec3(data.nishita.cloud_offset_x, 0.0f, data.nishita.cloud_offset_z);
-                    
-                    // Noise position
-                    Vec3 noisePos = offsetPos * scale;
-                    
+                    float h_frac = (p.y - minH) / (maxH - minH);
+                    float h_grad = std::max(0.01f, std::min(1.0f, h_frac / 0.05f)) * std::max(0.01f, std::min(1.0f, (1.0f - h_frac) / 0.3f));
 
+                    Vec3 noisePos = (p + Vec3(data.nishita.cloud_offset_x, 0, data.nishita.cloud_offset_z)) * scale;
+                    float density = CPUCloudNoise::cloud_shape(noisePos, coverage) * h_grad;
 
-                    
-                    // GPU cloud_shape ile aynı noise
-                    float rawDensity = CPUCloudNoise::cloud_shape(noisePos, coverage);
-                    float density = rawDensity * heightGradient;
-                    
                     if (density > 0.003f) {
-                        density *= densityMult;
-                        
-                        // ═══════════════════════════════════════════════════════════
-                        // LIGHT MARCHING (Self-Shadowing)
-                        // ═══════════════════════════════════════════════════════════
-                        float lightTransmittance = 1.0f;
-                        int lightSteps = 0;  // Fewer steps for CPU performance
-                        float safeSunY = fabsf(sunDirVec.y);
-                        if (safeSunY < 1e-3f) safeSunY = 1e-3f; // neredeyse yatay ışık
+                        density *= densityMult * horizonFade;
+                        float sigma_t = density * 1.5f;
+                        float stepTrans = expf(-sigma_t * stepSize * 0.02f);
 
-                        float distance = cloudMaxY - pos.y;
-                        distance = fmaxf(distance, 0.0f);     // ters yöne gitme
+                        // Improved scattering approximation
+                        float phase = (1.0f - g_mie * g_mie) / (4.0f * 3.14159f * powf(1.0f + g_mie * g_mie - 2.0f * g_mie * sunMu, 1.5f));
+                        Vec3 sunColor = (sunDir.y > 0.15f) ? Vec3(1.0f, 0.95f, 0.85f) : Vec3(1.0f, 0.6f, 0.3f);
+                        Vec3 inScat = sunColor * phase * data.nishita.sun_intensity * 0.2f;
 
-                        float steps = fmaxf((float)lightSteps, 1.0f);
-
-                        float lightStepSize = distance / safeSunY / steps;
-                        if (sunDirVec.y <= 0.0f || cloudMaxY <= pos.y)
-                            lightStepSize = 0.0f;                        
-                        if (sunDirVec.y > 0.01f) {
-                            for (int j = 1; j <= lightSteps; ++j) {
-                                Vec3 lightPos = pos + sunDirVec * (lightStepSize * (float)j);
-                                
-                                if (lightPos.y > cloudMaxY || lightPos.y < cloudMinY) break;
-                                
-                                Vec3 lightNoisePos = (lightPos + Vec3(data.nishita.cloud_offset_x, 0.0f, data.nishita.cloud_offset_z)) * scale;
-                                float lightDensity = CPUCloudNoise::cloud_shape(lightNoisePos, coverage);
-                                
-                                float lh = (lightPos.y - cloudMinY) / (cloudMaxY - cloudMinY);
-                                // Match Cumulus profile
-                                float lightHeightGrad = smoothstep(0.0f, 0.05f, lh) * smoothstep(1.0f, 0.3f, lh);
-                                if (lh < 0.2f) lightHeightGrad = fmaxf(lightHeightGrad, smoothstep(0.0f, 0.02f, lh));
-                                
-                                lightDensity *= lightHeightGrad * densityMult;
-                                
-                                lightTransmittance *= expf(-lightDensity * lightStepSize * 0.015f);
-                                
-                                if (lightTransmittance < 0.1f) break;
-                            }
-                        }
-                        
-                        // ═══════════════════════════════════════════════════════════
-                        // ADVANCED COLOR CALCULATION
-                        // ═══════════════════════════════════════════════════════════
-                        float cosTheta = rayDir.x * sunDirVec.x + rayDir.y * sunDirVec.y + rayDir.z * sunDirVec.z;
-                        
-                        // Dual-Lobe Henyey-Greenstein (Matches GPU)
-                        float phase1 = (1.0f - g * g) / (4.0f * (float)M_PI * powf(1.0f + g * g - 2.0f * g * cosTheta, 1.5f));
-                        float g2 = -0.4f; // Back scattering
-                        float phase2 = (1.0f - g2 * g2) / (4.0f * (float)M_PI * powf(1.0f + g2 * g2 - 2.0f * g2 * cosTheta, 1.5f));
-                        float phase = phase1 * 0.7f + phase2 * 0.3f; // Mix 70/30
-                        float powder = CPUCloudNoise::powderEffect(density, cosTheta);
-                        
-                        // ═══════════════════════════════════════════════════════════
-                        // SUN COLOR BASED ON ELEVATION (Sunset/Sunrise)
-                        // ═══════════════════════════════════════════════════════════
-                        float sunElevation = sunDirVec.y;
-                        Vec3 sunColor(1.0f, 0.95f, 0.9f);
-                        
-                        if (sunElevation < 0.3f) {
-                            float sunsetFactor = 1.0f - sunElevation / 0.3f;
-                            sunsetFactor = fmaxf(0.0f, fminf(1.0f, sunsetFactor));
-                            Vec3 sunsetColor(1.0f, 0.5f, 0.2f);
-                            sunColor = sunColor * (1.0f - sunsetFactor * 0.7f) + sunsetColor * sunsetFactor * 0.7f;
-                        }
-                        
-                        // ═══════════════════════════════════════════════════════════
-                        // DIRECT LIGHTING (with self-shadowing)
-                        // ═══════════════════════════════════════════════════════════
-                        float directIntensity = data.nishita.sun_intensity * phase * lightTransmittance * 5.0f;
-                        Vec3 directLight = sunColor * directIntensity;
-                        
-                        float silverLining = fmaxf(0.0f, cosTheta) * powder * lightTransmittance * 4.0f;
-                        directLight = directLight + sunColor * silverLining * data.nishita.sun_intensity;
-                        
-                        // ═══════════════════════════════════════════════════════════
-                        // AMBIENT / MULTI-SCATTERING
-                        // ═══════════════════════════════════════════════════════════
-                        float multiScatter = 0.2f * (1.0f - expf(-density * 4.0f));
-                        
-                        Vec3 shadowColor(0.15f, 0.2f, 0.35f);
-                        float shadowAmount = 1.0f - lightTransmittance;
-                        
-                        Vec3 ambient = ambientSky * 0.3f * (1.0f - shadowAmount);
-                        ambient = ambient + shadowColor * data.nishita.sun_intensity * 0.1f * shadowAmount;
-                        ambient = ambient + sunColor * multiScatter * data.nishita.sun_intensity * 0.3f;
-                        
-                        Vec3 lightColor = directLight + ambient;
-                        
-                        // Energy-conserving absorption
-                        Vec3 stepColor = lightColor * density;
-                        float absorption = density * stepSize * 0.012f;
-                        float stepTransmittance = expf(-absorption);
-                        
-                        cloudColor = cloudColor + stepColor * transmittance * (1.0f - stepTransmittance);
-                        transmittance *= stepTransmittance;
-                        
-                        if (transmittance < 0.01f) break;
+                        layerColor = layerColor + (inScat * (1.0f - stepTrans) * layerTransmittance);
+                        layerTransmittance *= stepTrans;
                     }
-                    t += stepSize;
+                    if (layerTransmittance < 0.01f) break;
                 }
-                
-                // Blend with atmosphere - no artificial minimum
-                Vec3 currentL = bgColor * transmittance + cloudColor;
-                L = make_float3(currentL.x, currentL.y, currentL.z);
+                accumulatedCloudColor += layerColor * transmittance;
+                transmittance *= layerTransmittance;
             }
+            L = L * transmittance + accumulatedCloudColor;
         }
-
-    return to_vec3(L);
+    }
+    return L;
 }
-
+       
 
 // Reset to defaults
 void World::reset() {
@@ -922,6 +730,15 @@ void World::reset() {
     defaults.mie_anisotropy = 0.98f;
     defaults.rayleigh_density = 8000.0f;
     defaults.mie_density = 1200.0f;
+    
+    // Recalculate sun direction from default angles
+    float elevRad = defaults.sun_elevation * 3.14159265f / 180.0f;
+    float azimRad = defaults.sun_azimuth * 3.14159265f / 180.0f;
+    defaults.sun_direction = normalize(make_float3(
+        cosf(elevRad) * sinf(azimRad), 
+        sinf(elevRad), 
+        cosf(elevRad) * cosf(azimRad)
+    ));
     
     defaults.humidity = 0.1f;
     defaults.temperature = 15.0f;
@@ -982,9 +799,7 @@ void World::serialize(nlohmann::json& j) const {
     n["godrays_intensity"] = data.nishita.godrays_intensity;
     n["godrays_density"] = data.nishita.godrays_density;
     n["godrays_samples"] = data.nishita.godrays_samples;
-    n["godrays_decay"] = data.nishita.godrays_decay;
-    n["godrays_density_clip_bias"] = data.nishita.godrays_density_clip_bias;
-    n["godrays_stochastic_threshold"] = data.nishita.godrays_stochastic_threshold;
+    n["godrays_samples"] = data.nishita.godrays_samples;
     n["humidity"] = data.nishita.humidity;
     n["temperature"] = data.nishita.temperature;
     n["ozone_absorption_scale"] = data.nishita.ozone_absorption_scale;
@@ -1094,9 +909,7 @@ void World::deserialize(const nlohmann::json& j) {
         data.nishita.godrays_intensity = n.value("godrays_intensity", 0.5f);
         data.nishita.godrays_density = n.value("godrays_density", 0.1f);
         data.nishita.godrays_samples = n.value("godrays_samples", 16);
-        data.nishita.godrays_decay = n.value("godrays_decay", 0.95f);
-        data.nishita.godrays_density_clip_bias = n.value("godrays_density_clip_bias", 0.0f);
-        data.nishita.godrays_stochastic_threshold = n.value("godrays_stochastic_threshold", 0.01f);
+        data.nishita.godrays_samples = n.value("godrays_samples", 16);
         
         // Physical params (Now back in nishita struct)
         data.nishita.humidity = n.value("humidity", 0.1f);

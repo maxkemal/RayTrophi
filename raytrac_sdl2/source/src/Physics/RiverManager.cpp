@@ -62,6 +62,9 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
     // ─────────────────────────────────────────────────────────────────────────
     // STEP 1: Remove old mesh from scene and WaterManager
     // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
+    // STEP 1: Remove old mesh from scene
+    // ─────────────────────────────────────────────────────────────────────────
     if (!river->meshTriangles.empty()) {
         for (auto& tri : river->meshTriangles) {
             auto it = std::find(scene.world.objects.begin(), scene.world.objects.end(), 
@@ -72,12 +75,26 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         }
         river->meshTriangles.clear();
     }
-    
-    // Remove from WaterManager if exists
-    if (river->waterSurfaceId >= 0) {
-        waterMgr.removeWaterSurface(scene, river->waterSurfaceId);
-        river->waterSurfaceId = -1;
+    else {
+        // Fallback: Check for existing objects with this river's name (e.g. from load)
+        // to prevent duplicate geometry if meshTriangles wasn't populated yet.
+        auto it = scene.world.objects.begin();
+        while (it != scene.world.objects.end()) {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(*it)) {
+                if (tri->getNodeName() == river->name) {
+                    it = scene.world.objects.erase(it);
+                    continue;
+                }
+            }
+            ++it;
+        }
     }
+    
+    // Determine the expected Water Surface ID for this river
+    int expectedWaterID = 10000 + river->id;
+
+    // We no longer blindly remove the water surface here.
+    // We will check for its existence in Step 6 and reuse/update it.
     
     // ─────────────────────────────────────────────────────────────────────────
     // STEP 2: Create water material (WaterManager style)
@@ -340,29 +357,51 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
     }
     
     // ─────────────────────────────────────────────────────────────────────────
-    // STEP 6: Register as WaterSurface in WaterManager
+    // STEP 6: Register or Update WaterSurface in WaterManager
     // ─────────────────────────────────────────────────────────────────────────
-    WaterSurface waterSurf;
-    waterSurf.id = 10000 + river->id;  // Offset to avoid ID conflicts with regular water
-    waterSurf.name = river->name;
-    waterSurf.params = river->waterParams;
-    waterSurf.material_id = waterMatID;
-    waterSurf.mesh_triangles = river->meshTriangles;
-    waterSurf.fft_state = nullptr;
     
-    if (!river->meshTriangles.empty()) {
-        waterSurf.reference_triangle = river->meshTriangles[0];
+    // Check if surface already exists (e.g. loaded from project)
+    WaterSurface* existingSurf = waterMgr.getWaterSurface(expectedWaterID);
+    
+    if (existingSurf) {
+        // UPDATE Existing Surface
+        existingSurf->name = river->name;
+        existingSurf->params = river->waterParams;
+        existingSurf->material_id = waterMatID;
+        existingSurf->mesh_triangles = river->meshTriangles;
+        
+        if (!river->meshTriangles.empty()) {
+            existingSurf->reference_triangle = river->meshTriangles[0];
+        }
+        
+        river->waterSurfaceId = existingSurf->id;
+        
+        SCENE_LOG_INFO("[RiverManager] Updated existing WaterSurface '" + river->name + 
+                       "' (ID: " + std::to_string(existingSurf->id) + ")");
+    } 
+    else {
+        // CREATE New Surface
+        WaterSurface waterSurf;
+        waterSurf.id = expectedWaterID;
+        waterSurf.name = river->name;
+        waterSurf.params = river->waterParams;
+        waterSurf.material_id = waterMatID;
+        waterSurf.mesh_triangles = river->meshTriangles;
+        waterSurf.fft_state = nullptr;
+        
+        if (!river->meshTriangles.empty()) {
+            waterSurf.reference_triangle = river->meshTriangles[0];
+        }
+        
+        // Add to WaterManager's list
+        waterMgr.getWaterSurfaces().push_back(waterSurf);
+        river->waterSurfaceId = waterSurf.id;
+        
+        SCENE_LOG_INFO("[RiverManager] Created new WaterSurface '" + river->name + 
+                       "' (ID: " + std::to_string(waterSurf.id) + ")");
     }
     
-    // Add to WaterManager's list
-    waterMgr.getWaterSurfaces().push_back(waterSurf);
-    river->waterSurfaceId = waterSurf.id;
-    
     river->needsRebuild = false;
-    
-    SCENE_LOG_INFO("[RiverManager] Generated mesh for '" + river->name + 
-                   "' with " + std::to_string(river->meshTriangles.size()) + 
-                   " triangles (WaterSurface ID: " + std::to_string(waterSurf.id) + ")");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

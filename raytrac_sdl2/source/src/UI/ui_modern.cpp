@@ -314,36 +314,102 @@ ImGuiTreeNodeFlags GetSectionFlags(bool defaultOpen) {
     return flags;
 }
 
+// Helper for the border rect
+struct SectionState {
+    ImVec2 startPos;
+    float width;
+    ImU32 borderColor;
+    bool isOpen;
+};
+static std::vector<SectionState> s_SectionStack;
+
 bool BeginSection(const char* title, const ImVec4& accentColor, bool defaultOpen) {
     ImGui::PushID(title);
     
     ImDrawList* drawList = ImGui::GetWindowDrawList();
     ImVec2 cursorPos = ImGui::GetCursorScreenPos();
     float width = ImGui::GetContentRegionAvail().x;
-    float height = ImGui::GetFrameHeight();
+    float height = ImGui::GetFrameHeight(); // Standard frame height (thinner than before)
     
-    // Sol tarafta accent bar Ã§iz
+    // Convert accent color
     ImU32 accentU32 = ImGui::ColorConvertFloat4ToU32(accentColor);
-    drawList->AddRectFilled(
-        cursorPos,
-        ImVec2(cursorPos.x + 3, cursorPos.y + height),
-        accentU32
+    ImU32 headerBg = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.15f));
+    ImU32 borderColor = ImGui::ColorConvertFloat4ToU32(ImVec4(accentColor.x, accentColor.y, accentColor.z, 0.5f));
+
+    // Draw Header Background (Sleek)
+    drawList->AddRectFilled(cursorPos, ImVec2(cursorPos.x + width, cursorPos.y + height), headerBg, 4.0f, ImDrawFlags_RoundCornersTop);
+    
+    // Draw Top Accent Line (Thin, distinct)
+    drawList->AddLine(
+        ImVec2(cursorPos.x, cursorPos.y), 
+        ImVec2(cursorPos.x + width, cursorPos.y), 
+        accentU32, 2.0f
     );
     
-    // Ä°Ã§eriÄŸi biraz saÄŸa kaydÄ±r
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 8);
+    // Modernized TreeNode
+    // Use FramePadding 4,4 to make it slimmer (default is often 4,3 or 8,6)
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
+    // Color text matching accent for consistency
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1,1,1,0.95f)); 
     
     bool opened = ImGui::TreeNodeEx(title, GetSectionFlags(defaultOpen));
     
-    if (!opened)
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+
+    if (opened) {
+        // Push state for EndSection to draw the surrounding border
+        s_SectionStack.push_back({cursorPos, width, borderColor, opened});
+        
+        // Add a bit of spacing after header
+        ImGui::Indent(8.0f); // Slight indent for content
+        ImGui::Spacing();
+    } else {
         ImGui::PopID();
+    }
     
     return opened;
 }
 
 void EndSection() {
-    ImGui::TreePop();
-    ImGui::PopID();
+    if (s_SectionStack.empty()) return;
+    
+    SectionState state = s_SectionStack.back();
+    s_SectionStack.pop_back();
+    
+    if (state.isOpen) {
+        ImGui::Unindent(8.0f);
+        ImGui::Spacing();
+        ImGui::TreePop(); 
+        
+        // Draw the Border around the whole open section
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImVec2 endPos = ImGui::GetCursorScreenPos();
+        
+        // Close the box from header start to current cursor position
+        // We exclude the top edge because we already drew a styled header there
+        // Actually, let's draw a full rect border excluding top? Or just a full rect with rounding?
+        // Let's do a full rect from Header Start to End Content
+        
+        // Header height was approx GetFrameHeight()
+        // We want the border to encompass the header + content.
+        
+        // Rect logic:
+        // Top-Left: state.startPos
+        // Bottom-Right: (state.startPos.x + state.width, endPos.y)
+        
+        drawList->AddRect(
+            state.startPos,
+            ImVec2(state.startPos.x + state.width, endPos.y),
+            state.borderColor,
+            4.0f
+        );
+
+        ImGui::PopID();
+    }
+    
+    // Extra spacing between sections
+    ImGui::Spacing();
 }
 
 bool BeginColoredSection(const char* title, const ImVec4& titleColor, bool defaultOpen) {
@@ -582,6 +648,197 @@ void DrawThemeSelector(float& panel_alpha) {
 
         EndSection();
     }
+}
+
+void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float pading = s * 0.2f;
+    float is = s - pading * 2;
+    ImVec2 cp = ImVec2(p.x + s * 0.5f, p.y + s * 0.5f);
+    p.x += pading; p.y += pading;
+
+    switch (type) {
+        case IconType::Scene:
+            dl->AddRect(p, ImVec2(p.x + is * 0.7f, p.y + is * 0.7f), col, 0, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is * 0.3f, p.y + is * 0.3f), ImVec2(p.x + is, p.y + is), col, 0, 0, thickness);
+            dl->AddLine(p, ImVec2(p.x + is * 0.3f, p.y + is * 0.3f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.7f, p.y), ImVec2(p.x + is, p.y + is * 0.3f), col, thickness);
+            dl->AddLine(ImVec2(p.x, p.y + is * 0.7f), ImVec2(p.x + is * 0.3f, p.y + is), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.7f, p.y + is * 0.7f), ImVec2(p.x + is, p.y + is), col, thickness);
+            break;
+        case IconType::Render:
+            dl->AddCircle(cp, is * 0.4f, col, 0, thickness * 1.5f);
+            for(int i=0; i<8; i++) {
+                float ang = i * (6.28f / 8.0f);
+                dl->AddLine(ImVec2(cp.x + cosf(ang)*is*0.35f, cp.y + sinf(ang)*is*0.35f),
+                           ImVec2(cp.x + cosf(ang)*is*0.55f, cp.y + sinf(ang)*is*0.55f), col, thickness * 1.5f);
+            }
+            break;
+        case IconType::Terrain:
+            dl->AddTriangleFilled(ImVec2(p.x, p.y + is), ImVec2(p.x + is*0.5f, p.y), ImVec2(p.x + is, p.y + is), col);
+            break;
+        case IconType::Water:
+            for(int i=0; i<3; i++) {
+                float yoff = i * (is/3.0f);
+                dl->AddBezierQuadratic(ImVec2(p.x, p.y + yoff), ImVec2(p.x + is*0.25f, p.y + yoff + 5), ImVec2(p.x + is*0.5f, p.y + yoff), col, thickness);
+                dl->AddBezierQuadratic(ImVec2(p.x + is*0.5f, p.y + yoff), ImVec2(p.x + is*0.75f, p.y + yoff - 5), ImVec2(p.x + is, p.y + yoff), col, thickness);
+            }
+            break;
+        case IconType::Volumetric:
+            dl->AddCircleFilled(ImVec2(cp.x - is*0.25f, cp.y + is*0.1f), is*0.25f, col);
+            dl->AddCircleFilled(ImVec2(cp.x + is*0.25f, cp.y + is*0.1f), is*0.25f, col);
+            dl->AddCircleFilled(ImVec2(cp.x, cp.y - is*0.15f), is*0.35f, col);
+            break;
+        case IconType::Force:
+            dl->AddCircle(cp, is * 0.45f, col, 0, thickness);
+            dl->AddLine(cp, ImVec2(cp.x, cp.y - is*0.4f), col, thickness * 1.5f);
+            dl->AddTriangleFilled(ImVec2(cp.x - 4, cp.y - is*0.4f), ImVec2(cp.x + 4, cp.y - is*0.4f), ImVec2(cp.x, cp.y - is*0.55f), col);
+            break;
+        case UIWidgets::IconType::World:
+            dl->AddCircle(cp, is*0.4f, col, 0, thickness);
+            dl->AddEllipse(cp, ImVec2(is*0.2f, is*0.4f), col, 0.0f, 0, thickness*0.8f); // Vertical axis
+            dl->AddLine(ImVec2(cp.x-is*0.4f, cp.y), ImVec2(cp.x+is*0.4f, cp.y), col, thickness*0.8f); // Horizontal
+            break;
+        case UIWidgets::IconType::System:
+            dl->AddRect(p, ImVec2(p.x + is, p.y + is * 0.7f), col, 2.0f, 0, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.3f, p.y + is), ImVec2(p.x + is*0.7f, p.y + is), col, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.5f, p.y + is*0.7f), ImVec2(p.x + is*0.5f, p.y + is), col, thickness);
+            break;
+        case IconType::Wind:
+            dl->AddLine(ImVec2(p.x, p.y + is*0.3f), ImVec2(p.x + is*0.7f, p.y + is*0.3f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.2f, p.y + is*0.6f), ImVec2(p.x + is*0.9f, p.y + is*0.6f), col, thickness);
+            dl->AddBezierQuadratic(ImVec2(p.x + is*0.7f, p.y + is*0.3f), ImVec2(p.x + is*0.85f, p.y + is*0.1f), ImVec2(p.x + is, p.y + is*0.3f), col, thickness);
+            break;
+        case IconType::Gravity:
+            dl->AddCircleFilled(cp, is * 0.4f, col);
+            dl->AddCircle(cp, is * 0.5f, col, 0, thickness);
+            break;
+        case IconType::Vortex:
+            for(int i=0; i<3; i++) dl->AddCircle(cp, is*0.15f*(i+1), col, 0, thickness);
+            dl->AddLine(cp, ImVec2(cp.x + is*0.5f, cp.y - is*0.5f), col, thickness);
+            break;
+        case IconType::Physics:
+            dl->AddCircleFilled(ImVec2(cp.x-4, cp.y-4), 4, col);
+            dl->AddRect(ImVec2(cp.x+2, cp.y+2), ImVec2(cp.x+10, cp.y+10), col, 0, 0, thickness);
+            break;
+        case IconType::Magnet:
+            dl->AddRect(p, ImVec2(p.x+is, p.y+is*0.4f), col, 5.0f, ImDrawFlags_RoundCornersTop, thickness*2);
+            dl->AddRectFilled(ImVec2(p.x, p.y), ImVec2(p.x+is*0.3f, p.y+is*0.2f), col);
+            dl->AddRectFilled(ImVec2(p.x+is*0.7f, p.y), ImVec2(p.x+is, p.y+is*0.2f), col);
+            break;
+        case IconType::Camera:
+            dl->AddRect(ImVec2(p.x, p.y+is*0.2f), ImVec2(p.x+is*0.7f, p.y+is*0.8f), col, 2.0f, 0, thickness);
+            dl->AddTriangleFilled(ImVec2(p.x+is*0.7f, cp.y), ImVec2(p.x+is, p.y), ImVec2(p.x+is, p.y+is), col);
+            break;
+        case IconType::Light:
+            dl->AddCircle(cp, is*0.3f, col, 0, thickness);
+            for(int i=0; i<8; i++) {
+                float a = i*6.28f/8.f;
+                dl->AddLine(ImVec2(cp.x+cosf(a)*is*0.35f, cp.y+sinf(a)*is*0.35f), ImVec2(cp.x+cosf(a)*is*0.55f, cp.y+sinf(a)*is*0.55f), col, thickness);
+            }
+            break;
+        case IconType::Mesh:
+            dl->AddRect(p, ImVec2(p.x+is, p.y+is), col, 1.0f, 0, thickness);
+            dl->AddLine(p, ImVec2(p.x+is, p.y+is), col, thickness*0.5f);
+            dl->AddLine(ImVec2(p.x+is, p.y), ImVec2(p.x, p.y+is), col, thickness*0.5f);
+            break;
+        case UIWidgets::IconType::Timeline:
+            for(int i=0; i<3; i++) dl->AddLine(ImVec2(p.x, p.y + is*0.3f*i + 2), ImVec2(p.x + is, p.y + is*0.3f*i + 2), col, thickness);
+            dl->AddRectFilled(ImVec2(cp.x-1, p.y), ImVec2(cp.x+1, p.y+is), col); // Needle
+            break;
+        case UIWidgets::IconType::Console:
+            dl->AddLine(ImVec2(p.x, p.y+2), ImVec2(p.x + is*0.4f, cp.y), col, thickness*1.2f);
+            dl->AddLine(ImVec2(p.x + is*0.4f, cp.y), ImVec2(p.x, p.y+is-2), col, thickness*1.2f);
+            dl->AddLine(ImVec2(cp.x, p.y+is-2), ImVec2(p.x+is, p.y+is-2), col, thickness*1.2f);
+            break;
+        case UIWidgets::IconType::Graph:
+            dl->AddCircle(ImVec2(p.x+is*0.2f, cp.y), is*0.15f, col, 0, thickness);
+            dl->AddCircle(ImVec2(p.x+is*0.8f, p.y+is*0.3f), is*0.15f, col, 0, thickness);
+            dl->AddCircle(ImVec2(p.x+is*0.8f, p.y+is*0.7f), is*0.15f, col, 0, thickness);
+            dl->AddLine(ImVec2(p.x+is*0.35f, cp.y), ImVec2(p.x+is*0.65f, p.y+is*0.3f), col, thickness*0.5f);
+            dl->AddLine(ImVec2(p.x+is*0.35f, cp.y), ImVec2(p.x+is*0.65f, p.y+is*0.7f), col, thickness*0.5f);
+            break;
+        case UIWidgets::IconType::AnimGraph:
+            dl->AddRect(ImVec2(p.x, p.y+is*0.1f), ImVec2(p.x+is*0.4f, p.y+is*0.4f), col, 1.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x+is*0.6f, p.y+is*0.6f), ImVec2(p.x+is, p.y+is*0.9f), col, 1.0f, 0, thickness);
+            dl->AddLine(ImVec2(p.x+is*0.4f, p.y+is*0.25f), ImVec2(p.x+is*0.6f, p.y+is*0.75f), col, thickness);
+            break;
+        case UIWidgets::IconType::LightPoint:
+            dl->AddCircleFilled(cp, is*0.15f, col);
+            for(int i=0; i<8; i++) {
+                float a = i*6.28f/8.f;
+                dl->AddLine(ImVec2(cp.x+cosf(a)*is*0.25f, cp.y+sinf(a)*is*0.25f), ImVec2(cp.x+cosf(a)*is*0.5f, cp.y+sinf(a)*is*0.5f), col, thickness*0.8f);
+            }
+            break;
+        case UIWidgets::IconType::LightDir:
+            for(int i=0; i<3; i++) {
+                dl->AddLine(ImVec2(p.x+is*0.3f*i + 2, p.y), ImVec2(p.x+is*0.3f*i + 2, p.y+is*0.7f), col, thickness);
+                dl->AddLine(ImVec2(p.x+is*0.3f*i + 2, p.y+is*0.7f), ImVec2(p.x+is*0.3f*i - 2, p.y+is*0.5f), col, thickness*0.8f);
+                dl->AddLine(ImVec2(p.x+is*0.3f*i + 2, p.y+is*0.7f), ImVec2(p.x+is*0.3f*i + 6, p.y+is*0.5f), col, thickness*0.8f);
+            }
+            break;
+        case UIWidgets::IconType::LightSpot:
+            dl->AddCircle(ImVec2(cp.x, p.y+is*0.2f), is*0.2f, col, 0, thickness);
+            dl->AddLine(ImVec2(cp.x-is*0.2f, p.y+is*0.2f), ImVec2(p.x, p.y+is*0.9f), col, thickness);
+            dl->AddLine(ImVec2(cp.x+is*0.2f, p.y+is*0.2f), ImVec2(p.x+is, p.y+is*0.9f), col, thickness);
+            dl->AddLine(ImVec2(p.x, p.y+is*0.9f), ImVec2(p.x+is, p.y+is*0.9f), col, thickness*0.5f);
+            break;
+        case UIWidgets::IconType::LightArea:
+            dl->AddRect(ImVec2(p.x+is*0.1f, p.y+is*0.2f), ImVec2(p.x+is*0.9f, p.y+is*0.6f), col, 1.0f, 0, thickness);
+            for(int i=0; i<4; i++) dl->AddLine(ImVec2(p.x+is*(0.2f+0.2f*i), p.y+is*0.6f), ImVec2(p.x+is*(0.2f+0.2f*i), p.y+is*0.9f), col, thickness*0.5f);
+            break;
+        default: break;
+    }
+}
+
+bool HorizontalTab(const char* label, UIWidgets::IconType icon, bool active, float width) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGuiStyle& style = ImGui::GetStyle();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    ImVec2 size = ImVec2(width > 0 ? width : ImGui::CalcTextSize(label).x + 44.0f, 22.0f);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    
+    ImGui::PushID(label);
+    bool clicked = ImGui::InvisibleButton("##htab", size);
+    bool hovered = ImGui::IsItemHovered();
+    ImGui::PopID();
+
+    if (active) {
+        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.08f)), 3.0f);
+        dl->AddRectFilled(ImVec2(p.x + 4, p.y + size.y - 2), ImVec2(p.x + size.x - 4, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)), 1.0f);
+    } else if (hovered) {
+        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.04f)), 3.0f);
+    }
+
+    ImU32 iconCol = active ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.6f, 0.65f, 1.0f));
+    DrawIcon(icon, ImVec2(p.x + 8, p.y + 3), 16.0f, iconCol);
+    
+    ImU32 textCol = active ? ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,1)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.6f, 0.65f, 1.0f));
+    dl->AddText(ImVec2(p.x + 30, p.y + 3), textCol, label);
+
+    if (active) {
+        // Vertical Bridge Indicator (Alignment with sidebar language)
+        dl->AddRectFilled(
+            ImVec2(p.x + 4, p.y + size.y - 3), 
+            ImVec2(p.x + size.x - 4, p.y + size.y), 
+            ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)),
+            1.5f
+        );
+
+        // Subtle bottom glow
+        dl->AddRectFilledMultiColor(
+            ImVec2(p.x, p.y + size.y - 8),
+            ImVec2(p.x + size.x, p.y + size.y),
+            IM_COL32(26, 230, 204, 0), IM_COL32(26, 230, 204, 0),
+            IM_COL32(26, 230, 204, 30), IM_COL32(26, 230, 204, 30)
+        );
+    }
+
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    ImGui::SameLine(0, 4);
+    return clicked;
 }
 
 } // namespace UIWidgets

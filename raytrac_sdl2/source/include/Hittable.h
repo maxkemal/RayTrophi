@@ -12,8 +12,6 @@
 #define HITTABLE_H
 
 #include "Ray.h"
-#include "RayPacket.h"
-#include "HitRecordPacket.h"
 #include "AABB.h"
 #include <vector>
 #include <memory>
@@ -74,12 +72,6 @@ class Hittable {
 public:
     virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const = 0;
     
-    // Packet Tracing Interface (Phase 2)
-    // Updates 'rec' based on active lanes in 'r' and 'rec.mask'
-    virtual void hit_packet(const RayPacket& packet, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const {
-        // Default implementation: Scalar fallback (slow)
-        // In reality, leaf nodes (Triangle) and BVH nodes must override this.
-    }
 
     virtual bool bounding_box(float time0, float time1, AABB& output_box) const = 0;
     virtual ~Hittable() = default;
@@ -95,23 +87,6 @@ public:
         return hit(ray, t_min, t_max, dummy);
     }
 
-    // Packet Occlusion Interface (Phase 2)
-    // Returns a mask of occluded rays
-    virtual __m256 occluded_packet(const RayPacket& packet, float t_min, __m256 t_max) const {
-        // Default implementation: Scalar fallback (very slow, override in BVH/Objects)
-        alignas(32) int mask_result[8] = {0};
-        alignas(32) float t_max_vals[8];
-        _mm256_store_ps(t_max_vals, t_max);
-
-        for (int i = 0; i < 8; i++) {
-            Ray r(Vec3(packet.orig_x.get(i), packet.orig_y.get(i), packet.orig_z.get(i)),
-                  Vec3(packet.dir_x.get(i), packet.dir_y.get(i), packet.dir_z.get(i)));
-            if (occluded(r, t_min, t_max_vals[i])) {
-                mask_result[i] = 0xFFFFFFFF;
-            }
-        }
-        return _mm256_load_ps((float*)mask_result);
-    }
 
     // Visibility flag for rendering (CPU/GPU)
     bool visible = true;

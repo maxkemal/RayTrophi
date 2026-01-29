@@ -676,7 +676,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                                 if (terrain) {
                                     terrain_brush.active_terrain_id = terrain->id;
                                     show_terrain_tab = true;
-                                    tab_to_focus = "Terrain";
+                                    // Focus removed per user request
                                     SCENE_LOG_INFO("Terrain selected via viewport: " + tName);
                                 }
                             }

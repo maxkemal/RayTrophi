@@ -44,6 +44,9 @@ namespace fs = std::filesystem;
 // Global project data instance
 ProjectData g_project;
 
+// Extern access to UI State (referenced for serialization)
+#include "../UI/scene_ui_animgraph.hpp"
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -227,12 +230,38 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     
     // 3. Clear Central Subsystems
     MaterialManager::getInstance().clear();
+    WaterManager::getInstance().clear();
     RiverManager::getInstance().clear();
     TerrainManager::getInstance().removeAllTerrains(scene);
     InstanceManager::getInstance().clearAll();  // Clear foliage/scatter instances 
     VDBVolumeManager::getInstance().unloadAll(); // Clear VDB/Gas GPU handles and reset IDs
     
-    SCENE_LOG_INFO("New project created. Subsystems cleared.");
+    // 4. Clear Animation/Bone Caches (CRITICAL - prevents bone corruption on new project)
+    // Clear per-model animator contexts and their bone caches
+    for (auto& ctx : scene.importedModelContexts) {
+        if (ctx.animator) {
+            ctx.animator->clear();
+        }
+        if (ctx.graph) {
+            ctx.graph.reset();
+        }
+        ctx.members.clear();
+    }
+    scene.importedModelContexts.clear();
+    
+    // Clear scene-level animation and bone data
+    scene.animationDataList.clear();
+    scene.boneData.clear();
+    
+    // Clear renderer's cached bone matrices
+    renderer.finalBoneMatrices.clear();
+    
+    // Clear Animation Graphs
+    g_animGraphUI.graphs.clear();
+    g_animGraphUI.activeCharacter = "";
+    g_animGraphUI = AnimGraphUIState();
+    
+    SCENE_LOG_INFO("New project created. Subsystems and animation caches cleared.");
 }
 
 // ============================================================================
@@ -355,6 +384,27 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             }
             j_bones["boneOffsetMatrices"] = j_offsets;
             
+            // Save bone default local transforms (bind pose)
+            json j_defaults = json::object();
+            for (const auto& [name, matrix] : scene.boneData.boneDefaultTransforms) {
+                j_defaults[name] = mat4ToJson(matrix);
+            }
+            j_bones["boneDefaultTransforms"] = j_defaults;
+            
+            // Save bone hierarchy
+            json j_parents = json::object();
+            for (const auto& [child, parent] : scene.boneData.boneParents) {
+                j_parents[child] = parent;
+            }
+            j_bones["boneParents"] = j_parents;
+            
+            // Save per-model inverses
+            json j_model_invs = json::object();
+            for (const auto& [prefix, inv] : scene.boneData.perModelInverses) {
+                j_model_invs[prefix] = mat4ToJson(inv);
+            }
+            j_bones["perModelInverses"] = j_model_invs;
+            
             // Save global inverse transform
             j_bones["globalInverseTransform"] = mat4ToJson(scene.boneData.globalInverseTransform);
             
@@ -367,16 +417,18 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             json j_animations = json::array();
             
             for (const auto& anim : scene.animationDataList) {
+                if (!anim) continue;
                 json j_anim;
-                j_anim["name"] = anim.name;
-                j_anim["duration"] = anim.duration;
-                j_anim["ticksPerSecond"] = anim.ticksPerSecond;
-                j_anim["startFrame"] = anim.startFrame;
-                j_anim["endFrame"] = anim.endFrame;
+                j_anim["name"] = anim->name;
+                j_anim["modelName"] = anim->modelName;
+                j_anim["duration"] = anim->duration;
+                j_anim["ticksPerSecond"] = anim->ticksPerSecond;
+                j_anim["startFrame"] = anim->startFrame;
+                j_anim["endFrame"] = anim->endFrame;
                 
                 // Position keys
                 json j_pos_keys = json::object();
-                for (const auto& [nodeName, keys] : anim.positionKeys) {
+                for (const auto& [nodeName, keys] : anim->positionKeys) {
                     json j_keys = json::array();
                     for (const auto& key : keys) {
                         j_keys.push_back({
@@ -392,7 +444,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 
                 // Rotation keys
                 json j_rot_keys = json::object();
-                for (const auto& [nodeName, keys] : anim.rotationKeys) {
+                for (const auto& [nodeName, keys] : anim->rotationKeys) {
                     json j_keys = json::array();
                     for (const auto& key : keys) {
                         j_keys.push_back({
@@ -409,7 +461,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 
                 // Scaling keys
                 json j_scale_keys = json::object();
-                for (const auto& [nodeName, keys] : anim.scalingKeys) {
+                for (const auto& [nodeName, keys] : anim->scalingKeys) {
                     json j_keys = json::array();
                     for (const auto& key : keys) {
                         j_keys.push_back({
@@ -426,8 +478,24 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 j_animations.push_back(j_anim);
             }
             
+           
             root["animationDataList"] = j_animations;
             SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.animationDataList.size()) + " animation clips.");
+        }
+        
+        // Animation Graphs (Visual Scripting)
+        if (progress_callback) progress_callback(83, "Saving animation graphs...");
+        {
+            json j_graphs = json::object();
+            for(const auto& [name, graph] : g_animGraphUI.graphs) {
+                if(graph) {
+                    json g;
+                    graph->saveToJson(g);
+                    j_graphs[name] = g;
+                }
+            }
+            root["animationGraphs"] = j_graphs;
+            root["activeGraphCharacter"] = g_animGraphUI.activeCharacter;
         }
 
         // World Settings (Atmosphere, Godrays, etc.)
@@ -472,14 +540,20 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         root["force_fields"] = serializeForceFields(scene.force_field_manager);
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.force_field_manager.force_fields.size()) + " Force Fields.");
         
-        // UI Settings (Pro Camera, Viewport, etc.)
-        if (!scene.ui_settings_json_str.empty()) {
-            try {
-                root["ui_settings"] = json::parse(scene.ui_settings_json_str);
-            } catch (...) {
-                SCENE_LOG_WARN("Failed to parse UI settings JSON for saving.");
-            }
+        // Imported Model Context Metadata
+        if (progress_callback) progress_callback(84, "Saving model contexts...");
+        json j_contexts = json::array();
+        for (const auto& ctx : scene.importedModelContexts) {
+            json c;
+            c["importName"] = ctx.importName;
+            c["hasAnimation"] = ctx.hasAnimation;
+            c["globalInverseTransform"] = mat4ToJson(ctx.globalInverseTransform);
+            c["useRootMotion"] = ctx.useRootMotion;
+            c["useAnimGraph"] = ctx.useAnimGraph;
+            c["visible"] = ctx.visible;
+            j_contexts.push_back(c);
         }
+        root["importedModelContexts"] = j_contexts;
 
         // Textures (with embed option)
         if (progress_callback) progress_callback(85, "Processing textures...");
@@ -675,8 +749,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 
             // Load World Settings (Atmosphere, Godrays)
             if (root.contains("world")) {
-                 renderer.world.deserialize(root["world"]);
-                 SCENE_LOG_INFO("World settings loaded from project.");
+                renderer.world.deserialize(root["world"]);
+                SCENE_LOG_INFO("World settings loaded from project.");
             }
 
             // Load Water Surfaces
@@ -692,7 +766,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 SCENE_LOG_INFO("[ProjectManager] Loading terrain system from: " + terrainDir);
                 TerrainManager::getInstance().deserialize(root["terrain_system"], terrainDir, scene);
             }
-            
+
             // Load River System (After terrain so rivers can follow terrain)
             if (root.contains("rivers")) {
                 if (progress_callback) progress_callback(76, "Loading river system...");
@@ -700,7 +774,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 RiverManager::getInstance().deserialize(root["rivers"], scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
             }
-            
+
             // Load Foliage System
             if (root.contains("instances")) {
                 if (progress_callback) progress_callback(77, "Loading foliage system...");
@@ -709,11 +783,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 InstanceManager::getInstance().rebuildSceneObjects(scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded foliage system.");
             }
-            
+
             // Load VDB Volumes
             if (root.contains("vdb_volumes")) {
                 if (progress_callback) progress_callback(78, "Loading VDB volumes...");
-                deserializeVDBVolumes(root["vdb_volumes"], scene); 
+                deserializeVDBVolumes(root["vdb_volumes"], scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded VDB volumes.");
             }
 
@@ -730,65 +804,122 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 deserializeForceFields(root["force_fields"], scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded Force Fields.");
             }
-            
+
             // Load Timeline/Animation (keyframes) - AFTER Objects are created
             if (root.contains("timeline")) {
                 scene.timeline.deserialize(root["timeline"]);
                 SCENE_LOG_INFO("[ProjectManager] Loaded timeline with " + std::to_string(scene.timeline.tracks.size()) + " tracks.");
             }
-            
+
+            // Load Animation Graphs
+            if (root.contains("animationGraphs")) {
+                g_animGraphUI = AnimGraphUIState(); // Clear first
+
+                for (auto& [name, j_graph] : root["animationGraphs"].items()) {
+                    auto graph = std::make_unique<AnimationGraph::AnimationNodeGraph>();
+                    graph->loadFromJson(j_graph);
+                    g_animGraphUI.graphs[name] = std::move(graph);
+                }
+
+                g_animGraphUI.activeCharacter = root.value("activeGraphCharacter", "");
+                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(g_animGraphUI.graphs.size()) + " animation graphs.");
+            }
+
             // Load BoneData (skeleton/skinning information)
             if (root.contains("boneData")) {
                 if (progress_callback) progress_callback(78, "Loading bone data...");
                 auto& j_bones = root["boneData"];
-                
+
                 // Clear existing bone data
                 scene.boneData.clear();
-                
+
                 // Load bone name to index mapping
-                if (j_bones.contains("boneNameToIndex")) {
-                    for (auto& [name, idx] : j_bones["boneNameToIndex"].items()) {
-                        scene.boneData.boneNameToIndex[name] = idx.get<int>();
-                    }
+                for (auto& [name, idx] : j_bones["boneNameToIndex"].items()) {
+                    scene.boneData.boneNameToIndex[name] = idx.get<int>();
                 }
-                
+
+
                 // Load bone offset matrices
                 if (j_bones.contains("boneOffsetMatrices")) {
                     for (auto& [name, mat] : j_bones["boneOffsetMatrices"].items()) {
                         scene.boneData.boneOffsetMatrices[name] = jsonToMat4(mat);
                     }
                 }
-                
+
+                // Load bone default transforms
+                if (j_bones.contains("boneDefaultTransforms")) {
+                    for (auto& [name, mat] : j_bones["boneDefaultTransforms"].items()) {
+                        scene.boneData.boneDefaultTransforms[name] = jsonToMat4(mat);
+                    }
+                }
+
+                // Load bone hierarchy
+                if (j_bones.contains("boneParents")) {
+                    for (auto& [child, parent] : j_bones["boneParents"].items()) {
+                        scene.boneData.boneParents[child] = parent.get<std::string>();
+                    }
+                }
+
+                if (j_bones.contains("perModelInverses")) {
+                    for (auto& [prefix, mat] : j_bones["perModelInverses"].items()) {
+                        scene.boneData.perModelInverses[prefix] = jsonToMat4(mat);
+                    }
+                }
+
                 // Load global inverse transform
                 if (j_bones.contains("globalInverseTransform")) {
                     scene.boneData.globalInverseTransform = jsonToMat4(j_bones["globalInverseTransform"]);
                 }
-                
+
                 // Rebuild reverse lookup for O(1) access
                 scene.boneData.rebuildReverseLookup();
-                
+
                 SCENE_LOG_INFO("[ProjectManager] Loaded bone data: " + std::to_string(scene.boneData.boneNameToIndex.size()) + " bones.");
             }
-            
+
             // Load UI Settings
             if (root.contains("ui_settings")) {
                 scene.ui_settings_json_str = root["ui_settings"].dump();
                 scene.load_counter++; // Signal SceneUI to reload settings
             }
-            
+
+            // Load Imported Model Contexts
+            if (root.contains("importedModelContexts")) {
+                scene.importedModelContexts.clear();
+                for (const auto& j_ctx : root["importedModelContexts"]) {
+                    SceneData::ImportedModelContext ctx;
+                    ctx.importName = j_ctx.value("importName", "");
+                    ctx.hasAnimation = j_ctx.value("hasAnimation", false);
+                    if (j_ctx.contains("globalInverseTransform")) {
+                        ctx.globalInverseTransform = jsonToMat4(j_ctx["globalInverseTransform"]);
+                    }
+                    else {
+                        ctx.globalInverseTransform = Matrix4x4::identity();
+                    }
+                    ctx.useRootMotion = j_ctx.value("useRootMotion", false);
+                    ctx.useAnimGraph = j_ctx.value("useAnimGraph", false);
+                    ctx.visible = j_ctx.value("visible", true);
+                    // Note: ctx.loader remains null as aiScene is not serialized, 
+                    // the fallback animation system will handle this.
+                    scene.importedModelContexts.push_back(ctx);
+                }
+                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.importedModelContexts.size()) + " model contexts.");
+            }
+
             // Load AnimationData (bone animation keyframes)
             if (root.contains("animationDataList")) {
                 if (progress_callback) progress_callback(79, "Loading animation data...");
                 scene.animationDataList.clear();
-                
+
                 for (const auto& j_anim : root["animationDataList"]) {
                     AnimationData anim;
                     anim.name = j_anim.value("name", "");
+                    anim.modelName = j_anim.value("modelName", "");
                     anim.duration = j_anim.value("duration", 0.0);
                     anim.ticksPerSecond = j_anim.value("ticksPerSecond", 24.0);
                     anim.startFrame = j_anim.value("startFrame", 0);
                     anim.endFrame = j_anim.value("endFrame", 0);
-                    
+
                     // Position keys
                     if (j_anim.contains("positionKeys")) {
                         for (auto& [nodeName, j_keys] : j_anim["positionKeys"].items()) {
@@ -804,7 +935,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                             anim.positionKeys[nodeName] = keys;
                         }
                     }
-                    
+
                     // Rotation keys
                     if (j_anim.contains("rotationKeys")) {
                         for (auto& [nodeName, j_keys] : j_anim["rotationKeys"].items()) {
@@ -821,7 +952,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                             anim.rotationKeys[nodeName] = keys;
                         }
                     }
-                    
+
                     // Scaling keys
                     if (j_anim.contains("scalingKeys")) {
                         for (auto& [nodeName, j_keys] : j_anim["scalingKeys"].items()) {
@@ -837,10 +968,10 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                             anim.scalingKeys[nodeName] = keys;
                         }
                     }
-                    
-                    scene.animationDataList.push_back(anim);
+
+                    scene.animationDataList.push_back(std::make_shared<AnimationData>(anim));
                 }
-                
+
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.animationDataList.size()) + " animation clips.");
             }
 
@@ -892,11 +1023,23 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // Instead of relying on g_needs_geometry_rebuild which waits for next frame,
     // we force a rebuild immediately to ensure foliage/instances are uploaded correctly.
     // This fixes the issue where instances appeared rotated until a scene update occurred.
+    // Resume animation system and force initial pose sync (Independent of GPU availability)
+    if (!scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty()) {
+        renderer.initializeAnimationSystem(scene);
+        // Settle bone matrices for frame 0, applying per-model inverses
+        renderer.updateAnimationWithGraph(scene, 0.0f, true);
+    }
+
     if (optix_gpu) {
         if (progress_callback) progress_callback(95, "Uploading to GPU...");
         
         // Full rebuild to handle new geometry/instances
         renderer.rebuildOptiXGeometry(scene, optix_gpu);
+        
+        // Sync bone matrices to GPU if they were computed
+        if (!renderer.finalBoneMatrices.empty() && optix_gpu && optix_gpu->isUsingTLAS()) {
+             optix_gpu->updateTLASGeometry(scene.world.objects, renderer.finalBoneMatrices);
+        }
         
         // Update auxiliary params
         optix_gpu->setLightParams(scene.lights);
@@ -945,7 +1088,7 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
     // Generate package path and unique ID
     uint32_t id = g_project.generateModelId();
     std::string package_path = generatePackagePath(filepath, "models", id);
-    std::string import_prefix = std::to_string(id) + "_";
+    std::string import_prefix = std::to_string(id);
     
     ImportedModelData model;
     model.id = id;
@@ -965,17 +1108,15 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
 
     // Load with Assimp - append mode (don't clear existing scene)
     // AssimpLoader usually just takes time, ideally we'd pass progress callback into it too
-    renderer.create_scene(scene, optix_gpu, filepath, progress_callback, true);  // append = true
+    renderer.create_scene(scene, optix_gpu, filepath, progress_callback, true, import_prefix);  // append = true, import_prefix = unique id
     
     if (progress_callback) progress_callback(80, "Processing objects...");
 
-    // Track new objects and add unique prefix to prevent name collision
+    // Track new objects
     for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
         if (tri) {
-            std::string original_name = tri->nodeName;
-            std::string unique_name = import_prefix + original_name;
-            tri->setNodeName(unique_name);
+            std::string unique_name = tri->nodeName; // Already prefixed by AssimpLoader now!
             
             ImportedModelData::ObjectInstance inst;
             inst.node_name = unique_name;

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Studio - Manual</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link active">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+
+            <div class="hero">
+                <div class="screenshot-area" style="margin-bottom: 40px;">
+                    <img src="images/index_header.jpg" alt="RayTrophi Cinematic"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">
+                        ⭐ Please save a Header Render as <code>docs/images/index_header.jpg</code>
+                    </div>
+                </div>
+
+                <h1>RayTrophi Studio</h1>
+                <p style="font-size: 1.5em; max-width: 700px; margin: 0 auto;">
+                    The Ultimate Platform for <strong>Procedural World Building</strong> and <strong>Physical
+                        Simulation</strong>.
+                </p>
+            </div>
+
+            <div class="feature-grid">
+                <div class="feature-box" onclick="location.href='world.html'">
+                    <div class="feature-icon">🌤️</div>
+                    <h3>Atmosphere & Gas</h3>
+                    <p>Spectral Sky, Volumetric Clouds, <strong>Gas Simulation</strong>, and <strong>Force
+                            Fields</strong>.</p>
+                    <div class="tag">VDB Sim</div>
+                </div>
+
+                <div class="feature-box" onclick="location.href='water.html'">
+                    <div class="feature-icon">🌊</div>
+                    <h3>Hydrodynamics</h3>
+                    <p>FFT Oceans, Caustics, and Procedural Rivers with Flow Maps.</p>
+                    <div class="tag">Fluid Physics</div>
+                </div>
+
+                <div class="feature-box" onclick="location.href='terrain.html'">
+                    <div class="feature-icon">⛰️</div>
+                    <h3>Terrain Sculpting</h3>
+                    <p>Hydraulic Erosion, Heightmap Nodes, and the new <strong>Foliage System</strong>.</p>
+                    <div class="tag">Erosion</div>
+                </div>
+
+                <div class="feature-box" onclick="location.href='animation.html'">
+                    <div class="feature-icon">🎬</div>
+                    <h3>Life & Motion</h3>
+                    <p>Timeline keyframing and the powerful <strong>Animation Graph</strong> for characters.</p>
+                    <div class="tag">Anim Graph</div>
+                </div>
+
+                <div class="feature-box" onclick="location.href='camera.html'">
+                    <div class="feature-icon">🎥</div>
+                    <h3>Physical Camera</h3>
+                    <p>Realistic optics with Depth of Field, ISO, and Shutter control.</p>
+                    <div class="tag">Optics</div>
+                </div>
+
+                <div class="feature-box" onclick="location.href='render.html'">
+                    <div class="feature-icon">🚀</div>
+                    <h3>Path Tracing</h3>
+                    <p>Hardware accelerated ray tracing with OptiX 7 and OIDN Denoising.</p>
+                    <div class="tag">RTX On</div>
+                </div>
+            </div>
+
+            <div style="margin-top: 80px; text-align: center; color: #666; font-size: 0.9em;">
+                &copy; 2026 RayTrophi Studio. Powered by OptiX 7 & C++20.
+            </div>
+
+        </div>
+    </div>
+
+</body>
+
+</html>

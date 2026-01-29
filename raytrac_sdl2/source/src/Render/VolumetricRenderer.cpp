@@ -13,7 +13,7 @@
 #include "renderer.h" 
 #include <cmath>
 #include <algorithm> // For std::min, std::max
-
+#include "AtmosphereLUT.h"
 // Helper for cloud transmittance (placeholder implementation based on original code)
 static float determine_cloud_transmittance(const WorldData& world, const Vec3& origin, const Vec3& dir, float maxDist) {
     if (!world.nishita.clouds_enabled && !world.nishita.cloud_layer2_enabled) return 1.0f;
@@ -81,9 +81,9 @@ static Vec3 get_sun_color(float sun_elevation) {
 static Vec3 to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
 
 // ============================================================================
-// GOD RAYS (CPU)
+// GOD RAYS (CPU) - MATCHED TO GPU logic
 // ============================================================================
-Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldData& world_data, const Ray& ray, float maxDistance, const Hittable* bvh) {
+Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldData& world_data, const Ray& ray, float maxDistance, const Hittable* bvh, class AtmosphereLUT* lut) {
     if (world_data.mode != WORLD_MODE_NISHITA || !world_data.nishita.godrays_enabled || world_data.nishita.godrays_intensity <= 0.0f) {
         return Vec3(0.0f);
     }
@@ -126,8 +126,14 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
     if (denom < 0.0001f) denom = 0.0001f;
     float phase = (1.0f - g2) / (4.0f * 3.14159265f * pow(denom, 1.5f));
 
-    // Sun Color is constant (directional light)
-    Vec3 sun_color = get_sun_color(sunElevation);
+    // Sun Color from LUT (Physical Parity)
+    Vec3 sun_color(1.0f);
+    if (lut) {
+        float3 sunTrans = lut->sampleTransmittance(std::max(0.01f, sunDir.y), nishita.altitude, nishita.atmosphere_height);
+        sun_color = Vec3(sunTrans.x, sunTrans.y, sunTrans.z);
+    } else {
+        sun_color = get_sun_color(sunElevation);
+    }
 
     for (int i = 0; i < num_steps; ++i) {
         float t = jitter + step_size * (float)i + step_size * 0.5f;
@@ -157,11 +163,11 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
 
             if (sunTrans > 0.001f) {
                 // Decay is distance dependent
-                float decay = pow(nishita.godrays_decay, t * 0.01f);
+              
 
-                // drastically reduce intensity multiplier to prevent whiteout
-                float global_scale = 0.00005f;
-                Vec3 contribution = sun_color * (density * phase * nishita.godrays_intensity) * transmittance * decay * step_size * elevationFactor * sunTrans * nishita.sun_intensity * global_scale;
+                // Match GPU Intensity and attenuation
+                float global_scale = 0.0002f; // Increased from 0.00005f to better match GPU
+                Vec3 contribution = sun_color * (density * phase * nishita.godrays_intensity) * transmittance  * step_size * elevationFactor * sunTrans * nishita.sun_intensity * global_scale;
 
                 if (std::isfinite(contribution.x)) {
                     total_light = total_light + contribution;
@@ -271,6 +277,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* opti
             gv.shadow_steps = gs.shadow_steps;
             gv.shadow_strength = gs.shadow_strength;
             gv.voxel_size = vdb->getVoxelSize();
+            gv.max_temperature = 6000.0f; // Default for standard VDBs
             
             // Color Ramp
             gv.color_ramp_enabled = gs.color_ramp_enabled;
@@ -354,6 +361,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* opti
             gv.shadow_steps = shader->quality.shadow_steps;
             gv.shadow_strength = shader->quality.shadow_strength;
             gv.voxel_size = gas->getSettings().voxel_size;
+            gv.max_temperature = gas->getSettings().max_temperature;
 
             // Color Ramp
             gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
@@ -420,6 +428,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* opti
             gv.max_steps = shader->quality.max_steps;
             gv.shadow_strength = shader->quality.shadow_strength;
             gv.shadow_steps = shader->quality.shadow_steps;
+            gv.max_temperature = gas->getSettings().max_temperature;
 
             // Color Ramp (Legacy)
             gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
@@ -436,4 +445,71 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* opti
         gpu_gas_volumes.push_back(gv);
     }
     optix_gpu_ptr->updateGasVolumeBuffer(gpu_gas_volumes);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// AERIAL PERSPECTIVE (CPU) - Matches GPU gpu_get_aerial_perspective
+// ════════════════════════════════════════════════════════════════════════════
+static float calculate_height_fog_factor_cpu(Vec3 rayOrigin, Vec3 rayDir, float distance, float fogDensity, float fogHeight, float fogFalloff) {
+    float a = fogDensity * expf(-fogFalloff * rayOrigin.y);
+    float b = fogFalloff * rayDir.y;
+    if (fabsf(b) < 1e-5f) return 1.0f - expf(-a * distance);
+    float fogAmount = a * (1.0f - expf(-b * distance)) / b;
+    return 1.0f - expf(-fogAmount);
+}
+
+Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const WorldData& world_data, const Vec3& origin, const Vec3& dir, float dist, const Vec3& color, AtmosphereLUT* lut) {
+    if (world_data.mode != WORLD_MODE_NISHITA || !lut || !lut->is_initialized() || dist > 1e6f) return color;
+    if (!world_data.advanced.aerial_perspective) return color;
+
+    float Rg = world_data.nishita.planet_radius;
+    if (Rg < 1000.0f) Rg = 6360000.0f; 
+    
+    // Accurate altitude based on origin (matches GPU)
+    Vec3 p = origin + Vec3(0, Rg, 0);
+    float current_altitude = p.length() - Rg;
+    Vec3 up = p / (Rg + current_altitude);
+    
+    float cosTheta = std::max(0.01f, Vec3::dot(up, dir));
+    float3 trans3 = lut->sampleTransmittance(cosTheta, current_altitude, world_data.nishita.atmosphere_height);
+    Vec3 transmittance(trans3.x, trans3.y, trans3.z);
+    
+    // Matched to GPU density scaling
+    float densityFactor = 1.0f + world_data.nishita.fog_density * 300.0f;
+    float effectiveDist = dist * densityFactor;
+    
+    const float min_dist = world_data.advanced.aerial_min_distance;
+    const float max_dist = world_data.advanced.aerial_max_distance;
+    float ramp = (dist < min_dist) ? 0.0f : std::min(1.0f, (dist - min_dist) / std::max(1.0f, max_dist - min_dist));
+    
+    // 20km -> 10km scale matched to GPU
+    float distFactor = std::min(1.0f, effectiveDist / 10000.0f);
+    distFactor *= (ramp * ramp);
+
+    Vec3 finalTrans(
+        powf(transmittance.x, distFactor),
+        powf(transmittance.y, distFactor),
+        powf(transmittance.z, distFactor)
+    );
+    
+    float3 lookupDir = make_float3(dir.x, std::max(0.0f, dir.y), dir.z);
+    float3 skyRadiance3 = lut->sampleSkyView(lookupDir, world_data.nishita.sun_direction, Rg, Rg + world_data.nishita.atmosphere_height);
+    Vec3 skyRadiance(skyRadiance3.x, skyRadiance3.y, skyRadiance3.z);
+    
+    // Blend with scene
+    Vec3 res = color * finalTrans + skyRadiance * (Vec3(1,1,1) - finalTrans);
+
+    // DYNAMIC HEIGHT FOG OVERLAY (Nishita active)
+    if (world_data.nishita.fog_enabled && world_data.nishita.fog_density > 0.01f) {
+        float fAmount = calculate_height_fog_factor_cpu(
+            origin, dir, dist,
+            world_data.nishita.fog_density * 0.5f,
+            world_data.nishita.fog_height,
+            world_data.nishita.fog_falloff
+        );
+        Vec3 fogCol(world_data.nishita.fog_color.x, world_data.nishita.fog_color.y, world_data.nishita.fog_color.z);
+        res = res * (1.0f - fAmount) + fogCol * fAmount;
+    }
+
+    return res;
 }

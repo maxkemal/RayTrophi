@@ -76,8 +76,16 @@ extern "C" __global__ void __raygen__rg() {
 }
 */
 
-// RAYGEN - Cycles-style Accumulative Rendering
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER: Compute luminance for variance calculation
+// ═══════════════════════════════════════════════════════════════════════════════
+__device__ __forceinline__ float compute_luminance(float3 color) {
+    return 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
+}
+
+// RAYGEN - Cycles-style Accumulative Rendering with Adaptive Sampling
 // Uses float4 accumulation buffer: RGB = accumulated color sum, W = total sample count
+// Uses variance_buffer for adaptive sampling: tracks per-pixel noise level
 extern "C" __global__ void __raygen__rg() {
     // 1. Direct Indexing (Native GPU Memory Coalescing)
     const uint3 launch_idx = optixGetLaunchIndex();
@@ -90,6 +98,49 @@ extern "C" __global__ void __raygen__rg() {
     if (i >= optixLaunchParams.image_width || j >= optixLaunchParams.image_height) return;
 
     const int pixel_index = j * optixLaunchParams.image_width + i;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADAPTIVE SAMPLING - Coefficient of Variation (CV = σ/μ) based convergence
+    // Industry standard: relative error is consistent across all brightness levels
+    // ═══════════════════════════════════════════════════════════════════════════
+    float4* accum_buffer = reinterpret_cast<float4*>(optixLaunchParams.accumulation_buffer);
+    float* variance_buffer = optixLaunchParams.variance_buffer;
+    
+    if (optixLaunchParams.use_adaptive_sampling && accum_buffer != nullptr && variance_buffer != nullptr) {
+        float4 prev = accum_buffer[pixel_index];
+        float prev_samples = prev.w;
+        float current_variance = variance_buffer[pixel_index];
+        
+        // Compute mean luminance for CV calculation
+        float mean_lum = compute_luminance(make_float3(prev.x, prev.y, prev.z));
+        
+        // Coefficient of Variation: CV = σ / μ (relative standard deviation)
+        // This gives consistent convergence across dark and bright regions
+        float cv = (mean_lum > 0.001f) ? sqrtf(current_variance) / mean_lum : 1.0f;
+        
+        // OIDN-aware threshold: if denoiser is enabled, we can be more aggressive
+        // OIDN handles low-frequency noise well, so we can stop earlier
+        float effective_threshold = optixLaunchParams.variance_threshold;
+        if (optixLaunchParams.use_denoiser) {
+            effective_threshold *= 2.0f;  // OIDN will clean up remaining noise
+        }
+        
+        // Check convergence: enough samples AND low relative variance (CV)
+        if (prev_samples >= optixLaunchParams.min_samples && 
+            current_variance > 0.0f &&  // Variance must be computed (not initial zero)
+            cv < effective_threshold) {
+            // Pixel has converged - skip sampling, just write existing color
+            float3 prev_color = make_float3(prev.x, prev.y, prev.z);
+            optixLaunchParams.framebuffer[pixel_index] = make_color(prev_color);
+            
+            // Debug: Count converged pixels
+            if (optixLaunchParams.converged_count != nullptr) {
+                atomicAdd(optixLaunchParams.converged_count, 1);
+            }
+            
+            return;  // Early exit - this pixel is done!
+        }
+    }
 
     // Use frame_number (accumulated sample count) for seed variation
     // This ensures each pass gets different random samples
@@ -185,7 +236,8 @@ extern "C" __global__ void __raygen__rg() {
 
     // ============ ACCUMULATION LOGIC (Cycles-style) ============
     // accumulation_buffer is float4*: RGB = accumulated color sum, W = total sample count
-    float4* accum_buffer = reinterpret_cast<float4*>(optixLaunchParams.accumulation_buffer);
+    float3 blended_color = new_color;
+    float new_total_samples = float(samples_this_pass);
     
     if (accum_buffer != nullptr) {
         float4 prev = accum_buffer[pixel_index];
@@ -193,15 +245,14 @@ extern "C" __global__ void __raygen__rg() {
         
         if (prev_samples > 0.0f) {
             // Progressive accumulation: weighted average of old and new
-            float new_total = prev_samples + samples_this_pass;
+            new_total_samples = prev_samples + samples_this_pass;
             float3 prev_color = make_float3(prev.x, prev.y, prev.z);
             
             // Weighted blend: (prev_color * prev_weight + new_color * new_weight) / total_weight
-            float3 blended = (prev_color * prev_samples + new_color * samples_this_pass) / new_total;
+            blended_color = (prev_color * prev_samples + new_color * samples_this_pass) / new_total_samples;
             
             // Store accumulated result
-            accum_buffer[pixel_index] = make_float4(blended.x, blended.y, blended.z, new_total);
-            new_color = blended;
+            accum_buffer[pixel_index] = make_float4(blended_color.x, blended_color.y, blended_color.z, new_total_samples);
         }
         else {
             // First sample - just store it
@@ -209,8 +260,31 @@ extern "C" __global__ void __raygen__rg() {
         }
     }
     
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADAPTIVE SAMPLING - Welford's Online Variance Algorithm
+    // More numerically stable than naive variance calculation
+    // Stores variance (σ²), CV is computed at check time as σ/μ
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (optixLaunchParams.use_adaptive_sampling && variance_buffer != nullptr) {
+        // Calculate luminance of new sample vs accumulated mean
+        float new_lum = compute_luminance(new_color);
+        float mean_lum = compute_luminance(blended_color);
+        
+        // Welford's online algorithm for running variance
+        // More stable than naive E[X²] - E[X]² approach
+        float diff = new_lum - mean_lum;
+        float prev_variance = variance_buffer[pixel_index];
+        
+        // Incremental variance update with decreasing alpha
+        float alpha = 1.0f / fmaxf(new_total_samples, 2.0f);
+        float updated_variance = prev_variance * (1.0f - alpha) + (diff * diff) * alpha;
+        
+        // Clamp to prevent numerical issues (fireflies)
+        variance_buffer[pixel_index] = fminf(fmaxf(updated_variance, 0.0f), 100.0f);
+    }
+    
     // Write final color to display framebuffer
-    optixLaunchParams.framebuffer[pixel_index] = make_color(new_color);
+    optixLaunchParams.framebuffer[pixel_index] = make_color(blended_color);
 }
 extern "C" __global__ void __miss__ms() {
     unsigned int p0 = optixGetPayload_0();

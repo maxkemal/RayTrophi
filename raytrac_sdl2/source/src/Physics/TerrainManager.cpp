@@ -1437,8 +1437,12 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
             int newIdx = (int)newPosY * w + (int)newPosX;
             float deltaHeight = data[newIdx] - data[idx];
             
-            // Sediment carrying capacity based on speed and slope
-            float capacity = fmaxf(-deltaHeight * speed * water * p.sedimentCapacity, p.minSlope);
+            // INDUSTRY STANDARD: Stream Power Law sediment capacity
+            // C = Kc * velocity * slope^n * water (n typically 0.5-1.0)
+            // Reference: Whipple & Tucker (1999)
+            float slope = fabsf(deltaHeight); // Local slope approximation
+            float slopeFactor = sqrtf(slope + 0.001f); // slope^0.5 with epsilon
+            float capacity = fmaxf(-deltaHeight * speed * water * p.sedimentCapacity * slopeFactor, p.minSlope);
             
             // Hardness factor
             float hardness = 0.0f;
@@ -1629,46 +1633,72 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
     
     std::vector<float> temp(data.size());
     
+    // D8 neighbor offsets and distance weights (diagonals are sqrt(2) apart)
+    const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+    const float distWeight[8] = {0.707f, 1.0f, 0.707f, 1.0f, 1.0f, 0.707f, 1.0f, 0.707f}; // 1/sqrt(2) for diagonals
+    
     for (int iter = 0; iter < p.iterations; iter++) {
         std::copy(data.begin(), data.end(), temp.begin());
         
+        #pragma omp parallel for
         for (int y = 1; y < h-1; y++) {
             for (int x = 1; x < w-1; x++) {
                 int idx = y * w + x;
                 float center = temp[idx];
                 
                 // Hardness modifies Talus Angle
-                // Hard rock (1.0) -> Can be steeper (talusAngle + 0.3)
-                // Soft soil (0.0) -> Flattens out (talusAngle)
                 float hardness = hasHardness ? terrain->hardnessMap[idx] : 0.0f;
-                float effectiveTalus = p.talusAngle + hardness * 0.3f; // Reduced influence to prevent spikes
+                float effectiveTalus = p.talusAngle + hardness * 0.3f;
                 
-                int nx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-                int ny[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-                float maxDiff = 0;
-                int maxIdx = -1;
+                // INDUSTRY STANDARD: Weighted multi-neighbor transfer
+                // Calculate all height differences and total excess slope
+                float diffs[8];
+                int nIdxs[8];
+                float totalExcess = 0.0f;
+                int neighborCount = 0;
                 
-                for (int i = 0; i < 8; i++) {
-                    float neighbor = temp[(y + ny[i]) * w + (x + nx[i])];
-                    float diff = center - neighbor;
-                    if (diff > effectiveTalus && diff > maxDiff) {
-                        maxDiff = diff;
-                        maxIdx = i;
+                for (int d = 0; d < 8; d++) {
+                    int nx = x + dx[d];
+                    int ny = y + dy[d];
+                    nIdxs[d] = ny * w + nx;
+                    
+                    // Adjust talus for diagonal distance
+                    float adjustedTalus = effectiveTalus * distWeight[d];
+                    float diff = center - temp[nIdxs[d]];
+                    
+                    if (diff > adjustedTalus) {
+                        diffs[d] = diff - adjustedTalus;
+                        totalExcess += diffs[d];
+                        neighborCount++;
+                    } else {
+                        diffs[d] = 0.0f;
                     }
                 }
                 
-                if (maxIdx >= 0) {
-                    float moveAmount = (maxDiff - effectiveTalus) * 0.5f * p.erosionAmount;
+                // Distribute material proportionally to all steep neighbors
+                if (totalExcess > 0.0f && neighborCount > 0) {
+                    float totalMove = totalExcess * 0.5f * p.erosionAmount;
                     
                     if (hasMask) {
-                        moveAmount *= mask[y * w + x];
+                        totalMove *= mask[idx];
                     }
                     
-                    // Hardness also limits movement rate but less aggressively
-                    moveAmount *= (1.0f - hardness * 0.4f); // Was 0.5f
+                    // Hardness limits movement rate
+                    totalMove *= (1.0f - hardness * 0.4f);
                     
-                    data[y * w + x] -= moveAmount;
-                    data[(y + ny[maxIdx]) * w + (x + nx[maxIdx])] += moveAmount;
+                    // Remove from center
+                    #pragma omp atomic
+                    data[idx] -= totalMove;
+                    
+                    // Distribute to neighbors proportionally
+                    for (int d = 0; d < 8; d++) {
+                        if (diffs[d] > 0.0f) {
+                            float weight = diffs[d] / totalExcess;
+                            #pragma omp atomic
+                            data[nIdxs[d]] += totalMove * weight;
+                        }
+                    }
                 }
             }
         }
@@ -1703,6 +1733,11 @@ void TerrainManager::thermalErosion(TerrainObject* terrain, const ThermalErosion
     SCENE_LOG_INFO("Thermal erosion completed");
 }
 
+// ===========================================================================
+// WIND EROSION - INDUSTRY STANDARD (Shadow Zone + Saltation Model)
+// Based on Bagnold's aeolian transport theory with wind shadow detection
+// Reference: Bagnold (1941), Werner (1995) dune formation model
+// ===========================================================================
 void TerrainManager::windErosion(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask) {
     if (!terrain) return;
     
@@ -1712,43 +1747,119 @@ void TerrainManager::windErosion(TerrainObject* terrain, float strength, float d
     bool hasHardness = !terrain->hardnessMap.empty();
     bool hasMask = !mask.empty() && mask.size() == w * h;
     
-    float dirX = cosf(direction * 3.14159f / 180.0f);
-    float dirY = sinf(direction * 3.14159f / 180.0f);
+    // Normalize wind direction
+    float dirRad = direction * 3.14159f / 180.0f;
+    float normWindX = cosf(dirRad);
+    float normWindY = sinf(dirRad);
+    
+    // Shadow zone parameters (Bagnold theory)
+    const int SHADOW_STEPS = 6;
+    const float SHADOW_ANGLE = 0.15f; // ~8.5 degrees shadow angle (typical for sand)
     
     for (int iter = 0; iter < iterations; iter++) {
-        for (int y = 2; y < h-2; y++) {
-            for (int x = 2; x < w-2; x++) {
+        // Use temp buffer for stable reads during iteration
+        std::vector<float> temp = data;
+        
+        #pragma omp parallel for
+        for (int y = 3; y < h-3; y++) {
+            for (int x = 3; x < w-3; x++) {
                 int idx = y * w + x;
+                float currentH = temp[idx];
                 
                 // Get hardness at this location
                 float hardness = hasHardness ? terrain->hardnessMap[idx] : 0.0f;
                 
-                int upwindX = x - (int)(dirX * 2);
-                int upwindY = y - (int)(dirY * 2);
-                if (upwindX < 0 || upwindX >= w || upwindY < 0 || upwindY >= h) continue;
+                // ========================================
+                // SHADOW ZONE DETECTION (Industry Standard)
+                // ========================================
+                // Ray march upwind to detect if we're in a wind shadow
+                float shadowFactor = 1.0f;
                 
-                float exposure = fmaxf(0.0f, data[idx] - data[upwindY * w + upwindX]);
-                float erode = exposure * strength * 0.001f;
-                
-                // Hardness reduces erosion (Harder = Less Erosion)
-                // 0.0 (Soft) -> 100% erosion
-                // 1.0 (Hard) -> 20% erosion (was 10%)
-                float resistance = hasHardness ? terrain->hardnessMap[idx] : 0.0f;
-                float actual_erode = erode * (1.0f - resistance * 0.8f);
-                
-                if (hasMask) {
-                    actual_erode *= mask[idx];
+                for (int step = 1; step <= SHADOW_STEPS; step++) {
+                    int checkX = x - (int)(normWindX * step);
+                    int checkY = y - (int)(normWindY * step);
+                    
+                    // Clamp to bounds
+                    checkX = std::clamp(checkX, 0, w - 1);
+                    checkY = std::clamp(checkY, 0, h - 1);
+                    
+                    int checkIdx = checkY * w + checkX;
+                    float upwindH = temp[checkIdx];
+                    
+                    // Check if upwind point casts shadow over current point
+                    float shadowHeight = upwindH - step * SHADOW_ANGLE;
+                    if (currentH < shadowHeight) {
+                        shadowFactor *= 0.3f; // In shadow - reduce erosion
+                    }
                 }
                 
-                data[idx] -= actual_erode;
+                // Calculate upwind/downwind positions
+                int upwindX = x - (int)(normWindX * 2);
+                int upwindY = y - (int)(normWindY * 2);
+                upwindX = std::clamp(upwindX, 0, w - 1);
+                upwindY = std::clamp(upwindY, 0, h - 1);
+                int upwindIdx = upwindY * w + upwindX;
                 
-                // Transport material downwind
-                int downwindX = x + (int)(dirX * 2);
-                int downwindY = y + (int)(dirY * 2);
-                if (downwindX >= 0 && downwindX < w && downwindY >= 0 && downwindY < h) {
-                    // Deposit valid eroded material
-                    // We deposit a fraction (e.g. 30%) of what was eroded
-                    data[downwindY * w + downwindX] += actual_erode * 0.4f;
+                int downwindX = x + (int)(normWindX * 2);
+                int downwindY = y + (int)(normWindY * 2);
+                downwindX = std::clamp(downwindX, 0, w - 1);
+                downwindY = std::clamp(downwindY, 0, h - 1);
+                int downwindIdx = downwindY * w + downwindX;
+                
+                // Far downwind for saltation jump
+                int farDownwindX = x + (int)(normWindX * 4);
+                int farDownwindY = y + (int)(normWindY * 4);
+                farDownwindX = std::clamp(farDownwindX, 0, w - 1);
+                farDownwindY = std::clamp(farDownwindY, 0, h - 1);
+                int farDownwindIdx = farDownwindY * w + farDownwindX;
+                
+                float upwindH = temp[upwindIdx];
+                float downwindH = temp[downwindIdx];
+                
+                // Windward slope (facing into wind)
+                float windwardSlope = currentH - upwindH;
+                
+                // Leeward slope (sheltered side)
+                float leewardSlope = currentH - downwindH;
+                
+                // ========================================
+                // EROSION: Windward faces (exposed to wind)
+                // ========================================
+                if (windwardSlope > 0.0f && shadowFactor > 0.5f) {
+                    // Saltation erosion - stronger on exposed windward slopes
+                    float erosionAmount = windwardSlope * strength * 0.001f * shadowFactor;
+                    
+                    // Abrasion boost on steep slopes
+                    float abrasionBoost = 1.0f + windwardSlope * 2.0f;
+                    erosionAmount *= abrasionBoost;
+                    
+                    // Hardness resistance
+                    erosionAmount *= (1.0f - hardness * 0.8f);
+                    
+                    if (hasMask) {
+                        erosionAmount *= mask[idx];
+                    }
+                    
+                    #pragma omp atomic
+                    data[idx] -= erosionAmount;
+                    
+                    // Saltation: material jumps and lands downwind
+                    // Split between immediate downwind and further saltation jump
+                    #pragma omp atomic
+                    data[downwindIdx] += erosionAmount * 0.5f;
+                    #pragma omp atomic
+                    data[farDownwindIdx] += erosionAmount * 0.3f;
+                }
+                
+                // ========================================
+                // DEPOSITION: Shadow zones and leeward faces
+                // ========================================
+                if (shadowFactor < 0.7f || leewardSlope > 0.0f) {
+                    // In shadow zone or on leeward slope - sediment settles
+                    float depositionAmount = (1.0f - shadowFactor) * strength * 0.0002f;
+                    
+                    #pragma omp atomic
+                    data[idx] += depositionAmount;
                 }
             }
         }
@@ -1756,7 +1867,7 @@ void TerrainManager::windErosion(TerrainObject* terrain, float strength, float d
     
     updateTerrainMesh(terrain);
     terrain->dirty_mesh = true;
-    SCENE_LOG_INFO("Wind erosion completed");
+    SCENE_LOG_INFO("Wind erosion completed (shadow zone + saltation model)");
 }
 
 void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {

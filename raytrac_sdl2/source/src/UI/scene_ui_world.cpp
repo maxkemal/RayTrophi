@@ -327,9 +327,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                         it->world.has_godrays_params = true;
                         it->world.godrays_intensity = np.godrays_intensity;
                         it->world.godrays_density = np.godrays_density;
-                        it->world.godrays_decay = np.godrays_decay;
-                        it->world.godrays_density_clip_bias = np.godrays_density_clip_bias;
-                        it->world.godrays_stochastic_threshold = np.godrays_stochastic_threshold;
+                       
                         break;
                     case WorldProp::CloudLighting:
                         it->world.has_cloud_lighting = true;
@@ -457,9 +455,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     wk.has_godrays_params = true;
                     wk.godrays_intensity = np.godrays_intensity;
                     wk.godrays_density = np.godrays_density;
-                    wk.godrays_decay = np.godrays_decay;
-                    wk.godrays_density_clip_bias = np.godrays_density_clip_bias;
-                    wk.godrays_stochastic_threshold = np.godrays_stochastic_threshold;
+                   
                     break;
                 case WorldProp::CloudLighting:
                     wk.has_cloud_lighting = true;
@@ -838,7 +834,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::Indent();
                 bool fogKeyed = isWorldKeyed(WorldProp::FogParams);
                 
-                if (SceneUI::DrawSmartFloat("fogd", "Fog Density", &params.fog_density, 0.001f, 0.1f, "%.4f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
+                if (SceneUI::DrawSmartFloat("fogd", "Fog Density", &params.fog_density, 0.001f, 1.0f, "%.4f", fogKeyed, [&]{ insertWorldKey("Fog", WorldProp::FogParams); }, 16)) {
                     changed = true;
                 }
                 UIWidgets::HelpMarker("Base fog density (lower = lighter fog)");
@@ -901,18 +897,11 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                     changed = true;
                 }
                 
-                if (SceneUI::DrawSmartFloat("grdec", "Ray Decay", &params.godrays_decay, 0.8f, 1.0f, "%.2f", grKeyed, [&]{ insertWorldKey("God Rays", WorldProp::GodRaysParams); }, 16)) {
+                if (ImGui::SliderInt("Ray Samples", &params.godrays_samples, 8, 48)) {
                     changed = true;
+                    if (grKeyed) insertWorldKey("God Rays", WorldProp::GodRaysParams);
                 }
-                UIWidgets::HelpMarker("How quickly rays fade with distance from sun");
-                
-                if (SceneUI::DrawSmartFloat("grclp", "Clip Threshold", &params.godrays_density_clip_bias, -0.1f, 0.1f, "%.4f", grKeyed, [&]{ insertWorldKey("God Rays", WorldProp::GodRaysParams); }, 16)) {
-                    changed = true;
-                }
-                if (SceneUI::DrawSmartFloat("grsth", "Stochastic Softness", &params.godrays_stochastic_threshold, 0.0f, 0.5f, "%.4f", grKeyed, [&]{ insertWorldKey("God Rays", WorldProp::GodRaysParams); }, 16)) {
-                    changed = true;
-                }
-                UIWidgets::HelpMarker("Fine-tune VDB depth clipping.\nNegative: More rays pass (fixes box).\nPositive: Less rays pass (fixes clipping).");
+                UIWidgets::HelpMarker("Number of samples for volumetric rays.\nHigh values = Better quality but slower.");
                 
                 ImGui::Unindent();
             }

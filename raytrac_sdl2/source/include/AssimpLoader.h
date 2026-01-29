@@ -75,6 +75,7 @@ struct MeshInstance {
 };
 struct AnimationData {
     std::string name;
+    std::string modelName; // Import prefix of the model this animation belongs to
     double duration;
     double ticksPerSecond;
     std::map<std::string, std::vector<aiVectorKey>> positionKeys;
@@ -230,6 +231,9 @@ struct BoneData {
     std::unordered_map<std::string, unsigned int> boneNameToIndex;
     std::unordered_map<std::string, aiNode*> boneNameToNode;
     std::unordered_map<std::string, Matrix4x4> boneOffsetMatrices;
+    std::unordered_map<std::string, Matrix4x4> boneDefaultTransforms; // NEW: Local bind pose (node->mTransformation)
+    std::unordered_map<std::string, std::string> boneParents; // NEW: Child name -> Parent name for hierarchy reconstruction
+    std::unordered_map<std::string, Matrix4x4> perModelInverses; // NEW: Model prefix -> globalInverseTransform
     Matrix4x4 globalInverseTransform;
     
     // =========================================================================
@@ -286,6 +290,9 @@ struct BoneData {
         boneNameToIndex.clear();
         boneNameToNode.clear();
         boneOffsetMatrices.clear();
+        boneDefaultTransforms.clear();
+        boneParents.clear();
+        perModelInverses.clear();
         boneIndexToName.clear();
         globalInverseTransform = Matrix4x4::identity();
     }
@@ -431,15 +438,17 @@ public:
     // @param filename: Path of the file to load (Dosya yolu)
     // @param material: Optional default material (Opsiyonel varsayılan materyal)
     // @return: Triangles, Animation Data, Bone Data (Üçgenler, Animasyon, Kemik Verileri)
-    std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<AnimationData>, BoneData>
-        loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr) {
+    std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<std::shared_ptr<AnimationData>>, BoneData>
+        loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr, const std::string& import_prefix = "") {
         
-        // Generate unique prefix from filename to prevent material collisions
-        // Materyal çakışmasını önlemek için benzersiz ön ek oluştur
-        std::filesystem::path p(filename);
-        this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
+        if (import_prefix.empty()) {
+            std::filesystem::path p(filename);
+            this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
+        } else {
+            this->currentImportName = import_prefix;
+        }
 
-        SCENE_LOG_INFO("Starting model loading: " + filename);
+        SCENE_LOG_INFO("Starting model loading: " + filename + " (Prefix: " + currentImportName + ")");
 
         BoneData boneData;
         
@@ -503,6 +512,7 @@ public:
         buildBoneData(scene, boneData);
 
         std::vector<std::shared_ptr<Triangle>> triangles;
+        std::vector<std::shared_ptr<AnimationData>> animationDataList;
         OptixGeometryData geometry_data;
 
         SCENE_LOG_INFO("Processing nodes to extract triangles...");
@@ -512,39 +522,38 @@ public:
         // NOTE: Bone weights now assigned inside processNodeToTriangles -> processTriangles
         
         SCENE_LOG_INFO("Processing animations...");
-        std::vector<AnimationData> animationDataList;
 
         if (scene->mNumAnimations > 0) {
             SCENE_LOG_INFO("Found " + std::to_string(scene->mNumAnimations) + " animation(s) in model.");
 
             for (unsigned int i = 0; i < scene->mNumAnimations; ++i) {
                 const aiAnimation* animation = scene->mAnimations[i];
-                AnimationData animData;
+                auto animData = std::make_shared<AnimationData>();
+                animData->modelName = currentImportName;
+                animData->name = getUniqueName(animation->mName.C_Str());
+                animData->duration = animation->mDuration;
+                animData->ticksPerSecond = animation->mTicksPerSecond;
 
-                animData.name = animation->mName.C_Str();
-                animData.duration = animation->mDuration;
-                animData.ticksPerSecond = animation->mTicksPerSecond;
-
-                SCENE_LOG_INFO("[Animation " + std::to_string(i + 1) + "] Name: " + animData.name +
-                    ", Duration: " + std::to_string(animData.duration) +
-                    ", TPS: " + std::to_string(animData.ticksPerSecond));
+                SCENE_LOG_INFO("[Animation " + std::to_string(i + 1) + "] Name: " + animData->name +
+                    ", Duration: " + std::to_string(animData->duration) +
+                    ", TPS: " + std::to_string(animData->ticksPerSecond));
 
                 unsigned int totalKeys = 0;
 
                 for (unsigned int j = 0; j < animation->mNumChannels; ++j) {
                     const aiNodeAnim* channel = animation->mChannels[j];
-                    std::string nodeName = channel->mNodeName.C_Str();
+                    std::string nodeName = getUniqueName(channel->mNodeName.C_Str());
 
                     for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k) {
-                        animData.positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
+                        animData->positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
                     }
 
                     for (unsigned int k = 0; k < channel->mNumRotationKeys; ++k) {
-                        animData.rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
+                        animData->rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
                     }
 
                     for (unsigned int k = 0; k < channel->mNumScalingKeys; ++k) {
-                        animData.scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
+                        animData->scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
                     }
 
                     totalKeys += channel->mNumPositionKeys + channel->mNumRotationKeys + channel->mNumScalingKeys;
@@ -556,7 +565,7 @@ public:
                 double maxTime = std::numeric_limits<double>::lowest();
                 
                 // Position keys
-                for (const auto& [nodeName, keys] : animData.positionKeys) {
+                for (const auto& [nodeName, keys] : animData->positionKeys) {
                     for (const auto& key : keys) {
                         minTime = std::min(minTime, key.mTime);
                         maxTime = std::max(maxTime, key.mTime);
@@ -564,7 +573,7 @@ public:
                 }
                 
                 // Rotation keys
-                for (const auto& [nodeName, keys] : animData.rotationKeys) {
+                for (const auto& [nodeName, keys] : animData->rotationKeys) {
                     for (const auto& key : keys) {
                         minTime = std::min(minTime, key.mTime);
                         maxTime = std::max(maxTime, key.mTime);
@@ -572,7 +581,7 @@ public:
                 }
                 
                 // Scaling keys
-                for (const auto& [nodeName, keys] : animData.scalingKeys) {
+                for (const auto& [nodeName, keys] : animData->scalingKeys) {
                     for (const auto& key : keys) {
                         minTime = std::min(minTime, key.mTime);
                         maxTime = std::max(maxTime, key.mTime);
@@ -580,15 +589,15 @@ public:
                 }
                 
                 // Time'ı frame'e çevir (Time to frame conversion)
-                if (animData.ticksPerSecond > 0) {
-                    animData.startFrame = static_cast<int>(std::round(minTime / animData.ticksPerSecond * 24.0)); // Blender default 24 FPS
-                    animData.endFrame = static_cast<int>(std::round(maxTime / animData.ticksPerSecond * 24.0));
+                if (animData->ticksPerSecond > 0) {
+                    animData->startFrame = static_cast<int>(std::round(minTime / animData->ticksPerSecond * 24.0)); // Blender default 24 FPS
+                    animData->endFrame = static_cast<int>(std::round(maxTime / animData->ticksPerSecond * 24.0));
                 }
 
                 SCENE_LOG_INFO("[Animation " + std::to_string(i + 1) + "] Total channels: " +
                     std::to_string(animation->mNumChannels) + ", Total keys: " +
                     std::to_string(totalKeys) + 
-                    ", Frame range: " + std::to_string(animData.startFrame) + "-" + std::to_string(animData.endFrame));
+                    ", Frame range: " + std::to_string(animData->startFrame) + "-" + std::to_string(animData->endFrame));
 
                 animationDataList.push_back(animData);
             }
@@ -618,7 +627,7 @@ public:
     // Modeli yükler ve Mesh'lere ayırır (Triangle listesi yerine).
     // Mantıksal mesh ayrımının gerektiği senaryolar için kullanılır.
     // =========================================================================
-    std::tuple<std::vector<Mesh>, std::vector<AnimationData>, BoneData>
+    std::tuple<std::vector<Mesh>, std::vector<std::shared_ptr<AnimationData>>, BoneData>
         loadModelToMeshes(const std::string& filename) {
         Assimp::Importer importer;
 
@@ -665,23 +674,30 @@ public:
         processBonesForMeshes(scene, meshes, boneData); 
 
         // 4. Animasyonları al (Extract animations)
-        std::vector<AnimationData> animationDataList;
+        // Ensure currentImportName is set for unique prefixing
+        if (currentImportName.empty()) {
+            std::filesystem::path p(filename);
+            this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
+        }
+
+        std::vector<std::shared_ptr<AnimationData>> animationDataList;
         if (scene->mNumAnimations > 0) {
             for (unsigned int i = 0; i < scene->mNumAnimations; ++i) {
                 const aiAnimation* animation = scene->mAnimations[i];
-                AnimationData animData;
-                animData.name = animation->mName.C_Str();
-                animData.duration = animation->mDuration;
-                animData.ticksPerSecond = animation->mTicksPerSecond;
+                auto animData = std::make_shared<AnimationData>();
+                animData->modelName = currentImportName;
+                animData->name = getUniqueName(animation->mName.C_Str());
+                animData->duration = animation->mDuration;
+                animData->ticksPerSecond = animation->mTicksPerSecond;
                 for (unsigned int j = 0; j < animation->mNumChannels; ++j) {
                     const aiNodeAnim* channel = animation->mChannels[j];
-                    std::string nodeName = channel->mNodeName.C_Str();
+                    std::string nodeName = getUniqueName(channel->mNodeName.C_Str());
                     for (unsigned int k = 0; k < channel->mNumPositionKeys; ++k)
-                        animData.positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
+                        animData->positionKeys[nodeName].push_back(channel->mPositionKeys[k]);
                     for (unsigned int k = 0; k < channel->mNumRotationKeys; ++k)
-                        animData.rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
+                        animData->rotationKeys[nodeName].push_back(channel->mRotationKeys[k]);
                     for (unsigned int k = 0; k < channel->mNumScalingKeys; ++k)
-                        animData.scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
+                        animData->scalingKeys[nodeName].push_back(channel->mScalingKeys[k]);
                 }
                 animationDataList.push_back(animData);
             }
@@ -856,6 +872,8 @@ public:
             data.colors.resize(nTris * 3);
             data.indices.resize(nTris);
             data.material_indices.resize(nTris);
+            data.boneIndices.resize(nTris * 3, make_int4(-1, -1, -1, -1));
+            data.boneWeights.resize(nTris * 3, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
 
             unsigned int num_threads = std::thread::hardware_concurrency();
             if (num_threads == 0) num_threads = 4;
@@ -896,6 +914,22 @@ public:
                                 data.normals[base_v_idx + k] = make_float3(norms[k].x, norms[k].y, norms[k].z);
                                 data.uvs[base_v_idx + k] = make_float2(uvs[k].u, uvs[k].v);
                                 data.colors[base_v_idx + k] = make_float3(cols[k].x, cols[k].y, cols[k].z);
+
+                                // Extract skinning data
+                                if (tri->hasSkinData()) {
+                                    const auto& weights = tri->getSkinBoneWeights(k);
+                                    int4 bi = make_int4(-1, -1, -1, -1);
+                                    float4 bw = make_float4(0, 0, 0, 0);
+
+                                    for (size_t w = 0; w < std::min(weights.size(), (size_t)4); ++w) {
+                                        if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                                        else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                                        else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                                        else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                                    }
+                                    data.boneIndices[base_v_idx + k] = bi;
+                                    data.boneWeights[base_v_idx + k] = bw;
+                                }
                             }
                             data.indices[i] = tri_idx_struct;
 
@@ -995,13 +1029,17 @@ public:
     // Helper to generate unique names
     std::string getUniqueName(const std::string& originalName) const {
         if (currentImportName.empty()) return originalName;
+        
+        // If it already has the prefix (e.g. from recursive call), don't double it
+        if (originalName.find(currentImportName + "_") == 0) return originalName;
+        
         return currentImportName + "_" + originalName;
     }
 
     void calculateAnimatedNodeTransformsRecursive(
         aiNode* node,
         const Matrix4x4& parentAnimatedGlobalTransform,
-        const std::map<std::string, const AnimationData*>& animationMap,
+        const std::map<std::string, std::shared_ptr<AnimationData>>& animationMap,
         float currentTime,
         std::unordered_map<std::string, Matrix4x4>& animatedGlobalTransformsStore
     ) {
@@ -1013,7 +1051,7 @@ public:
 
         // Eğer bu düğüm için animasyon verisi varsa, animasyonlu lokal transformu hesapla
         if (animationMap.count(originalNodeName) > 0) {
-            const AnimationData* anim = animationMap.at(originalNodeName);
+            std::shared_ptr<AnimationData> anim = animationMap.at(originalNodeName);
             // AnimationData::calculateAnimationTransform animasyon keyframe'lerinden transform oluşturur
             // Blender'dan gelen animasyon keyframe'leri zaten objenin doğru pozisyonunu içerir
             // YENİ: Bind pose'u (nodeLocalTransform) varsayılan olarak gönderiyoruz.
@@ -1063,6 +1101,11 @@ private:
         boneData.boneOffsetMatrices.clear();
 
         boneData.globalInverseTransform = convert(scene->mRootNode->mTransformation).inverse();
+        
+        // Store per-model inverse for AnimationController
+        if (!currentImportName.empty()) {
+            boneData.perModelInverses[currentImportName] = boneData.globalInverseTransform;
+        }
 
         // 1. Node map
         std::unordered_map<std::string, aiNode*> nodeMap;
@@ -1097,6 +1140,16 @@ private:
 
                 unsigned int boneIndex = boneData.boneNameToIndex[boneName];
                 boneData.boneNameToNode[boneName] = nodeMap.count(boneName) ? nodeMap[boneName] : nullptr;
+                
+                if (boneData.boneNameToNode[boneName]) {
+                    auto boneNode = boneData.boneNameToNode[boneName];
+                    boneData.boneDefaultTransforms[boneName] = convert(boneNode->mTransformation);
+                    
+                    // Capture parent name for hierarchical updates
+                    if (boneNode->mParent) {
+                        boneData.boneParents[boneName] = boneNode->mParent->mName.C_Str();
+                    }
+                }
                 boneData.boneOffsetMatrices[boneName] = convert(bone->mOffsetMatrix);
 
                 // Ağırlıkları vertexlere işle
@@ -1117,51 +1170,70 @@ private:
     }
 
     void buildBoneData(const aiScene* scene, BoneData& boneData) {
-       // SCENE_LOG_INFO("[buildBoneData] Starting bone map generation...");
-
         boneData.boneNameToIndex.clear();
         boneData.boneNameToNode.clear();
         boneData.boneOffsetMatrices.clear();
+        boneData.perModelInverses.clear();
+        boneData.boneParents.clear();
+        boneData.boneDefaultTransforms.clear();
+        
         boneData.globalInverseTransform = convert(scene->mRootNode->mTransformation).inverse();
+        
+        // Store this model's specific inverse
+        boneData.perModelInverses[this->currentImportName] = boneData.globalInverseTransform;
 
-        // Node map
-        std::unordered_map<std::string, aiNode*> nodeMap;
-        std::function<void(aiNode*)> collectNodes = [&](aiNode* node) {
-            nodeMap[node->mName.C_Str()] = node;
+        // Temporary map for all nodes in the scene
+        std::unordered_map<std::string, aiNode*> sceneNodeMap;
+        std::function<void(aiNode*)> collectAllNodes = [&](aiNode* node) {
+            sceneNodeMap[node->mName.C_Str()] = node;
             for (unsigned int i = 0; i < node->mNumChildren; ++i)
-                collectNodes(node->mChildren[i]);
+                collectAllNodes(node->mChildren[i]);
         };
-        collectNodes(scene->mRootNode);
+        collectAllNodes(scene->mRootNode);
 
-        // Iterate all meshes to find all unique bones
+        // 1. Identify all nodes that are either bones OR parents of bones
+        std::set<std::string> technicalBones; // Original names
+        
         for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
             aiMesh* mesh = scene->mMeshes[m];
             if (!mesh->HasBones()) continue;
-
             for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
-                aiBone* bone = mesh->mBones[b];
-                std::string originalBoneName = bone->mName.C_Str();
-                std::string boneName = getUniqueName(originalBoneName);
-
-                if (boneData.boneNameToIndex.find(boneName) == boneData.boneNameToIndex.end()) {
-                    unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
-                    boneData.boneNameToIndex[boneName] = id;
-                    
-                    // Haritayı doldur - Node map uses ORIGINAL node names in hierarchy traverse, 
-                    // BUT our boneNameToNode map needs to find the node.
-                    // The nodeMap key is also ORIGINAL name (from C_Str()).
-                    if (nodeMap.find(originalBoneName) != nodeMap.end()) {
-                        boneData.boneNameToNode[boneName] = nodeMap[originalBoneName];
-                    } else {
-                         // SCENE_LOG_WARN("Bone node not found in hierarchy: " + boneName);
-                    }
-                    boneData.boneOffsetMatrices[boneName] = convert(bone->mOffsetMatrix);
+                aiNode* boneNode = sceneNodeMap[mesh->mBones[b]->mName.C_Str()];
+                while (boneNode) {
+                    technicalBones.insert(boneNode->mName.C_Str());
+                    boneNode = boneNode->mParent; // Include the whole chain up to root
                 }
             }
         }
-       // SCENE_LOG_INFO("[buildBoneData] Completed. Total unique bones: " + std::to_string(boneData.boneNameToIndex.size()));
-        
-        // Build reverse lookup table for O(1) index-to-name queries
+
+        // 2. Add identified nodes to BoneData
+        for (const std::string& origName : technicalBones) {
+            aiNode* node = sceneNodeMap[origName];
+            std::string prefixedName = getUniqueName(origName);
+            
+            // Only actual bones with weights get an index for the final matrix array
+            // But ALL nodes in the chain need default transforms and parent links
+            boneData.boneDefaultTransforms[prefixedName] = convert(node->mTransformation);
+            if (node->mParent) {
+                boneData.boneParents[prefixedName] = getUniqueName(node->mParent->mName.C_Str());
+            }
+
+            // Check if this node is an actual weighted bone (from any mesh)
+            for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
+                aiMesh* mesh = scene->mMeshes[m];
+                for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
+                    if (std::string(mesh->mBones[b]->mName.C_Str()) == origName) {
+                        if (boneData.boneNameToIndex.find(prefixedName) == boneData.boneNameToIndex.end()) {
+                            unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
+                            boneData.boneNameToIndex[prefixedName] = id;
+                            boneData.boneOffsetMatrices[prefixedName] = convert(mesh->mBones[b]->mOffsetMatrix);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         boneData.rebuildReverseLookup();
     }
 
@@ -1227,7 +1299,7 @@ private:
 
             // Extract triangles from mesh
             // Mesh'teki üçgenleri çıkar
-            processTriangles(mesh, globalTransform, node->mName.C_Str(), convertedMaterial, triangles, boneData);
+            processTriangles(mesh, globalTransform, getUniqueName(node->mName.C_Str()), convertedMaterial, triangles, boneData);
 
             // Copy texture bundle to all newly added triangles
             // Yeni eklenen tüm üçgenlere texture paketini kopyala
@@ -1371,9 +1443,13 @@ private:
         // --- NEW: Pre-process bone weights for this mesh ---
         // This ensures every vertex gets its correct weight list before triangle splits
         std::vector<std::vector<std::pair<int, float>>> meshVertexWeights(mesh->mNumVertices);
+        bool hasActualWeights = false;
+
         if (mesh->HasBones()) {
             for (unsigned int i = 0; i < mesh->mNumBones; i++) {
                 aiBone* bone = mesh->mBones[i];
+                if (bone->mNumWeights == 0) continue;
+
                 std::string originalBoneName = bone->mName.C_Str();
                 std::string boneName = getUniqueName(originalBoneName);
                 
@@ -1384,6 +1460,7 @@ private:
                         const aiVertexWeight& vw = bone->mWeights[w];
                         if (vw.mVertexId < mesh->mNumVertices) {
                             meshVertexWeights[vw.mVertexId].emplace_back(globalBoneIndex, vw.mWeight);
+                            hasActualWeights = true;
                         }
                     }
                 }
@@ -1467,8 +1544,8 @@ private:
             triangle->setVertexColor(2, colors[2]);
 
             // --- NEW: Assign weights to triangle vertices ---
-            // --- YENİ: Üçgen vertexlerine ağırlıkları ata ---
-            if (mesh->HasBones()) {
+            // Only initialize skin data if the mesh actually has weights
+            if (hasActualWeights) {
                 triangle->initializeSkinData();
                 triangle->setSkinBoneWeights(0, meshVertexWeights[face.mIndices[0]]);
                 triangle->setSkinBoneWeights(1, meshVertexWeights[face.mIndices[1]]);
@@ -1497,8 +1574,11 @@ private:
                 aiCamera* aiCam = scene->mCameras[i];
                 if (!aiCam) continue;
 
-                cameraNodeNames.insert(aiCam->mName.C_Str());
-                aiNode* camNode = scene->mRootNode->FindNode(aiCam->mName.C_Str());
+                std::string originalCamName = aiCam->mName.C_Str();
+                std::string camName = getUniqueName(originalCamName);
+                
+                cameraNodeNames.insert(camName);
+                aiNode* camNode = scene->mRootNode->FindNode(originalCamName.c_str());
                 if (!camNode) {
                     continue;
                 }
@@ -1514,8 +1594,7 @@ private:
                 Vec3 vup = rotateVector(Vec3(0, 1, 0), rotation);
 
                 // Fallback if aspect ratio is zero
-                // Aspect oranı sıfırsa fallback uygula
-                double aspect = (aiCam->mAspect > 0.01) ? aiCam->mAspect : 1.0;
+                float aspect = aiCam->mAspect > 0 ? aiCam->mAspect : 1.777f;
                 double hfov_rad = aiCam->mHorizontalFOV;
                 double vfov_rad = 2.0 * atan(tan(hfov_rad / 2.0) / aspect);
                 double vfov = vfov_rad * 180.0 / M_PI;
@@ -1569,14 +1648,15 @@ private:
 
             for (unsigned int i = 0; i < scene->mNumLights; i++) {
                 aiLight* aiLgt = scene->mLights[i];
-                std::string name = aiLgt->mName.C_Str();
+                std::string originalName = aiLgt->mName.C_Str();
+                std::string name = getUniqueName(originalName);
                 std::string typeStr = LightTypeToString(aiLgt->mType);
 
                 // [VERBOSE] SCENE_LOG_INFO("Processing light: " + name + " (" + typeStr + ")"); // Per-light log
 
                 lightNodeNames.insert(name);
 
-                const aiNode* node = scene->mRootNode->FindNode(aiLgt->mName);
+                const aiNode* node = scene->mRootNode->FindNode(originalName.c_str());
                 if (!node) {
                   //  SCENE_LOG_WARN("Node not found for light: " + name);
                     continue;

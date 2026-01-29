@@ -327,6 +327,11 @@ public:
     std::vector<std::shared_ptr<ForceField>> force_fields;
     
     /**
+     * @brief Get all force fields (const ref for GPU upload)
+     */
+    const std::vector<std::shared_ptr<ForceField>>& getForceFields() const { return force_fields; }
+    
+    /**
      * @brief Add a force field to the manager
      * @return Assigned ID
      */

@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -59,6 +59,8 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
         
         if (ImGui::BeginListBox("##waterlist", ImVec2(-1, 80))) {
             for (int i = 0; i < waters.size(); i++) {
+                if (waters[i].type == WaterSurface::Type::River) continue; // Skip rivers (handled in River panel)
+                
                 bool is_selected = (selected_water_idx == i);
                 if (ImGui::Selectable(waters[i].name.c_str(), is_selected)) {
                     selected_water_idx = i;
@@ -79,20 +81,22 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
             ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Edit: %s", surf.name.c_str());
             
             // === WAVES ===
-            if (ImGui::CollapsingHeader("Waves", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::BeginSection("Waves", ImVec4(0.0f, 0.4f, 1.0f, 1.0f))) {
                 if (SceneUI::DrawSmartFloat("w_wspd", "Speed", &surf.params.wave_speed, 0.0f, 10.0f, "%.2f", false, nullptr, 16)) changed = true;
                 if (SceneUI::DrawSmartFloat("w_whgt", "Height", &surf.params.wave_strength, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) changed = true;
                 if (SceneUI::DrawSmartFloat("w_wfrq", "Frequency", &surf.params.wave_frequency, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
+                UIWidgets::EndSection();
             }
             
             // === COLORS ===
-            if (ImGui::CollapsingHeader("Colors", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::BeginSection("Colors", ImVec4(0.0f, 0.8f, 0.8f, 1.0f))) {
                 changed |= ImGui::ColorEdit3("Shallow Color", &surf.params.shallow_color.x);
                 changed |= ImGui::ColorEdit3("Deep Color", &surf.params.deep_color.x);
+                UIWidgets::EndSection();
             }
             
             // === DEPTH & ABSORPTION ===
-            if (ImGui::CollapsingHeader("Depth & Absorption")) {
+            if (UIWidgets::BeginSection("Depth & Absorption", ImVec4(0.0f, 0.2f, 0.6f, 1.0f), false)) {
                 if (SceneUI::DrawSmartFloat("w_dmax", "Max Depth", &surf.params.depth_max, 1.0f, 100.0f, "%.1f m", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Distance at which water reaches full deep color");
                 
@@ -101,10 +105,11 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 
                 if (SceneUI::DrawSmartFloat("w_absd", "Absorption Density", &surf.params.absorption_density, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("How quickly light is absorbed (murkiness)");
+                UIWidgets::EndSection();
             }
             
             // === FOAM ===
-            if (ImGui::CollapsingHeader("Foam", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::BeginSection("Foam", ImVec4(0.9f, 0.9f, 0.9f, 1.0f), false)) {
                 if (SceneUI::DrawSmartFloat("w_wf", "Wave Foam", &surf.params.foam_level, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Foam on wave crests");
                 
@@ -113,25 +118,28 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 if (SceneUI::DrawSmartFloat("w_fi", "Intensity", &surf.params.shore_foam_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
                 if (SceneUI::DrawSmartFloat("w_fd", "Distance", &surf.params.shore_foam_distance, 0.1f, 10.0f, "%.1f m", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("How far from shore foam appears");
+                UIWidgets::EndSection();
             }
             
             // === CAUSTICS ===
-            if (ImGui::CollapsingHeader("Caustics")) {
+            if (UIWidgets::BeginSection("Caustics", ImVec4(0.4f, 1.0f, 1.0f, 1.0f), false)) {
                 if (SceneUI::DrawSmartFloat("w_ci", "Intensity", &surf.params.caustic_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
                 if (SceneUI::DrawSmartFloat("w_cs", "Scale", &surf.params.caustic_scale, 0.1f, 10.0f, "%.2f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Size of caustic patterns");
                 if (SceneUI::DrawSmartFloat("w_csp", "Speed", &surf.params.caustic_speed, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
+                UIWidgets::EndSection();
             }
             
             // === SSS ===
-            if (ImGui::CollapsingHeader("Scattering")) {
+            if (UIWidgets::BeginSection("Scattering (SSS)", ImVec4(1.0f, 0.8f, 0.6f, 1.0f), false)) {
                 if (SceneUI::DrawSmartFloat("w_sssi", "SSS Intensity", &surf.params.sss_intensity, 0.0f, 0.5f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Sub-surface light scattering at edges");
                 changed |= ImGui::ColorEdit3("SSS Color", &surf.params.sss_color.x);
+                UIWidgets::EndSection();
             }
             
             // === FFT OCEAN (TESSENDORF) ===
-            if (ImGui::CollapsingHeader("FFT Ocean (Film Quality)")) {
+            if (UIWidgets::BeginSection("FFT Ocean (Film Quality)", ImVec4(1.0f, 0.8f, 0.0f, 1.0f))) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.5f, 1.0f));
                 ImGui::Text("Tessendorf Algorithm");
                 ImGui::PopStyleColor();
@@ -195,19 +203,21 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 } else {
                     ImGui::TextDisabled("Enable to use film-quality FFT ocean");
                 }
+                UIWidgets::EndSection();
             }
             
             // === PHYSICS ===
-            if (ImGui::CollapsingHeader("Physics")) {
+            if (UIWidgets::BeginSection("Physics", ImVec4(0.2f, 1.0f, 0.2f, 1.0f), false)) {
                 if (SceneUI::DrawSmartFloat("w_ior", "IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Index of Refraction (Water = 1.333)");
                 if (SceneUI::DrawSmartFloat("w_rgh", "Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Surface micro-roughness");
                 if (SceneUI::DrawSmartFloat("w_clr", "Clarity", &surf.params.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+                UIWidgets::EndSection();
             }
             
             // === SURFACE DETAIL ===
-            if (ImGui::CollapsingHeader("Surface Detail (Realism)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (UIWidgets::BeginSection("Surface Detail (Realism)", ImVec4(1.0f, 0.6f, 0.0f, 1.0f))) {
                 if (SceneUI::DrawSmartFloat("w_mds", "Micro Detail Strength", &surf.params.micro_detail_strength, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Adds high-frequency noise/ripples to break up the smooth surface");
                 if (SceneUI::DrawSmartFloat("w_msc", "Micro Detail Scale", &surf.params.micro_detail_scale, 1.0f, 100.0f, "%.1f", false, nullptr, 16)) changed = true;
@@ -217,6 +227,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 if (SceneUI::DrawSmartFloat("w_fns", "Foam Noise Scale", &surf.params.foam_noise_scale, 1.0f, 50.0f, "%.1f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Scale of noise used to break up foam");
                 if (SceneUI::DrawSmartFloat("w_fth", "Foam Threshold", &surf.params.foam_threshold, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+                UIWidgets::EndSection();
             }
             
             // === APPLY CHANGES ===

@@ -10,7 +10,7 @@ const std::string AnimationController::emptyString = "";
 // ANIMATION CLIP Implementation
 // ============================================================================
 
-AnimationClip::AnimationClip(const AnimationData* data) : sourceData(data) {
+AnimationClip::AnimationClip(std::shared_ptr<AnimationData> data) : sourceData(data) {
     if (data) {
         name = data->name;
         duration = (float)data->duration;
@@ -20,16 +20,73 @@ AnimationClip::AnimationClip(const AnimationData* data) : sourceData(data) {
     }
 }
 
+AnimationController::AnimationController() {
+    layers.resize(1);
+    layers[0].name = "Base";
+    globalSpeed = 1.0f;
+    globalPaused = false;
+    boneMatricesDirty = true;
+}
+
+// ============================================================================
+// FULL RESET - Clears all animation cache and state
+// ============================================================================
+
+void AnimationController::clear() {
+    // Clear all cached bone matrices
+    cachedFinalBoneMatrices.clear();
+    
+    // Clear clips and index map
+    clips.clear();
+    clipNameToIndex.clear();
+    
+    // Reset layers to initial state
+    layers.clear();
+    layers.resize(1);
+    layers[0] = AnimationLayer();
+    layers[0].name = "Base";
+    
+    // Reset root motion state
+    rootMotionEnabled = false;
+    rootMotionBone = "Hips";
+    accumulatedRootMotion = RootMotionDelta();
+    lastRootPosition = Vec3(0, 0, 0);
+    lastRootRotation = Quaternion();
+    
+    // Reset flags
+    boneMatricesDirty = true;
+    lastUpdateTime = -1.0f;
+    globalPaused = false;
+    globalSpeed = 1.0f;
+    
+    // Clear callback (optional - user may want to keep)
+    eventCallback = nullptr;
+    
+    SCENE_LOG_INFO("[AnimController] Fully cleared - bone matrices, clips, and layers reset.");
+}
+
 // ============================================================================
 // ANIMATION CONTROLLER Implementation
 // ============================================================================
 
-void AnimationController::registerClips(const std::vector<AnimationData>& animationDataList) {
+void AnimationController::registerClips(const std::vector<std::shared_ptr<AnimationData>>& animationDataList) {
+    // We want to avoid full clear if we are appending, 
+    // but the clip pointers in layers[i].blendState might still POINT to items in our 'clips' vector.
+    // If 'clips' vector reallocates, those pointers break.
+    
+    // To be safe, we'll store old clip names that were playing
+    std::vector<std::pair<int, std::string>> playingClips;
+    for (int i = 0; i < layers.size(); ++i) {
+        if (layers[i].blendState.clipA) {
+            playingClips.push_back({i, layers[i].blendState.clipA->name});
+        }
+    }
+
     clips.clear();
     clipNameToIndex.clear();
     
     for (size_t i = 0; i < animationDataList.size(); ++i) {
-        AnimationClip clip(&animationDataList[i]);
+        AnimationClip clip(animationDataList[i]);
         clipNameToIndex[clip.name] = clips.size();
         clips.push_back(clip);
         
@@ -37,6 +94,13 @@ void AnimationController::registerClips(const std::vector<AnimationData>& animat
                       " (duration: " + std::to_string(clip.getDurationInSeconds()) + "s)");
     }
     
+    // RE-LINK pointers in layers
+    for (auto& pair : playingClips) {
+        int layerIdx = pair.first;
+        const std::string& clipName = pair.second;
+        layers[layerIdx].blendState.clipA = getClip(clipName);
+    }
+
     // Initialize default layer if empty
     if (layers.empty()) {
         layers.resize(1);
@@ -192,6 +256,8 @@ void AnimationController::setLayerBoneMask(int layer, const std::vector<std::str
 // ========================================================================
 
 void AnimationController::setRootMotionEnabled(bool enabled, const std::string& rootBone) {
+    if (rootMotionEnabled == enabled && rootMotionBone == rootBone) return;
+    
     rootMotionEnabled = enabled;
     rootMotionBone = rootBone;
     accumulatedRootMotion = RootMotionDelta();
@@ -203,12 +269,42 @@ RootMotionDelta AnimationController::consumeRootMotion() {
     return result;
 }
 
+std::string AnimationController::findBestRootMotionBone(const std::string& clipName) {
+    AnimationClip* clip = getClip(clipName);
+    if (!clip || !clip->sourceData) return "RootNode";
+    
+    auto& posKeys = clip->sourceData->positionKeys;
+    
+    // 1. Check direct RootNode
+    if (posKeys.count("RootNode")) return "RootNode";
+    
+    // 2. Search for common names exactly
+    static const std::vector<std::string> common = {"Hips", "Pelvis", "base_link", "root", "Armature"};
+    for (const auto& name : common) {
+        if (posKeys.count(name)) return name;
+    }
+    
+    // 3. Search for names containing root-like strings (handles prefixes like "mixamorig:Hips")
+    for (auto& pair : posKeys) {
+        std::string nameLower = pair.first;
+        for (char& c : nameLower) c = (char)tolower(c);
+        
+        if (nameLower.find("hips") != std::string::npos || 
+            nameLower.find("pelvis") != std::string::npos ||
+            nameLower.find("root") != std::string::npos) {
+            return pair.first;
+        }
+    }
+
+    return "RootNode";
+}
+
 // ========================================================================
 // Main Update
 // ========================================================================
 
 bool AnimationController::update(float deltaTime, const BoneData& boneData) {
-    if (globalPaused || deltaTime <= 0.0f) {
+    if (globalPaused || (deltaTime <= 0.0f && !boneMatricesDirty)) {
         return false;
     }
     
@@ -232,51 +328,67 @@ bool AnimationController::update(float deltaTime, const BoneData& boneData) {
         // Initialize to identity
         std::fill(cachedFinalBoneMatrices.begin(), cachedFinalBoneMatrices.end(), Matrix4x4::identity());
         
+        // Cache for global transforms during this update pass
+        std::unordered_map<std::string, Matrix4x4> globalTransformCache;
+        
         // Process layers from bottom to top
         for (const auto& layer : layers) {
             if (layer.weight <= 0.0f) continue;
             
             const auto& state = layer.blendState;
             const AnimationClip* activeClip = state.clipA;
-            float activeTime = state.timeA;
-            
             if (!activeClip || !activeClip->sourceData) continue;
             
-            // Calculate blend if transitioning
-            const AnimationData* animA = activeClip->sourceData;
-            const AnimationData* animB = (state.clipB && state.clipB->sourceData) ? state.clipB->sourceData : nullptr;
+            std::shared_ptr<AnimationData> animA = activeClip->sourceData;
+            std::shared_ptr<AnimationData> animB = (state.clipB && state.clipB->sourceData) ? state.clipB->sourceData : nullptr;
+            float weight = state.blendWeight;
             
-            // Calculate bone transforms
+            // Re-calculate the whole hierarchy for this layer's animations
+            globalTransformCache.clear();
+            
             for (const auto& [boneName, boneIndex] : boneData.boneNameToIndex) {
+                // MODEL ISOLATION: Only update bones that belong to this animation's model
+                // This prevents multiple animated models from overwriting each other's poses
+                if (!animA->modelName.empty()) {
+                    // Check if bone belongs to this model (prefixed with "modelName_")
+                    if (boneName.find(animA->modelName + "_") != 0) {
+                        continue; // Skip bones from other models
+                    }
+                }
+
                 // Skip if bone mask is set and bone not in mask
                 if (!layer.affectedBones.empty()) {
                     auto it = std::find(layer.affectedBones.begin(), layer.affectedBones.end(), boneName);
                     if (it == layer.affectedBones.end()) continue;
                 }
                 
-                // Get offset matrix
+                // Get global animated transform (recursively)
+                Matrix4x4 animatedGlobal = getAnimatedGlobalTransform(
+                    boneName, boneData, 
+                    animA, state.timeA, 
+                    animB, state.timeB, 
+                    weight, state.mode, 
+                    globalTransformCache);
+                
+                // Final Bone Matrix = GlobalInverse * GlobalAnimated * Offset
                 auto offsetIt = boneData.boneOffsetMatrices.find(boneName);
-                if (offsetIt == boneData.boneOffsetMatrices.end()) continue;
+                Matrix4x4 offset = (offsetIt != boneData.boneOffsetMatrices.end()) ? offsetIt->second : Matrix4x4::identity();
                 
-                // Calculate animated transform from clip A
-                float timeInTicksA = activeTime * activeClip->ticksPerSecond;
-                Matrix4x4 transformA = calculateNodeTransform(animA, timeInTicksA, boneName, Matrix4x4::identity());
-                
-                // Blend with clip B if blending
-                Matrix4x4 finalTransform = transformA;
-                if (animB && state.isBlending()) {
-                    float timeInTicksB = state.timeB * state.clipB->ticksPerSecond;
-                    Matrix4x4 transformB = calculateNodeTransform(animB, timeInTicksB, boneName, Matrix4x4::identity());
-                    finalTransform = blendTransforms(transformA, transformB, state.blendWeight, state.mode);
+                // Retrieve correct Global Inverse for this model
+                Matrix4x4 globalInv = boneData.globalInverseTransform;
+                if (!animA->modelName.empty()) {
+                     auto invIt = boneData.perModelInverses.find(animA->modelName);
+                     if (invIt != boneData.perModelInverses.end()) {
+                         globalInv = invIt->second;
+                     }
                 }
                 
-                // CRITICAL FIX: Apply globalInverseTransform for correct axis transformation
-                // This is essential for FBX files which use Z-up coordinate system.
-                // Without this, skinned meshes will appear rotated and scaled incorrectly
-                // when loaded from a saved project (where loader context is not available).
-                Matrix4x4 boneMatrix = boneData.globalInverseTransform * finalTransform * offsetIt->second;
+                // Proper Skinning Formula: GlobalInverse * BoneGlobal * BoneOffset
+                Matrix4x4 boneMatrix = globalInv * animatedGlobal * offset;
                 
-                // Blend with existing matrix based on layer weight
+                // Blend with existing matrix (from previous layers)
+                // Since we isolated models, layers for DIFFERENT models won't compete for the same boneIndex.
+                // Multiple layers for the SAME model will still blend correctly.
                 if (layer.weight < 1.0f && layer.blendMode == BlendMode::Replace) {
                     cachedFinalBoneMatrices[boneIndex] = blendTransforms(
                         cachedFinalBoneMatrices[boneIndex], 
@@ -308,6 +420,18 @@ void AnimationController::updateLayer(AnimationLayer& layer, float deltaTime, co
     float durationA = state.clipA->getDurationInSeconds();
     state.timeA += deltaTime;
     
+    // Extract root motion from clipA
+    if (rootMotionEnabled && state.clipA->sourceData) {
+        float prevTime = state.timeA - deltaTime;
+        float currTime = state.timeA;
+        if (state.clipA->loop && durationA > 0.0f && currTime >= durationA) {
+            extractRootMotion(state.clipA->sourceData, prevTime, durationA, rootMotionBone);
+            extractRootMotion(state.clipA->sourceData, 0.0f, fmodf(currTime, durationA), rootMotionBone);
+        } else {
+            extractRootMotion(state.clipA->sourceData, prevTime, currTime, rootMotionBone);
+        }
+    }
+
     // Handle looping
     if (state.clipA->loop) {
         if (durationA > 0.0f && state.timeA >= durationA) {
@@ -382,16 +506,26 @@ void AnimationController::processQueue(AnimationLayer& layer) {
 }
 
 Matrix4x4 AnimationController::calculateNodeTransform(
-    const AnimationData* anim,
+    std::shared_ptr<AnimationData> anim,
     float timeInTicks,
     const std::string& nodeName,
-    const Matrix4x4& defaultTransform
+    const Matrix4x4& defaultTransform,
+    bool wrap
 ) const {
     if (!anim) return defaultTransform;
     
-    // Wrap time within animation duration
-    double wrappedTime = fmod((double)timeInTicks, anim->duration);
-    if (wrappedTime < 0) wrappedTime += anim->duration;
+    // Time sampling logic
+    double sampleTime = (double)timeInTicks;
+    if (wrap) {
+        sampleTime = fmod(sampleTime, anim->duration);
+        if (sampleTime < 0) sampleTime += anim->duration;
+    } else {
+        // Clamp to animation range if not wrapping
+        sampleTime = std::max(0.0, std::min(sampleTime, anim->duration));
+    }
+    
+    // Use sampleTime for interpolation
+    double wrappedTime = sampleTime; 
     
     Matrix4x4 translation = Matrix4x4::identity();
     Matrix4x4 rotation = Matrix4x4::identity();
@@ -402,22 +536,35 @@ Matrix4x4 AnimationController::calculateNodeTransform(
     if (posIt != anim->positionKeys.end() && !posIt->second.empty()) {
         const auto& keys = posIt->second;
         
-        // Find surrounding keyframes
         size_t keyIndex = 0;
-        for (size_t i = 0; i < keys.size() - 1; ++i) {
-            if (wrappedTime < keys[i + 1].mTime) {
-                keyIndex = i;
-                break;
+        if (wrappedTime >= keys.back().mTime) {
+            keyIndex = keys.size() - 1;
+        } else {
+            for (size_t i = 0; i < keys.size() - 1; ++i) {
+                if (wrappedTime < keys[i + 1].mTime) {
+                    keyIndex = i;
+                    break;
+                }
             }
         }
         
-        size_t nextKey = (keyIndex + 1) % keys.size();
-        double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
-        if (deltaTime < 0) deltaTime += anim->duration;
+        size_t nextKey = keyIndex + 1;
+        float t = 0.0f;
         
-        float t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        if (nextKey < keys.size()) {
+            double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
+            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        } else if (wrap) {
+            nextKey = 0;
+            double deltaTime = (anim->duration - keys[keyIndex].mTime) + keys[nextKey].mTime;
+            double elapsed = wrappedTime - keys[keyIndex].mTime;
+            t = (deltaTime > 0) ? (float)(elapsed / deltaTime) : 0.0f;
+        } else {
+            nextKey = keyIndex; // Clamp to end
+            t = 0.0f;
+        }
+        
         t = std::max(0.0f, std::min(1.0f, t));
-        
         const auto& start = keys[keyIndex].mValue;
         const auto& end = keys[nextKey].mValue;
         Vec3 pos(
@@ -434,26 +581,40 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         const auto& keys = rotIt->second;
         
         size_t keyIndex = 0;
-        for (size_t i = 0; i < keys.size() - 1; ++i) {
-            if (wrappedTime < keys[i + 1].mTime) {
-                keyIndex = i;
-                break;
+        if (wrappedTime >= keys.back().mTime) {
+            keyIndex = keys.size() - 1;
+        } else {
+            for (size_t i = 0; i < keys.size() - 1; ++i) {
+                if (wrappedTime < keys[i + 1].mTime) {
+                    keyIndex = i;
+                    break;
+                }
             }
         }
         
-        size_t nextKey = (keyIndex + 1) % keys.size();
-        double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
-        if (deltaTime < 0) deltaTime += anim->duration;
+        size_t nextKey = keyIndex + 1;
+        float t = 0.0f;
         
-        float t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        if (nextKey < keys.size()) {
+            double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
+            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        } else if (wrap) {
+            nextKey = 0;
+            double deltaTime = (anim->duration - keys[keyIndex].mTime) + keys[nextKey].mTime;
+            double elapsed = wrappedTime - keys[keyIndex].mTime;
+            t = (deltaTime > 0) ? (float)(elapsed / deltaTime) : 0.0f;
+        } else {
+            nextKey = keyIndex;
+            t = 0.0f;
+        }
+        
         t = std::max(0.0f, std::min(1.0f, t));
-        
-        Quaternion start(keys[keyIndex].mValue.w, keys[keyIndex].mValue.x, 
+        Quaternion q_start(keys[keyIndex].mValue.w, keys[keyIndex].mValue.x, 
                         keys[keyIndex].mValue.y, keys[keyIndex].mValue.z);
-        Quaternion end(keys[nextKey].mValue.w, keys[nextKey].mValue.x,
+        Quaternion q_end(keys[nextKey].mValue.w, keys[nextKey].mValue.x,
                       keys[nextKey].mValue.y, keys[nextKey].mValue.z);
         
-        Quaternion result = Quaternion::slerp(start, end, t);
+        Quaternion result = Quaternion::slerp(q_start, q_end, t);
         rotation = result.toMatrix();
     }
     
@@ -463,20 +624,34 @@ Matrix4x4 AnimationController::calculateNodeTransform(
         const auto& keys = sclIt->second;
         
         size_t keyIndex = 0;
-        for (size_t i = 0; i < keys.size() - 1; ++i) {
-            if (wrappedTime < keys[i + 1].mTime) {
-                keyIndex = i;
-                break;
+        if (wrappedTime >= keys.back().mTime) {
+            keyIndex = keys.size() - 1;
+        } else {
+            for (size_t i = 0; i < keys.size() - 1; ++i) {
+                if (wrappedTime < keys[i + 1].mTime) {
+                    keyIndex = i;
+                    break;
+                }
             }
         }
         
-        size_t nextKey = (keyIndex + 1) % keys.size();
-        double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
-        if (deltaTime < 0) deltaTime += anim->duration;
+        size_t nextKey = keyIndex + 1;
+        float t = 0.0f;
         
-        float t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        if (nextKey < keys.size()) {
+            double deltaTime = keys[nextKey].mTime - keys[keyIndex].mTime;
+            t = (deltaTime > 0) ? (float)((wrappedTime - keys[keyIndex].mTime) / deltaTime) : 0.0f;
+        } else if (wrap) {
+            nextKey = 0;
+            double deltaTime = (anim->duration - keys[keyIndex].mTime) + keys[nextKey].mTime;
+            double elapsed = wrappedTime - keys[keyIndex].mTime;
+            t = (deltaTime > 0) ? (float)(elapsed / deltaTime) : 0.0f;
+        } else {
+            nextKey = keyIndex;
+            t = 0.0f;
+        }
+        
         t = std::max(0.0f, std::min(1.0f, t));
-        
         const auto& start = keys[keyIndex].mValue;
         const auto& end = keys[nextKey].mValue;
         Vec3 scl(
@@ -488,6 +663,61 @@ Matrix4x4 AnimationController::calculateNodeTransform(
     }
     
     return translation * rotation * scale;
+}
+
+Matrix4x4 AnimationController::getAnimatedGlobalTransform(
+    const std::string& boneName,
+    const BoneData& boneData,
+    std::shared_ptr<AnimationData> animA, float timeA,
+    std::shared_ptr<AnimationData> animB, float timeB,
+    float blendWeight, BlendMode mode,
+    std::unordered_map<std::string, Matrix4x4>& cache
+) const {
+    // 1. Check cache first
+    auto it = cache.find(boneName);
+    if (it != cache.end()) return it->second;
+
+    // 2. Get local transform (interpolated from animation or default bind pose)
+    Matrix4x4 localDefault = Matrix4x4::identity();
+    auto defIt = boneData.boneDefaultTransforms.find(boneName);
+    if (defIt != boneData.boneDefaultTransforms.end()) {
+        localDefault = defIt->second;
+    }
+
+    float ticksPerSecA = animA ? (float)animA->ticksPerSecond : 24.0f;
+    Matrix4x4 localA = calculateNodeTransform(animA, timeA * ticksPerSecA, boneName, localDefault);
+    
+    // ROOT MOTION ISOLATION: If this is the root bone and RM is enabled, we remove translation
+    // to prevent the character from moving twice (double transformation).
+    if (rootMotionEnabled && boneName == rootMotionBone) {
+        localA.m[0][3] = 0; localA.m[1][3] = 0; localA.m[2][3] = 0;
+    }
+
+    Matrix4x4 localFinal = localA;
+    if (animB && blendWeight > 0.0f) {
+        float ticksPerSecB = animB ? (float)animB->ticksPerSecond : 24.0f;
+        Matrix4x4 localB = calculateNodeTransform(animB, timeB * ticksPerSecB, boneName, localDefault);
+        
+        if (rootMotionEnabled && boneName == rootMotionBone) {
+            localB.m[0][3] = 0; localB.m[1][3] = 0; localB.m[2][3] = 0;
+        }
+
+        localFinal = blendTransforms(localA, localB, blendWeight, mode);
+    }
+
+    // 3. Get parent's global transform
+    Matrix4x4 parentGlobal = Matrix4x4::identity();
+    auto parentIt = boneData.boneParents.find(boneName);
+    if (parentIt != boneData.boneParents.end()) {
+        parentGlobal = getAnimatedGlobalTransform(parentIt->second, boneData, animA, timeA, animB, timeB, blendWeight, mode, cache);
+    }
+
+    // 4. Combine: Global = ParentGlobal * Local
+    Matrix4x4 globalResult = parentGlobal * localFinal;
+    
+    // 5. Cache and return
+    cache[boneName] = globalResult;
+    return globalResult;
 }
 
 Matrix4x4 AnimationController::blendTransforms(
@@ -512,16 +742,27 @@ Matrix4x4 AnimationController::blendTransforms(
 }
 
 void AnimationController::extractRootMotion(
-    const AnimationData* anim,
+    std::shared_ptr<AnimationData> anim,
     float prevTime,
     float currentTime,
     const std::string& rootBone
 ) {
     if (!anim || !rootMotionEnabled) return;
     
-    // TODO: Implement root motion extraction
-    // Extract position delta from root bone keyframes
-    // Store in accumulatedRootMotion
+    double ticksPerSec = anim->ticksPerSecond;
+    
+    // CRITICAL: Disable wrapping here so we sample pos(duration) and pos(0) correctly
+    // instead of both wrapping to pos(0).
+    Matrix4x4 matPrev = calculateNodeTransform(anim, (float)(prevTime * ticksPerSec), rootBone, Matrix4x4::identity(), false);
+    Matrix4x4 matCurr = calculateNodeTransform(anim, (float)(currentTime * ticksPerSec), rootBone, Matrix4x4::identity(), false);
+    
+    Vec3 posPrev(matPrev.m[0][3], matPrev.m[1][3], matPrev.m[2][3]);
+    Vec3 posCurr(matCurr.m[0][3], matCurr.m[1][3], matCurr.m[2][3]);
+    
+    Vec3 delta = posCurr - posPrev;
+    
+    accumulatedRootMotion.positionDelta = accumulatedRootMotion.positionDelta + delta;
+    accumulatedRootMotion.hasPosition = true;
 }
 
 // ========================================================================

@@ -129,6 +129,7 @@ struct SceneInstance {
     uint32_t visibility_mask = 255;         // Ray visibility mask (0 = invisible)
     uint32_t sbt_offset = 0;                // Computed SBT offset
     std::string node_name;                  // Node name for lookup
+    void* source_hittable = nullptr;        // Pointer to CPU Hittable for transform sync
     bool visible = true;                    // CPU-side visibility flag for incremental delete
     
     // Set identity transform
@@ -178,6 +179,9 @@ public:
     // Initialize with OptiX context and stream
     void initialize(OptixDeviceContext ctx, CUstream str, OptixProgramGroup hit_pg);
     
+    // Mark that the scene structure (object list) has changed
+    void markTopologyDirty() { m_topology_dirty = true; }
+    
     // ═══════════════════════════════════════════════════════════════════════
     // BLAS MANAGEMENT
     // ═══════════════════════════════════════════════════════════════════════
@@ -197,7 +201,7 @@ public:
                                     const std::vector<Matrix4x4>& boneMatrices = {});
     
     // Updates only Instance Transforms (Lightweight: for rigid motion)
-    void syncInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects);
+    void syncInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects, bool force_rebuild_cache = false);
 
     // Get BLAS by mesh_id
     const MeshBLAS* getBLAS(int mesh_id) const;
@@ -214,7 +218,7 @@ public:
     // ═══════════════════════════════════════════════════════════════════════
     
     // Add instance, returns instance_id
-    int addInstance(int mesh_id, const float transform[12], int material_id, const std::string& name = "");
+    int addInstance(int mesh_id, const float transform[12], int material_id, const std::string& name = "", void* source_hittable = nullptr);
     
     // Update instance transform (fast - only TLAS rebuild needed)
     void updateInstanceTransform(int instance_id, const float transform[12]);
@@ -325,6 +329,24 @@ private:
     CUdeviceptr d_tlas_temp = 0;            // TLAS temp buffer
     size_t tlas_output_size = 0;
     bool tlas_needs_rebuild = true;
+    
+    // Topology cache for animation performance
+    bool m_topology_dirty = true;
+    std::vector<std::shared_ptr<Triangle>> m_cached_triangles;
+    struct MeshGroupCache {
+        int blas_idx;
+        std::vector<int> triangle_indices;
+        std::vector<int> instance_ids; // Map of TLAS instances using this BLAS
+    };
+    std::vector<MeshGroupCache> m_cached_groups;
+    
+    // Mapping for fast transform sync
+    struct InstanceTransformCache {
+        int instance_id;
+        std::string node_name;
+        std::shared_ptr<Triangle> representative_tri; // Fetch transform from here
+    };
+    std::vector<InstanceTransformCache> m_instance_sync_cache;
     
     // SBT
     OptixShaderBindingTable sbt = {};

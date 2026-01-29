@@ -184,6 +184,20 @@ namespace UIWidgets {
     void BeginLabelValuePair(const char* label, float labelWidth = 120.0f);
     void EndLabelValuePair();
 
+    // -------- PROGRAMMATIC ICONS --------
+    // High-stability geometric icons drawn via DrawList
+
+    enum class IconType {
+        Scene, Render, Terrain, Water, Volumetric, Force, World, System, 
+        Wind, Gravity, Physics, Vortex, Noise, Magnet,
+        Camera, Light, Mesh,
+        Timeline, Console, Graph, AnimGraph,
+        LightPoint, LightDir, LightSpot, LightArea
+    };
+
+    void DrawIcon(IconType type, ImVec2 pos, float size, ImU32 color, float thickness = 1.5f);
+    bool HorizontalTab(const char* label, IconType icon, bool active, float width = 0);
+
 } // namespace UIWidgets
 
 // ============================================================================

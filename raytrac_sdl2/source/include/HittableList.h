@@ -78,7 +78,6 @@ public:
     // Hit Detection
     // =========================================================================
     virtual bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const override;
-    virtual void hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const override;
     virtual bool bounding_box(float time0, float time1, AABB& output_box) const override;
 
     // =========================================================================

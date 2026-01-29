@@ -97,22 +97,27 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene) {
         
         bool is_selected = (selected_force_field == field);
         
-        // Icon based on type
-        const char* icon = "";
+        // Professional geometric icons
+        UIWidgets::IconType icon_type = UIWidgets::IconType::Force;
         switch (field->type) {
-            case Physics::ForceFieldType::Wind:      icon = "🌬️ "; break;
-            case Physics::ForceFieldType::Gravity:   icon = "🌎 "; break;
-            case Physics::ForceFieldType::Attractor: icon = "🧲 "; break;
-            case Physics::ForceFieldType::Repeller:  icon = "💨 "; break;
-            case Physics::ForceFieldType::Vortex:    icon = "🌀 "; break;
-            case Physics::ForceFieldType::Turbulence:icon = "🌊 "; break;
-            case Physics::ForceFieldType::CurlNoise: icon = "🌫️ "; break;
-            case Physics::ForceFieldType::Drag:      icon = "⚓ "; break;
-            case Physics::ForceFieldType::Magnetic:  icon = "🧲 "; break;
+            case Physics::ForceFieldType::Wind:      icon_type = UIWidgets::IconType::Wind; break;
+            case Physics::ForceFieldType::Gravity:   icon_type = UIWidgets::IconType::Gravity; break;
+            case Physics::ForceFieldType::Vortex:    icon_type = UIWidgets::IconType::Vortex; break;
+            case Physics::ForceFieldType::Turbulence:
+            case Physics::ForceFieldType::CurlNoise: icon_type = UIWidgets::IconType::Noise; break;
+            case Physics::ForceFieldType::Magnetic:  icon_type = UIWidgets::IconType::Magnet; break;
+            case Physics::ForceFieldType::Attractor:
+            case Physics::ForceFieldType::Repeller:
+            case Physics::ForceFieldType::Drag:      icon_type = UIWidgets::IconType::Physics; break;
             default: break;
         }
         
-        std::string label = std::string(icon) + field->name + "##ff" + std::to_string(i);
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        UIWidgets::DrawIcon(icon_type, ImVec2(pos.x, pos.y), 16, 
+            is_selected ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.7f, 0.7f, 0.7f, 1.0f)), 1.0f);
+        
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 20);
+        std::string label = field->name + "##ff" + std::to_string(i);
         
         // Dim if disabled
         if (!field->enabled) {
@@ -186,7 +191,10 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene) {
     // ─────────────────────────────────────────────────────────────────────────
     // TYPE & SHAPE
     // ─────────────────────────────────────────────────────────────────────────
-    if (ImGui::CollapsingHeader("Type & Shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // TYPE & SHAPE
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Type & Shape", ImVec4(0.5f, 0.9f, 0.5f, 1.0f))) {
         const char* types[] = { 
             "Wind", "Gravity", "Attractor", "Repeller", 
             "Vortex", "Turbulence", "Curl Noise", "Drag", "Magnetic", "Directional Noise"
@@ -265,13 +273,11 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene) {
             ImGui::DragFloat("Linear Drag", &field->linear_drag, 0.01f, 0.0f, 2.0f);
             ImGui::DragFloat("Quadratic Drag", &field->quadratic_drag, 0.001f, 0.0f, 1.0f);
         }
-    }
-    
-    // ─────────────────────────────────────────────────────────────────────────
-    // FALLOFF
-    // ─────────────────────────────────────────────────────────────────────────
-    if (field->shape != Physics::ForceFieldShape::Infinite) {
-        if (ImGui::CollapsingHeader("Falloff")) {
+
+        // Falloff
+        if (field->shape != Physics::ForceFieldShape::Infinite) {
+            ImGui::Separator();
+            ImGui::Text("Falloff Settings");
             const char* falloff_types[] = { 
                 "None", "Linear", "Smooth", "Sphere", "Inverse Square", "Exponential", "Custom" 
             };
@@ -283,15 +289,17 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene) {
             ImGui::DragFloat("Inner Radius", &field->inner_radius, 0.1f, 0.0f, field->falloff_radius);
             ImGui::DragFloat("Falloff Radius", &field->falloff_radius, 0.1f, field->inner_radius, 100.0f);
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────
-    // NOISE (for Turbulence/CurlNoise)
+    // NOISE & TURBULENCE
     // ─────────────────────────────────────────────────────────────────────────
-    if (field->type == Physics::ForceFieldType::Turbulence || 
-        field->type == Physics::ForceFieldType::CurlNoise ||
-        field->type == Physics::ForceFieldType::Wind) {
-        if (ImGui::CollapsingHeader("Noise")) {
+    if (UIWidgets::BeginSection("Noise & Turbulence", ImVec4(1.0f, 0.9f, 0.5f, 1.0f))) {
+        // NOISE (for Turbulence/CurlNoise/Wind)
+        if (field->type == Physics::ForceFieldType::Turbulence || 
+            field->type == Physics::ForceFieldType::CurlNoise ||
+            field->type == Physics::ForceFieldType::Wind) {
             ImGui::Checkbox("Use Noise", &field->use_noise);
             
             if (field->use_noise) {
@@ -304,6 +312,7 @@ inline void drawForceFieldPanel(UIContext& ui_ctx, SceneData& scene) {
                 ImGui::DragInt("Seed", &field->noise.seed, 1, 0, 99999);
             }
         }
+        UIWidgets::EndSection();
     }
     
     // ─────────────────────────────────────────────────────────────────────────

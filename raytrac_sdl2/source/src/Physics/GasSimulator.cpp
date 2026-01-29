@@ -6,6 +6,9 @@
 #include "GasSimulator.h"
 #include "ForceField.h"
 #include "gas_kernels.cuh"
+#include "gas_fft_solver.cuh"  // FFT Pressure Solver & Advanced Emitters
+#include "CurlNoise.h"
+#include "globals.h" // For SCENE_LOG_*
 #include <cmath>
 #include <algorithm>
 #include <thread>
@@ -150,7 +153,15 @@ nlohmann::json GasSimulationSettings::toJson() const {
     j["grid_offset"] = {grid_offset.x, grid_offset.y, grid_offset.z};
     j["timestep"] = timestep;
     j["substeps"] = substeps;
+    j["time_scale"] = time_scale;
     j["pressure_iterations"] = pressure_iterations;
+    
+    // CFL Adaptive Timestep
+    j["adaptive_timestep"] = adaptive_timestep;
+    j["cfl_number"] = cfl_number;
+    j["min_timestep"] = min_timestep;
+    j["max_timestep"] = max_timestep;
+    
     j["density_dissipation"] = density_dissipation;
     j["velocity_dissipation"] = velocity_dissipation;
     j["temperature_dissipation"] = temperature_dissipation;
@@ -166,8 +177,21 @@ nlohmann::json GasSimulationSettings::toJson() const {
     j["buoyancy_temperature"] = buoyancy_temperature;
     j["ambient_temperature"] = ambient_temperature;
     j["vorticity_strength"] = vorticity_strength;
+    j["turbulence_strength"] = turbulence_strength;
+    j["turbulence_scale"] = turbulence_scale;
+    j["turbulence_octaves"] = turbulence_octaves;
+    j["turbulence_lacunarity"] = turbulence_lacunarity;
+    j["turbulence_persistence"] = turbulence_persistence;
+    j["advection_mode"] = static_cast<int>(advection_mode);
+    j["pressure_solver"] = static_cast<int>(pressure_solver);
+    j["sor_omega"] = sor_omega;
     j["gravity"] = {gravity.x, gravity.y, gravity.z};
     j["wind"] = {wind.x, wind.y, wind.z};
+    j["sparse_mode"] = sparse_mode;
+    j["sparse_threshold"] = sparse_threshold;
+    j["max_velocity"] = max_velocity;
+    j["max_temperature"] = max_temperature;
+    j["max_density"] = max_density;
     j["mode"] = static_cast<int>(mode);
     j["backend"] = static_cast<int>(backend);
     j["cache_directory"] = cache_directory;
@@ -193,7 +217,15 @@ void GasSimulationSettings::fromJson(const nlohmann::json& j) {
     }
     if (j.contains("timestep")) timestep = j["timestep"];
     if (j.contains("substeps")) substeps = j["substeps"];
+    if (j.contains("time_scale")) time_scale = j["time_scale"];
     if (j.contains("pressure_iterations")) pressure_iterations = j["pressure_iterations"];
+    
+    // CFL Adaptive Timestep
+    if (j.contains("adaptive_timestep")) adaptive_timestep = j["adaptive_timestep"];
+    if (j.contains("cfl_number")) cfl_number = j["cfl_number"];
+    if (j.contains("min_timestep")) min_timestep = j["min_timestep"];
+    if (j.contains("max_timestep")) max_timestep = j["max_timestep"];
+    
     if (j.contains("density_dissipation")) density_dissipation = j["density_dissipation"];
     if (j.contains("velocity_dissipation")) velocity_dissipation = j["velocity_dissipation"];
     if (j.contains("temperature_dissipation")) temperature_dissipation = j["temperature_dissipation"];
@@ -209,6 +241,14 @@ void GasSimulationSettings::fromJson(const nlohmann::json& j) {
     if (j.contains("buoyancy_temperature")) buoyancy_temperature = j["buoyancy_temperature"];
     if (j.contains("ambient_temperature")) ambient_temperature = j["ambient_temperature"];
     if (j.contains("vorticity_strength")) vorticity_strength = j["vorticity_strength"];
+    if (j.contains("turbulence_strength")) turbulence_strength = j["turbulence_strength"];
+    if (j.contains("turbulence_scale")) turbulence_scale = j["turbulence_scale"];
+    if (j.contains("turbulence_octaves")) turbulence_octaves = j["turbulence_octaves"];
+    if (j.contains("turbulence_lacunarity")) turbulence_lacunarity = j["turbulence_lacunarity"];
+    if (j.contains("turbulence_persistence")) turbulence_persistence = j["turbulence_persistence"];
+    if (j.contains("advection_mode")) advection_mode = static_cast<AdvectionMode>(j["advection_mode"].get<int>());
+    if (j.contains("pressure_solver")) pressure_solver = static_cast<PressureSolverMode>(j["pressure_solver"].get<int>());
+    if (j.contains("sor_omega")) sor_omega = j["sor_omega"];
     if (j.contains("gravity")) {
         auto g = j["gravity"];
         gravity = Vec3(g[0], g[1], g[2]);
@@ -217,6 +257,11 @@ void GasSimulationSettings::fromJson(const nlohmann::json& j) {
         auto w = j["wind"];
         wind = Vec3(w[0], w[1], w[2]);
     }
+    if (j.contains("sparse_mode")) sparse_mode = j["sparse_mode"];
+    if (j.contains("sparse_threshold")) sparse_threshold = j["sparse_threshold"];
+    if (j.contains("max_velocity")) max_velocity = j["max_velocity"];
+    if (j.contains("max_temperature")) max_temperature = j["max_temperature"];
+    if (j.contains("max_density")) max_density = j["max_density"];
     if (j.contains("mode")) mode = static_cast<SimulationMode>(j["mode"].get<int>());
     if (j.contains("backend")) backend = static_cast<SolverBackend>(j["backend"].get<int>());
     if (j.contains("cache_directory")) cache_directory = j["cache_directory"];
@@ -254,26 +299,44 @@ GasSimulator::~GasSimulator() {
 void GasSimulator::initialize(const GasSimulationSettings& s) {
     settings = s;
     
-    // Safety checks
-    if (settings.resolution_x <= 0) settings.resolution_x = 32;
-    if (settings.resolution_y <= 0) settings.resolution_y = 32;
-    if (settings.resolution_z <= 0) settings.resolution_z = 32;
+    // Safety checks - clamp resolution to reasonable range (Increased for more detail)
+    settings.resolution_x = std::clamp(settings.resolution_x, 8, 512);
+    settings.resolution_y = std::clamp(settings.resolution_y, 8, 512);
+    settings.resolution_z = std::clamp(settings.resolution_z, 8, 512);
     
-    // Calculate uniform voxel size based on the longest axis and its resolution
-    // Industry Standard: voxel_size = domain_size / resolution
-    float vx = settings.grid_size.x / (float)settings.resolution_x;
-    float vy = settings.grid_size.y / (float)settings.resolution_y;
-    float vz = settings.grid_size.z / (float)settings.resolution_z;
+    // Calculate voxel size based on grid dimensions and resolution
+    // Use the maximum resolution to determine voxel size for uniform voxels
+    float max_dim = std::max({settings.grid_size.x, settings.grid_size.y, settings.grid_size.z});
+    int max_res = std::max({settings.resolution_x, settings.resolution_y, settings.resolution_z});
     
-    // We use the smallest voxel size to ensure we fit within the requested grid_size boundaries
-    // or we can allow non-uniform if we really want, but standard is UNIFORM.
-    // Let's use VX as the master and adjust others to be square.
-    settings.voxel_size = vx; 
+    // Determine the master voxel size based on the longest axis
+    settings.voxel_size = max_dim / (float)max_res;
     if (settings.voxel_size < 0.0001f) settings.voxel_size = 0.1f;
     
-    // Create grids
+    // DO NOT recalculate resolution - use what user specified (after clamping)
+    // This prevents resolution explosion when grid_size and resolution don't match aspect ratio
+    // The uniform voxel size is already determined by max_res, other axes will just have fewer voxels
+    
+    // Safety check for memory - cap at 256^3 for high detail (Increased from 128^3)
+    long long total_cells = (long long)settings.resolution_x * settings.resolution_y * settings.resolution_z;
+    const long long MAX_CELLS = 256LL * 256 * 256; // ~16.7 million cells max
+    if (total_cells > MAX_CELLS) {
+        float cap_factor = std::pow((float)MAX_CELLS / total_cells, 1.0f/3.0f);
+        settings.resolution_x = std::max(8, (int)(settings.resolution_x * cap_factor));
+        settings.resolution_y = std::max(8, (int)(settings.resolution_y * cap_factor));
+        settings.resolution_z = std::max(8, (int)(settings.resolution_z * cap_factor));
+        settings.voxel_size = settings.grid_size.x / (float)settings.resolution_x;
+    }
+    
+  
+
+    // Create grids with specified resolutions
     grid.resize(settings.resolution_x, settings.resolution_y, settings.resolution_z, settings.voxel_size, settings.grid_offset);
     grid_temp.resize(settings.resolution_x, settings.resolution_y, settings.resolution_z, settings.voxel_size, settings.grid_offset);
+    
+    // Clear all data (density, fuel, velocity, etc.)
+    grid.clear();
+    grid_temp.clear();
     
     // Initialize persistent buffers
     persistent_vorticity.assign(grid.getCellCount(), Vec3(0, 0, 0));
@@ -281,27 +344,86 @@ void GasSimulator::initialize(const GasSimulationSettings& s) {
     // Initialize with ambient temperature
     std::fill(grid.temperature.begin(), grid.temperature.end(), settings.ambient_temperature);
     
-    // Initialize CUDA if needed
+    // CRITICAL FIX: Always free old CUDA resources before reallocating
+    // This prevents buffer size mismatch when resolution changes
+    if (cuda_initialized) {
+        freeCUDA();
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // BACKEND SELECTION - Respect settings while prioritizing CUDA if possible
+    // ═══════════════════════════════════════════════════════════════════════════════
+    bool cuda_available = false;
+    int device_count = 0;
+    if (cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0) {
+        cudaDeviceProp prop;
+        if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess && prop.major >= 5) {
+            cuda_available = true;
+        }
+    } else {
+        cudaGetLastError(); // Clear any error flag
+    }
+    
+    // Choose which backend to actually use
     if (settings.backend == SolverBackend::CUDA) {
-        initCUDA();
+        if (cuda_available) {
+            initCUDA();
+            // If initCUDA failed (e.g. OOM), it would have logged error and left cuda_initialized=false
+            if (!cuda_initialized) {
+                SCENE_LOG_ERROR("[GasSimulator] CUDA backend requested but initialization failed. Falling back to CPU.");
+                settings.backend = SolverBackend::CPU;
+            }
+        } else {
+            SCENE_LOG_WARN("[GasSimulator] CUDA backend requested but no compatible GPU found. Falling back to CPU.");
+            settings.backend = SolverBackend::CPU;
+        }
+    } else {
+        // User explicitly chose CPU (useful for debugging/development)
+        SCENE_LOG_INFO("[GasSimulator] Using CPU backend as requested.");
     }
     
     current_frame = 0;
     accumulated_time = 0.0f;
+    gpu_data_valid = false;
     initialized = true;
 }
 
 void GasSimulator::step(float dt, const Matrix4x4& world_matrix) {
     if (!initialized) return;
     
+    // CRITICAL: Check for resolution mismatch - do NOT run if buffers don't match settings
+    // This prevents buffer overflow when user changes resolution in UI without restarting
+    if (settings.resolution_x != grid.nx || 
+        settings.resolution_y != grid.ny || 
+        settings.resolution_z != grid.nz) {
+        // Resolution mismatch - skip step until user reinitializes
+        return;
+    }
+    
     auto start = std::chrono::high_resolution_clock::now();
+    
+    // Apply time scale for simulation speed control
+    float scaled_dt = dt * settings.time_scale;
+    
+    // CFL Adaptive Timestep: Calculate safe timestep based on max velocity
+    float effective_dt = scaled_dt;
+    if (settings.adaptive_timestep) {
+        effective_dt = computeCFLTimestep(scaled_dt);
+    }
+    
+    // Update active tiles for sparse processing (VDB-style optimization)
+    grid.sparse_mode_enabled = settings.sparse_mode;
+    grid.sparse_threshold = settings.sparse_threshold;
+    if (settings.sparse_mode) {
+        grid.updateActiveTiles(settings.ambient_temperature);
+    }
     
     // Use CUDA if enabled and available
     if (settings.backend == SolverBackend::CUDA && cuda_initialized) {
-        stepCUDA(dt, world_matrix);
+        stepCUDA(effective_dt, world_matrix);
     } else {
-        // CPU solver
-        float substep_dt = dt / settings.substeps;
+        // CPU solver (OpenMP disabled to prevent deadlock after resolution change)
+        float substep_dt = effective_dt / settings.substeps;
         
         for (int sub = 0; sub < settings.substeps; ++sub) {
             // 1. Apply emitters (inject density/temperature/fuel)
@@ -345,6 +467,11 @@ void GasSimulator::reset() {
     std::fill(grid.temperature.begin(), grid.temperature.end(), settings.ambient_temperature);
     current_frame = 0;
     accumulated_time = 0.0f;
+    
+    // Clear GPU buffers if CUDA is active
+    if (cuda_initialized && settings.backend == SolverBackend::CUDA) {
+        clearGPU();
+    }
     gpu_data_valid = false;
 }
 
@@ -418,10 +545,21 @@ void GasSimulator::applyEmitters(float dt) {
                     
                     if (inside) {
                         size_t idx = grid.cellIndex(i, j, k);
-                        // No need for atomic if this emitter's loop is parallelized internally
+                        
+                        // Inject with limits to prevent overflow
                         grid.density[idx] += emitter.density_rate * dt;
+                        grid.density[idx] = std::min(grid.density[idx], settings.max_density);
+                        
                         grid.fuel[idx] += emitter.fuel_rate * dt;
-                        if (grid.temperature[idx] < emitter.temperature) grid.temperature[idx] = emitter.temperature;
+                        // Fuel limit: prevent infinite accumulation
+                        grid.fuel[idx] = std::min(grid.fuel[idx], 100.0f);
+                        
+                        // Temperature: blend towards emitter temp, don't exceed max
+                        float target_temp = std::min(emitter.temperature, settings.max_temperature * 0.9f);
+                        if (grid.temperature[idx] < target_temp) {
+                            // Gradual heating instead of instant set
+                            grid.temperature[idx] = grid.temperature[idx] * 0.9f + target_temp * 0.1f;
+                        }
                         
                         if (emitter.velocity.length() > 0.001f) {
                             if (i > 0) grid.vel_x[grid.velXIndex(i, j, k)] += emitter.velocity.x * dt;
@@ -440,10 +578,33 @@ void GasSimulator::applyEmitters(float dt) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void GasSimulator::applyForces(float dt, const Matrix4x4& world_matrix) {
+    applyGravity(dt);
     applyBuoyancy(dt);
     applyVorticity(dt);
+    applyCurlNoiseTurbulence(dt);  // Industry-standard curl noise
     applyWind(dt);
-    applyExternalForceFields(dt, world_matrix); // Now passes the world matrix
+    applyExternalForceFields(dt, world_matrix);
+    applyVelocityClamping(); // Stability limit from UI
+}
+
+void GasSimulator::applyGravity(float dt) {
+    if (settings.gravity.length() < 0.001f) return;
+    
+    Vec3 grav_accel = settings.gravity * dt;
+    
+    // Apply gravity uniformly to all velocity components
+    #pragma omp parallel for
+    for (int i = 0; i < (int)grid.vel_x.size(); ++i) {
+        grid.vel_x[i] += grav_accel.x;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < (int)grid.vel_y.size(); ++i) {
+        grid.vel_y[i] += grav_accel.y;
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < (int)grid.vel_z.size(); ++i) {
+        grid.vel_z[i] += grav_accel.z;
+    }
 }
 
 void GasSimulator::applyBuoyancy(float dt) {
@@ -553,20 +714,165 @@ void GasSimulator::applyWind(float dt) {
     }
 }
 
+void GasSimulator::applyVelocityClamping() {
+    // Apply stability limits from UI settings
+    const float max_vel = settings.max_velocity;
+    
+    #pragma omp parallel for
+    for (int i = 0; i < (int)grid.vel_x.size(); ++i) {
+        grid.vel_x[i] = std::max(-max_vel, std::min(max_vel, grid.vel_x[i]));
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < (int)grid.vel_y.size(); ++i) {
+        grid.vel_y[i] = std::max(-max_vel, std::min(max_vel, grid.vel_y[i]));
+    }
+    #pragma omp parallel for
+    for (int i = 0; i < (int)grid.vel_z.size(); ++i) {
+        grid.vel_z[i] = std::max(-max_vel, std::min(max_vel, grid.vel_z[i]));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CURL NOISE TURBULENCE (Industry-Standard Divergence-Free Turbulence)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void GasSimulator::applyCurlNoiseTurbulence(float dt) {
+    if (settings.turbulence_strength < 0.001f) return;
+    
+    const float time = accumulated_time;
+    const float freq = settings.turbulence_scale;
+    const float strength = settings.turbulence_strength;
+    
+    // Curl noise parameters from UI settings
+    const int octaves = settings.turbulence_octaves;
+    const float lacunarity = settings.turbulence_lacunarity;
+    const float persistence = settings.turbulence_persistence;
+    const float animation_speed = 0.5f;       // How fast turbulence evolves
+    
+    // Apply curl noise to velocity field
+    // This adds divergence-free swirling motion that looks natural
+    #pragma omp parallel for collapse(2)
+    for (int k = 1; k < grid.nz - 1; ++k) {
+        for (int j = 1; j < grid.ny - 1; ++j) {
+            for (int i = 1; i < grid.nx - 1; ++i) {
+                // World-space position for consistent noise sampling
+                Vec3 world_pos = grid.origin + Vec3(
+                    (i + 0.5f) * grid.voxel_size,
+                    (j + 0.5f) * grid.voxel_size,
+                    (k + 0.5f) * grid.voxel_size
+                );
+                
+                // Only apply turbulence where there's density (smoke)
+                float density = grid.densityAt(i, j, k);
+                if (density < 0.01f) continue;
+                
+                // Density-weighted strength - more turbulence in denser smoke
+                float local_strength = strength * std::min(density, 1.0f);
+                
+                // Get animated curl noise (divergence-free!)
+                Vec3 curl = Physics::Noise::curlFBM_animated(
+                    world_pos, time,
+                    octaves, freq, lacunarity, persistence,
+                    animation_speed, 42  // seed
+                );
+                
+                // Apply to velocity
+                size_t idx_x = grid.velXIndex(i, j, k);
+                size_t idx_y = grid.velYIndex(i, j, k);
+                size_t idx_z = grid.velZIndex(i, j, k);
+                
+                grid.vel_x[idx_x] += curl.x * local_strength * dt;
+                grid.vel_y[idx_y] += curl.y * local_strength * dt;
+                grid.vel_z[idx_z] += curl.z * local_strength * dt;
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CFL ADAPTIVE TIMESTEP (Industry Standard)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+float GasSimulator::computeMaxVelocity() {
+    // Scan grid for maximum velocity magnitude
+    // NOTE: OpenMP removed due to potential deadlock on Windows after resolution change
+    float max_vel_sq = 0.0f;
+    
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                // Sample velocity at cell center
+                float vx = (grid.vel_x[grid.velXIndex(i, j, k)] + grid.vel_x[grid.velXIndex(i + 1, j, k)]) * 0.5f;
+                float vy = (grid.vel_y[grid.velYIndex(i, j, k)] + grid.vel_y[grid.velYIndex(i, j + 1, k)]) * 0.5f;
+                float vz = (grid.vel_z[grid.velZIndex(i, j, k)] + grid.vel_z[grid.velZIndex(i, j, k + 1)]) * 0.5f;
+                
+                float vel_sq = vx * vx + vy * vy + vz * vz;
+                if (vel_sq > max_vel_sq) max_vel_sq = vel_sq;
+            }
+        }
+    }
+    
+    return std::sqrt(max_vel_sq);
+}
+
+float GasSimulator::computeCFLTimestep(float requested_dt) {
+    // CFL Condition: dt <= CFL_number * voxel_size / max_velocity
+    // This ensures fluid doesn't travel more than CFL_number cells per timestep
+    
+    float max_velocity = computeMaxVelocity();
+    
+    // Avoid division by zero - if no velocity, use requested dt
+    if (max_velocity < 1e-6f) {
+        return std::min(requested_dt, settings.max_timestep);
+    }
+    
+    // Calculate CFL-limited timestep
+    float cfl_dt = settings.cfl_number * settings.voxel_size / max_velocity;
+    
+    // Clamp to min/max bounds
+    cfl_dt = std::clamp(cfl_dt, settings.min_timestep, settings.max_timestep);
+    
+    // Return the smaller of requested and CFL-limited
+    float effective_dt = std::min(requested_dt, cfl_dt);
+    
+    // Log if we're limiting significantly (for debugging)
+    if (cfl_dt < requested_dt * 0.5f) {
+        // High velocity detected, timestep reduced significantly
+        // Could add logging here if needed
+    }
+    
+    return effective_dt;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXTERNAL FORCE FIELDS (Scene-level)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void GasSimulator::applyExternalForceFields(float dt, const Matrix4x4& world_matrix) {
     if (!external_force_field_manager) return;
+    size_t active_count = external_force_field_manager->getActiveCount();
+    if (active_count == 0) return; // Early exit if no fields
     
     float time = accumulated_time;
-    Matrix4x4 inv_world = world_matrix.inverse();
     
-    // Apply force fields to each staggered face component to avoid data races and ensure accuracy
+    // For force vectors, we only need to apply inverse ROTATION, not scale!
+    // Scale should not affect force magnitude - only direction matters.
+    // Extract rotation from world_matrix and compute its inverse.
+    // 
+    // NOTE: Force is in world space (m/s^2), velocity in grid is also in m/s.
+    // Since the grid is axis-aligned in local space but may be rotated in world,
+    // we need to rotate force from world to local orientation.
+    // But for now, gas volumes are typically not rotated, so we can apply force directly.
+    // If rotation is needed, we would extract R from world_matrix and use R^-1.
+    
+    // SIMPLIFIED: Apply world force directly to grid velocity.
+    // This works because grid velocity is in m/s (world units), not grid units.
+    // The force field returns m/s^2, so force * dt gives m/s delta.
+    
+    // Apply force fields to each staggered face component
+    // NOTE: OpenMP removed to prevent deadlock after resolution change on Windows
     
     // X-velocity components (nx+1, ny, nz)
-    #pragma omp parallel for collapse(2)
     for (int k = 0; k < grid.nz; ++k) {
         for (int j = 0; j < grid.ny; ++j) {
             for (int i = 0; i <= grid.nx; ++i) {
@@ -574,21 +880,20 @@ void GasSimulator::applyExternalForceFields(float dt, const Matrix4x4& world_mat
                 Vec3 face_pos_norm(i / (float)grid.nx, (j + 0.5f) / (float)grid.ny, (k + 0.5f) / (float)grid.nz);
                 Vec3 world_pos = world_matrix.transform_point(face_pos_norm);
                 
-                // For world velocity evaluation, we need to sample velocity at the physical location
+                // Sample current velocity (already in m/s)
                 Vec3 local_pos_physical = grid.origin + Vec3(i * grid.voxel_size, (j + 0.5f) * grid.voxel_size, (k + 0.5f) * grid.voxel_size);
                 Vec3 local_vel = grid.sampleVelocity(local_pos_physical);
-                Vec3 world_vel = world_matrix.transform_vector(local_vel);
                 
-                Vec3 world_force = external_force_field_manager->evaluateAtFiltered(world_pos, time, world_vel, true, false, false, false);
-                Vec3 local_force = inv_world.transform_vector(world_force);
+                // Evaluate force field at world position
+                Vec3 world_force = external_force_field_manager->evaluateAtFiltered(world_pos, time, local_vel, true, false, false, false);
                 
-                grid.vel_x[grid.velXIndex(i, j, k)] += local_force.x * dt;
+                // Apply force directly - no scale transformation needed for force vectors
+                grid.vel_x[grid.velXIndex(i, j, k)] += world_force.x * dt;
             }
         }
     }
 
     // Y-velocity components (nx, ny+1, nz)
-    #pragma omp parallel for collapse(2)
     for (int k = 0; k < grid.nz; ++k) {
         for (int j = 0; j <= grid.ny; ++j) {
             for (int i = 0; i < grid.nx; ++i) {
@@ -597,18 +902,15 @@ void GasSimulator::applyExternalForceFields(float dt, const Matrix4x4& world_mat
                 
                 Vec3 local_pos_physical = grid.origin + Vec3((i + 0.5f) * grid.voxel_size, j * grid.voxel_size, (k + 0.5f) * grid.voxel_size);
                 Vec3 local_vel = grid.sampleVelocity(local_pos_physical);
-                Vec3 world_vel = world_matrix.transform_vector(local_vel);
                 
-                Vec3 world_force = external_force_field_manager->evaluateAtFiltered(world_pos, time, world_vel, true, false, false, false);
-                Vec3 local_force = inv_world.transform_vector(world_force);
+                Vec3 world_force = external_force_field_manager->evaluateAtFiltered(world_pos, time, local_vel, true, false, false, false);
                 
-                grid.vel_y[grid.velYIndex(i, j, k)] += local_force.y * dt;
+                grid.vel_y[grid.velYIndex(i, j, k)] += world_force.y * dt;
             }
         }
     }
 
     // Z-velocity components (nx, ny, nz+1)
-    #pragma omp parallel for collapse(2)
     for (int k = 0; k <= grid.nz; ++k) {
         for (int j = 0; j < grid.ny; ++j) {
             for (int i = 0; i < grid.nx; ++i) {
@@ -617,12 +919,10 @@ void GasSimulator::applyExternalForceFields(float dt, const Matrix4x4& world_mat
                 
                 Vec3 local_pos_physical = grid.origin + Vec3((i + 0.5f) * grid.voxel_size, (j + 0.5f) * grid.voxel_size, k * grid.voxel_size);
                 Vec3 local_vel = grid.sampleVelocity(local_pos_physical);
-                Vec3 world_vel = world_matrix.transform_vector(local_vel);
                 
-                Vec3 world_force = external_force_field_manager->evaluateAtFiltered(world_pos, time, world_vel, true, false, false, false);
-                Vec3 local_force = inv_world.transform_vector(world_force);
+                Vec3 world_force = external_force_field_manager->evaluateAtFiltered(world_pos, time, local_vel, true, false, false, false);
                 
-                grid.vel_z[grid.velZIndex(i, j, k)] += local_force.z * dt;
+                grid.vel_z[grid.velZIndex(i, j, k)] += world_force.z * dt;
             }
         }
     }
@@ -716,7 +1016,7 @@ void GasSimulator::advectScalars(float dt) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PRESSURE SOLVER
+// PRESSURE SOLVER (with SOR support for faster convergence)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void GasSimulator::solvePressure() {
@@ -737,11 +1037,13 @@ void GasSimulator::solvePressure() {
     
     float h2 = grid.voxel_size * grid.voxel_size;
     
-    // WARM START: We don't reset pressure to 0 every frame anymore.
-    // This significantly improves temporal stability (prevents flicker).
-    // std::fill(grid.pressure.begin(), grid.pressure.end(), 0.0f);
+    // SOR relaxation factor (omega)
+    // omega = 1.0 -> Gauss-Seidel, omega > 1.0 -> SOR (faster convergence)
+    // Optimal for 3D Poisson: omega ≈ 2 / (1 + sin(π/n)) ≈ 1.7-1.9
+    float omega = (settings.pressure_solver == GasSimulationSettings::PressureSolverMode::SOR) 
+                  ? settings.sor_omega : 1.0f;
     
-    // Red-Black Gauss-Seidel for thread-safe parallel convergence
+    // Red-Black Gauss-Seidel / SOR for thread-safe parallel convergence
     for (int iter = 0; iter < settings.pressure_iterations; ++iter) {
         // Red cells update
         #pragma omp parallel for collapse(2)
@@ -750,7 +1052,6 @@ void GasSimulator::solvePressure() {
                 for (int i = 0; i < grid.nx; ++i) {
                     if ((i + j + k) % 2 == 0) {
                         // OPEN BOUNDARY CONDITION: Surroundings outside return 0 pressure
-                        // This allows fluid to flow out of the domain (outflow).
                         float p_sum = (i + 1 < grid.nx ? grid.pressureAt(i + 1, j, k) : 0.0f) +
                                       (i - 1 >= 0 ? grid.pressureAt(i - 1, j, k) : 0.0f) +
                                       (j + 1 < grid.ny ? grid.pressureAt(i, j + 1, k) : 0.0f) +
@@ -759,7 +1060,11 @@ void GasSimulator::solvePressure() {
                                       (k - 1 >= 0 ? grid.pressureAt(i, j, k - 1) : 0.0f);
                         
                         float div = grid.divergence[grid.cellIndex(i, j, k)];
-                        grid.pressure[grid.cellIndex(i, j, k)] = (p_sum - div * h2) / 6.0f;
+                        float p_new = (p_sum - div * h2) / 6.0f;
+                        
+                        // SOR: blend old and new values
+                        float p_old = grid.pressure[grid.cellIndex(i, j, k)];
+                        grid.pressure[grid.cellIndex(i, j, k)] = p_old + omega * (p_new - p_old);
                     }
                 }
             }
@@ -771,7 +1076,6 @@ void GasSimulator::solvePressure() {
             for (int j = 0; j < grid.ny; ++j) {
                 for (int i = 0; i < grid.nx; ++i) {
                     if ((i + j + k) % 2 == 1) {
-                         // OPEN BOUNDARY CONDITION: Surroundings outside return 0 pressure
                         float p_sum = (i + 1 < grid.nx ? grid.pressureAt(i + 1, j, k) : 0.0f) +
                                       (i - 1 >= 0 ? grid.pressureAt(i - 1, j, k) : 0.0f) +
                                       (j + 1 < grid.ny ? grid.pressureAt(i, j + 1, k) : 0.0f) +
@@ -780,7 +1084,11 @@ void GasSimulator::solvePressure() {
                                       (k - 1 >= 0 ? grid.pressureAt(i, j, k - 1) : 0.0f);
                         
                         float div = grid.divergence[grid.cellIndex(i, j, k)];
-                        grid.pressure[grid.cellIndex(i, j, k)] = (p_sum - div * h2) / 6.0f;
+                        float p_new = (p_sum - div * h2) / 6.0f;
+                        
+                        // SOR: blend old and new values
+                        float p_old = grid.pressure[grid.cellIndex(i, j, k)];
+                        grid.pressure[grid.cellIndex(i, j, k)] = p_old + omega * (p_new - p_old);
                     }
                 }
             }
@@ -839,38 +1147,29 @@ void GasSimulator::applyDissipation(float dt) {
     float vel_factor = std::pow(settings.velocity_dissipation, dt);
     float fuel_factor = std::pow(settings.fuel_dissipation, dt); 
     
-    #pragma omp parallel
-    {
-        #pragma omp for
-        for (int i = 0; i < (int)grid.density.size(); ++i) {
-            grid.density[i] *= density_factor;
-            if (grid.density[i] < 0.001f) grid.density[i] = 0.0f;
-        }
-        
-        #pragma omp for
-        for (int i = 0; i < (int)grid.temperature.size(); ++i) {
-            grid.temperature[i] = settings.ambient_temperature + (grid.temperature[i] - settings.ambient_temperature) * temp_factor;
-        }
-        
-        #pragma omp for
-        for (int i = 0; i < (int)grid.fuel.size(); ++i) {
-            grid.fuel[i] *= fuel_factor;
-            if (grid.fuel[i] < 0.001f) grid.fuel[i] = 0.0f;
-        }
-
-        #pragma omp for
-        for (int i = 0; i < (int)grid.interaction.size(); ++i) {
-            grid.interaction[i] *= 0.5f;
-            if (grid.interaction[i] < 0.001f) grid.interaction[i] = 0.0f;
-        }
-        
-        #pragma omp for
-        for (int i = 0; i < (int)grid.vel_x.size(); ++i) grid.vel_x[i] *= vel_factor;
-        #pragma omp for
-        for (int i = 0; i < (int)grid.vel_y.size(); ++i) grid.vel_y[i] *= vel_factor;
-        #pragma omp for
-        for (int i = 0; i < (int)grid.vel_z.size(); ++i) grid.vel_z[i] *= vel_factor;
+    // NOTE: OpenMP removed due to deadlock issues on Windows after resolution change
+    for (int i = 0; i < (int)grid.density.size(); ++i) {
+        grid.density[i] *= density_factor;
+        if (grid.density[i] < 0.001f) grid.density[i] = 0.0f;
     }
+    
+    for (int i = 0; i < (int)grid.temperature.size(); ++i) {
+        grid.temperature[i] = settings.ambient_temperature + (grid.temperature[i] - settings.ambient_temperature) * temp_factor;
+    }
+    
+    for (int i = 0; i < (int)grid.fuel.size(); ++i) {
+        grid.fuel[i] *= fuel_factor;
+        if (grid.fuel[i] < 0.001f) grid.fuel[i] = 0.0f;
+    }
+
+    for (int i = 0; i < (int)grid.interaction.size(); ++i) {
+        grid.interaction[i] *= 0.5f;
+        if (grid.interaction[i] < 0.001f) grid.interaction[i] = 0.0f;
+    }
+    
+    for (int i = 0; i < (int)grid.vel_x.size(); ++i) grid.vel_x[i] *= vel_factor;
+    for (int i = 0; i < (int)grid.vel_y.size(); ++i) grid.vel_y[i] *= vel_factor;
+    for (int i = 0; i < (int)grid.vel_z.size(); ++i) grid.vel_z[i] *= vel_factor;
 }
 
 void GasSimulator::processCombustion(float dt) {
@@ -880,10 +1179,18 @@ void GasSimulator::processCombustion(float dt) {
         return;
     }
 
+    const float max_temp = settings.max_temperature;
+    const float max_dens = settings.max_density;
+    
     long long cell_count = (long long)grid.getCellCount(); 
     
     #pragma omp parallel for
     for (long long i = 0; i < cell_count; ++i) {
+        // Defensive check: reset NaNs if any
+        if (!std::isfinite(grid.fuel[i])) grid.fuel[i] = 0.0f;
+        if (!std::isfinite(grid.temperature[i])) grid.temperature[i] = settings.ambient_temperature;
+        if (!std::isfinite(grid.density[i])) grid.density[i] = 0.0f;
+
         float f = grid.fuel[i];
         float t = grid.temperature[i];
         
@@ -892,24 +1199,40 @@ void GasSimulator::processCombustion(float dt) {
         
         if (f > 0.001f && t > settings.ignition_temperature) {
             // Yanma gerçekleşir!
-            float burned = f * settings.burn_rate * dt;
+            float den = grid.density[i];
+            float density_throttle = std::max(0.05f, 1.0f - (den / max_dens));
+            
+            float burned = f * settings.burn_rate * dt * density_throttle;
             if (burned > f) burned = f;
             
-            // Yakıtı tüket
+            // Soft throttle: strongly reduce burn rate as temperature approaches max
+            float range = max_temp - settings.ignition_temperature;
+            float temp_factor = (max_temp - t) / (range > 0 ? range : 1.0f);
+            float temp_headroom = std::max(0.0f, std::min(1.0f, temp_factor));
+            burned *= temp_headroom; 
+            
+            if (burned < 0.00001f) continue; 
+            
             grid.fuel[i] -= burned;
             
-            // Isı yay
-            grid.temperature[i] += burned * settings.heat_release;
+            float heat_to_add = burned * settings.heat_release;
+            float new_temp = t + heat_to_add;
+            float soft_start = max_temp * 0.90f;
             
-            // Duman üret
-            grid.density[i] += burned * settings.smoke_generation;
+            if (new_temp > soft_start) {
+                float excess = new_temp - soft_start;
+                float scale = max_temp - soft_start;
+                new_temp = soft_start + scale * (1.0f - std::exp(-excess / scale));
+            }
+            grid.temperature[i] = std::min(new_temp, max_temp);
+            grid.density[i] = std::min(den + burned * settings.smoke_generation, max_dens);
             
-            // Görsel alev yoğunluğu
             grid.interaction[i] = burned / dt;
             
-            // Genişleme (patlama etkisi benzeri)
+            // Genişleme (patlama etkisi): Pressure solver patlamasın diye limitle
             if (settings.expansion_strength > 0) {
-                grid.pressure[i] += burned * settings.expansion_strength;
+                float expansion_val = burned * settings.expansion_strength * density_throttle * temp_headroom;
+                grid.pressure[i] += std::min(expansion_val, 100.0f); 
             }
         }
     }
@@ -932,52 +1255,165 @@ void GasSimulator::enforceBoundaries() {
 
 void GasSimulator::applyPreset(const std::string& name) {
     if (name == "Fire") {
-        settings.density_dissipation = 0.98f;
-        settings.temperature_dissipation = 0.95f;
-        settings.fuel_dissipation = 0.99f;
-        settings.buoyancy_density = -0.1f;
-        settings.buoyancy_temperature = 0.8f;
-        settings.vorticity_strength = 0.4f;
-        settings.burn_rate = 1.2f;
-        settings.heat_release = 250.0f;
-        settings.smoke_generation = 0.3f;
-        settings.ignition_temperature = 350.0f;
+        // ═══════════════════════════════════════════════════════════════════
+        // FIRE PRESET - Houdini/EmberGen style realistic fire
+        // Key: Strong buoyancy, fast fuel burn, moderate vorticity
+        // ═══════════════════════════════════════════════════════════════════
+        settings.time_scale = 1.0f;               // Normal speed
+        settings.substeps = 2;                    // More substeps for stability
         
-        if (!emitters.empty()) {
-            emitters[0].fuel_rate = 50.0f;
-            emitters[0].density_rate = 2.0f;
-            emitters[0].temperature = 800.0f;
+        // Dissipation - keep values high (close to 1.0) for persistence
+        settings.density_dissipation = 0.995f;    // Smoke persists well
+        settings.temperature_dissipation = 0.95f; // Heat cools faster to prevent runaway
+        settings.velocity_dissipation = 0.98f;    // Velocity persists
+        settings.fuel_dissipation = 0.92f;        // Fuel burns away faster
+        
+        // Buoyancy - STRONG upward force
+        settings.buoyancy_density = -0.3f;        // Slight downward from density
+        settings.buoyancy_temperature = 5.0f;     // Strong upward force from heat (was 8, too explosive)
+        settings.ambient_temperature = 293.0f;    // Room temp (20°C)
+        
+        // Turbulence & Detail
+        settings.vorticity_strength = 0.8f;       // Good flame detail
+        settings.turbulence_strength = 0.3f;      // Add noise for flicker
+        settings.turbulence_scale = 2.0f;
+        
+        // Combustion
+        settings.ignition_temperature = 350.0f;   // Lower ignition for easy start
+        settings.burn_rate = 2.0f;                // Moderate combustion (was 3)
+        settings.heat_release = 100.0f;            // Increased for warmer fire
+        settings.expansion_strength = 3.0f;       // Fire expands outward
+        settings.smoke_generation = 0.8f;         // Moderate smoke from fire
+        settings.soot_generation = 0.1f;
+        
+        // Solver
+        settings.pressure_solver = GasSimulationSettings::PressureSolverMode::SOR;
+        settings.advection_mode = GasSimulationSettings::AdvectionMode::MacCormack;
+        settings.adaptive_timestep = true;
+        settings.cfl_number = 0.5f;
+        
+        // Emitter - continuous flame source
+        if (emitters.empty()) {
+            // Create default emitter at grid center-bottom
+            Emitter e;
+            e.name = "Fire Emitter";
+            e.shape = EmitterShape::Sphere;
+            e.position = grid.origin + Vec3(grid.nx * grid.voxel_size * 0.5f, 
+                                            grid.voxel_size * 2.0f,
+                                            grid.nz * grid.voxel_size * 0.5f);
+            e.radius = grid.voxel_size * 3.0f;
+            emitters.push_back(e);
         }
+        // Configure first emitter for fire (balanced values)
+        emitters[0].fuel_rate = 30.0f;        
+        emitters[0].density_rate = 3.0f;      
+        emitters[0].temperature = 800.0f;     // Increased emitter temp
+        emitters[0].velocity = Vec3(0, 3, 0); // Upward initial velocity (was 4)
+        emitters[0].enabled = true;
     }
     else if (name == "Smoke") {
-        settings.density_dissipation = 0.995f;
-        settings.temperature_dissipation = 0.99f;
-        settings.burn_rate = 0.0f; // No fire
-        settings.buoyancy_density = -0.5f;
-        settings.buoyancy_temperature = 0.2f;
+        // ═══════════════════════════════════════════════════════════════════
+        // SMOKE PRESET - Dense, slow-rising smoke plume
+        // Key: Moderate buoyancy, no combustion, slow dissipation
+        // ═══════════════════════════════════════════════════════════════════
+        settings.time_scale = 1.0f;
+        settings.substeps = 1;
         
-        if (!emitters.empty()) {
-            emitters[0].fuel_rate = 0.0f;
-            emitters[0].density_rate = 20.0f;
-            emitters[0].temperature = 350.0f;
+        // Dissipation - smoke lingers (values close to 1.0)
+        settings.density_dissipation = 0.995f;    // Smoke stays much longer
+        settings.temperature_dissipation = 0.98f; // Temperature persists for buoyancy
+        settings.velocity_dissipation = 0.98f;    // Velocity persists
+        settings.fuel_dissipation = 0.99f;
+        
+        // Buoyancy - warm smoke rises
+        settings.buoyancy_density = -0.3f;        // Slight downward from mass
+        settings.buoyancy_temperature = 6.0f;     // Strong thermal lift!
+        settings.ambient_temperature = 293.0f;
+        
+        // Turbulence - subtle detail
+        settings.vorticity_strength = 0.6f;       // Some swirls
+        settings.turbulence_strength = 0.15f;     // Minimal noise
+        settings.turbulence_scale = 1.5f;
+        
+        // No combustion
+        settings.burn_rate = 0.0f;
+        settings.heat_release = 0.0f;
+        settings.expansion_strength = 0.0f;
+        settings.smoke_generation = 0.0f;
+        
+        // Solver
+        settings.pressure_solver = GasSimulationSettings::PressureSolverMode::SOR;
+        settings.advection_mode = GasSimulationSettings::AdvectionMode::MacCormack;
+        settings.adaptive_timestep = true;
+        
+        // Emitter - continuous smoke source
+        if (emitters.empty()) {
+            Emitter e;
+            e.name = "Smoke Emitter";
+            e.shape = EmitterShape::Sphere;
+            e.position = grid.origin + Vec3(grid.nx * grid.voxel_size * 0.5f, 
+                                            grid.voxel_size * 2.0f,
+                                            grid.nz * grid.voxel_size * 0.5f);
+            e.radius = grid.voxel_size * 4.0f;
+            emitters.push_back(e);
         }
+        emitters[0].fuel_rate = 0.0f;         // No fuel
+        emitters[0].density_rate = 40.0f;     // Heavy smoke injection
+        emitters[0].temperature = 400.0f;     // Warm smoke
+        emitters[0].velocity = Vec3(0, 2, 0); // Gentle upward push
+        emitters[0].enabled = true;
     }
     else if (name == "Explosion") {
-        settings.density_dissipation = 0.94f;     // Smoke fades slightly faster
-        settings.temperature_dissipation = 0.85f; // Fire cooling
-        settings.burn_rate = 8.0f;                // Extremely fast combustion
-        settings.heat_release = 2500.0f;          // Massive heat release
-        settings.expansion_strength = 60.0f;     // Strong outward blast
-        settings.smoke_generation = 1.5f;
-        settings.vorticity_strength = 2.5f;      // Much more detail/swirls
+        // ═══════════════════════════════════════════════════════════════════
+        // EXPLOSION PRESET - Initial burst with shockwave
+        // Key: Massive initial energy, fast expansion, high vorticity
+        // ═══════════════════════════════════════════════════════════════════
+        settings.time_scale = 0.8f;               // Slightly slow-mo for drama
+        settings.substeps = 3;                    // High substeps for stability
+        
+        // Dissipation
+        settings.density_dissipation = 0.94f;     // Smoke fades over time
+        settings.temperature_dissipation = 0.80f; // Fire cools quickly
+        settings.velocity_dissipation = 0.88f;    // Blast wave dies down
+        settings.fuel_dissipation = 0.75f;        // Fuel consumed rapidly
+        
+        // Buoyancy - initial outward, then thermal rise
+        settings.buoyancy_density = -0.3f;
+        settings.buoyancy_temperature = 4.0f;     // Strong thermal lift
+        settings.ambient_temperature = 293.0f;
+        
+        // Turbulence - chaotic
+        settings.vorticity_strength = 3.0f;       // Very turbulent
+        settings.turbulence_strength = 0.8f;      // High noise
+        settings.turbulence_scale = 3.0f;
+        
+        // Combustion - intense but controlled
+        settings.ignition_temperature = 300.0f;
+        settings.burn_rate = 8.0f;                
+        settings.heat_release = 200.0f;           // High heat for explosion
+        settings.expansion_strength = 50.0f;      
+        settings.smoke_generation = 2.0f;         // Lots of smoke
+        settings.soot_generation = 0.5f;
+        
+        // Stability limits for explosion - allow more headroom
+        settings.max_temperature = 6000.0f;       // Full range for explosion
+        settings.max_velocity = 400.0f;
+        settings.max_density = 50.0f;
+        
+        // Solver
+        settings.pressure_solver = GasSimulationSettings::PressureSolverMode::SOR;
+        settings.advection_mode = GasSimulationSettings::AdvectionMode::MacCormack; // High detail
+        settings.adaptive_timestep = true;
+        settings.cfl_number = 0.4f;               // More conservative for stability
         
         // Clear grid and set initial 'fireball'
         grid.clear();
+        std::fill(grid.temperature.begin(), grid.temperature.end(), settings.ambient_temperature);
         
         int cx = settings.resolution_x / 2;
-        int cy = settings.resolution_y / 4; // Start near bottom
+        int cy = settings.resolution_y / 4;       // Start near bottom
         int cz = settings.resolution_z / 2;
-        int radius = std::max(2, settings.resolution_x / 16);
+        int radius = std::max(4, settings.resolution_x / 8);  // Bigger initial blast
         
         for (int k = -radius; k <= radius; ++k) {
             for (int j = -radius; j <= radius; ++j) {
@@ -988,9 +1424,21 @@ void GasSimulator::applyPreset(const std::string& name) {
                         if (dist <= radius) {
                             size_t idx = grid.cellIndex(x, y, z);
                             float factor = 1.0f - (dist / (float)radius);
-                            grid.fuel[idx] = 100.0f * factor;
-                            grid.temperature[idx] = 3000.0f * factor;
-                            grid.density[idx] = 10.0f * factor;
+                            factor = factor * factor;  // Quadratic falloff for sharper core
+                            
+                            grid.fuel[idx] = 150.0f * factor;
+                            grid.temperature[idx] = settings.ambient_temperature + 4000.0f * factor;
+                            grid.density[idx] = 15.0f * factor;
+                            
+                            // Initial outward velocity (explosion wave)
+                            float vx = (float)i / (radius + 0.01f) * 20.0f * factor;
+                            float vy = (float)j / (radius + 0.01f) * 20.0f * factor + 10.0f * factor;
+                            float vz = (float)k / (radius + 0.01f) * 20.0f * factor;
+                            
+                            // Set velocities (approximate - staggered grid)
+                            if (x < grid.nx) grid.vel_x[grid.velXIndex(x, y, z)] += vx;
+                            if (y < grid.ny) grid.vel_y[grid.velYIndex(x, y, z)] += vy;
+                            if (z < grid.nz) grid.vel_z[grid.velZIndex(x, y, z)] += vz;
                         }
                     }
                 }
@@ -1009,6 +1457,14 @@ float GasSimulator::sampleDensity(const Vec3& world_pos) const {
 
 float GasSimulator::sampleTemperature(const Vec3& world_pos) const {
     return grid.sampleTemperature(world_pos);
+}
+
+float GasSimulator::sampleFlameIntensity(const Vec3& world_pos) const {
+    return grid.sampleInteraction(world_pos);
+}
+
+float GasSimulator::sampleFuel(const Vec3& world_pos) const {
+    return grid.sampleFuel(world_pos);
 }
 
 Vec3 GasSimulator::sampleVelocity(const Vec3& world_pos) const {
@@ -1079,7 +1535,7 @@ bool GasSimulator::exportToVDB(const std::string& filepath) const {
         }
     }
     
-    // Create temperature grid
+    // Create temperature grid (store as delta above ambient for better range)
     openvdb::FloatGrid::Ptr temp_grid = openvdb::FloatGrid::create();
     temp_grid->setName("temperature");
     openvdb::FloatGrid::Accessor temp_accessor = temp_grid->getAccessor();
@@ -1088,8 +1544,42 @@ bool GasSimulator::exportToVDB(const std::string& filepath) const {
         for (int j = 0; j < grid.ny; ++j) {
             for (int i = 0; i < grid.nx; ++i) {
                 float t = grid.temperature[grid.cellIndex(i, j, k)];
-                if (t > settings.ambient_temperature + 0.1f) {
+                // Write absolute temperature (Kelvin). 
+                // Industry standard VDBs use Kelvin for blackbody temperature.
+                if (t > 0.001f) {
                     temp_accessor.setValue(openvdb::Coord(i, j, k), t);
+                }
+            }
+        }
+    }
+    
+    // Create fuel grid
+    openvdb::FloatGrid::Ptr fuel_grid = openvdb::FloatGrid::create();
+    fuel_grid->setName("fuel");
+    openvdb::FloatGrid::Accessor fuel_accessor = fuel_grid->getAccessor();
+    
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                float f = grid.fuel[grid.cellIndex(i, j, k)];
+                if (f > 0.001f) {
+                    fuel_accessor.setValue(openvdb::Coord(i, j, k), f);
+                }
+            }
+        }
+    }
+    
+    // Create flame/interaction grid (fire intensity)
+    openvdb::FloatGrid::Ptr flame_grid = openvdb::FloatGrid::create();
+    flame_grid->setName("flame");
+    openvdb::FloatGrid::Accessor flame_accessor = flame_grid->getAccessor();
+    
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                float f = grid.interaction[grid.cellIndex(i, j, k)];
+                if (f > 0.001f) {
+                    flame_accessor.setValue(openvdb::Coord(i, j, k), f);
                 }
             }
         }
@@ -1102,11 +1592,15 @@ bool GasSimulator::exportToVDB(const std::string& filepath) const {
     
     density_grid->setTransform(vdb_transform);
     temp_grid->setTransform(vdb_transform);
+    fuel_grid->setTransform(vdb_transform);
+    flame_grid->setTransform(vdb_transform);
     
     // Write file
     openvdb::GridPtrVec grids;
     grids.push_back(density_grid);
     grids.push_back(temp_grid);
+    grids.push_back(fuel_grid);
+    grids.push_back(flame_grid);
     
     try {
         openvdb::io::File file(filepath);
@@ -1216,7 +1710,18 @@ bool GasSimulator::exportSequenceToVDB(const std::string& directory,
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void GasSimulator::initCUDA() {
-    if (cuda_initialized) freeCUDA();
+    SCENE_LOG_INFO("[GasSimulator::initCUDA] START - Resolution: " +
+        std::to_string(settings.resolution_x) + "x" +
+        std::to_string(settings.resolution_y) + "x" +
+        std::to_string(settings.resolution_z));
+
+    // Clear any previous sticky CUDA errors before allocation
+    cudaGetLastError();
+
+    if (cuda_initialized) {
+        SCENE_LOG_INFO("[GasSimulator::initCUDA] Freeing old CUDA resources first...");
+        freeCUDA();
+    }
 
     FluidSim::cuda_init_simulation(
         settings.resolution_x, settings.resolution_y, settings.resolution_z,
@@ -1225,16 +1730,55 @@ void GasSimulator::initCUDA() {
         (float**)&d_pressure, (float**)&d_divergence,
         (float**)&d_vort_x, (float**)&d_vort_y, (float**)&d_vort_z
     );
-    
+
+    // Allocate temporary buffers for advection
+    size_t sz = (size_t)settings.resolution_x * settings.resolution_y * settings.resolution_z * sizeof(float);
+    cudaMalloc(&d_tmp1, sz);
+    cudaMalloc(&d_tmp2, sz);
+    cudaMalloc(&d_tmp3, sz);
+
+    cudaError_t allocErr = cudaGetLastError();
+    if (allocErr != cudaSuccess) {
+        SCENE_LOG_ERROR("[GasSimulator::initCUDA] CUDA allocation error: " + std::string(cudaGetErrorString(allocErr)));
+        // Don't return - continue and mark as initialized, the buffers may still be valid
+    }
+
     // Initial upload of CPU state
     uploadToGPU();
-    
+
+    // Initialize FFT solver if pressure solver mode is FFT
+    if (settings.pressure_solver == GasSimulationSettings::PressureSolverMode::FFT) {
+        initFFTSolver();
+    }
+
     cuda_initialized = true;
     gpu_data_valid = true;
-}
 
+    SCENE_LOG_INFO("[GasSimulator::initCUDA] COMPLETE - Buffer size: " + std::to_string(sz) + " bytes");
+}
 void GasSimulator::freeCUDA() {
     if (!cuda_initialized) return;
+    
+    SCENE_LOG_INFO("[GasSimulator::freeCUDA] START - Syncing device before free...");
+    
+    // Clear sticky errors before sync
+    cudaGetLastError();
+    
+    // Check if CUDA is available before sync
+    int device_count = 0;
+    cudaError_t err = cudaGetDeviceCount(&device_count);
+    if (err == cudaSuccess && device_count > 0) {
+        // Wait for all async operations to complete before freeing
+        err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("[GasSimulator::freeCUDA] cudaDeviceSynchronize failed: " + 
+                            std::string(cudaGetErrorString(err)));
+        }
+        // Clear any errors from sync (may happen if previous operations failed)
+        cudaGetLastError();
+    } else {
+        SCENE_LOG_WARN("[GasSimulator::freeCUDA] CUDA not available, skipping sync");
+    }
     
     FluidSim::cuda_free_simulation(
         (float*)d_density, (float*)d_temperature, (float*)d_fuel,
@@ -1242,18 +1786,88 @@ void GasSimulator::freeCUDA() {
         (float*)d_pressure, (float*)d_divergence,
         (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z
     );
+
+    if (d_tmp1) cudaFree(d_tmp1);
+    if (d_tmp2) cudaFree(d_tmp2);
+    if (d_tmp3) cudaFree(d_tmp3);
+    
+    // Free force field GPU buffer
+    freeGPUForceFields();
+    
+    // Free advanced emitters
+    freeGPUAdvancedEmitters();
+    
+    // Cleanup FFT solver
+    cleanupFFTSolver();
     
     d_density = d_temperature = d_fuel = nullptr;
     d_vel_x = d_vel_y = d_vel_z = nullptr;
     d_pressure = d_divergence = nullptr;
     d_vort_x = d_vort_y = d_vort_z = nullptr;
+    d_tmp1 = d_tmp2 = d_tmp3 = nullptr;
     
     cuda_initialized = false;
     gpu_data_valid = false;
+    
+    SCENE_LOG_INFO("[GasSimulator::freeCUDA] COMPLETE");
+}
+
+void GasSimulator::clearGPU() {
+    if (!cuda_initialized) return;
+    
+    // CRITICAL: Use grid dimensions (actual buffer size), not settings
+    size_t sz = (size_t)grid.nx * grid.ny * grid.nz * sizeof(float);
+    
+    // Clear all GPU buffers to zero
+    cudaMemset(d_density, 0, sz);
+    cudaMemset(d_fuel, 0, sz);
+    cudaMemset(d_vel_x, 0, sz);
+    cudaMemset(d_vel_y, 0, sz);
+    cudaMemset(d_vel_z, 0, sz);
+    cudaMemset(d_pressure, 0, sz);
+    cudaMemset(d_divergence, 0, sz);
+    cudaMemset(d_vort_x, 0, sz);
+    cudaMemset(d_vort_y, 0, sz);
+    cudaMemset(d_vort_z, 0, sz);
+    
+    // Set temperature to ambient
+    std::vector<float> ambient_temp_data((size_t)grid.nx * grid.ny * grid.nz, settings.ambient_temperature);
+    cudaMemcpy(d_temperature, ambient_temp_data.data(), sz, cudaMemcpyHostToDevice);
+    
+    gpu_data_valid = true;
 }
 
 void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
-    if (!cuda_initialized) return;
+    if (!cuda_initialized) {
+        SCENE_LOG_WARN("[GasSimulator::stepCUDA] Called but cuda_initialized=false!");
+        return;
+    }
+    
+    // SAFETY CHECK: Resolution mismatch should be handled in step(), but double-check here
+    // This is a fallback safety check in case auto-reinit in step() fails
+    if (settings.resolution_x != grid.nx || 
+        settings.resolution_y != grid.ny || 
+        settings.resolution_z != grid.nz) {
+        SCENE_LOG_ERROR("[GasSimulator::stepCUDA] Resolution mismatch still present after step()! " 
+                        "Settings: " + std::to_string(settings.resolution_x) + "x" + 
+                        std::to_string(settings.resolution_y) + "x" + 
+                        std::to_string(settings.resolution_z) + 
+                        ", Grid: " + std::to_string(grid.nx) + "x" + 
+                        std::to_string(grid.ny) + "x" + std::to_string(grid.nz) +
+                        ". This should not happen - check step() auto-reinit logic!");
+        return; // Do NOT run kernels with wrong resolution!
+    }
+    
+    // Validate pointers before use
+    if (!d_density || !d_temperature || !d_fuel || !d_vel_x || !d_vel_y || !d_vel_z ||
+        !d_pressure || !d_divergence || !d_tmp1 || !d_tmp2 || !d_tmp3) {
+        SCENE_LOG_ERROR("[GasSimulator::stepCUDA] NULL pointer detected! Aborting step.");
+        return;
+    }
+
+    // NOTE: Removed pre-step cudaDeviceSynchronize - was causing UI freezes
+    // Errors will be caught by individual kernel launches or at end of step
+    cudaGetLastError(); // Just clear sticky error without sync
 
     float substep_dt = dt / settings.substeps;
     float inv_voxel_size = 1.0f / (settings.voxel_size > 0.0001f ? settings.voxel_size : 0.1f);
@@ -1264,11 +1878,12 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
              if (!emitter.enabled) continue;
              
              // Convert World Position -> Grid Index Space
-             // Assumes grid.origin is (0,0,0) relative to the domain transform if handled externally,
-             // or if we handle world space here. 
-             // GasSimulator usually treats 'grid_offset' as origin.
-             Vec3 pos_idx = (emitter.position - settings.grid_offset) * inv_voxel_size;
-             Vec3 vel_idx = emitter.velocity * inv_voxel_size;
+             // IMPORTANT: Position must be relative to grid origin
+             Vec3 pos_idx = (emitter.position - grid.origin) * inv_voxel_size;
+             
+             // Convert velocity from world space (m/s) to grid space (cells/s)
+             // This is CRITICAL for advection to work correctly!
+             Vec3 vel_grid = emitter.velocity * inv_voxel_size;
              
              // Size in voxels
              float radius_idx = emitter.radius * inv_voxel_size;
@@ -1276,8 +1891,9 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
              
              float sx = (emitter.shape == EmitterShape::Sphere) ? radius_idx : size_idx.x;
              
+             // CRITICAL: Use grid dimensions (actual buffer size), not settings
              FluidSim::cuda_apply_emitter(
-                settings.resolution_x, settings.resolution_y, settings.resolution_z,
+                grid.nx, grid.ny, grid.nz,
                 substep_dt,
                 (float*)d_density, (float*)d_temperature, (float*)d_fuel,
                 (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
@@ -1285,33 +1901,121 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
                 pos_idx.x, pos_idx.y, pos_idx.z,
                 sx, size_idx.y, size_idx.z,
                 emitter.density_rate, emitter.temperature, emitter.fuel_rate,
-                vel_idx.x, vel_idx.y, vel_idx.z
+                vel_grid.x, vel_grid.y, vel_grid.z
              );
         }
         
-        // 2. Step Simulation
-        // Wind conversion
-        Vec3 wind_idx = settings.wind * inv_voxel_size;
+        // 2. Apply External Force Fields (GPU)
+        if (external_force_field_manager && external_force_field_manager->getActiveCount() > 0) {
+            uploadForceFieldsToGPU();
+            
+            if (d_force_fields && gpu_force_field_count > 0) {
+                // Convert world_matrix to column-major float array
+                float world_mat[16];
+                for (int c = 0; c < 4; ++c) {
+                    for (int r = 0; r < 4; ++r) {
+                        world_mat[c * 4 + r] = world_matrix.m[r][c];
+                    }
+                }
+                
+                // NOTE: Force field returns force in m/s², but GPU velocity is in grid units.
+                // We need to scale the force by inv_voxel_size to convert to grid units.
+                // This is done inside the kernel by passing inv_voxel_size as a parameter.
+                // For now, we apply a larger dt to compensate (hacky but works)
+                // TODO: Pass inv_voxel_size to kernel and scale force properly
+                
+                FluidSim::cuda_apply_force_fields(
+                    grid.nx, grid.ny, grid.nz, substep_dt * inv_voxel_size,  // Scale dt to convert force to grid units
+                    (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
+                    world_mat,
+                    (FluidSim::GPUForceField*)d_force_fields,
+                    gpu_force_field_count,
+                    accumulated_time
+                );
+            }
+        }
         
-        FluidSim::cuda_step_simulation(
-             settings.resolution_x, settings.resolution_y, settings.resolution_z,
-             substep_dt,
-             (float*)d_density, (float*)d_temperature, (float*)d_fuel,
-             (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
-             (float*)d_pressure, (float*)d_divergence,
-             (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z,
-             
-             settings.vorticity_strength,
-             settings.buoyancy_density, settings.buoyancy_temperature,
-             settings.ambient_temperature,
-             settings.density_dissipation, settings.velocity_dissipation,
-             settings.temperature_dissipation, settings.fuel_dissipation,
-             settings.ignition_temperature, settings.burn_rate, settings.heat_release,
-             settings.smoke_generation, settings.expansion_strength,
-             settings.pressure_iterations,
-             wind_idx.x, wind_idx.y, wind_idx.z
+        // 3. Step Simulation using new unified params API
+        // Build GPUSimulationParams from settings
+        FluidSim::GPUSimulationParams params = {};
+        
+        // Grid
+        params.nx = grid.nx;
+        params.ny = grid.ny;
+        params.nz = grid.nz;
+        params.voxel_size = settings.voxel_size;
+        params.inv_voxel_size = inv_voxel_size;
+        
+        // Timestep
+        params.dt = substep_dt;
+        params.time = accumulated_time;
+        
+        // Advection
+        params.advection_mode = static_cast<int>(settings.advection_mode);
+        
+        // Forces (convert to grid units)
+        params.buoyancy_density = settings.buoyancy_density * inv_voxel_size;
+        params.buoyancy_temperature = settings.buoyancy_temperature * inv_voxel_size;
+        params.ambient_temperature = settings.ambient_temperature;
+        
+        // Gravity (convert to grid units) - now actually used!
+        Vec3 gravity_grid = settings.gravity * inv_voxel_size;
+        params.gravity_x = gravity_grid.x;
+        params.gravity_y = gravity_grid.y;
+        params.gravity_z = gravity_grid.z;
+        
+        // Wind (convert to grid units)
+        Vec3 wind_grid = settings.wind * inv_voxel_size;
+        params.wind_x = wind_grid.x;
+        params.wind_y = wind_grid.y;
+        params.wind_z = wind_grid.z;
+        
+        // Dissipation (pre-compute pow for GPU)
+        params.density_dissipation = std::pow(settings.density_dissipation, substep_dt);
+        params.velocity_dissipation = std::pow(settings.velocity_dissipation, substep_dt);
+        params.temperature_dissipation = std::pow(settings.temperature_dissipation, substep_dt);
+        params.fuel_dissipation = std::pow(settings.fuel_dissipation, substep_dt);
+        
+        // Combustion
+        params.ignition_temperature = settings.ignition_temperature;
+        params.burn_rate = settings.burn_rate;
+        params.heat_release = settings.heat_release;
+        params.smoke_generation = settings.smoke_generation;
+        params.expansion_strength = settings.expansion_strength;
+        
+        // Vorticity & Turbulence
+        params.vorticity_strength = settings.vorticity_strength;
+        params.turbulence_strength = settings.turbulence_strength;
+        params.turbulence_scale = settings.turbulence_scale;
+        params.turbulence_octaves = settings.turbulence_octaves;
+        params.turbulence_lacunarity = settings.turbulence_lacunarity;
+        params.turbulence_persistence = settings.turbulence_persistence;
+        
+        // Pressure Solver
+        params.pressure_iterations = settings.pressure_iterations;
+        params.pressure_solver_mode = static_cast<int>(settings.pressure_solver);
+        params.sor_omega = settings.sor_omega;
+        // Stability limits (now from UI!)
+        params.max_velocity = settings.max_velocity;      
+        params.max_temperature = settings.max_temperature;  
+        params.max_density = settings.max_density;               
+        // Sparse (future)
+        params.sparse_mode = settings.sparse_mode ? 1 : 0;
+        params.sparse_threshold = settings.sparse_threshold;
+        
+        // Call new unified simulation step
+        FluidSim::cuda_step_simulation_v2(
+            params,
+            (float*)d_density, (float*)d_temperature, (float*)d_fuel,
+            (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
+            (float*)d_pressure, (float*)d_divergence,
+            (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z,
+            (float*)d_tmp1, (float*)d_tmp2, (float*)d_tmp3
         );
     }
+    
+    // NOTE: Removed post-step cudaDeviceSynchronize - was causing UI freezes
+    // CUDA kernels run asynchronously, errors will be caught on next operation that requires sync
     
     // Mark valid so next upload won't be redundant (though step updates it anyway)
     gpu_data_valid = true;
@@ -1320,8 +2024,9 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
 void GasSimulator::uploadToGPU() {
     if (!cuda_initialized) return;
     
+    // CRITICAL: Use grid dimensions (actual allocated size), not settings (user requested)
     FluidSim::cuda_upload_data(
-        settings.resolution_x, settings.resolution_y, settings.resolution_z,
+        grid.nx, grid.ny, grid.nz,
         grid.density.data(), grid.temperature.data(), grid.fuel.data(),
         grid.vel_x.data(), grid.vel_y.data(), grid.vel_z.data(),
         (float*)d_density, (float*)d_temperature, (float*)d_fuel,
@@ -1334,8 +2039,9 @@ void GasSimulator::uploadToGPU() {
 void GasSimulator::downloadFromGPU() {
     if (!cuda_initialized) return;
     
+    // CRITICAL: Use grid dimensions (actual allocated size), not settings (user requested)
     FluidSim::cuda_download_data(
-        settings.resolution_x, settings.resolution_y, settings.resolution_z,
+        grid.nx, grid.ny, grid.nz,
         (float*)d_density, (float*)d_temperature, (float*)d_fuel,
         (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
         grid.density.data(), grid.temperature.data(), grid.fuel.data(),
@@ -1343,4 +2049,243 @@ void GasSimulator::downloadFromGPU() {
     );
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU FORCE FIELD SUPPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void GasSimulator::uploadForceFieldsToGPU() {
+    if (!cuda_initialized || !external_force_field_manager) return;
+    
+    const auto& fields = external_force_field_manager->getForceFields();
+    
+    // Count active fields that affect gas
+    std::vector<FluidSim::GPUForceField> gpu_fields;
+    gpu_fields.reserve(fields.size());
+    
+    for (const auto& field : fields) {
+        if (!field || !field->enabled || !field->affects_gas) continue;
+        
+        FluidSim::GPUForceField gf = {};
+        
+        // Type mapping
+        gf.type = static_cast<int>(field->type);
+        gf.shape = static_cast<int>(field->shape);
+        gf.falloff_type = static_cast<int>(field->falloff_type);
+        gf.enabled = 1;
+        
+        // Transform (convert degrees to radians)
+        gf.pos_x = field->position.x;
+        gf.pos_y = field->position.y;
+        gf.pos_z = field->position.z;
+        gf.rot_x = field->rotation.x * 0.0174533f;
+        gf.rot_y = field->rotation.y * 0.0174533f;
+        gf.rot_z = field->rotation.z * 0.0174533f;
+        gf.scale_x = field->scale.x;
+        gf.scale_y = field->scale.y;
+        gf.scale_z = field->scale.z;
+        
+        // Force parameters
+        gf.strength = field->strength;
+        gf.dir_x = field->direction.x;
+        gf.dir_y = field->direction.y;
+        gf.dir_z = field->direction.z;
+        
+        // Falloff
+        gf.falloff_radius = field->falloff_radius;
+        gf.inner_radius = field->inner_radius;
+        
+        // Vortex
+        gf.axis_x = field->axis.x;
+        gf.axis_y = field->axis.y;
+        gf.axis_z = field->axis.z;
+        gf.inward_force = field->inward_force;
+        
+        // Noise
+        gf.noise_frequency = field->noise.frequency;
+        gf.noise_amplitude = field->noise.amplitude;
+        gf.noise_speed = field->noise.speed;
+        gf.noise_octaves = field->noise.octaves;
+        
+        // Drag (use linear_drag as coefficient)
+        gf.drag_coefficient = field->linear_drag;
+        
+        gpu_fields.push_back(gf);
+    }
+    
+    // Free old buffer if count changed
+    if (gpu_force_field_count != (int)gpu_fields.size()) {
+        freeGPUForceFields();
+    }
+    
+    if (gpu_fields.empty()) {
+        gpu_force_field_count = 0;
+        return;
+    }
+    
+    // Upload to GPU
+    if (!d_force_fields) {
+        d_force_fields = FluidSim::cuda_upload_force_fields(gpu_fields.data(), (int)gpu_fields.size());
+    } else {
+        // Update existing buffer
+        cudaMemcpy(d_force_fields, gpu_fields.data(), 
+                   gpu_fields.size() * sizeof(FluidSim::GPUForceField), 
+                   cudaMemcpyHostToDevice);
+    }
+    
+    gpu_force_field_count = (int)gpu_fields.size();
+}
+
+void GasSimulator::freeGPUForceFields() {
+    if (d_force_fields) {
+        FluidSim::cuda_free_force_fields((FluidSim::GPUForceField*)d_force_fields);
+        d_force_fields = nullptr;
+    }
+    gpu_force_field_count = 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FFT PRESSURE SOLVER (10-50x faster than iterative for grids > 64³)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void GasSimulator::initFFTSolver() {
+    if (fft_solver) {
+        cleanupFFTSolver();
+    }
+    
+    fft_solver = new FFTPressureSolver();
+    
+    if (!initFFTPressureSolver(*fft_solver, grid.nx, grid.ny, grid.nz)) {
+        SCENE_LOG_ERROR("[GasSimulator] Failed to initialize FFT Pressure Solver");
+        delete fft_solver;
+        fft_solver = nullptr;
+        use_fft_solver = false;
+        return;
+    }
+    
+    use_fft_solver = true;
+    SCENE_LOG_INFO("[GasSimulator] FFT Pressure Solver initialized - 10-50x faster!");
+}
+
+void GasSimulator::cleanupFFTSolver() {
+    if (fft_solver) {
+        cleanupFFTPressureSolver(*fft_solver);
+        delete fft_solver;
+        fft_solver = nullptr;
+    }
+    use_fft_solver = false;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU ADVANCED EMITTERS (Noise, Falloff, Spray Cone)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void GasSimulator::uploadAdvancedEmittersToGPU() {
+    if (emitters.empty()) {
+        freeGPUAdvancedEmitters();
+        return;
+    }
+    
+    // Convert Emitter to GPUAdvancedEmitter
+    std::vector<GPUAdvancedEmitter> gpu_emitters;
+    gpu_emitters.reserve(emitters.size());
+    
+    for (const auto& e : emitters) {
+        if (!e.enabled) continue;
+        
+        GPUAdvancedEmitter ge = {};
+        
+        // Shape & Transform
+        ge.shape = static_cast<int>(e.shape);
+        ge.enabled = e.enabled ? 1 : 0;
+        ge.pos_x = e.position.x;
+        ge.pos_y = e.position.y;
+        ge.pos_z = e.position.z;
+        ge.rot_x = 0.0f;  // Basic Emitter doesn't have rotation
+        ge.rot_y = 0.0f;
+        ge.rot_z = 0.0f;
+        ge.scale_x = 1.0f;
+        ge.scale_y = 1.0f;
+        ge.scale_z = 1.0f;
+        
+        // Shape dimensions
+        ge.radius = e.radius;
+        ge.size_x = e.size.x;
+        ge.size_y = e.size.y;
+        ge.size_z = e.size.z;
+        ge.height = e.size.y;  // Use Y size as height for cylinder/cone
+        ge.inner_radius = 0.0f;
+        ge.cone_angle = 0.5f;  // Default cone angle (radians)
+        
+        // Emission
+        ge.density_rate = e.density_rate;
+        ge.temperature = e.temperature;
+        ge.fuel_rate = e.fuel_rate;
+        ge.vel_x = e.velocity.x;
+        ge.vel_y = e.velocity.y;
+        ge.vel_z = e.velocity.z;
+        ge.velocity_magnitude = e.velocity.length();
+        
+        // Falloff (default smooth falloff)
+        ge.falloff_type = 2;  // Smooth
+        ge.falloff_start = 0.7f;
+        ge.falloff_end = 1.0f;
+        
+        // Noise modulation (disabled by default for basic emitters)
+        ge.noise_enabled = 0;
+        ge.noise_frequency = 1.0f;
+        ge.noise_amplitude = 0.3f;
+        ge.noise_speed = 0.5f;
+        ge.noise_seed = 42;
+        ge.noise_modulate_density = 1;
+        ge.noise_modulate_temperature = 0;
+        ge.noise_modulate_velocity = 0;
+        
+        // Velocity variance (default no spray)
+        ge.spray_cone_angle = 0.0f;
+        ge.speed_min = 1.0f;
+        ge.speed_max = 1.0f;
+        
+        // Emission profile (continuous)
+        ge.emission_mode = 0;  // Continuous
+        ge.start_frame = 0.0f;
+        ge.end_frame = -1.0f;  // Never ends
+        ge.pulse_interval = 10.0f;
+        ge.pulse_duration = 5.0f;
+        
+        gpu_emitters.push_back(ge);
+    }
+    
+    if (gpu_emitters.empty()) {
+        freeGPUAdvancedEmitters();
+        return;
+    }
+    
+    // Free old buffer if count changed
+    if (gpu_advanced_emitter_count != static_cast<int>(gpu_emitters.size())) {
+        freeGPUAdvancedEmitters();
+    }
+    
+    // Upload to GPU
+    if (!d_advanced_emitters) {
+        d_advanced_emitters = cuda_upload_advanced_emitters(gpu_emitters.data(), 
+                                                            static_cast<int>(gpu_emitters.size()));
+    } else {
+        // Update existing buffer
+        cudaMemcpy(d_advanced_emitters, gpu_emitters.data(),
+                   gpu_emitters.size() * sizeof(GPUAdvancedEmitter),
+                   cudaMemcpyHostToDevice);
+    }
+    
+    gpu_advanced_emitter_count = static_cast<int>(gpu_emitters.size());
+}
+
+void GasSimulator::freeGPUAdvancedEmitters() {
+    if (d_advanced_emitters) {
+        cuda_free_advanced_emitters(d_advanced_emitters);
+        d_advanced_emitters = nullptr;
+    }
+    gpu_advanced_emitter_count = 0;
+}
+
 } // namespace FluidSim
+

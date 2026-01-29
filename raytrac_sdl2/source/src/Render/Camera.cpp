@@ -45,61 +45,6 @@ Ray Camera::get_ray(float s, float t) const {
     return Ray(origin + offset, lower_left_corner + use_s * horizontal + use_t * vertical - origin - offset);
 }
 
-#include "RayPacket.h"
-void Camera::get_ray_packet(__m256 s, __m256 t, RayPacket& rp) const {
-    __m256 use_s = s;
-    __m256 use_t = t;
-
-    // Lens Distortion (SIMD)
-    if (std::abs(distortion) > 0.001f) {
-        float h_len = horizontal.length();
-        float v_len = vertical.length();
-        __m256 aspect_v = _mm256_set1_ps(h_len / (v_len + 1e-6f));
-        __m256 dist_v = _mm256_set1_ps(distortion);
-        
-        __m256 u_centered = _mm256_mul_ps(_mm256_sub_ps(s, _mm256_set1_ps(0.5f)), aspect_v);
-        __m256 v_centered = _mm256_sub_ps(t, _mm256_set1_ps(0.5f));
-        
-        __m256 r2 = _mm256_add_ps(_mm256_mul_ps(u_centered, u_centered), _mm256_mul_ps(v_centered, v_centered));
-        __m256 factor = _mm256_add_ps(_mm256_set1_ps(1.0f), _mm256_mul_ps(dist_v, r2));
-        
-        u_centered = _mm256_mul_ps(u_centered, factor);
-        v_centered = _mm256_mul_ps(v_centered, factor);
-        
-        use_s = _mm256_add_ps(_mm256_div_ps(u_centered, aspect_v), _mm256_set1_ps(0.5f));
-        use_t = _mm256_add_ps(v_centered, _mm256_set1_ps(0.5f));
-    }
-
-    // Depth of Field (Thin Lens Model)
-    // For simplicity in the first version of packet tracing, we splat one random offset for the whole packet
-    // to avoid heavy random generation. Alternatively, we generate 8 offsets.
-    // Let's generate 8 for better quality.
-    
-    alignas(32) float rd_x[8], rd_y[8];
-    for(int i=0; i<8; ++i) {
-        Vec3 rd = lens_radius * random_in_unit_polygon(blade_count);
-        rd_x[i] = rd.x;
-        rd_y[i] = rd.y;
-    }
-    
-    Vec3SIMD offset_x = Vec3SIMD(u.x) * Vec3SIMD(rd_x) + Vec3SIMD(v.x) * Vec3SIMD(rd_y);
-    Vec3SIMD offset_y = Vec3SIMD(u.y) * Vec3SIMD(rd_x) + Vec3SIMD(v.y) * Vec3SIMD(rd_y);
-    Vec3SIMD offset_z = Vec3SIMD(u.z) * Vec3SIMD(rd_x) + Vec3SIMD(v.z) * Vec3SIMD(rd_y);
-
-    rp.orig_x = Vec3SIMD(origin.x) + offset_x;
-    rp.orig_y = Vec3SIMD(origin.y) + offset_y;
-    rp.orig_z = Vec3SIMD(origin.z) + offset_z;
-
-    Vec3SIMD target_x = Vec3SIMD(lower_left_corner.x) + Vec3SIMD(use_s) * Vec3SIMD(horizontal.x) + Vec3SIMD(use_t) * Vec3SIMD(vertical.x);
-    Vec3SIMD target_y = Vec3SIMD(lower_left_corner.y) + Vec3SIMD(use_s) * Vec3SIMD(horizontal.y) + Vec3SIMD(use_t) * Vec3SIMD(vertical.y);
-    Vec3SIMD target_z = Vec3SIMD(lower_left_corner.z) + Vec3SIMD(use_s) * Vec3SIMD(horizontal.z) + Vec3SIMD(use_t) * Vec3SIMD(vertical.z);
-
-    rp.dir_x = target_x - rp.orig_x;
-    rp.dir_y = target_y - rp.orig_y;
-    rp.dir_z = target_z - rp.orig_z;
-
-    rp.update_derived_data();
-}
 int Camera::random_int(int min, int max) const {
     static std::random_device rd;
     static std::mt19937 gen(rd());  // Mersenne Twister RNG

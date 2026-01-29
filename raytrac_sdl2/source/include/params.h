@@ -209,6 +209,8 @@ struct GpuVDBVolume {
     int max_steps;
     int shadow_steps;
     float shadow_strength;
+    float max_temperature; // For normalization
+    float pad;
     
     // ─────────────────────────────────────────────────────────────────────────
     // PIVOT & ANIMATION
@@ -286,6 +288,8 @@ struct GpuGasVolume {
     int max_steps;
     int shadow_steps;
     float shadow_strength;
+    float max_temperature; // For normalization
+    float pad;
 };
 
 struct RayGenParams {
@@ -324,6 +328,7 @@ struct RayGenParams {
     int frame_number;            // Mevcut frame numarası
 	int max_depth; 		        // Maksimum derinlik
 	bool use_adaptive_sampling;   // Adaptif örnekleme kullanılıp kullanılmayacağı
+    bool use_denoiser;            // OIDN denoiser aktif mi (adaptive sampling threshold'u etkiler)
     // Uzamsal tutarlılık ve temporal akümülasyon için
     float* variance_buffer;      // Piksellerin varyans değerlerini saklamak için
     float* accumulation_buffer;  // Temporal akümülasyon için önceki frame verisi
@@ -339,6 +344,11 @@ struct RayGenParams {
     float clip_far;
     float time;            // Global time for animation (updates every frame)
     float water_time;       // Water time - frozen during accumulation passes
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ADAPTIVE SAMPLING DEBUG
+    // ═══════════════════════════════════════════════════════════════════════════
+    int* converged_count;     // Atomic counter for converged pixels (debug)
     
     // ═══════════════════════════════════════════════════════════════════════════
     // WIND ANIMATION (Shader-based foliage bending)

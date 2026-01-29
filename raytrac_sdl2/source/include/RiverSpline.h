@@ -306,6 +306,13 @@ public:
     bool carveEnablePointBars = true;      // Point bar deposits on inner bends
     float carvePointBarStrength = 0.3f;    // How much point bars raise terrain (reduced)
     
+    // Terrain Backup for Undo/Reset
+    std::vector<float> terrainBackupData;
+    int terrainBackupWidth = 0;
+    int terrainBackupHeight = 0;
+    int terrainBackupId = -1;
+    bool hasTerrainBackup = false;
+    
 private:
     RiverManager() = default;
     

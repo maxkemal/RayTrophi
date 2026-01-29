@@ -49,7 +49,6 @@ public:
         return false;
     }
 
-    __m256 occluded_packet(const RayPacket& packet, float t_min, __m256 t_max) const override;
 
     ParallelBVHNode() = default;  
 
@@ -61,6 +60,5 @@ public:
     bool bounding_box(float time0, float time1, AABB& output_box) const;
     bool use_optix;
    
-    virtual void hit_packet(const RayPacket& packet, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes = false) const override;
      bool hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool ignore_volumes = false) const ;
 };

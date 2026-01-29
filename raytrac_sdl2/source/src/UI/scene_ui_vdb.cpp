@@ -110,9 +110,7 @@ void SceneUI::importVDBVolume(UIContext& ctx) {
     // Auto-select the new VDB
     ctx.selection.selectVDBVolume(vdb, -1, vdb->name);
     
-    // Auto-switch to VDB tab
-    tab_to_focus = "VDB";
-    //show_vdb_tab = true;
+    // Auto-switch to VDB tab removed per user request
     
     addViewportMessage("Imported VDB: " + vdb->name, 3.0f, ImVec4(0.5f, 1.0f, 0.5f, 1.0f));
     
@@ -245,8 +243,7 @@ void SceneUI::importVDBSequence(UIContext& ctx) {
     
     ctx.selection.selectVDBVolume(vdb, -1, vdb->name);
     
-    // Focus tab
-    tab_to_focus = "Volumetric";
+    // Focus tab removed per user request
     show_volumetric_tab = true;
     
     addViewportMessage("Imported Sequence: " + vdb->name + " (" + std::to_string(vdb->getFrameCount()) + " frames)", 
@@ -387,40 +384,46 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     // Track initial state to detect changes for Undo/Redo (if implemented) or Project Modified flag
     bool was_modified = false;
     
-    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.3f, 0.2f, 0.5f, 0.8f));
+    // ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.3f, 0.2f, 0.5f, 0.8f)); // Removed to use Main Theme
     
     // ═══════════════════════════════════════════════════════════════════════════
     // FILE INFO
     // ═══════════════════════════════════════════════════════════════════════════
-    ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Volume: %s", vdb->name.c_str());
-    
-    auto* vol_data = VDBVolumeManager::getInstance().getVolume(vdb->getVDBVolumeID());
-    if (vol_data) {
-        ImGui::TextDisabled("File: %s", std::filesystem::path(vol_data->filepath).filename().string().c_str());
-        ImGui::TextDisabled("Size: %.2f MB", vol_data->gpu_buffer_size / (1024.0f * 1024.0f));
+    if (UIWidgets::BeginSection("File Information", ImVec4(0.3f, 0.5f, 0.7f, 1.0f))) {
+        ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Volume: %s", vdb->name.c_str());
         
-        // Bounds info
-        Vec3 bmin = vdb->getLocalBoundsMin();
-        Vec3 bmax = vdb->getLocalBoundsMax();
-        ImGui::TextDisabled("Bounds: (%.1f, %.1f, %.1f) - (%.1f, %.1f, %.1f)",
-            bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z);
-    }
-    
-    // Available grids
-    auto grids = vdb->getAvailableGrids();
-    if (!grids.empty()) {
-        ImGui::TextDisabled("Grids: ");
-        ImGui::SameLine();
-        for (size_t i = 0; i < grids.size(); ++i) {
-            if (i > 0) ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", grids[i].c_str());
+        auto* vol_data = VDBVolumeManager::getInstance().getVolume(vdb->getVDBVolumeID());
+        if (vol_data) {
+            ImGui::TextDisabled("File: %s", std::filesystem::path(vol_data->filepath).filename().string().c_str());
+            ImGui::TextDisabled("Size: %.2f MB", vol_data->gpu_buffer_size / (1024.0f * 1024.0f));
+            
+            // Bounds info
+            Vec3 bmin = vdb->getLocalBoundsMin();
+            Vec3 bmax = vdb->getLocalBoundsMax();
+            ImGui::TextDisabled("Bounds: (%.1f, %.1f, %.1f) - (%.1f, %.1f, %.1f)",
+                bmin.x, bmin.y, bmin.z, bmax.x, bmax.y, bmax.z);
         }
+        
+        // Available grids
+        auto grids = vdb->getAvailableGrids();
+        if (!grids.empty()) {
+            ImGui::TextDisabled("Grids: ");
+            ImGui::SameLine();
+            for (size_t i = 0; i < grids.size(); ++i) {
+                if (i > 0) ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", grids[i].c_str());
+            }
+        }
+        UIWidgets::EndSection();
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
     // ANIMATION
     // ═══════════════════════════════════════════════════════════════════════════
-    if (vdb->isAnimated() && ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ANIMATION
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (vdb->isAnimated() && UIWidgets::BeginSection("Animation", ImVec4(0.4f, 0.6f, 1.0f, 1.0f))) {
         ImGui::PushID("vdb_anim");  // Unique ID scope for animation widgets
         
         ImGui::Text("Sequence: %d Frames", vdb->getFrameCount());
@@ -440,6 +443,7 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
         }
         
         ImGui::PopID();
+        UIWidgets::EndSection();
     }
     
     ImGui::Separator();
@@ -447,7 +451,10 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     // ═══════════════════════════════════════════════════════════════════════════
     // TRANSFORM
     // ═══════════════════════════════════════════════════════════════════════════
-    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TRANSFORM
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (UIWidgets::BeginSection("Transform", ImVec4(0.5f, 0.9f, 0.5f, 1.0f))) {
         Vec3 pos = vdb->getPosition();
         Vec3 rot = vdb->getRotation();
         Vec3 scale = vdb->getScale();
@@ -485,6 +492,8 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
             vdb->setScale(Vec3(1.0f));
             changed = true;
         }
+
+        UIWidgets::EndSection();
     }
     
     // ═══════════════════════════════════════════════════════════════════════════
@@ -497,7 +506,7 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     
     // Animation section already exists above (lines 429-449)
     
-    ImGui::PopStyleColor();
+    // ImGui::PopStyleColor();
     
     // Apply changes
     if (changed) {

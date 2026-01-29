@@ -534,7 +534,16 @@ int main(int argc, char* argv[]) {
     ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
 	
     // Initialize OptiX
-    if (splashOk) { splash.setStatus("Initializing OptiX pipeline..."); splash.render(); }
+    bool ptx_exists = std::filesystem::exists("raygen.ptx");
+    if (splashOk) { 
+        if (!ptx_exists) {
+            splash.setStatus("Compiling GPU Shaders (First time setup, please wait)...");
+        } else {
+            splash.setStatus("Initializing OptiX (One-time JIT compile, next starts will be fast)...");
+        }
+        splash.render(); 
+    }
+    
     if (initializeOptixIfAvailable(optix_gpu)) {
         SCENE_LOG_INFO("OptiX is ready!");
         
@@ -735,8 +744,8 @@ int main(int argc, char* argv[]) {
 
         // Real-time Gas Simulation Step (sequential sim logic)
         bool gas_stepped = false;
-        for (auto& gas : scene.gas_volumes) {
-             if (gas->settings.mode == FluidSim::SimulationMode::RealTime) {
+           for (auto& gas : scene.gas_volumes) {
+               if (gas->getSettings().mode == FluidSim::SimulationMode::RealTime) {
                  if (gas->isPlaying() || (timeline_playing && gas->linked_to_timeline)) {
                      // Note: updateFromTimeline already handles catching up if linked.
                      // But if NOT linked, it only steps if isPlaying().
@@ -1514,7 +1523,11 @@ int main(int argc, char* argv[]) {
                         static int last_cpu_anim_frame = -1;
                         bool has_file_animations = !scene.animationDataList.empty();
                         if (current_f != last_cpu_anim_frame && has_file_animations) {
-                             ray_renderer.updateAnimationState(scene, time);
+                             if (ray_renderer.updateAnimationState(scene, time)) {
+                                 // Geometry changed (skinning applied), trigger BVH update
+                                 g_cpu_bvh_refit_pending = true; 
+                                 ray_renderer.resetCPUAccumulation();
+                             }
                              last_cpu_anim_frame = current_f;
                         }
                         
@@ -1679,7 +1692,12 @@ int main(int argc, char* argv[]) {
                     
                     if (has_file_animations) {
                         // File-based animations present - need full update (Assimp skinning, node hierarchy)
-                        ray_renderer.updateAnimationState(scene, time);
+                        bool geometry_modified = ray_renderer.updateAnimationState(scene, time);
+                        
+                        // CRITICAL: Update CPU BVH so viewport 'sees' the new pose (Fixes BBox/Selection)
+                        if (geometry_modified && !ui_ctx.render_settings.use_optix) {
+                            ray_renderer.updateBVH(scene, ui_ctx.render_settings.UI_use_embree);
+                        }
                     }
                     // else: TimelineWidget::draw() handles manual keyframes with O(1) object lookup - FAST!
                     

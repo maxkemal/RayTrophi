@@ -11,9 +11,7 @@
 #ifndef AABB_H
 #define AABB_H
 
-#include "Vec3SIMD.h"
 #include "Ray.h"
-#include "RayPacket.h"
 
 class AABB {
 public:
@@ -77,50 +75,6 @@ public:
     float surface_area() const;
     bool is_valid() const {
         return (min.x <= max.x && min.y <= max.y && min.z <= max.z);
-    }
-    // AABB Packet Intersection (Slab Method - SIMD)
-    __m256 hit_packet(const RayPacket& r, float t_min, float t_max) const {
-         return hit_packet(r, _mm256_set1_ps(t_min), _mm256_set1_ps(t_max));
-    }
-
-    __m256 hit_packet(const RayPacket& r, __m256 t_min, __m256 t_max) const {
-         // Box min/max components splatted to 8 lanes
-         Vec3SIMD b_min_x(min.x);
-         Vec3SIMD b_min_y(min.y);
-         Vec3SIMD b_min_z(min.z);
-
-         Vec3SIMD b_max_x(max.x);
-         Vec3SIMD b_max_y(max.y);
-         Vec3SIMD b_max_z(max.z);
-
-         // t0 = (min - org) * inv_dir
-         Vec3SIMD t0_x = (b_min_x - r.orig_x) * r.inv_dir_x;
-         Vec3SIMD t0_y = (b_min_y - r.orig_y) * r.inv_dir_y;
-         Vec3SIMD t0_z = (b_min_z - r.orig_z) * r.inv_dir_z;
-
-         // t1 = (max - org) * inv_dir
-         Vec3SIMD t1_x = (b_max_x - r.orig_x) * r.inv_dir_x;
-         Vec3SIMD t1_y = (b_max_y - r.orig_y) * r.inv_dir_y;
-         Vec3SIMD t1_z = (b_max_z - r.orig_z) * r.inv_dir_z;
-
-         // Swap t0/t1 based on sign of direction (for correctness when dir < 0)
-         Vec3SIMD tmin_x = Vec3SIMD::min(t0_x, t1_x);
-         Vec3SIMD tmax_x = Vec3SIMD::max(t0_x, t1_x);
-
-         Vec3SIMD tmin_y = Vec3SIMD::min(t0_y, t1_y);
-         Vec3SIMD tmax_y = Vec3SIMD::max(t0_y, t1_y);
-
-         Vec3SIMD tmin_z = Vec3SIMD::min(t0_z, t1_z);
-         Vec3SIMD tmax_z = Vec3SIMD::max(t0_z, t1_z);
-
-         // tnear = max(tmin_x, tmin_y, tmin_z, global_tmin)
-         __m256 t_enter = _mm256_max_ps(tmin_x.data, _mm256_max_ps(tmin_y.data, _mm256_max_ps(tmin_z.data, t_min)));
-         
-         // tfar = min(tmax_x, tmax_y, tmax_z, global_tmax)
-         __m256 t_exit = _mm256_min_ps(tmax_x.data, _mm256_min_ps(tmax_y.data, _mm256_min_ps(tmax_z.data, t_max)));
-
-         // Hit if t_enter <= t_exit
-         return _mm256_cmp_ps(t_enter, t_exit, _CMP_LE_OQ);
     }
 };
 

@@ -513,8 +513,6 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 
                  SCENE_LOG_INFO("Added Gas Volume: " + gas->name);
                  addViewportMessage("Added Gas Volume");
-                
-                 // tab_to_focus = "Gas";  // Focus Gas tab
              }
              
              if (ImGui::MenuItem("Force Field")) {
@@ -526,7 +524,6 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  SCENE_LOG_INFO("Added Force Field: " + ff->name);
                  addViewportMessage("Added Force Field");
                  show_forcefield_tab = true;
-                 // tab_to_focus = "Force Field";
              }
              
              ImGui::EndMenu();
@@ -561,27 +558,24 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             
 
             if (ImGui::MenuItem("Water Tab", nullptr, &show_water_tab)) { 
-                if (show_water_tab) tab_to_focus = "Water"; 
+                // if (show_water_tab) tab_to_focus = "Water"; 
             }
             if (ImGui::MenuItem("Terrain Tab", nullptr, &show_terrain_tab)) { 
-                if (show_terrain_tab) tab_to_focus = "Terrain"; 
+                // if (show_terrain_tab) tab_to_focus = "Terrain"; 
             }
            
          
             if (ImGui::MenuItem("Force Field Tab", nullptr, &show_forcefield_tab)) { 
                 if (show_forcefield_tab) tab_to_focus = "Force Field"; 
             }
+            if (ImGui::MenuItem("World Tab", nullptr, &show_world_tab)) { 
+                if (show_world_tab) tab_to_focus = "World"; 
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
-                if (show_system_tab) tab_to_focus = "System"; 
+                // if (show_system_tab) tab_to_focus = "System"; 
             }
             
-            ImGui::Separator();
-            
-            // Animation Graph Editor (floating window)
-            if (ImGui::MenuItem("Animation Graph Editor", nullptr, &g_animGraphUI.showNodeEditor)) {
-                // Toggle handled by MenuItem
-            }
             
             ImGui::EndMenu();
         }

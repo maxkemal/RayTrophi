@@ -145,3 +145,24 @@ __device__ float2 random_in_unit_disk(curandState* rng) {
     } while ((p.x * p.x + p.y * p.y) >= 1.0f);
     return p;
 }
+
+// Sample a direction within a cone around the target direction
+__device__ inline float3 sample_sphere_cap(const float3& dir, float angle_rad, curandState* rng) {
+    if (angle_rad < 1e-4f) return dir;
+    
+    float r1 = curand_uniform(rng);
+    float r2 = curand_uniform(rng);
+    
+    float cos_theta = 1.0f - r1 * (1.0f - cosf(angle_rad));
+    float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));
+    float phi = 2.0f * M_PI * r2;
+    
+    float3 local_dir = make_float3(cosf(phi) * sin_theta, sinf(phi) * sin_theta, cos_theta);
+    
+    // Create local coordinate system
+    float3 up = (fabsf(dir.y) < 0.999f) ? make_float3(0, 1, 0) : make_float3(1, 0, 0);
+    float3 tangent = normalize(cross(up, dir));
+    float3 bitangent = cross(dir, tangent);
+    
+    return tangent * local_dir.x + bitangent * local_dir.y + dir * local_dir.z;
+}

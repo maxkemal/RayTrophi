@@ -1,8 +1,6 @@
 ﻿#include "Triangle.h"
 #include "Ray.h"
 #include "AABB.h"
-#include "RayPacket.h"
-#include "HitRecordPacket.h"
 #include "globals.h"
 #include <cmath>
 
@@ -267,11 +265,15 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
         return;
     }
 
+    // Get root transform (Gizmo placement in scene)
+    Matrix4x4 rootTransform = getTransformMatrix();
+    Matrix4x4 rootNormalTransform = rootTransform.inverse().transpose();
+
     // Process each vertex
     for (int vi = 0; vi < 3; ++vi) {
         if (boneWeights[vi].empty()) {
-            vertices[vi].position = vertices[vi].original;
-            vertices[vi].normal = vertices[vi].originalNormal;
+            vertices[vi].position = rootTransform.transform_point(vertices[vi].original);
+            vertices[vi].normal = rootNormalTransform.transform_vector(vertices[vi].originalNormal).normalize();
             continue;
         }
 
@@ -292,12 +294,14 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
             }
         }
 
-        // Apply to vertex
-        vertices[vi].position = blendedBoneMatrix.transform_point(origPositions[vi]);
+        // Apply Bone Skinning -> Then Apply Root Transform 
+        Vec3 localSkinnedPos = blendedBoneMatrix.transform_point(origPositions[vi]);
+        vertices[vi].position = rootTransform.transform_point(localSkinnedPos);
         
         // Apply to normal
-        Matrix4x4 normalMatrix = blendedBoneMatrix.inverse().transpose();
-        vertices[vi].normal = normalMatrix.transform_vector(vertices[vi].originalNormal).normalize();
+        Matrix4x4 nodeNormalMatrix = blendedBoneMatrix.inverse().transpose();
+        Vec3 localSkinnedNormal = nodeNormalMatrix.transform_vector(vertices[vi].originalNormal).normalize();
+        vertices[vi].normal = rootNormalTransform.transform_vector(localSkinnedNormal).normalize();
     }
 
     aabbDirty = true;
@@ -447,133 +451,6 @@ bool Triangle::bounding_box(float time0, float time1, AABB& output_box) const {
 // Packet Tracing Implementation (Phase 2)
 // ============================================================================
 
-void Triangle::hit_packet(const RayPacket& r, float t_min, float t_max, HitRecordPacket& rec, bool ignore_volumes) const {
-    if (!visible) return;
-
-    // 1. Load Triangle Vertices (Broadcast to all 8 lanes)
-    Vec3SIMD v0_x(_mm256_set1_ps(vertices[0].position.x));
-    Vec3SIMD v0_y(_mm256_set1_ps(vertices[0].position.y));
-    Vec3SIMD v0_z(_mm256_set1_ps(vertices[0].position.z));
-
-    Vec3SIMD v1_x(_mm256_set1_ps(vertices[1].position.x));
-    Vec3SIMD v1_y(_mm256_set1_ps(vertices[1].position.y));
-    Vec3SIMD v1_z(_mm256_set1_ps(vertices[1].position.z));
-
-    Vec3SIMD v2_x(_mm256_set1_ps(vertices[2].position.x));
-    Vec3SIMD v2_y(_mm256_set1_ps(vertices[2].position.y));
-    Vec3SIMD v2_z(_mm256_set1_ps(vertices[2].position.z));
-
-    // 2. Edge Vectors
-    Vec3SIMD e1_x = v1_x - v0_x;
-    Vec3SIMD e1_y = v1_y - v0_y;
-    Vec3SIMD e1_z = v1_z - v0_z;
-
-    Vec3SIMD e2_x = v2_x - v0_x;
-    Vec3SIMD e2_y = v2_y - v0_y;
-    Vec3SIMD e2_z = v2_z - v0_z;
-
-    // 3. Möller–Trumbore
-    Vec3SIMD h_x, h_y, h_z;
-    Vec3SIMD::cross_8x(r.dir_x, r.dir_y, r.dir_z, e2_x, e2_y, e2_z, h_x, h_y, h_z);
-
-    __m256 a = Vec3SIMD::dot_product_8x(e1_x, e1_y, e1_z, h_x, h_y, h_z);
-
-    const float EPS = 1e-8f;
-    __m256 is_parallel = _mm256_and_ps(
-        _mm256_cmp_ps(a, _mm256_set1_ps(-EPS), _CMP_GT_OQ),
-        _mm256_cmp_ps(a, _mm256_set1_ps(EPS), _CMP_LT_OQ)
-    );
-
-    __m256 f = _mm256_div_ps(_mm256_set1_ps(1.0f), a);
-    
-    Vec3SIMD s_x = r.orig_x - v0_x;
-    Vec3SIMD s_y = r.orig_y - v0_y;
-    Vec3SIMD s_z = r.orig_z - v0_z;
-
-    __m256 u = _mm256_mul_ps(f, Vec3SIMD::dot_product_8x(s_x, s_y, s_z, h_x, h_y, h_z));
-    
-    __m256 bad_u = _mm256_or_ps(
-        _mm256_cmp_ps(u, _mm256_setzero_ps(), _CMP_LT_OQ),
-        _mm256_cmp_ps(u, _mm256_set1_ps(1.0f), _CMP_GT_OQ)
-    );
-
-    Vec3SIMD q_x, q_y, q_z;
-    Vec3SIMD::cross_8x(s_x, s_y, s_z, e1_x, e1_y, e1_z, q_x, q_y, q_z);
-
-    __m256 v = _mm256_mul_ps(f, Vec3SIMD::dot_product_8x(r.dir_x, r.dir_y, r.dir_z, q_x, q_y, q_z));
-    
-    __m256 bad_v = _mm256_or_ps(
-        _mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_LT_OQ),
-        _mm256_cmp_ps(_mm256_add_ps(u, v), _mm256_set1_ps(1.0f), _CMP_GT_OQ)
-    );
-
-    __m256 t_val = _mm256_mul_ps(f, Vec3SIMD::dot_product_8x(e2_x, e2_y, e2_z, q_x, q_y, q_z));
-    
-    __m256 bad_t = _mm256_or_ps(
-        _mm256_cmp_ps(t_val, _mm256_set1_ps(t_min), _CMP_LT_OQ),
-        _mm256_cmp_ps(t_val, _mm256_set1_ps(t_max), _CMP_GT_OQ)
-    );
-
-    __m256 failed = _mm256_or_ps(is_parallel, _mm256_or_ps(bad_u, _mm256_or_ps(bad_v, bad_t)));
-    __m256 success_mask = _mm256_andnot_ps(failed, _mm256_cmp_ps(_mm256_setzero_ps(), _mm256_setzero_ps(), _CMP_EQ_OQ));
-
-    // Result assembly
-    HitRecordPacket tr;
-    tr.t.data = t_val;
-    tr.u.data = u;
-    tr.v.data = v;
-    
-    r.point_at(tr.t, tr.p_x, tr.p_y, tr.p_z);
-
-    __m256 w = _mm256_sub_ps(_mm256_set1_ps(1.0f), _mm256_add_ps(u, v));
-    
-    auto splt = [&](int i, int axis) {
-        if (axis == 0) return _mm256_set1_ps(vertices[i].normal.x);
-        if (axis == 1) return _mm256_set1_ps(vertices[i].normal.y);
-        return _mm256_set1_ps(vertices[i].normal.z);
-    };
-
-    tr.normal_x.data = _mm256_add_ps(_mm256_mul_ps(w, splt(0, 0)), _mm256_add_ps(_mm256_mul_ps(u, splt(1, 0)), _mm256_mul_ps(v, splt(2, 0))));
-    tr.normal_y.data = _mm256_add_ps(_mm256_mul_ps(w, splt(0, 1)), _mm256_add_ps(_mm256_mul_ps(u, splt(1, 1)), _mm256_mul_ps(v, splt(2, 1))));
-    tr.normal_z.data = _mm256_add_ps(_mm256_mul_ps(w, splt(0, 2)), _mm256_add_ps(_mm256_mul_ps(u, splt(1, 2)), _mm256_mul_ps(v, splt(2, 2))));
-
-    Vec3SIMD::normalize_8x(tr.normal_x, tr.normal_y, tr.normal_z, tr.normal_x, tr.normal_y, tr.normal_z);
-
-    // --- FRONT FACE & NORMAL FLIPPING ---
-    __m256 n_dot_r = Vec3SIMD::dot_product_8x(tr.normal_x, tr.normal_y, tr.normal_z, r.dir_x, r.dir_y, r.dir_z);
-    tr.front_face = _mm256_cmp_ps(n_dot_r, _mm256_setzero_ps(), _CMP_LT_OQ);
-    
-    // If not front face, flip normal (Double-sided support)
-    tr.normal_x.data = _mm256_blendv_ps(_mm256_sub_ps(_mm256_setzero_ps(), tr.normal_x.data), tr.normal_x.data, tr.front_face);
-    tr.normal_y.data = _mm256_blendv_ps(_mm256_sub_ps(_mm256_setzero_ps(), tr.normal_y.data), tr.normal_y.data, tr.front_face);
-    tr.normal_z.data = _mm256_blendv_ps(_mm256_sub_ps(_mm256_setzero_ps(), tr.normal_z.data), tr.normal_z.data, tr.front_face);
-
-    // --- ALPHA TESTING ---
-    Material* mat = MaterialManager::getInstance().getMaterial(materialID);
-    if (mat) {
-        alignas(32) float opacity_vals[8];
-        bool has_transparency = false;
-        for (int i = 0; i < 8; i++) {
-            if ((1 << i) & _mm256_movemask_ps(success_mask)) {
-                float op = mat->get_opacity(Vec2(((float*)&tr.u.data)[i], ((float*)&tr.v.data)[i]));
-                opacity_vals[i] = op;
-                if (op < 0.99f) has_transparency = true;
-            } else {
-                opacity_vals[i] = 1.0f;
-            }
-        }
-
-        if (has_transparency) {
-            __m256 opacity_v = _mm256_load_ps(opacity_vals);
-            __m256 rand_v = Vec3SIMD::random_float_8x();
-            __m256 alpha_pass = _mm256_cmp_ps(rand_v, opacity_v, _CMP_LT_OQ);
-            success_mask = _mm256_and_ps(success_mask, alpha_pass);
-        }
-    }
-
-    tr.mat_id = _mm256_set1_epi32((int)materialID);
-    rec.merge_if_closer(tr, success_mask);
-}
 
 bool Triangle::occluded(const Ray& ray, float t_min, float t_max) const {
     HitRecord dummy;
@@ -583,52 +460,4 @@ bool Triangle::occluded(const Ray& ray, float t_min, float t_max) const {
     return hit(ray, t_min, t_max, dummy);
 }
 
-__m256 Triangle::occluded_packet(const RayPacket& r, float t_min, __m256 t_max) const {
-    if (!visible) return _mm256_setzero_ps();
 
-    // Re-use hit_packet logic basically, but just return success_mask
-    // Load Triangle Vertices 
-    Vec3SIMD v0_x(_mm256_set1_ps(vertices[0].position.x)), v0_y(_mm256_set1_ps(vertices[0].position.y)), v0_z(_mm256_set1_ps(vertices[0].position.z));
-    Vec3SIMD v1_x(_mm256_set1_ps(vertices[1].position.x)), v1_y(_mm256_set1_ps(vertices[1].position.y)), v1_z(_mm256_set1_ps(vertices[1].position.z));
-    Vec3SIMD v2_x(_mm256_set1_ps(vertices[2].position.x)), v2_y(_mm256_set1_ps(vertices[2].position.y)), v2_z(_mm256_set1_ps(vertices[2].position.z));
-
-    Vec3SIMD e1_x = v1_x - v0_x, e1_y = v1_y - v0_y, e1_z = v1_z - v0_z;
-    Vec3SIMD e2_x = v2_x - v0_x, e2_y = v2_y - v0_y, e2_z = v2_z - v0_z;
-
-    Vec3SIMD h_x, h_y, h_z;
-    Vec3SIMD::cross_8x(r.dir_x, r.dir_y, r.dir_z, e2_x, e2_y, e2_z, h_x, h_y, h_z);
-    __m256 a = Vec3SIMD::dot_product_8x(e1_x, e1_y, e1_z, h_x, h_y, h_z);
-    const float EPS = 1e-8f;
-    __m256 is_parallel = _mm256_and_ps(_mm256_cmp_ps(a, _mm256_set1_ps(-EPS), _CMP_GT_OQ), _mm256_cmp_ps(a, _mm256_set1_ps(EPS), _CMP_LT_OQ));
-    __m256 f = _mm256_div_ps(_mm256_set1_ps(1.0f), a);
-    
-    Vec3SIMD s_x = r.orig_x - v0_x, s_y = r.orig_y - v0_y, s_z = r.orig_z - v0_z;
-    __m256 u = _mm256_mul_ps(f, Vec3SIMD::dot_product_8x(s_x, s_y, s_z, h_x, h_y, h_z));
-    __m256 bad_u = _mm256_or_ps(_mm256_cmp_ps(u, _mm256_setzero_ps(), _CMP_LT_OQ), _mm256_cmp_ps(u, _mm256_set1_ps(1.0f), _CMP_GT_OQ));
-
-    Vec3SIMD q_x, q_y, q_z;
-    Vec3SIMD::cross_8x(s_x, s_y, s_z, e1_x, e1_y, e1_z, q_x, q_y, q_z);
-    __m256 v = _mm256_mul_ps(f, Vec3SIMD::dot_product_8x(r.dir_x, r.dir_y, r.dir_z, q_x, q_y, q_z));
-    __m256 bad_v = _mm256_or_ps(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_LT_OQ), _mm256_cmp_ps(_mm256_add_ps(u, v), _mm256_set1_ps(1.0f), _CMP_GT_OQ));
-    __m256 t_val = _mm256_mul_ps(f, Vec3SIMD::dot_product_8x(e2_x, e2_y, e2_z, q_x, q_y, q_z));
-    
-    __m256 bad_t = _mm256_or_ps(_mm256_cmp_ps(t_val, _mm256_set1_ps(t_min), _CMP_LT_OQ), _mm256_cmp_ps(t_val, t_max, _CMP_GT_OQ));
-    __m256 success_mask = _mm256_andnot_ps(_mm256_or_ps(is_parallel, _mm256_or_ps(bad_u, _mm256_or_ps(bad_v, bad_t))), _mm256_cmp_ps(_mm256_setzero_ps(), _mm256_setzero_ps(), _CMP_EQ_OQ));
-
-    // ALPHA TEST
-    if (_mm256_movemask_ps(success_mask)) {
-        Material* mat = MaterialManager::getInstance().getMaterial(materialID);
-        if (mat) {
-            alignas(32) float opacity_vals[8];
-            for (int i = 0; i < 8; i++) {
-                if ((1 << i) & _mm256_movemask_ps(success_mask)) {
-                    opacity_vals[i] = mat->get_opacity(Vec2(((float*)&u)[i], ((float*)&v)[i]));
-                } else opacity_vals[i] = 1.0f;
-            }
-            __m256 alpha_pass = _mm256_cmp_ps(Vec3SIMD::random_float_8x(), _mm256_load_ps(opacity_vals), _CMP_LT_OQ);
-            success_mask = _mm256_and_ps(success_mask, alpha_pass);
-        }
-    }
-
-    return success_mask;
-}

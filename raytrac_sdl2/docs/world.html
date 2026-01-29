@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - World & Sky</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link active">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>World & Environment</h1>
+
+            <div class="screenshot-area">
+                <img src="images/world_header.jpg" alt="Sky Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🌤️ Please save a Sky Render as <code>docs/images/world_header.jpg</code>
+                </div>
+            </div>
+
+            <p>The World module controls global lighting, atmospheric effects, volumetric clouds, and gas simulations.
+            </p>
+
+            <h2 id="nishita">1. Nishita Sky Model</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/world_sky.jpg" alt="Sky Settings"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Sky Settings UI</div>
+                </div>
+                <div>
+                    <p>Physically based spectral sky model simulating Rayleigh and Mie scattering.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Sun Elevation</td>
+                            <td>Height of the sun (Day/Night cycle).</td>
+                        </tr>
+                        <tr>
+                            <td>Air Density</td>
+                            <td>Controls Rayleigh scattering (Blue/Red sky).</td>
+                        </tr>
+                        <tr>
+                            <td>Dust Density</td>
+                            <td>Controls Mie scattering (Haze/Pollution).</td>
+                        </tr>
+                        <tr>
+                            <td>Ozone Density</td>
+                            <td>Absorption filter for deep blue zenith.</td>
+                        </tr>
+                        <tr>
+                            <td>Sun Intensity</td>
+                            <td>Brightness multiplier.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="clouds">2. Volumetric Clouds</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/world_clouds.jpg" alt="Cloud Settings"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Cloud Settings UI</div>
+                </div>
+                <div>
+                    <p>Ray-marched volumetric clouds with multi-scattering approximation.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Coverage</td>
+                            <td>Amount of clouds (0.0=Clear, 1.0=Storm).</td>
+                        </tr>
+                        <tr>
+                            <td>Density</td>
+                            <td>Thickness of the cloud layer.</td>
+                        </tr>
+                        <tr>
+                            <td>Absorption</td>
+                            <td>Light absorption inside clouds (Silver lining).</td>
+                        </tr>
+                        <tr>
+                            <td>Detail Scale</td>
+                            <td>Frequency of the noise texture.</td>
+                        </tr>
+                        <tr>
+                            <td>Wind Speed</td>
+                            <td>Movement speed across the sky.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="gas">3. Gas & Smoke Simulation</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/world_gas.jpg" alt="Gas Sim"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Gas Simulation UI</div>
+                </div>
+                <div>
+                    <p>A powerful GPU-accelerated fluid solver for smoke, fire, and explosions.</p>
+
+                    <h3>Simulation Settings</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Grid Size</td>
+                            <td>Physical world dimensions of the simulation box.</td>
+                        </tr>
+                        <tr>
+                            <td>Buoyancy</td>
+                            <td>Upward force based on temperature (Hot smoke rises).</td>
+                        </tr>
+                        <tr>
+                            <td>Vorticity</td>
+                            <td>Injects small swirling details to prevent diffusion.</td>
+                        </tr>
+                        <tr>
+                            <td>Dissipation</td>
+                            <td>Rate at which smoke/temperature fades over time.</td>
+                        </tr>
+                    </table>
+
+                    <h3>Rendering (Volumetric Shader)</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Scattering</td>
+                            <td>Dual-Lobe Henyey-Greenstein phase function.</td>
+                        </tr>
+                        <tr>
+                            <td>Multi-Scatter</td>
+                            <td>Approximates internal light bounces for realism.</td>
+                        </tr>
+                        <tr>
+                            <td>Blackbody</td>
+                            <td>Emits light based on physical temperature (Fire).</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="forces">4. Force Fields</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/world_forces.jpg" alt="Force Fields"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Force Field Settings</div>
+                </div>
+                <div>
+                    <p>Invisible forces that manipulate the motion of Gas and Smoke simulations.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Type</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Point Force</td>
+                            <td>Radial force. Positive pushes out (Explosion), Negative pulls in (Implosion).</td>
+                        </tr>
+                        <tr>
+                            <td>Directional</td>
+                            <td>Uniform force in a specific vector direction (Wind).</td>
+                        </tr>
+                        <tr>
+                            <td>Vortex</td>
+                            <td>Rotational force around a central axis (Tornado).</td>
+                        </tr>
+                        <tr>
+                            <td>Turbulence</td>
+                            <td>Adds curl noise to break up uniform motion and add chaos.</td>
+                        </tr>
+                        <tr>
+                            <td>Drag</td>
+                            <td>Resistance force that slows down fluid velocity over time.</td>
+                        </tr>
+                    </table>
+
+                    <h3>Common Parameters</h3>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Strength</td>
+                            <td>Magnitude of the force.</td>
+                        </tr>
+                        <tr>
+                            <td>Radius</td>
+                            <td>Effective range of the force field.</td>
+                        </tr>
+                        <tr>
+                            <td>Falloff</td>
+                            <td>How quickly the force weakens from the center.</td>
+                        </tr>
+                        <tr>
+                            <td>Position</td>
+                            <td>3D World coordinate of the force center.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>

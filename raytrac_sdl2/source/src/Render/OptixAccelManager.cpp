@@ -235,6 +235,7 @@ int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometry) {
     //                std::to_string(geometry.vertices.size()) + " verts, " +
     //                std::to_string(geometry.indices.size()) + " tris)");
     
+    m_topology_dirty = true; // New BLAS added, rebuild topology cache
     return mesh_id;
 }
 
@@ -346,110 +347,94 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
 // ----------------------------------------------------------------------------
 // NEW: Lightweight Transform Sync (No Vertex Upload)
 // ----------------------------------------------------------------------------
-void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) {
+void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects, bool force_rebuild_cache) {
     if (!context) return;
     
-    // 1. Collect all Triangles
-    std::vector<std::shared_ptr<Triangle>> triangles;
-    for (const auto& obj : objects) {
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            triangles.push_back(tri);
-        } else if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
-            // Traverse... (Simplified: assume flattened list or use existing mesh grouping)
-            // Actually, we need to map objects to meshes.
-            // 'triangles' vector in 'groupTrianglesByMesh' was simple.
-            // Re-doing grouping is slow.
-            // BETTER: Iterate 'mesh_blas_list' and find one representative triangle?
-            // We don't store pointer to Triangles in MeshBLAS.
-            // We DO store 'mesh_name'.
-            //
-            // Optimization: Iterate the input 'objects' (which are Triangles), 
-            // identify which mesh they belong to, and update that mesh's transform.
-            // Since all triangles in a mesh share the same transform, finding the first one is enough.
+    // 1. REBUILD CACHE IF DIRTY
+    // Using source_hittable pointers for O(1) direct mapping (fixes naming collisions!)
+    if (m_topology_dirty || m_instance_sync_cache.empty() || force_rebuild_cache) {
+        m_instance_sync_cache.clear();
+        
+        // Build a map of Hittable pointers to objects in the scene
+        std::unordered_map<void*, std::shared_ptr<Hittable>> ptr_to_obj;
+        for (const auto& obj : objects) {
+            ptr_to_obj[obj.get()] = obj;
         }
-    }
-    
-    // Optimized approach: 
-    // We already have 'instances' which store 'mesh_id'.
-    // We have 'mesh_blas_list' which has 'original_name'.
-    // We can iterate 'objects' (CPU Hittables), find their Name + Material, find matching Instance?
-    // 
-    // Or, we re-use the grouping logic but ONLY for 1 triangle per group?
-    // 
-    // Let's use the same logic as updateAllBLASFromTriangles but skip vertex collection.
-    
-    // Using direct iteration over objects to populate transform_map
-    // std::vector<std::shared_ptr<Triangle>> all_tris; // Removed
-    
-    // Group by Mesh (Lightweight: only need 1 tri per mesh to get transform)
-    std::unordered_map<std::string, Matrix4x4> transform_map;
-    
-    for (const auto& obj : objects) {
-        // Handle HittableInstance (Foliage, Scatter)
-        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
-            if (!inst->node_name.empty()) {
-                transform_map[inst->node_name] = inst->transform;
+
+        // Match with instances
+        for (size_t i = 0; i < instances.size(); ++i) {
+            if (instances[i].mesh_id < 0) continue;
+            
+            InstanceTransformCache cache_item;
+            cache_item.instance_id = static_cast<int>(i);
+            
+            // Priority 1: Direct Pointer Sync (Fastest & most accurate)
+            if (instances[i].source_hittable && ptr_to_obj.count(instances[i].source_hittable)) {
+                auto obj = ptr_to_obj[instances[i].source_hittable];
+                cache_item.representative_tri = std::dynamic_pointer_cast<Triangle>(obj);
+                m_instance_sync_cache.push_back(cache_item);
+            }
+            // Priority 2: Name-based Fallback (for compat)
+            else if (!instances[i].node_name.empty()) {
+                std::string name = instances[i].node_name;
+                size_t mat_pos = name.find("_mat_");
+                if (mat_pos != std::string::npos) name = name.substr(0, mat_pos);
+                
+                for (const auto& obj : objects) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                    if (tri && tri->getNodeName() == name) {
+                        cache_item.representative_tri = tri;
+                        m_instance_sync_cache.push_back(cache_item);
+                        break;
+                    }
+                }
             }
         }
-        // Handle Triangle (Static Mesh)
-        else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-             std::string base_name = tri->getNodeName();
-             if (base_name.empty()) base_name = "default_mesh";
-             
-             if (transform_map.find(base_name) == transform_map.end()) {
-                  transform_map[base_name] = tri->getTransformMatrix();
-             }
-         }
-         // TODO: Handle BVH children if needed
     }
-    
-    // Update Instances
-    for (size_t i = 0; i < instances.size(); ++i) {
-        if (instances[i].mesh_id < 0 || !instances[i].visible) continue;  // Skip invalid/hidden
+
+    // 2. FAST SYNC USING CACHE
+    for (const auto& item : m_instance_sync_cache) {
+        if (!item.representative_tri) continue;
         
-        // CRITICAL: Use instance's own node_name (supports cloned instances like "Car_1")
-        // NOT the BLAS's original_name (which is "Car" for all clones sharing that BLAS)
-        std::string name = instances[i].node_name;
+        Matrix4x4 m = item.representative_tri->getTransformMatrix();
+        float t[12];
+        t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
+        t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
+        t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
         
-        // Handle material suffix - strip "_mat_X" to get base name for lookup
-        size_t mat_pos = name.find("_mat_");
-        if (mat_pos != std::string::npos) {
-            name = name.substr(0, mat_pos);
-        }
-        
-        if (transform_map.count(name)) {
-            Matrix4x4 m = transform_map[name];
-            float t[12];
-            t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
-            t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
-            t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
-            
-            updateInstanceTransform(static_cast<int>(i), t);
-        }
+        updateInstanceTransform(item.instance_id, t);
     }
-    
-    tlas_needs_rebuild = true;
 }
 
 void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
     if (!context) return;
     
-    // Flatten objects to triangles
-    std::vector<std::shared_ptr<Triangle>> triangles;
-    triangles.reserve(objects.size());
-    for (const auto& obj : objects) {
-        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-        if (tri) triangles.push_back(tri);
+    // 1. REBUILD TOPOLOGY CACHE IF DIRTY
+    // This is the CRITICAL optimization for 500k+ triangle scenes
+    if (m_topology_dirty || m_cached_triangles.empty()) {
+        m_cached_triangles.clear();
+        m_cached_triangles.reserve(objects.size());
+        for (const auto& obj : objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri) m_cached_triangles.push_back(tri);
+        }
+        
+        std::vector<MeshData> groups = groupTrianglesByMesh(m_cached_triangles);
+        m_cached_groups.clear();
+        for (const auto& g : groups) {
+            int blas_idx = findBLAS(g.mesh_name, g.material_id);
+            if (blas_idx >= 0) {
+                m_cached_groups.push_back({blas_idx, g.triangle_indices});
+            }
+        }
+        
+        syncInstanceTransforms(objects, true);
+        m_topology_dirty = false;
     }
-    
-    // Group by mesh name (same as during initial build)
-    std::vector<MeshData> mesh_groups = groupTrianglesByMesh(triangles);
-    
-    // Build name -> mesh_group map for fast lookup
-    std::unordered_map<std::string, const MeshData*> name_to_group;
-    for (const auto& group : mesh_groups) {
-        name_to_group[group.mesh_name] = &group;
-    }
+
+    // ALWAYS sync instance transforms (rigid motion) using the O(1) cache
+    // This handles scale/pos for multiple characters correctly.
+    syncInstanceTransforms(objects, false);
 
     // Upload Bone Matrices (Reuse global buffer)
     CUdeviceptr d_boneMatricesPtr = 0;
@@ -467,24 +452,14 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
         d_boneMatricesPtr = d_globalBoneMatrices;
     }
     
-    int updated_count = 0;
-    
-    // For each existing BLAS, find matching mesh group by NAME and update
-    for (size_t blas_idx = 0; blas_idx < mesh_blas_list.size(); ++blas_idx) {
-        MeshBLAS& blas = mesh_blas_list[blas_idx];
-        
-        auto it = name_to_group.find(blas.mesh_name);
-        if (it == name_to_group.end()) {
-            // Mesh no longer exists in scene
-            continue;
-        }
-        
-        const MeshData& mesh = *(it->second);
+    // 3. UPDATE BLAS AND INSTANCE TRANSFORMS
+    for (const auto& group : m_cached_groups) {
+        MeshBLAS& blas = mesh_blas_list[group.blas_idx];
         bool gpu_skinning_applied = false;
 
-        // -----------------------------------------------------------------------
-        // GPU SKINNING PATH
-        // -----------------------------------------------------------------------
+        // --- DEFORMATION PATH (BLAS Rebuild) ---
+        // Only trigger expensive BLAS vertex updates if the mesh is actually deforming (Skinning)
+        // Static high-poly meshes will COMPLETELY skip this section.
         if (blas.hasSkinningData && d_boneMatricesPtr) {
             launchSkinningKernel(
                 reinterpret_cast<float3*>(blas.d_bindPoses),
@@ -492,100 +467,19 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
                 reinterpret_cast<int4*>(blas.d_boneIndices),
                 reinterpret_cast<float4*>(blas.d_boneWeights),
                 reinterpret_cast<float*>(d_boneMatricesPtr),
-                reinterpret_cast<float3*>(blas.d_vertices), // Output to BLAS directly
-                reinterpret_cast<float3*>(blas.d_normals),  // Output to BLAS directly
+                reinterpret_cast<float3*>(blas.d_vertices),
+                reinterpret_cast<float3*>(blas.d_normals),
                 static_cast<int>(blas.vertex_count),
                 static_cast<int>(boneMatrices.size()),
                 stream
             );
 
-            // Refit BLAS (Skip CPU Upload, NO Sync)
-            // We just need a geometry object with correct size to pass the check inside updateMeshBLAS
             MeshGeometry dummyGeom;
             dummyGeom.vertices.resize(blas.vertex_count); 
-            
-            // Pass sync=false to batch updates
-            if (updateMeshBLAS(static_cast<int>(blas_idx), dummyGeom, true, false)) {
-                updated_count++;
-            }
+            updateMeshBLAS(group.blas_idx, dummyGeom, true, false);
             gpu_skinning_applied = true;
         }
-
-        // -----------------------------------------------------------------------
-        // CPU PATH (Fallback)
-        // -----------------------------------------------------------------------
-        if (!gpu_skinning_applied) {
-            MeshGeometry geom;
-            geom.mesh_name = mesh.mesh_name;
-            geom.material_id = mesh.material_id;
-
-            for (int tri_idx : mesh.triangle_indices) {
-                if (tri_idx < 0 || tri_idx >= static_cast<int>(triangles.size())) continue;
-                auto& tri = triangles[tri_idx];
-                
-                uint32_t base = static_cast<uint32_t>(geom.vertices.size());
-                
-                // Get CURRENT vertex positions (skinned/transformed on CPU if GPU failed/inactive)
-                // FORCE LOCAL SPACE: Instances already have a transform matrix in TLAS.
-                // Using World Space here would apply transform twice (Mesh * Instance).
-                Vec3 v0, v1, v2;
-                
-                // FIX: For skinned meshes, use the deformed (current) vertices from CPU skinning
-                if (tri->hasSkinData()) {
-                    v0 = tri->getV0();
-                    v1 = tri->getV1();
-                    v2 = tri->getV2();
-                } else {
-                    // For static meshes, use original local positions (transform handles handle the rest)
-                    v0 = tri->getOriginalVertexPosition(0);
-                    v1 = tri->getOriginalVertexPosition(1);
-                    v2 = tri->getOriginalVertexPosition(2);
-                }
-                
-                geom.vertices.push_back({v0.x, v0.y, v0.z});
-                geom.vertices.push_back({v1.x, v1.y, v1.z});
-                geom.vertices.push_back({v2.x, v2.y, v2.z});
-                
-                geom.indices.push_back({base, base + 1, base + 2});
-                
-                Vec3 n0 = tri->getVertexNormal(0);
-                Vec3 n1 = tri->getVertexNormal(1);
-                Vec3 n2 = tri->getVertexNormal(2);
-                geom.normals.push_back({n0.x, n0.y, n0.z});
-                geom.normals.push_back({n1.x, n1.y, n1.z});
-                geom.normals.push_back({n2.x, n2.y, n2.z});
-            }
-            
-            // Pass sync=false to batch updates
-            if (updateMeshBLAS(static_cast<int>(blas_idx), geom, false, false)) {
-                updated_count++;
-            }
-        }
-        
-        // ═══════════════════════════════════════════════════════════════════════════
-        // Update Instance Transform for this mesh
-        // This is the key optimization: fast transform update without BLAS rebuild!
-        // ═══════════════════════════════════════════════════════════════════════════
-        if (!mesh.triangle_indices.empty()) {
-            int first_tri_idx = mesh.triangle_indices[0];
-            if (first_tri_idx >= 0 && first_tri_idx < static_cast<int>(triangles.size())) {
-                const auto& tri = triangles[first_tri_idx];
-                
-                // Get current transform from triangle
-                Matrix4x4 m = tri->getTransformMatrix();
-                float transform[12];
-                transform[0] = m.m[0][0]; transform[1] = m.m[0][1]; transform[2] = m.m[0][2]; transform[3] = m.m[0][3];
-                transform[4] = m.m[1][0]; transform[5] = m.m[1][1]; transform[6] = m.m[1][2]; transform[7] = m.m[1][3];
-                transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
-                
-                // Find all instances using this BLAS and update them
-                for (size_t i = 0; i < instances.size(); ++i) {
-                    if (instances[i].mesh_id == static_cast<int>(blas_idx)) {
-                        updateInstanceTransform(static_cast<int>(i), transform);
-                    }
-                }
-            }
-        }
+        // Rigid sync is now handled globally above
     }
     
    // SCENE_LOG_INFO("[OptixAccelManager] Updated " + std::to_string(updated_count) + " BLAS structures");
@@ -605,7 +499,7 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
 // INSTANCE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════
 
-int OptixAccelManager::addInstance(int mesh_id, const float transform[12], int material_id, const std::string& name) {
+int OptixAccelManager::addInstance(int mesh_id, const float transform[12], int material_id, const std::string& name, void* source_hittable) {
     if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
         SCENE_LOG_ERROR("[OptixAccelManager] Invalid mesh_id: " + std::to_string(mesh_id));
         return -1;
@@ -615,6 +509,7 @@ int OptixAccelManager::addInstance(int mesh_id, const float transform[12], int m
     inst.mesh_id = mesh_id;
     inst.material_id = material_id;
     inst.node_name = name;
+    inst.source_hittable = source_hittable;
     inst.sbt_offset = mesh_blas_list[mesh_id].sbt_offset;
     std::memcpy(inst.transform, transform, sizeof(float) * 12);
     
@@ -629,6 +524,7 @@ int OptixAccelManager::addInstance(int mesh_id, const float transform[12], int m
     }
     
     tlas_needs_rebuild = true;
+    m_topology_dirty = true; // Structure changed
     return instance_id;
 }
 
@@ -657,6 +553,7 @@ void OptixAccelManager::removeInstance(int instance_id) {
     instances[instance_id].mesh_id = -1;  // Mark as invalid
     free_instance_slots.push_back(instance_id);
     tlas_needs_rebuild = true;
+    m_topology_dirty = true; // Structure changed
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -715,6 +612,7 @@ int OptixAccelManager::cloneInstance(int source_instance_id, const std::string& 
     }
     
     tlas_needs_rebuild = true;
+    m_topology_dirty = true; // Structure changed
     return new_id;
 }
 
@@ -861,9 +759,11 @@ void OptixAccelManager::buildTLAS() {
         &tlas_handle, nullptr, 0
     ));
     
-    // NOTE: NO cudaStreamSynchronize here! Let GPU work asynchronously.
-    // The next launch() or render call will naturally sync.
-    // Removing this sync prevents UI freezes during TLAS updates.
+    // CRITICAL FIX: Sync after TLAS build to prevent race conditions with
+    // subsequent operations (VDB uploads) that may use a different stream.
+    // Without this sync, the TLAS build on the OptiX stream can race with
+    // VDB uploads on the default stream, causing "illegal memory access".
+    cudaStreamSynchronize(stream);
     
     // NOTE: Don't free d_tlas_temp - reuse it next time for efficiency!
     
@@ -1138,9 +1038,15 @@ void OptixAccelManager::cleanup() {
     hitgroup_records.clear();
     sbt = {};
     
+    // Reset Topology Cache (YaCache)
+    m_topology_dirty = true;
+    m_cached_triangles.clear();
+    m_cached_groups.clear();
+    m_instance_sync_cache.clear();
+
     tlas_needs_rebuild = true;
     
-    SCENE_LOG_INFO("[OptixAccelManager] Cleaned up");
+    SCENE_LOG_INFO("[OptixAccelManager] Cleaned up and reset caches");
 }
 
 void OptixAccelManager::clearInstances() {
@@ -1152,6 +1058,10 @@ void OptixAccelManager::clearInstances() {
     tlas_handle = 0;
     tlas_output_size = 0;
     tlas_needs_rebuild = true;
+
+    // Also reset topology cache as instances are gone
+    m_topology_dirty = true;
+    m_instance_sync_cache.clear();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

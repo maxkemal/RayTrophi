@@ -48,6 +48,10 @@ struct OptixGeometryData {
     std::vector<float3> colors; // Vertex colors
     std::vector<GpuMaterial> materials;
     std::vector<int> material_indices;
+    
+    // Skinning Data (for GPU Skinning)
+    std::vector<int4> boneIndices;
+    std::vector<float4> boneWeights;
 
     struct TextureBundle {
         cudaTextureObject_t albedo_tex = 0;
@@ -128,6 +132,7 @@ public:
     void updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices = {}); // BLAS+TLAS update
     void updateTLASMatricesOnly(const std::vector<std::shared_ptr<Hittable>>& objects); // Transform-only update
     void launch(SDL_Surface* surface, SDL_Window* window, int w, int h);
+    void launch(int w, int h); // Overload for internal use (renderer)
 
   
     void launch_tile_based_progressive(SDL_Surface* surface, SDL_Window* window, int width, int height, std::vector<uchar4>& framebuffer, SDL_Texture* raytrace_texture);
@@ -327,6 +332,7 @@ private:
     float* d_accumulation_buffer = nullptr;
     float* d_variance_buffer = nullptr;
     int* d_sample_count_buffer = nullptr;
+    int* d_converged_count = nullptr;  // Atomic counter for adaptive sampling debug
     std::vector<uchar4> partial_framebuffer;
 
     // Son ekran güncellemesinden bu yana işlenen piksellerin koordinatlarını biriktirir.
@@ -378,6 +384,7 @@ private:
     
     // Flag for parameter uploads
     bool params_dirty = true;
+    bool hasDirtyParams() const { return params_dirty; }
     size_t d_temp_buffer_size = 0; // Usage tracking for temp buffer optimization
 };
 

@@ -13,7 +13,6 @@
 #include "Material.h"
 #include "Texture.h"
 #include "Vec2.h"
-#include "Vec3SIMD.h"
 #include "Ray.h"
 #include "Hittable.h"
 #include <memory>
@@ -119,7 +118,6 @@ public:
     bool isEmissive() const;
     virtual float get_opacity(const Vec2& uv) const override;
     virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
-    virtual __m256 scatter_packet(const RayPacket& r_in, const HitRecordPacket& rec, Vec3Packet& attenuation, RayPacket& scattered) const override;
     float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const override;
     float get_scattering_factor() const override {
         // Example formula incorporating reflectivity and roughness
@@ -148,17 +146,6 @@ public:
     Vec3 fresnelSchlick(float cosTheta, const Vec3& F0) const;
     Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
 
-    // SIMD BRDF Helpers (Phase 3)
-    __m256 DistributionGGX_SIMD(const Vec3SIMD& N_x, const Vec3SIMD& N_y, const Vec3SIMD& N_z,
-                                const Vec3SIMD& H_x, const Vec3SIMD& H_y, const Vec3SIMD& H_z,
-                                const __m256& roughness) const;
-    __m256 GeometrySmith_SIMD(const Vec3SIMD& N_x, const Vec3SIMD& N_y, const Vec3SIMD& N_z,
-                              const Vec3SIMD& V_x, const Vec3SIMD& V_y, const Vec3SIMD& V_z,
-                              const Vec3SIMD& L_x, const Vec3SIMD& L_y, const Vec3SIMD& L_z,
-                              const __m256& roughness) const;
-    void fresnelSchlick_SIMD(const __m256& cosTheta,
-                             const Vec3SIMD& F0_x, const Vec3SIMD& F0_y, const Vec3SIMD& F0_z,
-                             Vec3SIMD& out_x, Vec3SIMD& out_y, Vec3SIMD& out_z) const;
     // float normalStrength = 1.0f; // Shadowing removed
     
     // Subsurface Scattering (Random Walk)

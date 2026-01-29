@@ -435,7 +435,7 @@ struct WorldKeyframe {
     bool has_fog = false;
     bool has_fog_params = false; // Density, Height, Falloff, Distance, Color, Scatter
     bool has_godrays = false;
-    bool has_godrays_params = false; // Intensity, Density, Decay, Samples, Clip, Stochastic
+    bool has_godrays_params = false; // Intensity, Density, Samples
 
     // Advanced Environment
     bool has_multi_scatter = false;
@@ -510,9 +510,7 @@ struct WorldKeyframe {
     float godrays_intensity = 0.5f;
     float godrays_density = 0.1f;
     int godrays_samples = 16;
-    float godrays_decay = 0.95f;
-    float godrays_density_clip_bias = 0.0f;
-    float godrays_stochastic_threshold = 0.01f;
+   
 
     // Advanced
     int multi_scatter_enabled = 1;
@@ -804,15 +802,13 @@ struct WorldKeyframe {
         if (a.has_godrays_params && b.has_godrays_params) {
             result.godrays_intensity = a.godrays_intensity + (b.godrays_intensity - a.godrays_intensity) * t;
             result.godrays_density = a.godrays_density + (b.godrays_density - a.godrays_density) * t;
-            result.godrays_decay = a.godrays_decay + (b.godrays_decay - a.godrays_decay) * t;
-            result.godrays_density_clip_bias = a.godrays_density_clip_bias + (b.godrays_density_clip_bias - a.godrays_density_clip_bias) * t;
-            result.godrays_stochastic_threshold = a.godrays_stochastic_threshold + (b.godrays_stochastic_threshold - a.godrays_stochastic_threshold) * t;
+            result.godrays_samples = (t < 0.5f) ? a.godrays_samples : b.godrays_samples;
         } else if (a.has_godrays_params) {
-            result.godrays_intensity = a.godrays_intensity; result.godrays_density = a.godrays_density; result.godrays_decay = a.godrays_decay;
-            result.godrays_density_clip_bias = a.godrays_density_clip_bias; result.godrays_stochastic_threshold = a.godrays_stochastic_threshold;
+            result.godrays_intensity = a.godrays_intensity; result.godrays_density = a.godrays_density;
+            result.godrays_samples = a.godrays_samples;
         } else if (b.has_godrays_params) {
-            result.godrays_intensity = b.godrays_intensity; result.godrays_density = b.godrays_density; result.godrays_decay = b.godrays_decay;
-            result.godrays_density_clip_bias = b.godrays_density_clip_bias; result.godrays_stochastic_threshold = b.godrays_stochastic_threshold;
+            result.godrays_intensity = b.godrays_intensity; result.godrays_density = b.godrays_density;
+            result.godrays_samples = b.godrays_samples;
         }
 
         // ===== ADVANCED =====
@@ -1874,7 +1870,7 @@ inline void to_json(json& j, const WorldKeyframe& w) {
 
         {"fge", w.fog_enabled}, {"fgd", w.fog_density}, {"fgh", w.fog_height}, {"fgf", w.fog_falloff}, {"fgds", w.fog_distance}, {"fgc", w.fog_color}, {"fgs", w.fog_sun_scatter},
 
-        {"gre", w.godrays_enabled}, {"gri", w.godrays_intensity}, {"grd", w.godrays_density}, {"grs", w.godrays_samples}, {"grdy", w.godrays_decay}, {"grcb", w.godrays_density_clip_bias}, {"grst", w.godrays_stochastic_threshold},
+        {"gre", w.godrays_enabled}, {"gri", w.godrays_intensity}, {"grd", w.godrays_density}, {"grs", w.godrays_samples},
 
         {"mse", w.multi_scatter_enabled}, {"msf", w.multi_scatter_factor}, {"ape", w.aerial_perspective}, {"apmin", w.aerial_min_distance}, {"apmax", w.aerial_max_distance},
         {"ove", w.env_overlay_enabled}, {"ovi", w.env_overlay_intensity}, {"ovr", w.env_overlay_rotation}, {"ovm", w.env_overlay_blend_mode}
@@ -1941,8 +1937,7 @@ inline void from_json(const json& j, WorldKeyframe& w) {
 
     w.godrays_enabled = j.value("gre", 0);
     w.godrays_intensity = j.value("gri", 0.5f); w.godrays_density = j.value("grd", 0.1f);
-    w.godrays_samples = j.value("grs", 16); w.godrays_decay = j.value("grdy", 0.95f);
-    w.godrays_density_clip_bias = j.value("grcb", 0.0f); w.godrays_stochastic_threshold = j.value("grst", 0.01f);
+    w.godrays_samples = j.value("grs", 16);
 
     w.multi_scatter_enabled = j.value("mse", 1); w.multi_scatter_factor = j.value("msf", 0.3f);
     w.aerial_perspective = j.value("ape", 1);
