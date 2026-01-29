@@ -11,81 +11,71 @@
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0;">RayTrophi</h2>
+        <h2>RayTrophi</h2>
         <a href="index.html" class="nav-link">Home / Overview</a>
         <a href="world.html" class="nav-link">World & Sky</a>
         <a href="water.html" class="nav-link">Water System</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="river.html" class="nav-link">River Tool</a>
-        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="animation.html" class="nav-link active">Animation</a>
-        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
         <a href="camera.html" class="nav-link">Pro Camera</a>
         <a href="system.html" class="nav-link">System & File</a>
     </div>
 
     <div id="content">
         <div class="container">
-            <a href="index.html" class="back-btn">← Back to Home</a>
-
             <h1>Animation System</h1>
 
-            <!-- HEADER IMAGE (Full Width) -->
-            <div class="screenshot-area" style="border:none; background:none; padding:0; margin-bottom:30px;">
-                <img src="images/anim_header.jpg" alt="Animation Showcase"
-                    style="width:100%; border-radius:8px; box-shadow: 0 5px 15px rgba(0,0,0,0.5);"
-                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
-                <div class="missing-img"
-                    style="border: 2px dashed #444; border-radius: 8px; display:none; align-items:center; justify-content:center; flex-direction:column; height:200px;">
-                    <div style="font-size:2em; margin-bottom:10px;">🎬</div>
-                    Please save a showcase screenshot of an Animated Scene as <code>manual/images/anim_header.jpg</code>
+            <div class="screenshot-area">
+                <img src="images/anim_header.jpg" alt="Animation Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🎬 Please save an Animation Render as <code>docs/images/anim_header.jpg</code>
                 </div>
             </div>
 
-            <p>RayTrophi includes a full-featured animation system capable of animating almost any property in the
-                scene.</p>
-
-            <!-- TIMELINE (Likely horizontal, keeping full width) -->
             <h2 id="timeline">1. Timeline & Keyframing</h2>
-
             <div class="card">
-                <div class="screenshot-area">
-                    <img src="images/anim_timeline.png" alt="Timeline Panel"
-                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Timeline Panel</strong> as
-                        <code>manual/images/anim_timeline.png</code>
-                    </div>
-                </div>
-
-                <h3>How to Animate</h3>
+                <img src="images/anim_timeline.jpg" alt="Timeline"
+                    style="width:100%; border-radius:8px; margin-bottom:15px;" onerror="this.style.display='none';">
+                <p>Animate any property by clicking the <span style="color:var(--accent-color)">Diamond Icon</span> next
+                    to it.</p>
                 <ol>
-                    <li>Move the Playhead.</li>
-                    <li>Adjust a parameter.</li>
-                    <li>Click the <span style="color:#0AC">Keyframe Diamond</span>.</li>
+                    <li>Move Playhead.</li>
+                    <li>Change Value.</li>
+                    <li>Set Keyframe.</li>
                 </ol>
             </div>
 
-            <!-- GRAPH EDITOR (Likely horizontal) -->
-            <h2 id="grapheditor">2. Graph Editor</h2>
+            <h2 id="animgraph">2. Anim Graph (Characters)</h2>
+            <p>New state machine system for character logic.</p>
 
-            <div class="card">
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/anim_graph.png" alt="Animation Graph"
+                    <img src="images/anim_fsm.jpg" alt="State Machine"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Animation Graph Editor</strong> as
-                        <code>manual/images/anim_graph.png</code>
-                    </div>
+                    <div class="missing-img">State Machine Graph</div>
                 </div>
-                <p>For precise control over easing and timing.</p>
+                <div>
+                    <h3>State Machine</h3>
+                    <p>Connect animation states (Idle, Walk, Run).</p>
+
+                    <h3>Blend Spaces</h3>
+                    <p>Blend multiple animations based on input (e.g. Speed, Direction).</p>
+
+                    <h3>Parameters</h3>
+                    <ul>
+                        <li><strong>Float:</strong> Speed</li>
+                        <li><strong>Bool:</strong> IsGrounded</li>
+                        <li><strong>Trigger:</strong> Jump</li>
+                    </ul>
+                </div>
             </div>
 
-            <div style="height:50px"></div>
+            <div style="height: 50px;"></div>
         </div>
     </div>
-
 </body>
 
 </html>

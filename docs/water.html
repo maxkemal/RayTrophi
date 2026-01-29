@@ -4,105 +4,48 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RayTrophi Manual - Water System</title>
+    <title>RayTrophi Manual - Water & Rivers</title>
     <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
     <div id="sidebar">
-        <h2 style="margin-top:0;">RayTrophi</h2>
+        <h2>RayTrophi</h2>
         <a href="index.html" class="nav-link">Home / Overview</a>
         <a href="world.html" class="nav-link">World & Sky</a>
         <a href="water.html" class="nav-link active">Water System</a>
-        <a href="render.html" class="nav-link">Render Settings</a>
-        <a href="river.html" class="nav-link">River Tool</a>
-        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
         <a href="animation.html" class="nav-link">Animation</a>
-        <a href="animgraph.html" class="nav-link">Anim Graph</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
         <a href="camera.html" class="nav-link">Pro Camera</a>
         <a href="system.html" class="nav-link">System & File</a>
     </div>
 
     <div id="content">
         <div class="container">
-            <a href="index.html" class="back-btn">← Back to Home</a>
+            <h1>Water & Hydrodynamics</h1>
 
-            <h1>Water System</h1>
-
-            <!-- HEADER IMAGE (Full Width) -->
-            <div class="screenshot-area" style="border:none; background:none; padding:0; margin-bottom:30px;">
-                <img src="images/water_header.jpg" alt="Water System Showcase"
-                    style="width:100%; border-radius:8px; box-shadow: 0 5px 15px rgba(0,0,0,0.5);"
-                    onerror="this.style.display='none'; this.nextElementSibling.style.display='flex'">
-                <div class="missing-img"
-                    style="border: 2px dashed #444; border-radius: 8px; display:none; align-items:center; justify-content:center; flex-direction:column; height:200px;">
-                    <div style="font-size:2em; margin-bottom:10px;">🌊</div>
-                    Please save a showcase render of the Ocean as <code>manual/images/water_header.jpg</code>
+            <div class="screenshot-area">
+                <img src="images/water_header.jpg" alt="Ocean Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🌊 Please save an Ocean Render as <code>docs/images/water_header.jpg</code>
                 </div>
             </div>
 
-            <p>The RayTrophi Water System creates realistic oceans, lakes, and pools using a hybrid approach of
-                Procedural Noise and Film-Quality FFT simulations.</p>
+            <p>Create realistic oceans, lakes, and procedural rivers.</p>
 
-            <div class="hint">
-                <strong>Tip:</strong> All water parameters can be animated! Click the <span style="color:#0AC">Keyframe
-                    Diamond</span> next to any slider to animate it.
-            </div>
-
-            <!-- WAVES SECTION (Split Layout) -->
-            <h2 id="waves">1. Procedural Waves</h2>
-            <p>Basic Gerstner waves for calm water bodies or simple rivers.</p>
-
-            <div class="card split-layout">
+            <h2 id="fft">1. FFT Ocean</h2>
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/water_waves.png" alt="Water Waves Panel"
+                    <img src="images/water_fft.jpg" alt="FFT UI"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Waves Panel</strong> as
-                        <code>manual/images/water_waves.png</code>
-                    </div>
+                    <div class="missing-img">FFT Ocean UI</div>
                 </div>
-
-                <div class="table-container">
-                    <table class="param-table">
-                        <tr>
-                            <th>Parameter</th>
-                            <th>Description</th>
-                        </tr>
-                        <tr>
-                            <td>Speed</td>
-                            <td>How fast the waves move across the surface.</td>
-                        </tr>
-                        <tr>
-                            <td>Height</td>
-                            <td>Vertical displacement of the waves. Set to 0 for a flat mirror surface.</td>
-                        </tr>
-                        <tr>
-                            <td>Frequency</td>
-                            <td>Density of the waves. Higher values create smaller, more rippled water.</td>
-                        </tr>
-                    </table>
-                </div>
-            </div>
-
-            <!-- FFT OCEAN SECTION (Split Layout) -->
-            <h2 id="fft">2. FFT Ocean (Film Quality)</h2>
-            <p>This module uses <strong>Tessendorf's FFT (Fast Fourier Transform)</strong> algorithm to simulate deep
-                ocean waves with realistic statistical distribution.</p>
-
-            <div class="card split-layout">
-                <div class="screenshot-area">
-                    <img src="images/water_fft.png" alt="FFT Ocean Panel"
-                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>FFT Ocean Panel</strong> as
-                        <code>manual/images/water_fft.png</code>
-                    </div>
-                </div>
-
-                <div class="table-container">
+                <div>
+                    <p>Uses <strong>Tessendorf's FFT</strong> algorithm for film-quality waves.</p>
                     <table class="param-table">
                         <tr>
                             <th>Parameter</th>
@@ -110,63 +53,74 @@
                         </tr>
                         <tr>
                             <td>Ocean Size</td>
-                            <td>Physical size (in meters) of one FFT tile.</td>
+                            <td>Physical size of a tile in meters.</td>
                         </tr>
                         <tr>
                             <td>Wind Speed</td>
-                            <td>Controls the energy spectrum. 30+ m/s is stormy.</td>
+                            <td>Energy spectrum (30+ m/s = Storm).</td>
                         </tr>
                         <tr>
                             <td>Choppiness</td>
-                            <td>Horizontal displacement. Too high values can cause self-intersection.</td>
+                            <td>Horizontal displacement (Wave peakedness).</td>
+                        </tr>
+                        <tr>
+                            <td>Foam Scale</td>
+                            <td>Whitecaps threshold.</td>
                         </tr>
                     </table>
                 </div>
             </div>
 
-            <!-- PHYSICS SECTION (Split Layout) -->
-            <h2 id="physics">3. Physics & Optics</h2>
-
-            <div class="card split-layout">
+            <h2 id="river">2. River Tool</h2>
+            <div class="screenshot-area" style="margin-bottom: 20px;">
+                <img src="images/river_header.jpg" alt="River Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🌊 Please save a River Render as <code>docs/images/river_header.jpg</code>
+                </div>
+            </div>
+            <div class="split-layout">
                 <div class="screenshot-area">
-                    <img src="images/water_physics.png" alt="Physics Panel"
+                    <img src="images/river_spline.jpg" alt="River Spline"
                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
-                    <div class="missing-img">
-                        Please save a screenshot of the <strong>Physics / Caustics Panel</strong> as
-                        <code>manual/images/water_physics.png</code>
-                    </div>
+                    <div class="missing-img">River Spline View</div>
                 </div>
-
-                <div class="table-container">
-                    <table class="param-table">
-                        <tr>
-                            <th>Parameter</th>
-                            <th>Description</th>
-                        </tr>
-                        <tr>
-                            <td>Max Depth</td>
-                            <td>The distance at which water becomes fully opaque.</td>
-                        </tr>
-                        <tr>
-                            <td>Absorption Density</td>
-                            <td>Turbidity/Murkiness.</td>
-                        </tr>
-                        <tr>
-                            <td>IOR</td>
-                            <td>Index of Refraction (Standard: 1.333).</td>
-                        </tr>
-                        <tr>
-                            <td>Caustics Intensity</td>
-                            <td>Brightness of light patterns on the sea floor.</td>
-                        </tr>
-                    </table>
+                <div>
+                    <p>Draw rivers on terrain using <strong>Cubic Bezier Splines</strong>.</p>
+                    <ul>
+                        <li><strong>Add Point:</strong> Extend river from current view.</li>
+                        <li><strong>Subdivide:</strong> Add detail between points.</li>
+                        <li><strong>Flow Map:</strong> Water texture scrolls along UVs.</li>
+                        <li><strong>Turbulence:</strong> Distortion for flow vectors.</li>
+                    </ul>
                 </div>
             </div>
 
-            <div style="height:50px"></div>
+            <h2 id="physics">3. Optics</h2>
+            <div class="card">
+                <table class="param-table">
+                    <tr>
+                        <th>Parameter</th>
+                        <th>Description</th>
+                    </tr>
+                    <tr>
+                        <td>Max Depth</td>
+                        <td>Distance where water becomes opaque.</td>
+                    </tr>
+                    <tr>
+                        <td>IOR</td>
+                        <td>Index of Refraction (1.333 standard).</td>
+                    </tr>
+                    <tr>
+                        <td>Caustics</td>
+                        <td>Startling light patterns on the sea floor.</td>
+                    </tr>
+                </table>
+            </div>
+
+            <div style="height: 50px;"></div>
         </div>
     </div>
-
 </body>
 
 </html>
