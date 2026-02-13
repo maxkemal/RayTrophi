@@ -163,6 +163,9 @@
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\InstanceManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\RiverManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui\imgui.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -222,10 +225,19 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AnimatedObject.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AnimationController.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AnimationNodes.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AreaLight.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AssimpLoader.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\BezierSpline.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\CPUInfo.h">
@@ -235,6 +247,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\CameraPresets.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\CloudManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ColorProcessingParams.h">
@@ -252,7 +267,13 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\EmbreeBVH.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\FoliageFwd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Hittable.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\HittableInstance.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\HittableList.h">
@@ -285,6 +306,9 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Mesh.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\NodeSystemV2.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\OptixAccelManager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -295,6 +319,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ParallelBVHNode_optimized.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\PhysicalCamera.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\PointLight.h">
@@ -318,7 +345,13 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Renderer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\RiverSpline.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneCommand.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneExporter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneHistory.h">
@@ -339,7 +372,13 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SpotLight.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainFFT.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainNodesV2.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainSystem.h">
@@ -444,9 +483,12 @@
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\unified_volume_sampling.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\water_shaders_cpu.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <CustomBuild Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\9c68b946b271f09d3d134e3834762a5c\raygen.ptx.rule">
+    <CustomBuild Include="E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\2a0d4695fab3f8bdc30d1876922d1b0e\raygen.ptx.rule">
       <Filter>CMake Rules</Filter>
     </CustomBuild>
     <CustomBuild Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\CMakeLists.txt" />
@@ -455,17 +497,17 @@
     <None Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\miniz.c">
       <Filter>Source Files</Filter>
     </None>
-    <None Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx" />
+    <None Include="E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="CMake Rules">
-      <UniqueIdentifier>{A0667A3D-5A81-328F-BD90-546F69C1E457}</UniqueIdentifier>
+      <UniqueIdentifier>{E02C0CC0-1255-3C97-801B-42C880E7202E}</UniqueIdentifier>
     </Filter>
     <Filter Include="Header Files">
-      <UniqueIdentifier>{335EA457-3794-3066-99B5-A4A37FE3C2CA}</UniqueIdentifier>
+      <UniqueIdentifier>{4A10BCA5-DDF8-35C4-BDFF-1A9CC3912426}</UniqueIdentifier>
     </Filter>
     <Filter Include="Source Files">
-      <UniqueIdentifier>{80B51741-3C11-3C11-B718-13D1A535185E}</UniqueIdentifier>
+      <UniqueIdentifier>{4E5F34DE-FBBD-3E93-A69B-FD8A78E8BA39}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

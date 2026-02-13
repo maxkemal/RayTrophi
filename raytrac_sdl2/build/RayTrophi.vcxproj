@@ -22,7 +22,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{663378ED-FFDB-3B40-8081-B871045DBB05}</ProjectGuid>
+    <ProjectGuid>{969D3B74-0522-34D7-81AA-100C1D5A5B68}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
     <Platform>x64</Platform>
@@ -60,25 +60,25 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
     <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\Debug\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\Debug\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">RayTrophi.dir\Debug\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">RayTrophi</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">.exe</TargetExt>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</LinkIncremental>
     <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</GenerateManifest>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\Release\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\Release\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">RayTrophi.dir\Release\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">RayTrophi</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.exe</TargetExt>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkIncremental>
     <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</GenerateManifest>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\MinSizeRel\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\MinSizeRel\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">RayTrophi.dir\MinSizeRel\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">RayTrophi</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">.exe</TargetExt>
     <LinkIncremental Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkIncremental>
     <GenerateManifest Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">true</GenerateManifest>
-    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\RelWithDebInfo\</OutDir>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\RelWithDebInfo\</OutDir>
     <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">RayTrophi.dir\RelWithDebInfo\</IntDir>
     <TargetName Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">RayTrophi</TargetName>
     <TargetExt Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">.exe</TargetExt>
@@ -124,7 +124,7 @@
     <PostBuildEvent>
       <Message>Copying raygen.ptx to output directory</Message>
       <Command>setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/Debug/raygen.ptx"
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/Debug/raygen.ptx
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -139,8 +139,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
-      <ImportLibrary>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/Debug/RayTrophi.lib</ImportLibrary>
-      <ProgramDataBaseFile>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/Debug/RayTrophi.pdb</ProgramDataBaseFile>
+      <ImportLibrary>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/Debug/RayTrophi.lib</ImportLibrary>
+      <ProgramDataBaseFile>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/Debug/RayTrophi.pdb</ProgramDataBaseFile>
       <SubSystem>Console</SubSystem>
     </Link>
     <ProjectReference>
@@ -191,7 +191,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <PostBuildEvent>
       <Message>Copying raygen.ptx to output directory</Message>
       <Command>setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/Release/raygen.ptx"
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/Release/raygen.ptx
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -206,8 +206,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
-      <ImportLibrary>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/Release/RayTrophi.lib</ImportLibrary>
-      <ProgramDataBaseFile>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/Release/RayTrophi.pdb</ProgramDataBaseFile>
+      <ImportLibrary>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/Release/RayTrophi.lib</ImportLibrary>
+      <ProgramDataBaseFile>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/Release/RayTrophi.pdb</ProgramDataBaseFile>
       <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
@@ -258,7 +258,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <PostBuildEvent>
       <Message>Copying raygen.ptx to output directory</Message>
       <Command>setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/MinSizeRel/raygen.ptx"
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/MinSizeRel/raygen.ptx
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -273,8 +273,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
-      <ImportLibrary>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/MinSizeRel/RayTrophi.lib</ImportLibrary>
-      <ProgramDataBaseFile>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/MinSizeRel/RayTrophi.pdb</ProgramDataBaseFile>
+      <ImportLibrary>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/MinSizeRel/RayTrophi.lib</ImportLibrary>
+      <ProgramDataBaseFile>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/MinSizeRel/RayTrophi.pdb</ProgramDataBaseFile>
       <SubSystem>Console</SubSystem>
     </Link>
     <ProjectReference>
@@ -324,7 +324,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <PostBuildEvent>
       <Message>Copying raygen.ptx to output directory</Message>
       <Command>setlocal
-"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/RelWithDebInfo/raygen.ptx"
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/RelWithDebInfo/raygen.ptx
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -339,8 +339,8 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalOptions>%(AdditionalOptions) /machine:x64</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
-      <ImportLibrary>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/RelWithDebInfo/RayTrophi.lib</ImportLibrary>
-      <ProgramDataBaseFile>E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/RelWithDebInfo/RayTrophi.pdb</ProgramDataBaseFile>
+      <ImportLibrary>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/RelWithDebInfo/RayTrophi.lib</ImportLibrary>
+      <ProgramDataBaseFile>E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/RelWithDebInfo/RayTrophi.pdb</ProgramDataBaseFile>
       <SubSystem>Console</SubSystem>
     </Link>
     <ProjectReference>
@@ -352,10 +352,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </CudaLink>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <CustomBuild Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\9c68b946b271f09d3d134e3834762a5c\raygen.ptx.rule">
+    <CustomBuild Include="E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\2a0d4695fab3f8bdc30d1876922d1b0e\raygen.ptx.rule">
       <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Compiling CUDA to PTX: source/src/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -364,11 +364,11 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Compiling CUDA to PTX: source/src/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -377,11 +377,11 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Compiling CUDA to PTX: source/src/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -390,11 +390,11 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Compiling CUDA to PTX: source/src/raygen.cu</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
-"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx" -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
+"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" -ptx "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src/raygen.cu" -o E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/raygen.ptx -I"C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/include" -I"E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/source/src" --use_fast_math --maxrregcount=64 -gencode=arch=compute_50,code=compute_50 -allow-unsupported-compiler
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -403,7 +403,7 @@ exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
       <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\raygen.cu;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\material_gpu.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\params.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\payload.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\sbt_data.h;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\material_scatter.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\vec3_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\random_utils.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\ray_color.cuh;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\trace_ray.cuh;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
     </CustomBuild>
   </ItemGroup>
@@ -412,7 +412,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <UseUtf8Encoding>Always</UseUtf8Encoding>
       <Message Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Building Custom Rule E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/CMakeLists.txt</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">setlocal
-"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" "-BE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build" --check-stamp-file "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp"
+"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" -BE:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build --check-stamp-file E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -420,12 +420,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Building Custom Rule E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/CMakeLists.txt</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">setlocal
-"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" "-BE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build" --check-stamp-file "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp"
+"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" -BE:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build --check-stamp-file E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -433,12 +433,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">Building Custom Rule E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/CMakeLists.txt</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">setlocal
-"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" "-BE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build" --check-stamp-file "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp"
+"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" -BE:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build --check-stamp-file E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -446,12 +446,12 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">Building Custom Rule E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/CMakeLists.txt</Message>
       <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">setlocal
-"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" "-BE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build" --check-stamp-file "E:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp"
+"C:\Program Files\CMake\bin\cmake.exe" "-SE:/visual studio proje c++/raytracing_Proje_Moduler/raytrac_sdl2" -BE:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build --check-stamp-file E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/generate.stamp
 if %errorlevel% neq 0 goto :cmEnd
 :cmEnd
 endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
@@ -459,8 +459,8 @@ endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
 exit /b %1
 :cmDone
 if %errorlevel% neq 0 goto :VCEnd</Command>
-      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
-      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCUDAInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCXXInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeCommonLanguageInclude.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeGenericSystem.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeInitializeConfigs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeLanguageInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeParseImplicitLinkInfo.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeRCInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInformation.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\CMakeSystemSpecificInitialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\CMakeCommonCompilerMacros.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Compiler\NVIDIA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindCUDAToolkit.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindOpenMP.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageHandleStandardArgs.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\FindPackageMessage.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-Initialize.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC-CXX.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-MSVC.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows-NVIDIA-CUDA.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\Windows.cmake;C:\Program Files\CMake\share\cmake-3.30\Modules\Platform\WindowsPaths.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCUDACompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeCXXCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeRCCompiler.cmake;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\3.30.0\CMakeSystem.cmake;%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\generate.stamp</Outputs>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">false</LinkObjects>
     </CustomBuild>
   </ItemGroup>
@@ -519,6 +519,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\unified_converters.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\InstanceGroup.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\InstanceManager.cpp" />
+    <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\src\RiverManager.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui\imgui.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui\imgui_draw.cpp" />
     <ClCompile Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui\imgui_impl_opengl3.cpp" />
@@ -540,17 +541,23 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui\imstb_truetype.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AABB.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AnimatedObject.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AnimationController.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AnimationNodes.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AreaLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\AssimpLoader.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\BezierSpline.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\CPUInfo.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Camera.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\CameraPresets.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\CloudManager.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ColorProcessingParams.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Dielectric.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\DiffuseLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\DirectionalLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\EmbreeBVH.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\FoliageFwd.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Hittable.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\HittableInstance.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\HittableList.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ImGuizmo.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\InstanceGroup.h" />
@@ -561,10 +568,12 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\MaterialManager.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Matrix4x4.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Mesh.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\NodeSystemV2.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\OptixAccelManager.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\OptixWrapper.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ParallelBVHNode.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ParallelBVHNode_optimized.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\PhysicalCamera.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\PointLight.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\PrincipledBSDF.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ProjectData.h" />
@@ -572,14 +581,18 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Quaternion.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Ray.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Renderer.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\RiverSpline.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneCommand.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneExporter.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneHistory.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneSelection.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SceneSerializer.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SequencerAdapter.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SplashScreen.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\SpotLight.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainFFT.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainManager.h" />
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainNodesV2.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\TerrainSystem.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\Texture.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\ThreadLocalRNG.h" />
@@ -614,12 +627,13 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\unified_types.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\unified_volume.h" />
     <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\unified_volume_sampling.h" />
-    <None Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx">
+    <ClInclude Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include\water_shaders_cpu.h" />
+    <None Include="E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\raygen.ptx">
     </None>
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\ZERO_CHECK.vcxproj">
-      <Project>{FC29E67D-6427-3EAA-B174-45D3414BCA2B}</Project>
+    <ProjectReference Include="E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\ZERO_CHECK.vcxproj">
+      <Project>{CB3343BF-A893-3E51-A001-B9F0AF4B9024}</Project>
       <Name>ZERO_CHECK</Name>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
