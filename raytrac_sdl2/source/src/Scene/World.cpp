@@ -294,7 +294,6 @@ World::World() {
 void World::initializeLUT() {
     // GPU SAFETY CHECK: Skip LUT initialization if no CUDA device available
     // Transmittance/SkyView LUTs require CUDA for precomputation, but not necessarily OptiX.
-    extern bool g_hasCUDA; 
     if (!g_hasCUDA) {
         SCENE_LOG_WARN("No CUDA device available - skipping LUT initialization (CPU fallback mode)");
         // Set LUT handles to 0 so GPU code knows to use fallback
@@ -530,7 +529,7 @@ NishitaSkyParams World::getNishitaParams() const {
 
 // Simplified Nishita for CPU Preview (Optional, for now returns simple gradient or black if unimplemented)
 // Implementing full Nishita on CPU might be slow for real-time without optimization.
-Vec3 World::evaluate(const Vec3& ray_dir) {
+Vec3 World::evaluate(const Vec3& ray_dir, const Vec3& origin) {
     if (data.mode == WORLD_MODE_COLOR) {
         return to_vec3(data.color) * data.color_intensity;
     }
@@ -554,13 +553,13 @@ Vec3 World::evaluate(const Vec3& ray_dir) {
         return to_vec3(data.color); // Fallback
     }
     else if (data.mode == WORLD_MODE_NISHITA) {
-        return calculateNishitaSky(ray_dir);
+        return calculateNishitaSky(ray_dir, origin);
     }
     return Vec3(0);
 }
 
 // MATCHED TO GPU: High-Quality LUT based Sky radiance
-Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
+Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
     float3 dir = normalize(to_float3(ray_dir));
     float3 sunDir = normalize(data.nishita.sun_direction);
     
@@ -585,9 +584,30 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
     float excessPhase = fmaxf(0.0f, phaseM - 2.0f); // Matched to 2.0f LUT clamp
     
     if (excessPhase > 0.0f && atmosphere_lut) {
-        float3 transSun = atmosphere_lut->sampleTransmittance(std::max(0.01f, sunDir.y), data.nishita.altitude, data.nishita.atmosphere_height);
+        // COORDINATE SYNC: Camera Y=0 is planet surface. Center is at (0, -Rg, 0)
+        float Rg = data.nishita.planet_radius;
+        Vec3 p = origin + Vec3(0, Rg, 0);
+        float current_altitude = std::max(0.0f, p.length() - Rg);
+        
+        float cosTheta = std::max(0.01f, sunDir.y);
+        float3 transSun = atmosphere_lut->sampleTransmittance(cosTheta, current_altitude, data.nishita.atmosphere_height);
+        
         Vec3 mieScat = to_vec3(data.nishita.mie_scattering) * (data.nishita.mie_density * 0.15f);
         L += to_vec3(transSun) * (mieScat * excessPhase * data.nishita.sun_intensity);
+    }
+    
+    // --- MULTI-SCATTERING (Matches GPU Exactly) ---
+    if (data.advanced.multi_scatter_enabled) {
+        Vec3 scatteringAlbedo(0.8f, 0.85f, 0.9f);
+        float multiFactor = data.advanced.multi_scatter_factor;
+        
+        // Approximation logic matching GPU apply_multi_scattering
+        Vec3 ms = L;
+        Vec3 secondOrder = L * scatteringAlbedo * 0.5f * expf(-0.5f * 0.3f);
+        ms = ms + secondOrder * multiFactor;
+        Vec3 thirdOrder = secondOrder * scatteringAlbedo * 0.25f * expf(-0.5f * 0.1f);
+        ms = ms + thirdOrder * multiFactor * 0.5f;
+        L = ms;
     }
 
     // --- SUN DISK (Matches GPU Exactly) ---
@@ -612,8 +632,15 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir) {
          float edge_t = std::max(0.0f, std::min(1.0f, (radial_pos - 0.85f) / 0.15f));
          float edgeSoftness = 1.0f - edge_t * edge_t * (3.0f - 2.0f * edge_t);
          
-         // Transmittance to sun
-         float3 trans = atmosphere_lut->sampleTransmittance(std::max(0.01f, sunDir.y), data.nishita.altitude, data.nishita.atmosphere_height);
+         // Transmittance to sun (altitude-dependent)
+         float Rg = data.nishita.planet_radius;
+         Vec3 p = origin + Vec3(0, Rg, 0);
+         float current_altitude = std::max(0.0f, p.length() - Rg);
+         
+         float3 trans = { 1.0f, 1.0f, 1.0f };
+         if (atmosphere_lut) {
+             trans = atmosphere_lut->sampleTransmittance(std::max(0.01f, sunDir.y), current_altitude, data.nishita.atmosphere_height);
+         }
          // Multiplier matched to GPU (80000.0f)
          L += to_vec3(trans) * data.nishita.sun_intensity * 80000.0f * limbDarkening * edgeSoftness;
     }

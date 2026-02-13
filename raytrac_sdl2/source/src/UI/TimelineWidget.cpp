@@ -20,6 +20,12 @@
 #include "world.h"
 #include "OptixWrapper.h"  // For direct instance transform updates
 
+// External rendering state for animation render sync
+extern std::atomic<bool> rendering_in_progress;
+extern std::atomic<bool> rendering_stopped_cpu;
+extern std::atomic<bool> rendering_stopped_gpu;
+extern std::atomic<bool> rendering_paused;
+
 // Helper to parse entity name and channel from track name
 // Returns { "Cube_1", ChannelType::Location } if input is "Cube_1.Location"
 static std::pair<std::string, ChannelType> parseTrackName(const std::string& track_name) {
@@ -68,6 +74,15 @@ static std::pair<std::string, ChannelType> parseTrackName(const std::string& tra
 // MAIN DRAW FUNCTION
 // ============================================================================
 void TimelineWidget::draw(UIContext& ctx) {
+    // ANIMATION RENDER SYNC: When animation render is active, 
+    // timeline should FOLLOW the render frame, not control it
+    if (ctx.render_settings.animation_render_locked && rendering_in_progress) {
+        // Read current frame FROM render_settings (set by Renderer thread)
+        current_frame = ctx.render_settings.animation_current_frame;
+        // Disable playback during render
+        is_playing = false;
+    }
+    
     // PERFORMANCE: Only sync once on first frame, or when explicitly triggered
     // syncFromAnimationData is now called only when needed, not every frame
     static bool first_sync_done = false;
@@ -209,6 +224,17 @@ void TimelineWidget::draw(UIContext& ctx) {
                     }
                 }
             }
+            
+            // After applying all water keyframes, run actual water simulation update
+            // This updates FFT ocean and geometric wave mesh animation
+            float frame_delta = 1.0f / static_cast<float>(ctx.render_settings.animation_fps);
+            if (WaterManager::getInstance().update(frame_delta)) {
+                // Water mesh changed - need geometry update
+                g_bvh_rebuild_pending = true;
+                g_optix_rebuild_pending = true;
+                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+            }
+            
             last_water_update_frame = current_frame;
         }
     }
@@ -509,6 +535,65 @@ void TimelineWidget::draw(UIContext& ctx) {
 // PLAYBACK CONTROLS + TOOLBAR
 // ============================================================================
 void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
+    // Check if animation render is active - disable most controls
+    bool render_locked = ctx.render_settings.animation_render_locked && rendering_in_progress;
+    
+    // Show render status indicator when locked - but INCLUDE STOP BUTTON!
+    if (render_locked) {
+        // Show PAUSED status if paused
+        if (rendering_paused.load()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "PAUSED:");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "RENDERING:");
+        }
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "Frame %d / %d", 
+            ctx.render_settings.animation_current_frame,
+            ctx.render_settings.animation_end_frame);
+        ImGui::SameLine();
+        
+        // PAUSE/RESUME BUTTON
+        if (rendering_paused.load()) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.8f, 0.3f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.5f, 0.1f, 1.0f));
+            if (ImGui::Button("RESUME", ImVec2(65, 20))) {
+                rendering_paused = false;
+                SCENE_LOG_INFO("Animation render resumed from Timeline.");
+            }
+            ImGui::PopStyleColor(3);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.5f, 0.1f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.7f, 0.2f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.5f, 0.4f, 0.1f, 1.0f));
+            if (ImGui::Button("PAUSE", ImVec2(65, 20))) {
+                rendering_paused = true;
+                SCENE_LOG_INFO("Animation render paused from Timeline.");
+            }
+            ImGui::PopStyleColor(3);
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pause/Resume render (or press P/Space)");
+        
+        ImGui::SameLine();
+        
+        // STOP BUTTON - Always accessible during render!
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.6f, 0.1f, 0.1f, 1.0f));
+        if (ImGui::Button("STOP", ImVec2(60, 20))) {
+            rendering_stopped_cpu = true;
+            rendering_stopped_gpu = true;
+            SCENE_LOG_WARN("Animation render stopped from Timeline.");
+        }
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop animation render (or press ESC)");
+        
+        ImGui::SameLine();
+        ImGui::TextDisabled("| P=Pause  ESC=Stop");
+        
+        return;  // Skip all other controls during render
+    }
+    
     // --- TOOLBAR BUTTONS ---
     bool has_selection = !selected_track.empty();
     bool has_keyframe_selected = has_selection && selected_keyframe_frame >= 0;
@@ -1337,6 +1422,11 @@ void TimelineWidget::handleZoomPan(ImVec2 canvas_pos, ImVec2 canvas_size) {
 // SCRUBBING (CLICK TO SET FRAME)
 // ============================================================================
 void TimelineWidget::handleScrubbing(ImVec2 canvas_pos, float canvas_width) {
+    // RENDER LOCK: Don't allow scrubbing during animation render
+    if (rendering_in_progress) {
+        return;
+    }
+    
     ImGuiIO& io = ImGui::GetIO();
     
     // BUGFIX: Don't scrub if ImGui is capturing mouse (e.g., dropdown/popup open)

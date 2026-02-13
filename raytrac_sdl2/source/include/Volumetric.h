@@ -28,7 +28,7 @@ public:
     virtual float get_opacity(const Vec2& uv) const override;
     
     // Unified Ray Marching Scatter Logic
-    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
+    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const override;
     
     // Emissions
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const override;

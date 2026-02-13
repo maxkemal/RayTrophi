@@ -14,6 +14,24 @@
 #include <algorithm>
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// CLEAR ALL RIVERS (Also removes WaterSurfaces from WaterManager)
+// ═══════════════════════════════════════════════════════════════════════════════
+void RiverManager::clear(SceneData* scene) {
+    // Remove associated WaterSurfaces from WaterManager BEFORE clearing rivers
+    // This ensures FFT handles are properly cleaned up
+    if (scene) {
+        for (auto& river : rivers) {
+            if (river.waterSurfaceId >= 0) {
+                WaterManager::getInstance().removeWaterSurface(*scene, river.waterSurfaceId);
+            }
+        }
+    }
+    
+    rivers.clear();
+    next_id = 1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TERRAIN HEIGHT SAMPLING
 // ═══════════════════════════════════════════════════════════════════════════════
 float RiverManager::sampleTerrainHeight(const Vec3& position) const {
@@ -116,9 +134,10 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         gpu->ior = wp.ior;
         gpu->metallic = 0.0f;
         
-        gpu->anisotropic = wp.wave_speed;
-        gpu->sheen = fmaxf(0.001f, wp.wave_strength);  // > 0 = IS_WATER
-        gpu->sheen_tint = wp.wave_frequency;
+        // Water flag (sheen > 0 = IS_WATER)
+        gpu->sheen = 0.01f;  // > 0 = IS_WATER
+        gpu->anisotropic = 0.0f;
+        gpu->sheen_tint = 0.0f;
         
         gpu->clearcoat = wp.shore_foam_intensity;
         gpu->clearcoat_roughness = wp.caustic_intensity;

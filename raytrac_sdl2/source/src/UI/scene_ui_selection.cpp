@@ -224,115 +224,100 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
     // Draw the marquee rectangle while selecting
     drawMarqueeRect();
 }
-bool SceneUI::deleteSelectedObject(UIContext& ctx)
-{
-    std::string deleted_name = ctx.selection.selected.name;
-    if (deleted_name.empty()) return false;
-
-    auto& objects = ctx.scene.world.objects;
-    size_t removed_count = 0;
-
-    objects.erase(
-        std::remove_if(objects.begin(), objects.end(),
-            [&deleted_name, &removed_count](const std::shared_ptr<Hittable>& obj)
-            {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (tri && tri->nodeName == deleted_name) {
-                    removed_count++;
-                    return true;
-                }
-                return false;
-            }),
-        objects.end()
-    );
-
-    if (removed_count == 0) return false;
-
-    // --- Project data bookkeeping ---
-    auto& proj = g_ProjectManager.getProjectData();
-
-    for (auto& model : proj.imported_models) {
-        for (const auto& inst : model.objects) {
-            if (inst.node_name == deleted_name) {
-                if (std::find(model.deleted_objects.begin(),
-                    model.deleted_objects.end(),
-                    deleted_name) == model.deleted_objects.end()) {
-                    model.deleted_objects.push_back(deleted_name);
-                }
-                break;
-            }
-        }
-    }
-
-    // Remove procedural objects
-    auto& procs = proj.procedural_objects;
-    procs.erase(
-        std::remove_if(procs.begin(), procs.end(),
-            [&deleted_name](const ProceduralObjectData& p) {
-                return p.display_name == deleted_name;
-            }),
-        procs.end()
-    );
-
-    g_ProjectManager.markModified();
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // DEFERRED REBUILD - Set flags instead of immediate rebuild for faster UI
-    // ═══════════════════════════════════════════════════════════════════════════
-    invalidateCache(); // FORCE FULL REBUILD
-    g_mesh_cache_dirty = true;
-    g_bvh_rebuild_pending = true;
-    g_optix_rebuild_pending = true;
-    
-    // Auto-cleanup timeline tracks for deleted object
-    auto it = ctx.scene.timeline.tracks.find(deleted_name);
-    if (it != ctx.scene.timeline.tracks.end()) {
-        ctx.scene.timeline.tracks.erase(it);
-    }
-
-    SCENE_LOG_INFO(
-        "Deleted: " + deleted_name + " (" +
-        std::to_string(removed_count) + " triangles)"
-    );
-
-    return true;
-}
 
 void SceneUI::handleDeleteShortcut(UIContext& ctx)
 {
     if (!ImGui::IsKeyPressed(ImGuiKey_Delete) &&
         !ImGui::IsKeyPressed(ImGuiKey_X)) return;
 
-    bool deleted = false;
-
-    if (ctx.selection.selected.type == SelectableType::Light) {
-        deleted = deleteSelectedLight(ctx);
-    }
-    else if (ctx.selection.selected.type == SelectableType::Object) {
-        deleted = deleteSelectedObject(ctx);
-    }
-
-    if (deleted) {
-        ctx.selection.clearSelection();
+    // Use the optimized multi-selection capable triggerDelete
+    if (ctx.selection.hasSelection()) {
+        triggerDelete(ctx);
     }
 }
 
 void SceneUI::handleMouseSelection(UIContext& ctx) {
     // Only select if not interacting with UI or Gizmo
     if (ImGui::IsMouseClicked(0)) {
-
-        // Ignore click if over UI elements (Window/Panel), Gizmo, or HUD overlay
-        // WantCaptureMouse is true if mouse is over any ImGui window or interacting with it
-        // hud_captured_mouse is true if HUD elements (Focus Ring, Zoom, Exposure) captured the click
-        if (ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsOver() || hud_captured_mouse) {
-            // Reset HUD flag for next frame
-            hud_captured_mouse = false;
-            return;
+        bool capture = ImGui::GetIO().WantCaptureMouse;
+        bool gizmo_over = ImGuizmo::IsOver();
+        
+        //// Detailed logging for diagnostics
+        //SCENE_LOG_INFO("Viewport click. Cache: " + std::string(mesh_cache_valid ? "OK" : "NO") + 
+        //               ", ObjCount: " + std::to_string(ctx.scene.world.objects.size()) + 
+        //               ", Capture=" + std::to_string(capture) + 
+        //               ", GizmoOver=" + std::to_string(gizmo_over) + 
+        //               ", HUD=" + std::to_string(hud_captured_mouse) +
+        //               ", Dragging=" + std::to_string(is_dragging));
+                       
+        if (!is_dragging) {
+            // Ignore click if over UI elements (Window/Panel), Gizmo, or HUD overlay
+            if (capture || gizmo_over || hud_captured_mouse) {
+                // Reset HUD flag for next frame
+                hud_captured_mouse = false;
+                return;
+            }
         }
 
-        // LAZY CPU SYNC: Update any pending objects before picking
-        // This is where the deferred vertex update actually happens
-        ensureCPUSyncForPicking();
+        // ═══════════════════════════════════════════════════════════════════════════
+        // SELECTION CACHE SYNC (Now centralized in update(), but kept here as safety)
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (!mesh_cache_valid) {
+            rebuildMeshCache(ctx.scene.world.objects);
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // GPU MODE VERTEX SYNC: In GPU TLAS mode, CPU vertices are NOT updated during
+        // gizmo drag (only GPU transform is updated). We must sync before picking.
+        // This is a one-time cost per click - acceptable for accurate selection.
+        // ═══════════════════════════════════════════════════════════════════════════
+        extern bool g_bvh_rebuild_pending;
+        if (g_bvh_rebuild_pending && ctx.render_settings.use_optix) {
+            // BVH is stale - transforms changed. Sync ALL objects with TransformHandle.
+            int synced_objects = 0;
+            for (auto& [name, triangles] : mesh_cache) {
+                if (triangles.empty()) continue;
+                auto first_tri = triangles[0].second;
+                if (first_tri && first_tri->getTransformHandle()) {
+                    for (auto& pair : triangles) {
+                        pair.second->updateTransformedVertices();
+                    }
+                    synced_objects++;
+                }
+            }
+            if (synced_objects > 0) {
+              //  SCENE_LOG_INFO("GPU picking sync: updated " + std::to_string(synced_objects) + " objects");
+            }
+            // Clear the pending flag after full sync
+            g_bvh_rebuild_pending = false;
+        }
+
+        // Also process lazy sync queue (for any stragglers)
+        ensureCPUSyncForPicking(ctx);
+
+
+        // ═══════════════════════════════════════════════════════════════════════════
+        // SKINNED MESH FIX: When using GPU rendering with animations,
+        // CPU vertices may be out of sync. Force a sync for picking accuracy.
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (ctx.render_settings.use_optix && !ctx.scene.animationDataList.empty()) {
+            // We have GPU rendering + animations: sync CPU vertices for skinned meshes
+            // This is a one-time cost per click, acceptable for accurate selection
+            bool synced_any = false;
+            for (auto& obj : ctx.scene.world.objects) {
+                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                if (tri && !tri->getVertexBoneWeights().empty()) {
+                    // This is a skinned triangle - apply current bone matrices
+                    if (!ctx.renderer.finalBoneMatrices.empty()) {
+                        tri->apply_skinning(ctx.renderer.finalBoneMatrices);
+                        synced_any = true;
+                    }
+                }
+            }
+            if (synced_any) {
+                SCENE_LOG_INFO("Synced skinned mesh vertices for viewport selection");
+            }
+        }
 
         // Check if Ctrl is held for multi-selection
         bool ctrl_held = ImGui::GetIO().KeyCtrl;
@@ -435,22 +420,80 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
-            // Perform Linear Selection (Bypasses BVH for accuracy and avoids rebuilds)
+            // ═══════════════════════════════════════════════════════════════════════════
+            // SMART SELECTION: GPU picking (O(1)) with CPU fallback
+            // GPU mode: Try pick buffer first, fall back to CPU linear scan
+            // CPU mode: Linear scan through mesh_cache with updated vertices
+            // ═══════════════════════════════════════════════════════════════════════════
 
             HitRecord rec;
             bool hit = false;
             float closest_so_far = 1e9f;
             HitRecord temp_rec;
 
-            for (const auto& obj : ctx.scene.world.objects) {
-                if (obj->hit(r, 0.001f, closest_so_far, temp_rec)) {
-                    hit = true;
-                    closest_so_far = temp_rec.t;
-                    rec = temp_rec;
+            // GPU PICKING PATH: Use pick buffer for O(1) object selection
+            // Skip GPU pick if rebuild is pending (pick buffer is stale after object delete/add)
+            extern bool g_optix_rebuild_pending;
+            bool gpu_pick_success = false;
+            std::string gpu_picked_name;
+            
+            bool use_gpu = ctx.render_settings.use_optix;
+            bool has_ptr = (ctx.optix_gpu_ptr != nullptr);
+            bool rebuild_pending = g_optix_rebuild_pending;
+            
+            if (use_gpu && has_ptr && !rebuild_pending) {
+                // Pass viewport dimensions for coordinate scaling
+                int vp_w = static_cast<int>(win_w);
+                int vp_h = static_cast<int>(win_h);
+                int object_id = ctx.optix_gpu_ptr->getPickedObjectId(x, y, vp_w, vp_h);
+                if (object_id >= 0) {
+                    gpu_picked_name = ctx.optix_gpu_ptr->getPickedObjectName(x, y, vp_w, vp_h);
+                    // Only mark as success if name found AND exists in mesh_cache
+                    if (!gpu_picked_name.empty() && mesh_cache.find(gpu_picked_name) != mesh_cache.end()) {
+                        // [FIX] Ignore ForceField visualization meshes
+                        if (gpu_picked_name.find("ForceField") == std::string::npos && 
+                            gpu_picked_name.find("Force Field") == std::string::npos) {
+                            gpu_pick_success = true;
+                        }
+                       // SCENE_LOG_INFO("GPU Pick: " + gpu_picked_name);
+                    }
+                }
+            }
+
+            // ═══════════════════════════════════════════════════════════════════════
+            // CPU BVH PICKING: Faster fallback for large scenes (e.g. 1.2M triangles)
+            // ═══════════════════════════════════════════════════════════════════════
+            if (!gpu_pick_success) {
+                // First try the world BVH (if not being rebuilt)
+                extern bool g_bvh_rebuild_pending;
+                if (ctx.scene.bvh && !g_bvh_rebuild_pending) {
+                    if (ctx.scene.bvh->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                        hit = true;
+                        closest_so_far = temp_rec.t;
+                        rec = temp_rec;
+                    }
+                }
+                
+                // Fallback to Linear Scan ONLY if scene is very small OR BVH missing/rebuilding
+                // Note: Rebuilding 1.2M objects BVH is much faster than linear scanning them!
+                if (!hit && (mesh_cache.size() < 1000 || !ctx.scene.bvh)) {
+                    for (const auto& [name, triangles] : mesh_cache) {
+                        // [FIX] Ignore ForceField gizmos
+                        if (name.find("ForceField") != std::string::npos || 
+                            name.find("Force Field") != std::string::npos) continue;
+
+                        for (const auto& pair : triangles) {
+                            if (pair.second->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                                hit = true;
+                                closest_so_far = temp_rec.t;
+                                rec = temp_rec;
+                            }
+                        }
+                    }
                 }
             }
             
-            // Check Gas Volumes
+            // Check Gas Volumes (not in main BVH, separate list)
             for (const auto& gas : ctx.scene.gas_volumes) {
                 if (gas->hit(r, 0.001f, closest_so_far, temp_rec)) {
                     hit = true;
@@ -459,7 +502,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
-            // Check VDB Volumes
+            // Check VDB Volumes (not in main BVH, separate list)
             for (const auto& vdb : ctx.scene.vdb_volumes) {
                 if (vdb->hit(r, 0.001f, closest_so_far, temp_rec)) {
                     hit = true;
@@ -504,7 +547,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         ctx.optix_gpu_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
-                    SCENE_LOG_INFO(std::string("Pick Focus set to: ") + std::to_string(min_dist) + "m");
+                   // SCENE_LOG_INFO(std::string("Pick Focus set to: ") + std::to_string(min_dist) + "m");
                 }
 
                 is_picking_focus = false;
@@ -546,6 +589,52 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 return; // Camera selected, done
             }
 
+            // ═══════════════════════════════════════════════════════════════════════════
+            // GPU PICK SUCCESS PATH: Direct mesh selection from pick buffer result
+            // ═══════════════════════════════════════════════════════════════════════════
+            if (gpu_pick_success && !gpu_picked_name.empty()) {
+                // Find the object in mesh_cache using GPU-provided name
+                auto cache_it = mesh_cache.find(gpu_picked_name);
+                if (cache_it != mesh_cache.end() && !cache_it->second.empty()) {
+                    auto& first_tri = cache_it->second[0].second;
+                    int index = cache_it->second[0].first;
+                    
+                    if (ctrl_held) {
+                        SelectableItem item;
+                        item.type = SelectableType::Object;
+                        item.object = first_tri;
+                        item.object_index = index;
+                        item.name = first_tri->nodeName;
+                        
+                        if (ctx.selection.isSelected(item)) {
+                            ctx.selection.removeFromSelection(item);
+                        } else {
+                            ctx.selection.addToSelection(item);
+                        }
+                    } else {
+                        ctx.selection.selectObject(first_tri, index, first_tri->nodeName);
+                        
+                        // TERRAIN CONNECTION: Check if this is a terrain chunk
+                        std::string tName = first_tri->nodeName;
+                        if (tName.find("Terrain_") == 0) {
+                            size_t chunkPos = tName.find("_Chunk");
+                            if (chunkPos != std::string::npos) {
+                                tName = tName.substr(0, chunkPos);
+                            }
+                            auto terrain = TerrainManager::getInstance().getTerrainByName(tName);
+                            if (terrain) {
+                                terrain_brush.active_terrain_id = terrain->id;
+                                show_terrain_tab = true;
+                                //SCENE_LOG_INFO("Terrain selected via GPU pick: " + tName);
+                            }
+                        }
+                    }
+                    return; // GPU pick selection done
+                }
+                // Note: If gpu_pick_success is true but cache lookup failed, we already
+                // handled that above by setting gpu_pick_success = false before CPU scan
+            }
+
             if (hit && (rec.t < closest_t)) {
 
                 // --- VDB VOLUME SELECTION ---
@@ -581,7 +670,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         else {
                             // Single selection
                             ctx.selection.selectVDBVolume(found_vdb, index, found_vdb->name);
-                            SCENE_LOG_INFO("Selected VDB Volume via viewport: " + found_vdb->name);
+                           // SCENE_LOG_INFO("Selected VDB Volume via viewport: " + found_vdb->name);
                         }
                     }
                 }
@@ -619,7 +708,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         else {
                             // Single selection
                             ctx.selection.selectGasVolume(found_gas, index, found_gas->name);
-                            SCENE_LOG_INFO("Selected Gas Volume via viewport: " + found_gas->name);
+                           // SCENE_LOG_INFO("Selected Gas Volume via viewport: " + found_gas->name);
                         }
                     }
                 }
@@ -632,22 +721,17 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     // Ensure cache is valid
                     if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
 
-                    bool found = false;
-                    for (auto& [name, list] : mesh_cache) {
-                        for (auto& pair : list) {
-                            if (pair.second.get() == rec.triangle) {
-                                found_tri = pair.second;
-                                index = pair.first;
-                                found = true;
-                                break;
-                            }
+                    // Try fast O(1) lookup first with const-correctness
+                    auto it = tri_to_index.find(rec.triangle);
+                    if (it != tri_to_index.end()) {
+                        index = it->second;
+                        if (index >= 0 && index < (int)ctx.scene.world.objects.size()) {
+                            found_tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[index]);
                         }
-                        if (found) break;
                     }
 
                     if (found_tri) {
                         if (ctrl_held) {
-                            // Multi-selection: Toggle object in selection list
                             SelectableItem item;
                             item.type = SelectableType::Object;
                             item.object = found_tri;
@@ -656,14 +740,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 
                             if (ctx.selection.isSelected(item)) {
                                 ctx.selection.removeFromSelection(item);
-                            }
-                            else {
+                            } else {
                                 ctx.selection.addToSelection(item);
                             }
-                        }
-                        else {
-                            // Single selection: Replace selection
+                        } else {
                             ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
+                            SCENE_LOG_INFO("Selected via CPU Viewport: " + found_tri->nodeName);
 
                             // TERRAIN CONNECTION: Check if this is a terrain chunk
                             std::string tName = found_tri->nodeName;
@@ -676,33 +758,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                                 if (terrain) {
                                     terrain_brush.active_terrain_id = terrain->id;
                                     show_terrain_tab = true;
-                                    // Focus removed per user request
-                                    SCENE_LOG_INFO("Terrain selected via viewport: " + tName);
                                 }
                             }
                         }
-                    }
-                    else {
-                        SCENE_LOG_WARN("Selection: Object found but not in cache. Forcing rebuild...");
+                    } else {
+                        SCENE_LOG_WARN("Selection: Triangle hit but not found in cache. Forcing rebuild...");
                         rebuildMeshCache(ctx.scene.world.objects);
-                        
-                        // Retry finding the triangle once more after rebuild
-                        found = false;
-                        for (auto& [name, list] : mesh_cache) {
-                            for (auto& pair : list) {
-                                if (pair.second.get() == rec.triangle) {
-                                    found_tri = pair.second;
-                                    index = pair.first;
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if (found) break;
-                        }
-
-                        if (found && found_tri) {
-                            ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
-                        }
                     }
                 }
                 else if (closest_camera && closest_camera_t < closest_t) {
@@ -763,13 +824,13 @@ void SceneUI::triggerDelete(UIContext& ctx) {
 
     // Collect all items to delete (supports multi-selection)
     std::vector<SelectableItem> items_to_delete = ctx.selection.multi_selection;
-    
+
     // OPTIMIZATION: Collect ALL hittable pointers to delete into a single set for O(1) lookup
     // Using Hittable* (base class) for type safety
     std::unordered_set<Hittable*> objects_to_delete;
     std::vector<std::string> deleted_names;
     std::vector<std::pair<std::string, std::vector<std::shared_ptr<Triangle>>>> undo_data;
-    
+
     // ═══════════════════════════════════════════════════════════════════════════
     // VDB VOLUME DELETION
     // ═══════════════════════════════════════════════════════════════════════════
@@ -778,13 +839,13 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
             // Unload GPU resources
             item.vdb_volume->unload();
-            
+
             // Remove from Scene VDB list
             if (ctx.scene.removeVDBVolume(item.vdb_volume)) {
                 vdb_deleted = true;
                 SCENE_LOG_INFO("Deleted VDB Volume: " + item.vdb_volume->name);
             }
-            
+
             // Also ensure it is removed from world.objects (Hittable list)
             // This is handled generically below if we add it to objects_to_delete, 
             // OR we can explicitly remove it here.
@@ -811,13 +872,13 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         if (item.type == SelectableType::GasVolume && item.gas_volume) {
             // Unload GPU resources
             item.gas_volume->freeGPUResources();
-            
+
             // Remove from Scene Gas list
             if (ctx.scene.removeGasVolume(item.gas_volume)) {
                 gas_deleted = true;
                 SCENE_LOG_INFO("Deleted Gas Volume: " + item.gas_volume->name);
             }
-            
+
             // GasVolume is a Hittable, must be removed from world.objects
             objects_to_delete.insert(item.gas_volume.get());
         }
@@ -843,7 +904,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             }
         }
     }
-    
+
     if (ff_deleted_count > 0) {
         // Reset accumulation if needed (force fields might affect visual simulation)
         ctx.renderer.resetCPUAccumulation();
@@ -917,7 +978,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 [&](const ProceduralObjectData& p) { return p.display_name == deleted_name; });
             proj_data.procedural_objects.erase(it, proj_data.procedural_objects.end());
         }
-        
+
         // Check Water Surfaces - remove from WaterManager if name matches
         auto& water_surfaces = WaterManager::getInstance().getWaterSurfaces();
         for (auto& surf : water_surfaces) {
@@ -929,7 +990,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             }
         }
     }
-    
+
     // Remove marked water surfaces
     auto& water_surfaces = WaterManager::getInstance().getWaterSurfaces();
     water_surfaces.erase(
@@ -989,23 +1050,12 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         ctx.selection.clearSelection();
         g_ProjectManager.markModified();
 
-        // ═══════════════════════════════════════════════════════════════════════════
-        // OPTIMIZED UPDATE - Manually remove from cache to avoid slow rebuild
-        // ═══════════════════════════════════════════════════════════════════════════
-        for (const auto& name : deleted_names) {
-            // Remove from fast lookup cache
-            mesh_cache.erase(name);
-            
-            // Remove from UI iteration cache
-            auto it = std::remove_if(mesh_ui_cache.begin(), mesh_ui_cache.end(), 
-                [&](const auto& pair){ return pair.first == name; });
-            mesh_ui_cache.erase(it, mesh_ui_cache.end());
-        }
-
         g_mesh_cache_dirty = true;  // Flag for Main.cpp / other systems
-        invalidateCache();          // FORCE FULL REBUILD - indices are definitely wrong now
-        // mesh_cache_valid = true; // REMOVED: Incremental update is risky for indices
-        
+
+        // Update class tracker and FORCE FULL REBUILD
+        last_scene_obj_count = ctx.scene.world.objects.size();
+        invalidateCache();
+
         if (deleted_objects > 0) {
             // ═══════════════════════════════════════════════════════════════════════
             // INCREMENTAL GPU UPDATE (TLAS mode) - Instant!
@@ -1017,11 +1067,12 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 }
                 // Single TLAS update after ALL hides complete (batched for efficiency)
                 ctx.optix_gpu_ptr->rebuildTLAS();
-            } else {
+            }
+            else {
                 // GAS mode fallback: Full rebuild required
                 g_optix_rebuild_pending = true;
             }
-            
+
             // CPU BVH still needs rebuild for picking (async)
             g_bvh_rebuild_pending = true;
         }
@@ -1037,7 +1088,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
             ctx.optix_gpu_ptr->resetAccumulation();
         }
-        
+
         // ═══════════════════════════════════════════════════════════════════════════
         // AUTO-CLEANUP TIMELINE TRACKS FOR DELETED ENTITIES
         // ═══════════════════════════════════════════════════════════════════════════
@@ -1049,7 +1100,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
                 ctx.scene.timeline.tracks.erase(it);
             }
         }
-        
+
         // Also clean up deleted lights and cameras from timeline
         for (const auto& item : items_to_delete) {
             if (item.type == SelectableType::Light && item.light) {
@@ -1067,10 +1118,6 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         }
 
         ctx.start_render = true;
-
-        // [VERBOSE] SCENE_LOG_INFO("Deleted " + std::to_string(deleted_objects) + " objects, " + 
-        //                std::to_string(deleted_lights) + " lights, " +
-        //                std::to_string(deleted_cameras) + " cameras");
     }
 }
 
@@ -1093,6 +1140,7 @@ void SceneUI::drawMarqueeRect() {
     // Draw border
     draw_list->AddRect(ImVec2(x1, y1), ImVec2(x2, y2), IM_COL32(100, 150, 255, 200), 0.0f, 0, 2.0f);
 }
+
 void SceneUI::triggerDuplicate(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     if (!sel.hasSelection()) return;

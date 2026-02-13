@@ -15,6 +15,37 @@ class Quaternion {
 public:
     float w, x, y, z;
 
+    // Create a quaternion representing the rotation from 'start' to 'dest' vectors
+    static Quaternion rotationBetween(const Vec3& start, const Vec3& dest) {
+        Vec3 startNorm = start.normalize();
+        Vec3 destNorm = dest.normalize();
+    
+        float cosTheta = Vec3::dot(startNorm, destNorm);
+        Vec3 rotationAxis;
+    
+        if (cosTheta < -1.0f + 1e-6f) {
+            // Vectors are opposite, rotate 180 degrees around any orthogonal axis
+            rotationAxis = Vec3::cross(Vec3(0.0f, 0.0f, 1.0f), startNorm);
+            if (rotationAxis.length_squared() < 1e-6f) // parallel to z-axis
+                rotationAxis = Vec3::cross(Vec3(1.0f, 0.0f, 0.0f), startNorm);
+            
+            rotationAxis = rotationAxis.normalize();
+            return Quaternion(0.0f, rotationAxis.x, rotationAxis.y, rotationAxis.z);
+        }
+    
+        rotationAxis = Vec3::cross(startNorm, destNorm);
+    
+        float s = sqrtf((1.0f + cosTheta) * 2.0f);
+        float invs = 1.0f / s;
+    
+        return Quaternion(
+            s * 0.5f,
+            rotationAxis.x * invs,
+            rotationAxis.y * invs,
+            rotationAxis.z * invs
+        );
+    }
+
     // VarsayÃ½lan yapÃ½cÃ½
     Quaternion() : w(1), x(0), y(0), z(0) {}
 

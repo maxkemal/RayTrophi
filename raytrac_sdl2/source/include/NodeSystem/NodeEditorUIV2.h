@@ -96,6 +96,21 @@ namespace NodeSystem {
         std::function<void(uint32_t nodeId)> onNodeContextMenu;
         std::function<void()> onGraphModified;
 
+        /**
+         * @brief Reset editor state (zoom, scroll, selection)
+         */
+        void reset() {
+            zoom = 1.0f;
+            scrollX = 0.0f;
+            scrollY = 0.0f;
+            selectedNodeId = 0;
+            selectedLinkId = 0;
+            selectedGroupId = 0;
+            draggingNodeId = 0;
+            isCreatingLink = false;
+            linkStartPinId = 0;
+        }
+
     private:
         std::unordered_map<uint32_t, ImVec2> pinPositions_;
         ImVec2 canvasPos_;

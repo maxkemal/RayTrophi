@@ -59,6 +59,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/UI/*.cpp"
     "source/src/Utils/*.cpp"
     "source/src/Animation/*.cpp"
+    "source/src/Hair/*.cpp"
 )
 
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
@@ -132,6 +133,8 @@ add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUT})
 # --- INCLUDE DIRECTORIES ---
 target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/include/Hair"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/include/Backend"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src"
     # Recursively add all subdirectories in source/src as includes
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Core"
@@ -142,6 +145,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/UI"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Utils"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Animation"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Hair"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/external/imgui"

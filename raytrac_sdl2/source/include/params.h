@@ -310,6 +310,7 @@ struct RayGenParams {
     float3 background_color;
     OptixTraversableHandle handle;
     GpuMaterial* materials;
+    int material_count;
     GpuVolumetricInfo* volumetric_infos;
     
     // VDB Volume Objects (independent of mesh geometry)
@@ -357,8 +358,67 @@ struct RayGenParams {
     float wind_strength;      // Wind strength (0-1 normalized)
     float wind_speed;         // Animation speed multiplier
     float wind_time;          // Wind animation time (separate from water_time)
-    //float4* accumulation_buffer launch_tile_based_progressive için gerektiğinde;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU PICKING (Object ID buffer for viewport selection)
+    // ═══════════════════════════════════════════════════════════════════════════
+    int* pick_buffer;         // Per-pixel object ID (SBT index), -1 = no hit
+    float* pick_depth_buffer; // Per-pixel hit distance (for depth sorting)
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HAIR RENDERING (OptiX Curve Primitives)
+    // ═══════════════════════════════════════════════════════════════════════════
+    OptixTraversableHandle hair_handle;   // Separate GAS for hair curves
+    int hair_enabled;                     // 0 = no hair, 1 = hair rendering active
+    
+    // Hair geometry data (for closesthit program)
+    float4* hair_vertices;                // x,y,z,radius per control point
+    unsigned int* hair_indices;           // Segment start indices
+    float3* hair_tangents;                // Pre-computed tangent per segment
+    int hair_segment_count;
+    int hair_vertex_count;
+    
+    // Hair material parameters (Marschner BSDF)
+    float3 hair_color;                    // Base hair color
+    float hair_melanin;                   // 0=blonde, 0.5=brown, 1=black
+    float hair_melanin_redness;           // Red pigment ratio
+    float hair_roughness;                 // Longitudinal roughness
+    float hair_radial_roughness;          // Azimuthal roughness
+    float hair_ior;                       // Index of refraction (1.55 human)
+    float3 hair_absorption;               // Explicit absorption coefficient (for Mode 2)
+    float hair_alpha;                     // Cuticle tilt in radians
+    float hair_coat;                      // Outer coat layer (fur)
+    float3 hair_coat_tint;                // Coat color
+    float hair_random_hue;
+    float hair_random_value;
+    
+    // Hair coloring mode (0=Direct, 1=Melanin, 2=Absorption, 3=Root UV Map)
+    int hair_color_mode;
+    
+    // Custom hair textures (assigned via Hair Material Panel)
+    cudaTextureObject_t hair_albedo_tex;        // Custom albedo texture for hair
+    cudaTextureObject_t hair_roughness_tex;      // Custom roughness texture for hair
+    int hair_has_albedo_tex;                     // 1 = custom albedo texture valid
+    int hair_has_roughness_tex;                  // 1 = custom roughness texture valid
+    
+    // Scalp mesh texture (inherited from bound mesh material)
+    cudaTextureObject_t hair_scalp_albedo_tex;   // Scalp mesh albedo texture
+    int hair_has_scalp_albedo_tex;               // 1 = scalp texture valid
+    float3 hair_scalp_base_color;                // Scalp material base color (fallback)
    
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HAIR CURVE HIT DATA (for closesthit program)
+// ═══════════════════════════════════════════════════════════════════════════════
+struct HairHitGroupData {
+    float4* vertices;         // x,y,z,radius per control point
+    unsigned int* indices;    // Segment start indices
+    float3* tangents;         // Pre-computed tangent per segment
+    uint32_t* strand_ids;     // Per-segment strand identifier
+    int segment_count;
+    int vertex_count;
+};
+
 #define SHADOW_RAY_TYPE 1
 #define RAY_TYPE_COUNT 2

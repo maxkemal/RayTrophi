@@ -20,12 +20,6 @@
 namespace TerrainNodesV2 {
 
 
-    // C++14 compatible clamp helper (std::clamp requires C++17)
-    template<typename T>
-    inline T clampValue(T val, T lo, T hi) {
-        return (val < lo) ? lo : ((val > hi) ? hi : val);
-    }
-
     // ============================================================================
     // HEIGHTMAP FILE LOADING
     // ============================================================================
@@ -519,7 +513,7 @@ namespace TerrainNodesV2 {
         
         // Run erosion via TerrainManager
         if (useGPU) {
-            mgr.hydraulicErosionGPU(terrain, params, mask);
+            mgr.fluvialErosionGPU(terrain, params, mask);
         } else {
             mgr.hydraulicErosion(terrain, params, mask);
         }
@@ -528,21 +522,51 @@ namespace TerrainNodesV2 {
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
         *result.data = terrain->heightmap.data;
         
+        // Apply Edge Falloff if enabled
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+        
         return result;
     }
     
     void HydraulicErosionNode::drawContent() {
-        ImGui::Checkbox("Use GPU", &useGPU);
-        ImGui::DragInt("Iterations", &params.iterations, 100, 1000, 500000);
-        ImGui::DragInt("Droplet Lifetime", &params.dropletLifetime, 1, 10, 256);
-        ImGui::DragFloat("Inertia", &params.inertia, 0.01f, 0.0f, 1.0f);
-        ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.1f, 0.1f, 50.0f);
-        ImGui::DragFloat("Deposit Speed", &params.depositSpeed, 0.01f, 0.0f, 1.0f);
-        ImGui::DragFloat("Erode Speed", &params.erodeSpeed, 0.01f, 0.0f, 1.0f);
-        ImGui::DragFloat("Evaporate Speed", &params.evaporateSpeed, 0.001f, 0.0f, 0.1f);
-        ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f);
-        ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 20.0f);
-        ImGui::DragInt("Erosion Radius", &params.erosionRadius, 1, 1, 8);
+        if (ImGui::Checkbox("Use GPU (Hybrid Fluvial)", &useGPU)) dirty = true;
+        
+        if (useGPU) {
+            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Mode: GPU Stream Power (Parity)");
+            if (ImGui::DragInt("Intensity", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
+            if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.05f, 0.1f, 20.0f)) dirty = true;
+            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.01f, 2.0f)) dirty = true;
+            if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
+            if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f)) dirty = true;
+            
+            if (ImGui::Button("Reset GPU Params")) {
+                params.iterations = 50000;
+            params.sedimentCapacity = 2.0f;
+            params.erodeSpeed = 0.05f;
+            params.erosionRadius = 2;
+            params.minSlope = 0.005f;
+            dirty = true;
+            }
+        } else {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "Mode: CPU Droplet Sim");
+            if (ImGui::DragInt("Iterations", &params.iterations, 1000, 1000, 1000000)) dirty = true;
+            if (ImGui::DragInt("Droplet Lifetime", &params.dropletLifetime, 1, 32, 512)) dirty = true;
+            if (ImGui::DragFloat("Inertia", &params.inertia, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.1f, 0.1f, 100.0f)) dirty = true;
+            if (ImGui::DragFloat("Deposit Speed", &params.depositSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragFloat("Erode Speed", &params.erodeSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragFloat("Evaporate Speed", &params.evaporateSpeed, 0.001f, 0.0f, 0.2f)) dirty = true;
+            if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.0001f, 0.0f, 0.1f, "%.4f")) dirty = true;
+            if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 50.0f)) dirty = true;
+            if (ImGui::DragInt("Erosion Radius", &params.erosionRadius, 1, 1, 12)) dirty = true;
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
     }
     
     NodeSystem::PinValue ThermalErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -595,14 +619,29 @@ namespace TerrainNodesV2 {
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
         *result.data = terrain->heightmap.data;
         
+        // Apply Edge Falloff if enabled
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+        
         return result;
     }
     
     void ThermalErosionNode::drawContent() {
         ImGui::Checkbox("Use GPU", &useGPU);
         ImGui::DragInt("Iterations", &params.iterations, 1, 1, 500);
-        ImGui::DragFloat("Talus Angle", &params.talusAngle, 0.01f, 0.1f, 1.5f);
-        ImGui::DragFloat("Erosion Amount", &params.erosionAmount, 0.01f, 0.0f, 1.0f);
+        
+        float uiDegrees = std::atan(params.talusAngle) * 180.0f / 3.14159f;
+        if (ImGui::DragFloat("Talus Angle", &uiDegrees, 0.1f, 0.0f, 80.0f, "%.1f deg")) {
+            params.talusAngle = std::tan(uiDegrees * 3.14159f / 180.0f);
+            dirty = true;
+        }
+        if (ImGui::DragFloat("Erosion Amount", &params.erosionAmount, 0.01f, 0.0f, 1.0f)) dirty = true;
+
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
     }
     
     NodeSystem::PinValue FluvialErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -621,11 +660,11 @@ namespace TerrainNodesV2 {
         TerrainObject* terrain = tctx->terrain;
         TerrainManager& mgr = TerrainManager::getInstance();
         
-        // CRITICAL: Use scale values from TerrainContext (set at evaluation start)
+        // CRITICAL: Preserve scales
         float preserved_scale_xz = tctx->scale_xz;
         float preserved_scale_y = tctx->scale_y;
         
-        // ALWAYS apply input to terrain - handle size mismatch
+        // Setup terrain data
         if (inputHeight.width != terrain->heightmap.width || 
             inputHeight.height != terrain->heightmap.height) {
             terrain->heightmap.width = inputHeight.width;
@@ -633,11 +672,8 @@ namespace TerrainNodesV2 {
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
         terrain->heightmap.data = *inputHeight.data;
-        
-        // Apply scale from context
         terrain->heightmap.scale_xz = preserved_scale_xz;
         terrain->heightmap.scale_y = preserved_scale_y;
-        terrain->dirty_mesh = true;
         
         // Get optional mask
         std::vector<float> mask;
@@ -647,24 +683,66 @@ namespace TerrainNodesV2 {
         }
         
         if (useGPU) {
+            // ========================================================
+            // GPU WAY: CPU-Parity Stream Power Erosion (Hybrid)
+            // ========================================================
             mgr.fluvialErosionGPU(terrain, params, mask);
         } else {
+            // ========================================================
+            // CPU WAY: Global Hydrological Analysis
+            // ========================================================
             mgr.fluvialErosion(terrain, params, mask);
         }
         
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
         *result.data = terrain->heightmap.data;
         
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+        
         return result;
     }
     
     void FluvialErosionNode::drawContent() {
-        ImGui::Checkbox("Use GPU", &useGPU);
-        ImGui::DragInt("Iterations", &params.iterations, 100, 1000, 500000);
-        ImGui::DragFloat("Evaporate Speed", &params.evaporateSpeed, 0.001f, 0.0f, 0.1f);
-        ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.1f, 0.1f, 50.0f);
-        ImGui::DragFloat("Erode Speed", &params.erodeSpeed, 0.01f, 0.0f, 1.0f);
-        ImGui::DragFloat("Deposit Speed", &params.depositSpeed, 0.01f, 0.0f, 1.0f);
+        if (ImGui::Checkbox("Use GPU (River Carver)", &useGPU)) dirty = true;
+        
+        if (useGPU) {
+            if (ImGui::Button("Reset GPU Params")) {
+                params = HydraulicErosionParams();
+                params.iterations = 250000;
+                params.sedimentCapacity = 2.0f;
+                params.erosionRadius = 4;
+                params.erodeSpeed = 0.5f;
+                dirty = true;
+            }
+            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Mode: GPU Global Hydrological (Parity)");
+            if (ImGui::DragInt("Intensity", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
+            if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.1f, 0.1f, 20.0f)) dirty = true;
+            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.0f, 2.0f)) dirty = true;
+            if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
+            if (ImGui::DragFloat("Cutoff Slope", &params.minSlope, 0.001f, 0.0f, 0.1f)) dirty = true;
+            ImGui::TextDisabled("Using Hybrid CPU/GPU workflow for accuracy.");
+        } else {
+            if (ImGui::Button("Reset CPU Params")) {
+                params = HydraulicErosionParams();
+                params.iterations = 100000;
+                params.sedimentCapacity = 1.0f; 
+                params.erosionRadius = 4;
+                dirty = true;
+            }
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "Mode: CPU Global Analysis");
+            if (ImGui::DragInt("Sim Passes", &params.iterations, 25000, 25000, 500000, "%d units")) dirty = true;
+            if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.1f, 0.1f, 10.0f)) dirty = true;
+            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
+            if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 10)) dirty = true;
+            if (ImGui::DragFloat("Cutoff Slope", &params.minSlope, 0.001f, 0.0f, 0.1f)) dirty = true;
+        }
+        
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
     }
     
     NodeSystem::PinValue WindErosionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -717,14 +795,24 @@ namespace TerrainNodesV2 {
         auto result = createHeightOutput(inputHeight.width, inputHeight.height);
         *result.data = terrain->heightmap.data;
         
+        // Apply Edge Falloff if enabled
+        if (this->edgeFalloffWidth > 0.01f) {
+            applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
+        }
+        
         return result;
     }
     
     void WindErosionNode::drawContent() {
         ImGui::Checkbox("Use GPU", &useGPU);
-        ImGui::DragFloat("Strength", &strength, 0.01f, 0.0f, 1.0f);
-        ImGui::DragFloat("Direction", &direction, 1.0f, 0.0f, 360.0f);
-        ImGui::DragInt("Iterations", &iterations, 1, 1, 100);
+        ImGui::SliderFloat("Strength", &strength, 0.0f, 1.0f);
+        ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f);
+        ImGui::DragInt("Iterations", &iterations, 1, 1, 200);
+
+        ImGui::Separator();
+        ImGui::Text("Edge Falloff");
+        if (ImGui::DragFloat("Fade Width", &this->edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+        if (ImGui::SliderFloat("Fade Value", &this->edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
     }
 
     // ============================================================================
@@ -1088,57 +1176,57 @@ namespace TerrainNodesV2 {
         switch (p) {
             case ErosionPreset::YoungMountains:
                 timeScaleMy = 5.0f;
-                rainfallFactor = 1.0f;
-                temperatureFactor = 0.8f;
-                windFactor = 0.5f;
+                rainfallFactor = 0.15f;    // Tamed: Was 1.0
+                temperatureFactor = 0.1f;
+                windFactor = 0.05f;
                 break;
             case ErosionPreset::MatureMountains:
-                timeScaleMy = 30.0f;
-                rainfallFactor = 1.2f;
-                temperatureFactor = 1.0f;
-                windFactor = 0.7f;
+                timeScaleMy = 40.0f;
+                rainfallFactor = 0.3f;     // Tamed: Was 1.2
+                temperatureFactor = 0.2f;
+                windFactor = 0.15f;
                 break;
             case ErosionPreset::AncientPlateau:
-                timeScaleMy = 200.0f;
-                rainfallFactor = 0.8f;
-                temperatureFactor = 1.5f;
-                windFactor = 1.0f;
+                timeScaleMy = 250.0f;
+                rainfallFactor = 0.6f;     // Ancient needs high cumulative work
+                temperatureFactor = 0.4f;
+                windFactor = 0.3f;
                 break;
             case ErosionPreset::TropicalRainforest:
                 timeScaleMy = 20.0f;
-                rainfallFactor = 2.0f;
-                temperatureFactor = 0.5f;
-                windFactor = 0.3f;
+                rainfallFactor = 0.5f;     // Was 2.0
+                temperatureFactor = 0.15f;
+                windFactor = 0.1f;
                 break;
             case ErosionPreset::AridDesert:
-                timeScaleMy = 50.0f;
-                rainfallFactor = 0.1f;
-                temperatureFactor = 2.0f;
-                windFactor = 2.0f;
+                timeScaleMy = 80.0f;
+                rainfallFactor = 0.05f;
+                temperatureFactor = 0.5f;
+                windFactor = 0.6f;
                 break;
             case ErosionPreset::GlacialCarving:
-                timeScaleMy = 1.0f;
-                rainfallFactor = 0.5f;
-                temperatureFactor = 2.0f;  // Freeze-thaw
-                windFactor = 1.5f;
+                timeScaleMy = 2.0f;
+                rainfallFactor = 0.2f;
+                temperatureFactor = 0.6f;  // High freeze-thaw
+                windFactor = 0.2f;
                 break;
             case ErosionPreset::CoastalErosion:
-                timeScaleMy = 10.0f;
-                rainfallFactor = 1.5f;
-                temperatureFactor = 0.8f;
-                windFactor = 1.8f;
+                timeScaleMy = 15.0f;
+                rainfallFactor = 0.25f;
+                temperatureFactor = 0.15f;
+                windFactor = 0.4f;
                 break;
             case ErosionPreset::VolcanicTerrain:
-                timeScaleMy = 0.5f;
-                rainfallFactor = 1.2f;
-                temperatureFactor = 1.5f;
-                windFactor = 0.8f;
+                timeScaleMy = 0.8f;
+                rainfallFactor = 0.3f;
+                temperatureFactor = 0.4f;
+                windFactor = 0.1f;
                 break;
             case ErosionPreset::RiverDelta:
-                timeScaleMy = 5.0f;
-                rainfallFactor = 1.8f;
-                temperatureFactor = 0.4f;
-                windFactor = 0.2f;
+                timeScaleMy = 10.0f;
+                rainfallFactor = 0.4f;
+                temperatureFactor = 0.1f;
+                windFactor = 0.05f;
                 break;
             default:
                 break;
@@ -1194,15 +1282,15 @@ namespace TerrainNodesV2 {
         
         // Setup Parameters
         float timeMultiplier = 1.0f + std::log10(1.0f + timeScaleMy) * timeScaleMy * 0.1f;
-        int baseIterations = 5000 * qualityLevel;
+        int baseIterations = 15000 * qualityLevel; // Tripled from 5000
         
         totalPasses = 1 + static_cast<int>(timeScaleMy / 50.0f);
-        totalPasses = (std::min)(totalPasses, 20); // Limit max passes
+        totalPasses = (std::min)(totalPasses, 30); // Higher pass cap
         
         // Calculate iterations
         hydraulicItersPerPass = static_cast<int>(baseIterations * rainfallFactor * timeMultiplier / totalPasses);
-        thermalItersPerPass = static_cast<int>(100 * qualityLevel * temperatureFactor * timeMultiplier / totalPasses);
-        windItersPerPass = static_cast<int>(40 * qualityLevel * windFactor * timeMultiplier / totalPasses);
+        thermalItersPerPass = static_cast<int>(150 * qualityLevel * temperatureFactor * timeMultiplier / totalPasses);
+        windItersPerPass = static_cast<int>(60 * qualityLevel * windFactor * timeMultiplier / totalPasses);
         
         // Clamp limits (Safety)
         hydraulicItersPerPass = (std::min)(hydraulicItersPerPass, 500000);
@@ -1280,8 +1368,11 @@ namespace TerrainNodesV2 {
                 if (temperatureFactor > 0.01f && thermalItersPerPass > 0) {
                     ThermalErosionParams tp;
                     tp.iterations = thermalItersPerPass;
-                    tp.talusAngle = 25.0f - temperatureFactor * 5.0f;
-                    tp.erosionAmount = 0.5f * temperatureFactor;
+                    // Normalize Talus Angle: UI uses degrees, Kernel uses tangent (h/w)
+                    float degrees = 30.0f - temperatureFactor * 10.0f; // Soften as it gets hotter
+                    tp.talusAngle = std::tan(degrees * 3.14159f / 180.0f);
+                    tp.erosionAmount = 0.4f * temperatureFactor;
+                    
                     if (useGPU) mgr.thermalErosionGPU(cachedTerrain, tp, cachedMask);
                     else mgr.thermalErosion(cachedTerrain, tp, cachedMask);
                 }
@@ -1289,13 +1380,21 @@ namespace TerrainNodesV2 {
                 // 2. Hydraulic
                 if (rainfallFactor > 0.01f && hydraulicItersPerPass > 0) {
                     HydraulicErosionParams hp;
-                    hp.iterations = hydraulicItersPerPass;
-                    hp.erosionRadius = 3 + static_cast<int>(rainfallFactor * 2);
-                    hp.depositSpeed = 0.1f;
-                    hp.sedimentCapacity = 8.0f * rainfallFactor;
-                    hp.evaporateSpeed = 0.01f;
-                    hp.erodeSpeed = 0.5f * rainfallFactor;
-                    if (useGPU) mgr.hydraulicErosionGPU(cachedTerrain, hp, cachedMask);
+                    // SCALE ITERATIONS by resolution for consistent density in Wizard
+                    int w = cachedTerrain->heightmap.width;
+                    int h = cachedTerrain->heightmap.height;
+                    float resScale = (float)(w * h) / (512.0f * 512.0f);
+                    hp.iterations = static_cast<int>(hydraulicItersPerPass * resScale);
+                    
+                    hp.erosionRadius = 2; // Fixed radius for stability
+                    hp.depositSpeed = 0.2f; // Balanced for consistency
+                    hp.sedimentCapacity = 2.0f * rainfallFactor; // Tamed from 12.0
+                    hp.evaporateSpeed = 0.012f;
+                    hp.erodeSpeed = 0.15f * rainfallFactor; // Tamed from 0.6
+                    hp.gravity = 10.0f;
+                    hp.dropletLifetime = 128;
+                    
+                    if (useGPU) mgr.fluvialErosionGPU(cachedTerrain, hp, cachedMask);
                     else mgr.hydraulicErosion(cachedTerrain, hp, cachedMask);
                 }
                 
@@ -1734,77 +1833,97 @@ namespace TerrainNodesV2 {
         int h = input.height;
         auto result = createMaskOutput(w, h);
         
-        // Get height scale for proper slope detection
+        // Height scale for proper slope detection
         float heightScale = (tctx && tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
         
-        // Flow accumulation buffer
-        std::vector<float> flow(w * h, 1.0f);  // Start with uniform "rain"
+        // 1. Sort indices by height (Descending) to ensure flow travels from top to bottom
+        std::vector<int> indices(w * h);
+        for(int i = 0; i < w * h; i++) indices[i] = i;
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+            return (*input.data)[a] > (*input.data)[b];
+        });
+
+        // 2. Initial rain (Flow accumulation buffer)
+        std::vector<float> flow(w * h, 1.0f);
         
-        // D8 flow direction offsets
         const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
         const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-        // D8 distance weights (diagonals are sqrt(2) apart)
         const float dist[] = {1.414f, 1.0f, 1.414f, 1.0f, 1.0f, 1.414f, 1.0f, 1.414f};
-        
-        // Multiple iterations for flow propagation
+
+        // 3. One-pass Flow Accumulation (MFD Theory)
+        // This is MUCH more accurate than iterative scattering for static masks
+        for (int idx : indices) {
+            int x = idx % w;
+            int y = idx / w;
+            if (x == 0 || x == w - 1 || y == 0 || y == h - 1) continue;
+
+            float centerH = (*input.data)[idx] * heightScale;
+            float currentFlow = flow[idx];
+
+            // Multiple Flow Direction (MFD): Distribute to ALL downhill neighbors
+            float totalSlope = 0.0f;
+            float slopes[8];
+            int downhillCount = 0;
+
+            for (int d = 0; d < 8; d++) {
+                int nidx = (y + dy[d]) * w + (x + dx[d]);
+                float slope = (centerH - (*input.data)[nidx] * heightScale) / dist[d];
+                
+                if (slope > 0.0001f) {
+                    slopes[d] = std::pow(slope, 1.1f); // Exponent for channelization
+                    totalSlope += slopes[d];
+                    downhillCount++;
+                } else {
+                    slopes[d] = 0.0f;
+                }
+            }
+
+            if (totalSlope > 0.0f) {
+                // Distribute flow to all downhill neighbors proportionally
+                for (int d = 0; d < 8; d++) {
+                    if (slopes[d] > 0.0f) {
+                        int nidx = (y + dy[d]) * w + (x + dx[d]);
+                        float weight = (slopes[d] / totalSlope) * decay;
+                        flow[nidx] += currentFlow * weight;
+                    }
+                }
+            } else {
+                // FLAT AREA HANDLING: Spread flow to all neighbors slightly to avoid "pixels"
+                // This simulates water pooling and slowly finding an exit
+                for (int d = 0; d < 8; d++) {
+                    int nidx = (y + dy[d]) * w + (x + dx[d]);
+                    flow[nidx] += currentFlow * (0.1f * decay / 8.0f);
+                }
+            }
+        }
+
+        // 4. Post-processing: Apply iterations as a "Flow Diffusion" pass if requested
+        // This softens the organic paths and helps in extremely flat areas
         for (int iter = 0; iter < iterations; iter++) {
-            std::vector<float> newFlow(w * h, 0.0f);
-            
+            std::vector<float> blurred = flow;
             for (int y = 1; y < h - 1; y++) {
                 for (int x = 1; x < w - 1; x++) {
                     int idx = y * w + x;
-                    float centerH = (*input.data)[idx] * heightScale;
-                    float currentFlow = flow[idx];
-                    
-                    // Find steepest downhill neighbor
-                    float maxSlope = 0.0f;
-                    int bestDir = -1;
-                    
-                    for (int d = 0; d < 8; d++) {
-                        int nx = x + dx[d];
-                        int ny = y + dy[d];
-                        int nidx = ny * w + nx;
-                        
-                        float neighborH = (*input.data)[nidx] * heightScale;
-                        float slope = (centerH - neighborH) / dist[d];
-                        
-                        if (slope > maxSlope) {
-                            maxSlope = slope;
-                            bestDir = d;
-                        }
-                    }
-                    
-                    // Flow to steepest downhill neighbor
-                    if (bestDir >= 0 && maxSlope > 0.0001f) {
-                        int nx = x + dx[bestDir];
-                        int ny = y + dy[bestDir];
-                        int nidx = ny * w + nx;
-                        newFlow[nidx] += currentFlow * strength * decay;
-                    }
-                    
-                    // Keep some flow at current position
-                    newFlow[idx] += currentFlow * (1.0f - decay);
+                    float sum = flow[idx] * 2.0f;
+                    for(int d=0; d<8; d++) sum += flow[(y+dy[d])*w + (x+dx[d])];
+                    blurred[idx] = sum / 10.0f;
                 }
             }
-            
-            flow = newFlow;
+            flow = blurred;
         }
-        
-        // Find max for normalization
+
+        // 5. Final Scaling & Normalization
         float maxFlow = 0.001f;
-        if (normalize) {
-            for (int i = 0; i < w * h; i++) {
-                if (flow[i] > maxFlow) maxFlow = flow[i];
-            }
-        } else {
-            maxFlow = 1.0f;
-        }
+        for (float f : flow) if (f > maxFlow) maxFlow = f;
         
-        // Write to output
+        float finalStrength = strength;
         for (int i = 0; i < w * h; i++) {
-            (*result.data)[i] = clampValue(flow[i] / maxFlow, 0.0f, 1.0f);
+            float val = (flow[i] / maxFlow) * finalStrength;
+            // Gamma-like curve for better visual contrast in small streams
+            val = std::pow(val, 0.6f); 
+            (*result.data)[i] = clampValue(val, 0.0f, 1.0f);
         }
-        
+
         return result;
     }
     
@@ -1886,9 +2005,29 @@ namespace TerrainNodesV2 {
     
     void ExposureMaskNode::drawContent() {
         ImGui::SetNextItemWidth(100);
-        ImGui::SliderFloat("Azimuth", &sunAzimuth, 0.0f, 360.0f, "%.0f°");
+        if (ImGui::SliderFloat("Azimuth", &sunAzimuth, 0.0f, 360.0f, "%.0f\302\260")) {
+            while(sunAzimuth < 0) sunAzimuth += 360;
+            while(sunAzimuth >= 360) sunAzimuth -= 360;
+        }
+        
+        // Visual Compass for Azimuth
+        ImGui::SameLine();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImVec2 cp = ImGui::GetCursorScreenPos();
+        float c_size = 12.0f;
+        cp.x += c_size + 5;
+        cp.y += 12.0f;
+        drawList->AddCircleFilled(cp, c_size + 2, IM_COL32(40, 40, 40, 255));
+        drawList->AddCircle(cp, c_size, IM_COL32(200, 200, 200, 255), 16);
+        
+        float s_rad = sunAzimuth * 0.0174533f;
+        ImVec2 s_needle(cp.x + sinf(s_rad) * c_size, cp.y - cosf(s_rad) * c_size);
+        drawList->AddLine(cp, s_needle, IM_COL32(255, 200, 50, 255), 2.0f); // Golden sun color
+        drawList->AddText(ImVec2(cp.x - 3, cp.y - c_size - 14), IM_COL32(200, 200, 200, 150), "N");
+        ImGui::Dummy(ImVec2(c_size * 2 + 10, 1)); 
+
         ImGui::SetNextItemWidth(100);
-        ImGui::SliderFloat("Elevation", &sunElevation, 0.0f, 90.0f, "%.0f°");
+        ImGui::SliderFloat("Elevation", &sunElevation, 0.0f, 90.0f, "%.0f\302\260");
         ImGui::SetNextItemWidth(100);
         ImGui::SliderFloat("Contrast", &contrast, 0.1f, 3.0f);
         ImGui::Checkbox("Invert (Shadow)", &invert);
@@ -2060,6 +2199,70 @@ namespace TerrainNodesV2 {
         if (ImGui::DragInt("Levels", &levels, 1, 2, 64)) dirty = true;
         if (ImGui::DragFloat("Sharpness", &sharpness, 0.01f, 0.0f, 1.0f)) dirty = true;
         if (ImGui::DragFloat("Offset", &offset, 0.1f, -100.0f, 100.0f)) dirty = true;
+    }
+    
+    // EDGE FALLOFF NODE
+    NodeSystem::PinValue EdgeFalloffNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto input = getHeightInput(0, ctx);
+        if (!input.isValid()) {
+            ctx.addError(id, "No valid input");
+            return NodeSystem::PinValue{};
+        }
+        
+        int w = input.width;
+        int h = input.height;
+        auto result = createHeightOutput(w, h);
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                float height = (*input.data)[idx];
+                
+                // Calculate normalized distance from nearest edge (0 to 0.5)
+                float dx = (float)x / (std::max(1, w - 1));
+                float dy = (float)y / (std::max(1, h - 1));
+                
+                float distX = std::min(dx, 1.0f - dx);
+                float distY = std::min(dy, 1.0f - dy);
+                
+                // IMPROVED MATH:
+                // Instead of min(distX, distY) which creates a diagonal ridge (box distance),
+                // we use a smooth combination that rounds the corners.
+                float tx = std::clamp(distX / (std::max(0.001f, fadeWidth)), 0.0f, 1.0f);
+                float ty = std::clamp(distY / (std::max(0.001f, fadeWidth)), 0.0f, 1.0f);
+                
+                // Multiplicative falloff eliminates the diagonal "crease"
+                float t = tx * ty; 
+                
+                // Apply optional extra smoothing to the mask itself
+                switch (mode) {
+                    case FalloffMode::Linear:
+                        break;
+                    case FalloffMode::Smoothstep:
+                        t = t * t * (3.0f - 2.0f * t);
+                        break;
+                    case FalloffMode::Cosine:
+                        t = 0.5f * (1.0f - std::cos(t * 3.14159f));
+                        break;
+                }
+                
+                (*result.data)[idx] = fadeValue * (1.0f - t) + height * t;
+            }
+        }
+        
+        return result;
+    }
+    
+    void EdgeFalloffNode::drawContent() {
+        if (ImGui::SliderFloat("Fade Width", &fadeWidth, 0.001f, 0.5f, "%.3f")) dirty = true;
+        if (ImGui::DragFloat("Fade Value", &fadeValue, 0.1f)) dirty = true;
+        
+        const char* modeNames[] = { "Linear", "Smoothstep", "Cosine" };
+        int modeIdx = (int)mode;
+        if (ImGui::Combo("Fade Mode", &modeIdx, modeNames, 3)) {
+            mode = (FalloffMode)modeIdx;
+            dirty = true;
+        }
     }
     
     // MASK COMBINE NODE
@@ -2865,6 +3068,7 @@ namespace TerrainNodesV2 {
             case NodeType::Smooth: node = addNode<SmoothNode>(); break;
             case NodeType::Normalize: node = addNode<NormalizeNode>(); break;
             case NodeType::Terrace: node = addNode<TerraceNode>(); break;
+            case NodeType::EdgeFalloff: node = addNode<EdgeFalloffNode>(); break;
             case NodeType::MaskCombine: node = addNode<MaskCombineNode>(); break;
             case NodeType::Overlay: node = addNode<OverlayNode>(); break;
             case NodeType::Screen: node = addNode<ScreenNode>(); break;
@@ -2926,22 +3130,34 @@ namespace TerrainNodesV2 {
         markAllDirty();
 
         // Find Height Output Node and pull data
-        HeightOutputNode* outputNode = nullptr;
+        HeightOutputNode* heightOutputNode = nullptr;
+        std::vector<SplatOutputNode*> splatOutputNodes;
+
         for (auto& node : nodes) {
-            if (node->getTypeId() == "TerrainV2.HeightOutput") {
-                outputNode = dynamic_cast<HeightOutputNode*>(node.get());
-                break;
+            std::string typeId = node->getTypeId();
+            if (typeId == "TerrainV2.HeightOutput") {
+                if (!heightOutputNode) heightOutputNode = dynamic_cast<HeightOutputNode*>(node.get());
+            } else if (typeId == "TerrainV2.SplatOutput") {
+                if (auto* splat = dynamic_cast<SplatOutputNode*>(node.get())) {
+                    splatOutputNodes.push_back(splat);
+                }
             }
         }
         
-        if (!outputNode) {
-            // No output node found - nothing to evaluate
+        // Evaluate Splat Outputs first (optional but good for data flow consistency)
+        for (auto* splatNode : splatOutputNodes) {
+            splatNode->compute(0, ctx);
+        }
+
+        if (!heightOutputNode) {
+            // No height output node found - nothing to update geometry-wise
+            // But we still checked splats above.
             return;
         }
         
         // Pull data from the input of the output node (Input index 0 for Height)
         // This triggers the pull-based evaluation chain through ALL connected nodes
-        auto heightData = outputNode->getHeightInput(0, ctx);
+        auto heightData = heightOutputNode->getHeightInput(0, ctx);
         
         // Check for errors in the evaluation chain
         if (ctx.hasErrors()) {
@@ -2979,6 +3195,7 @@ namespace TerrainNodesV2 {
             
             // Update mesh visualization (Rebuild if resized, Update if content changed)
             if (resized) {
+                TerrainManager::getInstance().resizeSplatMap(terrain);
                 TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
             } else {
                 TerrainManager::getInstance().updateTerrainMesh(terrain);
@@ -3143,6 +3360,8 @@ namespace TerrainNodesV2 {
                     newNode = addTerrainNode(NodeType::Normalize, x, y);
                 } else if (typeId == "TerrainV2.Terrace") {
                     newNode = addTerrainNode(NodeType::Terrace, x, y);
+                } else if (typeId == "TerrainV2.EdgeFalloff") {
+                    newNode = addTerrainNode(NodeType::EdgeFalloff, x, y);
                 } else if (typeId == "TerrainV2.MaskCombine") {
                     newNode = addTerrainNode(NodeType::MaskCombine, x, y);
                 } else if (typeId == "TerrainV2.Overlay") {

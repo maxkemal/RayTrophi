@@ -626,6 +626,8 @@ const VDBVolumeData* VDBVolumeManager::getVolume(int volume_id) const {
 }
 
 bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr) {
+    if (!g_hasCUDA) return false;
+
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
     
     // CRITICAL FIX: Synchronize and clear any prior CUDA errors at the very start
@@ -779,6 +781,7 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
 }
 
 void VDBVolumeManager::freeGPU(int volume_id) {
+    if (!g_hasCUDA) return;
     int idx = findVolumeIndex(volume_id);
     if (idx < 0) return;
     
@@ -820,6 +823,8 @@ void VDBVolumeManager::freeGPU(int volume_id) {
 }
 
 void VDBVolumeManager::freeAllGPU() {
+    if (!g_hasCUDA) return;
+
     for (auto& vol : volumes) {
         if (vol.d_nano_grid) {
             cudaFree(vol.d_nano_grid);

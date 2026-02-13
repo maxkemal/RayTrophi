@@ -21,6 +21,8 @@ struct __align__(16) HitGroupData
 
     // Material info (4-byte align)
     int material_id = -1;
+    int mesh_material_id = -1;    // [NEW] Material of the scalp mesh
+    int is_hair = 0;              // 1 = hair curve, 0 = mesh/terrain
 
     int has_albedo_tex = 0;
     int has_roughness_tex = 0;
@@ -29,6 +31,7 @@ struct __align__(16) HitGroupData
     int has_transmission_tex = 0;
     int has_opacity_tex = 0;
     int has_emission_tex = 0;
+    int opacity_has_alpha = 0;
     int pad0 = 0; // fill-up to keep next part aligned
 
     float3 emission = {0,0,0};
@@ -40,12 +43,14 @@ struct __align__(16) HitGroupData
     const float3* normals = nullptr;
     const float3* tangents = nullptr;
     const float2* uvs = nullptr;
+    const uint32_t* strand_ids = nullptr;
+    const float2* root_uvs = nullptr;     // Per-segment root UV (hair only)
 
     // Existence flags (bool kırıldı, int ile sabitiz)
     int has_normals = 0;
     int has_uvs = 0;
     int has_tangents = 0;
-    int pad2 = 0; // Alignment helper (ensures next block starts at 8-byte boundary)
+    int has_root_uvs = 0; // 1 = root_uvs pointer is valid
 
     // Texture objects (OptiX bunları seviyor)
     cudaTextureObject_t albedo_tex = 0;
@@ -55,6 +60,9 @@ struct __align__(16) HitGroupData
     cudaTextureObject_t transmission_tex = 0;
     cudaTextureObject_t opacity_tex = 0;
     cudaTextureObject_t emission_tex = 0;
+    
+    // Hair Material Data
+    GpuHairMaterial hair_material;
     
     // Volumetric material support
     int is_volumetric = 0;        // 1 = volumetric material, 0 = surface
@@ -113,5 +121,11 @@ struct __align__(16) HitGroupData
     float foliage_height = 1.0f;  // Mesh bounding box height (for Y-based bending)
     float3 foliage_pivot = {0,0,0}; // Local pivot point (usually base of tree)
     int foliage_pad = 0;          // Alignment padding
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU PICKING (Object identification for viewport selection)
+    // ═══════════════════════════════════════════════════════════════════════════
+    int object_id = -1;           // Unique object ID (SBT record index or mesh index)
+    int object_id_pad = 0;        // Alignment padding
 };
 

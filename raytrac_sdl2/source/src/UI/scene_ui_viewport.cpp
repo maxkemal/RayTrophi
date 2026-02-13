@@ -181,6 +181,25 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pivot Point");
 
+    // --- Mouse Sensitivity (Minimalist Overlay) ---
+    ImGui::Spacing();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 0.9f), "Sens:"); 
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
+    
+    // Transparent slider background for glassmorphism look
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.2f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.1f, 0.1f, 0.1f, 0.3f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.15f, 0.15f, 0.15f, 0.4f));
+
+    if (ImGui::SliderFloat("##MouseSensOverlay", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.2f")) {
+        // Updated
+    }
+    ImGui::PopStyleColor(3);
+
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust Mouse Sensitivity");
+
     ImGui::PopStyleColor(); // Window background
     ImGui::End();
 }

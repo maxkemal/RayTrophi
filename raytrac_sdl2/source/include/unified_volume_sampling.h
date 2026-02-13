@@ -139,19 +139,13 @@ UNIFIED_FUNC float light_march_transmittance(
         if (density_accum > 5.0f) break; // Early exit for dense regions
     }
     
-    // Beer's Law for light absorption
+    // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
     float beers = expf(-density_accum);
-    
-    // Secondary softer term for multi-scatter approximation
     float beers_soft = expf(-density_accum * 0.25f);
-    
-    // Blend based on multi-scatter setting
     float albedo_avg = (params.albedo.x + params.albedo.y + params.albedo.z) / 3.0f;
-    light_transmittance = beers * (1.0f - params.multi_scatter * albedo_avg) + 
-                          beers_soft * params.multi_scatter * albedo_avg;
+    float phys_trans = beers * (1.0f - params.multi_scatter * albedo_avg) + beers_soft * (params.multi_scatter * albedo_avg);
     
-    // Apply shadow strength
-    light_transmittance = 1.0f - params.shadow_strength * (1.0f - light_transmittance);
+    return 1.0f - params.shadow_strength * (1.0f - phys_trans);
     
     return light_transmittance;
 }
@@ -167,7 +161,7 @@ UNIFIED_FUNC Vec3f unified_march_volume(
     float rand_jitter
 ) {
     Vec3f accumulated_color(0.0f);
-    float T = 1.0f;
+    Vec3f transmittance(1.0f);
     Vec3f p = origin;
     
     // Apply jitter to start position (anti-banding)
@@ -185,21 +179,20 @@ UNIFIED_FUNC Vec3f unified_march_volume(
         float d = calculate_unified_density(p, params);
         
         if (d > 0.001f) {
-            float sigma_a = params.absorption_prob * d;
+            Vec3f sigma_a = params.albedo * params.absorption_prob * d; // Simplified: absorption color = albedo
+            Vec3f sigma_s_rgb = params.albedo * params.scattering_factor * d;
             float sigma_s = params.scattering_factor * d;
-            float sigma_t = sigma_a + sigma_s;
-            
-            // Albedo average for multi-scatter calculation
+            Vec3f sigma_t_rgb = sigma_a + sigma_s_rgb;
             float albedo_avg = (params.albedo.x + params.albedo.y + params.albedo.z) / 3.0f;
             
-            // Multi-scatter transmittance
-            float step_T = compute_multiscatter_transmittance(
-                sigma_t, params.step_size, params.multi_scatter, albedo_avg
-            );
+            // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches Renderer.cpp) ---
+            Vec3f T_single = Vec3f(expf(-sigma_t_rgb.x * params.step_size), expf(-sigma_t_rgb.y * params.step_size), expf(-sigma_t_rgb.z * params.step_size));
+            Vec3f T_multi_p = Vec3f(expf(-sigma_t_rgb.x * params.step_size * 0.25f), expf(-sigma_t_rgb.y * params.step_size * 0.25f), expf(-sigma_t_rgb.z * params.step_size * 0.25f));
+            Vec3f step_T = T_single * (1.0f - params.multi_scatter * albedo_avg) + T_multi_p * (params.multi_scatter * albedo_avg);
             
-            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             // IN-SCATTERING CALCULATION
-            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             
             // Dual-lobe phase function
             float cos_theta = -(dir.x * sun_dir.x + dir.y * sun_dir.y + dir.z * sun_dir.z);
@@ -216,20 +209,22 @@ UNIFIED_FUNC Vec3f unified_march_volume(
             Vec3f inscatter = params.albedo * Li * phase * sigma_s * light_T;
             inscatter = inscatter * (1.0f + powder * 0.5f); // Powder boost
             
-            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             // EMISSION
-            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             Vec3f emit = params.emission_color * d;
             
-            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-            // ACCUMULATE (matches GPU formula)
-            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-            Vec3f step_color = (inscatter + emit) * T * (1.0f - step_T);
-            accumulated_color = accumulated_color + step_color;
+            // Energy-stable integration (Parity with Renderer.cpp)
+            Vec3f source = inscatter + emit;
+            Vec3f one_minus_T = Vec3f(1.0f - step_T.x, 1.0f - step_T.y, 1.0f - step_T.z);
+            accumulated_color = accumulated_color + (source * one_minus_T * transmittance);
             
-            T *= step_T;
-            if (T < 0.01f) {
-                T = 0.0f;
+            transmittance.x *= step_T.x;
+            transmittance.y *= step_T.y;
+            transmittance.z *= step_T.z;
+            
+            if ((transmittance.x + transmittance.y + transmittance.z) < 0.03f) {
+                transmittance = Vec3f(0.0f);
                 break;
             }
         }
@@ -237,8 +232,6 @@ UNIFIED_FUNC Vec3f unified_march_volume(
         p = p + dir * params.step_size;
     }
     
-    out_transmittance = T;
+    out_transmittance = (transmittance.x + transmittance.y + transmittance.z) / 3.0f;
     return accumulated_color;
 }
-
-

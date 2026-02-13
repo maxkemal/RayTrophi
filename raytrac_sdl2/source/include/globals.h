@@ -54,6 +54,9 @@ enum class ResolutionSource {
 };
 
 struct RenderSettings {
+    // Input / Interaction
+    float mouse_sensitivity = 0.4f;
+
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
     
@@ -85,10 +88,12 @@ struct RenderSettings {
     TimelineQualityPreset timeline_quality_preset = TimelineQualityPreset::Draft; // Easy quality selection
     bool timeline_use_denoiser = false;  // Apply denoiser during timeline playback
     bool start_animation_render = false;
+    bool animation_render_locked = false;  // Lock viewport/camera during animation render
     bool save_image_requested = false;
-	int animation_start_frame = 0;
-	int animation_end_frame = 0;
+    int animation_start_frame = 0;
+    int animation_end_frame = 100;      // Default to 100 frames (sensible default)
     int animation_current_frame = 0;
+    int animation_total_frames = 0;     // For progress tracking
     std::string animation_output_folder = "";
     
     // Animation playback (timeline icin)
@@ -250,6 +255,7 @@ extern bool render_finished;
 extern std::atomic<bool> rendering_in_progress;
 extern std::atomic<bool> rendering_stopped_gpu;
 extern std::atomic<bool> rendering_stopped_cpu;
+extern std::atomic<bool> rendering_paused;  // Pause animation render (P key or button)
 
 // ===========================================================================
 // DIRTY FLAGS - Set to true when respective data changes

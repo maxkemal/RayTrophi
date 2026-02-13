@@ -65,8 +65,15 @@ struct WaterParams {
     // Micro Details
     float micro_detail_strength;
     float micro_detail_scale;
+    float micro_anim_speed;             // Animation speed multiplier
+    float micro_morph_speed;            // Shape morphing speed
     float foam_noise_scale;
     float foam_threshold;
+    
+    // Wind Animation (for micro details)
+    float wind_direction;           // Radians, direction wind is blowing
+    float wind_speed;               // m/s, controls micro detail animation speed
+    float time;                     // Current time for animation
 };
 
 // --- Helper Functions ---
@@ -363,8 +370,13 @@ __device__ inline WaterResult sampleFFTOcean(
     float foam_level,
     float micro_detail_strength,
     float micro_detail_scale,
+    float micro_anim_speed,
+    float micro_morph_speed,
     float foam_noise_scale,
-    float foam_threshold
+    float foam_threshold,
+    float wind_direction,
+    float wind_speed,
+    float time
 ) {
     // World position to UV
     float u = position.x / ocean_size;
@@ -383,14 +395,77 @@ __device__ inline WaterResult sampleFFTOcean(
     float3 normal = normalize(make_float3(nxz.x, ny, nxz.y));
     
     // === MICRO DETAIL (CAPILLARY WAVES) ===
+    // Multi-layer animated noise for realistic ripples
+    // Uses STATIONARY animation pattern - no drift, only in-place morphing
     if (micro_detail_strength > 0.001f) {
-        float2 noise_pos = make_float2(position.x, position.z) * micro_detail_scale;
+        // Wind direction vectors (main and cross-wind)
+        float wind_dx = cosf(wind_direction);
+        float wind_dz = sinf(wind_direction);
+        float cross_dx = -wind_dz;  // Perpendicular
+        float cross_dz = wind_dx;
         
-        // Use derivatives of noise for proper normal perturbation
+        // Morph speed controlled by user parameter (replaces drift with in-place animation)
+        float morph = micro_morph_speed;
+        
+        // Animation intensity based on wind (subtle influence, no drift)
+        float wind_factor = fminf(1.0f, sqrtf(fmaxf(0.1f, wind_speed)) * 0.2f);
+        
+        // === STATIONARY WAVE PATTERN ===
+        // Instead of offsetting position (drift), we morph the noise pattern itself
+        // This creates realistic wave motion without any directional movement
+        
+        // === LAYER 1: Primary ripples (stationary, morphing) ===
+        // Position is FIXED in world space - no drift offset
+        float2 pos1_base = make_float2(position.x, position.z) * micro_detail_scale;
+        // Time-based morphing of the pattern itself (oscillating, not drifting)
+        float morph_phase1 = time * 0.5f * morph;
+        float2 pos1 = make_float2(
+            pos1_base.x + sinf(morph_phase1) * wind_factor * 0.3f,
+            pos1_base.y + cosf(morph_phase1 * 0.8f) * wind_factor * 0.3f
+        );
+        
+        // === LAYER 2: Secondary ripples (larger, slower morph) ===
+        float2 pos2_base = make_float2(position.x, position.z) * micro_detail_scale * 0.5f;
+        float morph_phase2 = time * 0.25f * morph;
+        // Slight directional bias but oscillating, not drifting
+        float2 pos2 = make_float2(
+            pos2_base.x + sinf(morph_phase2) * wind_dx * wind_factor * 0.4f 
+                        + cosf(morph_phase2 * 1.3f) * 0.2f,
+            pos2_base.y + sinf(morph_phase2 * 0.7f) * wind_dz * wind_factor * 0.4f 
+                        + sinf(morph_phase2 * 1.1f) * 0.2f
+        );
+        
+        // === LAYER 3: Fine detail (cross-wind bias, fast morph) ===
+        float2 pos3_base = make_float2(position.x, position.z) * micro_detail_scale * 2.0f;
+        float morph_phase3 = time * 0.8f * morph;
+        // Cross-wind direction for variety
+        float2 pos3 = make_float2(
+            pos3_base.x + sinf(morph_phase3) * cross_dx * wind_factor * 0.15f,
+            pos3_base.y + cosf(morph_phase3) * cross_dz * wind_factor * 0.15f
+        );
+        
+        // Sample all layers
         float d = 0.01f;
-        float h_c = fbm(noise_pos);
-        float h_x = fbm(noise_pos + make_float2(d, 0.0f));
-        float h_z = fbm(noise_pos + make_float2(0.0f, d));
+        
+        // Layer 1 derivatives (main ripples)
+        float h1_c = fbm(pos1);
+        float h1_x = fbm(pos1 + make_float2(d, 0.0f));
+        float h1_z = fbm(pos1 + make_float2(0.0f, d));
+        
+        // Layer 2 derivatives (larger scale, directional bias)
+        float h2_c = fbm(pos2);
+        float h2_x = fbm(pos2 + make_float2(d, 0.0f));
+        float h2_z = fbm(pos2 + make_float2(0.0f, d));
+        
+        // Layer 3 derivatives (fine detail)
+        float h3_c = noise(pos3);  // Single octave for speed
+        float h3_x = noise(pos3 + make_float2(d, 0.0f));
+        float h3_z = noise(pos3 + make_float2(0.0f, d));
+        
+        // Combine layers with different weights
+        float h_c = h1_c * 0.5f + h2_c * 0.35f + h3_c * 0.15f;
+        float h_x = h1_x * 0.5f + h2_x * 0.35f + h3_x * 0.15f;
+        float h_z = h1_z * 0.5f + h2_z * 0.35f + h3_z * 0.15f;
         
         float dsdx = (h_x - h_c) / d;
         float dsdz = (h_z - h_c) / d;
@@ -448,8 +523,13 @@ __device__ inline WaterResult evaluateWater(
             params.foam_level,
             params.micro_detail_strength,
             params.micro_detail_scale,
+            params.micro_anim_speed,
+            params.micro_morph_speed,
             params.foam_noise_scale,
-            params.foam_threshold
+            params.foam_threshold,
+            params.wind_direction,
+            params.wind_speed,
+            params.time
         );
     } else {
         return evaluateGerstnerWave(

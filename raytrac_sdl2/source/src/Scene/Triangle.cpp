@@ -373,7 +373,8 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool 
     rec.interpolated_normal =
         (w * vertices[0].normal + u * vertices[1].normal + v * vertices[2].normal).normalize();
 
-    rec.normal = rec.interpolated_normal;
+    // Ensure normal always points against ray and set front_face flag
+    rec.set_face_normal(r, rec.interpolated_normal);
 
     // Use u, v, w directly for UV interpolation
     Vec2 uv = w * t0 + u * t1 + v * t2;
@@ -382,17 +383,23 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool 
     rec.u = uv.u;
     rec.v = uv.v;
     
-    // Set material from MaterialManager
-    rec.material = MaterialManager::getInstance().getMaterialShared(materialID);
-    rec.materialID = materialID;
+    // --- HIGH PERFORMANCE MATERIAL ACCESS & ALPHA TESTING ---
+    if (!cachedMaterial) {
+        cachedMaterial = MaterialManager::getInstance().getMaterial(materialID);
+    }
 
     // --- ALPHA TESTING ---
-    if (rec.material) {
-        float opacity = rec.material->get_opacity(rec.uv);
+    if (cachedMaterial && cachedMaterial->isTransparent()) {
+        float opacity = cachedMaterial->get_opacity(rec.uv);
         if (Vec3::random_float() > opacity) {
             return false; // Transparent hit, ignore and let BVH continue
         }
     }
+
+    rec.materialPtr = cachedMaterial;
+    rec.material = MaterialManager::getInstance().getMaterialShared(materialID);
+    rec.materialID = materialID;
+    rec.terrain_id = terrain_id;
 
     return true;
 }

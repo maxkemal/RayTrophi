@@ -302,6 +302,8 @@ struct SceneData {
         animationDataList.clear();
         boneData.clear();              // Clear bone hierarchy
         timeline.clear();              // Clear keyframes
+        ui_settings_json_str = "";     // Clear UI settings string
+        load_counter = 0;              // Reset load counter
         
         // Clear per-model animator caches BEFORE clearing the vector
         for (auto& ctx : importedModelContexts) {

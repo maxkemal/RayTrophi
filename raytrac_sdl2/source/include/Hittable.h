@@ -34,6 +34,7 @@ struct HitRecord {
     Vec3 face_normal;
   
     std::shared_ptr<Material> material;
+    Material* materialPtr = nullptr; // FAST ACCESS
     uint16_t materialID = 0xFFFF;
     
     float t = 0.0f;
@@ -48,12 +49,20 @@ struct HitRecord {
    
     const VDBVolume* vdb_volume = nullptr; // Pointer to VDB Volume if hit
     const GasVolume* gas_volume = nullptr; // Pointer to Gas Volume if hit
+    int terrain_id = -1; // Terrain ID if hit
     Vec3 tangent;
     Vec3 bitangent;
     bool has_tangent = false;
     Vec2 uv;
     bool is_instance_hit = false; // Track if the hit came from an instance (for brush filters)
-  
+    
+    // Custom Blended Data (for Terrain System)
+    bool use_custom_data = false;
+    Vec3 custom_albedo;
+    float custom_roughness = 0.5f;
+    float custom_metallic = 0.0f;
+    float custom_transmission = 0.0f;
+ 
     inline void set_face_normal(const Ray& r, const Vec3& outward_normal) {
         front_face = Vec3::dot(r.direction, outward_normal) < 0;
         normal = front_face ? outward_normal : -outward_normal;

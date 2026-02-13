@@ -36,10 +36,28 @@
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-void OptixAccelManager::initialize(OptixDeviceContext ctx, CUstream str, OptixProgramGroup hit_pg) {
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(call)                                                        \
+    do {                                                                        \
+        cudaError_t error = call;                                               \
+        if (error != cudaSuccess) {                                             \
+            std::string msg = "[OptixAccelManager] CUDA call failed: " +        \
+                           std::string(cudaGetErrorString(error));              \
+            SCENE_LOG_ERROR(msg);                                               \
+            if (m_messageCallback) m_messageCallback(msg, 2);                   \
+        }                                                                       \
+    } while (0)
+#endif
+
+void OptixAccelManager::initialize(OptixDeviceContext ctx, CUstream str, 
+                                   OptixProgramGroup hit_pg, OptixProgramGroup hit_shadow_pg,
+                                   OptixProgramGroup hair_hit_pg, OptixProgramGroup hair_shadow_pg) {
     context = ctx;
     stream = str;
     hit_program_group = hit_pg;
+    hit_shadow_program_group = hit_shadow_pg;
+    hair_hit_program_group = hair_hit_pg;
+    hair_shadow_program_group = hair_shadow_pg;
     // SCENE_LOG_INFO("[OptixAccelManager] Initialized with OptiX context");
 }
 
@@ -106,6 +124,7 @@ int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometry) {
     
     MeshBLAS blas;
     blas.mesh_name = geometry.mesh_name;
+    blas.original_name = geometry.original_name.empty() ? geometry.mesh_name : geometry.original_name;  // Base name for GPU picking
     blas.material_id = geometry.material_id;  // Store material ID for SBT
     blas.vertex_count = geometry.vertices.size();
     blas.index_count = geometry.indices.size();
@@ -224,8 +243,6 @@ int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometry) {
         return -1;
     }
     
-    // Assign SBT offset (each mesh gets one SBT record)
-    blas.sbt_offset = static_cast<int>(mesh_blas_list.size());
     
     int mesh_id = static_cast<int>(mesh_blas_list.size());
     mesh_blas_list.push_back(std::move(blas));
@@ -263,6 +280,228 @@ int OptixAccelManager::findBLAS(const std::string& name, int material_id) const 
         }
     }
     return -1;
+}
+
+int OptixAccelManager::buildCurveBLAS(const CurveGeometry& geometry) {
+    if (geometry.vertices.empty() || geometry.indices.empty()) {
+        return -1;
+    }
+
+    CurveBLAS blas;
+    blas.name = geometry.name;
+    blas.material_id = geometry.material_id;
+    blas.mesh_material_id = geometry.mesh_material_id;
+    blas.hair_material = geometry.hair_material;
+    blas.vertex_count = geometry.vertices.size();
+    blas.segment_count = geometry.indices.size();
+    blas.use_bspline = geometry.use_bspline;
+
+    if (!geometry.vertices.empty()) {
+        float4 v0 = geometry.vertices[0];
+       /* SCENE_LOG_INFO("[OptixAccelManager] Building Curve BLAS: " + std::to_string(blas.vertex_count) + 
+                       " verts, " + std::to_string(blas.segment_count) + " segments. First vert: (" + 
+                       std::to_string(v0.x) + "," + std::to_string(v0.y) + "," + std::to_string(v0.z) + 
+                       ") Radius: " + std::to_string(v0.w));*/
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SPLIT float4 → float3 (positions) + float (widths)
+    // OptiX REQUIRES separate, aligned buffers for positions and widths.
+    // The float4 stride trick causes OPTIX_ERROR_INVALID_VALUE (7001).
+    // ═══════════════════════════════════════════════════════════════════════════
+    size_t n = geometry.vertices.size();
+    std::vector<float3> positions(n);
+    std::vector<float> widths(n);
+    for (size_t i = 0; i < n; ++i) {
+        positions[i] = make_float3(geometry.vertices[i].x, geometry.vertices[i].y, geometry.vertices[i].z);
+        widths[i] = geometry.vertices[i].w;
+    }
+
+    // Upload positions (float3)
+    size_t pos_size = n * sizeof(float3);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_vertices), pos_size));
+    CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_vertices), positions.data(), pos_size, cudaMemcpyHostToDevice, stream));
+
+    // Upload widths (float) — separate, properly aligned buffer
+    size_t w_size = n * sizeof(float);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_widths), w_size));
+    CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_widths), widths.data(), w_size, cudaMemcpyHostToDevice, stream));
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // INDEX BUFFER (Respect strand breaks!)
+    // We must use indices from geometry.indices, as they correctly handle
+    // the gaps between different hair strands.
+    // ═══════════════════════════════════════════════════════════════════════════
+    size_t idx_size = geometry.indices.size() * sizeof(unsigned int);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_indices), idx_size));
+    CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_indices), geometry.indices.data(), idx_size, cudaMemcpyHostToDevice, stream));
+    
+    // Upload tangent data (used by __closesthit__hair for shading)
+    if (!geometry.tangents.empty()) {
+        size_t t_size = geometry.tangents.size() * sizeof(float3);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_tangents), t_size));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_tangents), geometry.tangents.data(), t_size, cudaMemcpyHostToDevice, stream));
+    } else {
+        blas.d_tangents = 0;
+    }
+
+    // Upload strand IDs (for per-strand random variation)
+    if (!geometry.strand_ids.empty()) {
+        size_t s_size = geometry.strand_ids.size() * sizeof(uint32_t);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_strand_ids), s_size));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_strand_ids), geometry.strand_ids.data(), s_size, cudaMemcpyHostToDevice, stream));
+    } else {
+        blas.d_strand_ids = 0;
+    }
+
+    // Upload root UVs (for per-strand texture sampling on GPU)
+    if (!geometry.root_uvs.empty()) {
+        size_t ruv_size = geometry.root_uvs.size() * sizeof(float2);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_root_uvs), ruv_size));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_root_uvs), geometry.root_uvs.data(), ruv_size, cudaMemcpyHostToDevice, stream));
+    } else {
+        blas.d_root_uvs = 0;
+    }
+
+    // Build Curve GAS
+    OptixBuildInput curve_input = {};
+    curve_input.type = OPTIX_BUILD_INPUT_TYPE_CURVES;
+    
+    // Select curve type based on geometry configuration
+    if (blas.use_bspline) {
+        // CUBIC_BSPLINE: Requires 4 control points per segment. 
+        // Note: Intersection is much more expensive than Linear.
+        curve_input.curveArray.curveType = OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE;
+    } else {
+        // ROUND_LINEAR: Simple ray-cylinder intersection (Very fast)
+        curve_input.curveArray.curveType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
+    }
+    
+    curve_input.curveArray.numPrimitives = static_cast<unsigned int>(blas.segment_count);
+    curve_input.curveArray.vertexBuffers = &blas.d_vertices;
+    curve_input.curveArray.numVertices = static_cast<unsigned int>(blas.vertex_count);
+    curve_input.curveArray.vertexStrideInBytes = sizeof(float3);  // 12 bytes (standard)
+    
+    // INDEXED mode — each entry is the starting vertex index of a 2-vertex linear segment
+    curve_input.curveArray.indexBuffer = blas.d_indices; 
+    curve_input.curveArray.indexStrideInBytes = sizeof(unsigned int); 
+    
+    // Width buffer — separate aligned buffer with per-vertex radius
+    curve_input.curveArray.widthBuffers = &blas.d_widths;
+    curve_input.curveArray.widthStrideInBytes = sizeof(float);  // 4 bytes (standard)
+    
+    curve_input.curveArray.normalBuffers = 0;
+
+    curve_input.curveArray.endcapFlags = 0; // Default
+    
+    unsigned int curve_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    curve_input.curveArray.flag = curve_flags[0];
+
+    SCENE_LOG_INFO("[OptixAccelManager] Building Curve GAS: ABI=" + std::to_string(OPTIX_ABI_VERSION) + 
+                   " Verts=" + std::to_string(blas.vertex_count) +
+                   " Segs=" + std::to_string(blas.segment_count) +
+                   " PosPtr=" + std::to_string(blas.d_vertices) +
+                   " WidthPtr=" + std::to_string(blas.d_widths));
+
+    // SIMPLIFIED FLAGS - "ALLOW_UPDATE" required for refitting
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.operation = OPTIX_BUILD_OPERATION_BUILD;
+
+    OptixAccelBufferSizes gas_buffer_sizes;
+    OptixResult compute_res = optixAccelComputeMemoryUsage(context, &accel_options, &curve_input, 1, &gas_buffer_sizes);
+    if (compute_res != OPTIX_SUCCESS) {
+        SCENE_LOG_ERROR("[OptixAccelManager] Failed to compute curve GAS memory: " + std::to_string(compute_res));
+        return -1;
+    }
+
+    CUdeviceptr d_temp;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_temp), gas_buffer_sizes.tempSizeInBytes));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_gas_output), gas_buffer_sizes.outputSizeInBytes));
+    blas.gas_output_size = gas_buffer_sizes.outputSizeInBytes; // Cache for refit
+
+    // Force Sync to ensure uploads complete and to rule out race conditions
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    OptixResult build_res = optixAccelBuild(context, stream, &accel_options, &curve_input, 1, 
+                                     d_temp, gas_buffer_sizes.tempSizeInBytes, 
+                                     blas.d_gas_output, gas_buffer_sizes.outputSizeInBytes, 
+                                     &blas.handle, nullptr, 0);
+
+    CUDA_CHECK(cudaFree(reinterpret_cast<void*>(d_temp)));
+    
+    if (build_res != OPTIX_SUCCESS) {
+        SCENE_LOG_ERROR("[OptixAccelManager] Failed to build curve BLAS: " + std::to_string(build_res));
+        blas.cleanup();
+        return -1;
+    }
+
+    int curve_id = static_cast<int>(curve_blas_list.size());
+    curve_blas_list.push_back(std::move(blas));
+    return curve_id;
+}
+
+bool OptixAccelManager::refitCurveBLAS(int curve_id, bool sync, 
+                                     CUdeviceptr d_external_vertices, 
+                                     CUdeviceptr d_external_widths,
+                                     size_t vertex_stride,
+                                     size_t width_stride) 
+{
+    if (curve_id < 0 || curve_id >= static_cast<int>(curve_blas_list.size())) return false;
+    CurveBLAS& blas = curve_blas_list[curve_id];
+
+    // Build Curve GAS Update Input
+    OptixBuildInput curve_input = {};
+    curve_input.type = OPTIX_BUILD_INPUT_TYPE_CURVES;
+    curve_input.curveArray.curveType = blas.use_bspline ? OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE : OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
+    curve_input.curveArray.numPrimitives = static_cast<unsigned int>(blas.segment_count);
+    
+    // Use external buffers if provided, else use the ones stored in BLAS
+    // Store in persistent members so OptiX can read them asynchronously after this function returns
+    blas.d_refit_vertices = (d_external_vertices != 0) ? d_external_vertices : blas.d_vertices;
+    blas.d_refit_widths = (d_external_widths != 0) ? d_external_widths : blas.d_widths;
+    
+    curve_input.curveArray.vertexBuffers = &blas.d_refit_vertices;
+    curve_input.curveArray.numVertices = static_cast<unsigned int>(blas.vertex_count);
+    curve_input.curveArray.vertexStrideInBytes = (vertex_stride != 0) ? (unsigned int)vertex_stride : sizeof(float3);
+    
+    curve_input.curveArray.indexBuffer = blas.d_indices;
+    curve_input.curveArray.indexStrideInBytes = sizeof(unsigned int);
+    
+    curve_input.curveArray.widthBuffers = &blas.d_refit_widths;
+    curve_input.curveArray.widthStrideInBytes = (width_stride != 0) ? (unsigned int)width_stride : sizeof(float);
+    
+    unsigned int curve_flags[1] = { OPTIX_GEOMETRY_FLAG_NONE };
+    curve_input.curveArray.flag = curve_flags[0];
+
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;
+
+    OptixAccelBufferSizes buffer_sizes;
+    OptixResult res = optixAccelComputeMemoryUsage(context, &accel_options, &curve_input, 1, &buffer_sizes);
+    if (res != OPTIX_SUCCESS) return false;
+
+    CUdeviceptr d_temp;
+    cudaMalloc(reinterpret_cast<void**>(&d_temp), buffer_sizes.tempUpdateSizeInBytes);
+
+    res = optixAccelBuild(
+        context, stream, &accel_options, &curve_input, 1,
+        d_temp, buffer_sizes.tempUpdateSizeInBytes,
+        blas.d_gas_output, blas.gas_output_size,
+        &blas.handle, nullptr, 0
+    );
+
+    cudaFree(reinterpret_cast<void*>(d_temp));
+    
+    if (sync) cudaStreamSynchronize(stream);
+    return (res == OPTIX_SUCCESS);
+}
+
+void OptixAccelManager::updateCurveMaterial(int curve_id, const GpuHairMaterial& material) {
+    if (curve_id >= 0 && curve_id < static_cast<int>(curve_blas_list.size())) {
+        curve_blas_list[curve_id].hair_material = material;
+    }
 }
 
 bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload, bool sync) {
@@ -344,6 +583,79 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
     return true;
 }
 
+void OptixAccelManager::uploadMeshVerticesPartial(int mesh_id, 
+                                               const std::vector<float3>& vertices, 
+                                               const std::vector<float3>& normals, 
+                                               size_t offset_in_vertices) {
+    if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) return;
+    MeshBLAS& blas = mesh_blas_list[mesh_id];
+    
+    // Safety check: Offset + Size must be within BLAS vertex count
+    if (offset_in_vertices + vertices.size() > blas.vertex_count) {
+        SCENE_LOG_ERROR("[OptixAccelManager] Partial vertex upload out of bounds");
+        return;
+    }
+    
+    // 1. Upload partial vertex data
+    if (!vertices.empty()) {
+        size_t v_size = vertices.size() * sizeof(float3);
+        size_t v_offset = offset_in_vertices * sizeof(float3);
+        cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_vertices + v_offset), vertices.data(), v_size, cudaMemcpyHostToDevice, stream);
+    }
+    
+    // 2. Upload partial normal data if present
+    if (!normals.empty() && blas.d_normals) {
+         size_t n_size = normals.size() * sizeof(float3);
+         size_t n_offset = offset_in_vertices * sizeof(float3);
+         cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_normals + n_offset), normals.data(), n_size, cudaMemcpyHostToDevice, stream);
+    }
+}
+
+bool OptixAccelManager::refitMeshBLAS(int mesh_id, bool sync) {
+    if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) return false;
+    MeshBLAS& blas = mesh_blas_list[mesh_id];
+
+    // Refit GAS (Topology remains same)
+    OptixBuildInput build_input = {};
+    build_input.type = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+    build_input.triangleArray.vertexBuffers = &blas.d_vertices;
+    build_input.triangleArray.numVertices = static_cast<unsigned int>(blas.vertex_count);
+    build_input.triangleArray.vertexFormat = OPTIX_VERTEX_FORMAT_FLOAT3;
+    build_input.triangleArray.vertexStrideInBytes = sizeof(float3);
+    build_input.triangleArray.indexBuffer = blas.d_indices;
+    build_input.triangleArray.numIndexTriplets = static_cast<unsigned int>(blas.index_count);
+    build_input.triangleArray.indexFormat = OPTIX_INDICES_FORMAT_UNSIGNED_INT3;
+    build_input.triangleArray.indexStrideInBytes = sizeof(uint3);
+    
+    unsigned int flags = OPTIX_GEOMETRY_FLAG_NONE;
+    build_input.triangleArray.flags = &flags;
+    build_input.triangleArray.numSbtRecords = 1;
+    
+    OptixAccelBuildOptions accel_options = {};
+    accel_options.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE | OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+    accel_options.operation = OPTIX_BUILD_OPERATION_UPDATE;  
+    
+    OptixAccelBufferSizes buffer_sizes;
+    OptixResult res = optixAccelComputeMemoryUsage(context, &accel_options, &build_input, 1, &buffer_sizes);
+    if (res != OPTIX_SUCCESS) return false;
+    
+    CUdeviceptr d_temp;
+    cudaMalloc(reinterpret_cast<void**>(&d_temp), buffer_sizes.tempUpdateSizeInBytes);
+    
+    res = optixAccelBuild(
+        context, stream, &accel_options, &build_input, 1,
+        d_temp, buffer_sizes.tempUpdateSizeInBytes,
+        blas.d_gas_output, blas.gas_output_size,
+        &blas.handle, nullptr, 0
+    );
+    
+    cudaFree(reinterpret_cast<void*>(d_temp));
+    
+    if (sync) cudaStreamSynchronize(stream);
+    
+    return (res == OPTIX_SUCCESS);
+}
+
 // ----------------------------------------------------------------------------
 // NEW: Lightweight Transform Sync (No Vertex Upload)
 // ----------------------------------------------------------------------------
@@ -363,7 +675,7 @@ void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr
 
         // Match with instances
         for (size_t i = 0; i < instances.size(); ++i) {
-            if (instances[i].mesh_id < 0) continue;
+            if (instances[i].blas_id < 0) continue;
             
             InstanceTransformCache cache_item;
             cache_item.instance_id = static_cast<int>(i);
@@ -499,18 +811,37 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
 // INSTANCE MANAGEMENT
 // ═══════════════════════════════════════════════════════════════════════════
 
-int OptixAccelManager::addInstance(int mesh_id, const float transform[12], int material_id, const std::string& name, void* source_hittable) {
-    if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
-        SCENE_LOG_ERROR("[OptixAccelManager] Invalid mesh_id: " + std::to_string(mesh_id));
+int OptixAccelManager::addInstance(int blas_id, const float transform[12], int material_id, InstanceType type, const std::string& name, void* source_hittable) {
+    bool valid_blas = false;
+    int sbt_offset = 0;
+    OptixTraversableHandle handle = 0;
+
+    if (type == InstanceType::Mesh) {
+        if (blas_id >= 0 && blas_id < static_cast<int>(mesh_blas_list.size())) {
+            valid_blas = true;
+            sbt_offset = mesh_blas_list[blas_id].sbt_offset;
+            handle = mesh_blas_list[blas_id].handle;
+        }
+    } else {
+        if (blas_id >= 0 && blas_id < static_cast<int>(curve_blas_list.size())) {
+            valid_blas = true;
+            // sbt_offset will be updated during buildTLAS/buildSBT
+            handle = curve_blas_list[blas_id].handle;
+        }
+    }
+
+    if (!valid_blas || handle == 0) {
+        SCENE_LOG_ERROR("[OptixAccelManager] Invalid blas_id or type: " + std::to_string(blas_id));
         return -1;
     }
     
     SceneInstance inst;
-    inst.mesh_id = mesh_id;
+    inst.type = type;
+    inst.blas_id = blas_id;
     inst.material_id = material_id;
     inst.node_name = name;
     inst.source_hittable = source_hittable;
-    inst.sbt_offset = mesh_blas_list[mesh_id].sbt_offset;
+    inst.sbt_offset = sbt_offset;
     std::memcpy(inst.transform, transform, sizeof(float) * 12);
     
     int instance_id;
@@ -550,7 +881,7 @@ void OptixAccelManager::removeInstance(int instance_id) {
         return;
     }
     
-    instances[instance_id].mesh_id = -1;  // Mark as invalid
+    instances[instance_id].blas_id = -1;  // Mark as invalid
     free_instance_slots.push_back(instance_id);
     tlas_needs_rebuild = true;
     m_topology_dirty = true; // Structure changed
@@ -594,7 +925,7 @@ int OptixAccelManager::cloneInstance(int source_instance_id, const std::string& 
     }
     
     const auto& source = instances[source_instance_id];
-    if (source.mesh_id < 0) return -1;  // Skip invalid instances
+    if (source.blas_id < 0) return -1;  // Skip invalid instances
     
     SceneInstance newInst = source;  // Copy everything
     newInst.node_name = newNodeName;
@@ -621,7 +952,7 @@ std::vector<int> OptixAccelManager::cloneInstancesByNodeName(const std::string& 
     
     // Find all instances matching source name (including material variants)
     for (size_t i = 0; i < instances.size(); ++i) {
-        if (instances[i].mesh_id < 0 || !instances[i].visible) continue;  // Skip invalid/hidden
+        if (instances[i].blas_id < 0 || !instances[i].visible) continue;  // Skip invalid/hidden
         
         // Match exact name or name_mat_X pattern
         std::string instName = instances[i].node_name;
@@ -660,14 +991,20 @@ void OptixAccelManager::buildTLAS() {
     
     for (size_t i = 0; i < instances.size(); ++i) {
         const auto& inst = instances[i];
-        if (inst.mesh_id < 0 || inst.mesh_id >= static_cast<int>(mesh_blas_list.size())) {
-            continue;  // Skip invalid instances
-        }
+        if (inst.blas_id < 0) continue;
         
-        const MeshBLAS& blas = mesh_blas_list[inst.mesh_id];
-        if (blas.handle == 0) {
-            continue;  // Skip if BLAS not built
+        OptixTraversableHandle handle = 0;
+        if (inst.type == InstanceType::Mesh) {
+            if (inst.blas_id < static_cast<int>(mesh_blas_list.size())) {
+                handle = mesh_blas_list[inst.blas_id].handle;
+            }
+        } else {
+            if (inst.blas_id < static_cast<int>(curve_blas_list.size())) {
+                handle = curve_blas_list[inst.blas_id].handle;
+            }
         }
+
+        if (handle == 0) continue;
         
         OptixInstance optix_inst = {};
         
@@ -675,15 +1012,27 @@ void OptixAccelManager::buildTLAS() {
         std::memcpy(optix_inst.transform, inst.transform, sizeof(float) * 12);
         
         optix_inst.instanceId = static_cast<unsigned int>(i);
-        optix_inst.sbtOffset = blas.sbt_offset;
+        
+        // CRITICAL FIX: Look up the latest sbtOffset from the BLAS record.
+        // This ensures that even if instances were added before buildSBT, 
+        // they get the correct offset in the final TLAS.
+        if (inst.type == InstanceType::Mesh) {
+            optix_inst.sbtOffset = mesh_blas_list[inst.blas_id].sbt_offset;
+        } else {
+            optix_inst.sbtOffset = curve_blas_list[inst.blas_id].sbt_offset;
+        }
+        
         optix_inst.visibilityMask = inst.visibility_mask;
         
-        // DISABLE CULLING: Essential for double-sided materials and mirrored instances (negative scale)
-        // We do NOT use OPTIX_INSTANCE_FLAG_FLIP_TRIANGLE_FACING because it alters barycentrics 
-        // (A-C-B order) while our shader reads attributes in A-B-C order, causing skewed interpolation.
-        // Instead, we hit the backface and let the Shader flip the Normal.
-        optix_inst.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
-        optix_inst.traversableHandle = blas.handle;
+        if (inst.type == InstanceType::Mesh) {
+            // DISABLE CULLING: Essential for double-sided materials and mirrored instances (negative scale)
+            optix_inst.flags = OPTIX_INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING;
+        } else {
+            // Curves usually don't need culling flags
+            optix_inst.flags = OPTIX_INSTANCE_FLAG_NONE;
+        }
+        
+        optix_inst.traversableHandle = handle;
         
         optix_instances.push_back(optix_inst);
     }
@@ -799,8 +1148,9 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
     
     // One SBT record per mesh (BLAS)
     for (size_t mesh_idx = 0; mesh_idx < mesh_blas_list.size(); ++mesh_idx) {
-        const MeshBLAS& blas = mesh_blas_list[mesh_idx];
-        int mat_id = blas.material_id;  // Use actual material ID from mesh
+        MeshBLAS& blas = mesh_blas_list[mesh_idx];
+        blas.sbt_offset = static_cast<int>(hitgroup_records.size());
+        int mat_id = blas.material_id; 
         
         SbtRecord<HitGroupData> rec = {};
         
@@ -834,6 +1184,7 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
             rec.data.has_transmission_tex = tex.has_transmission_tex;
             rec.data.has_opacity_tex = tex.has_opacity_tex;
             rec.data.has_emission_tex = tex.has_emission_tex;
+            rec.data.opacity_has_alpha = tex.opacity_has_alpha;
         }
         
         // Emission from material - use material_id as index
@@ -864,6 +1215,7 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                      if (!terrain.splatMap->is_gpu_uploaded) terrain.splatMap->upload_to_gpu();
                      rec.data.splat_map_tex = terrain.splatMap->get_cuda_texture();
                 } else {
+                     rec.data.splat_map_tex = 0;
                      SCENE_LOG_WARN("[TERRAIN SBT] No splatMap for terrain '" + terrain.name + "'");
                 }
                 
@@ -879,6 +1231,8 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                                  if (!pbsdf->albedoProperty.texture->is_gpu_uploaded) 
                                      pbsdf->albedoProperty.texture->upload_to_gpu();
                                  rec.data.layer_albedo_tex[i] = pbsdf->albedoProperty.texture->get_cuda_texture();
+                            } else {
+                                 rec.data.layer_albedo_tex[i] = 0;
                             }
                             
                             // NORMAL
@@ -886,6 +1240,8 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                                  if (!pbsdf->normalProperty.texture->is_gpu_uploaded) 
                                      pbsdf->normalProperty.texture->upload_to_gpu();
                                  rec.data.layer_normal_tex[i] = pbsdf->normalProperty.texture->get_cuda_texture();
+                            } else {
+                                 rec.data.layer_normal_tex[i] = 0;
                             }
                             
                             // ROUGHNESS
@@ -893,6 +1249,8 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                                  if (!pbsdf->roughnessProperty.texture->is_gpu_uploaded) 
                                      pbsdf->roughnessProperty.texture->upload_to_gpu();
                                  rec.data.layer_roughness_tex[i] = pbsdf->roughnessProperty.texture->get_cuda_texture();
+                            } else {
+                                 rec.data.layer_roughness_tex[i] = 0;
                             }
                         }
                         
@@ -914,11 +1272,283 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
         rec.data.foliage_height = 0.0f;
         rec.data.foliage_pivot = make_float3(0.0f, 0.0f, 0.0f);
         
+        // ═══════════════════════════════════════════════════════════════════════════
+        // GPU PICKING - Object ID for viewport selection
+        // Use mesh_idx as unique object ID (matches SBT record index)
+        // ═══════════════════════════════════════════════════════════════════════════
+        rec.data.object_id = static_cast<int>(mesh_idx);
+        
+        // Record 0: Radiance
         OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hit_program_group, &rec));
+        hitgroup_records.push_back(rec);
+        
+        // Record 1: Shadow
+        OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hit_shadow_program_group, &rec));
+        hitgroup_records.push_back(rec);
+    }
+
+    // SBT Records for Curves (Hair)
+    for (size_t curve_idx = 0; curve_idx < curve_blas_list.size(); ++curve_idx) {
+        CurveBLAS& blas = curve_blas_list[curve_idx];
+        blas.sbt_offset = static_cast<int>(hitgroup_records.size());
+
+        SbtRecord<HitGroupData> rec = {};
+        rec.data.vertices = reinterpret_cast<float3*>(blas.d_vertices); // float3 positions
+        rec.data.indices = reinterpret_cast<uint3*>(blas.d_indices);    // Not used for non-indexed curves
+        rec.data.tangents = reinterpret_cast<float3*>(blas.d_tangents);
+        rec.data.strand_ids = reinterpret_cast<const uint32_t*>(blas.d_strand_ids);
+        rec.data.root_uvs = reinterpret_cast<const float2*>(blas.d_root_uvs);
+        rec.data.has_root_uvs = (blas.d_root_uvs != 0) ? 1 : 0;
+        rec.data.material_id = blas.material_id;
+        rec.data.mesh_material_id = blas.mesh_material_id; // [NEW] Set scalp material ID
+        rec.data.hair_material = blas.hair_material; // [NEW] Set per-groom hair material
+        rec.data.object_id = static_cast<int>(mesh_blas_list.size() + curve_idx);
+
+        if (blas.material_id >= 0 && blas.material_id < static_cast<int>(materials.size())) {
+            rec.data.emission = materials[blas.material_id].emission;
+        }
+
+        // Texture bundle logic:
+        // For hair, we might want textures from the hair material OR the scalp material (ROOT_UV_MAP)
+        int texture_mat_id = blas.material_id;
+        
+        // If ROOT_UV_MAP is active and scalp material is valid, check if we should use scalp textures
+        if (blas.hair_material.colorMode == 3 && blas.mesh_material_id >= 0) {
+            bool hairHasAlbedo = false;
+            if (blas.material_id >= 0 && blas.material_id < static_cast<int>(textures.size())) {
+                hairHasAlbedo = textures[blas.material_id].has_albedo_tex;
+            }
+            if (!hairHasAlbedo) {
+                texture_mat_id = blas.mesh_material_id; // Use scalp material for textures
+            }
+        }
+
+        if (texture_mat_id >= 0 && texture_mat_id < static_cast<int>(textures.size())) {
+            const auto& tex = textures[texture_mat_id];
+            rec.data.albedo_tex = tex.albedo_tex;
+            rec.data.roughness_tex = tex.roughness_tex;
+            rec.data.normal_tex = tex.normal_tex;
+            rec.data.metallic_tex = tex.metallic_tex;
+            rec.data.transmission_tex = tex.transmission_tex;
+            rec.data.opacity_tex = tex.opacity_tex;
+            rec.data.emission_tex = tex.emission_tex;
+            rec.data.has_albedo_tex = tex.has_albedo_tex;
+            rec.data.has_roughness_tex = tex.has_roughness_tex;
+            rec.data.has_normal_tex = tex.has_normal_tex;
+            rec.data.has_metallic_tex = tex.has_metallic_tex;
+            rec.data.has_transmission_tex = tex.has_transmission_tex;
+            rec.data.has_opacity_tex = tex.has_opacity_tex;
+            rec.data.has_emission_tex = tex.has_emission_tex;
+            rec.data.opacity_has_alpha = tex.opacity_has_alpha;
+        }
+
+        rec.data.is_hair = 1;
+
+        // Record 0: Radiance
+        OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hair_hit_program_group, &rec));
+        hitgroup_records.push_back(rec);
+        
+        // Record 1: Shadow
+        OPTIX_CHECK_ACCEL(optixSbtRecordPackHeader(hair_shadow_program_group, &rec));
         hitgroup_records.push_back(rec);
     }
     
     uploadHitGroupRecords();
+}
+
+void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain) {
+    if (hitgroup_records.empty()) return;
+
+    bool modified = false;
+
+    // Update each hitgroup record
+    for (auto& rec : hitgroup_records) {
+        int mat_id = rec.data.material_id;
+        
+        // 1. Basic Material Properties (Emission)
+        if (mat_id >= 0 && mat_id < static_cast<int>(materials.size())) {
+            rec.data.emission = materials[mat_id].emission;
+            modified = true;
+            
+            // 1b. Regular Material Texture Sync (if not terrain)
+            if (!rec.data.is_terrain) {
+                Material* base_mat = MaterialManager::getInstance().getMaterial(mat_id);
+                PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(base_mat);
+                if (pbsdf) {
+                    // Albedo
+                    if (pbsdf->albedoProperty.texture) {
+                        if (!pbsdf->albedoProperty.texture->is_gpu_uploaded) pbsdf->albedoProperty.texture->upload_to_gpu();
+                        rec.data.albedo_tex = pbsdf->albedoProperty.texture->get_cuda_texture();
+                        rec.data.has_albedo_tex = 1;
+                    } else {
+                        rec.data.albedo_tex = 0;
+                        rec.data.has_albedo_tex = 0;
+                    }
+
+                    // Normal
+                    if (pbsdf->normalProperty.texture) {
+                        if (!pbsdf->normalProperty.texture->is_gpu_uploaded) pbsdf->normalProperty.texture->upload_to_gpu();
+                        rec.data.normal_tex = pbsdf->normalProperty.texture->get_cuda_texture();
+                        rec.data.has_normal_tex = 1;
+                    } else {
+                        rec.data.normal_tex = 0;
+                        rec.data.has_normal_tex = 0;
+                    }
+
+                    // Roughness
+                    if (pbsdf->roughnessProperty.texture) {
+                        if (!pbsdf->roughnessProperty.texture->is_gpu_uploaded) pbsdf->roughnessProperty.texture->upload_to_gpu();
+                        rec.data.roughness_tex = pbsdf->roughnessProperty.texture->get_cuda_texture();
+                        rec.data.has_roughness_tex = 1;
+                    } else {
+                        rec.data.roughness_tex = 0;
+                        rec.data.has_roughness_tex = 0;
+                    }
+                    
+                    // Metallic
+                    if (pbsdf->metallicProperty.texture) {
+                        if (!pbsdf->metallicProperty.texture->is_gpu_uploaded) pbsdf->metallicProperty.texture->upload_to_gpu();
+                        rec.data.metallic_tex = pbsdf->metallicProperty.texture->get_cuda_texture();
+                        rec.data.has_metallic_tex = 1;
+                    } else {
+                        rec.data.metallic_tex = 0;
+                        rec.data.has_metallic_tex = 0;
+                    }
+                }
+            }
+        }
+
+        // 2. Terrain System Sync (Textures & SplatMap)
+        if (sync_terrain && rec.data.is_terrain) {
+            auto& terrains = TerrainManager::getInstance().getTerrains();
+            for (auto& terrain : terrains) {
+                if (terrain.material_id == mat_id) {
+                    // Sync Splat Map
+                    if (terrain.splatMap) {
+                        if (!terrain.splatMap->is_gpu_uploaded) terrain.splatMap->upload_to_gpu();
+                        rec.data.splat_map_tex = terrain.splatMap->get_cuda_texture();
+                    } else {
+                        rec.data.splat_map_tex = 0;
+                    }
+
+                    // Sync Layers (Textured Layers)
+                    for (int i = 0; i < 4; ++i) {
+                        rec.data.layer_uv_scale[i] = terrain.layer_uv_scales[i];
+                        if (i < terrain.layers.size() && terrain.layers[i]) {
+                             PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(terrain.layers[i].get());
+                             if (pbsdf) {
+                                  // Albedo
+                                  if (pbsdf->albedoProperty.texture) {
+                                      if (!pbsdf->albedoProperty.texture->is_gpu_uploaded) 
+                                          pbsdf->albedoProperty.texture->upload_to_gpu();
+                                      rec.data.layer_albedo_tex[i] = pbsdf->albedoProperty.texture->get_cuda_texture();
+                                  } else {
+                                      rec.data.layer_albedo_tex[i] = 0;
+                                  }
+                                  
+                                  // Normal
+                                  if (pbsdf->normalProperty.texture) {
+                                      if (!pbsdf->normalProperty.texture->is_gpu_uploaded) 
+                                          pbsdf->normalProperty.texture->upload_to_gpu();
+                                      rec.data.layer_normal_tex[i] = pbsdf->normalProperty.texture->get_cuda_texture();
+                                  } else {
+                                      rec.data.layer_normal_tex[i] = 0;
+                                  }
+
+                                  // Roughness
+                                  if (pbsdf->roughnessProperty.texture) {
+                                      if (!pbsdf->roughnessProperty.texture->is_gpu_uploaded) 
+                                          pbsdf->roughnessProperty.texture->upload_to_gpu();
+                                      rec.data.layer_roughness_tex[i] = pbsdf->roughnessProperty.texture->get_cuda_texture();
+                                  } else {
+                                      rec.data.layer_roughness_tex[i] = 0;
+                                  }
+                             }
+                        }
+                    }
+                    modified = true;
+                    break; 
+                }
+            }
+        }
+
+        // 3. Hair System Sync (Per-Groom Material)
+        if (rec.data.is_hair) {
+            int curve_idx = rec.data.object_id - static_cast<int>(mesh_blas_list.size());
+            if (curve_idx >= 0 && curve_idx < static_cast<int>(curve_blas_list.size())) {
+                const auto& blas = curve_blas_list[curve_idx];
+                rec.data.hair_material = blas.hair_material;
+                
+                // [FIX] Update texture fallback during sync!
+                int texture_mat_id = blas.material_id;
+                
+                // If ROOT_UV_MAP is active, check if we should use scalp textures
+                if (blas.hair_material.colorMode == 3 && blas.mesh_material_id >= 0) {
+                    bool hairHasAlbedo = false;
+                    Material* hair_mat = MaterialManager::getInstance().getMaterial(blas.material_id);
+                    PrincipledBSDF* p_hair = dynamic_cast<PrincipledBSDF*>(hair_mat);
+                    if (p_hair && p_hair->albedoProperty.texture) {
+                        hairHasAlbedo = true;
+                    }
+                    
+                    if (!hairHasAlbedo) {
+                        texture_mat_id = blas.mesh_material_id;
+                    }
+                }
+                
+                // Update textures in SBT from the chosen material
+                Material* target_mat = MaterialManager::getInstance().getMaterial(texture_mat_id);
+                PrincipledBSDF* p_target = dynamic_cast<PrincipledBSDF*>(target_mat);
+                if (p_target) {
+                    // Albedo
+                    if (p_target->albedoProperty.texture) {
+                        if (!p_target->albedoProperty.texture->is_gpu_uploaded) p_target->albedoProperty.texture->upload_to_gpu();
+                        rec.data.albedo_tex = p_target->albedoProperty.texture->get_cuda_texture();
+                        rec.data.has_albedo_tex = 1;
+                    } else {
+                        rec.data.albedo_tex = 0;
+                        rec.data.has_albedo_tex = 0;
+                    }
+                    
+                    // Roughness
+                    if (p_target->roughnessProperty.texture) {
+                        if (!p_target->roughnessProperty.texture->is_gpu_uploaded) p_target->roughnessProperty.texture->upload_to_gpu();
+                        rec.data.roughness_tex = p_target->roughnessProperty.texture->get_cuda_texture();
+                        rec.data.has_roughness_tex = 1;
+                    } else {
+                        rec.data.roughness_tex = 0;
+                        rec.data.has_roughness_tex = 0;
+                    }
+
+                    // Normal
+                    if (p_target->normalProperty.texture) {
+                        if (!p_target->normalProperty.texture->is_gpu_uploaded) p_target->normalProperty.texture->upload_to_gpu();
+                        rec.data.normal_tex = p_target->normalProperty.texture->get_cuda_texture();
+                        rec.data.has_normal_tex = 1;
+                    } else {
+                        rec.data.normal_tex = 0;
+                        rec.data.has_normal_tex = 0;
+                    }
+
+                    // Metallic
+                    if (p_target->metallicProperty.texture) {
+                        if (!p_target->metallicProperty.texture->is_gpu_uploaded) p_target->metallicProperty.texture->upload_to_gpu();
+                        rec.data.metallic_tex = p_target->metallicProperty.texture->get_cuda_texture();
+                        rec.data.has_metallic_tex = 1;
+                    } else {
+                        rec.data.metallic_tex = 0;
+                        rec.data.has_metallic_tex = 0;
+                    }
+                }
+                
+                modified = true;
+            }
+        }
+    }
+
+    if (modified) {
+        uploadHitGroupRecords();
+    }
 }
 
 
@@ -928,11 +1558,18 @@ void OptixAccelManager::uploadHitGroupRecords() {
     
     size_t sbt_size = hitgroup_records.size() * sizeof(SbtRecord<HitGroupData>);
     
-    if (d_hitgroup_records) {
-        cudaFree(reinterpret_cast<void*>(d_hitgroup_records));
+    // CRASH FIX: Avoid cudaFree/cudaMalloc if size hasn't changed.
+    // This allows safe material updates even during rendering (if data matches).
+    if (d_hitgroup_records && sbt_size == m_last_hitgroup_size) {
+        cudaMemcpy(reinterpret_cast<void*>(d_hitgroup_records), hitgroup_records.data(), sbt_size, cudaMemcpyHostToDevice);
+    } else {
+        if (d_hitgroup_records) {
+            cudaFree(reinterpret_cast<void*>(d_hitgroup_records));
+        }
+        cudaMalloc(reinterpret_cast<void**>(&d_hitgroup_records), sbt_size);
+        cudaMemcpy(reinterpret_cast<void*>(d_hitgroup_records), hitgroup_records.data(), sbt_size, cudaMemcpyHostToDevice);
+        m_last_hitgroup_size = sbt_size;
     }
-    cudaMalloc(reinterpret_cast<void**>(&d_hitgroup_records), sbt_size);
-    cudaMemcpy(reinterpret_cast<void*>(d_hitgroup_records), hitgroup_records.data(), sbt_size, cudaMemcpyHostToDevice);
     
     sbt.hitgroupRecordBase = d_hitgroup_records;
     sbt.hitgroupRecordStrideInBytes = sizeof(SbtRecord<HitGroupData>);
@@ -1017,6 +1654,11 @@ void OptixAccelManager::cleanup() {
         blas.cleanup();
     }
     mesh_blas_list.clear();
+
+    for (auto& blas : curve_blas_list) {
+        blas.cleanup();
+    }
+    curve_blas_list.clear();
     
     // Cleanup instances
     instances.clear();
@@ -1062,6 +1704,24 @@ void OptixAccelManager::clearInstances() {
     // Also reset topology cache as instances are gone
     m_topology_dirty = true;
     m_instance_sync_cache.clear();
+}
+
+void OptixAccelManager::clearCurves() {
+    // 1. Cleanup and clear BLAS
+    for (auto& blas : curve_blas_list) {
+        blas.cleanup();
+    }
+    curve_blas_list.clear();
+
+    // 2. Remove instances of type Curve
+    auto it = std::remove_if(instances.begin(), instances.end(), [](const SceneInstance& inst) {
+        return inst.type == InstanceType::Curve;
+    });
+    instances.erase(it, instances.end());
+
+    // 3. Reset internal tracking for curves
+    tlas_needs_rebuild = true;
+    m_topology_dirty = true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

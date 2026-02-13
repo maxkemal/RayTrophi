@@ -33,6 +33,7 @@ struct TriangleData {
     Vec3 n0, n1, n2;          // 36 bytes
     Vec2 t0, t1, t2;          // 24 bytes
     uint16_t materialID;      // 2 bytes
+    int terrain_id = -1;      // Terrain ID if this triangle belongs to a terrain mesh
     const Triangle* original_ptr = nullptr; // Pointer to original object for identity/name checks
     
     // Total: 98 bytes (was 114 bytes with shared_ptr)

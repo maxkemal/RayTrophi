@@ -51,15 +51,19 @@ public:
         const std::shared_ptr<Texture>& opacityTexture = nullptr,
         const TextureTransform& transform = TextureTransform(),
         const Vec3& emission = Vec3(0.0f, 0.0f, 0.0f),
-        const Vec3& subsurfaceColor_in = Vec3(0.0, 0.0, 0.0),
+        float subsurface_in = 0.0f,
+        const Vec3& subsurfaceColor_in = Vec3(1.0f, 0.8f, 0.6f),
         float subsurfaceRadius_in = 0.0f,
         float clearcoat_in = 0.0f,
         float transmission_in = 0.0f,
+        float translucent_in = 0.0f,
         float clearcoatRoughness_in = 0.03f
-    ) : subsurfaceColor(subsurfaceColor_in),
+    ) : subsurface(subsurface_in),
+        subsurfaceColor(subsurfaceColor_in),
         subsurfaceRadius(Vec3(subsurfaceRadius_in)), 
         clearcoat(clearcoat_in),
         transmission(transmission_in),
+        translucent(translucent_in),
         clearcoatRoughness(clearcoatRoughness_in),
         textureTransform(transform)
     {
@@ -117,7 +121,7 @@ public:
     float getIOR() const;
     bool isEmissive() const;
     virtual float get_opacity(const Vec2& uv) const override;
-    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
+    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const override;
     float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const override;
     float get_scattering_factor() const override {
         // Example formula incorporating reflectivity and roughness
@@ -146,6 +150,11 @@ public:
     Vec3 fresnelSchlick(float cosTheta, const Vec3& F0) const;
     Vec3 fresnelSchlickRoughness(float cosTheta, const Vec3& F0, float roughness) const;
 
+    // GPU-parity scatter lobes
+    bool clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
+    bool sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
+    bool translucent_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
+
     // float normalStrength = 1.0f; // Shadowing removed
     
     // Subsurface Scattering (Random Walk)
@@ -166,6 +175,8 @@ public:
     // Other properties
     float anisotropic = 0.0f;                           // Surface anisotropy
     float transmission = 0.0f;                          // Glass/water transmission
+    float sheen = 0.0f;                                 // Sheen amount (used as IS_WATER flag)
+    float sheen_tint = 0.5f;                            // Sheen color tint (used as wave frequency for water)
     Vec3 anisotropicDirection;
     float opacityAlpha = 1.0f;
 private:

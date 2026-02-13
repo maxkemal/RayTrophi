@@ -23,10 +23,17 @@
 #include "scene_ui_gas.hpp"
 #include <VolumetricRenderer.h>
 
+// External GPU availability flag
+extern bool g_hasOptix;
+
 // ─────────────────────────────────────────────────────────────────────────────
-// HELPER: Sync VDB volumes to GPU (OptiX)
+// HELPER: Sync VDB volumes to GPU (OptiX) - with GPU availability check
 // ─────────────────────────────────────────────────────────────────────────────
 void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
+    // SAFETY: Only sync to GPU if OptiX is actually available
+    if (!g_hasOptix) {
+        return; // Silent skip - CPU-only mode
+    }
     if (ctx.optix_gpu_ptr) {
         VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.optix_gpu_ptr);
     }
@@ -99,7 +106,8 @@ void SceneUI::importVDBVolume(UIContext& ctx) {
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
     
-    if (ctx.optix_gpu_ptr) {
+    // GPU sync only if OptiX is available
+    if (g_hasOptix && ctx.optix_gpu_ptr) {
         // Upload VDB volumes to GPU for OptiX ray marching
         syncVDBVolumesToGPU(ctx);
         ctx.optix_gpu_ptr->resetAccumulation();

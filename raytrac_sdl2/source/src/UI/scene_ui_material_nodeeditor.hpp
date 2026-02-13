@@ -89,6 +89,13 @@ public:
         };
     }
     
+    /**
+     * @brief Reset editor state
+     */
+    void reset() {
+        editor.reset();
+    }
+    
     void draw(MaterialNodeGraph& graph) {
         float libraryWidth = 160.0f;
         

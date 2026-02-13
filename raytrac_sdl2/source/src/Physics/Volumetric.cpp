@@ -84,7 +84,8 @@ Vec3 Volumetric::march_volume(const Vec3& origin, const Vec3& dir, float& out_tr
     return toVec3(vol_color);
 }
 
-bool Volumetric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
+bool Volumetric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const {
+    is_specular = false;
     // Only transmittance behavior for surface-based volume
     
     // Fetch AABB from the hit object (Triangle)

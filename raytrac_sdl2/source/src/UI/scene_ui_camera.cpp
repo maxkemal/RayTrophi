@@ -790,7 +790,7 @@
             ImGui::TextUnformatted("Sensitivity");
             ImGui::SameLine(80);
             ImGui::PushItemWidth(-1);
-            ImGui::SliderFloat("##MouseSens", &ctx.mouse_sensitivity, 0.01f, 5.0f, "%.2f");
+            ImGui::SliderFloat("##MouseSens", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.2f");
             ImGui::PopItemWidth();
         }
 

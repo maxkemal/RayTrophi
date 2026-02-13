@@ -534,7 +534,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
     else if (current_mode == WORLD_MODE_HDRI) {
         if (UIWidgets::BeginSection("HDRI Map", ImVec4(0.2f, 0.7f, 0.5f, 1.0f))) {
             // Load Button
-            if (UIWidgets::PrimaryButton("Load Environment", ImVec2(-1, 0))) {
+            if (UIWidgets::PrimaryButton("Load Environment", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
 #ifdef _WIN32
                 std::string file = openFileDialogW(L"Environment Maps\0*.hdr;*.exr;*.jpg;*.jpeg;*.png\0HDR/EXR\0*.hdr;*.exr\0All Files\0*.*\0");
                 if (!file.empty()) {
@@ -766,7 +766,7 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                 ImGui::Separator();
                 
                 // Load Environment Texture Button
-                if (UIWidgets::PrimaryButton("Load Environment Map", ImVec2(-1, 0))) {
+                if (UIWidgets::PrimaryButton("Load Environment Map", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
 #ifdef _WIN32
                     std::string file = openFileDialogW(L"Environment Maps\0*.hdr;*.exr;*.jpg;*.jpeg;*.png\0HDR/EXR\0*.hdr;*.exr\0All Files\0*.*\0");
                     if (!file.empty()) {

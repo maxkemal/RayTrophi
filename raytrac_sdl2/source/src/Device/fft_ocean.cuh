@@ -72,6 +72,10 @@ struct FFTOceanState {
     float* d_displacement_z_real;  // Z displacement
     float2* d_normal;              // Normal (X, Z) packed for texture sampling
     
+    // CUDA Arrays for proper 2D texturing (linear filtering, wrapping)
+    cudaArray_t height_array = nullptr;
+    cudaArray_t normal_array = nullptr;
+    
     // cuFFT plans
     void* fft_plan;                // cufftHandle (opaque to avoid header dependency)
     
@@ -195,6 +199,94 @@ extern "C" {
     // Get ocean normal at world position
     void sampleOceanNormal(const FFTOceanState* state, const FFTOceanParams* params, 
                            float x, float z, float* nx, float* ny, float* nz);
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // GPU GEOMETRIC WAVES API
+    // ═══════════════════════════════════════════════════════════════════════════════
+    
+    struct GeoWaveParams {
+        float time;
+        float wave_height;
+        float wave_scale;
+        float choppiness;
+        int octaves;
+        float persistence;
+        float lacunarity;
+        float swell_direction;
+        float swell_amplitude;
+        float alignment;
+        float damping;
+        float ridge_offset;
+        int noise_type; // 0=Perlin, 1=FBM, 2=Ridge, 3=Voronoi, 4=Billow, 5=Gerstner, 6=Tessendorf
+    };
+    
+    struct GPUGeoWaveState {
+        void* d_vertices;
+        void* d_original;
+        int vertex_count;
+        bool initialized;
+    };
+    
+    // Initialize GPU geometric waves (upload original vertices)
+    int initGPUGeometricWaves(GPUGeoWaveState* state, const float* h_original, int vertex_count);
+    
+    // Update geometric waves on GPU and download displaced vertices
+    void updateGPUGeometricWaves(GPUGeoWaveState* state, const GeoWaveParams* params, float* h_output);
+    
+    // Cleanup GPU geometric waves resources
+    void cleanupGPUGeometricWaves(GPUGeoWaveState* state);
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // FFT-DRIVEN MESH DISPLACEMENT API
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // Uses the high-quality FFT ocean data to displace mesh vertices
+    // Combines the best of both worlds: FFT quality + physical mesh
+    
+    struct FFTMeshParams {
+        float ocean_size;           // World space size of ocean tile
+        float height_scale;         // Height displacement multiplier
+        float choppiness;           // Horizontal displacement multiplier
+        float mesh_offset_x;        // Mesh origin X offset in world space
+        float mesh_offset_z;        // Mesh origin Z offset in world space
+    };
+    
+    // Displace mesh vertices using FFT height/displacement data (GPU accelerated)
+    // Input: original vertex positions, FFT state with computed height/displacement
+    // Output: displaced vertices with proper normals
+    void displaceFFTMesh(
+        const FFTOceanState* state,
+        const FFTMeshParams* params,
+        const float* h_original,    // Host: original vertex positions (x,y,z) x vertex_count
+        float* h_output,            // Host: output displaced positions (x,y,z) x vertex_count
+        float* h_normals,           // Host: output normals (nx,ny,nz) x vertex_count
+        int vertex_count
+    );
+    
+    // GPU-side displacement (for already GPU-resident vertex data)
+    void displaceFFTMeshGPU(
+        const FFTOceanState* state,
+        const FFTMeshParams* params,
+        const float3* d_original,   // Device: original positions
+        float3* d_output,           // Device: displaced positions
+        float3* d_normals,          // Device: output normals
+        int vertex_count
+    );
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // CPU BATCH SAMPLING API (for mesh displacement without per-vertex GPU calls)
+    // ═══════════════════════════════════════════════════════════════════════════════
+    
+    // Download entire FFT ocean data to CPU for fast batch processing
+    // Returns true on success
+    bool downloadFFTOceanData(
+        const FFTOceanState* state,
+        float* h_height,           // Output: height buffer (N*N floats)
+        float* h_disp_x,           // Output: X displacement buffer (N*N floats)
+        float* h_disp_z,           // Output: Z displacement buffer (N*N floats)
+        float* h_normal_x,         // Output: normal X buffer (N*N floats)
+        float* h_normal_z,         // Output: normal Z buffer (N*N floats)
+        int* out_resolution        // Output: actual resolution N
+    );
 
 #ifdef __cplusplus
 }

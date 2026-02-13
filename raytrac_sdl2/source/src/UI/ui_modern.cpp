@@ -272,20 +272,11 @@ namespace UIWidgets {
 
 void HelpMarker(const char* desc) {
     ImGui::SameLine();
-    
-    // Use theme accent color for better visibility instead of disabled gray
-    ImVec4 helpColor = ThemeManager::instance().current().colors.accent;
-    ImGui::TextColored(helpColor, "[?]");
+    ImGui::TextDisabled("(?)");
     
     if (ImGui::IsItemHovered()) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         ImGui::BeginTooltip();
-        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
-        
-        // Add a stylistic header
-        ImGui::TextColored(helpColor, "Info");
-        ImGui::Separator();
-        
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 36.0f);
         ImGui::TextUnformatted(desc);
         ImGui::PopTextWrapPos();
         ImGui::EndTooltip();
@@ -562,6 +553,22 @@ void ProgressBarEx(float fraction, const ImVec2& size, const char* overlay,
     ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barColor);
     ImGui::ProgressBar(fraction, size, overlay);
     ImGui::PopStyleColor();
+}
+
+float GetInspectorItemWidth() {
+    float avail = ImGui::GetContentRegionAvail().x;
+    float w = avail * 0.45f;
+    if (w > 260.0f) w = 260.0f;
+    if (w < 160.0f) w = 160.0f;
+    return w;
+}
+
+float GetInspectorActionWidth() {
+    float avail = ImGui::GetContentRegionAvail().x;
+    float w = avail * 0.45f;;
+    if (w > 260.0f) w = 260.0f; // Action buttons max width
+    if (w < 160.0f) w = 160.0f;
+    return w;
 }
 
 float GetRightAlignOffset(float widgetWidth) {

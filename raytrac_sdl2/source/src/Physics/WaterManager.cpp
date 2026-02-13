@@ -38,6 +38,14 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
         it->fft_state = nullptr;
     }
     
+    // Cleanup GPU Geometric Wave resources
+    if (it->gpu_geo_state && g_hasCUDA) {
+        GPUGeoWaveState* gpu_state = static_cast<GPUGeoWaveState*>(it->gpu_geo_state);
+        cleanupGPUGeometricWaves(gpu_state);
+        delete gpu_state;
+        it->gpu_geo_state = nullptr;
+    }
+    
     // 2. Remove triangles from scene
     for (auto& tri : it->mesh_triangles) {
         auto obj_it = std::find(scene.world.objects.begin(), scene.world.objects.end(), tri);
@@ -51,12 +59,35 @@ void WaterManager::removeWaterSurface(SceneData& scene, int id) {
 }
 
 void WaterManager::clear() {
+    // CRITICAL: Clear GPU material FFT handles BEFORE destroying FFT state
+    // This prevents OptiX from trying to sample destroyed textures
     for (auto& surf : water_surfaces) {
+         // Clear GPU material FFT texture handles first
+         if (surf.material_id > 0) {
+             auto mat = MaterialManager::getInstance().getMaterial(surf.material_id);
+             if (mat && mat->gpuMaterial) {
+                 mat->gpuMaterial->fft_height_tex = 0;
+                 mat->gpuMaterial->fft_normal_tex = 0;
+             }
+         }
+         
+         // Now cleanup FFT state
          if (surf.fft_state) {
              FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
-             cleanupFFTOcean(state);
+             if (g_hasCUDA) {
+                 cleanupFFTOcean(state);
+             }
              delete state;
              surf.fft_state = nullptr;
+         }
+         // Cleanup GPU Geometric Wave resources
+         if (surf.gpu_geo_state) {
+             GPUGeoWaveState* gpu_state = static_cast<GPUGeoWaveState*>(surf.gpu_geo_state);
+             if (g_hasCUDA) {
+                 cleanupGPUGeometricWaves(gpu_state);
+             }
+             delete gpu_state;
+             surf.gpu_geo_state = nullptr;
          }
     }
     water_surfaces.clear();
@@ -72,7 +103,7 @@ bool WaterManager::update(float dt) {
         // ════════════════════════════════════════════════════════════════════════
         // FFT OCEAN UPDATE (GPU-side animation - shader based)
         // ════════════════════════════════════════════════════════════════════════
-        if (surf.params.use_fft_ocean) {
+        if (surf.params.use_fft_ocean && g_hasCUDA) {
             // Manage FFT State
             if (!surf.fft_state) {
                  FFTOceanState* state = new FFTOceanState();
@@ -97,9 +128,31 @@ bool WaterManager::update(float dt) {
                     needs_gpu_sync = true;
                 }
             }
+            
+            // CRITICAL: Only proceed if state is properly initialized
+            // If initFFTOcean failed, skip FFT processing to avoid access violation
+            if (!state->initialized) {
+                continue; // Skip to next water surface
+            }
 
+            // Check if FFT parameters changed (wind/amplitude etc)
+            // If they did, updateFFTOcean will regenerate the spectrum
+            bool fft_params_changed = (
+                fft_params.ocean_size != state->cached_params.ocean_size ||
+                fft_params.wind_speed != state->cached_params.wind_speed ||
+                fft_params.wind_direction != state->cached_params.wind_direction ||
+                fft_params.amplitude != state->cached_params.amplitude ||
+                fft_params.choppiness != state->cached_params.choppiness ||
+                fft_params.time_scale != state->cached_params.time_scale
+            );
+            
             // Run simulation
             updateFFTOcean(state, &fft_params, global_time);
+            
+            // If FFT params changed, we need to signal for accumulation reset
+            if (fft_params_changed) {
+                needs_gpu_sync = true;
+            }
             
             // Connect to Material
             if (surf.material_id > 0) {
@@ -118,7 +171,10 @@ bool WaterManager::update(float dt) {
              // Cleanup if disabled but state exists
              if (surf.fft_state) {
                  FFTOceanState* state = static_cast<FFTOceanState*>(surf.fft_state);
-                 cleanupFFTOcean(state);
+                 // Only cleanup if we actually have CUDA, or just delete the state pointer if CUDA is gone/lost
+                 if (g_hasCUDA) {
+                     cleanupFFTOcean(state);
+                 }
                  delete state;
                  surf.fft_state = nullptr;
                  needs_gpu_sync = true;
@@ -133,8 +189,33 @@ bool WaterManager::update(float dt) {
              }
         }
         
-        // Note: Mesh animation is handled via keyframe system (applyKeyframe)
-        // FFT animation is shader-based and doesn't need mesh updates
+        // ════════════════════════════════════════════════════════════════════════
+        // FFT-DRIVEN MESH DISPLACEMENT (Highest Quality - New!)
+        // ════════════════════════════════════════════════════════════════════════
+        // Uses FFT ocean data to displace mesh vertices - combines the best of both:
+        // Film-quality FFT waves + Physical mesh for raytracing/shadows
+        if (surf.animate_mesh && surf.params.use_fft_ocean && surf.params.use_fft_mesh_displacement) {
+            surf.animation_time += dt * surf.params.fft_time_scale;
+            updateFFTDrivenMesh(&surf, surf.animation_time);
+            needs_gpu_sync = true; // Mesh vertices changed, need BVH update
+        }
+        // ════════════════════════════════════════════════════════════════════════
+        // GEOMETRIC WAVES - MESH ANIMATION (GPU or CPU) - Legacy/Alternative
+        // ════════════════════════════════════════════════════════════════════════
+        // This runs independently of FFT - uses procedural noise or Gerstner waves
+        // Skip if FFT mesh displacement is active (avoid double displacement)
+        else if (surf.animate_mesh && surf.params.use_geometric_waves && !surf.params.use_fft_mesh_displacement) {
+            surf.animation_time += dt * surf.params.geo_wave_speed;
+            
+            if (surf.use_gpu_animation && g_hasCUDA) {
+                // GPU Path - much faster for large meshes
+                updateGPUAnimatedWaterMesh(&surf, surf.animation_time);
+            } else {
+                // CPU Path - fallback
+                updateAnimatedWaterMesh(&surf, surf.animation_time);
+            }
+            needs_gpu_sync = true; // Mesh vertices changed, need BVH update
+        }
     }
     
     return needs_gpu_sync;
@@ -173,12 +254,14 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     gpu->metallic = 0.0f;
     
     // === WAVE PARAMS (original packing) ===
-    // anisotropic -> Wave Speed
+    // anisotropic -> Wave Speed (only used when FFT is disabled)
     // sheen -> Wave Strength (Serves as IS_WATER flag if > 0)
-    // sheen_tint -> Wave Frequency
-    gpu->anisotropic = surf.params.wave_speed;
-    gpu->sheen = fmaxf(0.001f, surf.params.wave_strength);  // >0 = IS_WATER flag
-    gpu->sheen_tint = surf.params.wave_frequency;
+    // sheen_tint -> Wave Frequency (only used when FFT is disabled)
+    // NOTE: When FFT is enabled, these simple wave params are ignored by shader
+    //       because evaluateWater() uses FFT textures instead of Gerstner waves
+    gpu->anisotropic = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
+    gpu->sheen = fmaxf(0.001f, surf.params.wave_strength);  // >0 = IS_WATER flag (always needed)
+    gpu->sheen_tint = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
     
     // === ADVANCED WATER PARAMS (new packing) ===
     // clearcoat -> Shore Foam Intensity
@@ -840,54 +923,322 @@ void WaterManager::updateAnimatedWaterMesh(WaterSurface* surf, float time) {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════════
+// GPU ANIMATED MESH UPDATE
+// ════════════════════════════════════════════════════════════════════════════════
+void WaterManager::updateGPUAnimatedWaterMesh(WaterSurface* surf, float time) {
+    if (!surf || surf->type != WaterSurface::Type::Plane) return;
+    if (!surf->params.use_geometric_waves) return;
+    if (!g_hasCUDA) {
+        // Fallback to CPU
+        updateAnimatedWaterMesh(surf, time);
+        return;
+    }
+    
+    // Cache original positions if not done
+    if (surf->original_positions.empty()) {
+        cacheOriginalPositions(surf);
+    }
+    
+    int vertex_count = static_cast<int>(surf->original_positions.size());
+    if (vertex_count == 0) return;
+    
+    // Initialize GPU state if needed
+    GPUGeoWaveState* gpu_state = static_cast<GPUGeoWaveState*>(surf->gpu_geo_state);
+    if (!gpu_state || !gpu_state->initialized) {
+        gpu_state = new GPUGeoWaveState();
+        surf->gpu_geo_state = gpu_state;
+        
+        // Prepare original positions as float array
+        std::vector<float> h_original(vertex_count * 3);
+        for (int i = 0; i < vertex_count; ++i) {
+            h_original[i * 3 + 0] = surf->original_positions[i].x;
+            h_original[i * 3 + 1] = surf->original_positions[i].y;
+            h_original[i * 3 + 2] = surf->original_positions[i].z;
+        }
+        
+        if (!initGPUGeometricWaves(gpu_state, h_original.data(), vertex_count)) {
+            // Init failed, fallback to CPU
+            delete gpu_state;
+            surf->gpu_geo_state = nullptr;
+            updateAnimatedWaterMesh(surf, time);
+            return;
+        }
+    }
+    
+    // Prepare params
+    GeoWaveParams params;
+    params.time = time;
+    params.wave_height = surf->params.geo_wave_height;
+    params.wave_scale = surf->params.geo_wave_scale;
+    params.choppiness = surf->params.geo_wave_choppiness;
+    params.octaves = surf->params.geo_octaves;
+    params.persistence = surf->params.geo_persistence;
+    params.lacunarity = surf->params.geo_lacunarity;
+    params.swell_direction = surf->params.geo_swell_direction * 3.14159265f / 180.0f;
+    params.swell_amplitude = surf->params.geo_swell_amplitude;
+    params.alignment = surf->params.geo_alignment;
+    params.damping = surf->params.geo_damping;
+    params.ridge_offset = surf->params.geo_ridge_offset;
+    params.noise_type = static_cast<int>(surf->params.geo_noise_type);
+    
+    // Allocate output buffer
+    std::vector<float> h_output(vertex_count * 3);
+    
+    // Run GPU kernel
+    updateGPUGeometricWaves(gpu_state, &params, h_output.data());
+    
+    // Apply to mesh triangles
+    size_t idx = 0;
+    for (auto& tri : surf->mesh_triangles) {
+        if (!tri) continue;
+        
+        Vec3 positions[3];
+        for (int v = 0; v < 3; ++v) {
+            if (idx < (size_t)vertex_count) {
+                positions[v] = Vec3(
+                    h_output[idx * 3 + 0],
+                    h_output[idx * 3 + 1],
+                    h_output[idx * 3 + 2]
+                );
+                idx++;
+            }
+        }
+        
+        // Calculate face normal
+        Vec3 edge1 = positions[1] - positions[0];
+        Vec3 edge2 = positions[2] - positions[0];
+        Vec3 normal = edge1.cross(edge2);
+        float len = normal.length();
+        if (len > 0.0001f) normal = normal / len;
+        else normal = Vec3(0, 1, 0);
+        
+        // Apply to triangle
+        for (int v = 0; v < 3; ++v) {
+            tri->setVertexPosition(v, positions[v]);
+            tri->setVertexNormal(v, normal);
+        }
+        tri->markAABBDirty();
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// FFT-DRIVEN MESH DISPLACEMENT (Highest Quality - CPU Hybrid Version)
+// ════════════════════════════════════════════════════════════════════════════════
+// Downloads FFT data once, then processes all vertices on CPU with bilinear interpolation
+// More reliable than GPU kernel approach, compatible with geometric waves pattern
+void WaterManager::updateFFTDrivenMesh(WaterSurface* surf, float time) {
+    if (!surf) return;
+    if (!surf->params.use_fft_ocean || !surf->params.use_fft_mesh_displacement) return;
+    if (!surf->fft_state || !g_hasCUDA) return;
+    
+    FFTOceanState* fft_state = static_cast<FFTOceanState*>(surf->fft_state);
+    if (!fft_state->initialized) return;
+    
+    // Cache original positions if needed
+    if (surf->original_positions.empty()) {
+        cacheOriginalPositions(surf);
+    }
+    
+    int vertex_count = static_cast<int>(surf->original_positions.size());
+    if (vertex_count == 0) {
+        SCENE_LOG_WARN("[FFT Mesh] No vertices to displace!");
+        return;
+    }
+    
+    // Get FFT parameters
+    float ocean_size = surf->params.fft_ocean_size;
+    float height_scale = surf->params.fft_mesh_height_scale;
+    float choppiness = surf->params.fft_mesh_choppiness;
+    
+    // Download FFT data to CPU (single batch copy)
+    int N = 0;
+    std::vector<float> h_height, h_disp_x, h_disp_z, h_normal_x, h_normal_z;
+    
+    if (!downloadFFTOceanData(fft_state, nullptr, nullptr, nullptr, nullptr, nullptr, &N) || N == 0) {
+        SCENE_LOG_WARN("[FFT Mesh] FFT data not ready (N=0)");
+        return;
+    }
+    
+    int N2 = N * N;
+    h_height.resize(N2);
+    h_disp_x.resize(N2);
+    h_disp_z.resize(N2);
+    h_normal_x.resize(N2);
+    h_normal_z.resize(N2);
+    
+    if (!downloadFFTOceanData(fft_state, h_height.data(), h_disp_x.data(), h_disp_z.data(), 
+                              h_normal_x.data(), h_normal_z.data(), &N)) {
+        SCENE_LOG_WARN("[FFT Mesh] Failed to download FFT data");
+        return;
+    }
+    
+    // DEBUG: Check FFT data range
+    static int debug_counter = 0;
+    if (debug_counter++ % 100 == 0) {
+        float minH = h_height[0], maxH = h_height[0];
+        for (int i = 1; i < N2; ++i) {
+            minH = fminf(minH, h_height[i]);
+            maxH = fmaxf(maxH, h_height[i]);
+        }
+        SCENE_LOG_INFO("[FFT Mesh] N=%d, Height range: [%.4f, %.4f], scale=%.2f, vertices=%d", 
+                       N, minH, maxH, height_scale, vertex_count);
+    }
+    
+    // Bilinear sampling lambda
+    auto sampleBilinear = [&](const std::vector<float>& data, float u, float v) -> float {
+        u = u - floorf(u);
+        v = v - floorf(v);
+        
+        float fx = u * (float)N;
+        float fz = v * (float)N;
+        
+        int ix0 = (int)floorf(fx) % N;
+        int iz0 = (int)floorf(fz) % N;
+        int ix1 = (ix0 + 1) % N;
+        int iz1 = (iz0 + 1) % N;
+        
+        // Ensure non-negative
+        if (ix0 < 0) ix0 += N;
+        if (iz0 < 0) iz0 += N;
+        
+        float tx = fx - floorf(fx);
+        float tz = fz - floorf(fz);
+        
+        float v00 = data[iz0 * N + ix0];
+        float v10 = data[iz0 * N + ix1];
+        float v01 = data[iz1 * N + ix0];
+        float v11 = data[iz1 * N + ix1];
+        
+        float v0 = v00 * (1.0f - tx) + v10 * tx;
+        float v1 = v01 * (1.0f - tx) + v11 * tx;
+        return v0 * (1.0f - tz) + v1 * tz;
+    };
+    
+    // Apply displacement to all vertices
+    size_t idx = 0;
+    for (auto& tri : surf->mesh_triangles) {
+        if (!tri) continue;
+        
+        for (int v = 0; v < 3; ++v) {
+            if (idx >= (size_t)vertex_count) break;
+            
+            const Vec3& orig = surf->original_positions[idx];
+            
+            // World position to UV
+            float u = orig.x / ocean_size;
+            float vv = orig.z / ocean_size;
+            
+            // Sample FFT data
+            float height = sampleBilinear(h_height, u, vv);
+            float disp_x = sampleBilinear(h_disp_x, u, vv);
+            float disp_z = sampleBilinear(h_disp_z, u, vv);
+            float nx = sampleBilinear(h_normal_x, u, vv);
+            float nz = sampleBilinear(h_normal_z, u, vv);
+            
+            // Apply displacement with scaling
+            Vec3 newPos(
+                orig.x + disp_x * choppiness,
+                orig.y + height * height_scale,
+                orig.z + disp_z * choppiness
+            );
+            
+            // Calculate normal
+            float ny = sqrtf(fmaxf(0.001f, 1.0f - nx * nx - nz * nz));
+            Vec3 newNormal = Vec3(nx, ny, nz).normalize();
+            
+            tri->setVertexPosition(v, newPos);
+            tri->setVertexNormal(v, newNormal);
+            idx++;
+        }
+        tri->markAABBDirty();
+    }
+}
+
 // ============================================================================
 // APPLY KEYFRAME (for timeline animation)
 // ============================================================================
 void WaterManager::applyKeyframe(WaterSurface* surf, const WaterKeyframe& kf) {
     if (!surf) return;
     
-    bool changed = false;
+    bool geo_changed = false;
+    bool fft_changed = false;
     
-    // Apply only keyed properties
+    // ═══════════════════════════════════════════════════════════════════════
+    // GEOMETRIC WAVES - Apply only keyed properties
+    // ═══════════════════════════════════════════════════════════════════════
     if (kf.has_wave_height) {
         surf->params.geo_wave_height = kf.wave_height;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_wave_scale) {
         surf->params.geo_wave_scale = kf.wave_scale;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_wind_direction) {
         surf->params.geo_swell_direction = kf.wind_direction;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_choppiness) {
         surf->params.geo_wave_choppiness = kf.choppiness;
-        changed = true;
+        geo_changed = true;
+    }
+    if (kf.has_geo_speed) {
+        surf->params.geo_wave_speed = kf.geo_speed;
+        geo_changed = true;
     }
     if (kf.has_alignment) {
         surf->params.geo_alignment = kf.alignment;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_damping) {
         surf->params.geo_damping = kf.damping;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_swell_amplitude) {
         surf->params.geo_swell_amplitude = kf.swell_amplitude;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_sharpening) {
         surf->params.geo_sharpening = kf.sharpening;
-        changed = true;
+        geo_changed = true;
     }
     if (kf.has_detail_strength) {
         surf->params.geo_detail_strength = kf.detail_strength;
-        changed = true;
+        geo_changed = true;
     }
     
-    // Rebuild mesh if any parameters changed
-    if (changed && surf->params.use_geometric_waves) {
+    // ═══════════════════════════════════════════════════════════════════════
+    // FFT OCEAN - Apply keyed properties (real-time parameter animation!)
+    // ═══════════════════════════════════════════════════════════════════════
+    if (kf.has_fft_wind_speed) {
+        surf->params.fft_wind_speed = kf.fft_wind_speed;
+        fft_changed = true;
+    }
+    if (kf.has_fft_wind_direction) {
+        // Convert degrees to radians for FFT system
+        surf->params.fft_wind_direction = kf.fft_wind_direction * 3.14159265f / 180.0f;
+        fft_changed = true;
+    }
+    if (kf.has_fft_amplitude) {
+        surf->params.fft_amplitude = kf.fft_amplitude;
+        fft_changed = true;
+    }
+    if (kf.has_fft_choppiness) {
+        surf->params.fft_choppiness = kf.fft_choppiness;
+        fft_changed = true;
+    }
+    if (kf.has_fft_time_scale) {
+        surf->params.fft_time_scale = kf.fft_time_scale;
+        fft_changed = true;
+    }
+    if (kf.has_fft_ocean_size) {
+        surf->params.fft_ocean_size = kf.fft_ocean_size;
+        fft_changed = true;
+    }
+    
+    // Rebuild mesh if geometric parameters changed
+    if (geo_changed && surf->params.use_geometric_waves) {
         updateWaterMesh(surf);
         
         // Signal BVH rebuild
@@ -896,6 +1247,9 @@ void WaterManager::applyKeyframe(WaterSurface* surf, const WaterKeyframe& kf) {
         g_bvh_rebuild_pending = true;
         g_optix_rebuild_pending = true;
     }
+    
+    // FFT changes are picked up automatically by update() on next frame
+    // No need for explicit rebuild - the FFT system reads params each frame
 }
 
 // ============================================================================
@@ -921,6 +1275,9 @@ void WaterManager::captureKeyframeToTrack(WaterSurface* surf, ObjectAnimationTra
     kf.water.choppiness = surf->params.geo_wave_choppiness;
     kf.water.has_choppiness = true;
     
+    kf.water.geo_speed = surf->params.geo_wave_speed;
+    kf.water.has_geo_speed = true;
+    
     kf.water.alignment = surf->params.geo_alignment;
     kf.water.has_alignment = true;
     
@@ -935,6 +1292,30 @@ void WaterManager::captureKeyframeToTrack(WaterSurface* surf, ObjectAnimationTra
     
     kf.water.detail_strength = surf->params.geo_detail_strength;
     kf.water.has_detail_strength = true;
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // FFT OCEAN - Capture if FFT is enabled
+    // ═══════════════════════════════════════════════════════════════════════
+    if (surf->params.use_fft_ocean) {
+        kf.water.fft_wind_speed = surf->params.fft_wind_speed;
+        kf.water.has_fft_wind_speed = true;
+        
+        // Convert radians to degrees for keyframe storage
+        kf.water.fft_wind_direction = surf->params.fft_wind_direction * 180.0f / 3.14159265f;
+        kf.water.has_fft_wind_direction = true;
+        
+        kf.water.fft_amplitude = surf->params.fft_amplitude;
+        kf.water.has_fft_amplitude = true;
+        
+        kf.water.fft_choppiness = surf->params.fft_choppiness;
+        kf.water.has_fft_choppiness = true;
+        
+        kf.water.fft_time_scale = surf->params.fft_time_scale;
+        kf.water.has_fft_time_scale = true;
+        
+        kf.water.fft_ocean_size = surf->params.fft_ocean_size;
+        kf.water.has_fft_ocean_size = true;
+    }
     
     kf.has_water = true;
     
@@ -1044,8 +1425,17 @@ nlohmann::json WaterManager::serialize() const {
         ws["geo_detail_strength"] = surf.params.geo_detail_strength;
         ws["geo_smooth_normals"] = surf.params.geo_smooth_normals;
         
+        // FFT-Driven Mesh Displacement
+        ws["use_fft_mesh_displacement"] = surf.params.use_fft_mesh_displacement;
+        ws["fft_mesh_height_scale"] = surf.params.fft_mesh_height_scale;
+        ws["fft_mesh_choppiness"] = surf.params.fft_mesh_choppiness;
+        
+        // Water Preset
+        ws["current_preset"] = static_cast<int>(surf.params.current_preset);
+        
         // Animation state
         ws["animate_mesh"] = surf.animate_mesh;
+        ws["use_gpu_animation"] = surf.use_gpu_animation;
         
         ws["type"] = (int)surf.type;
 
@@ -1182,8 +1572,18 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
         surf.params.geo_detail_strength = ws.value("geo_detail_strength", 0.15f);
         surf.params.geo_smooth_normals = ws.value("geo_smooth_normals", true);
         
+        // FFT-Driven Mesh Displacement
+        surf.params.use_fft_mesh_displacement = ws.value("use_fft_mesh_displacement", false);
+        surf.params.fft_mesh_height_scale = ws.value("fft_mesh_height_scale", 1.0f);
+        surf.params.fft_mesh_choppiness = ws.value("fft_mesh_choppiness", 1.0f);
+        
+        // Water Preset (load as int, cast to enum)
+        int preset_val = ws.value("current_preset", 0);
+        surf.params.current_preset = static_cast<WaterWaveParams::WaterPreset>(preset_val);
+        
         // Animation state
         surf.animate_mesh = ws.value("animate_mesh", false);
+        surf.use_gpu_animation = ws.value("use_gpu_animation", true);
 
         // Find existing triangles in scene by nodeName (don't create new ones!)
         for (auto& obj : scene.world.objects) {
@@ -1210,10 +1610,10 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
                 gpu->roughness = surf.params.roughness;
                 gpu->ior = surf.params.ior;
                 
-                // Wave params
-                gpu->anisotropic = surf.params.wave_speed;
-                gpu->sheen = std::fmax(0.001f, surf.params.wave_strength);
-                gpu->sheen_tint = surf.params.wave_frequency;
+                // Wave params - disable simple waves when FFT is active
+                gpu->anisotropic = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
+                gpu->sheen = std::fmax(0.001f, surf.params.wave_strength);  // IS_WATER flag
+                gpu->sheen_tint = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
                 
                 // Advanced params
                 gpu->clearcoat = surf.params.shore_foam_intensity;

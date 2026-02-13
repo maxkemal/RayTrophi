@@ -9,7 +9,8 @@ Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, f
 {
     lens_radius = aperture * 0.5f;
     near_dist = 0.1; // Yakın mesafe, genellikle 0.1 olarak ayarlanır
-    far_dist = focus_dist * 2.0; // Uzak mesafe, odak uzaklığının iki katı olarak ayarlanır
+    far_dist = 20000.0f; // Uzak mesafe artırıldı (10km) - CPU volume rendering sorunu için
+    // far_dist = focus_dist * 2.0; // REMOVED: Broken logic that clips rendering at 20m if focus is 10m
     update_camera_vectors();
 }
 

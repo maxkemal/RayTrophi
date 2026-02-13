@@ -24,6 +24,11 @@
 static MaterialNodes::MaterialNodeEditorUI matNodeEditor;
 static bool showMatNodeEditor = false;
 
+void SceneUI::resetMaterialUI() {
+    matNodeEditor.reset();
+    showMatNodeEditor = false;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // MATERIAL & TEXTURE EDITOR PANEL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -724,10 +729,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         bool texture_changed = false;
         
         // Node Editor Toggle
-        ImGui::SameLine();
+       /* ImGui::SameLine();
         if (ImGui::Button("Edit Nodes")) {
             showMatNodeEditor = !showMatNodeEditor;
-        }
+        }*/
         
         // ensure graph exists if we are going to edit it
         if (!active_mat_ptr->nodeGraph) {

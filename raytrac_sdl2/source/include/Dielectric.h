@@ -35,7 +35,7 @@ public:
 
     Vec3 calculate_refracted_attenuation(const Vec3& base_color, double thickness, const Vec3& fresnel_factor, const Vec3& ior) const;
 
-    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
+    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const override;
     virtual float getIndexOfRefraction() const override;
 
     Vec3 fresnel(const Vec3& incident, const Vec3& normal, const Vec3& ir_values) const;

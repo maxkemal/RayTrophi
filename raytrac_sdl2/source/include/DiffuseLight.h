@@ -17,7 +17,7 @@ class DiffuseLight : public Material {
 public:
     DiffuseLight(Vec3 c);
    
-    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const override;
+    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const override;
     virtual float get_opacity(const Vec2& uv) const override;
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const override;
    

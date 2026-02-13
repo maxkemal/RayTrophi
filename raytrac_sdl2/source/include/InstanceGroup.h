@@ -131,6 +131,9 @@ struct InstanceGroup {
         bool allow_flats = true;                // Allow points between [min, max]
         bool allow_gullies = true;              // Allow points with curv > curvature_max
         
+        float slope_direction_angle = 0.0f;     // Preferred direction (degrees, 0 = North/Z+)
+        float slope_direction_influence = 0.0f; // 0 = Ignore direction, 1 = Strict placement only in direction
+        
         // Global overrides (if needed, but per-source is preferred)
         bool use_global_settings = false;       // If true, overrides source settings
         float scale_min = 0.8f;

@@ -161,83 +161,105 @@ bool PrincipledBSDF::scatter(
     const Ray& r_in,
     const HitRecord& rec,
     Vec3& attenuation,
-    Ray& scattered
+    Ray& scattered,
+    bool& is_specular
 ) const {
+    is_specular = false; // Default: non-specular or importance sampled
     // UV koordinatları, texture dönüşümünü uygula
-    // Apply UV transformation (if needed)
     Vec2 uv = applyTextureTransform(rec.u, rec.v);
 
-    // Albedo, roughness, metallic gibi değerleri al (texture olabilir)
-    // Fetch BRDF properties (may be textured)
-    Vec3 albedo = getPropertyValue(albedoProperty, uv);
-   // albedo = Vec3::max(albedo, Vec3(0.05f)); // Tam siyahı engelle (Avoid total black)
-    float roughness = getPropertyValue(roughnessProperty, uv).y;
-    float metallic = getPropertyValue(metallicProperty, uv).z;   
-    float transmissionValue = transmission;
-    float opacity = get_opacity(uv);
-	float ior = getIOR();
+    // Albedo, roughness, metallic gibi değerlerin önceden hesaplanmış (Terrain) olup olmadığını kontrol et
+    Vec3 albedo;
+    float roughness;
+    float metallic;
+    float transmissionValue;
 
-    Vec3 N = rec.interpolated_normal.normalize(); // Geometri normali
-    Vec3 V = -r_in.direction.normalize();         // Gelen ışığın yönü (view vector)
-    Vec3 L = scattered.direction;
-    attenuation = Vec3(0.0f);
-    // 1. Opacity check - now handled in ray_color (bounce refund logic)
+    if (rec.use_custom_data) {
+        albedo = rec.custom_albedo;
+        roughness = rec.custom_roughness;
+        metallic = rec.custom_metallic;
+        transmissionValue = rec.custom_transmission;
+    } else {
+        albedo = getPropertyValue(albedoProperty, uv);
+        roughness = getPropertyValue(roughnessProperty, uv).y;
+        metallic = getPropertyValue(metallicProperty, uv).z;
+        transmissionValue = getTransmission(uv);
+    }
+    
+    Vec3 emission = getPropertyValue(emissionProperty, uv);
+    
 
-  
-     
-    // 3. Transmission varsa cam/şeffaf gibi davran
-    // Transmission check (e.g. glass-like material)
-    if (Vec3::random_float() < transmissionValue) {
-        Dielectric dielectricMat(
-            ior, albedo, 1.0, 1.0, roughness, 0
-        ); // IOR vs. daha gelişmiş hale getirilebilir
-        return dielectricMat.scatter(r_in, rec, attenuation, scattered);
+    float translucentValue = translucent; 
+
+    // Subsurface Scattering
+    // getSubsurface() olmadığı için skalar.
+    float sssValue = subsurface; 
+    
+    // Clearcoat
+    // ClearcoatProperty tanımlı değil, skalar.
+    float clearcoatValue = clearcoat;
+    
+    float ior = getIOR();
+
+    Vec3 N = rec.normal;                  // Oriented normal (points against ray)
+    Vec3 V = -r_in.direction.normalize(); // View vector
+    if(emission.length_squared() > 0.0001f) {
+        attenuation = emission;
+        is_specular = false; // Transmission is specular
+        return true;
+    }
+    // 1. CLEAR COAT (Top layer - ONLY on front face)
+    if (rec.front_face && clearcoatValue > 0.01f) {
+        // Fresnel for clear coat decides reflection probability
+        const float cc_ior = 1.5f;
+        float cc_f0 = ((cc_ior - 1.0f) / (cc_ior + 1.0f));
+        cc_f0 *= cc_f0; // ≈ 0.04
+        float cc_fresnel = cc_f0 + (1.0f - cc_f0) * std::pow(1.0f - std::max(Vec3::dot(V, N), 0.0f), 5.0f);
+        float cc_prob = clearcoatValue * cc_fresnel;
+        
+        if (Vec3::random_float() < cc_prob) {
+            is_specular = true; // Clearcoat is specular on GPU
+            return clearcoat_scatter(r_in, rec, attenuation, scattered);
+        }
     }
 
-    // 4. Mikrofacet yönü için Half-Vector oluştur
-    // Sample a GGX-based half-vector for microfacet reflection
+    // 2. TRANSMISSION (Glass/Water - typically front-face to enter, but Dielectric handles both)
+    if (transmissionValue >= 0.01f && Vec3::random_float() < transmissionValue) {
+        Dielectric dielectricMat(
+            ior, albedo, 1.0, 1.0, roughness, 0
+        );
+        is_specular = true; // Transmission is specular
+        return dielectricMat.scatter(r_in, rec, attenuation, scattered, is_specular);
+    }
+
+    // 3. SUBSURFACE SCATTERING (Random Walk)
+    if (sssValue > 0.01f && Vec3::random_float() < sssValue) {
+        return sss_random_walk_scatter(r_in, rec, attenuation, scattered);
+    }
+
+    // 4. TRANSLUCENT (Thin surface light pass-through)
+    if (translucentValue > 0.01f && Vec3::random_float() < translucentValue) {
+        return translucent_scatter(r_in, rec, attenuation, scattered);
+    }
+
+    // 5. STANDARD DIFFUSE + SPECULAR (Base layer)
+    // GPU Parity: GPU uses a simplified (albedo/PI + Fresnel) attenuation for indirect bounces
     Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), roughness, N);
-     L = Vec3::reflect(-V, H).normalize();
+    Vec3 L = Vec3::reflect(-V, H).normalize();
     
     // Ensure L is in the upper hemisphere
-    if (Vec3::dot(N, L) < 0.0f) L = -L; // Or just return false? Usually geometric normal check handles this.
-    // For safety, flip if needed or clamp.
-    float NdotL = std::fmax(Vec3::dot(N, L), 0.001f);
-    float NdotV = std::fmax(Vec3::dot(N, V), 0.001f);
-    float NdotH = std::fmax(Vec3::dot(N, H), 0.001f);
-    float VdotH = std::fmax(Vec3::dot(V, H), 0.001f);
+    if (Vec3::dot(N, L) < 0.0f) L = -L;
 
-    // Fresnel (Schlick)
+    float VdotH = std::fmax(Vec3::dot(V, H), 0.001f);
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
     Vec3 F = fresnelSchlickRoughness(VdotH, F0, roughness);
 
-    // Diffuse Term (Lambertian)
+    // Energy conservation
     Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
     Vec3 k_d = (Vec3(1.0f) - F_avg) * (1.0f - metallic);
 
-    // Optimization: Algebraic Simplification of Weight = Weight_Spec + Weight_Diff
-    // Weight_Spec = (F * G * VdotH) / (NdotV * NdotH)  [D cancels out]
-    // Weight_Diff = (k_d * albedo) * NdotL * (denom^2 * 4 * VdotH) / (alpha2 * NdotH) [PI cancels out]
-
-    float alpha = roughness * roughness;
-    float alpha2 = std::max(alpha * alpha, 0.001f);
-    float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
-
-    // 1. Specular Weight
-    float G = GeometrySmith(N, V, L, roughness);
-    Vec3 spec_weight = (F * G * VdotH) / (NdotV * NdotH);
-
-    // 2. Diffuse Weight
-    // Note: Implicit PDF is (D * NdotH) / (4 * VdotH). Inverse PDF has (4 * VdotH) in numerator.
-    // Diffuse term has 1/PI. PDF has 1/PI. They cancel.
-    // Explicitly: (k_d * albedo / PI) * NdotL * (4 * VdotH) / (D * NdotH)
-    // Substitute D = alpha2 / (PI * denom^2)
-    // Result: (k_d * albedo) * NdotL * (denom^2 * 4 * VdotH) / (alpha2 * NdotH)
-    float pdf_inverse_factor = (denom * denom * 4.0f * VdotH) / (alpha2 * NdotH);
-    Vec3 diff_weight = (k_d * albedo)/M_PI * (NdotL * pdf_inverse_factor);
-
-    // Final Attenuation
-    attenuation = diff_weight + spec_weight;
+    // GPU matching weighting: (albedo/PI) * kd + Fresnel (Restored PI for energy conservation)
+    attenuation = (albedo * k_d * (1.0f / M_PI)) + F;
 
     // Sanity check
     if (std::isnan(attenuation.x) || std::isnan(attenuation.y) || std::isnan(attenuation.z)) {
@@ -248,20 +270,33 @@ bool PrincipledBSDF::scatter(
     return true;
 }
 float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const  {
-    float metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
-    float roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
+    float metallic;
+    float roughness;
+    if (rec.use_custom_data) {
+        metallic = rec.custom_metallic;
+        roughness = rec.custom_roughness;
+    } else {
+        metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
+        roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
+    }
     float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0f);
-
+    Vec3 emission = getPropertyValue(emissionProperty, Vec2(rec.u, rec.v));
+    if (emission.length_squared() > 0.0001f) {
+        return 0.0f; // Emissive materyaller için PDF yok
+    }
     // GGX sample: assume isotropic
     // GPU ile uyumlu D terimi
-    float alpha = max(roughness * roughness, 0.001f);
+    float alpha = std::max(roughness * roughness, 0.001f);
     float alpha2 = alpha * alpha;
-    float NdotH = max(Vec3::dot(rec.normal, (outgoing + incoming)), 0.001);
+    
+    Vec3 H = (outgoing + incoming).normalize();
+    float NdotH = std::max(Vec3::dot(rec.normal, H), 0.001f);
     float NdotH2 = NdotH * NdotH;
     float denom = (NdotH2 * (alpha2 - 1.0f) + 1.0f);
     float D = alpha2 / (M_PI * denom * denom);
 
-    float pdf_specular = D * NdotH / (4.0f * std::fmax(Vec3::dot(outgoing, (incoming + outgoing)), 0.001));
+    float VdotH = std::max(Vec3::dot(outgoing, H), 0.001f);
+    float pdf_specular = D * NdotH / (4.0f * VdotH);
     float pdf_diffuse = cos_theta / M_PI;
 
     float fresnel_weight = metallic; // çok basit: sadece metal oranı
@@ -645,5 +680,96 @@ Vec2 PrincipledBSDF::applyCubicWrapping(const Vec2& uv) const {
 }
 void PrincipledBSDF::setTextureTransform(const TextureTransform& transform) {
     textureTransform = transform;
+}
+
+bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
+    Vec3 N = rec.normal;
+    Vec3 V = -r_in.direction.normalize();
+    
+    const float cc_ior = 1.5f;
+    float cc_f0 = ((cc_ior - 1.0f) / (cc_ior + 1.0f));
+    cc_f0 *= cc_f0;
+    
+    float cc_rough = std::max(this->clearcoatRoughness, 0.001f);
+    Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), cc_rough, N);
+    Vec3 L = Vec3::reflect(-V, H).normalize();
+    
+    float NdotL = std::max(Vec3::dot(N, L), 0.001f);
+    if (NdotL <= 0.0f) return false;
+    
+    float VdotH = std::max(Vec3::dot(V, H), 0.001f);
+    float fresnel = cc_f0 + (1.0f - cc_f0) * std::pow(1.0f - VdotH, 5.0f);
+    
+    float NdotH = std::max(Vec3::dot(N, H), 0.001f);
+    float NdotV = std::max(Vec3::dot(N, V), 0.001f);
+    
+    float alpha = cc_rough * cc_rough;
+    float alpha2 = std::max(alpha * alpha, 0.001f);
+    float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
+    float D = alpha2 / (M_PI * denom * denom);
+    float G = GeometrySmith(N, V, L, cc_rough);
+    
+    // GPU matching: (f * cos / pdf) leads to (fresnel * G * VdotH) / (NdotV * NdotH)
+    // However, GPU scatter_material returns the full BRDF term directly for attenuation 
+    // and let ray_color handle it.
+    float spec = (fresnel * D * G) / (4.0f * NdotV * NdotL + 0.001f);
+    attenuation = Vec3(spec) * this->clearcoat;
+    scattered = Ray(rec.point + N * 0.001f, L);
+    
+    return true;
+}
+
+bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
+    Vec3 N = rec.normal;
+    
+    Vec3 sss_color = this->subsurfaceColor;
+    Vec3 sss_radius = this->subsurfaceRadius;
+    float sss_scale = std::max(this->subsurfaceScale, 0.001f);
+    float sss_anisotropy = this->subsurfaceAnisotropy;
+    
+    auto compute_sigma_t = [](const Vec3& radius, float scale) {
+        Vec3 scaled_radius = radius * scale;
+        return Vec3(
+            scaled_radius.x > 0.0001f ? 1.0f / scaled_radius.x : 10000.0f,
+            scaled_radius.y > 0.0001f ? 1.0f / scaled_radius.y : 10000.0f,
+            scaled_radius.z > 0.0001f ? 1.0f / scaled_radius.z : 10000.0f
+        );
+    };
+    
+    Vec3 sigma_t = compute_sigma_t(sss_radius, sss_scale);
+    
+    float rand_channel = Vec3::random_float();
+    float sigma_sample;
+    if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
+    else if (rand_channel < 0.666f) sigma_sample = sigma_t.y;
+    else sigma_sample = sigma_t.z;
+    
+    float scatter_dist = -std::log(std::max(Vec3::random_float(), 0.0001f)) / sigma_sample;
+    scatter_dist = std::min(scatter_dist, sss_scale * 10.0f);
+    
+    Vec3 scatter_dir = sample_henyey_greenstein(-N, sss_anisotropy);
+    
+    attenuation = sss_color * Vec3(
+        std::exp(-sigma_t.x * scatter_dist),
+        std::exp(-sigma_t.y * scatter_dist),
+        std::exp(-sigma_t.z * scatter_dist)
+    );
+    
+    scattered = Ray(rec.point - N * 0.001f, scatter_dir);
+    
+    return true;
+}
+
+bool PrincipledBSDF::translucent_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
+    Vec3 N = rec.normal;
+    Vec2 uv = applyTextureTransform(rec.u, rec.v);
+    Vec3 albedo = getPropertyValue(albedoProperty, uv);
+    
+    Vec3 trans_dir = Vec3::random_cosine_direction(-N);
+    
+    attenuation = albedo * 0.8f; 
+    scattered = Ray(rec.point - N * 0.001f, trans_dir);
+    
+    return true;
 }
 

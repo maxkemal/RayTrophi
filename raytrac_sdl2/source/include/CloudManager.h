@@ -9,6 +9,7 @@
 * =========================================================================
 */
 #pragma once
+#include "globals.h"
 #include <cuda_runtime.h>
 #include "World.h"
 #include "fft_ocean.cuh" // Make implementation visible
@@ -27,6 +28,8 @@ public:
 
     // Update cloud simulation (runs FFT if needed)
     void update(float dt, const NishitaSkyParams& params) {
+        if (!g_hasCUDA) return;
+
         if (!params.cloud_use_fft) {
             if (initialized) cleanup(); // Free resources if disabled
             return;
@@ -73,7 +76,7 @@ public:
     void cleanup() {
         if (fft_state) {
             FFTOceanState* state = static_cast<FFTOceanState*>(fft_state);
-            cleanupFFTOcean(state);
+            if (g_hasCUDA) cleanupFFTOcean(state);
             delete state;
             fft_state = nullptr;
         }

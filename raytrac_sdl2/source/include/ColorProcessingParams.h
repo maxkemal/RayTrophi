@@ -41,7 +41,7 @@ public:
     // Improved LogCTransform helper function
     float LogCTransform(float x) {
         // Avoid division by zero or negative values
-        x = std::max(x, 1e-10f);
+        x = (std::max)(x, 1e-10f);
 
         // Adjusted LogC transformation parameters for better color preservation
         constexpr float cut = 0.010591f;
@@ -61,8 +61,8 @@ public:
     // Improved AGX tonemapping with better color preservation
     Vec3 AGXToneMapping(const Vec3& color) {
         // Find maximum value to preserve color ratios
-        float maxVal = std::max(std::max(color.x, color.y), color.z);
-        maxVal = std::max(maxVal, 1e-5f); // Avoid division by zero
+        float maxVal = (std::max)((std::max)(color.x, color.y), color.z);
+        maxVal = (std::max)(maxVal, 1e-5f); // Avoid division by zero
 
         // Preserve color ratios by normalizing
         Vec3 normalizedColor(
