@@ -174,6 +174,23 @@ public:
         m.m[3][0] = 0.0f; m.m[3][1] = 0.0f; m.m[3][2] = 0.0f; m.m[3][3] = 1.0f;
         return m;
     }
+    
+    void setIdentity() {
+        m[0][0] = 1.0f; m[0][1] = 0.0f; m[0][2] = 0.0f; m[0][3] = 0.0f;
+        m[1][0] = 0.0f; m[1][1] = 1.0f; m[1][2] = 0.0f; m[1][3] = 0.0f;
+        m[2][0] = 0.0f; m[2][1] = 0.0f; m[2][2] = 1.0f; m[2][3] = 0.0f;
+        m[3][0] = 0.0f; m[3][1] = 0.0f; m[3][2] = 0.0f; m[3][3] = 1.0f;
+    }
+    
+    bool isIdentity() const {
+        const float eps = 1e-6f;
+        return std::abs(m[0][0] - 1.0f) < eps && std::abs(m[1][1] - 1.0f) < eps &&
+               std::abs(m[2][2] - 1.0f) < eps && std::abs(m[3][3] - 1.0f) < eps &&
+               std::abs(m[0][1]) < eps && std::abs(m[0][2]) < eps && std::abs(m[0][3]) < eps &&
+               std::abs(m[1][0]) < eps && std::abs(m[1][2]) < eps && std::abs(m[1][3]) < eps &&
+               std::abs(m[2][0]) < eps && std::abs(m[2][1]) < eps && std::abs(m[2][3]) < eps &&
+               std::abs(m[3][0]) < eps && std::abs(m[3][1]) < eps && std::abs(m[3][2]) < eps;
+    }
 
     float minor(int row, int col) const;
     float cofactor(int row, int col) const;

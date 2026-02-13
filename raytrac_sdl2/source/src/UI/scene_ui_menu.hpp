@@ -85,8 +85,8 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                  std::string auxPath = current_path + ".aux.json";
                                  nlohmann::json rootJson;
                                  
-                                 // 1. Terrain Node Graph
-                                 rootJson["terrain_graph"] = terrainNodeGraph.toJson();
+                                 // 1. Terrain Node Graph (REMOVE: Now in main json via TerrainManager)
+                                 // rootJson["terrain_graph"] = terrainNodeGraph.toJson();
                                  
                                  // 2. Viewport Settings
                                  rootJson["viewport_settings"] = {
@@ -149,7 +149,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                                      std::string auxPath = filepath + ".aux.json";
                                      nlohmann::json rootJson;
                                      
-                                     rootJson["terrain_graph"] = terrainNodeGraph.toJson();
+                                     // rootJson["terrain_graph"] = terrainNodeGraph.toJson();
                                      rootJson["viewport_settings"] = {
                                          {"shading_mode", viewport_settings.shading_mode},
                                          {"show_gizmos", viewport_settings.show_gizmos},
@@ -305,7 +305,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          
                          // Wait for GPU to finish all pending operations
                          if (ctx.optix_gpu_ptr) {
-                             cudaDeviceSynchronize();
+                             if (g_hasCUDA) cudaDeviceSynchronize();
                          }
                          
                          scene_loading = false;

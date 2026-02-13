@@ -140,10 +140,12 @@ struct RiverSpline {
         
         // Water params (basic for now)
         j["waterParams"] = {
-            {"wave_speed", waterParams.wave_speed},
-            {"wave_strength", waterParams.wave_strength},
             {"clarity", waterParams.clarity},
-            {"ior", waterParams.ior}
+            {"ior", waterParams.ior},
+            {"micro_detail_strength", waterParams.micro_detail_strength},
+            {"micro_detail_scale", waterParams.micro_detail_scale},
+            {"micro_anim_speed", waterParams.micro_anim_speed},
+            {"micro_morph_speed", waterParams.micro_morph_speed}
         };
         
         return j;
@@ -185,10 +187,12 @@ struct RiverSpline {
         
         if (j.contains("waterParams")) {
             auto& wp = j["waterParams"];
-            waterParams.wave_speed = wp.value("wave_speed", 1.0f);
-            waterParams.wave_strength = wp.value("wave_strength", 0.5f);
             waterParams.clarity = wp.value("clarity", 0.8f);
             waterParams.ior = wp.value("ior", 1.333f);
+            waterParams.micro_detail_strength = wp.value("micro_detail_strength", 0.05f);
+            waterParams.micro_detail_scale = wp.value("micro_detail_scale", 20.0f);
+            waterParams.micro_anim_speed = wp.value("micro_anim_speed", 0.1f);
+            waterParams.micro_morph_speed = wp.value("micro_morph_speed", 1.0f);
         }
         
         needsRebuild = true;
@@ -243,11 +247,8 @@ public:
     // Sample terrain height at position (interface to TerrainSystem)
     float sampleTerrainHeight(const Vec3& position) const;
     
-    // Clear all rivers
-    void clear() {
-        rivers.clear();
-        next_id = 1;
-    }
+    // Clear all rivers (implemented in .cpp - also clears WaterManager surfaces)
+    void clear(SceneData* scene = nullptr);
     
     // Serialization
     nlohmann::json serialize() const {

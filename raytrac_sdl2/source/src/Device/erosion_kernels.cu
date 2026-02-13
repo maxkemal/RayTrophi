@@ -51,33 +51,32 @@ extern "C" __global__ void thermalErosionKernel(float* heightmap, ThermalErosion
     int idx = y * p.mapWidth + x;
     float h = heightmap[idx];
     
-    // INDUSTRY STANDARD: Weighted multi-neighbor transfer
-    // Instead of transferring only to steepest neighbor, distribute proportionally
-    // to ALL neighbors exceeding talus angle (more realistic, smoother results)
-    
     float diffs[8];
     int nIdxs[8];
     float totalExcess = 0.0f;
     int neighborCount = 0;
     
-    // D8 neighbor offsets (dx, dy) and distance weights
+    // Physical slope = dh * heightScale / (dist * cellSize)
+    float safeHeightScale = fmaxf(1.0f, p.heightScale);
+    float invCellSize = 1.0f / fmaxf(0.001f, p.cellSize);
+    float slopeScale = safeHeightScale * invCellSize;
+    
+    // D8 neighbor offsets and distance weights
     const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
     const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
-    const float distWeight[8] = {0.707f, 1.0f, 0.707f, 1.0f, 1.0f, 0.707f, 1.0f, 0.707f}; // 1/sqrt(2) for diagonals
+    const float dists[8] = {1.414f, 1.0f, 1.414f, 1.0f, 1.0f, 1.414f, 1.0f, 1.414f};
     
-    // First pass: Calculate all height differences and total excess
     for (int d = 0; d < 8; d++) {
-        int nx = x + dx[d];
-        int ny = y + dy[d];
-        nIdxs[d] = ny * p.mapWidth + nx;
+        nIdxs[d] = (y + dy[d]) * p.mapWidth + (x + dx[d]);
         
-        // Adjust talus for diagonal distance (diagonals can be steeper)
-        float adjustedTalus = p.talusAngle * distWeight[d];
         float diff = h - heightmap[nIdxs[d]];
+        float slope = diff * slopeScale / dists[d];
         
-        if (diff > adjustedTalus) {
-            diffs[d] = diff - adjustedTalus;
-            totalExcess += diffs[d];
+        if (slope > p.talusAngle) {
+            // Amount of normalized height to move
+            float excess = (slope - p.talusAngle) * dists[d] * p.cellSize / safeHeightScale;
+            diffs[d] = excess;
+            totalExcess += excess;
             neighborCount++;
         } else {
             diffs[d] = 0.0f;
@@ -88,6 +87,10 @@ extern "C" __global__ void thermalErosionKernel(float* heightmap, ThermalErosion
     if (totalExcess > 0.0f && neighborCount > 0) {
         // Total amount to move (half of excess, scaled by erosion rate)
         float totalMove = totalExcess * 0.5f * p.erosionAmount;
+        
+        // STABILITY CAP: Never move more than 5% of height per step
+        totalMove = fminf(totalMove, 0.05f);
+        if (totalMove > h) totalMove = h * 0.9f;
         
         // Remove from center
         atomicAdd(&heightmap[idx], -totalMove);
@@ -143,16 +146,18 @@ extern "C" __global__ void fluvialFluxKernel(float* heightMap, float* waterMap, 
     float* fT = &fluxMap[idx * 4 + 2];
     float* fB = &fluxMap[idx * 4 + 3];
     
-    // Calculate Height Diffs
+    // Calculate Height Diffs in meters
+    float safeHeightScale = fmaxf(1.0f, p.heightScale);
     float dH[4];
-    dH[0] = H - (heightMap[nIdx[0]] + waterMap[nIdx[0]]);
-    dH[1] = H - (heightMap[nIdx[1]] + waterMap[nIdx[1]]);
-    dH[2] = H - (heightMap[nIdx[2]] + waterMap[nIdx[2]]);
-    dH[3] = H - (heightMap[nIdx[3]] + waterMap[nIdx[3]]);
+    dH[0] = (H - (heightMap[nIdx[0]] + waterMap[nIdx[0]])) * safeHeightScale;
+    dH[1] = (H - (heightMap[nIdx[1]] + waterMap[nIdx[1]])) * safeHeightScale;
+    dH[2] = (H - (heightMap[nIdx[2]] + waterMap[nIdx[2]])) * safeHeightScale;
+    dH[3] = (H - (heightMap[nIdx[3]] + waterMap[nIdx[3]])) * safeHeightScale;
     
     // Update Flux (Pipe Model)
-    float pipeArea = p.pipeLength * p.pipeLength; // Section area? usually just 1
-    float fluxFactor = p.fixedDeltaTime * pipeArea * p.gravity;
+    // fluxFactor = dt * A * g / L
+    float invCellSize = 1.0f / fmaxf(0.01f, p.cellSize);
+    float fluxFactor = p.fixedDeltaTime * p.gravity * invCellSize;
     
     *fL = fmaxf(0.0f, *fL + fluxFactor * dH[0]);
     *fR = fmaxf(0.0f, *fR + fluxFactor * dH[1]);
@@ -234,19 +239,24 @@ extern "C" __global__ void fluvialErosionKernel(float* heightMap, float* waterMa
     float vy = velocityMap[idx*2+1];
     float velocity = sqrtf(vx*vx + vy*vy);
     
-    // INDUSTRY STANDARD: Stream Power Law with slope term
-    // Calculate local slope from height gradient
-    float dzdx = (heightMap[idx + 1] - heightMap[idx - 1]) / (2.0f * p.cellSize);
-    float dzdy = (heightMap[idx + p.mapWidth] - heightMap[idx - p.mapWidth]) / (2.0f * p.cellSize);
-    float slope = sqrtf(dzdx * dzdx + dzdy * dzdy);
+    // Normalized gradient/slope
+    float invCellSize = 1.0f / fmaxf(0.001f, p.cellSize);
+    float dzdx = (heightMap[idx + 1] - heightMap[idx - 1]) * 0.5f * invCellSize;
+    float dzdy = (heightMap[idx + p.mapWidth] - heightMap[idx - p.mapWidth]) * 0.5f * invCellSize;
+    float slope = sqrtf(dzdx * dzdx + dzdy * dzdy) * p.heightScale;
+    
+    // Physical Downhill check
+    float dotVGrad = (vx * dzdx + vy * dzdy) * p.heightScale;
+    float capacityMultiplier = fmaxf(0.1f, -dotVGrad * invCellSize); 
     
     // Stream Power Law: C = Kc * velocity * slope^n
-    // Using n = 0.5 (common for fluvial systems)
-    // Add small epsilon to prevent zero capacity on flat areas
-    float slopeFactor = sqrtf(slope + 0.001f);
-    float C = p.sedimentCapacityConstant * velocity * slopeFactor;
+    // Use slightly higher power for slope to encourage channelization
+    float slopeFactor = powf(slope + 0.001f, 0.7f);
+    // Capacity in heightmap units (0..1)
+    float C = p.sedimentCapacityConstant * velocity * slopeFactor * capacityMultiplier / fmaxf(1.0f, p.heightScale);
+    C = fminf(C, 0.2f); // Cap maximum capacity to 20% of height range
     
-    // Water depth factor - deeper water can carry more sediment
+    // Water depth factor
     float waterDepth = waterMap[idx];
     C *= fminf(1.0f + waterDepth * 0.5f, 2.0f);
     
@@ -254,27 +264,107 @@ extern "C" __global__ void fluvialErosionKernel(float* heightMap, float* waterMa
     float ht = heightMap[idx];
     
     if (C > st) {
-        // Erode (Pick up sediment) - Stream Power Erosion
-        float erode = p.erosionRate * (C - st);
-        
-        // Bedrock protection: can't erode more than available height
-        erode = fminf(erode, ht * 0.1f); // Max 10% per step for stability
-        
-        // Slope-dependent erosion boost (steeper = more erosion)
-        erode *= (1.0f + slope * 0.5f);
+        // EROSION
+        float erode = p.erosionRate * (C - st) * p.fixedDeltaTime;
+        // STABILITY: Bedrock protection (Even more conservative to avoid 'wrong' look)
+        erode = fminf(erode, ht * 0.002f); 
+        erode = fminf(erode, 0.001f); // Absolute cap per step
         
         heightMap[idx] -= erode;
         sedimentMap[idx] += erode;
     } else {
-        // Deposit - preferentially in low-velocity, low-slope areas
-        float depositionFactor = 1.0f / (1.0f + velocity * 2.0f); // Slower = more deposition
-        float depo = p.depositionRate * (st - C) * depositionFactor;
+        // DEPOSITION
+        float depositionFactor = 1.0f / (1.0f + velocity * 5.0f); // Higher penalty for velocity
+        float depo = p.depositionRate * (st - C) * depositionFactor * p.fixedDeltaTime;
+        // STABILITY: Prevent sudden spikes (Max 1% of height gap or small constant)
+        depo = fminf(depo, 0.01f);
+        
         heightMap[idx] += depo;
         sedimentMap[idx] -= depo;
     }
     
     // Evaporation
     waterMap[idx] *= (1.0f - p.evaporationRate * p.fixedDeltaTime);
+}
+
+// 5. Stream Power Law Erosion - Matches CPU "Global Hydrological" Model
+// Based on E = K * sqrt(A) * S
+extern "C" __global__ void fluvialStreamPowerKernel(float* heightMap, float* flowMap, float* hardnessMap, float* maskMap, StreamPowerParamsGPU p) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x <= 2 || x >= p.mapWidth - 3 || y <= 2 || y >= p.mapHeight - 3) return;
+    int idx = y * p.mapWidth + x;
+    
+    // MASK CHECK: Stop execution if masked out
+    if (maskMap != nullptr && maskMap[idx] < 0.01f) return;
+
+    float flow = flowMap[idx];
+    if (flow < 3.0f) return; // Ignore tiny streams
+    
+    // Physical slope calculation
+    float invCellSize = 1.0f / fmaxf(0.001f, p.cellSize);
+    float slopeX = (heightMap[idx + 1] - heightMap[idx - 1]) * 0.5f * invCellSize;
+    float slopeY = (heightMap[idx + p.mapWidth] - heightMap[idx - p.mapWidth]) * 0.5f * invCellSize;
+    float slope = sqrtf(slopeX * slopeX + slopeY * slopeY);
+    
+    // Apply minimum slope to ensure flow/erosion on flat plains
+    slope = fmaxf(slope, p.minSlope);
+    
+    // Stream Power Law: E = K * sqrt(A) * S
+    float Ks = p.erodeSpeed * 0.02f;
+    float streamPower = Ks * sqrtf(flow) * slope;
+    
+    // Chaos/Turbulence Factor (from CPU version)
+    // Helps break "Circuit Board" artifacts in flat areas
+    if (slope < 0.05f) {
+        float noise = (float)((idx * 1103515245 + 12345) & 0x7FFFFFFF) / 2147483647.0f;
+        float flatIntensity = 1.0f - (slope / 0.05f);
+        streamPower += Ks * sqrtf(flow) * 0.25f * flatIntensity * (0.7f + noise * 0.6f);
+    }
+    
+    // Dynamic Channel Width
+    float hardness = (hardnessMap != nullptr) ? hardnessMap[idx] : 0.3f;
+    float flowScale = fminf(1.0f, (flow - 3.0f) / 100.0f);
+    float baseRadius = (float)p.erosionRadius * 0.5f;
+    float dynamicRadius = fmaxf(0.5f, baseRadius * sqrtf(flowScale) * (1.5f - hardness));
+    int channelRadius = (int)ceilf(dynamicRadius);
+    if (channelRadius > 10) channelRadius = 10;
+    
+    float hardnessMultiplier = 1.0f - hardness * 0.7f;
+    float flowPower = fminf(1.5f, sqrtf(flow) * 0.2f);
+    float slopeDampening = fminf(1.0f, slope * 60.0f); // Slightly steeper dampening
+    
+    streamPower *= hardnessMultiplier * p.sedimentCapacity * flowPower * slopeDampening;
+
+    // Apply Mask Weight (Soft edges)
+    if (maskMap != nullptr) streamPower *= maskMap[idx];
+    
+    // Apply erosion with circular falloff
+    for (int dy = -channelRadius; dy <= channelRadius; dy++) {
+        for (int dx = -channelRadius; dx <= channelRadius; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+            if (nx < 0 || nx >= p.mapWidth || ny < 0 || ny >= p.mapHeight) continue;
+            
+            float distSq = (float)(dx * dx + dy * dy);
+            if (distSq > dynamicRadius * dynamicRadius) continue;
+            
+            int nIdx = ny * p.mapWidth + nx;
+            float dist = sqrtf(distSq);
+            
+            // Smooth circular falloff (Cubic)
+            float t = dist / (dynamicRadius + 0.001f);
+            float falloff = 1.0f - t * t * (3.0f - 2.0f * t);
+            falloff = fmaxf(falloff, 0.0f);
+            
+            float erode = streamPower * falloff;
+            // Protect bedrock (max 10% of height)
+            erode = fminf(erode, heightMap[nIdx] * 0.1f);
+            
+            atomicAdd(&heightMap[nIdx], -erode);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -288,94 +378,81 @@ extern "C" __global__ void windErosionKernel(float* heightMap, WindErosionParams
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     
-    if (x <= 2 || x >= p.mapWidth - 3 || y <= 2 || y >= p.mapHeight - 3) return;
+    // Bounds check with padding
+    if (x <= 5 || x >= p.mapWidth - 6 || y <= 5 || y >= p.mapHeight - 6) return;
     int idx = y * p.mapWidth + x;
-    
     float h = heightMap[idx];
     
-    // Normalize wind direction
+    // Use PRNG for wind jitter/stochastic behavior
+    curandState state;
+    curand_init(1337, idx, 0, &state);
+    // Physical slope = dh * heightScale / (dist * cellSize)
+    float safeHeightScale = fmaxf(0.1f, p.heightScale);
+    float invCellSize = 1.0f / fmaxf(0.01f, p.cellSize);
+    float slopeScale = safeHeightScale * invCellSize;
+    
+    // Add 10% jitter to wind direction for natural feel
+    float angleJitter = (curand_uniform(&state) - 0.5f) * 0.2f;
     float windLen = sqrtf(p.windDirX * p.windDirX + p.windDirY * p.windDirY);
-    float normWindX = (windLen > 0.001f) ? p.windDirX / windLen : 1.0f;
-    float normWindY = (windLen > 0.001f) ? p.windDirY / windLen : 0.0f;
+    float cosJ = cosf(angleJitter);
+    float sinJ = sinf(angleJitter);
+    float normWindX = (windLen > 0.001f) ? (p.windDirX * cosJ - p.windDirY * sinJ) / windLen : 1.0f;
+    float normWindY = (windLen > 0.001f) ? (p.windDirX * sinJ + p.windDirY * cosJ) / windLen : 0.0f;
     
-    // INDUSTRY STANDARD: Shadow Zone Detection
-    // Ray march upwind to detect if we're in a wind shadow
+    // INDUSTRY STANDARD: Resolution-Independent Shadow Zone
+    // Shadow angle ~15 degrees means for every 1 unit upwind distance, 
+    // the "blocking" height drops by tan(15) ~= 0.26
     float shadowFactor = 1.0f;
-    const int SHADOW_STEPS = 6;
-    const float SHADOW_ANGLE = 0.15f; // ~8.5 degrees shadow angle (typical for sand)
+    const float SHADOW_TAN = 0.26f;
     
-    for (int step = 1; step <= SHADOW_STEPS; step++) {
+    // Search upwind up to 20 world units or map bounds
+    float maxSearchDist = 20.0f; 
+    int maxSteps = (int)(maxSearchDist * invCellSize);
+    maxSteps = min(maxSteps, 15); // Performance cap for real-time
+    
+    for (int step = 1; step <= maxSteps; step++) {
+        float dist = step * p.cellSize;
         int checkX = x - (int)(normWindX * step);
         int checkY = y - (int)(normWindY * step);
         
-        // Clamp to bounds
-        checkX = max(0, min(p.mapWidth - 1, checkX));
-        checkY = max(0, min(p.mapHeight - 1, checkY));
+        if (checkX < 0 || checkX >= p.mapWidth || checkY < 0 || checkY >= p.mapHeight) break;
         
-        int checkIdx = checkY * p.mapWidth + checkX;
-        float upwindH = heightMap[checkIdx];
-        
-        // Check if upwind point casts shadow over current point
-        // Shadow extends at SHADOW_ANGLE below upwind peak
-        float shadowHeight = upwindH - step * SHADOW_ANGLE;
-        if (h < shadowHeight) {
-            // We're in the wind shadow - reduce erosion, increase deposition
-            shadowFactor *= 0.3f;
+        float upwindH = heightMap[checkY * p.mapWidth + checkX];
+        // Physical check: upwind peak higher than current + physical slope
+        if (upwindH * p.heightScale > h * p.heightScale + dist * SHADOW_TAN) {
+            shadowFactor *= 0.4f; 
+            if (shadowFactor < 0.1f) break;
         }
     }
     
-    // Calculate local windward slope
-    int upwindX = x - (int)normWindX;
-    int upwindY = y - (int)normWindY;
-    upwindX = max(0, min(p.mapWidth - 1, upwindX));
-    upwindY = max(0, min(p.mapHeight - 1, upwindY));
-    int upwindIdx = upwindY * p.mapWidth + upwindX;
+    // Local windward slope (physical)
+    int ux = x - (int)normWindX;
+    int uy = y - (int)normWindY;
+    float upwindH = heightMap[uy * p.mapWidth + ux];
+    float slope = (h - upwindH) * slopeScale;
     
-    int downwindX = x + (int)normWindX;
-    int downwindY = y + (int)normWindY;
-    downwindX = max(0, min(p.mapWidth - 1, downwindX));
-    downwindY = max(0, min(p.mapHeight - 1, downwindY));
-    int downwindIdx = downwindY * p.mapWidth + downwindX;
-    
-    // Further downwind for saltation deposition
-    int farDownwindX = x + (int)(normWindX * 3);
-    int farDownwindY = y + (int)(normWindY * 3);
-    farDownwindX = max(0, min(p.mapWidth - 1, farDownwindX));
-    farDownwindY = max(0, min(p.mapHeight - 1, farDownwindY));
-    int farDownwindIdx = farDownwindY * p.mapWidth + farDownwindX;
-    
-    float upwindH = heightMap[upwindIdx];
-    float downwindH = heightMap[downwindIdx];
-    
-    // Windward slope - exposed to erosion
-    float windwardSlope = h - upwindH;
-    
-    // Leeward slope - sheltered, deposition zone
-    float leewardSlope = h - downwindH;
-    
-    // EROSION: Windward faces (facing into wind)
-    if (windwardSlope > 0.0f && shadowFactor > 0.5f) {
-        // Saltation erosion - stronger on exposed windward slopes
-        float erosionAmount = windwardSlope * p.suspensionRate * p.strength * shadowFactor;
+    if (slope > 0.0f && shadowFactor > 0.5f) {
+        // EROSION: Exposed windward face
+        // Strength scales with slope (steeper = more exposed to wind force)
+        float erosion = slope * p.strength * p.suspensionRate * shadowFactor;
+        atomicAdd(&heightMap[idx], -erosion);
         
-        // Abrasion increases with slope angle
-        float abrasionBoost = 1.0f + windwardSlope * 2.0f;
-        erosionAmount *= abrasionBoost;
+        // SALTATION: Material lands downwind
+        // Target distance: jump depends on wind strength, but normalized to world space
+        float jumpDistWorld = 4.0f * p.strength; // Base jump of 4m at full strength
+        int jumpSteps = (int)(jumpDistWorld * invCellSize);
+        jumpSteps = max(1, min(jumpSteps, 10));
         
-        atomicAdd(&heightMap[idx], -erosionAmount);
+        int dx_jump = x + (int)(normWindX * jumpSteps);
+        int dy_jump = y + (int)(normWindY * jumpSteps);
         
-        // Saltation: material jumps and lands downwind
-        // Split between immediate downwind and further saltation jump
-        atomicAdd(&heightMap[downwindIdx], erosionAmount * p.depositionRate * 0.6f);
-        atomicAdd(&heightMap[farDownwindIdx], erosionAmount * p.depositionRate * 0.4f);
-    }
-    
-    // DEPOSITION: Leeward faces (wind shadow) and shadow zones
-    if (shadowFactor < 0.7f || leewardSlope > 0.0f) {
-        // In shadow zone or on leeward slope - sediment settles
-        // Capture some passing sediment based on how sheltered we are
-        float depositionAmount = (1.0f - shadowFactor) * p.strength * 0.02f;
-        atomicAdd(&heightMap[idx], depositionAmount);
+        if (dx_jump > 0 && dx_jump < p.mapWidth && dy_jump > 0 && dy_jump < p.mapHeight) {
+            atomicAdd(&heightMap[dy_jump * p.mapWidth + dx_jump], erosion * p.depositionRate);
+        }
+    } else if (shadowFactor < 0.7f) {
+        // DEPOSITION: Settling in sheltered area (Wind Shadow)
+        float settling = (1.0f - shadowFactor) * p.strength * 0.05f * p.depositionRate;
+        atomicAdd(&heightMap[idx], settling);
     }
 }
 
@@ -567,25 +644,29 @@ extern "C" __global__ void thermalErosionWithHardnessKernel(float* heightmap, fl
     // D8 neighbor offsets and distance weights
     const int dx[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
     const int dy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
-    const float distWeight[8] = {0.707f, 1.0f, 0.707f, 1.0f, 1.0f, 0.707f, 1.0f, 0.707f};
-    
-    // Calculate all height differences and total excess
+    const float dists[8] = {1.414f, 1.0f, 1.414f, 1.0f, 1.0f, 1.414f, 1.0f, 1.414f};
+
     float diffs[8];
     int nIdxs[8];
     float totalExcess = 0.0f;
     int neighborCount = 0;
     
+    // Physical slope = dh * heightScale / (dist * cellSize)
+    float safeHeightScale = fmaxf(0.1f, p.heightScale);
+    float invCellSize = 1.0f / fmaxf(0.01f, p.cellSize);
+    float slopeScale = safeHeightScale * invCellSize;
+    
     for (int d = 0; d < 8; d++) {
-        int nx = x + dx[d];
-        int ny = y + dy[d];
-        nIdxs[d] = ny * p.mapWidth + nx;
+        nIdxs[d] = (y + dy[d]) * p.mapWidth + (x + dx[d]);
         
-        float adjustedTalus = effectiveTalus * distWeight[d];
+        // Physical slope = dh * heightScale / (dist * cellSize)
         float diff = h - heightmap[nIdxs[d]];
+        float slope = diff * slopeScale / dists[d];
         
-        if (diff > adjustedTalus) {
-            diffs[d] = diff - adjustedTalus;
-            totalExcess += diffs[d];
+        if (slope > effectiveTalus) {
+            float excess = (slope - effectiveTalus) * dists[d] * p.cellSize / safeHeightScale;
+            diffs[d] = excess;
+            totalExcess += excess;
             neighborCount++;
         } else {
             diffs[d] = 0.0f;
@@ -596,8 +677,12 @@ extern "C" __global__ void thermalErosionWithHardnessKernel(float* heightmap, fl
     if (totalExcess > 0.0f && neighborCount > 0) {
         float totalMove = totalExcess * 0.5f * p.erosionAmount;
         
+        // STABILITY CAP: Never move more than 5% of height per step
+        totalMove = fminf(totalMove, 0.05f);
+        if (totalMove > h) totalMove = h * 0.9f;
+        
         // Hardness reduces erosion rate
-        totalMove *= (1.0f - hardness * 0.4f);
+        totalMove *= (1.0f - hardness * 0.7f);
         
         // Remove from center
         atomicAdd(&heightmap[idx], -totalMove);
@@ -621,26 +706,33 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
     curandState state;
     curand_init(1234 + seed_offset + p.seed, idx, 0, &state);
     
+    // Random start position
     float posX = curand_uniform(&state) * (p.mapWidth - 1);
     float posY = curand_uniform(&state) * (p.mapHeight - 1);
     
-    float dirX = 0, dirY = 0;
+    float dirX = 0.0f, dirY = 0.0f;
     float speed = 1.0f;
     float water = 1.0f;
     float sediment = 0.0f;
     
+    float invCellSize = 1.0f / fmaxf(0.001f, p.cellSize);
+    
+    // Droplet simulation loop
     for (int step = 0; step < p.dropletLifetime; step++) {
         int nodeX = (int)posX;
         int nodeY = (int)posY;
         
-        if (nodeX <= 0 || nodeX >= p.mapWidth - 1 || nodeY <= 0 || nodeY >= p.mapHeight - 1) break;
+        // Bounds check (with padding for gradient)
+        if (nodeX <= 1 || nodeX >= p.mapWidth - 2 || nodeY <= 1 || nodeY >= p.mapHeight - 2) break;
         
         int gridIdx = nodeY * p.mapWidth + nodeX;
-        // float height = heightmap[gridIdx]; // Unused raw read? Use interp or raw for Gradient?
-        // Gradient
-        float gradX = (heightmap[gridIdx + 1] - heightmap[gridIdx - 1]);
-        float gradY = (heightmap[gridIdx + p.mapWidth] - heightmap[gridIdx - p.mapWidth]);
         
+        // Normalize gradient by cellSize to ensure consistent force across resolutions
+        // Using central difference for better stability
+        float gradX = (heightmap[gridIdx + 1] - heightmap[gridIdx - 1]) * 0.5f * invCellSize;
+        float gradY = (heightmap[gridIdx + p.mapWidth] - heightmap[gridIdx - p.mapWidth]) * 0.5f * invCellSize;
+        
+        // Update direction with inertia
         dirX = dirX * p.inertia - gradX * (1.0f - p.inertia);
         dirY = dirY * p.inertia - gradY * (1.0f - p.inertia);
         
@@ -657,42 +749,61 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         
         if (newPosX <= 1.0f || newPosX >= p.mapWidth - 2.0f || newPosY <= 1.0f || newPosY >= p.mapHeight - 2.0f) break;
         
+        // Height sampling
         float oldH = bilinearInterpolate(heightmap, p.mapWidth, p.mapHeight, posX, posY);
         float newH = bilinearInterpolate(heightmap, p.mapWidth, p.mapHeight, newPosX, newPosY);
         float deltaHeight = newH - oldH;
         
-        // INDUSTRY STANDARD: Stream Power Law sediment capacity
-        // C = Kc * velocity * slope^n * water (n typically 0.5-1.0)
-        // Reference: Whipple & Tucker (1999)
-        float slope = fabsf(deltaHeight); // Local slope approximation
-        float slopeFactor = sqrtf(slope + 0.001f); // slope^0.5 with epsilon
-        float sedimentCapacity = fmaxf(-deltaHeight * speed * water * p.sedimentCapacity * slopeFactor, p.minSlope);
+        // Physical slope calculation
+        float localSlope = -deltaHeight * p.heightScale * invCellSize; // Physical slope
+        float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity * sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope);
         
-        if (deltaHeight > 0) {
-            // Uphill: Carve if fast
-             if (speed > 0.5f && sediment < sedimentCapacity) {
-                 float carve = fminf(deltaHeight * 0.5f, oldH * 0.05f); 
-                 // Use simple updateHeight (bilinear) - FAST
-                 updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, -carve);
-                 sediment += carve;
-             } else {
-                 float depo = fminf(deltaHeight, sediment);
-                 sediment -= depo;
-                 updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, depo);
-             }
-        } else if (sediment > sedimentCapacity) {
-            float depo = (sediment - sedimentCapacity) * p.depositSpeed;
-            sediment -= depo;
-            updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, depo);
+        // Convert capacity back to normalized units if necessary? 
+        // No, p.sedimentCapacity should be tuned for the physical slope.
+        // BUT deltaHeight is in 0..1 units. Capacity must match sediment units.
+        // If sediment is picked up in 0..1 units, capacity should also be in 0..1 units.
+        capacity /= fmaxf(1.0f, p.heightScale);
+        
+        if (deltaHeight > 0.0f) {
+            // UPHILL - MOMENTUM CHECK
+            if (speed > 0.5f && sediment < capacity) {
+                // High momentum: carve through obstacle (creates channels)
+                // STABILITY: Cap at 30% of height diff and 5% of absolute height
+                float erodeAmount = fminf(deltaHeight * 0.3f, oldH * 0.05f);
+                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, -erodeAmount);
+                sediment += erodeAmount;
+                speed *= 0.6f; // Significant penalty for climbing
+            } else {
+                // Low momentum: deposit and redirect/stop
+                // STABILITY: Never deposit more than half of sediment or height diff in one step
+                float depoAmount = fminf(sediment * 0.3f, deltaHeight * 0.5f);
+                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, depoAmount);
+                sediment -= depoAmount;
+                speed = 0.0f; // Droplet stops at the wall
+            }
+        } else if (sediment > capacity) {
+            // DOWNHILL - DEPOSITION (Droplet overloaded)
+            float depoAmount = (sediment - capacity) * p.depositSpeed;
+            // STABILITY: Prevent massive spikes
+            depoAmount = fminf(depoAmount, -deltaHeight * 0.5f);
+            updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, depoAmount);
+            sediment -= depoAmount;
         } else {
-            float erode = fminf((sedimentCapacity - sediment) * p.erodeSpeed, -deltaHeight);
-            updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, -erode);
-            sediment += erode;
+            // DOWNHILL - EROSION (Droplet hungry)
+            float erodeAmount = fminf((capacity - sediment) * p.erodeSpeed, -deltaHeight);
+            // STABILITY: Prevent deep pits (max 5% of local height)
+            erodeAmount = fminf(erodeAmount, oldH * 0.05f);
+            updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, -erodeAmount);
+            sediment += erodeAmount;
         }
         
-        speed = sqrtf(speed*speed + deltaHeight * p.gravity);
+        // Physics update (Correct gravity logic)
+        // Kinetic Energy: v_new^2 = v_old^2 + g * (h_old - h_new) = v_old^2 - g * deltaHeight
+        speed = sqrtf(fmaxf(0.001f, speed*speed - deltaHeight * p.gravity));
         water *= (1.0f - p.evaporateSpeed);
-        posX = newPosX; posY = newPosY;
-        if (water < 0.001f) break;
+        posX = newPosX; 
+        posY = newPosY;
+        
+        if (water < 0.01f || speed < 0.01f) break;
     }
 }

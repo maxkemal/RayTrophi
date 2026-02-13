@@ -7,11 +7,14 @@
 #include <unordered_map> // Gereken başlık
 #include <algorithm>    // std::min ve std::max için
 #include <cstring>      // memcpy for camera hash
+#include <cmath>        // std::isfinite for hair validation
 #include <set>          // for unique_nodes in TLAS building
 
 
+#include "TerrainManager.h"
 #include <SpotLight.h>
 #include <filesystem>
+#include "Hair/HairSystem.h"
 #include <imgui.h>
 #include <imgui_impl_sdlrenderer2.h>
 #include "Matrix4x4.h"
@@ -227,6 +230,18 @@ void OptixWrapper::launch(int w, int h) {
     params.variance_buffer = d_variance_buffer;
     params.sample_count_buffer = d_sample_count_buffer;
     params.materials = d_materials;
+    params.material_count = m_material_count;
+    
+    // Hair rendering parameters
+    params.hair_handle = m_hairHandle;
+    params.hair_enabled = (m_hairHandle != 0) ? 1 : 0;
+    
+    // Hair geometry data for closesthit program
+    params.hair_vertices = reinterpret_cast<float4*>(m_d_hairVertices);
+    params.hair_indices = reinterpret_cast<unsigned int*>(m_d_hairIndices);
+    params.hair_tangents = reinterpret_cast<float3*>(m_d_hairTangents);
+    params.hair_segment_count = static_cast<int>(m_hairSegmentCount);
+    params.hair_vertex_count = static_cast<int>(m_hairVertexCount);
     
     // OPTIMIZATION: Only upload if params changed (dirty flag)
     // Logic layer (World, Animation, Loaders) is now responsible for ensuring
@@ -452,110 +467,169 @@ void OptixWrapper::validateMaterialIndices(const OptixGeometryData& data) {
 }
 
 
-void OptixWrapper::setupPipeline(const char* raygen_ptx) {
+void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     // 1. Compile options
     OptixModuleCompileOptions module_options = {};
     module_options.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-    module_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
+    module_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_2;
     module_options.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_NONE;
 
     OptixPipelineCompileOptions pipeline_options = {};
     pipeline_options.usesMotionBlur = false;
-    // CRITICAL: Must use ALLOW_ANY or ALLOW_SINGLE_LEVEL_INSTANCING for TLAS support!
-    // ALLOW_SINGLE_GAS doesn't properly support instance transforms, causing
-    // optixGetObjectToWorldTransformMatrix to return identity instead of actual transform.
     pipeline_options.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_ANY;
     pipeline_options.numPayloadValues = 2;
     pipeline_options.numAttributeValues = 2;
     pipeline_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_options.pipelineLaunchParamsVariableName = "optixLaunchParams";
+    
+    pipeline_options.usesPrimitiveTypeFlags = 
+        OPTIX_PRIMITIVE_TYPE_FLAGS_TRIANGLE | 
+        OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR |
+        OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER |
+        OPTIX_PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BSPLINE;
 
     char log[2048];
     size_t log_size = sizeof(log);
 
-    // 2. PTX modül oluştur (OptiX 8 için güncellendi)
-    // OptiX 8'de NVRTC ile derlenmiş PTX modülü kullanmak
+    auto start_jit = std::chrono::high_resolution_clock::now();
+
+    // 2. Create Raygen Module
     OPTIX_CHECK(optixModuleCreate(
-        context,
-        &module_options,
-        &pipeline_options,
-        raygen_ptx,
-        strlen(raygen_ptx),
-        log,
-        &log_size,
-        &module
+        context, &module_options, &pipeline_options,
+        ptx_data.raygen_ptx, strlen(ptx_data.raygen_ptx),
+        log, &log_size, &raygen_module
     ));
 
-    // 3. Program group: raygen
+    // 3. Create Miss Module
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixModuleCreate(
+        context, &module_options, &pipeline_options,
+        ptx_data.miss_ptx, strlen(ptx_data.miss_ptx),
+        log, &log_size, &miss_module
+    ));
+
+    // 4. Create HitGroup Module
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixModuleCreate(
+        context, &module_options, &pipeline_options,
+        ptx_data.hitgroup_ptx, strlen(ptx_data.hitgroup_ptx),
+        log, &log_size, &hitgroup_module
+    ));
+
+    auto end_jit = std::chrono::high_resolution_clock::now();
+    float jit_time = std::chrono::duration<float>(end_jit - start_jit).count();
+    SCENE_LOG_INFO("[OptiX] JIT Multi-Module Creation took " + std::to_string(jit_time) + " seconds");
+
+    // 5. Program groups
+    OptixProgramGroupOptions pg_options = {};
+    
+    // Raygen
     OptixProgramGroupDesc raygen_desc = {};
     raygen_desc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-    raygen_desc.raygen.module = module;
+    raygen_desc.raygen.module = raygen_module;
     raygen_desc.raygen.entryFunctionName = "__raygen__rg";
-
-    OptixProgramGroupOptions pg_options = {};
     log_size = sizeof(log);
-    OPTIX_CHECK(optixProgramGroupCreate(
-        context, &raygen_desc, 1, &pg_options, log, &log_size, &raygen_pg));
+    OPTIX_CHECK(optixProgramGroupCreate(context, &raygen_desc, 1, &pg_options, log, &log_size, &raygen_pg));
 
-    // 4. Program group: miss
+    // Miss
     OptixProgramGroupDesc miss_desc = {};
     miss_desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-    miss_desc.miss.module = module;
+    miss_desc.miss.module = miss_module;
     miss_desc.miss.entryFunctionName = "__miss__ms";
-
     log_size = sizeof(log);
-    OPTIX_CHECK(optixProgramGroupCreate(
-        context, &miss_desc, 1, &pg_options, log, &log_size, &miss_pg));
+    OPTIX_CHECK(optixProgramGroupCreate(context, &miss_desc, 1, &pg_options, log, &log_size, &miss_pg));
 
-    // 5. Program group: hit
+    OptixProgramGroupDesc miss_shadow_desc = {};
+    miss_shadow_desc.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+    miss_shadow_desc.miss.module = miss_module;
+    miss_shadow_desc.miss.entryFunctionName = "__miss__shadow";
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(context, &miss_shadow_desc, 1, &pg_options, log, &log_size, &miss_shadow_pg));
+
+    // Hit Groups
     OptixProgramGroupDesc hit_desc = {};
     hit_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-    hit_desc.hitgroup.moduleCH = module;
+    hit_desc.hitgroup.moduleCH = hitgroup_module;
     hit_desc.hitgroup.entryFunctionNameCH = "__closesthit__ch";
-    hit_desc.hitgroup.moduleAH = module;
+    hit_desc.hitgroup.moduleAH = hitgroup_module;
     hit_desc.hitgroup.entryFunctionNameAH = "__anyhit__ah";
-
     log_size = sizeof(log);
-    OPTIX_CHECK(optixProgramGroupCreate(
-        context, &hit_desc, 1, &pg_options, log, &log_size, &hit_pg));
+    OPTIX_CHECK(optixProgramGroupCreate(context, &hit_desc, 1, &pg_options, log, &log_size, &hit_pg));
 
-    // 6. Pipeline oluştur
-    OptixProgramGroup program_groups[] = { raygen_pg, miss_pg, hit_pg };
-    OptixPipelineLinkOptions link_options = {};
-    link_options.maxTraceDepth = 1;
-
+    OptixProgramGroupDesc hit_shadow_desc = {};
+    hit_shadow_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    hit_shadow_desc.hitgroup.moduleCH = hitgroup_module; 
+    hit_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
+    hit_shadow_desc.hitgroup.moduleAH = hitgroup_module;
+    hit_shadow_desc.hitgroup.entryFunctionNameAH = "__anyhit__ah";
     log_size = sizeof(log);
-    OPTIX_CHECK(optixPipelineCreate(
-        context, &pipeline_options, &link_options,
-        program_groups, 3,
-        log, &log_size,
-        &pipeline
-    ));
+    OPTIX_CHECK(optixProgramGroupCreate(context, &hit_shadow_desc, 1, &pg_options, log, &log_size, &hit_shadow_pg));
 
-    // 7. Shader Binding Table (SBT) hazırla
-    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) EmptySbtRecord {
-        char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+    // Hair
+    OptixModule curveIS_module = nullptr;
+    {
+        OptixBuiltinISOptions builtinISOptions = {};
+        builtinISOptions.builtinISModuleType = OPTIX_PRIMITIVE_TYPE_ROUND_CUBIC_BSPLINE;
+        builtinISOptions.usesMotionBlur = false;
+        builtinISOptions.buildFlags = OPTIX_BUILD_FLAG_NONE;
+        builtinISOptions.curveEndcapFlags = 0;
+        OPTIX_CHECK(optixBuiltinISModuleGet(context, &module_options, &pipeline_options, &builtinISOptions, &curveIS_module));
+    }
+
+    OptixProgramGroupDesc hair_hit_desc = {};
+    hair_hit_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    hair_hit_desc.hitgroup.moduleCH = hitgroup_module;
+    hair_hit_desc.hitgroup.entryFunctionNameCH = "__closesthit__hair";
+    hair_hit_desc.hitgroup.moduleIS = curveIS_module;
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(context, &hair_hit_desc, 1, &pg_options, log, &log_size, &hair_hit_pg));
+
+    OptixProgramGroupDesc hair_shadow_desc = {};
+    hair_shadow_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    hair_shadow_desc.hitgroup.moduleCH = hitgroup_module;
+    hair_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
+    hair_shadow_desc.hitgroup.moduleIS = curveIS_module;
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixProgramGroupCreate(context, &hair_shadow_desc, 1, &pg_options, log, &log_size, &hair_shadow_pg));
+
+    // 6. Pipeline Link
+    std::vector<OptixProgramGroup> program_groups = { 
+        raygen_pg, miss_pg, miss_shadow_pg, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg 
     };
+    OptixPipelineLinkOptions link_options = {};
+    link_options.maxTraceDepth = 2;
+    log_size = sizeof(log);
+    OPTIX_CHECK(optixPipelineCreate(context, &pipeline_options, &link_options, program_groups.data(), static_cast<unsigned int>(program_groups.size()), log, &log_size, &pipeline));
 
+    // Manager and SBT initialization (remains similar)
+    if (!accel_manager) {
+        accel_manager = std::make_unique<OptixAccelManager>();
+        accel_manager->setMessageCallback([this](const std::string& msg, int type) {
+            if (m_accelStatusCallback) m_accelStatusCallback(msg, type);
+            if (type == 2) SCENE_LOG_ERROR(msg);
+            else if (type == 1) SCENE_LOG_WARN(msg);
+            else SCENE_LOG_INFO(msg);
+        });
+    }
+    accel_manager->initialize(context, stream, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg);
+
+    // SBT Raygen
+    struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) EmptySbtRecord { char header[OPTIX_SBT_RECORD_HEADER_SIZE]; };
     EmptySbtRecord raygen_record = {};
     OPTIX_CHECK(optixSbtRecordPackHeader(raygen_pg, &raygen_record));
     cudaMalloc(reinterpret_cast<void**>(&sbt.raygenRecord), sizeof(EmptySbtRecord));
     cudaMemcpy(reinterpret_cast<void*>(sbt.raygenRecord), &raygen_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
 
-    EmptySbtRecord miss_record = {};
-    OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &miss_record));
-    cudaMalloc(reinterpret_cast<void**>(&sbt.missRecordBase), sizeof(EmptySbtRecord));
-    cudaMemcpy(reinterpret_cast<void*>(sbt.missRecordBase), &miss_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
+    // SBT Miss
+    EmptySbtRecord miss_records[2] = {};
+    OPTIX_CHECK(optixSbtRecordPackHeader(miss_pg, &miss_records[0]));
+    OPTIX_CHECK(optixSbtRecordPackHeader(miss_shadow_pg, &miss_records[1]));
+    cudaMalloc(reinterpret_cast<void**>(&sbt.missRecordBase), sizeof(miss_records));
+    cudaMemcpy(reinterpret_cast<void*>(sbt.missRecordBase), miss_records, sizeof(miss_records), cudaMemcpyHostToDevice);
     sbt.missRecordStrideInBytes = sizeof(EmptySbtRecord);
-    sbt.missRecordCount = 1;
+    sbt.missRecordCount = 2;
 
-    EmptySbtRecord hit_record = {};
-    OPTIX_CHECK(optixSbtRecordPackHeader(hit_pg, &hit_record));
-    cudaMalloc(reinterpret_cast<void**>(&sbt.hitgroupRecordBase), sizeof(EmptySbtRecord));
-    cudaMemcpy(reinterpret_cast<void*>(sbt.hitgroupRecordBase), &hit_record, sizeof(EmptySbtRecord), cudaMemcpyHostToDevice);
-    sbt.hitgroupRecordStrideInBytes = sizeof(EmptySbtRecord);
-    sbt.hitgroupRecordCount = 1;
-
+    sbt.hitgroupRecordCount = 0;
 }
 void OptixWrapper::destroyTextureObjects() {
     int texture_obj_count = 0;
@@ -825,6 +899,9 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
             rec.data.nanovdb_grid = nullptr;
             rec.data.has_nanovdb = 0;
         }
+        
+        // GPU PICKING - Object ID for viewport selection (GAS mode uses material index)
+        rec.data.object_id = static_cast<int>(mat_index);
 
         OPTIX_CHECK(optixSbtRecordPackHeader(hit_pg, &rec));
         hitgroup_records.push_back(rec);
@@ -1034,6 +1111,11 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     // Samples per pass: 1 for smooth progressive updates
     // Could increase for faster convergence at cost of UI responsiveness
     int samples_this_pass = 1;
+    
+    // GPU PICKING - Ensure pick buffers are allocated (safety net for first render)
+    if (!d_pick_buffer || pick_buffer_size != static_cast<size_t>(width) * height) {
+        ensurePickBuffers(width, height);
+    }
 
     // ------------------ SETUP PARAMS -----------------------
     params.framebuffer = d_framebuffer;
@@ -1041,8 +1123,14 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.image_width = width;
     params.image_height = height;
     params.handle = traversable_handle;
+    params.hair_enabled = (accel_manager && accel_manager->getCurveInstanceCount() > 0) ? 1 : 0; 
     params.materials = reinterpret_cast<GpuMaterial*>(d_materials);
+    params.material_count = m_material_count;
     params.volumetric_infos = reinterpret_cast<GpuVolumetricInfo*>(d_volumetric_infos);
+    
+    // GPU PICKING - Set pick buffer pointers for shader access
+    params.pick_buffer = d_pick_buffer;
+    params.pick_depth_buffer = d_pick_depth_buffer;
 
 
 
@@ -1058,7 +1146,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.converged_count = d_converged_count;  // Debug counter for converged pixels
 
     // Frame number is the accumulated sample count (for random seed variation)
-    params.frame_number = accumulated_samples + 1;
+    // IMPORTANT: Start from 0 so pick buffer can be written on first frame!
+    params.frame_number = accumulated_samples;  // Was: accumulated_samples + 1
     params.current_pass = accumulated_samples;
     params.is_final_render = render_settings.is_final_render_mode ? 1 : 0;
     params.grid_enabled = render_settings.grid_enabled ? 1 : 0;
@@ -1195,8 +1284,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     int row_stride = surface->pitch / 4;
 
     // Safety checks to prevent crash if Surface size != Render size
-    int safe_w = min(width, surface->w);
-    int safe_h = min(height, surface->h);
+    int safe_w = (std::min)(width, surface->w);
+    int safe_h = (std::min)(height, surface->h);
 
     for (int j = 0; j < safe_h; ++j) {
         for (int i = 0; i < safe_w; ++i) {
@@ -1212,8 +1301,20 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     }
 
     // ------------------ PROGRESS DISPLAY -----------------------
+    extern std::string active_model_path;
+    std::string projectName = active_model_path;
+    if (projectName.empty() || projectName == "Untitled") {
+        projectName = "Untitled";
+    } else {
+        // Extract filename from path
+        size_t lastSlash = projectName.find_last_of("\\/");
+        if (lastSlash != std::string::npos) {
+            projectName = projectName.substr(lastSlash + 1);
+        }
+    }
+
     float progress = 100.0f * accumulated_samples / target_max_samples;
-    std::string title = "RayTrophi - Sample " + std::to_string(accumulated_samples) +
+    std::string title = "RayTrophi Studio [" + projectName + "] - GPU - Sample " + std::to_string(accumulated_samples) +
         "/" + std::to_string(target_max_samples) +
         " (" + std::to_string(int(progress)) + "%) - " +
         std::to_string(int(pass_ms)) + "ms/sample";
@@ -1422,7 +1523,7 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
         
         LightGPU l = {};
         const Vec3& color = light->color;
-        float intensity = light->intensity*5 ;
+        float intensity = light->intensity ;
 
         // Initialize default values for new fields
         l.inner_cone_cos = 1.0f;
@@ -1576,6 +1677,9 @@ void OptixWrapper::resetBuffers(int width, int height) {
         accumulated_samples = 0;
         accumulation_valid = false;
     }
+    
+    // GPU PICKING - Always ensure pick buffers exist (handles first-time allocation)
+    ensurePickBuffers(width, height);
 
     cudaMemset(d_accumulation_buffer, 0, sizeof(float) * width * height * 3);
     cudaMemset(d_variance_buffer, 0, sizeof(float) * width * height);
@@ -1586,6 +1690,8 @@ void OptixWrapper::resetBuffers(int width, int height) {
     }
     
     frame_counter = 1;
+    Image_width = width;
+    Image_height = height;
 }
 
 bool OptixWrapper::isAccumulationComplete() const {
@@ -1871,13 +1977,27 @@ void OptixWrapper::updateMaterialBuffer(const std::vector<GpuMaterial>& material
     
     size_t mat_size = materials.size() * sizeof(GpuMaterial);
     cudaError_t err = cudaMemcpy(d_materials, materials.data(), mat_size, cudaMemcpyHostToDevice);
-    
+    m_material_count = static_cast<int>(materials.size());
     if (err != cudaSuccess) {
         SCENE_LOG_ERROR("[OptiX] updateMaterialBuffer failed: " + std::string(cudaGetErrorString(err)));
         return;
     }
     
    // SCENE_LOG_INFO("[OptiX] Material buffer updated: " + std::to_string(materials.size()) + " materials");
+}
+
+void OptixWrapper::syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain) {
+    if (accel_manager) {
+        accel_manager->syncSBTMaterialData(materials, sync_terrain);
+        
+        // CRITICAL: Update OptixWrapper's sbt pointers from AccelManager
+        // If uploadHitGroupRecords reallocated the buffer (e.g. if size changed), 
+        // we must update our local sbt base pointer to avoid dangling pointers.
+        const auto& accel_sbt = accel_manager->getSBT();
+        sbt.hitgroupRecordBase = accel_sbt.hitgroupRecordBase;
+        sbt.hitgroupRecordStrideInBytes = accel_sbt.hitgroupRecordStrideInBytes;
+        sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
+    }
 }
 
 void OptixWrapper::updateSBTMaterialBindings(const std::vector<int>& material_indices) {
@@ -2143,7 +2263,18 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     g_optix_rebuild_in_progress = true;
     cudaDeviceSynchronize(); // Ensure previous kernels finished
     
-    SCENE_LOG_INFO("[OptiX TLAS] Building scene (Native Instancing Enabled)...");
+    // [FIX] Crucially clear previous scene state to avoid memory leaks and ghost geometry
+    if (accel_manager) {
+        accel_manager->cleanup();
+        traversable_handle = 0; // [CRITICAL FIX] Prevent rendering with stale handle during rebuild
+    }
+
+    // Cache material data for potential incremental updates (like hair generation)
+    m_cached_materials = data.materials;
+    m_cached_textures = data.textures;
+    m_cached_volumetrics = data.volumetric_info;
+
+   // SCENE_LOG_INFO("[OptiX TLAS] Building scene (Native Instancing Enabled)...");
     
     // ===========================================================================
     // STEP 1: CLASSIFY OBJECTS (Recursive Flattening)
@@ -2185,8 +2316,8 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         collectRenderables(obj);
     }
     
-    SCENE_LOG_INFO("[OptiX] Geometry Source - Static Triangles: " + std::to_string(static_triangles.size()) + 
-                   ", Instances: " + std::to_string(instances.size()));
+   // SCENE_LOG_INFO("[OptiX] Geometry Source - Static Triangles: " + std::to_string(static_triangles.size()) + 
+     //              ", Instances: " + std::to_string(instances.size()));
 
     // Check if we found anything regarding issue
     if (static_triangles.empty() && instances.empty()) {
@@ -2222,7 +2353,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         if (m_accelStatusCallback) accel_manager->setMessageCallback(m_accelStatusCallback);
     }
     accel_manager->cleanup();
-    accel_manager->initialize(context, stream, hit_pg);
+    accel_manager->initialize(context, stream, hit_pg, hit_shadow_pg, hair_hit_pg, hair_shadow_pg);
     
     // Note: We use OptixInstance vector for TLAS build
     std::vector<OptixInstance> optix_instances;
@@ -2247,6 +2378,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             // This ensures static geometry matches exactly what is on CPU
             MeshGeometry geom;
             geom.mesh_name = mesh.mesh_name;
+            geom.original_name = mesh.original_name;  // Base node name for GPU picking
             geom.material_id = mesh.material_id;
             
             // Reserve memory
@@ -2330,7 +2462,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                      transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
                  }
 
-                                   int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, geom.mesh_name, (void*)(mesh.triangle_indices.empty() ? nullptr : static_triangles[mesh.triangle_indices[0]].get()));
+                                   int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, InstanceType::Mesh, geom.mesh_name, (void*)(mesh.triangle_indices.empty() ? nullptr : static_triangles[mesh.triangle_indices[0]].get()));
 
                  
                  if (inst_id >= 0) {
@@ -2395,6 +2527,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     // Must build new BLAS for this source part
                     MeshGeometry geom;
                     geom.mesh_name = grp.mesh_name; // Use unique key
+                    geom.original_name = grp.original_name;  // Base name for GPU picking
                     geom.material_id = grp.material_id;
                     
                     for (int idx : grp.triangle_indices) {
@@ -2467,7 +2600,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             if (blas) {
                 // Node Name: Propagate original instance node name (e.g. "Tree_Instance_5")
                 // but maybe we should append material suffix? No, usually not needed for hit.
-                int inst_id = accel_manager->addInstance(mid, transform, blas->material_id, inst->node_name, inst.get());
+                int inst_id = accel_manager->addInstance(mid, transform, blas->material_id, InstanceType::Mesh, inst->node_name, inst.get());
                 if (inst_id >= 0) {
                      node_to_instance[inst->node_name].push_back(inst_id);
                      instance_to_node[inst_id] = inst->node_name;
@@ -2477,9 +2610,25 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         }
     }
     
+    // ===========================================================================
+    // STEP 4.5: BUILD BLAS FOR CURVES (Hair)
+    // ===========================================================================
+    for (const auto& curve : data.curves) {
+        int curve_id = accel_manager->buildCurveBLAS(curve);
+        if (curve_id >= 0) {
+            float transform[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
+            accel_manager->addInstance(curve_id, transform, curve.material_id, InstanceType::Curve, curve.name);
+        }
+    }
+    
     
     // ===========================================================================
-    // STEP 5: BUILD TLAS
+    // STEP 5: BUILD SBT (Sets correct sbtOffsets for TLAS)
+    // ===========================================================================
+    accel_manager->buildSBT(data.materials, data.textures, data.volumetric_info);
+
+    // ===========================================================================
+    // STEP 6: BUILD TLAS
     // ===========================================================================
     accel_manager->buildTLAS();
     traversable_handle = accel_manager->getTraversableHandle();
@@ -2490,14 +2639,12 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         return;
     }
     
-    // Upload SBT via Manager
-    accel_manager->buildSBT(data.materials, data.textures, data.volumetric_info);
-    
     // Allocate and update global material buffer
     if (!data.materials.empty()) {
         if (d_materials) cudaFree(reinterpret_cast<void*>(d_materials));
         cudaMalloc(reinterpret_cast<void**>(&d_materials), data.materials.size() * sizeof(GpuMaterial));
         updateMaterialBuffer(data.materials);
+        m_material_count = static_cast<int>(data.materials.size());
     }
     
     // CRITICAL: Merge SBTs
@@ -2509,7 +2656,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
     
     g_optix_rebuild_in_progress = false;
-    SCENE_LOG_INFO("[OptiX TLAS] Build complete. Instances: " + std::to_string(accel_manager->getInstanceCount()));
+   // SCENE_LOG_INFO("[OptiX TLAS] Build complete. Instances: " + std::to_string(accel_manager->getInstanceCount()));
 }
 
 
@@ -2739,6 +2886,72 @@ std::vector<int> OptixWrapper::cloneInstancesByNodeName(const std::string& sourc
     return new_ids;
 }
 
+void OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, TerrainObject* terrain) {
+    if (!accel_manager || !terrain || !use_tlas_mode) return;
+    
+    // 1. Find the BLAS ID for this terrain
+    int blas_id = accel_manager->findBLAS(node_name, terrain->material_id);
+    if (blas_id == -1) {
+        // Fallback 1: Try with "_Chunk" suffix (Common for TerrainMgr chunks)
+        std::string chunk_name = node_name + "_Chunk";
+        blas_id = accel_manager->findBLAS(chunk_name, terrain->material_id);
+        
+        if (blas_id == -1) {
+             // Fallback 2: Try explicit material suffix
+             std::string alt_name = node_name;
+             if (terrain->material_id > 0) alt_name += "_mat_" + std::to_string(terrain->material_id);
+             blas_id = accel_manager->findBLAS(alt_name, terrain->material_id);
+             
+             if (blas_id == -1) {
+                 // Fallback 3: Chunk + Material Suffix
+                 std::string chunk_mat = chunk_name;
+                 if (terrain->material_id > 0) chunk_mat += "_mat_" + std::to_string(terrain->material_id);
+                 blas_id = accel_manager->findBLAS(chunk_mat, terrain->material_id);
+                 
+                 if (blas_id == -1) {
+                     SCENE_LOG_ERROR("updateTerrainBLASPartial: FAILED to find BLAS for terrain: " + node_name + " (MatID: " + std::to_string(terrain->material_id) + ")");
+                     return;
+                 }
+             }
+        }
+    }
+    
+    // SCENE_LOG_INFO("updateTerrainBLASPartial: Found BLAS ID " + std::to_string(blas_id) + " for " + node_name);
+
+    // 2. Build Geometry for the ENTIRE terrain (Robust Fallback)
+    MeshGeometry geom;
+    geom.mesh_name = node_name; // Ensure name matches for verification if needed
+    size_t tri_count = terrain->mesh_triangles.size();
+    
+    if (tri_count == 0) {
+        SCENE_LOG_WARN("updateTerrainBLASPartial: Terrain has 0 triangles! cannot update.");
+        return;
+    }
+    
+    geom.vertices.reserve(tri_count * 3);
+    geom.normals.reserve(tri_count * 3);
+    
+    for (const auto& tri : terrain->mesh_triangles) {
+        if (!tri) continue;
+        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(0)));
+        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(1)));
+        geom.vertices.push_back(toFloat3(tri->getOriginalVertexPosition(2)));
+        
+        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(0)));
+        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(1)));
+        geom.normals.push_back(toFloat3(tri->getOriginalVertexNormal(2)));
+    }
+    
+    // 3. Perform Update
+    bool success = accel_manager->updateMeshBLAS(blas_id, geom, false, true);
+    if (!success) {
+        SCENE_LOG_ERROR("updateTerrainBLASPartial: updateMeshBLAS returned FALSE for BLAS ID " + std::to_string(blas_id));
+    } else {
+        // SCENE_LOG_INFO("updateTerrainBLASPartial: Successfully updated BLAS " + std::to_string(blas_id));
+        resetAccumulation();
+    }
+}
+
 void OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles) {
     if (!accel_manager || triangles.empty() || !use_tlas_mode) return;
 
@@ -2887,4 +3100,369 @@ void OptixWrapper::updateGasVolumeBuffer(const std::vector<GpuGasVolume>& volume
     
     // Mark params dirty
     params_dirty = true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU PICKING - Object selection from rendered frame
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void OptixWrapper::ensurePickBuffers(int width, int height) {
+    size_t required_size = static_cast<size_t>(width) * height;
+    
+    bool was_allocated = (d_pick_buffer != nullptr && pick_buffer_size > 0);
+    
+    if (pick_buffer_size != required_size) {
+        // Free old buffers
+        if (d_pick_buffer) {
+            cudaFree(d_pick_buffer);
+            d_pick_buffer = nullptr;
+        }
+        if (d_pick_depth_buffer) {
+            cudaFree(d_pick_depth_buffer);
+            d_pick_depth_buffer = nullptr;
+        }
+        
+        // Allocate new buffers
+        if (required_size > 0) {
+            cudaError_t err = cudaMalloc(&d_pick_buffer, required_size * sizeof(int));
+            if (err != cudaSuccess) {
+                SCENE_LOG_ERROR("[OptiX] Pick buffer allocation failed");
+                pick_buffer_size = 0;
+                return;
+            }
+            
+            err = cudaMalloc(&d_pick_depth_buffer, required_size * sizeof(float));
+            if (err != cudaSuccess) {
+                SCENE_LOG_ERROR("[OptiX] Pick depth buffer allocation failed");
+                cudaFree(d_pick_buffer);
+                d_pick_buffer = nullptr;
+                pick_buffer_size = 0;
+                return;
+            }
+            
+            // Initialize to -1
+            cudaMemset(d_pick_buffer, 0xFF, required_size * sizeof(int)); // -1 in two's complement
+            
+            pick_buffer_size = required_size;
+           // SCENE_LOG_INFO("[OptiX] Pick buffers allocated: " + std::to_string(width) + "x" + std::to_string(height));
+            
+            // CRITICAL: If this is first allocation, reset accumulation to trigger frame_number=0
+            // This ensures the shader writes object IDs to the pick buffer
+            if (!was_allocated) {
+                accumulated_samples = 0;
+              //  SCENE_LOG_INFO("[OptiX] Pick buffer first allocation - resetting to frame 0");
+            }
+        }
+    }
+    
+    // Update params
+    params.pick_buffer = d_pick_buffer;
+    params.pick_depth_buffer = d_pick_depth_buffer;
+    params_dirty = true;
+}
+
+int OptixWrapper::getPickedObjectId(int x, int y, int viewport_width, int viewport_height) {
+    if (!d_pick_buffer || pick_buffer_size == 0) {
+        SCENE_LOG_INFO("[OptiX] Pick buffer not ready (ptr=" + std::to_string((uint64_t)d_pick_buffer) + " size=" + std::to_string(pick_buffer_size) + ")");
+        return -1;
+    }
+    
+    // Scale from viewport coordinates to render buffer coordinates
+    // viewport_width/height = 0 means no scaling (coordinates are already in render space)
+    int render_x = x;
+    int render_y = y;
+    if (viewport_width > 0 && viewport_height > 0 && 
+        (viewport_width != Image_width || viewport_height != Image_height)) {
+        render_x = (x * Image_width) / viewport_width;
+        render_y = (y * Image_height) / viewport_height;
+    }
+    
+    // CRITICAL: Flip Y-coordinate!
+    // SDL/ImGui (x,y) -> (0,0) is TOP-LEFT
+    // GPU Buffer Pixel Indexing -> (0,0) is BOTTOM-LEFT (in our renderer's j-loop)
+    // Conversion: buffer_y = (height - 1) - screen_y
+    render_y = (Image_height - 1) - render_y;
+
+    // Bounds check
+    if (render_x < 0 || render_x >= Image_width || render_y < 0 || render_y >= Image_height) {
+        SCENE_LOG_INFO("[OptiX] Pick out of bounds (" + std::to_string(render_x) + "," + std::to_string(render_y) + ") vs (" + std::to_string(Image_width) + "," + std::to_string(Image_height) + ")");
+        return -1;
+    }
+    
+    // Read single value from GPU
+    int pixel_idx = render_y * Image_width + render_x;
+    int object_id = -1;
+    
+    cudaError_t err = cudaMemcpy(&object_id, d_pick_buffer + pixel_idx, sizeof(int), cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess) {
+        SCENE_LOG_ERROR("[OptiX] Pick buffer read failed");
+        return -1;
+    }
+    
+   // SCENE_LOG_INFO("[OptiX] Pick at (" + std::to_string(render_x) + "," + std::to_string(render_y) + ") = object_id " + std::to_string(object_id));
+    return object_id;
+}
+
+std::string OptixWrapper::getPickedObjectName(int x, int y, int viewport_width, int viewport_height) {
+    int object_id = getPickedObjectId(x, y, viewport_width, viewport_height);
+    if (object_id < 0) {
+        return "";
+    }
+    
+    // In TLAS mode, object_id is mesh_idx (SBT index)
+    // Get mesh name directly from accel_manager
+    if (accel_manager) {
+        std::string name = accel_manager->getMeshNameByIndex(object_id);
+        if (!name.empty()) {
+           // SCENE_LOG_INFO("[GPU Pick] mesh_idx=" + std::to_string(object_id) + " -> name='" + name + "'");
+            return name;
+        }
+    }
+    
+    // Fallback: Look up instance ID to node name mapping (for GAS mode)
+    auto it = instance_to_node.find(object_id);
+    if (it != instance_to_node.end()) {
+        return it->second;
+    }
+    
+    return "";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HAIR RENDERING (OptiX Curve Primitives)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void OptixWrapper::buildHairGeometry(
+    const float4* vertices,
+    const unsigned int* indices,
+    const uint32_t* strand_ids,
+    const float3* tangents,
+    const float2* root_uvs,
+    size_t vertex_count,
+    size_t segment_count,
+    const GpuHairMaterial& material,
+    const std::string& groomName,
+    int materialID,
+    int meshMaterialID,
+    bool useBSpline,
+    bool clearPrevious
+) {
+    if (vertex_count == 0 || segment_count == 0 || !accel_manager) {
+        return;
+    }
+
+    // Update internal material ID for future reference
+    m_hairMaterialID = materialID;
+
+    // 1. Clear previous hair curves if requested
+    if (clearPrevious) {
+        accel_manager->clearCurves();
+        m_groomToCurveID.clear();
+    }
+
+    // 2. Build BLAS via Manager
+    CurveGeometry curve_geom;
+    curve_geom.name = groomName.empty() ? ("Hair_Geometry_" + std::to_string(accel_manager->getSBT().hitgroupRecordCount)) : groomName;
+    curve_geom.material_id = materialID;
+    curve_geom.mesh_material_id = meshMaterialID; // [NEW] Store scalp material ID
+    curve_geom.hair_material = material; // [NEW] Set per-groom material
+    curve_geom.vertices.assign(vertices, vertices + vertex_count);
+    curve_geom.indices.assign(indices, indices + segment_count);
+    curve_geom.use_bspline = useBSpline; 
+
+    if (tangents) {
+        curve_geom.tangents.assign(tangents, tangents + segment_count);
+    }
+
+    if (strand_ids) {
+        curve_geom.strand_ids.assign(strand_ids, strand_ids + segment_count);
+    }
+    
+    if (root_uvs) {
+        curve_geom.root_uvs.assign(root_uvs, root_uvs + segment_count);
+    }
+
+    int curve_blas_id = accel_manager->buildCurveBLAS(curve_geom);
+    if (curve_blas_id >= 0) {
+        if (!groomName.empty()) m_groomToCurveID[groomName] = curve_blas_id;
+
+        float transform[12] = { 1,0,0,0, 0,1,0,0, 0,0,1,0 };
+        accel_manager->addInstance(curve_blas_id, transform, materialID, InstanceType::Curve, curve_geom.name);
+        
+        // 3. REBUILD SBT - Crucial for shading! 
+        if (!m_cached_materials.empty()) {
+            accel_manager->buildSBT(m_cached_materials, m_cached_textures, m_cached_volumetrics);
+        }
+
+        // 4. REBUILD TLAS - Crucial for visibility!
+        accel_manager->buildTLAS();
+        traversable_handle = accel_manager->getTraversableHandle();
+
+        // 5. CRITICAL: Merge SBT 
+        const auto& accel_sbt = accel_manager->getSBT();
+        sbt.hitgroupRecordBase = accel_sbt.hitgroupRecordBase;
+        sbt.hitgroupRecordStrideInBytes = accel_sbt.hitgroupRecordStrideInBytes;
+        sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
+
+        resetAccumulation();
+    }
+}
+
+void OptixWrapper::updateHairGeometryRefit(
+    const std::string& groomName,
+    const float3* d_vertices,
+    const float* d_widths,
+    const float3* d_tangents
+) {
+    if (!accel_manager) return;
+    
+    auto it = m_groomToCurveID.find(groomName);
+    if (it == m_groomToCurveID.end()) return;
+
+    int curve_id = it->second;
+    
+    // OptiX AccelManager now gets the separate buffers directly
+    CUdeviceptr d_v = reinterpret_cast<CUdeviceptr>(d_vertices);
+    CUdeviceptr d_w = reinterpret_cast<CUdeviceptr>(d_widths);
+    
+    // Default strides (0 means tight packing: sizeof(float3) and sizeof(float))
+    size_t v_stride = 0;
+    size_t w_stride = 0;
+
+    // 2. Trigger Refit in AccelManager
+    if (accel_manager->refitCurveBLAS(curve_id, false, d_v, d_w, v_stride, w_stride)) {
+        // Refit successful - Rebuild TLAS to update bounds
+        accel_manager->updateTLAS();
+        traversable_handle = accel_manager->getTraversableHandle();
+        
+        // Reset accumulation for interactive response
+        resetAccumulation();
+    }
+}
+
+void OptixWrapper::updateHairMaterialsOnly(const Hair::HairSystem& hairSystem) {
+    if (!accel_manager) return;
+    
+    bool changed = false;
+    auto names = hairSystem.getGroomNames();
+    for (const auto& name : names) {
+        if (m_groomToCurveID.find(name) != m_groomToCurveID.end()) {
+            const auto* groom = hairSystem.getGroom(name);
+            if (groom) {
+                GpuHairMaterial gpuMat = Hair::HairBSDF::convertToGpu(groom->material);
+                accel_manager->updateCurveMaterial(m_groomToCurveID[name], gpuMat);
+                changed = true;
+            }
+        }
+    }
+    
+    if (changed) {
+        accel_manager->syncSBTMaterialData(m_cached_materials, false);
+        // Sync our SBT descriptor too
+        const auto& accel_sbt = accel_manager->getSBT();
+        sbt.hitgroupRecordBase = accel_sbt.hitgroupRecordBase;
+        sbt.hitgroupRecordStrideInBytes = accel_sbt.hitgroupRecordStrideInBytes;
+        sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
+    }
+}
+
+
+void OptixWrapper::setHairMaterial(
+    float3 color,
+    float3 absorption,
+    float melanin,
+    float melanin_redness,
+    float roughness,
+    float radial_roughness,
+    float ior,
+    float coat,
+    float alpha,
+    float random_hue,
+    float random_value
+) {
+    if (g_scene_loading_in_progress) return; // Prevent param updates during load
+
+    params.hair_color = color;
+    params.hair_absorption = absorption; 
+    params.hair_melanin = melanin; 
+    params.hair_melanin_redness = melanin_redness;
+    params.hair_roughness = roughness;
+    params.hair_radial_roughness = radial_roughness;
+    params.hair_ior = ior;
+    params.hair_alpha = alpha; 
+    params.hair_coat = coat;   
+    params.hair_random_hue = random_hue;
+    params.hair_random_value = random_value;
+
+    params_dirty = true;
+    resetAccumulation();
+}
+
+void OptixWrapper::setHairColorMode(int colorMode) {
+    if (g_scene_loading_in_progress) return;
+    params.hair_color_mode = colorMode;
+    params_dirty = true;
+    resetAccumulation();
+}
+
+void OptixWrapper::setHairTextures(
+    cudaTextureObject_t albedoTex, bool hasAlbedo,
+    cudaTextureObject_t roughnessTex, bool hasRoughness,
+    cudaTextureObject_t scalpAlbedoTex, bool hasScalpAlbedo,
+    float3 scalpBaseColor
+) {
+    if (g_scene_loading_in_progress) return;
+    
+    params.hair_albedo_tex = albedoTex;
+    params.hair_has_albedo_tex = hasAlbedo ? 1 : 0;
+    params.hair_roughness_tex = roughnessTex;
+    params.hair_has_roughness_tex = hasRoughness ? 1 : 0;
+    params.hair_scalp_albedo_tex = scalpAlbedoTex;
+    params.hair_has_scalp_albedo_tex = hasScalpAlbedo ? 1 : 0;
+    params.hair_scalp_base_color = scalpBaseColor;
+    
+    params_dirty = true;
+    resetAccumulation();
+}
+
+void OptixWrapper::clearHairGeometry() {
+    if (m_d_hairVertices) {
+        cudaFree(reinterpret_cast<void*>(m_d_hairVertices));
+        m_d_hairVertices = 0;
+    }
+    if (m_d_hairIndices) {
+        cudaFree(reinterpret_cast<void*>(m_d_hairIndices));
+        m_d_hairIndices = 0;
+    }
+    if (m_d_hairTangents) {
+        cudaFree(reinterpret_cast<void*>(m_d_hairTangents));
+        m_d_hairTangents = 0;
+    }
+    if (m_d_hairGas) {
+        cudaFree(reinterpret_cast<void*>(m_d_hairGas));
+        m_d_hairGas = 0;
+    }
+
+    // [FIX] Crucially clear curves from AccelManager and REBUILD TLAS
+    // If we don't rebuild TLAS, the old hair instances will still be in the BVH
+    // but point to the memory we just freed above -> CRASH.
+    if (accel_manager) {
+        accel_manager->clearCurves();
+        m_groomToCurveID.clear();
+        accel_manager->buildTLAS();
+        traversable_handle = accel_manager->getTraversableHandle();
+    }
+
+    m_hairHandle = 0;
+    m_hairVertexCount = 0;
+    m_hairSegmentCount = 0;
+    
+    // Update launch params and trigger sync
+    params.handle = traversable_handle;
+    params.hair_enabled = 0;
+    params.hair_handle = 0;
+    params_dirty = true;
+    
+    SCENE_LOG_INFO("[OptiX] Hair geometry cleared and TLAS rebuilt");
+    resetAccumulation();
 }

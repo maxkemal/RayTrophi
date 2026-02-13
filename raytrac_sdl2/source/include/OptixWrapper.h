@@ -33,83 +33,15 @@
 #include <OpenImageDenoise/oidn.hpp>
 #include <sbt_data.h>
 #include "Matrix4x4.h"
+#include <OptixAccelManager.h>
+
+#include <OptixTypes.h>
 
 // Forward declarations for TLAS/BLAS support
 class Triangle;
-struct MeshGeometry;
-struct MeshData;
-
-struct OptixGeometryData {
-    std::vector<float3> vertices;
-    std::vector<uint3> indices;
-    std::vector<float3> normals;
-    std::vector<float3> tangents;
-    std::vector<float2> uvs;
-    std::vector<float3> colors; // Vertex colors
-    std::vector<GpuMaterial> materials;
-    std::vector<int> material_indices;
-    
-    // Skinning Data (for GPU Skinning)
-    std::vector<int4> boneIndices;
-    std::vector<float4> boneWeights;
-
-    struct TextureBundle {
-        cudaTextureObject_t albedo_tex = 0;
-        cudaTextureObject_t roughness_tex = 0;
-        cudaTextureObject_t normal_tex = 0;
-        cudaTextureObject_t metallic_tex = 0;
-        cudaTextureObject_t transmission_tex = 0;
-        cudaTextureObject_t opacity_tex = 0;
-        cudaTextureObject_t emission_tex=0;
-
-        int has_albedo_tex = 0;
-        int has_roughness_tex = 0;
-        int has_normal_tex = 0;
-        int has_metallic_tex = 0;
-        int has_transmission_tex = 0;
-        int has_opacity_tex = 0;
-        int has_emission_tex = 0;
-    };
-    
-    // Volumetric material info for GPU
-    struct VolumetricInfo {
-        int is_volumetric = 0;
-        float density = 1.0f;
-        float absorption = 0.1f;
-        float scattering = 0.5f;
-        float3 albedo = {1.0f, 1.0f, 1.0f};
-        float3 emission = {0.0f, 0.0f, 0.0f};
-        float g = 0.0f;
-        float step_size = 0.1f;
-        int max_steps = 100;
-        float noise_scale = 1.0f;  // Noise frequency multiplier
-        
-        // Multi-Scattering Parameters
-        float multi_scatter = 0.3f;
-        float g_back = -0.3f;
-        float lobe_mix = 0.7f;
-        int light_steps = 4;
-        float shadow_strength = 0.8f;
-        
-        float3 aabb_min = {0.0f, 0.0f, 0.0f};
-        float3 aabb_max = {1.0f, 1.0f, 1.0f};
-        
-        // NanoVDB GPU grid pointer
-        // NanoVDB GPU grid pointer
-        void* nanovdb_grid = nullptr;
-        int has_nanovdb = 0;
-        
-        // 3D Density Texture (GasVolume)
-        cudaTextureObject_t vol_density_texture = 0;
-        int has_vol_texture = 0;
-    };
-
-    std::vector<TextureBundle> textures;
-    std::vector<VolumetricInfo> volumetric_info;  // Parallel to materials
-};
-
-// Forward declare the acceleration manager (full include in OptixWrapper.cpp)
 class OptixAccelManager;
+namespace Hair { class HairSystem; }
+
 
 class OptixWrapper {
 public:
@@ -124,7 +56,12 @@ public:
     bool isCudaAvailable();
     // OIDN denoising is now handled by Renderer::applyOIDNDenoising
     void validateMaterialIndices(const OptixGeometryData& data);
-    void setupPipeline(const char* raygen_ptx);
+    struct PtxData {
+        const char* raygen_ptx;
+        const char* miss_ptx;
+        const char* hitgroup_ptx;
+    };
+    void setupPipeline(const PtxData& ptx);
     void destroyTextureObjects();
     void buildFromData(const OptixGeometryData& data);
     void buildFromDataTLAS(const OptixGeometryData& data, const std::vector<std::shared_ptr<Hittable>>& objects);
@@ -176,6 +113,9 @@ public:
     // Updates d_materials buffer only - for material property changes (color, roughness, etc.)
     void updateMaterialBuffer(const std::vector<GpuMaterial>& materials);
     
+    // Synchronize material properties (emission, textures) into existing SBT
+    void syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain = true);
+
     // Updates instance transform by Node Name (e.g. for Gizmo/UI updates)
     void updateObjectTransform(const std::string& node_name, const Matrix4x4& transform);
     
@@ -212,6 +152,7 @@ public:
 
     // Targeted BLAS Update for Terrain Sculpting (Avoids full scene rebuild)
     void updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
+    void updateTerrainBLASPartial(const std::string& node_name, class TerrainObject* terrain);
 
     // ═══════════════════════════════════════════════════════════════════════
     // INCREMENTAL UPDATES (Fast delete/duplicate without BLAS rebuild)
@@ -228,7 +169,98 @@ public:
     OptixAccelManager* getAccelManager() { return accel_manager.get(); }
     // Updates Gas Volume buffer for GPU ray marching
     void updateGasVolumeBuffer(const std::vector<GpuGasVolume>& volumes);
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HAIR RENDERING (OptiX Curve Primitives)
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    /**
+     * @brief Build hair geometry acceleration structure
+     * @param vertices float4 array (x, y, z, radius)
+     * @param indices Segment start indices
+     * @param tangents Pre-computed tangent per segment
+     * @param vertex_count Number of vertices
+     * @param segment_count Number of curve segments
+     */
+    void buildHairGeometry(
+        const float4* vertices,
+        const unsigned int* indices,
+        const uint32_t* strand_ids,
+        const float3* tangents,
+        const float2* root_uvs,
+        size_t vertex_count,
+        size_t segment_count,
+        const GpuHairMaterial& material,
+        const std::string& groomName = "default",
+        int materialID = 0,
+        int meshMaterialID = -1,
+        bool useBSpline = false,
+        bool clearPrevious = true
+    );
+    
+    /**
+     * @brief Fast update for hair geometry (Refit)
+     * Used for GPU grooming to avoid full GAS rebuild
+     */
+    void updateHairGeometryRefit(
+        const std::string& groomName,
+        const float3* d_vertices,
+        const float* d_widths,
+        const float3* d_tangents
+    );
+    
+    /**
+     * @brief Update hair material parameters
+     */
+    void setHairMaterial(float3 color, float3 absorption, float melanin, float melaninRedness, float roughness, float radialRoughness, float ior, float coat, float alpha, float random_hue, float random_value);
+    
+    /**
+     * @brief Set hair color mode (0=Direct, 1=Melanin, 2=Absorption, 3=Root UV Map)
+     */
+    void setHairColorMode(int colorMode);
+    
+    /**
+     * @brief Set hair custom textures (albedo, roughness) and scalp mesh texture
+     */
+    void setHairTextures(
+        cudaTextureObject_t albedoTex, bool hasAlbedo,
+        cudaTextureObject_t roughnessTex, bool hasRoughness,
+        cudaTextureObject_t scalpAlbedoTex, bool hasScalpAlbedo,
+        float3 scalpBaseColor
+    );
+    
+    /**
+     * @brief Set the material ID for hair geometry
+     */
+    void setHairMaterialID(int materialID) { m_hairMaterialID = materialID; }
+    
+    /**
+     * @brief Check if hair geometry is present
+     */
+    bool hasHairGeometry() const { return m_hairHandle != 0; }
+    
+    /**
+     * @brief Clear hair geometry
+     */
+    void clearHairGeometry();
+    void updateHairMaterialsOnly(const Hair::HairSystem& hairSystem);
 private:
+    // Hair rendering members
+    OptixTraversableHandle m_hairHandle = 0;
+    CUdeviceptr m_d_hairVertices = 0;
+    CUdeviceptr m_d_hairIndices = 0;
+    CUdeviceptr m_d_hairTangents = 0;
+    CUdeviceptr m_d_hairStrandIDs = 0;
+    CUdeviceptr m_d_hairGas = 0;
+    size_t m_hairVertexCount = 0;
+    size_t m_hairSegmentCount = 0;
+    int m_hairMaterialID = 0;
+    
+    // Mapping for per-groom material updates
+    std::unordered_map<std::string, int> m_groomToCurveID; 
+
+  
+    
     std::function<void(const std::string&, int)> m_accelStatusCallback;
     
     // OptiX context
@@ -309,11 +341,17 @@ private:
     CUdeviceptr d_params=0;
     CUdeviceptr d_coords_x=0, d_coords_y=0;
     OptixTraversableHandle traversable_handle = 0;
-    OptixModule module = nullptr;
+    OptixModule raygen_module = nullptr;
+    OptixModule miss_module = nullptr;
+    OptixModule hitgroup_module = nullptr;
     RayGenParams params;
     OptixProgramGroup raygen_pg = nullptr;
     OptixProgramGroup miss_pg = nullptr;
+    OptixProgramGroup miss_shadow_pg = nullptr;
     OptixProgramGroup hit_pg = nullptr;
+    OptixProgramGroup hit_shadow_pg = nullptr;
+    OptixProgramGroup hair_hit_pg = nullptr;      // Hair curve radiance
+    OptixProgramGroup hair_shadow_pg = nullptr;   // Hair curve shadow
     OptixPipeline pipeline = nullptr;
     OptixShaderBindingTable sbt = {};
     GpuMaterial* d_materials = nullptr;
@@ -386,5 +424,28 @@ private:
     bool params_dirty = true;
     bool hasDirtyParams() const { return params_dirty; }
     size_t d_temp_buffer_size = 0; // Usage tracking for temp buffer optimization
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU PICKING (Object ID buffer for viewport selection)
+    // ═══════════════════════════════════════════════════════════════════════════
+    int* d_pick_buffer = nullptr;          // Per-pixel object ID (-1 = no hit)
+    float* d_pick_depth_buffer = nullptr;  // Per-pixel hit distance
+    size_t pick_buffer_size = 0;           // Current allocation size
+    
+    // Cached scene data for incremental SBT/TLAS updates
+    std::vector<GpuMaterial> m_cached_materials;
+    std::vector<OptixGeometryData::TextureBundle> m_cached_textures;
+    std::vector<OptixGeometryData::VolumetricInfo> m_cached_volumetrics;
+    int m_material_count = 0;
+    
+public:
+    // Get object ID at screen coordinates (returns -1 if no hit or buffer not ready)
+    // viewport_width/height = screen size for coordinate scaling (0 = no scaling)
+    int getPickedObjectId(int x, int y, int viewport_width = 0, int viewport_height = 0);
+    
+    // Get object name at screen coordinates (returns empty string if no hit)
+    std::string getPickedObjectName(int x, int y, int viewport_width = 0, int viewport_height = 0);
+    
+    // Ensure pick buffers are allocated for current resolution
+    void ensurePickBuffers(int width, int height);
 };
-

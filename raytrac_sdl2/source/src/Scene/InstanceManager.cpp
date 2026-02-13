@@ -303,6 +303,8 @@ json InstanceManager::serialize() {
             {"allow_ridges", group.brush_settings.allow_ridges},
             {"allow_flats", group.brush_settings.allow_flats},
             {"allow_gullies", group.brush_settings.allow_gullies},
+            {"slope_direction_angle", group.brush_settings.slope_direction_angle},
+            {"slope_direction_influence", group.brush_settings.slope_direction_influence},
             {"use_global_settings", group.brush_settings.use_global_settings}
         };
 
@@ -397,6 +399,8 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             group.brush_settings.allow_ridges = s.value("allow_ridges", true);
             group.brush_settings.allow_flats = s.value("allow_flats", true);
             group.brush_settings.allow_gullies = s.value("allow_gullies", true);
+            group.brush_settings.slope_direction_angle = s.value("slope_direction_angle", 0.0f);
+            group.brush_settings.slope_direction_influence = s.value("slope_direction_influence", 0.0f);
             group.brush_settings.use_global_settings = s.value("use_global_settings", false);
         }
 

@@ -110,7 +110,6 @@ bool quit = false;
 bool apply_tonemap = false;
 bool reset_tonemap = false;
 bool mouse_control_enabled = true;
-float mouse_sensitivity = 0.4f;
 bool camera_moved = false;
 bool use_denoiser = false;
 bool camera_moved_recently = false;
@@ -196,8 +195,7 @@ UIContext ui_ctx{
    active_model_path,
    apply_tonemap,
    reset_tonemap,
-   mouse_control_enabled,
-   mouse_sensitivity
+   mouse_control_enabled
 };
 void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor) {
     Uint32* pixels = (Uint32*)surface->pixels;
@@ -370,25 +368,31 @@ std::string WStringToString(const std::wstring& wstr) {
     WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), strTo.data(), size_needed, nullptr, nullptr);
     return strTo;
 }
-// Tek merkezden kontrol edilen OptiX init
 bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
-    if (!g_hasOptix) return false; // Donanım yoksa direkt false döner
+    if (!g_hasOptix) return false;
 
     try {
         optix_gpu.initialize();
 
-        // PTX dosyası her zaman yüklenmeye çalışılır
-        std::filesystem::path ptx_path = L"raygen.ptx";
-        std::ifstream file(ptx_path, std::ios::binary);
-        if (!file.is_open()) {
-            SCENE_LOG_ERROR("Failed to open PTX file: " + WStringToString(ptx_path));
-            g_hasOptix = false;
-            return false;
-        }
+        auto load_ptx = [](const std::wstring& filename) -> std::string {
+            std::filesystem::path ptx_path = filename;
+            std::ifstream file(ptx_path, std::ios::binary);
+            if (!file.is_open()) {
+                throw std::runtime_error("Failed to open PTX file: " + WStringToString(ptx_path));
+            }
+            return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        };
 
-        std::string ptx((std::istreambuf_iterator<char>(file)),
-            std::istreambuf_iterator<char>());
-        optix_gpu.setupPipeline(ptx.c_str());
+        OptixWrapper::PtxData ptx_data;
+        std::string raygen_ptx = load_ptx(L"raygen.ptx");
+        std::string miss_ptx = load_ptx(L"miss_kernels.ptx");
+        std::string hitgroup_ptx = load_ptx(L"hitgroup_kernels.ptx");
+
+        ptx_data.raygen_ptx = raygen_ptx.c_str();
+        ptx_data.miss_ptx = miss_ptx.c_str();
+        ptx_data.hitgroup_ptx = hitgroup_ptx.c_str();
+
+        optix_gpu.setupPipeline(ptx_data);
     }
     catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("OptiX initialization failed: ") + e.what());
@@ -481,7 +485,7 @@ int main(int argc, char* argv[]) {
         SCENE_LOG_ERROR(std::string("SDL_Init Error: ") + SDL_GetError());
         return 1;
     }
-    
+    SDL_EnableScreenSaver();
     // ===========================================================================
     // SPLASH SCREEN - Frameless startup screen with loading status
     // ===========================================================================
@@ -557,6 +561,9 @@ int main(int argc, char* argv[]) {
         
         render_settings.use_optix = true;
         ui_ctx.render_settings.use_optix = true;
+
+        // Ensure Renderer has access to OptiX for Hair/Geometry updates
+        ray_renderer.setOptixWrapper(&optix_gpu);
     }
     else {
         SCENE_LOG_WARN("Falling back to CPU rendering.");
@@ -571,7 +578,7 @@ int main(int argc, char* argv[]) {
     if (splashOk) { splash.setStatus("Building BVH structures..."); splash.render(); }
     ray_renderer.world.initializeLUT(); // Essential for Nishita Sky performance
     ray_renderer.rebuildBVH(scene, UI_use_embree);
-    if (g_hasOptix) {
+    if (g_hasOptix && optix_gpu.isCudaAvailable()) { // Ensure initialized
         ray_renderer.rebuildOptiXGeometry(scene, &optix_gpu);
         // CRITICAL: Immediately sync GPU buffers so sun direction is correct at startup
         optix_gpu.setWorld(ray_renderer.world.getGPUData());
@@ -612,6 +619,169 @@ int main(int argc, char* argv[]) {
 
     SDL_Event e;
     while (!quit) {
+        // =========================================================================
+        // POWER MANAGEMENT - Prevent sleep during render but allow screen off
+        // =========================================================================
+        static bool last_sleep_state = false;
+        bool busy_rendering = rendering_in_progress.load() || (ui_ctx.render_settings.is_rendering_active && ui_ctx.render_settings.is_final_render_mode);
+        if (busy_rendering != last_sleep_state) {
+            if (busy_rendering) {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED);
+            } else {
+                SetThreadExecutionState(ES_CONTINUOUS);
+            }
+            last_sleep_state = busy_rendering;
+        }
+
+        // =========================================================================
+        // INPUT & EVENT HANDLING (CRITICAL: MUST BE AT TOP FOR RESPONSIVENESS)
+        // =========================================================================
+        // ANIMATION RENDER LOCK: Block camera/viewport input during animation render
+        bool input_locked = ui_ctx.render_settings.animation_render_locked || 
+                           (rendering_in_progress && ui_ctx.is_animation_mode);
+
+        while (SDL_PollEvent(&e)) {
+            ImGui_ImplSDL2_ProcessEvent(&e);
+            if (e.type == SDL_QUIT) ui.tryExit();
+
+            if (e.type == SDL_KEYDOWN) {
+                // ═══════════════════════════════════════════════════════════════════
+                // ANIMATION RENDER SHORTCUTS - Always active, even during render!
+                // ═══════════════════════════════════════════════════════════════════
+                if (rendering_in_progress && ui_ctx.is_animation_mode) {
+                    if (e.key.keysym.sym == SDLK_ESCAPE) {
+                        rendering_stopped_cpu = true;
+                        rendering_stopped_gpu = true;
+                        SCENE_LOG_WARN("Animation render stopped by ESC key.");
+                        ui.addViewportMessage("Render Stopped (ESC)", 3.0f, ImVec4(1.0f, 0.4f, 0.4f, 1.0f));
+                    }
+                    if (e.key.keysym.sym == SDLK_p || e.key.keysym.sym == SDLK_SPACE) {
+                        rendering_paused = !rendering_paused.load();
+                        if (rendering_paused.load()) {
+                             SCENE_LOG_INFO("Animation render PAUSED (press P or Space to resume)");
+                             ui.addViewportMessage("PAUSED (P to resume)", 0.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+                        } else {
+                             SCENE_LOG_INFO("Animation render RESUMED");
+                             ui.addViewportMessage("Resumed", 2.0f, ImVec4(0.4f, 1.0f, 0.4f, 1.0f));
+                        }
+                    }
+                }
+                
+                if (e.key.keysym.sym == SDLK_s && (e.key.keysym.mod & KMOD_CTRL)) {
+                     ui_ctx.render_settings.save_image_requested = true;
+                }
+                
+                if (e.key.keysym.sym == SDLK_DELETE) {
+                    if (!ImGui::GetIO().WantCaptureKeyboard) {
+                        ui.triggerDelete(ui_ctx);
+                    }
+                }
+
+                if (e.key.keysym.sym == SDLK_h) {
+                    if (!ImGui::GetIO().WantCaptureKeyboard) {
+                        for (auto& obj : scene.world.objects) obj->visible = true;
+                        for (auto& light : scene.lights) light->visible = true;
+                        for (auto& vdb : scene.vdb_volumes) vdb->visible = true;
+                        for (auto& gas : scene.gas_volumes) gas->visible = true;
+                        if (g_hasOptix) {
+                            optix_gpu.showAllInstances();
+                            optix_gpu.setLightParams(scene.lights);
+                        }
+                        g_bvh_rebuild_pending = true;
+                        ray_renderer.resetCPUAccumulation();
+                        SCENE_LOG_INFO("All objects and lights are now visible.");
+                        ui.addViewportMessage("All objects visible", 2.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+                    }
+                }
+            }
+
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_MIDDLE && !input_locked) {
+                dragging = true;
+                last_mouse_x = e.button.x;
+                last_mouse_y = e.button.y;
+            }
+            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && !input_locked) {
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    int win_w, win_h;
+                    SDL_GetWindowSize(window, &win_w, &win_h);
+                    rayhit = true;
+                    mx = e.button.x;
+                    my = win_h - e.button.y; 
+                    u = (mx + 0.5f) / (float)win_w;
+                    v = (my + 0.5f) / (float)win_h;
+                }
+            }
+            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_MIDDLE) {
+                dragging = false;
+                if (mouse_control_enabled && !input_locked)
+                    start_render = true;
+            }
+
+            if (e.type == SDL_MOUSEMOTION && dragging && scene.camera && mouse_control_enabled && !input_locked) {
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    int dx = e.motion.x - last_mouse_x;
+                    int dy = e.motion.y - last_mouse_y;
+                    const Uint8* state = SDL_GetKeyboardState(NULL);
+                    bool is_shift_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
+
+                    if (is_shift_pressed) {
+                        float pan_speed = (0.015f + render_settings.mouse_sensitivity * 0.04f) * scene.camera->focus_dist; 
+                        Vec3 offset = scene.camera->u * -(float)dx * pan_speed + scene.camera->v * (float)dy * pan_speed;
+                        scene.camera->lookfrom += offset;
+                        scene.camera->lookat += offset;
+                        scene.camera->update_camera_vectors();
+                    }
+                    else {
+                        bool is_ctrl_pressed = state[SDL_SCANCODE_LCTRL] || state[SDL_SCANCODE_RCTRL];
+                        if (is_ctrl_pressed) {
+                            float zoom_speed = 0.05f * scene.camera->focus_dist;
+                            float zoom_amount = -(float)dy * zoom_speed * 0.1f; 
+                            Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                            scene.camera->lookfrom += forward * zoom_amount;
+                            scene.camera->lookat += forward * zoom_amount;
+                            scene.camera->update_camera_vectors();
+                        }
+                        else {
+                            yaw += dx * render_settings.mouse_sensitivity * 0.2f;
+                            pitch -= dy * render_settings.mouse_sensitivity * 0.2f;
+                            pitch = std::clamp(pitch, -89.9f, 89.9f);
+                            float rad_yaw = yaw * 3.14159265f / 180.0f;
+                            float rad_pitch = pitch * 3.14159265f / 180.0f;
+                            Vec3 direction;
+                            direction.x = cosf(rad_yaw) * cosf(rad_pitch);
+                            direction.y = sinf(rad_pitch);
+                            direction.z = sinf(rad_yaw) * cosf(rad_pitch);
+                            scene.camera->vup = Vec3(0.0f, 1.0f, 0.0f);
+                            scene.camera->setLookDirection(direction.normalize());
+                        }
+                    }
+                    last_mouse_x = e.motion.x;
+                    last_mouse_y = e.motion.y;
+                    last_camera_move_time = std::chrono::steady_clock::now();
+                    start_render = true;
+                    g_camera_dirty = true;
+                }
+            }
+
+            if (e.type == SDL_MOUSEWHEEL && mouse_control_enabled && scene.camera && !input_locked) {
+                if (!ImGui::GetIO().WantCaptureMouse) {
+                    float scroll_amount = e.wheel.y;
+                    const Uint8* k_state = SDL_GetKeyboardState(NULL);
+                    bool is_shift = k_state[SDL_SCANCODE_LSHIFT] || k_state[SDL_SCANCODE_RSHIFT];
+                    float wheel_boost = is_shift ? (3.0f + render_settings.mouse_sensitivity * 2.0f) : 1.0f;
+                    float move_v = 1.5f * render_settings.mouse_sensitivity * wheel_boost; 
+                    Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                    scene.camera->lookfrom += forward * scroll_amount * move_v;
+                    scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
+                    scene.camera->update_camera_vectors();
+                    ui.updateAutofocus(ui_ctx);
+                    last_camera_move_time = std::chrono::steady_clock::now();
+                    camera_moved = true;
+                    start_render = true;
+                    g_camera_dirty = true;
+                }
+            }
+        }
 
         // --- AUTO RESIZE FOR FINAL RENDER ---
         bool is_final_mode = ui_ctx.render_settings.is_final_render_mode;
@@ -793,15 +963,18 @@ int main(int argc, char* argv[]) {
              WaterManager::getInstance().update(0.0f);
         }
 
-        ImGui_ImplSDLRenderer2_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
-        ImGui::NewFrame();
-        ui_ctx.ray_texture = raytrace_texture;
-        
-        // ===================================================================
-        // SCENE LOADING POPUP
-        // ===================================================================
+        // =========================================================================
+        // SCENE LOADING STATE (PROTECT MAIN THREAD)
+        // =========================================================================
         if (ui.scene_loading.load()) {
+            // 1. DRAIN EVENTS (Done above)
+            
+            // 2. START NEW FRAME
+            ImGui_ImplSDLRenderer2_NewFrame();
+            ImGui_ImplSDL2_NewFrame();
+            ImGui::NewFrame();
+
+            // 3. DRAW LOADING POPUP
             if (!ImGui::IsPopupOpen("Loading Scene...")) {
                  ImGui::OpenPopup("Loading Scene...");
             }
@@ -817,35 +990,44 @@ int main(int argc, char* argv[]) {
                 ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Loading / Saving...");
                 ImGui::Spacing();
                 
-                // Real progress from loading thread
                 int progress = ui.scene_loading_progress.load();
                 float progress_f = progress / 100.0f;
-                
-                // Progress bar with percentage
                 char overlay[32];
                 snprintf(overlay, sizeof(overlay), "%d%%", progress);
                 ImGui::ProgressBar(progress_f, ImVec2(-1, 22), overlay);
                 
                 ImGui::Spacing();
-                
-                // Current stage text
                 ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s", ui.scene_loading_stage.c_str());
-                
                 ImGui::EndPopup();
             }
+
+            // 4. RENDER & PRESENT
+            SDL_SetRenderDrawColor(renderer, 20, 20, 25, 255); 
+            SDL_RenderClear(renderer);
+            
+            // Draw last rendered frame behind the loading progress
+            if (raytrace_texture) {
+                SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+            }
+            
+            ImGui::Render();
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+            SDL_RenderPresent(renderer);
+
+            // 5. DO NOT HOG CPU - Give cycles to the loader thread
+            SDL_Delay(10); 
+            continue; // Skip the rest of the loop (Camera, Scene, UI Drawing)
         }
-        // Close scene loading popup when done
+        // =========================================================================
+        // SCENE LOADING COMPLETE (Finalize on Main Thread)
+        // =========================================================================
         else if (ui.scene_loading_done.load()) {
             ui.scene_loading_done = false;
-            // Scene loaded, popup will auto-close
             
             // Refresh UI cache and start render
             ui.invalidateCache();
             
-            // =========================================================================
-            // REBUILD ON MAIN THREAD (Thread-safe OptiX handling)
-            // ProjectManager sets g_needs_geometry_rebuild, we do actual GPU work here
-            // =========================================================================
+            // Rebuild BVH and OptiX on main thread (required for GPU context safety)
             if (g_needs_geometry_rebuild) {
                 ui_ctx.renderer.rebuildBVH(ui_ctx.scene, ui_ctx.render_settings.UI_use_embree);
                 g_needs_geometry_rebuild = false;
@@ -855,34 +1037,29 @@ int main(int argc, char* argv[]) {
             
             if (ui_ctx.optix_gpu_ptr && g_needs_optix_sync) {
                 ui_ctx.renderer.rebuildOptiXGeometry(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
-                
-                // CRITICAL: Update materials AFTER geometry rebuild
                 ui_ctx.renderer.updateOptiXMaterialsOnly(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
                 
                 ui_ctx.optix_gpu_ptr->setLightParams(ui_ctx.scene.lights);
                 if (ui_ctx.scene.camera) ui_ctx.optix_gpu_ptr->setCameraParams(*ui_ctx.scene.camera);
                 ui_ctx.optix_gpu_ptr->resetAccumulation();
                 g_needs_optix_sync = false;
-                SCENE_LOG_INFO("GPU rebuild complete on main thread.");
             }
             
             // Mark all buffers dirty for fresh scene
             g_camera_dirty = true;
             g_lights_dirty = true;
             g_world_dirty = true;
-            
             ui_ctx.start_render = true;
+            SCENE_LOG_INFO("Project visualization ready.");
         }
 
-        // CRITICAL: If loading is still in progress, SKIP scene drawing and interaction
-        // This prevents Main Thread from accessing Scene data (camera/world) while
-        // the Loading Thread is clearing/modifying it (Scene::clear race condition).
-        if (ui.scene_loading.load()) {
-            ImGui::Render();
-            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-            SDL_RenderPresent(renderer);
-            continue;
-        }
+        // =========================================================================
+        // NORMAL UI & RENDER LOOP (Starts here)
+        // =========================================================================
+        ImGui_ImplSDLRenderer2_NewFrame();
+        ImGui_ImplSDL2_NewFrame();
+        ImGui::NewFrame();
+        ui_ctx.ray_texture = raytrace_texture;
         
         ui.draw(ui_ctx);
         
@@ -991,211 +1168,45 @@ int main(int argc, char* argv[]) {
             SDL_RenderPresent(renderer);
             continue;  // Skip rest of loop
         }
-        while (SDL_PollEvent(&e)) {
-            // surface = SDL_GetWindowSurface(window);
-            if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_s && (e.key.keysym.mod & KMOD_CTRL)) {
-                     ui_ctx.render_settings.save_image_requested = true;
-                }
-                
-                // DELETE OBJECT SHORTCUT
-                if (e.key.keysym.sym == SDLK_DELETE) {
-                    // Only invoke if not typing in an Input field (ImGui check)
-                    if (!ImGui::GetIO().WantCaptureKeyboard) {
-                        ui.triggerDelete(ui_ctx);
-                    }
-                }
-
-                // SHOW ALL HIDDEN OBJECTS SHORTCUT ('H')
-                if (e.key.keysym.sym == SDLK_h) {
-                    // Only invoke if not typing in an Input field
-                    if (!ImGui::GetIO().WantCaptureKeyboard) {
-                        for (auto& obj : scene.world.objects) obj->visible = true;
-                        for (auto& light : scene.lights) light->visible = true;
-                        for (auto& vdb : scene.vdb_volumes) vdb->visible = true;
-                        for (auto& gas : scene.gas_volumes) gas->visible = true;
-
-                        if (g_hasOptix) {
-                            optix_gpu.showAllInstances();
-                            optix_gpu.setLightParams(scene.lights);
-                        }
-                        
-                        // Force CPU rebuild because visibility changed
-                        g_bvh_rebuild_pending = true;
-                        ray_renderer.resetCPUAccumulation();
-                        
-                        SCENE_LOG_INFO("All objects and lights are now visible.");
-                        ui.addViewportMessage("All objects visible", 2.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
-                    }
-                }
-            }
-
-            if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-            {
-               // image_width = pending_width;
-               // image_height = pending_height;
-               // reset_render_resolution(image_width, image_height);
-            }
-
-            ImGui_ImplSDL2_ProcessEvent(&e);
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_MIDDLE) {
-                dragging = true;
-                last_mouse_x = e.button.x;
-                last_mouse_y = e.button.y;
-            }
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) {
-                if (!ImGui::GetIO().WantCaptureMouse) {
-                    int win_w, win_h;
-                    SDL_GetWindowSize(window, &win_w, &win_h);
-
-                    rayhit = true;
-                    mx = e.button.x;
-                    // my'yi window height'a göre ters çevir (global my değişkenini kullanarak)
-                    my = win_h - e.button.y; 
-
-                    u = (mx + 0.5f) / (float)win_w;
-                    v = (my + 0.5f) / (float)win_h;
-                }
-            }
-            if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_MIDDLE) {
-                dragging = false;
-                if (mouse_control_enabled)
-                    start_render = true;
-            }
-
-            if (e.type == SDL_MOUSEMOTION && dragging && scene.camera && mouse_control_enabled) {
-                // Mouse ImGui widgetlerinin üzerindeyse kamera dönmesin
-                if (!ImGui::GetIO().WantCaptureMouse) { // Not on UI
-                    int dx = e.motion.x - last_mouse_x;
-                    int dy = e.motion.y - last_mouse_y;
-
-                    const Uint8* state = SDL_GetKeyboardState(NULL);
-                    bool is_shift_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
-
-                    if (is_shift_pressed) {
-                        // PANNING (Shift + Middle Mouse)
-                        float pan_speed = mouse_sensitivity * 0.01f * scene.camera->focus_dist; 
-                        
-                        Vec3 right = scene.camera->u; 
-                        Vec3 up = scene.camera->v;    
-                        
-                        Vec3 offset = right * -(float)dx * pan_speed + up * (float)dy * pan_speed;
-                        
-                        scene.camera->lookfrom += offset;
-                        scene.camera->lookat += offset;
-                        
-                        scene.camera->update_camera_vectors();
-                    }
-                    else {
-                        // Check for Control Key (Zoom)
-                        bool is_ctrl_pressed = state[SDL_SCANCODE_LCTRL] || state[SDL_SCANCODE_RCTRL];
-                        
-                        if (is_ctrl_pressed) {
-                            // ZOOM (Ctrl + Middle Mouse Drag Up/Down)
-                            // Dragging mouse Up (negative dy) = Zoom In
-                            // Dragging mouse Down (positive dy) = Zoom Out
-                            
-                            float zoom_speed = 0.05f * scene.camera->focus_dist;
-                            float zoom_amount = -(float)dy * zoom_speed * 0.1f; 
-
-                            Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                            scene.camera->lookfrom += forward * zoom_amount;
-                            scene.camera->lookat += forward * zoom_amount; // pan-zoom vs dolly-zoom? 
-                            // Blender "Zoom" usually acts like Dolly (moves camera), keeping LookAt distance relative?
-                            // Actually pure dolly moves camera but maintains focus distance for DOF?
-                            // Let's emulate scroll wheel logic: move both.
-                            
-                            scene.camera->update_camera_vectors();
-                        }
-                        else {
-                            // ORBIT / ROTATION (Middle Mouse only)
-                            // Rotation speed reduced by factor of 0.2 for better control
-                            yaw += dx * mouse_sensitivity * 0.2f;
-                            pitch -= dy * mouse_sensitivity * 0.2f;
-                            pitch = std::clamp(pitch, -89.9f, 89.9f);
-
-                            float rad_yaw = yaw * 3.14159265f / 180.0f;
-                            float rad_pitch = pitch * 3.14159265f / 180.0f;
-
-                            Vec3 direction;
-                            direction.x = cosf(rad_yaw) * cosf(rad_pitch);
-                            direction.y = sinf(rad_pitch);
-                            direction.z = sinf(rad_yaw) * cosf(rad_pitch);
-
-                            direction = direction.normalize();
-                            
-                            // Prevent unwanted roll by locking Up vector
-                            scene.camera->vup = Vec3(0.0f, 1.0f, 0.0f);
-                            
-                            scene.camera->setLookDirection(direction);
-                        }
-                    }
-
-                    last_mouse_x = e.motion.x;
-                    last_mouse_y = e.motion.y;
-                    last_camera_move_time = std::chrono::steady_clock::now();
-                    start_render = true;
-                    g_camera_dirty = true;  // Mark camera buffer for GPU update
-                }
-            }
-
-            if (e.type == SDL_MOUSEWHEEL && mouse_control_enabled && scene.camera) {
-                // Eğer mouse ImGui üzerinde değilse
-                if (!ImGui::GetIO().WantCaptureMouse) {
-                    float scroll_amount = e.wheel.y;  // yukarı: pozitif, aşağı: negatif
-                    float move_speed = 1.5f * mouse_sensitivity; // Apply Mouse Sensitivity to Zoom
-                    Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
-                    scene.camera->lookfrom += forward * scroll_amount * move_speed;
-                    scene.camera->lookat = scene.camera->lookfrom + forward * scene.camera->focus_dist;
-
-                    scene.camera->update_camera_vectors();
-                    
-                    // Update Autofocus (AF-C) if enabled
-                    ui.updateAutofocus(ui_ctx);
-                    
-                    last_camera_move_time = std::chrono::steady_clock::now();
-                    camera_moved = true;
-                    start_render = true;
-                    g_camera_dirty = true;  // Mark camera buffer for GPU update
-                }
-            }
-
-
-            if (e.type == SDL_QUIT) ui.tryExit();
-        }
         const Uint8* key_state = SDL_GetKeyboardState(NULL);
+        
+        // Re-check input lock for keyboard controls (input_locked was inside event loop scope)
+        bool keyboard_locked = ui_ctx.render_settings.animation_render_locked || 
+                              (rendering_in_progress && ui_ctx.is_animation_mode);
 
-        if (mouse_control_enabled && scene.camera) {
+        if (mouse_control_enabled && scene.camera && !keyboard_locked) {
 
             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
             Vec3 right = Vec3::cross(forward, scene.camera->vup).normalize();
             Vec3 up = scene.camera->vup;
 
-            // Arrow Keys for Camera Movement (avoids conflict with G/R/S gizmo shortcuts)
-            // Apply sensitivity to base movement speed
-            float effective_speed = move_speed * (mouse_sensitivity * 5.0f); // Scale up a bit as sensitivity is usually low (0.1)
+            // Arrow Keys + WASDQE for Camera Movement
+            const Uint8* s = SDL_GetKeyboardState(NULL);
+            bool is_shift = s[SDL_SCANCODE_LSHIFT] || s[SDL_SCANCODE_RSHIFT];
+            float boost = is_shift ? (4.0f + render_settings.mouse_sensitivity * 6.0f) : 1.0f;
+            float effective_speed = move_speed * (render_settings.mouse_sensitivity * 5.0f) * boost;
 
-            if (key_state[SDL_SCANCODE_UP]) {
+            if (key_state[SDL_SCANCODE_UP] || key_state[SDL_SCANCODE_W]) {
                 scene.camera->lookfrom += forward * effective_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_DOWN]) {
+            if (key_state[SDL_SCANCODE_DOWN] || key_state[SDL_SCANCODE_S]) {
                 scene.camera->lookfrom -= forward * effective_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_LEFT]) {
+            if (key_state[SDL_SCANCODE_LEFT] || key_state[SDL_SCANCODE_A]) {
                 scene.camera->lookfrom -= right * effective_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_RIGHT]) {
+            if (key_state[SDL_SCANCODE_RIGHT] || key_state[SDL_SCANCODE_D]) {
                 scene.camera->lookfrom += right * effective_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_PAGEUP]) {
+            if (key_state[SDL_SCANCODE_PAGEUP] || key_state[SDL_SCANCODE_E]) {
                 scene.camera->lookfrom += up * effective_speed;
                 camera_moved = true;
             }
-            if (key_state[SDL_SCANCODE_PAGEDOWN]) {
+            if (key_state[SDL_SCANCODE_PAGEDOWN] || key_state[SDL_SCANCODE_Q]) {
                 scene.camera->lookfrom -= up * effective_speed;
                 camera_moved = true;
             }
@@ -1252,6 +1263,7 @@ int main(int argc, char* argv[]) {
                     ui_ctx.render_settings.start_animation_render = false;
                     render_settings.start_animation_render = false;
                     rendering_in_progress = true; // Set block flag immediately
+                    ui_ctx.is_animation_mode = true; // Enable animation mode for UI status bar
                     
                     // Reset stop flags for new render
                     rendering_stopped_cpu = false;
@@ -1265,7 +1277,9 @@ int main(int argc, char* argv[]) {
                     SCENE_LOG_INFO("Output folder set to: " + output_folder);
 
                     // Capture local copies of settings to avoid thread race
-                    int anim_sample_count = ui_ctx.render_settings.final_render_samples; // Use intended target, NOT viewport accum count
+                    // FIX: Use animation_samples_per_frame (UI setting) instead of final_render_samples
+                    int anim_sample_count = ui_ctx.render_settings.animation_samples_per_frame;
+                    if (anim_sample_count <= 0) anim_sample_count = 128; // Fallback
                     int anim_sample_per_pass = sample_per_pass;
                     int anim_fps = ui_ctx.render_settings.animation_fps;
                     float anim_duration = ui_ctx.render_settings.animation_duration;
@@ -1275,7 +1289,28 @@ int main(int argc, char* argv[]) {
                     int anim_start_frame = ui_ctx.render_settings.animation_start_frame;
                     int anim_end_frame = ui_ctx.render_settings.animation_end_frame;
                     
-                    SCENE_LOG_INFO("DEBUG: Main starting animation thread. UI frames: " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame));
+                    // VALIDATION: Ensure valid frame range
+                    if (anim_end_frame < anim_start_frame) {
+                        anim_end_frame = anim_start_frame; // At least 1 frame
+                    }
+                    if (anim_end_frame == 0 && anim_start_frame == 0) {
+                        // Both zero - check if scene has animation data
+                        if (!scene.animationDataList.empty() && scene.animationDataList[0]) {
+                            anim_start_frame = scene.animationDataList[0]->startFrame;
+                            anim_end_frame = scene.animationDataList[0]->endFrame;
+                            SCENE_LOG_INFO("Frame range auto-detected from animation file: " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame));
+                        } else {
+                            anim_end_frame = 100; // Default fallback
+                            SCENE_LOG_WARN("No frame range set, using default 0-100");
+                        }
+                    }
+                    
+                    // Update UI with validated values for progress display
+                    ui_ctx.render_settings.animation_start_frame = anim_start_frame;
+                    ui_ctx.render_settings.animation_end_frame = anim_end_frame;
+                    ui_ctx.render_settings.animation_total_frames = anim_end_frame - anim_start_frame + 1;
+                    
+                    SCENE_LOG_INFO("Animation render: Frames " + std::to_string(anim_start_frame) + " - " + std::to_string(anim_end_frame) + " (" + std::to_string(ui_ctx.render_settings.animation_total_frames) + " total) @ " + std::to_string(anim_sample_count) + " samples/frame");
 
                     // Detach thread
                     std::thread anim_thread([=]() {
@@ -1949,6 +1984,9 @@ int main(int argc, char* argv[]) {
             if (!g_optix_rebuilding) {
                 ui.addViewportMessage("Rebuilding OptiX Geometry...", 10.0f);
                 
+                // CRITICAL FIX: Ensure GPU is completely idle before freeing/modifying geometry
+                if (g_hasCUDA) cudaDeviceSynchronize();
+
                 // Capture references for lambda
                 auto& scene_ref = scene;
                 auto optix_ptr = &optix_gpu;
@@ -1970,8 +2008,9 @@ int main(int argc, char* argv[]) {
                 });
                 
                 g_optix_rebuilding = true;
+                g_optix_rebuild_pending = false; // Only clear when we actually start the rebuild
             }
-            g_optix_rebuild_pending = false;
+            // Else: Keep g_optix_rebuild_pending = true so it triggers after current rebuild finishes
         }
         
         // Check if async OptiX rebuild is complete

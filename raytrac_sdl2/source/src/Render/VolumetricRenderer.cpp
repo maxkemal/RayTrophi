@@ -11,6 +11,7 @@
 #include "GasVolume.h"
 #include "VolumeShader.h"
 #include "renderer.h" 
+#include "globals.h"
 #include <cmath>
 #include <algorithm> // For std::min, std::max
 #include "AtmosphereLUT.h"
@@ -218,7 +219,7 @@ float VolumetricRenderer::determineSunTransmittance(const Vec3& origin, const Ve
 // GPU SYNC
 // ============================================================================
 void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
-    if (!optix_gpu_ptr) return;
+    if (!optix_gpu_ptr || !g_hasCUDA) return;
 
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;

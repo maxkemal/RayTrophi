@@ -23,29 +23,29 @@ class Material;
 class Texture;
 
 // Serialization version - increment when format changes
-static constexpr int TERRAIN_SERIALIZATION_VERSION = 1;
+static constexpr int TERRAIN_SERIALIZATION_VERSION = 2;
 
 // ===========================================================================
 // EROSION PARAMETERS
 // ===========================================================================
 
 struct HydraulicErosionParams {
-    int iterations = 50000;        // Number of droplets
-    int dropletLifetime = 64;      // Max steps per droplet
-    float inertia = 0.05f;         // Direction momentum (0-1)
-    float sedimentCapacity = 4.0f; // Max sediment per speed unit
-    float minSlope = 0.01f;        // Minimum slope
-    float erodeSpeed = 0.3f;       // Erosion rate
+    int iterations = 50000;        // Number of 'hits' (Determines passes in GPU)
+    int dropletLifetime = 128;     // Max steps per droplet (Legacy CPU)
+    float inertia = 0.05f;         // direction momentum (0-1)
+    float sedimentCapacity = 1.5f; // Tamed for Stream Power Law
+    float minSlope = 0.01f;        // Minimal slope for flow
+    float erodeSpeed = 0.1f;       // Tamed erosion rate
     float depositSpeed = 0.3f;     // Deposit rate
     float evaporateSpeed = 0.01f;  // Evaporation rate
-    float gravity = 4.0f;
-    int erosionRadius = 3;         // Brush radius
+    float gravity = 4.0f;          // Reset to moderate
+    int erosionRadius = 2;         // Default channel width
 };
 
 struct ThermalErosionParams {
-    int iterations = 50;
+    int iterations = 50;          // Moderate default
     float talusAngle = 0.5f;       // ~27 degrees
-    float erosionAmount = 0.5f;
+    float erosionAmount = 0.3f;    // Less aggressive
 };
 
 class TerrainManager {
@@ -75,7 +75,7 @@ public:
     void rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain);
     
     // Update only dirty sectors (incremental update for performance)
-    void updateDirtySectors(TerrainObject* terrain);
+    void updateDirtySectors(TerrainObject* terrain, bool clearRegion = true);
     
     // ===========================================================================
     // NORMAL CALCULATION
@@ -107,6 +107,9 @@ public:
     
     // Export splat map to PNG file
     void exportSplatMap(TerrainObject* terrain, const std::string& filepath);
+
+    // Import splat map from image file
+    void importSplatMap(TerrainObject* terrain, const std::string& filepath);
 
     // ===========================================================================
     // FOLIAGE SYSTEM
@@ -358,6 +361,7 @@ private:
     void* fluvFluxKernelFunc = nullptr;
     void* fluvWaterKernelFunc = nullptr;
     void* fluvErodeKernelFunc = nullptr;
+    void* streamPowerKernelFunc = nullptr;
     void* windKernelFunc = nullptr;
     // Post-processing kernels (for CPU-GPU parity)
     void* pitFillKernelFunc = nullptr;

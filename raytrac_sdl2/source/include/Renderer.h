@@ -51,6 +51,7 @@
 #include <functional>
 #include "AssimpLoader.h"
 #include "AnimationController.h"  // New animation management system
+#include "Hair/HairSystem.h"      // Hair/Fur rendering system
 
 // Forward Declarations
 class HittableList;
@@ -128,7 +129,9 @@ public:
     
     // Flag to use new animation system (can be toggled for compatibility)
     bool useNewAnimationSystem = false;
-   // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
+    // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
+
+    void setOptixWrapper(OptixWrapper* ptr) { optix_gpu_ptr = ptr; }
 
     void rebuildBVH(SceneData& scene, bool use_embree);
     void updateBVH(SceneData& scene, bool use_embree);
@@ -158,13 +161,34 @@ public:
     static std::vector<Vec3> normalMapBuffer;
     SDL_PixelFormat* pixelFormat;
 
+    // Hair/Fur System
+    Hair::HairSystem hairSystem;
+    Hair::HairMaterialParams hairMaterial;  // Current hair material from UI
+    
+    // Hair system accessors
+    Hair::HairSystem& getHairSystem() { return hairSystem; }
+    const Hair::HairSystem& getHairSystem() const { return hairSystem; }
+    
+    // Hair material setter (called from UI) - updates both CPU and GPU
+    void setHairMaterial(const Hair::HairMaterialParams& mat);
+    const Hair::HairMaterialParams& getHairMaterial() const { return hairMaterial; }
+    
+    // Upload hair to GPU (call after hair system changes)
+    void uploadHairToGPU();
+    
+    // Fast update hair geometry (uses refit if possible)
+    void updateHairGeometryOnGPU(bool forceRebuild = false);
+
+    bool hideInterpolatedHair = false; // [NEW] Toggle to hide child hairs (interpolated) for performance during grooming
+
+    OptixWrapper* optix_gpu_ptr = nullptr; // Set externally via set_optix()   
 private:
     std::vector<float> variance_buffer;
     static constexpr size_t CACHE_SIZE = 8;
     static constexpr size_t DIMENSION_COUNT = 2;
     AssimpLoader assimpLoader;
 
-    OptixWrapper* optix_gpu_ptr = nullptr; // Set externally via set_optix()   
+   
     std::mutex cache_mutex;  // Header'da tanımlama
     ColorProcessor color_processor;
    

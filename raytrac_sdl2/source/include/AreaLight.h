@@ -48,7 +48,7 @@ public:
 
     Vec3 getIntensity(const Vec3& point, const Vec3& light_sample_point) const override {
         float distance2 = (light_sample_point - point).length_squared();
-        return (color * intensity) / std::max(distance2, 0.0001f);
+        return (color * intensity) / (std::max)(distance2, 0.0001f);
     }
 
     float pdf(const Vec3& hit_point, const Vec3& incoming_direction) const override {
@@ -57,7 +57,7 @@ public:
         wi = wi.normalize();
 
         Vec3 light_normal = direction.normalize();
-        float cos_theta = std::fmax(0.0001, Vec3::dot(-wi, light_normal));
+        float cos_theta = std::fmax(0.0001f, Vec3::dot(-wi, light_normal));
         return dist2 / (area * cos_theta);
     }
 

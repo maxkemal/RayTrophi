@@ -48,12 +48,12 @@ public:
 
     Vec3 getIntensity(const Vec3& point, const Vec3& light_sample_point) const override {
         float distance2 = (light_sample_point - point).length_squared();
-        return (color * intensity) / std::max(distance2, 0.0001f);
+        return (color * intensity) / (std::max)(distance2, 0.0001f);
     }
 
     float pdf(const Vec3& /*hit_point*/, const Vec3& /*incoming_direction*/) const override {
         float area = 4.0f * M_PI * radius * radius;
-        return 1.0f / std::max(area, 0.0001f);
+        return 1.0f / (std::max)(area, 0.0001f);
     }
 
     Vec3 random_point() const override {

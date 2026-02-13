@@ -26,35 +26,35 @@ AtmosphereLUT::~AtmosphereLUT() {
 }
 
 void AtmosphereLUT::cleanup() {
-    if (data.transmittance_lut) {
+    if (g_hasCUDA && data.transmittance_lut) {
         cudaDestroyTextureObject(data.transmittance_lut);
         data.transmittance_lut = 0;
     }
-    if (data.skyview_lut) {
+    if (g_hasCUDA && data.skyview_lut) {
         cudaDestroyTextureObject(data.skyview_lut);
         data.skyview_lut = 0;
     }
-    if (transmittance_array) {
+    if (g_hasCUDA && transmittance_array) {
         cudaFreeArray(transmittance_array);
         transmittance_array = nullptr;
     }
-    if (skyview_array) {
+    if (g_hasCUDA && skyview_array) {
         cudaFreeArray(skyview_array);
         skyview_array = nullptr;
     }
-    if (multi_scatter_array) {
+    if (g_hasCUDA && multi_scatter_array) {
         cudaFreeArray(multi_scatter_array);
         multi_scatter_array = nullptr;
     }
-    if (aerial_perspective_array) {
+    if (g_hasCUDA && aerial_perspective_array) {
         cudaFreeArray(aerial_perspective_array);
         aerial_perspective_array = nullptr;
     }
-    if (data.multi_scattering_lut) {
+    if (g_hasCUDA && data.multi_scattering_lut) {
         cudaDestroyTextureObject(data.multi_scattering_lut);
         data.multi_scattering_lut = 0;
     }
-    if (data.aerial_perspective_lut) {
+    if (g_hasCUDA && data.aerial_perspective_lut) {
         cudaDestroyTextureObject(data.aerial_perspective_lut);
         data.aerial_perspective_lut = 0;
     }
@@ -63,6 +63,11 @@ void AtmosphereLUT::cleanup() {
 
 void AtmosphereLUT::initialize() {
     cleanup();
+
+    if (!g_hasCUDA) {
+        initialized = true; // Still "initialized" for CPU use
+        return;
+    }
 
     // 1. Allocate Transmittance LUT (256x64 RGBA32F)
     cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float4>();
@@ -165,7 +170,9 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
             host_transmittance[y * TRANSMITTANCE_LUT_W + x] = make_float4(transmittance.x, transmittance.y, transmittance.z, 1.0f);
         }
     }
-    cudaMemcpy2DToArray(transmittance_array, 0, 0, host_transmittance.data(), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_H, cudaMemcpyHostToDevice);
+    if (g_hasCUDA) {
+        cudaMemcpy2DToArray(transmittance_array, 0, 0, host_transmittance.data(), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_W * sizeof(float4), TRANSMITTANCE_LUT_H, cudaMemcpyHostToDevice);
+    }
 
     // Phase 2: Multi-Scattering LUT (32x32)
     host_multi_scatter.resize(MULTI_SCATTER_LUT_RES * MULTI_SCATTER_LUT_RES);
@@ -191,7 +198,9 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
             host_multi_scatter[y * MULTI_SCATTER_LUT_RES + x] = make_float4(msFactor * 0.1f, msFactor * 0.12f, msFactor * 0.15f, 1.0f);
         }
     }
-    cudaMemcpy2DToArray(multi_scatter_array, 0, 0, host_multi_scatter.data(), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES, cudaMemcpyHostToDevice);
+    if (g_hasCUDA) {
+        cudaMemcpy2DToArray(multi_scatter_array, 0, 0, host_multi_scatter.data(), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES * sizeof(float4), MULTI_SCATTER_LUT_RES, cudaMemcpyHostToDevice);
+    }
 
     // Phase 3: SkyView LUT (256x128)
     host_skyview.resize(SKYVIEW_LUT_W * SKYVIEW_LUT_H);
@@ -254,7 +263,9 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
             host_skyview[y * SKYVIEW_LUT_W + x] = make_float4(radiance.x * params.sun_intensity, radiance.y * params.sun_intensity, radiance.z * params.sun_intensity, 1.0f);
         }
     }
-    cudaMemcpy2DToArray(skyview_array, 0, 0, host_skyview.data(), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_H, cudaMemcpyHostToDevice);
+    if (g_hasCUDA) {
+        cudaMemcpy2DToArray(skyview_array, 0, 0, host_skyview.data(), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_W * sizeof(float4), SKYVIEW_LUT_H, cudaMemcpyHostToDevice);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════

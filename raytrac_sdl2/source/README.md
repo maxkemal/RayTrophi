@@ -1,61 +1,37 @@
-# RayTrophi
+# RayTrophi Studio Core
 
-## v0.02 (Mayıs 2025)
+## v0.05 (Şubat 2026) - World Building Expansion
 
 ---
 
 ## 🇹🇷 Türkçe (TR)
 
-**RayTrophi**, CPU ve GPU hızlandırmalı bir raytracing motorudur. Fiziksel olarak doğru ışık taşıma, PBR materyaller, animasyon desteği ve OptiX/Embree/CPU arasında esnek çalışma modlarına sahiptir.
+**RayTrophi**, yüksek performanslı bir dünya oluşturma ve render motorudur. RTX hızlandırmalı OptiX 7 mimarisi üzerine kurulu olup, sinematik kalitede görsel üretim için gerekli tüm modern araçları sunar.
 
-### Bu sürümde:
+### Bu sürümde (v0.05):
 
-- 🔥 **OptiX pipeline güncellendi**
-- 🎞 **Animasyon desteği (kamera, ışık, obje)**
-- 🧠 **Principled BSDF güncellemeleri**
-- 📷 **GPU kamera sistemi**
-- 🧹 **Kod modernizasyonu**
-- ✅ **CPU-Embree-OptiX senkronizasyonu**
+- 🦁 **Gelişmiş Saç & Kürk Sistemi:** İnteraktif boyama, tarama ve Root UV desteği.
+- 🌫️ **GPU Hacimsel Render (OpenVDB):** NanoVDB entegrasyonu ile bulut ve duman renderı.
+- 🏞️ **Terrain Node V2:** Hidrolik erozyon ve gelişmiş gürültü (noise) düğümleri.
+- 🌊 **Su & Nehir Araçları:** FFT okyanus ve Spline tabanlı nehir düzenleyici.
+- 🌳 **Bitki Örtüsü (Foliage):** Milyonlarca instanced objeyi tek seferde boyama desteği.
 
-### Gelecek Planları (v0.03+)
-- Volumetrik materyal GPU tarafına taşınacak.
-- Multiple Importance Sampling (MIS) iyileştirilecek.
-- Bone animasyonları GPU’da desteklenecek.
-
-### Kullanılan Üçüncü Parti Kütüphaneler:
-- **Assimp** → BSD / MIT
-- **Embree** → Apache 2.0
-- **OIDN** → Apache 2.0
-- **OptiX** → NVIDIA özel lisansı
-
-> Not: RayTrophi kendi kodu MIT lisansı ile lisanslanmıştır. Üçüncü parti kütüphaneler kendi lisansları altında kullanılmaktadır.
+> Detaylı özellik listesi ve kurulum için ana dizindeki [README.md](../README.md) dosyasını inceleyin.
 
 ---
 
 ## 🇬🇧 English (EN)
 
-**RayTrophi** is a ray tracing engine with CPU and GPU acceleration. It supports physically accurate light transport, PBR materials, animation support, and flexible modes switching between OptiX, Embree, and CPU.
+**RayTrophi** is a high-performance world-building and rendering engine. Built on the RTX-accelerated OptiX 7 architecture, it provides all the modern tools needed for cinematic-quality visual production.
 
-### This version includes:
+### This version (v0.05):
 
-- 🔥 **OptiX pipeline updates**
-- 🎞 **Animation support (camera, light, object)**
-- 🧠 **Principled BSDF improvements**
-- 📷 **GPU camera system**
-- 🧹 **Code modernization**
-- ✅ **CPU-Embree-OptiX synchronization**
+- 🦁 **Advanced Hair & Fur System:** Interactive painting, grooming, and Root UV support.
+- 🌫️ **GPU Volumetric Rendering (OpenVDB):** Cloud and smoke rendering via NanoVDB.
+- 🏞️ **Terrain Node V2:** Hydraulic erosion and advanced noise nodes.
+- 🌊 **Water & River Tools:** FFT Ocean and Spline-based river editor.
+- 🌳 **Vegetation (Foliage):** Painting millions of instanced objects with optimized performance.
 
-### Future Plans (v0.03+)
-- Move volumetric materials to GPU.
-- Improve Multiple Importance Sampling (MIS).
-- Support bone animations on GPU.
-
-### Third Party Libraries Used:
-- **Assimp** → BSD / MIT
-- **Embree** → Apache 2.0
-- **OIDN** → Apache 2.0
-- **OptiX** → NVIDIA proprietary license
-
-> Note: RayTrophi core code is licensed under MIT. Third-party libraries retain their own licenses.
+> For a full list of features and build instructions, please check the main [README.md](../README.md).
 
 ---

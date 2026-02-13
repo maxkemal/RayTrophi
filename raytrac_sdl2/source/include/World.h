@@ -239,7 +239,7 @@ public:
     AtmosphereLUT* getLUT() const { return atmosphere_lut; }
 
     // CPU Evaluation (for background missing)
-    Vec3 evaluate(const Vec3& ray_dir);
+    Vec3 evaluate(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));
     WorldData data;
 private:
  
@@ -250,7 +250,7 @@ private:
    AtmosphereLUT* atmosphere_lut = nullptr;
    
    // Internal helper for Nishita
-   Vec3 calculateNishitaSky(const Vec3& ray_dir);
+   Vec3 calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));
 
 public:
     // Reset to default settings

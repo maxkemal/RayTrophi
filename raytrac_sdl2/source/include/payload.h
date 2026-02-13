@@ -44,7 +44,17 @@ struct OptixHitResult {
     int has_transmission_tex;
     int has_opacity_tex;
     int has_emission_tex;
-    int pad0; // 16 byte hizalama için
+    int opacity_has_alpha;
+    // Removed pad0 as we added an int, keeping it 16-byte aligned? 
+    // Wait, let's keep pad0 if needed but check alignment.
+    // has_albedo_tex (4) + ... + has_emission_tex (4) = 7 * 4 = 28 bytes.
+    // + opacity_has_alpha (4) = 32 bytes. No padding needed for 16-byte alignment.
+    // But let's check the previous state. 
+    // has_albedo_tex(4), has_roughness_tex(4), has_normal_tex(4), has_metallic_tex(4), 
+    // has_transmission_tex(4), has_opacity_tex(4), has_emission_tex(4) = 28 bytes.
+    // + pad0 (4) = 32 bytes.
+    // If I add opacity_has_alpha, it's 32 bytes. Perfect.
+
     
     // Volumetric material info
     int is_volumetric;        // Volumetric stuff
@@ -71,6 +81,20 @@ struct OptixHitResult {
     // NanoVDB Grid (for VDB-based volumetrics)
     void* nanovdb_grid;           // Device pointer to NanoVDB grid
     int has_nanovdb;              // 1 = use NanoVDB, 0 = procedural
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GPU PICKING (Object identification for viewport selection)
+    // ═══════════════════════════════════════════════════════════════════════════
+    int object_id;                // Object ID from HitGroupData (-1 = no object ID)
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HAIR RENDERING
+    // ═══════════════════════════════════════════════════════════════════════════
+    int is_hair;                  // 1 = hair hit, 0 = regular geometry
+    float3 color;                 // Pre-computed color (for hair direct lighting)
+    float3 albedo;                // Surface albedo
+    float roughness;              // Surface roughness
+    float metallic;               // Surface metallic
     
     // Blended Material Data (For Terrain Layers)
     int use_blended_data;      // 1 = use baked values below instead of sampling textures again

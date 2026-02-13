@@ -22,6 +22,8 @@ struct HydraulicErosionParamsGPU {
     float depositSpeed;
     float evaporateSpeed;
     float gravity;
+    float cellSize;
+    float heightScale;
     unsigned int seed;
     float* hardnessMap;  // Optional hardness map (nullptr if not used)
 };
@@ -31,6 +33,8 @@ struct ThermalErosionParamsGPU {
     int mapHeight;
     float talusAngle; // Tangent of angle (height diff / width)
     float erosionAmount;
+    float cellSize;
+    float heightScale;
     bool useHardness;
     float* hardnessMap;  // Optional hardness map (nullptr if not used)
 };
@@ -40,6 +44,7 @@ struct PostProcessParamsGPU {
     int mapWidth;
     int mapHeight;
     float cellSize;
+    float heightScale;
     float pitThreshold;     // Threshold for pit detection (0.05f * cellSize)
     float spikeThreshold;   // Threshold for spike detection (0.1f * cellSize)
     int edgeFadeWidth;      // Width of edge fade zone (w / 40)
@@ -51,11 +56,23 @@ struct FluvialErosionParamsGPU {
     float fixedDeltaTime;
     float pipeLength;
     float cellSize;
+    float heightScale;
     float erosionRate;
     float depositionRate;
     float evaporationRate;
     float gravity;
     float sedimentCapacityConstant;
+};
+
+struct StreamPowerParamsGPU {
+    int mapWidth;
+    int mapHeight;
+    float cellSize;
+    float heightScale;
+    float erodeSpeed;
+    float sedimentCapacity;
+    float minSlope;
+    int erosionRadius;
 };
 
 struct WindErosionParamsGPU {
@@ -66,6 +83,8 @@ struct WindErosionParamsGPU {
     float strength;
     float suspensionRate;
     float depositionRate;
+    float cellSize;
+    float heightScale;
 };
 
 }

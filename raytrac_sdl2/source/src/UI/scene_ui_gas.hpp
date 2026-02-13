@@ -29,6 +29,7 @@
 #include <memory>
 #include <string>
 
+
 namespace GasUI {
 
 // Currently selected gas volume for UI (Shared within Volumetric panel)
@@ -230,7 +231,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
             
-            if (ImGui::Button("Apply New Resolution (Restart Simulation)", ImVec2(-1, 35))) {
+            if (ImGui::Button("Apply New Resolution (Restart Simulation)", ImVec2(UIWidgets::GetInspectorActionWidth(), 35))) {
                 gas->stop();
                 gas->initialize();
                 // Don't auto-play - let user start manually
@@ -279,8 +280,19 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         // Pressure Solver Mode
         const char* pressure_solvers[] = { "Gauss-Seidel", "SOR (Faster)", "Multigrid", "FFT (Fastest)" };
         int current_solver = static_cast<int>(settings.pressure_solver);
+        
+        bool can_use_fft = ::g_hasCUDA;
+        if (!can_use_fft && settings.pressure_solver == FluidSim::GasSimulationSettings::PressureSolverMode::FFT) {
+            settings.pressure_solver = FluidSim::GasSimulationSettings::PressureSolverMode::GaussSeidel;
+            current_solver = 0;
+        }
+
         if (ImGui::Combo("Pressure Solver", &current_solver, pressure_solvers, 4)) {
             settings.pressure_solver = static_cast<FluidSim::GasSimulationSettings::PressureSolverMode>(current_solver);
+            // Validation
+            if (settings.pressure_solver == FluidSim::GasSimulationSettings::PressureSolverMode::FFT && !can_use_fft) {
+                settings.pressure_solver = FluidSim::GasSimulationSettings::PressureSolverMode::GaussSeidel;
+            }
         }
         UIWidgets::HelpMarker("FFT solver is 10-50x faster than iterative methods for grids > 64^3. Requires CUDA. SOR converges 2-3x faster than Gauss-Seidel.");
         
@@ -341,10 +353,13 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         const char* backends[] = { "CPU", "CUDA" };
         int current_backend = static_cast<int>(settings.backend);
         
-        bool cuda_detected = false;
-        int device_count = 0;
-        if (cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0) cuda_detected = true;
-        else cudaGetLastError(); // Clear error
+        bool cuda_detected = ::g_hasCUDA;
+
+        if (!cuda_detected) {
+            ImGui::BeginDisabled();
+            settings.backend = FluidSim::SolverBackend::CPU; // Force CPU
+            current_backend = 0;
+        }
 
         if (ImGui::Combo("Backend", &current_backend, backends, 2)) {
             FluidSim::SolverBackend new_backend = static_cast<FluidSim::SolverBackend>(current_backend);
@@ -360,6 +375,10 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             }
         }
         
+        if (!cuda_detected) {
+            ImGui::EndDisabled();
+        }
+
         if (cuda_detected) {
             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "  [GPU Found: CUDA Supported]");
         } else {

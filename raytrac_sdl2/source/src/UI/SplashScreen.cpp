@@ -41,7 +41,7 @@ bool SplashScreen::init(const std::string& logoPath, int maxWidth, int maxHeight
         "RayTrophi",
         posX, posY,
         m_windowWidth, m_windowHeight,
-        SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_ALWAYS_ON_TOP | SDL_WINDOW_SKIP_TASKBAR
+        SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN | SDL_WINDOW_SKIP_TASKBAR
     );
     
     if (m_window) {

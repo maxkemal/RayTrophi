@@ -10,6 +10,8 @@
 */
 #pragma once
 
+#include "globals.h"
+
 // Forward Declarations
 class Renderer;
 struct SceneData;
@@ -27,6 +29,7 @@ class GasVolume;
 #include "SceneCommand.h"  // TransformState struct
 #include "TimelineWidget.h"  // Timeline animation widget
 #include "CameraPresets.h"   // Camera body, lens, ISO, shutter presets
+#include "Hair/HairUI.h"     // Hair/Fur editing panel
 
 #include "TerrainNodesV2.h" // Terrain node graph V2 system
 #include "scene_ui_nodeeditor.hpp" // Terrain node editor UI
@@ -37,6 +40,7 @@ class GasVolume;
 #include <string>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include "Vec3.h" // For bbox_cache
 #include "instancegroup.h" 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -73,8 +77,7 @@ struct UIContext {
     bool& reset_tonemap;
 
     bool& mouse_control_enabled;
-    float& mouse_sensitivity;
-
+    
     // Animation Preview Buffer (Thread-Safe)
     // Moved to end to preserve initializer list compatibility
     std::vector<uint32_t> animation_preview_buffer;
@@ -109,7 +112,11 @@ public:
     bool show_volumetric_tab = true;  // Unified Volumetrics tab (VDB + Gas)
     bool show_forcefield_tab = true;   // Force Field tab (Default open)
     bool show_world_tab = true;        // World & Sky tab (Default open)
+    bool show_hair_tab = true;         // Hair & Fur tab (Default open)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
+
+    // Hair/Fur System
+    Hair::HairUI hairUI;               // Hair editing panel
 
     // Static Helpers (Shared across modules)
     static std::string openFileDialogW(const wchar_t* filter = L"All Files\0*.*\0", const std::string& initialDir = "", const std::string& defaultFilename = "");
@@ -177,7 +184,7 @@ public:
      void triggerDuplicate(UIContext& ctx); // Trigger duplicate operation (for Menu and Key)
      void processAnimations(UIContext& ctx); // Apply keyframe data to scene objects
   
-     void invalidateCache() { mesh_cache_valid = false; }
+     void invalidateCache();
      void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
      void updateBBoxCache(const std::string& objectName);  // Update bounding box for specific object after transform
      
@@ -211,6 +218,7 @@ public:
     void tryOpen(UIContext& ctx);
     void performNewProject(UIContext& ctx);
     void performOpenProject(UIContext& ctx);
+    void resetMaterialUI(); // Reset material editor state
     
     // Existing functions...
     void tryExit();
@@ -351,6 +359,8 @@ public:
     void drawTerrainPanel(UIContext& ctx);
     void handleTerrainBrush(UIContext& ctx);
     void handleTerrainFoliageBrush(UIContext& ctx);  // Foliage paint brush
+    void handleHairBrush(UIContext& ctx);            // Hair paint brush
+    void drawHairBrushPreview(UIContext& ctx, const Vec3& hitPoint, const Vec3& hitNormal);       // Draw hair brush circle in viewport
     void tickProgressiveVertexSync(); // Called each frame to process a chunk
     void updateAutofocus(UIContext& ctx);  // Run autofocus logic (raycast center)
     
@@ -373,7 +383,6 @@ private:
     // --- Input / Editor ---
     void handleEditorShortcuts(UIContext& ctx);
     bool deleteSelectedLight(UIContext& ctx);
-    bool deleteSelectedObject(UIContext& ctx);
     void handleDeleteShortcut(UIContext& ctx);
 
     // --- Overlays & Gizmos ---
@@ -411,6 +420,7 @@ private:
     bool show_scene_log = false; // Default closed
     float side_panel_width = 360.0f; // Resizable Left Panel width
     float bottom_panel_height = 100.0f; // Default to minimum height
+    float hierarchy_panel_height = 250.0f; // New: Resizable hierarchy list height
     float last_applied_width = 0.0f;
     float last_applied_height = 0.0f;
     int last_applied_aspect_w = 0;
@@ -422,12 +432,9 @@ private:
     float titleResetTime = 0.0f;
     bool titleChanged = false;
 
-    // Mesh Selection Optimization Cache
-    // Groups triangles by nodeName for O(1) access during transform
-    // Stores pair of {original_index, triangle}
-    // Groups triangles by nodeName for O(1) access during transform
-    // Stores pair of {original_index, triangle}
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
+    // Fast lookup from Triangle pointer to its index in world.objects (for BVH Picking)
+    std::unordered_map<const class Triangle*, int> tri_to_index;
     // Sequential cache for ImGui Clipper (Visualization)
     std::vector<std::pair<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>>> mesh_ui_cache;
     
@@ -440,12 +447,13 @@ private:
     std::map<std::string, std::vector<uint16_t>> material_slots_cache;
 
     bool mesh_cache_valid = false;
+    size_t last_scene_obj_count = 0; // Tracking for cache invalidation
     
     // Lazy CPU Vertex Sync - objects that need CPU update before picking
     // In TLAS mode, we skip CPU vertex update on gizmo release for instant response.
     // Instead, we mark objects as "needing sync" and only update when picking is attempted.
     std::set<std::string> objects_needing_cpu_sync;
-    void ensureCPUSyncForPicking(); // Called before mouse picking to sync pending objects
+    void ensureCPUSyncForPicking(UIContext& ctx); // Called before mouse picking to sync pending objects
    
     // Interaction State
     bool is_dragging = false; // Tracks if a gizmo manipulation is in progress

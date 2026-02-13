@@ -1,83 +1,81 @@
-# RayTrophi - Advanced OptiX & Hybrid Ray Tracing Engine
+# RayTrophi Studio - The Open-Source Cinematic World Building Engine
 
-RayTrophi is a high-performance, modular ray tracing engine built with **NVIDIA OptiX 7**, **SDL2**, **ImGui**, and **OpenVDB (NanoVDB)**. It bridges the gap between real-time preview and offline path tracing, offering advanced features like volumetric rendering, node-based terrain generation, and a complete animation timeline.
+**RayTrophi** is a high-performance, modular world-building and rendering engine powered by **NVIDIA OptiX 7 (RTX)**. Designed to bridge the gap between creative freedom and high-end cinematic rendering, it offers a comprehensive suite of tools for terrain generation, fluid simulations, procedural hair, and advanced animation.
 
-![RayTrophi](RayTrophi_image.png)
+![RayTrophi Studio Display](RayTrophi_image.png)
 
-## 🚀 Key Features
+---
 
-### 🌪️ Gas & Fluid Simulation (NEW)
-- **Physical Gas Solver:** GPU-accelerated fluid simulation (Smoke, Fire) with real-time feedback.
-- **Force Fields:** Interact with simulations using Point, Directional, Vortex, Turbulence, and Drag forces.
-- **Volumetric Rendering:** Dual-Lobe Phase function, Multi-Scattering, and Blackbody radiation for realistic fire/explosions.
-- **OpenVDB / NanoVDB Support:** Import standard `.vdb` files and sequences for complex volumetric data.
+## 🌟 Core Pillars
 
-### 🎬 Advanced Animation System
-- **Animation Graph (AnimGraph):** State Machine based character animation logic (Idle -> Walk -> Run).
-- **Blend Spaces:** Smoothly blend between animations based on parameters (e.g., Speed, Direction).
-- **Timeline & Keyframing:** Animate Objects, Lights, Cameras, and World properties (Sky, Cloud Density, etc.).
-- **Skinned Mesh Support:** GPU-accelerated skinning for character meshes.
+### 🦁 Procedural Hair & Fur System (NEW)
+*   **Integrated Grooming:** Advanced grooming tools with support for guide strands and interpolated children.
+*   **Interactive Hair Painting:** Real-time brush system for Adding, Removing, Combing, Cutting, and Clumping hair.
+*   **Root UV Mapping:** Dynamically sample textures from underlying emitters (scalp/skin) for seamless integration.
+*   **Physics & Styles:** Built-in support for Clumping, Waves, Frizz, and Gravity with a deep preset library.
 
-### 🌍 Terrain & Foliage
-- **Foliage Painting:** Paint millions of instanced objects (trees, grass, rocks) with optimized GPU Performance. Features brush radius, density, and alignment controls.
-- **Terrain Node System (V2):** 
-  - Hydraulic Erosion simulation.
-  - Generative noise nodes (Perlin, Worley).
-- **Water System:**
-  - **FFT Ocean:** Real-time deep ocean simulation with whitecaps.
-  - **River Tool:** Create flowing rivers using cubic bezier splines with flow maps and turbulence.
-- **Atmosphere:**
-  - Nishita Sky Model (Spectral Day/Night Cycle).
-  - Volumetric Fog & God Rays.
+### 🌊 Environmental Simulation
+*   **Node-Based Terrain (V2):** Generative noise nodes (Perlin/Worley) coupled with **Hydraulic Erosion** for realistic geology.
+*   **Advanced Water System:** 
+    *   **FFT Ocean:** High-fidelity deep water simulation with interactive whitecaps.
+    *   **Spline Rivers:** Create flowing water bodies with custom flow-maps, turbulence, and depth control.
+*   **Foliage Painting:** Instant displacement of millions of instanced trees, rocks, and grass with optimized GPU culling.
 
-### 🖌️ Scene Editor & Tools
-- **Modern UI Overhaul:** Refined dark theme with organized panels for World, Terrain, Water, and Animation.
-- **Interactive Gizmos:** Blender-style 3D manipulators for Translate, Rotate, and Scale.
-- **Asset Management:** robust GLTF/GLB import support.
-- **Documentation:** Built-in offline documentation with modern web interface.
+### 🌪️ Volumetrics & Gas Dynamics
+*   **GPU Gas Solver:** Real-time fluid simulation (Smoke, Fire) with interactive **Force Fields** (Vortex, Turbulence, Point).
+*   **VDB Support:** High-speed import and rendering of industry-standard `.vdb` and `.nvdb` (NanoVDB) sequences.
+*   **Cinematic Shading:** Multi-Scattering, Dual-Lobe phase functions, and Blackbody radiation for hyper-realistic fire.
 
-### 🎨 Rendering Core
-- **Hybrid Engine:** 
-  - **GPU:** OptiX 7 (RTX Accelerated) Path Tracing with Instancing support.
-  - **CPU:** Intel Embree / Parallel BVH Fallback.
-- **Materials:** Principled BSDF (Disney), Glass, Metal, Emission, Volumetric.
-- **Denoiser:** Intel OIDN integration for noise-free previews.
+### 🎬 Animation & Logic
+*   **AnimGraph:** State-machine-based logic for complex character movement (Idle to Run blending).
+*   **Timeline Editor:** Integrated keyframe animation for objects, lights, cameras, and even atmospheric properties.
+*   **Skinned Mesh:** High-performance GPU skinning for animated characters and creatures.
 
-## 🎮 Controls
+---
 
-### Viewport Navigation
-- **Orbit:** Middle Mouse Drag
-- **Pan:** Shift + Middle Mouse Drag
-- **Zoom:** Mouse Wheel or Ctrl + Middle Mouse Drag
-- **Focus:** `F` (Focus on selected object)
+## 🎨 Rendering Excellence
 
-### Tools & Edit
-- **Select:** Left Click
-- **Gizmo Modes:** `G` (Grab), `R` (Rotate), `S` (Scale)
-- **Duplicate:** `Shift + Drag`
-- **Delete:** `Del` or `X`
-- **Undo/Redo:** `Ctrl+Z` / `Ctrl+Y`
-- **Play Animation:** `Space`
+*   **Wavefront Path Tracer:** Optimized for NVIDIA RTX hardware using OptiX 7.x.
+*   **Hybrid Fallback:** Seamlessly switch to CPU rendering (Intel Embree) for systems without RTX.
+*   **Materials:** Full **Disney Principled BSDF** implementation, plus specialized shaders for Glass, Thin-Film, and Hair.
+*   **Post-Processing:** Real-time Tonemapping (AGX, ACES, Filmic), Gamma control, and **Intel OIDN** denoising.
 
-### Rendering
-- **Final Render:** `F12`
-- **Animation Render:** (Via Render Panel)
+---
 
-## 🔧 Build Instructions
-1. **Requirements:**
-   - Visual Studio 2022
-   - NVIDIA Driver (Latest)
-   - CUDA Toolkit 11.x or 12.x
-   - OptiX 7.x SDK
-2. **Setup:**
-   - Open `raytrac_sdl2.sln`
-   - Ensure `vcpkg` dependencies are installed (SDL2, ImGui, Assimp, OIDN, OpenVDB/NanoVDB).
-3. **Build:**
-   - Select `Release` configuration.
-   - Build Solution (`Ctrl+Shift+B`).
-4. **Run:**
-   - Launch `raytracing_render_code.exe` (or from VS Debugger).
+## 🛠️ Getting Started
 
-## 📜 License
-Developed by **Kemal DEMİRTAŞ**.
-This project is for educational and portfolio purposes.
+### Prerequisites
+*   **OS:** Windows 10/11
+*   **GPU:** NVIDIA RTX recommended (OptiX 7+ support)
+*   **Tools:** Visual Studio 2022, CUDA Toolkit 12.x
+
+### Build Instructions
+1.  Clone the repository: `git clone https://github.com/maxkemal/RayTrophi.git`
+2.  Open `raytrac_sdl2.sln` in Visual Studio 2022.
+3.  Install dependencies via `vcpkg` (Assimp, SDL2, OpenVDB, NanoVDB, ImGui, Intel OIDN).
+4.  Set configuration to **Release** and build solution.
+
+---
+
+## 🎮 Navigation & Shortcuts
+
+| Action | Shortcut |
+| :--- | :--- |
+| **Orbit Camera** | Middle Mouse Drag |
+| **Focus Selection** | `F` |
+| **Gizmo Move/Rot/Scale** | `G` / `R` / `S` |
+| **Interactive Paint** | `P` (Toggle in Hair/Terrain panels) |
+| **Final Render (FHD)** | `F12` |
+| **Undo / Redo** | `Ctrl+Z` / `Ctrl+Y` |
+
+---
+
+## 📜 Roadmap & License
+Developed and Maintained by **Kemal DEMİRTAŞ (maxkemal)**.
+
+RayTrophi is open-source and intended for artists, developers, and researchers. 
+*   **License:** MIT Core. (Check individual 3rd party licenses for OptiX, OIDN, etc.)
+*   **Goal:** To become the go-to open-source studio for cinematic ray-traced content.
+
+---
+*Inspired by the beauty of light and the complexity of nature.*

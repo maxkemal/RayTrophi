@@ -105,7 +105,8 @@ Vec3 Dielectric::apply_scratches(const Vec3& color, const Vec3& point) const {
 
     return Vec3::clamp(final_color, 0.0f, 1.0f);
 }
-bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
+bool Dielectric::scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const {
+    is_specular = true;
     // Normalizasyon
     Vec3 unit_direction = r_in.direction.normalize();
     Vec3 outward_normal = rec.interpolated_normal;

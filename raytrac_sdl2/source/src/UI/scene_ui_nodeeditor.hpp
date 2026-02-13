@@ -85,7 +85,8 @@ public:
             {"Filter", ImVec4(0.4f, 0.6f, 0.8f, 1.0f), {
                 {NodeType::Smooth, "Smooth"},
                 {NodeType::Normalize, "Normalize"},
-                {NodeType::Terrace, "Terrace"}
+                {NodeType::Terrace, "Terrace"},
+                {NodeType::EdgeFalloff, "Edge Falloff"}
             }},
             {"Mask", ImVec4(0.7f, 0.4f, 0.8f, 1.0f), {
                 {NodeType::HeightMask, "Height Mask"},
@@ -141,6 +142,22 @@ public:
         editor.onGraphModified = []() {
             ProjectManager::getInstance().markModified();
         };
+    }
+    
+    /**
+     * @brief Reset editor and UI state
+     */
+    void reset() {
+        lastPreviewedNodeId = 0;
+        lastPreviewedData.clear();
+        lastPreviewedWidth = 0;
+        lastPreviewedHeight = 0;
+        previewZoom = 1.0f;
+        previewPanX = 0.0f;
+        previewPanY = 0.0f;
+        isPanningPreview = false;
+        
+        editor.reset();
     }
     
     // Templated Context to avoid circular dependency with scene_ui.h
@@ -814,7 +831,7 @@ private:
                 g_bvh_rebuild_pending = true;
                 g_optix_rebuild_pending = true;
                 if (ctx.optix_gpu_ptr) {
-                    cudaDeviceSynchronize();
+                    if (g_hasCUDA) cudaDeviceSynchronize();
                     ctx.optix_gpu_ptr->resetAccumulation();
                 }
             }

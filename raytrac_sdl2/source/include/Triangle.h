@@ -244,6 +244,7 @@ public:
     const Vec3& n2_cref() const { return vertices[2].normal; }
     std::string nodeName;
     TriangleVertexData vertices[3];           // Consolidated vertex data (144 bytes)
+    int terrain_id = -1;                                // Terrain ID if this is a terrain triangle
 private:
     // ========================================================================
     // Optimized Data Members
@@ -251,6 +252,7 @@ private:
     
    
     uint16_t materialID = 0xFFFF;                       // Material lookup ID (2 bytes)
+  
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
     std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
     
@@ -261,6 +263,7 @@ private:
     // AABB Caching
     mutable AABB cachedAABB;                  // 24 bytes
     mutable bool aabbDirty = true;            // 1 byte
+    mutable Material* cachedMaterial = nullptr; // Performance cache
 
     // Scratch buffers for apply_skinning (reused across calls)
     mutable Vec3 blendedPos, blendedNorm;     // 24 bytes

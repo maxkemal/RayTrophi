@@ -12,6 +12,7 @@
 #define SCENE_UI_TERRAIN_HPP
 
 #include "scene_ui.h"
+#include "SceneSelection.h"
 #include "MaterialManager.h" // Added for material selection
 #include "OptixWrapper.h"
 #include "OptixAccelManager.h"
@@ -55,22 +56,31 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
     // -----------------------------------------------------------------------------
     // 1. TERRAIN MANAGEMENT (Create / Import)
     // -----------------------------------------------------------------------------
-    if (UIWidgets::BeginSection("Manage Terrains", ImVec4(0.4f, 0.8f, 0.5f, 1.0f), true)) {
-        ImGui::Indent(8.0f);
+    if (UIWidgets::BeginSection("Terrain Management", ImVec4(0.4f, 0.8f, 0.5f, 1.0f), true)) {
         static int new_res = 128;
         static float new_size = 100.0f;
-        static float import_height = 20.0f;
 
         // Creation Params
+        ImGui::TextDisabled("Create New Terrain:");
         ImGui::PushItemWidth(160.0f);
-        ImGui::DragInt("Resolution", &new_res, 1, 64, 2048);
+        ImGui::DragInt("Resolution", &new_res, 1, 64, 4096);
         ImGui::DragFloat("Size (m)", &new_size, 10.0f, 10.0f, 100000.0f);
         ImGui::PopItemWidth();
 
-        if (UIWidgets::PrimaryButton("Create Grid Terrain", ImVec2(-1, 0))) {
+        if (UIWidgets::PrimaryButton("Create Grid Terrain", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
             auto t = TerrainManager::getInstance().createTerrain(ctx.scene, new_res, new_size);
             if (t) {
                 terrain_brush.active_terrain_id = t->id;
+                // Open node graph for advanced editing immediately after creation
+                show_terrain_graph = true;
+                // Ensure graph is visible: close timeline and set bottom panel height
+                show_animation_panel = false;
+                bottom_panel_height = 320.0f;
+                // If terrain has generated mesh triangles, select one to sync viewport selection
+                if (!t->mesh_triangles.empty() && ctx.selection.hasSelection() == false) {
+                    auto tri = t->mesh_triangles.front();
+                    if (tri) ctx.selection.selectObject(tri, -1, tri->nodeName);
+                }
                 SCENE_LOG_INFO("Terrain created: " + t->name);
                 ctx.renderer.resetCPUAccumulation();
                 g_bvh_rebuild_pending = true;
@@ -78,42 +88,89 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             }
         }
 
+        ImGui::SameLine();
+        UIWidgets::HelpMarker("Use the node-based terrain graph (bottom panel) to build complex, procedural terrain structures and advanced edits.");
+
+        ImGui::Spacing();
         ImGui::Separator();
-
-        // Import Params
-        ImGui::PushItemWidth(160.0f);
-        ImGui::DragFloat("Max Height (m)", &import_height, 1.0f, 1.0f, 50000.0f);
-
-        static int import_res_idx = 0; // Default 512
-        const char* res_items[] = { "512 (Fast)", "1024 (Balanced)", "2048 (High)", "4096 (Extreme)" };
-        ImGui::Combo("Import Resolution", &import_res_idx, res_items, IM_ARRAYSIZE(res_items));
-        ImGui::PopItemWidth();
         
-        static int target_res = 512;
-        if (import_res_idx == 0) target_res = 512;
-        else if (import_res_idx == 1) target_res = 1024;
-        else if (import_res_idx == 2) target_res = 2048;
-        else if (import_res_idx == 3) target_res = 4096;
+        // ---------------- TERRAIN LIST ----------------
+        ImGui::TextDisabled("Terrain List:");
+        auto& terrains = TerrainManager::getInstance().getTerrains();
 
-        if (UIWidgets::SecondaryButton("Import Heightmap...", ImVec2(-1, 0))) {
-            std::string path = openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
-            if (!path.empty()) {
-                auto t = TerrainManager::getInstance().createTerrainFromHeightmap(ctx.scene, path, new_size, import_height, target_res);
-                if (t) {
-                    terrain_brush.active_terrain_id = t->id;
-                    SCENE_LOG_INFO("Terrain imported from: " + path);
-                    ctx.renderer.resetCPUAccumulation();
-                    g_bvh_rebuild_pending = true;
-                    g_optix_rebuild_pending = true;
+        // Cleanup: If terrain triangles were removed from the scene by other code,
+        // remove stale terrain entries so the list stays in sync with the viewport.
+        std::vector<int> stale_ids;
+        for (auto& tt : terrains) {
+            bool found = false;
+            for (auto& tri_ptr : tt.mesh_triangles) {
+                if (std::find(ctx.scene.world.objects.begin(), ctx.scene.world.objects.end(), tri_ptr) != ctx.scene.world.objects.end()) {
+                    found = true; break;
                 }
             }
+            if (!found) stale_ids.push_back(tt.id);
+        }
+        for (int sid : stale_ids) {
+            if (ctx.optix_gpu_ptr && g_hasCUDA) cudaDeviceSynchronize();
+            TerrainManager::getInstance().removeTerrain(ctx.scene, sid);
+            if (terrain_brush.active_terrain_id == sid) terrain_brush.active_terrain_id = -1;
+            SCENE_LOG_INFO("Removed stale terrain: " + std::to_string(sid));
+            ctx.renderer.resetCPUAccumulation();
+            g_bvh_rebuild_pending = true; g_optix_rebuild_pending = true;
+        }
+        
+        if (terrains.empty()) {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No terrains created.");
+        }
+        else {
+             // Create a scrollable list with fixed height
+             if (ImGui::BeginChild("TerrainList", ImVec2(0, 150), true)) {
+                 for (size_t ti = 0; ti < terrains.size(); ++ti) {
+                     auto& t = terrains[ti];
+                     bool is_selected = (terrain_brush.active_terrain_id == t.id);
+                     std::string label = t.name + " (ID: " + std::to_string(t.id) + ")";
+                     
+                     if (ImGui::Selectable(label.c_str(), is_selected)) {
+                         terrain_brush.active_terrain_id = t.id;
+                         // Select a representative triangle so the viewport selection matches the list
+                         if (!t.mesh_triangles.empty()) {
+                             auto tri = t.mesh_triangles.front();
+                             if (tri) ctx.selection.selectObject(tri, -1, tri->nodeName);
+                         }
+                         SCENE_LOG_INFO("Active terrain switched to: " + t.name);
+                         // Trigger rebuild for highlighting or gizmos if necessary
+                         ctx.renderer.resetCPUAccumulation(); 
+                     }
+                     
+                     if (is_selected) {
+                         ImGui::SetItemDefaultFocus();
+                     }
+
+                     // Right-click context: delete single terrain
+                     std::string popup_id = "terrain_ctx_" + std::to_string(t.id);
+                     if (ImGui::BeginPopupContextItem(popup_id.c_str())) {
+                         if (ImGui::MenuItem("Delete")) {
+                             if (ctx.optix_gpu_ptr && g_hasCUDA) cudaDeviceSynchronize();
+                             TerrainManager::getInstance().removeTerrain(ctx.scene, t.id);
+                             if (terrain_brush.active_terrain_id == t.id) terrain_brush.active_terrain_id = -1;
+                             SCENE_LOG_INFO("Terrain deleted from list: " + t.name);
+                             ctx.renderer.resetCPUAccumulation();
+                             g_bvh_rebuild_pending = true; g_optix_rebuild_pending = true;
+                             ImGui::EndPopup();
+                             break; // terrains vector changed, break out of loop
+                         }
+                         ImGui::EndPopup();
+                     }
+                 }
+             }
+             ImGui::EndChild();
         }
 
         ImGui::Spacing();
         ImGui::Separator();
 
-        if (UIWidgets::DangerButton("Clear All Terrains", ImVec2(-1, 0))) {
-            if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
+        if (UIWidgets::DangerButton("Clear All Terrains", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            if (ctx.optix_gpu_ptr && g_hasCUDA) cudaDeviceSynchronize();
             TerrainManager::getInstance().removeAllTerrains(ctx.scene);
             terrain_brush.active_terrain_id = -1;
             SCENE_LOG_INFO("All terrains cleared.");
@@ -121,7 +178,6 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             g_bvh_rebuild_pending = true;
             g_optix_rebuild_pending = true;
         }
-        ImGui::Unindent(8.0f);
         UIWidgets::EndSection();
     }
 
@@ -133,8 +189,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
     if (terrain_brush.active_terrain_id != -1) {
         auto* t = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
         if (t) {
-            if (UIWidgets::BeginSection("Mesh Quality", ImVec4(0.6f, 1.0f, 0.8f, 1.0f), false)) {
-                ImGui::Indent(8.0f);
+            if (UIWidgets::BeginSection("Mesh Quality", ImVec4(0.6f, 1.0f, 0.8f, 1.0f), true)) {
+                // Normal Quality Dropdown
                 // Normal Quality Dropdown
                 const char* normalQualityItems[] = { "Fast (4-neighbor)", "Sobel (8-neighbor)", "High Quality" };
                 int nq = (int)t->normal_quality;
@@ -148,11 +204,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     g_optix_rebuild_pending = true;
                     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                 }
-                UIWidgets::HelpMarker("Fast: Simple 4-neighbor average\nSobel: Smooth 8-neighbor filter (recommended)\nHigh Quality: Enhanced edge detection");
+                ImGui::SameLine(); UIWidgets::HelpMarker("Fast: Simple 4-neighbor average\nSobel: Smooth 8-neighbor filter (recommended)\nHigh Quality: Enhanced edge detection");
                 
                 // Normal Strength Slider
                 ImGui::PushItemWidth(160.0f);
-                if (SceneUI::DrawSmartFloat("nstr", "Normal Str", &t->normal_strength, 0.1f, 3.0f, "%.2f", false, nullptr, 16)) {
+                if (SceneUI::DrawSmartFloat("nstr", "Normal Strength", &t->normal_strength, 0.1f, 10.0f, "%.2f", false, nullptr, 16)) {
                     t->dirty_mesh = true;
                     TerrainManager::getInstance().updateTerrainMesh(t);
                     ctx.renderer.resetCPUAccumulation();
@@ -161,13 +217,13 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                 }
                 ImGui::PopItemWidth();
+                ImGui::SameLine(); UIWidgets::HelpMarker("Intensity of surface detail lighting (bumpiness).");
                 
                 // Dirty Sectors Info
                 int dirtySectors = t->dirty_region.countDirtySectors();
                 if (dirtySectors > 0) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Dirty Sectors: %d/256", dirtySectors);
+                    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Pending Sectors: %d/256", dirtySectors);
                 }
-                ImGui::Unindent(8.0f);
                 UIWidgets::EndSection();
             }
             
@@ -175,38 +231,39 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             
             ImGui::Spacing();
 
-            // -----------------------------------------------------------------------------
             // 3. LAYER MANAGEMENT
-            // -----------------------------------------------------------------------------
-            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Layer Management");
-            ImGui::Separator();
+            if (UIWidgets::BeginSection("Materials & Layers", ImVec4(0.5f, 0.8f, 1.0f, 1.0f), true)) {
+                ImGui::SameLine(); UIWidgets::HelpMarker("Manages which materials (grass, rock, snow, etc.) are used at different heights and slopes.");
 
             if (t->layers.empty()) {
-                if (ImGui::Button("Initialize Layers")) {
+                if (UIWidgets::PrimaryButton("Initialize Layers", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
                     TerrainManager::getInstance().initLayers(t);
                     SCENE_LOG_INFO("Terrain layers initialized for: " + t->name);
-                    g_optix_rebuild_pending = true; // Rebuild SBT
+                    if (ctx.optix_gpu_ptr) {
+                        ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                        ctx.optix_gpu_ptr->resetAccumulation();
+                        ctx.renderer.resetCPUAccumulation();
+                    }
                 }
             }
             else {
                 // Layer Editors
-                // Define layer names for auto-creation
-                static const char* autoLayerNames[4] = {"Grass", "Rock", "Snow", "Dirt"};
+                static const char* autoLayerNames[4] = {"Grass", "Rock", "Snow", "Flow"};
                 static const Vec3 autoLayerColors[4] = {
-                    Vec3(0.3f, 0.5f, 0.2f),  // Grass: green-ish
-                    Vec3(0.4f, 0.4f, 0.4f),  // Rock: gray
-                    Vec3(0.9f, 0.9f, 0.95f), // Snow: white
-                    Vec3(0.5f, 0.35f, 0.2f)  // Dirt: brown
+                    Vec3(0.3f, 0.5f, 0.2f),  // Grass
+                    Vec3(0.4f, 0.4f, 0.4f),  // Rock
+                    Vec3(0.9f, 0.9f, 0.95f), // Snow
+                    Vec3(0.5f, 0.35f, 0.2f)  // Flow (Riverbeds)
                 };
                 
                 for (int i = 0; i < 4; i++) {
                     ImGui::PushID(i);
                     std::string layerName = "";
                     ImVec4 layerColor;
-                    if (i == 0) { layerName = "Layer 0 (Grass)"; layerColor = ImVec4(0.5, 0.8, 0.5, 1); }
-                    else if (i == 1) { layerName = "Layer 1 (Rock)"; layerColor = ImVec4(0.6, 0.6, 0.6, 1); }
-                    else if (i == 2) { layerName = "Layer 2 (Snow)"; layerColor = ImVec4(0.9, 0.9, 1.0, 1); }
-                    else { layerName = "Layer 3 (Dirt)"; layerColor = ImVec4(0.7, 0.6, 0.4, 1); }
+                    if (i == 0) { layerName = "Layer 0 (Grass/Flat)"; layerColor = ImVec4(0.5, 0.8, 0.5, 1); }
+                    else if (i == 1) { layerName = "Layer 1 (Rock/Slope)"; layerColor = ImVec4(0.6, 0.6, 0.6, 1); }
+                    else if (i == 2) { layerName = "Layer 2 (Snow/Peak)"; layerColor = ImVec4(0.9, 0.9, 1.0, 1); }
+                    else { layerName = "Layer 3 (Flow/River)"; layerColor = ImVec4(0.5, 0.7, 1.0, 1); }
 
                     ImGui::TextColored(layerColor, "%s", layerName.c_str());
 
@@ -215,14 +272,18 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     if (t->layers[i]) currentMatName = t->layers[i]->materialName;
                     else currentMatName = "[None]";
 
-                    ImGui::SetNextItemWidth(160.0f); // Fixed width per user request
+                    ImGui::SetNextItemWidth(160.0f);
                     if (ImGui::BeginCombo("Material", currentMatName.c_str())) {
                         auto& materials = MaterialManager::getInstance().getAllMaterials();
                         for (auto& mat : materials) {
                             bool is_selected = (t->layers[i] == mat);
                             if (ImGui::Selectable(mat->materialName.c_str(), is_selected)) {
                                 t->layers[i] = mat;
-                                g_optix_rebuild_pending = true;
+                                if (ctx.optix_gpu_ptr) {
+                                    ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                    ctx.renderer.resetCPUAccumulation();
+                                }
                             }
                             if (is_selected) ImGui::SetItemDefaultFocus();
                         }
@@ -238,15 +299,23 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             newMat->materialName = matName;
                             MaterialManager::getInstance().addMaterial(matName, newMat);
                             t->layers[i] = newMat;
-                            g_optix_rebuild_pending = true;
+                            if (ctx.optix_gpu_ptr) {
+                                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                                ctx.renderer.resetCPUAccumulation();
+                            }
                             SCENE_LOG_INFO("Created terrain layer material: " + matName);
                         }
                     }
 
                     // UV Scale
                         ImGui::PushItemWidth(160.0f);
-                        if (SceneUI::DrawSmartFloat("uvs", "UV Scale", &t->layer_uv_scales[i], 0.1f, 1000.0f, "%.1f", false, nullptr, 12)) {
-                            g_optix_rebuild_pending = true;
+                        if (SceneUI::DrawSmartFloat("uvs", "UV Tile Scale", &t->layer_uv_scales[i], 0.1f, 1000.0f, "%.1f", false, nullptr, 12)) {
+                            if (ctx.optix_gpu_ptr) {
+                                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                                ctx.optix_gpu_ptr->resetAccumulation();
+                                ctx.renderer.resetCPUAccumulation();
+                            }
                         }
                         ImGui::PopItemWidth();
                     
@@ -264,7 +333,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             t->splatMap->updateGPU(); // Helper needed? or manually?
                             // Texture::updateGPU() exists in Texture.h (I saw it).
                             t->splatMap->updateGPU();
-                            g_optix_rebuild_pending = true;
+                            if (ctx.optix_gpu_ptr) ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
                             if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
                             SCENE_LOG_INFO("Filled mask for Layer " + std::to_string(i));
                         }
@@ -315,7 +384,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                         ctx.renderer.stopRendering();
                                         // Wait a tiny bit to ensure kernel finished
                                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                                        cudaDeviceSynchronize(); // Force GPU idle
+                                                        if (g_hasCUDA) cudaDeviceSynchronize(); // Force GPU idle
                                         
                                         TextureType type = isNormal ? TextureType::Normal : TextureType::Albedo;
                                         if (std::string(label) == "Roughness") type = TextureType::Roughness;
@@ -332,7 +401,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                         }
 
                                         // CRITICAL: Request Geometry/SBT Rebuild to update texture handles in SBT
-                                        g_optix_rebuild_pending = true;
+                                        // g_optix_rebuild_pending = true; // Fast sync handles this now
 
                                         ctx.renderer.resetCPUAccumulation();
                                         if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
@@ -352,7 +421,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                             texture_graveyard.push_back(texSlot);
                                         }
 
-                                        cudaDeviceSynchronize(); // Force GPU idle
+                                                        if (g_hasCUDA) cudaDeviceSynchronize(); // Force GPU idle
 
                                         texSlot = nullptr;
 
@@ -363,7 +432,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
                                         // CRITICAL: Request Geometry/SBT Rebuild to update texture handles in SBT
                                         // The main loop will handle this, ensuring synchronization.
-                                        g_optix_rebuild_pending = true;
+                                        // g_optix_rebuild_pending = true; // Fast sync handles this now
 
                                         ctx.renderer.resetCPUAccumulation();
                                         if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
@@ -388,28 +457,45 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ImGui::PopID();
                 }
             }
+            UIWidgets::EndSection();
+        }
 
             ImGui::Spacing();
 
-            // ===============================================================
             // 4. CENTRALIZED FOLIAGE SYSTEM
-            // ===============================================================
-            UIWidgets::ColoredHeader("Foliage System", ImVec4(0.3f, 0.9f, 0.4f, 1.0f));
+            if (UIWidgets::BeginSection("Foliage System", ImVec4(0.3f, 0.9f, 0.4f, 1.0f), true)) {
+                ImGui::SameLine(); UIWidgets::HelpMarker("Allows you to place trees, rocks, grass, etc., on the terrain via brushes or procedural scatter.");
             
             InstanceManager& im = InstanceManager::getInstance();
             static char newFolGroupName[64] = "New Foliage Layer";
             ImGui::SetNextItemWidth(160.0f);
             ImGui::InputText("##NewFolName", newFolGroupName, 64);
             ImGui::SameLine();
-            if (ImGui::Button("Create Foliage Layer")) {
+            if (UIWidgets::PrimaryButton("Create Layer", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
                 std::string gName = std::string(newFolGroupName);
-                if (gName.find("Foliage") == std::string::npos) gName = "Foliage_" + gName;
+                if (gName.find("Foliage") == std::string::npos && gName.find("Scatter") == std::string::npos) 
+                    gName = "Foliage_" + gName;
                 
-                // Fix: Explicit empty vector type
-                int newId = im.createGroup(gName, "", std::vector<std::shared_ptr<Triangle>>{});
+                // Ensure unique name
+                auto& existingGroups = im.getGroups();
+                int suffix = 1;
+                std::string finalName = gName;
+                bool exists = true;
+                while (exists) {
+                    exists = false;
+                    for (const auto& grp : existingGroups) {
+                        if (grp.name == finalName) {
+                            exists = true;
+                            finalName = gName + "_" + std::to_string(suffix++);
+                            break;
+                        }
+                    }
+                }
+                
+                int newId = im.createGroup(finalName, "", std::vector<std::shared_ptr<Triangle>>{});
                 InstanceGroup* g = im.getGroup(newId);
-                if (g) g->brush_settings.splat_map_channel = -1; // Default to None so it works immediately
-                SCENE_LOG_INFO("Created Foliage Layer: " + gName);
+                if (g) g->brush_settings.splat_map_channel = -1; 
+                SCENE_LOG_INFO("Created Foliage Layer: " + finalName);
             }
             
             ImGui::Spacing();
@@ -423,9 +509,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 if (group.name.find("Foliage") == std::string::npos && group.name.find("Scatter") == std::string::npos) continue; 
                 
                 ImGui::PushID((int)group.id);
-                // Display Name + Count. Use ### to separate ID from changing label.
-                std::string headerLabel = group.name + " (" + std::to_string(group.instances.size()) + ")###Header" + std::to_string(group.id);
-                if (ImGui::TreeNode(headerLabel.c_str())) {                   
+                // Header with icon placeholder spacing
+                std::string headerLabel = "   " + group.name + " (" + std::to_string(group.instances.size()) + ")###Header" + std::to_string(group.id);
+                if (ImGui::TreeNode(headerLabel.c_str())) {
+                    ImVec2 hp = ImGui::GetItemRectMin();
+                    UIWidgets::DrawIcon(UIWidgets::IconType::Scene, ImVec2(hp.x + 10, hp.y + 2), 14, 0xFFBBBBBB);
                     
                     // RENAME and IDENTITY
                     char renameBuf[64];
@@ -439,8 +527,13 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     
                     // SOURCES
                      ImGui::Separator();
-                     ImGui::Text("Sources:");
-                     if (ImGui::Button("+ Add Selection")) {
+                     ImGui::Text("   Source Meshes:");
+                     {
+                         ImVec2 cp = ImGui::GetItemRectMin();
+                         UIWidgets::DrawIcon(UIWidgets::IconType::Mesh, ImVec2(cp.x + 4, cp.y + 1), 12, 0xFFBBBBBB);
+                     }
+                     ImGui::SameLine(); UIWidgets::HelpMarker("Select the 3D models to be used in this layer. If multiple models are added, they will be distributed randomly.");
+                     if (UIWidgets::SecondaryButton("+ Add Selected", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                          if (ctx.selection.hasSelection()) {
                              std::string n = ctx.selection.selected.name;
                              std::vector<std::shared_ptr<Triangle>> tris;
@@ -453,11 +546,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              } else {
                                   SCENE_LOG_WARN("Selection invalid.");
                              }
-                         }
+                        }
                      }
                      
                      ImGui::SameLine();
-                     if (ImGui::Button("Pick from List")) {
+                     if (UIWidgets::SecondaryButton("Pick from List", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                          ImGui::OpenPopup("ObjPicker");
                      }
                      
@@ -530,12 +623,19 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      }
                      
                      ImGui::Separator();
+                     ImGui::Separator();
                      // ACTIONS
-                     ImGui::Text("Scatter Settings:");
+                     ImGui::Text("   Scatter Settings (Global):");
+                     {
+                         ImVec2 cp = ImGui::GetItemRectMin();
+                         UIWidgets::DrawIcon(UIWidgets::IconType::World, ImVec2(cp.x + 4, cp.y + 1), 12, 0xFFBBBBBB);
+                     }
                      ImGui::PushItemWidth(160.0f);
-                     ImGui::DragInt("Total Count", &group.brush_settings.target_count, 100, 1, 10000000);
-                     ImGui::InputInt("Seed", &group.brush_settings.seed);
-                     ImGui::DragFloat("Min Distance", &group.brush_settings.min_distance, 0.1f, 0.0f, 50.0f);
+                     ImGui::DragInt("Target Count", &group.brush_settings.target_count, 100, 1, 10000000);
+                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Total number of instances to spread across the whole terrain.");
+                     ImGui::InputInt("Seed (Randomness)", &group.brush_settings.seed);
+                     ImGui::DragFloat("Min. Distance", &group.brush_settings.min_distance, 0.1f, 0.0f, 50.0f);
+                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum distance between instances (m). Prevents overlap.");
                      ImGui::PopItemWidth();
                      
                      // Helper helper for brush state
@@ -545,7 +645,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
                      // Paint Button
                      if (is_painting) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                     if (ImGui::Button("Paint##Fol")) {
+                     if (ImGui::Button("Paint (Add)", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
                          if (is_painting) {
                              foliage_brush.enabled = false;
                              foliage_brush.active_group_id = -1;
@@ -561,7 +661,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      
                      // Erase Button
                      if (is_erasing) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
-                     if (ImGui::Button("Erase##Fol")) {
+                     if (ImGui::Button("Erase (Remove)", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
                          if (is_erasing) {
                              foliage_brush.enabled = false;
                              foliage_brush.active_group_id = -1;
@@ -589,52 +689,91 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                      
                      ImGui::Separator();
 
-                        ImGui::Text("Placement Rules");
+                         UIWidgets::ColoredHeader("      Placement Rules", ImVec4(0.4f, 0.7f, 1.0f, 1.0f));
+                         {
+                             ImVec2 cp = ImGui::GetItemRectMin();
+                             UIWidgets::DrawIcon(UIWidgets::IconType::System, ImVec2(cp.x + 12, cp.y + 2), 14, 0xFFBBBBBB);
+                         }
+                        ImGui::SameLine(); UIWidgets::HelpMarker("Configures the growth logic of the foliage. Plants can be filtered by altitude, slope, and terrain shape.");
+                        
                         ImGui::PushItemWidth(160.0f);
                         // Height Range
-                        ImGui::DragFloatRange2("Height Range", &group.brush_settings.height_min, &group.brush_settings.height_max, 1.0f, -500.0f, 2000.0f, "Min: %.1f m", "Max: %.1f m");
+                        ImGui::DragFloatRange2("Altitude Range", &group.brush_settings.height_min, &group.brush_settings.height_max, 1.0f, -1000.0f, 5000.0f, "Min: %.1f m", "Max: %.1f m");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Restricts placement within a specific sea-level altitude range.");
                         
                         // Slope Limit
-                        ImGui::DragFloat("Max Slope", &group.brush_settings.slope_max, 1.0f, 0.0f, 90.0f, "%.1f deg");
+                        ImGui::DragFloat("Slope Limit", &group.brush_settings.slope_max, 1.0f, 0.0f, 90.0f, "%.1f deg");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Maximum steepness for placement.\n0 = Only flats\n90 = Everywhere including vertical cliffs.");
+                        
+                        // Slope Direction (Exposure/Aspect)
+                        ImGui::TextDisabled("Aspect Filter (Biology):");
+                        ImGui::SameLine(); UIWidgets::HelpMarker("Simulates plant exposure to sunlight. You can place more vegetation on North (shaded) or South (sunny) facing slopes.");
+
+                        if (SceneUI::DrawSmartFloat("sd_angle", "Target Angle", &group.brush_settings.slope_direction_angle, 0.0f, 360.0f, "%.0f deg", false, nullptr, 16)) {
+                            while(group.brush_settings.slope_direction_angle < 0) group.brush_settings.slope_direction_angle += 360;
+                            while(group.brush_settings.slope_direction_angle >= 360) group.brush_settings.slope_direction_angle -= 360;
+                        }
+                        
+                        // Small Visual Compass Indicator
+                        ImGui::SameLine();
+                        ImDrawList* drawList = ImGui::GetWindowDrawList();
+                        ImVec2 cp = ImGui::GetCursorScreenPos();
+                        float c_size = 10.0f;
+                        cp.x += c_size + 5;
+                        cp.y += 10.0f;
+                        drawList->AddCircleFilled(cp, c_size + 2, IM_COL32(40, 40, 40, 255));
+                        drawList->AddCircle(cp, c_size, IM_COL32(200, 200, 200, 255), 16);
+                        
+                        float s_rad = group.brush_settings.slope_direction_angle * 0.0174533f;
+                        ImVec2 s_needle(cp.x + sinf(s_rad) * c_size, cp.y - cosf(s_rad) * c_size);
+                        drawList->AddLine(cp, s_needle, IM_COL32(255, 80, 80, 255), 2.0f);
+                        drawList->AddText(ImVec2(cp.x - 3, cp.y - c_size - 14), IM_COL32(255, 255, 255, 150), "N");
+                        ImGui::Dummy(ImVec2(c_size * 2 + 20, 1)); 
+                        
+                        SceneUI::DrawSmartFloat("sd_inf", "Influence", &group.brush_settings.slope_direction_influence, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Determines how strictly the target angle is followed.\n0 = All sides\n1 = Strict directional placement.");
                         ImGui::PopItemWidth();
                         
                         // Curvature (Flow/Ridge detection)
-                        ImGui::TextDisabled("Curvature Filter:");
-                        ImGui::SameLine();
+                        ImGui::TextDisabled("Curvature (Shape) Filter:");
+                        ImGui::SameLine(); UIWidgets::HelpMarker("Identifies terrain features like Ridges (peaks), Gullies (valleys), or Flats. Essential for realistic ecosystem distribution.");
+                        
                         ImGui::SetNextItemWidth(160.0f);
-                        ImGui::DragInt("Scale", &group.brush_settings.curvature_step, 0.1f, 1, 20, "%d px");
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Feature Scale (Step Size)\nIncrease to detect larger features like river beds or ignore noise.\n1 = Micro/Pixel details\n5+ = Macro/Terrain features");
+                        ImGui::DragInt("Detail Scale", &group.brush_settings.curvature_step, 0.1f, 1, 30, "%d px");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sampling distance for feature detection.\nSmall = Sharp ridges/cracks\nLarge = Broad mountain caps / river beds");
                         
                         // Line 1: Ridges
                         ImGui::Checkbox("Ridges", &group.brush_settings.allow_ridges);
                         if (group.brush_settings.allow_ridges) {
                             ImGui::SameLine();
+                            UIWidgets::HelpMarker("Convex areas like mountain crests and hill tops.");
+                            ImGui::SameLine();
                             ImGui::SetNextItemWidth(80);
-                            SceneUI::DrawSmartFloat("##RThresh", "", &group.brush_settings.curvature_min, -50.0f, -0.1f, "< %.1f", false, nullptr, 0); // 0 label width as label is empty
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Threshold: Values below this are considered Ridges");
+                            SceneUI::DrawSmartFloat("##RThresh", "", &group.brush_settings.curvature_min, -200.0f, -0.01f, "< %.2f", false, nullptr, 0); 
                         }
 
                         // Line 2: Gullies
-                        ImGui::SameLine();
                         ImGui::Checkbox("Gullies", &group.brush_settings.allow_gullies);
-                         if (group.brush_settings.allow_gullies) {
+                        if (group.brush_settings.allow_gullies) {
+                            ImGui::SameLine();
+                            UIWidgets::HelpMarker("Concave areas like valleys, river beds and depressions.");
                             ImGui::SameLine();
                             ImGui::SetNextItemWidth(80);
-                            SceneUI::DrawSmartFloat("##GThresh", "", &group.brush_settings.curvature_max, 0.1f, 50.0f, "> %.1f", false, nullptr, 0);
-                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Threshold: Values above this are considered Gullies/Channels");
+                            SceneUI::DrawSmartFloat("##GThresh", "", &group.brush_settings.curvature_max, 0.01f, 200.0f, "> %.2f", false, nullptr, 0);
                         }
 
                         // Line 3: Flats (Middle)
                         ImGui::Checkbox("Flats", &group.brush_settings.allow_flats);
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Allow areas between Ridge and Gully thresholds");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stable areas that are neither crests nor troughs.");
                         
                         // Splat Map Channel
-                        const char* channels[] = { "None", "Red (Grass/Flat)", "Green (Slope)", "Blue (Height/Cliff)", "Alpha (Flow/Mask)" };
+                        const char* channels[] = { "None", "Red (Grass/Flat)", "Green (Slope/Rock)", "Blue (Height/Snow)", "Alpha (Flow Map)" };
                         int current_idx = group.brush_settings.splat_map_channel + 1; // Map -1 to 0, 0 to 1, etc.
                         ImGui::PushItemWidth(160.0f);
                         if (ImGui::Combo("Mask Channel", &current_idx, channels, 5)) {
                             group.brush_settings.splat_map_channel = current_idx - 1;
                         }
+                        ImGui::SameLine(); UIWidgets::HelpMarker("Restricts placement based on terrain paint data.");
                         ImGui::PopItemWidth();
 
                         if (group.brush_settings.splat_map_channel != -1) {
@@ -649,15 +788,15 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         if (ImGui::Combo("Exclude Channel", &ex_idx, channels, 5)) {
                             group.brush_settings.exclusion_channel = ex_idx - 1;
                         }
+                        ImGui::SameLine(); UIWidgets::HelpMarker("Placement is prevented where this channel is painted (e.g., roads).");
                         ImGui::PopItemWidth();
                         if (group.brush_settings.exclusion_channel != -1) {
                              ImGui::SameLine();
                              ImGui::SetNextItemWidth(80);
-                             ImGui::DragFloat("Thresh##Ex", &group.brush_settings.exclusion_threshold, 0.05f, 0.0f, 1.0f);
-                             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Values in this channel ABOVE this threshold will be excluded.");
+                             ImGui::DragFloat("Threshold##Ex", &group.brush_settings.exclusion_threshold, 0.05f, 0.0f, 1.0f);
                         }
 
-                        if (ImGui::Button("Scatter Procedurally")) {
+                        if (UIWidgets::PrimaryButton("Scatter Procedurally", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
                         // Clear existing instances to ensure fresh generation (Replace vs Append)
                         group.clearInstances();
 
@@ -787,33 +926,61 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             sx = std::clamp(sx, step, t->heightmap.width - 1 - step);
                             sz = std::clamp(sz, step, t->heightmap.height - 1 - step);
                             
-                            // Sample neighbors with step
-                            float hl = t->heightmap.getHeight(sx - step, sz);
-                            float hr = t->heightmap.getHeight(sx + step, sz);
-                            float hu = t->heightmap.getHeight(sx, sz - step);
-                            float hd = t->heightmap.getHeight(sx, sz + step);
+                             // Sample neighbors with step (Use normalized data for scale-invariant curvature)
+                             // Laplacian = (L + R + U + D) - 4*C
+                             float hl = t->heightmap.data[sz * t->heightmap.width + (sx - step)];
+                             float hr = t->heightmap.data[sz * t->heightmap.width + (sx + step)];
+                             float hu = t->heightmap.data[(sz - step) * t->heightmap.width + sx];
+                             float hd = t->heightmap.data[(sz + step) * t->heightmap.width + sx];
+                             float h_center_norm = t->heightmap.data[sz * t->heightmap.width + sx];
+
+                             float laplacian_norm = (hl + hr + hu + hd) - 4.0f * h_center_norm;
+                             // Sensitivity Adjustment: Dividing by step size ensures that macro features 
+                             // don't produce extreme Laplacian values compared to micro features.
+                             float laplacian = (laplacian_norm / (float)(step * step)) * 1000.0f; 
+                             
+                             // 4. Slope calculation still needs world heights for degrees
+                             float hl_world = hl * t->heightmap.scale_y;
+                             float hr_world = hr * t->heightmap.scale_y;
+                             float hu_world = hu * t->heightmap.scale_y;
+                             float hd_world = hd * t->heightmap.scale_y;
                             
-                            float slopeRunX = 2.0f * hmCellSizeX;
-                            float slopeRunZ = 2.0f * hmCellSizeZ;
+                            float slopeRunX = 2.0f * hmCellSizeX * step; // Adjusted for step
+                            float slopeRunZ = 2.0f * hmCellSizeZ * step; // Adjusted for step
                             
-                            float dX_central = fabsf(hr - hl) / slopeRunX;
-                            float dZ_central = fabsf(hd - hu) / slopeRunZ;
-                            float slopeTan = sqrtf(dX_central*dX_central + dZ_central*dZ_central);
-                            float slopeDeg = atan(slopeTan) * 57.2958f;
+                             float dX_raw = (hr_world - hl_world) / slopeRunX;
+                             float dZ_raw = (hd_world - hu_world) / slopeRunZ;
+                            
+                            float dX_central = fabsf(dX_raw);
+                            float dZ_central = fabsf(dZ_raw);
+                            float slopeRunComp = sqrtf(dX_central*dX_central + dZ_central*dZ_central);
+                            float slopeDeg = atan(slopeRunComp) * 57.2958f;
                             
                             if (slopeDeg > group.brush_settings.slope_max) {
                                 continue;
                             }
+
+                            // 4.5. Slope Direction (Exposure/Aspect) Check
+                            if (group.brush_settings.slope_direction_influence > 0.01f && slopeDeg > 2.0f) {
+                                // Direction vector in XZ plane (DOWNHILL): (-dX_raw, -dZ_raw)
+                                // atan2(x, z) gives angle where 0 is North/Z+
+                                float lookRad = atan2f(-dX_raw, -dZ_raw); 
+                                float lookDeg = lookRad * 57.2958f;
+                                if (lookDeg < 0) lookDeg += 360.0f;
+                                
+                                float targetDeg = group.brush_settings.slope_direction_angle;
+                                float diff = fabsf(lookDeg - targetDeg);
+                                if (diff > 180.0f) diff = 360.0f - diff;
+                                
+                                // Exponential/Cosine falloff for natural transition
+                                float dirWeight = std::max(0.0f, cosf(diff * 0.0174533f)); 
+                                // Mix based on influence
+                                float finalDirProb = (1.0f - group.brush_settings.slope_direction_influence) + (group.brush_settings.slope_direction_influence * dirWeight);
+                                
+                                if (dist(rng) > finalDirProb) continue;
+                            }
                             
-                            // 5. Curvature Check (Laplacian)
-                            // (Left + Right + Up + Down - 4*Center)
-                            // Positive = Concave (Bowl/Valley)
-                            // Negative = Convex (Hill/Ridge)
-                            // NOTE: Neighbors (hl, hr, hu, hd) and center (h_center) MUST be sampled from the same grid indices used for slope.
-                            // We used neighbors of (sx, sz) for slope. We need h_center at (sx, sz).
-                            float h_center = t->heightmap.getHeight(sx, sz);
-                            
-                            float laplacian = (hl + hr + hu + hd) - 4.0f * h_center;
+                             // Laplacian already calculated above using normalized data
                             
                             bool is_ridge = laplacian < group.brush_settings.curvature_min;
                             bool is_gully = laplacian > group.brush_settings.curvature_max;
@@ -873,14 +1040,14 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         ctx.renderer.resetCPUAccumulation();
                      }
                      ImGui::SameLine();
-                     if (ImGui::Button("Clear Instances")) {
-                         group.clearInstances();
-                         SceneUI::syncInstancesToScene(ctx, group, true);
-                         g_optix_rebuild_pending = true;
-                         ctx.renderer.resetCPUAccumulation();
-                     }
+                         if (UIWidgets::DangerButton("Clear Instances", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
+                             group.clearInstances();
+                             SceneUI::syncInstancesToScene(ctx, group, true);
+                             g_optix_rebuild_pending = true;
+                             ctx.renderer.resetCPUAccumulation();
+                         }
                      ImGui::SameLine();
-                     if (ImGui::Button("Delete Layer")) {
+                     if (ImGui::Button("Delete Layer", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
                          fol_remove_id = group.id;
                      }
                     
@@ -955,137 +1122,99 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     
                     ctx.renderer.resumeRendering();
 
-                    g_optix_rebuild_pending = true;
+                }
+            }
+            ImGui::Unindent();
+            UIWidgets::EndSection();
+        }
+
+            // 5. PROCEDURAL TOOLS & MASKS
+            if (UIWidgets::BeginSection("Procedural Generators", ImVec4(0.8f, 0.4f, 1.0f, 1.0f), true)) {
+                ImGui::Indent();
+
+                UIWidgets::ColoredHeader("Auto-Mask Generation", ImVec4(0.7f, 0.9f, 0.8f, 1.0f));
+                ImGui::PushItemWidth(160.0f);
+                SceneUI::DrawSmartFloat("mhmin", "Height Start", &t->am_height_min, 0.0f, 500.0f, "%.1f", false, nullptr, 12);
+                SceneUI::DrawSmartFloat("mhmax", "Height End", &t->am_height_max, 0.0f, 500.0f, "%.1f", false, nullptr, 12);
+                SceneUI::DrawSmartFloat("mslope", "Slope Steep", &t->am_slope, 1.0f, 20.0f, "%.1f", false, nullptr, 12);
+                SceneUI::DrawSmartFloat("mflow", "Flow Thresh", &t->am_flow_threshold, 1.0f, 500.0f, "%.0f", false, nullptr, 12);
+                ImGui::PopItemWidth();
+
+                if (UIWidgets::PrimaryButton("Generate Mask", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+                    TerrainManager::getInstance().autoMask(t, 0.0f, 0.0f, t->am_height_min, t->am_height_max, t->am_slope);
                     ctx.renderer.resetCPUAccumulation();
-                 }
-            }
+                    if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.optix_gpu_ptr) ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                    SCENE_LOG_INFO("Auto-mask generated for: " + t->name);
+                }
 
-            // Auto Mask
-            UIWidgets::ColoredHeader("Procedural Auto-Mask", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
-            
-            ImGui::PushItemWidth(160.0f);
-            if (SceneUI::DrawSmartFloat("mhmin", "Height Start", &t->am_height_min, 0.0f, 500.0f, "%.1f", false, nullptr, 12)) {}
-            if (SceneUI::DrawSmartFloat("mhmax", "Height End", &t->am_height_max, 0.0f, 500.0f, "%.1f", false, nullptr, 12)) {}
-            if (SceneUI::DrawSmartFloat("mslope", "Slope Steep", &t->am_slope, 1.0f, 20.0f, "%.1f", false, nullptr, 12)) {}
-            ImGui::PopItemWidth();
-
-            if (ImGui::Button("Generate Mask")) {
-                TerrainManager::getInstance().autoMask(t, 0.0f, 0.0f, t->am_height_min, t->am_height_max, t->am_slope);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                g_optix_rebuild_pending = true;
-                SCENE_LOG_INFO("Auto-mask generated for: " + t->name);
-            }
-            
-            ImGui::SameLine();
-            ImGui::SameLine();
-            static float bake_flow_threshold = 25.0f;
-            if (ImGui::Button("Bake Flow to Alpha")) {
-                if (t->splatMap && t->splatMap->is_loaded()) {
-                    // Simple Flow Accumulation Logic (Single Pass Downhill)
-                    // 1. Compute Flow
-                    std::vector<float> flow(t->heightmap.width * t->heightmap.height, 1.0f); // Init with 1 (rain)
-                    
-                    // Iterate by height (highest first) - approximate by just grid iteration? 
-                    // No, for flow we really need sorted height. But for UI tool, maybe a simpler local slope accumulation?
-                    // Let's do a simple multi-pass accumulation.
-                    
-                    int w = t->heightmap.width;
-                    int h = t->heightmap.height;
-                    
-                    // Create indices and sort by height (descending)
-                    std::vector<std::pair<float, int>> sorted_idx;
-                    sorted_idx.reserve(w * h);
-                    for(int z=0; z<h; z++) {
-                        for(int x=0; x<w; x++) {
-                            sorted_idx.push_back({t->heightmap.getHeight(x, z), z*w + x});
-                        }
+                if (ImGui::Button("Import Splat Map", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+                    std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0");
+                    if (!path.empty()) {
+                        TerrainManager::getInstance().importSplatMap(t, path);
+                        ctx.renderer.resetCPUAccumulation();
+                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.optix_gpu_ptr) ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
                     }
-                    std::sort(sorted_idx.rbegin(), sorted_idx.rend()); // High to Low
-                    
-                    // Propagate Flow
-                    for(const auto& pair : sorted_idx) {
-                        int idx = pair.second;
-                        int x = idx % w;
-                        int z = idx / w;
-                        float currentH = pair.first;
-                        float water = flow[idx];
-                        
-                        // Find lowest neighbor
-                        float minH = currentH;
-                        int targetIdx = -1;
-                        
-                        int neighbors[8][2] = {{-1,-1}, {0,-1}, {1,-1}, {-1,0}, {1,0}, {-1,1}, {0,1}, {1,1}};
-                        for(auto& n : neighbors) {
-                            int nx = x + n[0];
-                            int nz = z + n[1];
-                            if(nx >=0 && nx < w && nz >=0 && nz < h) {
-                                float nh = t->heightmap.getHeight(nx, nz);
-                                if(nh < minH) {
-                                    minH = nh;
-                                    targetIdx = nz * w + nx;
-                                }
+                }
+
+                ImGui::Spacing();
+                UIWidgets::ColoredHeader("Flow Baking & Export", ImVec4(0.8f, 0.7f, 0.6f, 1.0f));
+                ImGui::PushItemWidth(160.0f);
+                static float bake_flow_threshold = 25.0f;
+                ImGui::DragFloat("Flow Thresh", &bake_flow_threshold, 1.0f, 1.0f, 500.0f, "%.0f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum flow accumulation to be written to Alpha.\nIncrease this to ignore flat areas/rain and keep only rivers.");
+                ImGui::PopItemWidth();
+
+                if (UIWidgets::PrimaryButton("Bake Flow to Alpha", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.6f, 30))) {
+                    if (t->splatMap && t->splatMap->is_loaded() && !t->flowMap.empty()) {
+                        int w = t->heightmap.width;
+                        int h = t->heightmap.height;
+                        int sw = t->splatMap->width;
+                        int sh = t->splatMap->height;
+
+                        for (int y = 0; y < sh; y++) {
+                            for (int x = 0; x < sw; x++) {
+                                float u = (float)x / (float)(sw > 1 ? sw - 1 : 1);
+                                float v = (float)y / (float)(sh > 1 ? sh - 1 : 1);
+                                int fx = std::clamp((int)(u * (w-1) + 0.5f), 0, w-1);
+                                int fy = std::clamp((int)(v * (h-1) + 0.5f), 0, h-1);
+                                
+                                float flowVal = t->flowMap[fy * w + fx];
+                                float flowNorm = fmaxf(0.0f, flowVal - t->am_flow_threshold);
+                                float final_A = 1.0f - expf(-flowNorm * 0.4f);
+                                final_A = std::clamp(final_A, 0.0f, 0.98f);
+                                
+                                t->splatMap->pixels[y * sw + x].a = (uint8_t)(final_A * 255.0f);
                             }
                         }
-                        
-                        if(targetIdx != -1) {
-                            flow[targetIdx] += water;
+                        t->splatMap->updateGPU();
+                        ctx.renderer.resetCPUAccumulation();
+                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                        SCENE_LOG_INFO("Flow baked to Splat Alpha using engine-side FlowMap.");
+                    } else {
+                        SCENE_LOG_WARN("Please run Erosion first to generate a Flow Map.");
+                    }
+                }
+
+                ImGui::SameLine();
+                if (ImGui::Button("Export Splat Map", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.6f, 30))) {
+                    if (t->splatMap && !t->splatMap->pixels.empty()) {
+                        std::string path = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
+                        if (!path.empty()) {
+                            TerrainManager::getInstance().exportSplatMap(t, path);
+                            SCENE_LOG_INFO("Splat map exported to: " + path);
                         }
                     }
-                    
-                    // Log-scale and Normalize
-                    float maxFlow = 0.0f;
-                    for(float v : flow) if(v > maxFlow) maxFlow = v;
-                    
-                    for(int i=0; i<w*h; i++) {
-                         float f = flow[i];
-                         
-                         // Threshold filtering
-                         if (f < bake_flow_threshold) {
-                             f = 0.0f;
-                         }
-                         
-                         // Log scale for better visibility of channels
-                         float val = 0.0f;
-                         if (f > 0.0f) {
-                             val = log(f) / log(maxFlow > 1 ? maxFlow : 2.0f);
-                             val = std::pow(val, 0.5f); // Gamma correct usually helps flow maps
-                             if(val > 1.0f) val = 1.0f;
-                         }
-                         
-                         // Write to Alpha (Channel 3)
-                         // Texture uses std::vector<CompactVec4> pixels.
-                         if (i < t->splatMap->pixels.size()) {
-                             t->splatMap->pixels[i].a = static_cast<uint8_t>(std::clamp(val * 255.0f, 0.0f, 255.0f));
-                         }
-                    }
-                    
-                    t->splatMap->upload_to_gpu(); // Important!
-                    SCENE_LOG_INFO("Flow baked to Splat Map Alpha channel.");
-                } else {
-                    SCENE_LOG_ERROR("No Splat Map loaded/generated to bake flow into.");
                 }
-            }
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(100);
-            ImGui::DragFloat("Flow Thresh", &bake_flow_threshold, 1.0f, 1.0f, 500.0f, "%.0f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum flow accumulation to be written to Alpha.\nIncrease this to ignore flat areas/rain and keep only rivers.");
-            
-            ImGui::SameLine();
-            if (ImGui::Button("Export Splat Map")) {
-                if (t->splatMap && !t->splatMap->pixels.empty()) {
-                    std::string path = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
-                    if (!path.empty()) {
-                        TerrainManager::getInstance().exportSplatMap(t, path);
-                        SCENE_LOG_INFO("Splat map exported to: " + path);
-                    }
-                }
-            }
+
+                ImGui::Unindent();
+                UIWidgets::EndSection();
             
             // ===============================================================
             // ROCK HARDNESS (for realistic erosion)
             // ===============================================================
-            UIWidgets::ColoredHeader("Rock Hardness", ImVec4(0.7f, 0.5f, 0.3f, 1.0f));
+            UIWidgets::ColoredHeader("      Rock Hardness", ImVec4(0.7f, 0.5f, 0.3f, 1.0f));
             
             static float defaultHardness = 0.3f;
             ImGui::PushItemWidth(160.0f);
@@ -1101,316 +1230,189 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Hardness Map: Not initialized");
             }
             
-            if (ImGui::Button("Init Hardness Map")) {
+            if (ImGui::Button("Init Hardness Map", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
                 TerrainManager::getInstance().initHardnessMap(t, defaultHardness);
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Auto-Generate")) {
+            if (ImGui::Button("Auto-Generate", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
                 TerrainManager::getInstance().autoGenerateHardness(t, 0.7f, 0.15f);
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
             }
-            UIWidgets::HelpMarker("Auto-generate based on slope:\n- Steep = Hard (rock)\n- Flat = Soft (soil)");
-            
-            // ===============================================================
-            // EROSION TOOLS
-            // ===============================================================
-            UIWidgets::ColoredHeader("Erosion Tools", ImVec4(0.6f, 0.4f, 0.8f, 1.0f));
-
-            static HydraulicErosionParams hydro_params;
-            static ThermalErosionParams thermal_params;
-            static float wind_strength = 1.0f;
-            static float wind_direction = 45.0f;
-            static int wind_iters = 50;
-            static float fluvial_strength = 1.0f;
-            static int erosion_mode = 0;
-            static bool use_gpu = true;
-
-            // GPU Toggle (applies to Hydraulic, Fluvial, Thermal)
-            ImGui::Checkbox("Use GPU Acceleration", &use_gpu);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Run erosion on GPU (up to 100x faster).\nAll erosion types support GPU acceleration.");
-            ImGui::Separator();
-
-            ImGui::RadioButton("Hydraulic", &erosion_mode, 0); ImGui::SameLine();
-            ImGui::RadioButton("Fluvial", &erosion_mode, 1); ImGui::SameLine();
-            ImGui::RadioButton("Thermal", &erosion_mode, 2); ImGui::SameLine();
-            ImGui::RadioButton("Wind", &erosion_mode, 3);
-
-            if (erosion_mode == 0) {
-                // HYDRAULIC EROSION
-                UIWidgets::ColoredHeader("Hydraulic Erosion", ImVec4(0.4f, 0.6f, 1.0f, 1.0f));
-                
-                static int current_preset = -1;
-                auto detectPreset = [&]() -> int {
-                    if (hydro_params.iterations == 10000 && hydro_params.erodeSpeed == 0.2f) return 0;
-                    if (hydro_params.iterations == 50000 && hydro_params.erodeSpeed == 0.3f) return 1;
-                    if (hydro_params.iterations == 200000 && hydro_params.erodeSpeed == 0.5f) return 2;
-                    if (hydro_params.iterations == 500000 && hydro_params.erodeSpeed == 0.8f) return 3;
-                    return -1;
-                };
-                current_preset = detectPreset();
-                
-                const char* presetNames[] = { "Light", "Medium", "Heavy", "Extreme" };
-                ImVec4 activeColor(0.3f, 0.8f, 0.3f, 1.0f);
-                
-                ImGui::Text("Presets:"); ImGui::SameLine();
-                if (current_preset == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                if (ImGui::SmallButton("Light")) { hydro_params.iterations = 10000; hydro_params.erodeSpeed = 0.2f; hydro_params.depositSpeed = 0.4f; hydro_params.sedimentCapacity = 3.0f; }
-                if (current_preset == 0) ImGui::PopStyleColor();
-                ImGui::SameLine();
-                if (current_preset == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                if (ImGui::SmallButton("Medium")) { hydro_params.iterations = 50000; hydro_params.erodeSpeed = 0.3f; hydro_params.depositSpeed = 0.3f; hydro_params.sedimentCapacity = 4.0f; }
-                if (current_preset == 1) ImGui::PopStyleColor();
-                ImGui::SameLine();
-                if (current_preset == 2) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                if (ImGui::SmallButton("Heavy")) { hydro_params.iterations = 200000; hydro_params.erodeSpeed = 0.5f; hydro_params.depositSpeed = 0.2f; hydro_params.sedimentCapacity = 6.0f; }
-                if (current_preset == 2) ImGui::PopStyleColor();
-                ImGui::SameLine();
-                if (current_preset == 3) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                if (ImGui::SmallButton("Extreme")) { hydro_params.iterations = 500000; hydro_params.erodeSpeed = 0.8f; hydro_params.depositSpeed = 0.1f; hydro_params.sedimentCapacity = 10.0f; }
-                if (current_preset == 3) ImGui::PopStyleColor();
-                ImGui::SameLine();
-                if (current_preset >= 0) ImGui::TextColored(activeColor, "(%s)", presetNames[current_preset]);
-                else ImGui::TextDisabled("(Custom)");
-                
-                ImGui::PushItemWidth(160.0f);
-                ImGui::DragInt("Iterations##H", &hydro_params.iterations, 1000, 1000, 500000);
-                if(SceneUI::DrawSmartFloat("espeed", "Erode Spd", &hydro_params.erodeSpeed, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {}
-                if(SceneUI::DrawSmartFloat("dspeed", "Dep Speed", &hydro_params.depositSpeed, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {}
-                if(SceneUI::DrawSmartFloat("inert", "Inertia", &hydro_params.inertia, 0.0f, 1.0f, "%.2f", false, nullptr, 12)) {}
-                if(SceneUI::DrawSmartFloat("scap", "SedCap", &hydro_params.sedimentCapacity, 0.1f, 10.0f, "%.1f", false, nullptr, 12)) {}
-                ImGui::DragInt("Brush Radius", &hydro_params.erosionRadius, 1, 1, 8);
-                ImGui::PopItemWidth();
-
-                if (ImGui::Button("Apply Hydraulic Erosion")) {
-                    if (use_gpu) TerrainManager::getInstance().hydraulicErosionGPU(t, hydro_params);
-                    else TerrainManager::getInstance().hydraulicErosion(t, hydro_params);
-                    ctx.renderer.resetCPUAccumulation();
-                    g_bvh_rebuild_pending = true; g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) { cudaDeviceSynchronize(); ctx.optix_gpu_ptr->resetAccumulation(); }
-                }
-            }
-            else if (erosion_mode == 1) {
-                // FLUVIAL EROSION
-                UIWidgets::ColoredHeader("Fluvial Erosion (River Networks)", ImVec4(0.4f, 0.7f, 1.0f, 1.0f));
-                ImGui::PushItemWidth(160.0f);
-                if(SceneUI::DrawSmartFloat("fstr", "Erode Str", &fluvial_strength, 0.1f, 5.0f, "%.1f", false, nullptr, 12)) {}
-                ImGui::PopItemWidth();
-                UIWidgets::HelpMarker("Controls river channel depth and width.");
-                ImGui::TextWrapped("Creates realistic river networks using flow accumulation.");
-                
-                if (ImGui::Button("Apply Fluvial Erosion")) {
-                    HydraulicErosionParams fluvParams;
-                    fluvParams.erodeSpeed = fluvial_strength;
-                    fluvParams.depositSpeed = 0.1f;
-                    fluvParams.iterations = 2000;
-                    if (use_gpu) TerrainManager::getInstance().fluvialErosionGPU(t, fluvParams);
-                    else TerrainManager::getInstance().fluvialErosion(t, fluvParams);
-                    ctx.renderer.resetCPUAccumulation();
-                    g_bvh_rebuild_pending = true; g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) { cudaDeviceSynchronize(); ctx.optix_gpu_ptr->resetAccumulation(); }
-                }
-            }
-            else if (erosion_mode == 2) {
-                // THERMAL EROSION
-                UIWidgets::ColoredHeader("Thermal Erosion (Slope Collapse)", ImVec4(0.8f, 0.5f, 0.4f, 1.0f));
-                ImGui::PushItemWidth(160.0f);
-                ImGui::DragInt("Iterations##T", &thermal_params.iterations, 1, 1, 200);
-                if(SceneUI::DrawSmartFloat("ttal", "Talus Ang", &thermal_params.talusAngle, 0.1f, 1.0f, "%.2f", false, nullptr, 12)) {}
-                if(SceneUI::DrawSmartFloat("tamt", "Amount", &thermal_params.erosionAmount, 0.1f, 2.0f, "%.1f", false, nullptr, 12)) {}
-                ImGui::PopItemWidth();
-
-                if (ImGui::Button("Apply Thermal Erosion")) {
-                    if (use_gpu) TerrainManager::getInstance().thermalErosionGPU(t, thermal_params);
-                    else TerrainManager::getInstance().thermalErosion(t, thermal_params);
-                    ctx.renderer.resetCPUAccumulation();
-                    g_bvh_rebuild_pending = true; g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) { cudaDeviceSynchronize(); ctx.optix_gpu_ptr->resetAccumulation(); }
-                }
-            }
-            else if (erosion_mode == 3) {
-                // WIND EROSION
-                UIWidgets::ColoredHeader("Wind Erosion", ImVec4(0.7f, 0.7f, 0.5f, 1.0f));
-                ImGui::PushItemWidth(160.0f);
-                if(SceneUI::DrawSmartFloat("wstr", "Wind Str", &wind_strength, 0.1f, 10.0f, "%.1f", false, nullptr, 12)) {}
-                if(SceneUI::DrawSmartFloat("wdir", "Direction", &wind_direction, 0.0f, 360.0f, "%.0f", false, nullptr, 12)) {}
-                ImGui::DragInt("Iterations##W", &wind_iters, 1, 1, 200);
-                ImGui::PopItemWidth();
-
-                if (ImGui::Button("Apply Wind Erosion")) {
-                    if (use_gpu) TerrainManager::getInstance().windErosionGPU(t, wind_strength, wind_direction, wind_iters);
-                    else TerrainManager::getInstance().windErosion(t, wind_strength, wind_direction, wind_iters);
-                    ctx.renderer.resetCPUAccumulation();
-                    g_bvh_rebuild_pending = true; g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) { cudaDeviceSynchronize(); ctx.optix_gpu_ptr->resetAccumulation(); }
-                }
-            }
-
-            // Wizard Mode
-            ImGui::Separator();
-            UIWidgets::ColoredHeader("Erosion Wizard (Combined)", ImVec4(0.4f, 0.8f, 0.5f, 1.0f));
-            static int wiz_iters = 50;
-            static float wiz_strength = 1.0f;
-            ImGui::PushItemWidth(160.0f);
-            ImGui::DragInt("Wizard Steps", &wiz_iters, 1, 10, 200);
-            ImGui::DragFloat("Wizard Strength", &wiz_strength, 0.1f, 0.1f, 5.0f);
-            ImGui::PopItemWidth();
-            
-            if (ImGui::Button("Run Combined Process", ImVec2(160.0f, 0))) {
-                TerrainManager::getInstance().applyCombinedErosion(t, wiz_iters, wiz_strength, use_gpu);
-                ctx.renderer.resetCPUAccumulation();
-                g_bvh_rebuild_pending = true;
-                g_optix_rebuild_pending = true;
-                if (ctx.optix_gpu_ptr) {
-                    cudaDeviceSynchronize();
-                    ctx.optix_gpu_ptr->resetAccumulation();
-                }
-            }
-
-            // Timeline Integration
-            ImGui::Separator();
-            UIWidgets::ColoredHeader("Timeline & Keyframes", ImVec4(0.7f, 0.4f, 0.8f, 1.0f));
-            
-            int current_frame = ctx.scene.timeline.current_frame;
-            ImGui::Text("Current Frame: %d", current_frame);
-            
-            std::string trackName = t->name.empty() ? "Terrain" : t->name;
-            bool hasTrack = ctx.scene.timeline.tracks.find(trackName) != ctx.scene.timeline.tracks.end();
-            
-            if (ImGui::Button("Capture State Keyframe")) {
-                // Get or create track
-                ObjectAnimationTrack& track = ctx.scene.timeline.tracks[trackName]; // Creates if not exists
-                track.object_name = trackName;
-                track.object_index = -1; // Not a standard object list item maybe? Or find index
-                
-                TerrainManager::getInstance().captureKeyframeToTrack(t, track, current_frame);
-                //ctx.status_message = "Terrain Keyframe Captured at Frame " + std::to_string(current_frame);
-            }
-            
-            if (hasTrack) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Track Exists");
-                
-                // Show keyframe count for this track
-                int kf_count = (int)ctx.scene.timeline.tracks[trackName].keyframes.size();
-                ImGui::SameLine();
-                ImGui::TextDisabled("(%d keys)", kf_count);
-                
-                // NOTE: Animation updates are now handled globally in TimelineWidget::draw()
-                // This ensures terrain animation works regardless of which panel is open
-            } else {
-                ImGui::SameLine();
-                ImGui::TextDisabled("(No Track)");
-            }
-
-            // Heightmap Export
-            ImGui::Separator();
-            if (ImGui::Button("Export Heightmap (16-bit RAW)")) {
-                std::string path = saveFileDialogW(L"RAW Files\0*.raw\0");
-                if (!path.empty()) {
-                    TerrainManager::getInstance().exportHeightmap(t, path);
-                }
-            }
+            ImGui::Unindent(12.0f);
+            UIWidgets::EndSection();
         }
-
-        ImGui::Spacing();
-
-        // -----------------------------------------------------------------------------
-        // 3. SCULPTING & PAINTING
-        // -----------------------------------------------------------------------------
-        UIWidgets::ColoredHeader("Tools (Sculpt/Paint)", ImVec4(1.0f, 0.7f, 0.4f, 1.0f));
-
-        ImGui::Checkbox("Enable Tool", &terrain_brush.enabled);
-
-        if (terrain_brush.enabled) {
-            // Active Terrain Selector (Same as before)
-            auto& terrains = TerrainManager::getInstance().getTerrains();
-            if (terrains.empty()) {
-                ImGui::TextColored(ImVec4(1, 0, 0, 1), "No Terrains available.");
-            }
-            else {
-                std::string current_name = "None";
-                if (terrain_brush.active_terrain_id != -1) {
-                    auto* t = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
-                    if (t) current_name = t->name + " (ID: " + std::to_string(t->id) + ")";
+ 
+            // 6. TIMELINE & EXPORT
+            if (UIWidgets::BeginSection("Timeline & Export", ImVec4(0.7f, 0.4f, 0.8f, 1.0f), true)) {
+                ImGui::Indent();
+                
+                // Timeline Integration
+                UIWidgets::ColoredHeader("Timeline & Keyframes", ImVec4(0.7f, 0.4f, 0.8f, 1.0f));
+                
+                int current_frame = ctx.scene.timeline.current_frame;
+                ImGui::Text("Current Frame: %d", current_frame);
+                
+                std::string trackName = t->name.empty() ? "Terrain" : t->name;
+                bool hasTrack = ctx.scene.timeline.tracks.find(trackName) != ctx.scene.timeline.tracks.end();
+                
+                if (ImGui::Button("Capture State Keyframe", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+                    // Get or create track
+                    ObjectAnimationTrack& track = ctx.scene.timeline.tracks[trackName]; // Creates if not exists
+                    track.object_name = trackName;
+                    track.object_index = -1; 
+                    
+                    TerrainManager::getInstance().captureKeyframeToTrack(t, track, current_frame);
+                }
+                
+                if (hasTrack) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Track Exists");
+                    
+                    // Show keyframe count for this track
+                    int kf_count = (int)ctx.scene.timeline.tracks[trackName].keyframes.size();
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%d keys)", kf_count);
+                } else {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(No Track)");
                 }
 
-                ImGui::PushItemWidth(160.0f);
-                if (ImGui::BeginCombo("Active Terrain", current_name.c_str())) {
-                    for (auto& t : terrains) {
-                        bool is_selected = (t.id == terrain_brush.active_terrain_id);
-                        std::string label = t.name + " (ID: " + std::to_string(t.id) + ")";
-                        if (ImGui::Selectable(label.c_str(), is_selected)) {
-                            terrain_brush.active_terrain_id = t.id;
-                        }
-                        if (is_selected) ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-                ImGui::PopItemWidth();
-
+                // Heightmap Export
                 ImGui::Separator();
-
-                // Brush Settings
-                ImGui::RadioButton("Raise", &terrain_brush.mode, 0); ImGui::SameLine();
-                ImGui::RadioButton("Lower", &terrain_brush.mode, 1); ImGui::SameLine();
-                ImGui::RadioButton("Flatten", &terrain_brush.mode, 2); ImGui::SameLine();
-                ImGui::RadioButton("Smooth", &terrain_brush.mode, 3); ImGui::SameLine();
-                ImGui::RadioButton("Stamp", &terrain_brush.mode, 4);
-                ImGui::RadioButton("Paint Splat", &terrain_brush.mode, 5); ImGui::SameLine();
-                ImGui::RadioButton("Paint Hard", &terrain_brush.mode, 6); ImGui::SameLine();
-                ImGui::RadioButton("Paint Soft", &terrain_brush.mode, 7);
-
-                if (terrain_brush.mode == 2) { // Flatten Settings
-                    ImGui::Indent();
-                    ImGui::Checkbox("Use Fixed Height", &terrain_brush.use_fixed_height);
-                    if (terrain_brush.use_fixed_height) {
-                        ImGui::PushItemWidth(160.0f);
-                        ImGui::DragFloat("Target Height", &terrain_brush.flatten_target, 0.1f, 0.0f, 100.0f);
-                        ImGui::PopItemWidth();
+                if (ImGui::Button("Export Heightmap (16-bit RAW)", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+                    std::string path = SceneUI::saveFileDialogW(L"RAW Files\0*.raw\0", L"raw");
+                    if (!path.empty()) {
+                        TerrainManager::getInstance().exportHeightmap(t, path);
                     }
-                    ImGui::Unindent();
                 }
-                else if (terrain_brush.mode == 4) { // Stamp Settings
-                    ImGui::Indent();
-                    ImGui::PushItemWidth(160.0f);
-                    ImGui::SliderFloat("Rotation", &terrain_brush.stamp_rotation, 0.0f, 360.0f);
-                    ImGui::PopItemWidth();
-                    if (ImGui::Button("Load Stamp Texture...")) {
-                        std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
-                        if (!path.empty()) {
-                            terrain_brush.stamp_texture = std::make_shared<Texture>(path, TextureType::Albedo);
+                ImGui::Unindent();
+                UIWidgets::EndSection();
+            } 
+    } 
+
+    // -----------------------------------------------------------------------------
+    // 8. SCULPTING & PAINTING
+    // -----------------------------------------------------------------------------
+    if (terrain_brush.active_terrain_id != -1) {
+        if (UIWidgets::BeginSection("      Sculpting & Painting Tools (EXPERIMENTAL)", ImVec4(1.0f, 0.7f, 0.4f, 1.0f), true)) {
+            ImVec2 hp = ImGui::GetItemRectMin();
+            UIWidgets::DrawIcon(UIWidgets::IconType::Magnet, ImVec2(hp.x + 8, hp.y + 4), 16, 0xFFBBBBBB);
+            ImGui::Indent(12.0f);
+                    ImGui::SameLine(); UIWidgets::HelpMarker("Use these tools to manually shape the terrain geometry or paint texture layers and physical properties.");
+
+                    ImGui::Checkbox("Enable Brush", &terrain_brush.enabled);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Activates the mouse brush in the viewport.");
+
+                    if (terrain_brush.enabled) {
+                        // Active Terrain Selector
+                        auto& terrains = TerrainManager::getInstance().getTerrains();
+                        if (terrains.empty()) {
+                            ImGui::TextColored(ImVec4(1, 0, 0, 1), "No active terrain found.");
+                        }
+                        else {
+                            std::string current_name = "None";
+                            if (terrain_brush.active_terrain_id != -1) {
+                                auto* t = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
+                                if (t) current_name = t->name + " (ID: " + std::to_string(t->id) + ")";
+                            }
+
+                            ImGui::PushItemWidth(160.0f);
+                            if (ImGui::BeginCombo("Target Terrain", current_name.c_str())) {
+                                for (auto& t : terrains) {
+                                    bool is_selected = (t.id == terrain_brush.active_terrain_id);
+                                    std::string label = "> " + t.name + " (ID: " + std::to_string(t.id) + ")";
+                                    if (ImGui::Selectable(label.c_str(), is_selected)) {
+                                        terrain_brush.active_terrain_id = t.id;
+                                    }
+                                    if (is_selected) ImGui::SetItemDefaultFocus();
+                                }
+                                ImGui::EndCombo();
+                            }
+                            ImGui::PopItemWidth();
+
+                            ImGui::Separator();
+                            ImGui::TextDisabled("Brush Mode:");
+
+                             // Brush Modes with Symbols
+                            ImGui::RadioButton("Raise", &terrain_brush.mode, 0); ImGui::SameLine();
+                            // If shift is held, small icon-like letters
+                            ImGui::RadioButton("Lower", &terrain_brush.mode, 1); ImGui::SameLine();
+                            ImGui::RadioButton("Flatten", &terrain_brush.mode, 2); ImGui::SameLine();
+                            ImGui::RadioButton("Smooth", &terrain_brush.mode, 3);
+                            
+                            ImGui::RadioButton("Stamp", &terrain_brush.mode, 4); ImGui::SameLine();
+                            ImGui::RadioButton("Paint Layers", &terrain_brush.mode, 5);
+                            
+                            ImGui::RadioButton("Paint Hard", &terrain_brush.mode, 6); ImGui::SameLine();
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Increases erosion resistance (Rock).");
+                            
+                            ImGui::RadioButton("Paint Soft", &terrain_brush.mode, 7);
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Decreases erosion resistance (Soil/Sand).");
+
+                            ImGui::Spacing();
+
+                            if (terrain_brush.mode == 2) { // Flatten Settings
+                                ImGui::Indent();
+                                ImGui::Checkbox("Use Fixed Height", &terrain_brush.use_fixed_height);
+                                if (terrain_brush.use_fixed_height) {
+                                    ImGui::PushItemWidth(160.0f);
+                                    ImGui::DragFloat("Altitude", &terrain_brush.flatten_target, 0.1f, -1000.0f, 5000.0f, "%.1f m");
+                                    ImGui::PopItemWidth();
+                                } else {
+                                    ImGui::TextDisabled("(Sampled from initial click)");
+                                }
+                                ImGui::Unindent();
+                            }
+                            else if (terrain_brush.mode == 4) { // Stamp Settings
+                                ImGui::Indent();
+                                ImGui::PushItemWidth(160.0f);
+                                ImGui::SliderFloat("Rotation", &terrain_brush.stamp_rotation, 0.0f, 360.0f, "%.0f deg");
+                                ImGui::PopItemWidth();
+                                if (UIWidgets::SecondaryButton("Load Stamp Texture...", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.8f, 0))) {
+                                    std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
+                                    if (!path.empty()) {
+                                        terrain_brush.stamp_texture = std::make_shared<Texture>(path, TextureType::Albedo);
+                                    }
+                                }
+                                if (terrain_brush.stamp_texture) {
+                                    ImGui::TextDisabled("Stamp: %s", std::filesystem::path(terrain_brush.stamp_texture->name).filename().string().c_str());
+                                }
+                                ImGui::Unindent();
+                            }
+                            else if (terrain_brush.mode == 5) { // Paint Settings
+                                ImGui::Indent();
+                                const char* channels[] = { "Layer 0 (Grass/Flat)", "Layer 1 (Rock/Slope)", "Layer 2 (Snow/Peak)", "Layer 3 (Custom Alpha)" };
+                                ImGui::PushItemWidth(200.0f);
+                                ImGui::Combo("Splat Channel", &terrain_brush.paint_channel, channels, IM_ARRAYSIZE(channels));
+                                ImGui::PopItemWidth();
+                                ImGui::Unindent();
+                            }
+
+                            ImGui::Separator();
+                            ImGui::PushItemWidth(160.0f);
+                            ImGui::SliderFloat("Radius", &terrain_brush.radius, 1.0f, 200.0f, "%.1f m");
+                            ImGui::SliderFloat("Strength", &terrain_brush.strength, 0.01f, 10.0f, "%.2f");
+                            ImGui::PopItemWidth();
+
+                            ImGui::Checkbox("Show Viewport Circle", &terrain_brush.show_preview);
+
+                            ImGui::Separator();
+                            ImGui::TextDisabled("Hotkeys:");
+                            ImGui::Text("  LMB: Apply Brush");
+                            ImGui::Text("  Shift + LMB: Alternate Mode");
                         }
                     }
-                    if (terrain_brush.stamp_texture) {
-                        ImGui::Text("Stamp: %s", terrain_brush.stamp_texture->name.c_str());
-                    }
+
                     ImGui::Unindent();
-                }
-                else if (terrain_brush.mode == 5) { // Paint Settings
-                    ImGui::Indent();
-                    const char* channels[] = { "Layer 0 (Red)", "Layer 1 (Green)", "Layer 2 (Blue)", "Layer 3 (Alpha)" };
-                    ImGui::PushItemWidth(160.0f);
-                    ImGui::Combo("Channel", &terrain_brush.paint_channel, channels, IM_ARRAYSIZE(channels));
-                    ImGui::PopItemWidth();
-                    ImGui::Unindent();
-                }
-
-                ImGui::PushItemWidth(160.0f);
-                ImGui::SliderFloat("Radius", &terrain_brush.radius, 1.0f, 100.0f);
-                ImGui::SliderFloat("Strength", &terrain_brush.strength, 0.1f, 5.0f);
-                ImGui::PopItemWidth();
-
-                ImGui::Checkbox("Show Preview", &terrain_brush.show_preview);
-
-                UIWidgets::HelpMarker("Left Click to Sculpt/Paint.\nPaint Splat modifies texture layers.\nPaint Hard/Soft modifies erosion resistance.");
+                UIWidgets::EndSection();
             }
         }
-
     }
 }
+
 // ===============================================================================
 // TERRAIN INTERACTION (Viewport)
 // ===============================================================================
@@ -1548,8 +1550,9 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      if (ctx.optix_gpu_ptr && g_hasOptix && ctx.render_settings.use_optix) {
                          // OPTIMIZATION: Only update the terrain mesh BLAS
                          // Does NOT trigger full scene rebuild, just BLAS upload + TLAS refit
-                         ctx.optix_gpu_ptr->updateMeshBLASFromTriangles(terrain->name, terrain->mesh_triangles);
+                         ctx.optix_gpu_ptr->updateTerrainBLASPartial(terrain->name, terrain);
                      }
+                     terrain->dirty_region.clear();
                      g_bvh_rebuild_pending = true;
                  }
             }

@@ -230,11 +230,24 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     
     // 3. Clear Central Subsystems
     MaterialManager::getInstance().clear();
+    RiverManager::getInstance().clear(&scene);  // Clear rivers BEFORE WaterManager (rivers own WaterSurfaces)
     WaterManager::getInstance().clear();
-    RiverManager::getInstance().clear();
     TerrainManager::getInstance().removeAllTerrains(scene);
     InstanceManager::getInstance().clearAll();  // Clear foliage/scatter instances 
     VDBVolumeManager::getInstance().unloadAll(); // Clear VDB/Gas GPU handles and reset IDs
+    renderer.getHairSystem().clearAll();        // Clear all hair grooms
+    renderer.uploadHairToGPU();                 // Sync GPU (clear it)
+
+    // 4. CRITICAL: Rebuild OptiX geometry for the empty scene.
+    // This ensures that all GPU BLAS, instances, and TLAS are fully cleared/reset.
+    // If we only call uploadHairToGPU, old meshes from previous projects may linger
+    // in the AccelManager's internal instance list, causing slowness even if
+    // they aren't visible.
+    if (render_settings.use_optix) {
+        renderer.rebuildOptiXGeometry(scene, renderer.optix_gpu_ptr);
+    }
+
+
     
     // 4. Clear Animation/Bone Caches (CRITICAL - prevents bone corruption on new project)
     // Clear per-model animator contexts and their bone caches
@@ -280,6 +293,16 @@ bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings, Ren
 bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings, Renderer& renderer,
                                   std::function<void(int, const std::string&)> progress_callback) {
     if (progress_callback) progress_callback(0, "Preparing to save...");
+
+    // Update Project Name from File Path if it's "Untitled" or empty
+    // This ensures assets (like terrains) get the correct prefix
+    fs::path p(filepath);
+    std::string filename = p.stem().string(); // "my_project" from "C:/.../my_project.rtp"
+    if (g_project.project_name == "Untitled" || g_project.project_name.empty()) {
+        g_project.project_name = filename;
+    }
+    // Also store the current path
+    g_project.current_file_path = filepath;
 
     // Sync project data with current scene state
     syncProjectToScene(scene);
@@ -507,6 +530,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         // Water System
         if (progress_callback) progress_callback(83, "Saving water surfaces...");
         root["water"] = WaterManager::getInstance().serialize();
+        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(WaterManager::getInstance().getWaterSurfaces().size()) + " water surfaces.");
 
         // Terrain System
         if (progress_callback) progress_callback(84, "Saving terrain system...");
@@ -539,6 +563,14 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         if (progress_callback) progress_callback(84, "Saving Force Fields...");
         root["force_fields"] = serializeForceFields(scene.force_field_manager);
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.force_field_manager.force_fields.size()) + " Force Fields.");
+        
+        // Hair System
+        if (progress_callback) progress_callback(84, "Saving hair system...");
+        // Use binary stream for faster saving
+        root["hair"] = renderer.getHairSystem().serialize(&out_bin);
+        root["hair_material"] = renderer.getHairMaterial();
+        SCENE_LOG_INFO("[ProjectManager] Saved hair system with " + std::to_string(renderer.getHairSystem().getGroomCount()) + " grooms.");
+
         
         // Imported Model Context Metadata
         if (progress_callback) progress_callback(84, "Saving model contexts...");
@@ -770,7 +802,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             // Load River System (After terrain so rivers can follow terrain)
             if (root.contains("rivers")) {
                 if (progress_callback) progress_callback(76, "Loading river system...");
-                RiverManager::getInstance().clear();
+                RiverManager::getInstance().clear(&scene);  // Pass scene for proper WaterSurface cleanup
                 RiverManager::getInstance().deserialize(root["rivers"], scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
             }
@@ -804,6 +836,23 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 deserializeForceFields(root["force_fields"], scene);
                 SCENE_LOG_INFO("[ProjectManager] Loaded Force Fields.");
             }
+
+            // Load Hair System
+            renderer.getHairSystem().clearAll();
+            renderer.uploadHairToGPU();
+            
+            if (root.contains("hair")) {
+                if (progress_callback) progress_callback(78, "Loading hair system...");
+                renderer.getHairSystem().deserialize(root["hair"], &in_bin);
+                if (root.contains("hair_material")) {
+                    renderer.setHairMaterial(root["hair_material"].get<Hair::HairMaterialParams>());
+                }
+                renderer.getHairSystem().buildBVH();
+                renderer.uploadHairToGPU();
+                SCENE_LOG_INFO("[ProjectManager] Loaded hair system with " + std::to_string(renderer.getHairSystem().getGroomCount()) + " grooms.");
+            }
+
+
 
             // Load Timeline/Animation (keyframes) - AFTER Objects are created
             if (root.contains("timeline")) {
@@ -1756,6 +1805,8 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     json j;
     
     j["samples_per_pixel"] = settings.samples_per_pixel;
+    j["samples_per_pass"] = settings.samples_per_pass;
+    j["mouse_sensitivity"] = settings.mouse_sensitivity;
     j["max_bounces"] = settings.max_bounces;
     j["final_render_width"] = settings.final_render_width;
     j["final_render_height"] = settings.final_render_height;
@@ -1773,6 +1824,8 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
 
 void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& settings) {
     settings.samples_per_pixel = j.value("samples_per_pixel", 1);
+    settings.samples_per_pass = j.value("samples_per_pass", 1);
+    settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
     settings.max_bounces = j.value("max_bounces", 10);
     settings.final_render_width = j.value("final_render_width", 1280);
     settings.final_render_height = j.value("final_render_height", 720);
@@ -1968,8 +2021,8 @@ void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, c
                 // Store in memory cache - keyed by original_name
                 m_embedded_texture_cache[original_name] = {std::move(data), texType};
                 
-                SCENE_LOG_INFO("[EMBED CACHE] Stored texture in memory: " + original_name + 
-                               " (" + std::to_string(size) + " bytes)");
+               /* SCENE_LOG_INFO("[EMBED CACHE] Stored texture in memory: " + original_name + 
+                               " (" + std::to_string(size) + " bytes)");*/
             }
         }
         // Path mode textures are loaded directly by material deserializer from disk

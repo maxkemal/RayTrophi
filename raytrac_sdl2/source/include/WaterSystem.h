@@ -29,12 +29,12 @@ struct WaterWaveParams {
     float wave_frequency = 1.0f;
     
     // Base colors
-    Vec3 deep_color = Vec3(0.02f, 0.08f, 0.2f);      // Dark blue for deep water
-    Vec3 shallow_color = Vec3(0.3f, 0.6f, 0.8f);    // Light cyan for shallow
+    Vec3 deep_color = Vec3(0.01f, 0.02f, 0.05f);     // Very dark blue for deep water
+    Vec3 shallow_color = Vec3(2.0f/255.0f, 3.0f/255.0f, 3.0f/255.0f); // Dark blue (2, 3, 3) for physical look
     
     // Physics
     float clarity = 0.8f;      // 0.0 = murky, 1.0 = crystal clear
-    float foam_level = 0.2f;   // Foam at wave crests
+    float foam_level = 0.01f;  // Lower default foam
     float ior = 1.333f;        // Index of Refraction (water = 1.333)
     float roughness = 0.02f;   // Surface micro-roughness
     
@@ -59,16 +59,18 @@ struct WaterWaveParams {
     // === ADVANCED: FFT Ocean (Tessendorf) ===
     bool use_fft_ocean = false;         // Enable FFT ocean simulation
     int fft_resolution = 256;           // FFT grid size (64, 128, 256, 512)
-    float fft_ocean_size = 100.0f;      // World space coverage
-    float fft_wind_speed = 10.0f;       // Wind speed (m/s)
+    float fft_ocean_size = 100.0f;      // World space coverage (meters)
+    float fft_wind_speed = 10.0f;       // Wind speed (m/s) - affects wave size
     float fft_wind_direction = 0.0f;    // Wind direction (degrees)
     float fft_choppiness = 1.0f;        // Horizontal displacement strength
-    float fft_amplitude = 0.0002f;      // Wave amplitude scale (Phillips A)
+    float fft_amplitude = 0.001f;       // Phillips spectrum amplitude (higher = bigger waves)
     float fft_time_scale = 1.0f;        // Animation speed
 
     // === ADVANCED: Realistic Details ===
     float micro_detail_strength = 0.05f;// Strength of high-freq noise (ripples) - Default small
     float micro_detail_scale = 20.0f;   // Scale of noise (higher = smaller ripples)
+    float micro_anim_speed = 0.1f;      // Animation speed multiplier for micro details
+    float micro_morph_speed = 1.0f;     // Morph/shape-change speed for micro details
     float foam_noise_scale = 4.0f;      // Scale of foam breakup noise
     float foam_threshold = 0.4f;        // Offset for foam appearance
 
@@ -100,6 +102,211 @@ struct WaterWaveParams {
     
     // Smooth Normals
     bool geo_smooth_normals = true;     // Enable smooth shading (vertex normal averaging)
+    
+    // === FFT-DRIVEN MESH DISPLACEMENT (Best Quality - Combines FFT + Mesh) ===
+    bool use_fft_mesh_displacement = false;  // Use FFT data to displace mesh vertices
+    float fft_mesh_height_scale = 50.0f;     // Amplification for FFT height (raw FFT values are small)
+    float fft_mesh_choppiness = 1.0f;        // Scale factor for FFT horizontal displacement
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // WATER PRESETS - Quick setup for common water types
+    // ═══════════════════════════════════════════════════════════════════════════════
+    enum class WaterPreset { 
+        Custom,         // User-defined settings
+        CalmOcean,      // Calm open ocean - gentle swells
+        StormyOcean,    // Stormy sea - high waves, lots of foam
+        TropicalOcean,  // Crystal clear tropical water
+        Lake,           // Still lake - minimal waves
+        River,          // Flowing river with current
+        Pool,           // Swimming pool - very calm
+        Pond            // Small pond with subtle ripples
+    };
+    WaterPreset current_preset = WaterPreset::Custom;
+    
+    // Apply preset values
+    void applyPreset(WaterPreset preset) {
+        current_preset = preset;
+        
+        switch (preset) {
+            case WaterPreset::CalmOcean:
+                // FFT settings for calm ocean
+                use_fft_ocean = true;
+                fft_resolution = 256;
+                fft_ocean_size = 100.0f;      // 100m tile
+                fft_wind_speed = 10.0f;       // Moderate wind
+                fft_wind_direction = 0.0f;
+                fft_choppiness = 1.0f;
+                fft_amplitude = 0.001f;       // Higher for visible waves
+                fft_time_scale = 1.0f;
+                // Appearance
+                deep_color = Vec3(0.01f, 0.03f, 0.08f);
+                shallow_color = Vec3(0.05f, 0.15f, 0.2f);
+                roughness = 0.02f;
+                foam_level = 0.05f;
+                // Micro details
+                micro_detail_strength = 0.03f;
+                micro_detail_scale = 15.0f;
+                micro_anim_speed = 0.05f;
+                micro_morph_speed = 0.3f;
+                // FFT Mesh - Direct height control
+                use_fft_mesh_displacement = true;
+                fft_mesh_height_scale = 50.0f;   // Amplify FFT output significantly
+                fft_mesh_choppiness = 1.0f;
+                break;
+                
+            case WaterPreset::StormyOcean:
+                use_fft_ocean = true;
+                fft_resolution = 256;
+                fft_ocean_size = 150.0f;
+                fft_wind_speed = 25.0f;       // Strong wind
+                fft_wind_direction = 0.0f;
+                fft_choppiness = 2.0f;
+                fft_amplitude = 0.003f;       // High amplitude for storms
+                fft_time_scale = 1.2f;
+                // Dark stormy colors
+                deep_color = Vec3(0.02f, 0.04f, 0.06f);
+                shallow_color = Vec3(0.1f, 0.15f, 0.18f);
+                roughness = 0.05f;
+                foam_level = 0.4f;
+                foam_threshold = 0.25f;
+                // Aggressive micro details
+                micro_detail_strength = 0.08f;
+                micro_detail_scale = 25.0f;
+                micro_anim_speed = 0.15f;
+                micro_morph_speed = 0.8f;
+                // FFT Mesh
+                use_fft_mesh_displacement = true;
+                fft_mesh_height_scale = 80.0f;   // High waves
+                fft_mesh_choppiness = 2.5f;
+                break;
+                
+            case WaterPreset::TropicalOcean:
+                use_fft_ocean = true;
+                fft_resolution = 256;
+                fft_ocean_size = 80.0f;
+                fft_wind_speed = 5.0f;
+                fft_wind_direction = 0.0f;
+                fft_choppiness = 0.5f;
+                fft_amplitude = 0.0005f;
+                fft_time_scale = 0.6f;
+                // Crystal clear tropical
+                deep_color = Vec3(0.0f, 0.05f, 0.1f);
+                shallow_color = Vec3(0.1f, 0.4f, 0.5f);
+                clarity = 0.95f;
+                roughness = 0.01f;
+                foam_level = 0.02f;
+                absorption_density = 0.2f;
+                // Very subtle micro details
+                micro_detail_strength = 0.02f;
+                micro_detail_scale = 10.0f;
+                micro_anim_speed = 0.03f;
+                micro_morph_speed = 0.2f;
+                // FFT Mesh
+                use_fft_mesh_displacement = true;
+                fft_mesh_height_scale = 30.0f;
+                fft_mesh_choppiness = 0.5f;
+                break;
+                
+            case WaterPreset::Lake:
+                use_fft_ocean = true;
+                fft_resolution = 128;
+                fft_ocean_size = 50.0f;
+                fft_wind_speed = 3.0f;
+                fft_wind_direction = 0.0f;
+                fft_choppiness = 0.3f;
+                fft_amplitude = 0.0003f;
+                fft_time_scale = 0.4f;
+                // Lake colors
+                deep_color = Vec3(0.02f, 0.05f, 0.08f);
+                shallow_color = Vec3(0.08f, 0.2f, 0.25f);
+                clarity = 0.7f;
+                roughness = 0.01f;
+                foam_level = 0.0f;
+                // Almost no micro details - glassy
+                micro_detail_strength = 0.01f;
+                micro_detail_scale = 8.0f;
+                micro_anim_speed = 0.02f;
+                micro_morph_speed = 0.1f;
+                // Gentle mesh displacement
+                use_fft_mesh_displacement = true;
+                fft_mesh_height_scale = 15.0f;
+                fft_mesh_choppiness = 0.3f;
+                break;
+                
+            case WaterPreset::River:
+                use_fft_ocean = true;
+                fft_resolution = 128;
+                fft_ocean_size = 30.0f;  // Smaller for river
+                fft_wind_speed = 4.0f;
+                fft_wind_direction = 0.0f;  // Fixed flow direction
+                fft_choppiness = 0.5f;
+                fft_amplitude = 0.0004f;
+                fft_time_scale = 1.5f;    // Faster animation
+                // River colors
+                deep_color = Vec3(0.03f, 0.06f, 0.05f);
+                shallow_color = Vec3(0.1f, 0.18f, 0.15f);
+                clarity = 0.5f;
+                roughness = 0.03f;
+                foam_level = 0.1f;
+                // Directional micro details (flow feeling)
+                micro_detail_strength = 0.04f;
+                micro_detail_scale = 12.0f;
+                micro_anim_speed = 0.2f;  // Faster - flowing
+                micro_morph_speed = 0.5f;
+                // River mesh displacement
+                use_fft_mesh_displacement = true;
+                fft_mesh_height_scale = 20.0f;
+                fft_mesh_choppiness = 0.5f;
+                break;
+                
+            case WaterPreset::Pool:
+                use_fft_ocean = false;  // No FFT - very calm
+                use_fft_mesh_displacement = false;
+                // Pool colors
+                deep_color = Vec3(0.0f, 0.1f, 0.2f);
+                shallow_color = Vec3(0.2f, 0.5f, 0.6f);
+                clarity = 1.0f;
+                roughness = 0.005f;
+                foam_level = 0.0f;
+                // Minimal ripples
+                micro_detail_strength = 0.005f;
+                micro_detail_scale = 5.0f;
+                micro_anim_speed = 0.01f;
+                micro_morph_speed = 0.05f;
+                break;
+                
+            case WaterPreset::Pond:
+                use_fft_ocean = true;
+                fft_resolution = 64;
+                fft_ocean_size = 20.0f;
+                fft_wind_speed = 2.0f;
+                fft_wind_direction = 0.0f;
+                fft_choppiness = 0.2f;
+                fft_amplitude = 0.0001f;
+                fft_time_scale = 0.3f;
+                // Murky pond
+                deep_color = Vec3(0.02f, 0.04f, 0.03f);
+                shallow_color = Vec3(0.08f, 0.12f, 0.08f);
+                clarity = 0.4f;
+                roughness = 0.02f;
+                foam_level = 0.0f;
+                // Very subtle
+                micro_detail_strength = 0.01f;
+                micro_detail_scale = 6.0f;
+                micro_anim_speed = 0.015f;
+                micro_morph_speed = 0.1f;
+                // Light displacement
+                use_fft_mesh_displacement = true;
+                fft_mesh_height_scale = 10.0f;
+                fft_mesh_choppiness = 0.2f;
+                break;
+                
+            case WaterPreset::Custom:
+            default:
+                // Keep current values
+                break;
+        }
+    }
 };
 
 struct WaterSurface {
@@ -123,9 +330,13 @@ struct WaterSurface {
     // Runtime FFT State (opaque handle to FFTOceanState)
     void* fft_state = nullptr;
     
+    // Runtime GPU Geometric Wave State (opaque handle to GPUGeoWaveState)
+    void* gpu_geo_state = nullptr;
+    
     // Animation state
     float animation_time = 0.0f;
-    bool animate_mesh = false;  // Enable CPU mesh animation (performance intensive)
+    bool animate_mesh = false;      // Enable mesh animation
+    bool use_gpu_animation = true;  // Use GPU for geometric waves (faster)
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -152,8 +363,14 @@ public:
     // Update mesh geometry based on physics parameters (static, called once)
     void updateWaterMesh(WaterSurface* surf);
     
-    // Update mesh with animation (called each frame for animated surfaces)
+    // Update mesh with animation - CPU path (called each frame for animated surfaces)
     void updateAnimatedWaterMesh(WaterSurface* surf, float time);
+    
+    // Update mesh with animation - GPU path (much faster for large meshes)
+    void updateGPUAnimatedWaterMesh(WaterSurface* surf, float time);
+    
+    // Update mesh using FFT ocean data - highest quality (GPU accelerated)
+    void updateFFTDrivenMesh(WaterSurface* surf, float time);
     
     // Store original positions for animation (call after initial mesh creation)
     void cacheOriginalPositions(WaterSurface* surf);

@@ -1156,27 +1156,45 @@ struct WaterKeyframe {
     // Water surface identification
     int water_surface_id = -1;
     
-    // Per-property flags
+    // Per-property flags - Geometric Waves
     bool has_wave_height = false;
     bool has_wave_scale = false;
     bool has_wind_direction = false;
     bool has_choppiness = false;
+    bool has_geo_speed = false;
     bool has_alignment = false;
     bool has_damping = false;
     bool has_swell_amplitude = false;
     bool has_sharpening = false;
     bool has_detail_strength = false;
     
-    // Property values (matches WaterWaveParams)
+    // Per-property flags - FFT Ocean
+    bool has_fft_wind_speed = false;
+    bool has_fft_wind_direction = false;
+    bool has_fft_amplitude = false;
+    bool has_fft_choppiness = false;
+    bool has_fft_time_scale = false;
+    bool has_fft_ocean_size = false;
+    
+    // Property values - Geometric Waves (matches WaterWaveParams)
     float wave_height = 2.0f;
     float wave_scale = 50.0f;
     float wind_direction = 0.0f;      // degrees
     float choppiness = 1.0f;
+    float geo_speed = 1.0f;           // Animation speed
     float alignment = 0.5f;
     float damping = 0.0f;
     float swell_amplitude = 0.2f;
     float sharpening = 0.0f;
     float detail_strength = 0.15f;
+    
+    // Property values - FFT Ocean
+    float fft_wind_speed = 10.0f;       // m/s - Storm intensity
+    float fft_wind_direction = 0.0f;    // degrees - Wave travel direction
+    float fft_amplitude = 0.0002f;      // Phillips A - Overall wave scale
+    float fft_choppiness = 1.0f;        // Horizontal displacement
+    float fft_time_scale = 1.0f;        // Animation speed
+    float fft_ocean_size = 100.0f;      // Tile size
     
     WaterKeyframe() = default;
     
@@ -1230,6 +1248,16 @@ struct WaterKeyframe {
             result.choppiness = b.choppiness;
         }
         
+        // Geo Speed (animation speed for geometric waves)
+        result.has_geo_speed = a.has_geo_speed || b.has_geo_speed;
+        if (a.has_geo_speed && b.has_geo_speed) {
+            result.geo_speed = a.geo_speed + (b.geo_speed - a.geo_speed) * t;
+        } else if (a.has_geo_speed) {
+            result.geo_speed = a.geo_speed;
+        } else if (b.has_geo_speed) {
+            result.geo_speed = b.geo_speed;
+        }
+        
         // Alignment
         result.has_alignment = a.has_alignment || b.has_alignment;
         if (a.has_alignment && b.has_alignment) {
@@ -1278,6 +1306,75 @@ struct WaterKeyframe {
             result.detail_strength = a.detail_strength;
         } else if (b.has_detail_strength) {
             result.detail_strength = b.detail_strength;
+        }
+        
+        // ═══════════════════════════════════════════════════════════════════════
+        // FFT OCEAN PARAMETERS
+        // ═══════════════════════════════════════════════════════════════════════
+        
+        // FFT Wind Speed (Storm intensity transition)
+        result.has_fft_wind_speed = a.has_fft_wind_speed || b.has_fft_wind_speed;
+        if (a.has_fft_wind_speed && b.has_fft_wind_speed) {
+            result.fft_wind_speed = a.fft_wind_speed + (b.fft_wind_speed - a.fft_wind_speed) * t;
+        } else if (a.has_fft_wind_speed) {
+            result.fft_wind_speed = a.fft_wind_speed;
+        } else if (b.has_fft_wind_speed) {
+            result.fft_wind_speed = b.fft_wind_speed;
+        }
+        
+        // FFT Wind Direction (with angle wrapping)
+        result.has_fft_wind_direction = a.has_fft_wind_direction || b.has_fft_wind_direction;
+        if (a.has_fft_wind_direction && b.has_fft_wind_direction) {
+            float diff = b.fft_wind_direction - a.fft_wind_direction;
+            if (diff > 180.0f) diff -= 360.0f;
+            if (diff < -180.0f) diff += 360.0f;
+            result.fft_wind_direction = a.fft_wind_direction + diff * t;
+            if (result.fft_wind_direction < 0) result.fft_wind_direction += 360.0f;
+            if (result.fft_wind_direction >= 360.0f) result.fft_wind_direction -= 360.0f;
+        } else if (a.has_fft_wind_direction) {
+            result.fft_wind_direction = a.fft_wind_direction;
+        } else if (b.has_fft_wind_direction) {
+            result.fft_wind_direction = b.fft_wind_direction;
+        }
+        
+        // FFT Amplitude
+        result.has_fft_amplitude = a.has_fft_amplitude || b.has_fft_amplitude;
+        if (a.has_fft_amplitude && b.has_fft_amplitude) {
+            result.fft_amplitude = a.fft_amplitude + (b.fft_amplitude - a.fft_amplitude) * t;
+        } else if (a.has_fft_amplitude) {
+            result.fft_amplitude = a.fft_amplitude;
+        } else if (b.has_fft_amplitude) {
+            result.fft_amplitude = b.fft_amplitude;
+        }
+        
+        // FFT Choppiness
+        result.has_fft_choppiness = a.has_fft_choppiness || b.has_fft_choppiness;
+        if (a.has_fft_choppiness && b.has_fft_choppiness) {
+            result.fft_choppiness = a.fft_choppiness + (b.fft_choppiness - a.fft_choppiness) * t;
+        } else if (a.has_fft_choppiness) {
+            result.fft_choppiness = a.fft_choppiness;
+        } else if (b.has_fft_choppiness) {
+            result.fft_choppiness = b.fft_choppiness;
+        }
+        
+        // FFT Time Scale (Animation speed)
+        result.has_fft_time_scale = a.has_fft_time_scale || b.has_fft_time_scale;
+        if (a.has_fft_time_scale && b.has_fft_time_scale) {
+            result.fft_time_scale = a.fft_time_scale + (b.fft_time_scale - a.fft_time_scale) * t;
+        } else if (a.has_fft_time_scale) {
+            result.fft_time_scale = a.fft_time_scale;
+        } else if (b.has_fft_time_scale) {
+            result.fft_time_scale = b.fft_time_scale;
+        }
+        
+        // FFT Ocean Size
+        result.has_fft_ocean_size = a.has_fft_ocean_size || b.has_fft_ocean_size;
+        if (a.has_fft_ocean_size && b.has_fft_ocean_size) {
+            result.fft_ocean_size = a.fft_ocean_size + (b.fft_ocean_size - a.fft_ocean_size) * t;
+        } else if (a.has_fft_ocean_size) {
+            result.fft_ocean_size = a.fft_ocean_size;
+        } else if (b.has_fft_ocean_size) {
+            result.fft_ocean_size = b.fft_ocean_size;
         }
         
         return result;

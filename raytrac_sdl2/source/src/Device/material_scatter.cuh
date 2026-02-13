@@ -1,9 +1,9 @@
 ﻿// Safe and stable BRDF + scatter implementation
 #pragma once
+#include "params.h"
 #include "vec3_utils.cuh"
 #include "random_utils.cuh"
 #include "ray.h"
-#include "params.h"
 #include "payload.h"
 #include <material_gpu.h>
 
@@ -13,9 +13,9 @@
 #define GPU_MIN_DOT 0.0001f
 
 __device__ float G_SchlickGGX(float NdotV, float roughness) {
-    // Industry standard for Direct Lighting: k = (r+1)^2 / 8
-    float r = roughness + 1.0f;
-    float k = (r * r) / 8.0f;
+    // IBL/Path Tracing variant: k = alpha / 2 = (roughness^2) / 2
+    float alpha = roughness * roughness;
+    float k = alpha / 2.0f;
     return NdotV / (NdotV * (1.0f - k) + k);
 }
 
@@ -44,29 +44,18 @@ __device__ float3 float3_min(const float3& a, const float3& b) {
 }
 __device__ float get_alpha_gpu(const OptixHitResult& payload, const float2& uv)
 {
-    // 1. Explicit Opacity Map (Priority)
-    // Assume standard Grayscale map (White=Opaque, Black=Transparent).
-    // We use Red channel (tex.x) because texture loaders usually put grayscale into RGB.
-    // We do NOT check tex.w (Alpha) here because many opacity maps are JPG/PNG with full Alpha (1.0).
+    // If we have an explicit opacity map, use it exclusively (matches CPU)
     if (payload.opacity_tex) {
         float4 tex = tex2D<float4>(payload.opacity_tex, uv.x, uv.y);
-        // Use average of RGB for robustness against colored masks, or just X. 
-        // Let's use average to be safe if it's not pure grayscale.
-        return (tex.x + tex.y + tex.z) / 3.0f; 
+        
+        // Robust grayscale/alpha detection: use alpha if texture has alpha, else red/luminance
+        float val = (payload.opacity_has_alpha) ? tex.w : tex.x;
+        
+        // 0.1 Cutoff to ignore compression noise/artifacts
+        return (val < 0.1f) ? 0.0f : val;
     }
-
-    // 2. Albedo Map Alpha Channel (Fallback)
-    // If no explicit opacity map, check if Albedo has alpha transparency.
-    if (payload.albedo_tex) {
-        float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
-        // Trust the Alpha channel. 
-        // If loaded as RGB (no alpha), texture loader usually sets W=1.0.
-        // If loaded as RGBA, W is the alpha.
-        return tex.w; 
-    }
-
-    // 3. Default (Opaque)
-    return 1.0f;
+    
+    return 1.0f; // Fallback to scalar opacity handled in calling function
 }
 
 
@@ -79,7 +68,6 @@ __device__ float3 evaluate_brdf(
 {
     const float3 N = payload.normal;
     float2 uv = payload.uv;
-    uv = clamp(uv, 0.0f, 1.0f);
 
     float NdotL = max(dot(N, wi), GPU_MIN_DOT);
     float NdotV = max(dot(N, wo), GPU_MIN_DOT);
@@ -95,7 +83,7 @@ __device__ float3 evaluate_brdf(
     }
     else if (payload.has_albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
-        albedo = (tex.y == 0.0f && tex.z == 0.0f) ?
+        albedo = (fabsf(tex.x - tex.y) < 1e-3f && fabsf(tex.x - tex.z) < 1e-3f) ?
             make_float3(tex.x, tex.x, tex.x) :
             make_float3(tex.x, tex.y, tex.z);
     }
@@ -132,7 +120,9 @@ __device__ float3 evaluate_brdf(
     float D = alpha2 / (M_PIf * denom * denom);
 
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    float3 F = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) * powf(1.0f - VdotH, 5.0f);
+    // Roughness-aware Fresnel (F90) matches CPU PrincipledBSDF::fresnelSchlickRoughness
+    float3 F90 = make_float3(fmaxf(1.0f - roughness, F0.x), fmaxf(1.0f - roughness, F0.y), fmaxf(1.0f - roughness, F0.z));
+    float3 F = F0 + (F90 - F0) * powf(1.0f - VdotH, 5.0f);
 
     float G = G_Smith(NdotV, NdotL, roughness);
     float3 spec = (F * D * G) / (4.0f * NdotV * NdotL + 0.001f);   
@@ -519,41 +509,15 @@ __device__ bool scatter_material(
 {
     float2 uv = payload.uv;
     float3 N = payload.normal;
-   
-    uv = clamp(uv, 0.0f, 1.0f);
+ 
     const float3 V = -normalize(ray_in.direction);
-	if (length(N) < 0.001f) {
-		N = make_float3(0.0f, 0.0f, 1.0f); // Normal sıfırsa Z eksenine yönlendir
-	}
-   
-    float3 albedo = material.albedo/M_PIf;
-    if (payload.use_blended_data) {
-        albedo = payload.blended_albedo / M_PIf; // Maintain division convention if needed, though check logic
-        // Wait, blended_albedo comes from raygen which already did sRGB->Linear. 
-        // material.albedo/M_PIf suggests albedo is used as diffuse reflectance rho.
-        // Usually albedo is just color. Dividing by PI is strictly for Lambertian BRDF term.
-        // Let's keep consistency.
+    if (length(N) < 0.001f) {
+        N = make_float3(0.0f, 0.0f, 1.0f); // Normal is zero, orient to Z axis
     }
-    else if (payload.has_albedo_tex) {
-        float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
-        albedo = (tex.y == 0.0f && tex.z == 0.0f) ?
-            make_float3(tex.x, tex.x, tex.x) :
-            make_float3(tex.x, tex.y, tex.z);
-    }
-   
     float opacity = material.opacity;
     opacity *= get_alpha_gpu(payload, uv);
-    
-    // Tam şeffaf (opacity ≈ 0) durumunda direkt geç, hayalet görüntü bırakma
-    if (opacity < 0.001f) {
-        // Tamamen şeffaf - ışın hiç etkileşime girmeden geçer
-        *attenuation = make_float3(1.0f, 1.0f, 1.0f);  // Hiç soğurma yok
-        *scattered = Ray(payload.position + ray_in.direction * 0.001f, ray_in.direction);
-        *pdf = 1.0f;
-        *is_specular = true;  // Delta dağılım - MIS atla
-        return true;
-    }
-    
+
+
     if (opacity < 1.0f) {
         // Yarı-şeffaf: stokastik olarak opak veya şeffaf yol seç
         if (random_float(rng) < opacity) {
@@ -569,7 +533,21 @@ __device__ bool scatter_material(
             return true;
         }
     }
-   
+    float3 albedo = material.albedo;
+    if (payload.use_blended_data) {
+        albedo = payload.blended_albedo;
+        // Wait, blended_albedo comes from raygen which already did sRGB->Linear. 
+        // material.albedo/M_PIf suggests albedo is used as diffuse reflectance rho.
+        // Usually albedo is just color. Dividing by PI is strictly for Lambertian BRDF term.
+        // Let's keep consistency.
+    }
+    else if (payload.has_albedo_tex) {
+        float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
+        albedo = (fabsf(tex.x - tex.y) < 1e-3f && fabsf(tex.x - tex.z) < 1e-3f) ?
+            make_float3(tex.x, tex.x, tex.x) :
+            make_float3(tex.x, tex.y, tex.z);
+    }
+
    
     float roughness = material.roughness;
     if (payload.use_blended_data) {
@@ -647,7 +625,7 @@ __device__ bool scatter_material(
     float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
-    float3 diffuse = k_d * albedo / M_PIf;
+    float3 diffuse = k_d * albedo/M_PIf;
     float3 specular = F;
     *pdf = pdf_brdf(material, wo, wi, payload.normal);   
     *scattered = Ray(payload.position + L * 0.001f, L);

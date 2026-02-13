@@ -550,6 +550,19 @@ public:
             " | Total time: " + std::to_string(duration.count()) + "ms"); */
     }
 
+    // ===== Constructor Procedural/Memory Only (No Disk Load) =====
+    Texture(const std::string& name, int w, int h, TextureType type)
+        : name(name), width(w), height(h), type(type),
+        is_srgb(type == TextureType::Albedo), is_aces(type == TextureType::Emission) {
+
+        pixels.resize(width * height);
+        m_is_loaded = true;
+        is_gpu_uploaded = false;
+        is_hdr = false;
+        has_alpha = true;
+        is_gray_scale = false;
+    }
+
     // ===== Constructor Memory Buffer - Embedded texture'lar için dosya yazmadan yükleme =====
     // Bu constructor proje dosyasından embedded texture binary'si okunduğunda kullanılır
     // Disk I/O yapmadan doğrudan bellekten yükler - daha hızlı ve temp dosya gerektirmez
@@ -667,10 +680,11 @@ public:
     
     Vec3 get_color(float u, float v) const {
         if (!m_is_loaded) return Vec3(0);
-        u = std::clamp(u, 0.0f, 1.0f);
-        v = std::clamp(v, 0.0f, 1.0f);
+        // Wrap coordinates for tiling support (Repeat mode)
+        u = u - floorf(u);
+        v = v - floorf(v);
         int x = static_cast<int>(u * (width - 1));
-        int y = static_cast<int>((1.0 - v) * (height - 1));
+        int y = static_cast<int>((1.0f - v) * (height - 1));
         x = std::clamp(x, 0, width - 1);
         y = std::clamp(y, 0, height - 1);
 
@@ -685,10 +699,11 @@ public:
 
     float get_alpha(float u, float v) const {
         if (!m_is_loaded || pixels.empty()) return 1.0f;
-        u = std::clamp(u, 0.0f, 1.0f);
-        v = std::clamp(v, 0.0f, 1.0f);
+        // Wrap coordinates
+        u = u - floorf(u);
+        v = v - floorf(v);
         int x = static_cast<int>(u * (width - 1));
-        int y = static_cast<int>((1.0 - v) * (height - 1));
+        int y = static_cast<int>((1.0f - v) * (height - 1));
         x = std::clamp(x, 0, width - 1);
         y = std::clamp(y, 0, height - 1);
         return pixels[y * width + x].alpha();
@@ -867,6 +882,59 @@ public:
         }
     }
 
+    // Upload a specific region to GPU (useful for partial splatmap updates)
+    bool upload_region_to_gpu(int x, int y, int w, int h) {
+        if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return false;
+
+        // Clamp to texture bounds
+        x = std::max(0, x);
+        y = std::max(0, y);
+        w = std::min(w, width - x);
+        h = std::min(h, height - y);
+
+        if (w <= 0 || h <= 0) return false;
+
+        cudaError_t err = cudaSuccess;
+        if (is_hdr) {
+            std::vector<float4> region_data(w * h);
+            for (int j = 0; j < h; ++j) {
+                std::memcpy(&region_data[j * w], &float_pixels[(y + j) * width + x], w * sizeof(float4));
+            }
+            err = cudaMemcpy2DToArray(cuda_array, x * sizeof(float4), y, region_data.data(),
+                w * sizeof(float4),
+                w * sizeof(float4), h,
+                cudaMemcpyHostToDevice);
+        } else {
+            bool needs_srgb_conversion = (type == TextureType::Albedo);
+            std::vector<uchar4> region_data(w * h);
+            
+            if (needs_srgb_conversion) {
+                const auto& lut = SRGBToLinearLUT::instance();
+                for (int j = 0; j < h; ++j) {
+                    for (int i = 0; i < w; ++i) {
+                        auto& p = pixels[(y + j) * width + (x + i)];
+                        region_data[j * w + i] = make_uchar4(lut[p.r], lut[p.g], lut[p.b], p.a);
+                    }
+                }
+            } else {
+                for (int j = 0; j < h; ++j) {
+                    std::memcpy(&region_data[j * w], &pixels[(y + j) * width + x], w * sizeof(uchar4));
+                }
+            }
+            
+            err = cudaMemcpy2DToArray(cuda_array, x * sizeof(uchar4), y, region_data.data(),
+                w * sizeof(uchar4),
+                w * sizeof(uchar4), h,
+                cudaMemcpyHostToDevice);
+        }
+
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("Texture region update failed: " + std::string(cudaGetErrorString(err)));
+            return false;
+        }
+        return true;
+    }
+
     cudaTextureObject_t getTextureObject() const { return tex_obj; }
     bool isUploaded() const { return is_gpu_uploaded; }
 
@@ -879,6 +947,7 @@ public:
             cudaFreeArray(cuda_array);
             cuda_array = nullptr;
         }
+        is_gpu_uploaded = false;
     }
 
     ~Texture() {

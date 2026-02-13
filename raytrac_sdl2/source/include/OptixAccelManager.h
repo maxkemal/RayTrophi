@@ -20,9 +20,11 @@
 #include "material_gpu.h"
 #include "sbt_record.h"
 #include "sbt_data.h"
-#include <OptixWrapper.h>
+#include <OptixTypes.h>
 #include <functional> // Added for std::function
 #include "PrincipledBSDF.h"
+#include "Matrix4x4.h"
+#include "Hittable.h"
 #include "skinning_kernels.cuh" // GPU Skinning Kernels
 // ═══════════════════════════════════════════════════════════════════════════
 // OPTIX TLAS/BLAS ACCELERATION STRUCTURE MANAGER
@@ -39,30 +41,6 @@
 // Forward declaration
 class Triangle;
 
-// Per-mesh geometry data for BLAS building
-struct MeshGeometry {
-    std::vector<float3> vertices;
-    std::vector<uint3> indices;
-    std::vector<float3> normals;
-    std::vector<float2> uvs;
-    std::vector<float3> tangents;
-    std::vector<float3> colors;
-    int material_id = 0;
-    std::string mesh_name;
-    
-    // Skinning Data (Optional)
-    std::vector<int4> boneIndices;
-    std::vector<float4> boneWeights;
-};
-
-// Per-mesh data for grouping triangles by nodeName
-// Used to identify which triangles belong to the same mesh/object
-struct MeshData {
-    std::string mesh_name;                  // Unique name (e.g. "Car_mat_0")
-    std::string original_name;              // Original node name (e.g. "Car")
-    std::vector<int> triangle_indices;      // Indices into global triangle list
-    int material_id = 0;                    // Primary material ID for this mesh
-};
 
 // Per-mesh Bottom-Level Acceleration Structure
 struct MeshBLAS {
@@ -79,10 +57,10 @@ struct MeshBLAS {
     size_t gas_output_size = 0;             // GAS output buffer size (for refit)
     size_t vertex_count = 0;
     size_t index_count = 0;
-    int sbt_offset = 0;                     // SBT hit group offset
+    int sbt_offset = 0;                     // Base SBT offset (for RAY_TYPE_COUNT records)
     int material_id = 0;                    // Material ID for this mesh
     std::string mesh_name;                  // Unique name (e.g. "Car_mat_0")
-    std::string original_name;              // Base node name (e.g. "Car")
+    std::string original_name;              // Node name from OBJ/FBX (e.g. "Car")
     
     // Foliage Properties
     bool is_foliage = false;
@@ -117,9 +95,52 @@ struct MeshBLAS {
     }
 };
 
+
+// Per-hair curve Bottom-Level Acceleration Structure
+struct CurveBLAS {
+    OptixTraversableHandle handle = 0;
+    CUdeviceptr d_vertices = 0;
+    CUdeviceptr d_widths = 0;         // Separate per-vertex radius buffer (required by OptiX)
+    CUdeviceptr d_indices = 0;
+    CUdeviceptr d_tangents = 0;
+    CUdeviceptr d_strand_ids = 0;
+    CUdeviceptr d_gas_output = 0;
+    size_t gas_output_size = 0;
+    size_t vertex_count = 0;
+    size_t segment_count = 0;
+    int sbt_offset = 0;
+    int material_id = 0;
+    int mesh_material_id = -1;
+    GpuHairMaterial hair_material;
+    std::string name;
+    bool use_bspline = false;
+    CUdeviceptr d_root_uvs = 0;       // Per-segment root UV (float2)
+
+    // Temporary storage for refit pointers to ensure they stay valid for async builds
+    CUdeviceptr d_refit_vertices = 0;
+    CUdeviceptr d_refit_widths = 0;
+
+    void cleanup() {
+        if (d_vertices) { cudaFree(reinterpret_cast<void*>(d_vertices)); d_vertices = 0; }
+        if (d_widths) { cudaFree(reinterpret_cast<void*>(d_widths)); d_widths = 0; }
+        if (d_indices) { cudaFree(reinterpret_cast<void*>(d_indices)); d_indices = 0; }
+        if (d_tangents) { cudaFree(reinterpret_cast<void*>(d_tangents)); d_tangents = 0; }
+        if (d_strand_ids) { cudaFree(reinterpret_cast<void*>(d_strand_ids)); d_strand_ids = 0; }
+        if (d_root_uvs) { cudaFree(reinterpret_cast<void*>(d_root_uvs)); d_root_uvs = 0; }
+        if (d_gas_output) { cudaFree(reinterpret_cast<void*>(d_gas_output)); d_gas_output = 0; }
+        handle = 0;
+    }
+};
+
+enum class InstanceType {
+    Mesh,
+    Curve
+};
+
 // Per-instance data for TLAS
 struct SceneInstance {
-    int mesh_id = -1;                       // Index into mesh_blas_list
+    InstanceType type = InstanceType::Mesh;
+    int blas_id = -1;                       // Index into mesh_blas_list or curve_blas_list
     int material_id = 0;                    // Material index for SBT
     float transform[12] = {                 // 3x4 row-major transform matrix
         1, 0, 0, 0,                         // Row 0: scale.x * right + tx
@@ -177,7 +198,9 @@ public:
     ~OptixAccelManager() { cleanup(); }
     
     // Initialize with OptiX context and stream
-    void initialize(OptixDeviceContext ctx, CUstream str, OptixProgramGroup hit_pg);
+    void initialize(OptixDeviceContext ctx, CUstream str, 
+                    OptixProgramGroup hit_pg, OptixProgramGroup hit_shadow_pg,
+                    OptixProgramGroup hair_hit_pg, OptixProgramGroup hair_shadow_pg);
     
     // Mark that the scene structure (object list) has changed
     void markTopologyDirty() { m_topology_dirty = true; }
@@ -189,9 +212,38 @@ public:
     // Build BLAS for a mesh, returns mesh_id
     int buildMeshBLAS(const MeshGeometry& geometry);
     
+    // Build BLAS for hair curves
+    int buildCurveBLAS(const CurveGeometry& geometry);
+    
+    // Update curve material parameters without rebuild
+    void updateCurveMaterial(int curve_id, const GpuHairMaterial& material);
+
+    // Fast update for hair curves (Refit)
+    /**
+     * @brief Fast update of curve acceleration structure (Refit)
+     * @param d_external_vertices Optional new vertex buffer (interleaved supported via stride)
+     * @param d_external_widths Optional new width buffer
+     * @param vertex_stride Optional custom stride (default 0 means sizeof(float3))
+     * @param width_stride Optional custom stride (default 0 means sizeof(float))
+     */
+    bool refitCurveBLAS(int curve_id, bool sync = true, 
+                       CUdeviceptr d_external_vertices = 0, 
+                       CUdeviceptr d_external_widths = 0,
+                       size_t vertex_stride = 0,
+                       size_t width_stride = 0);
+
     // Update BLAS vertices and refit (for transform updates)
     // Returns true if successful, false if refit not possible (needs full rebuild)
     bool updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload = false, bool sync = true);
+    
+    // Partial update: Upload only a range of vertices/normals
+    void uploadMeshVerticesPartial(int mesh_id, 
+                                   const std::vector<float3>& vertices, 
+                                   const std::vector<float3>& normals, 
+                                   size_t offset_in_vertices);
+
+    // Trigger BLAS refit after partial uploads
+    bool refitMeshBLAS(int mesh_id, bool sync = true);
     
     // Update ALL BLAS structures from triangle list (for gizmo transform)
     // Updates all BLAS vertex buffers (Heavy: for deformation)
@@ -218,7 +270,7 @@ public:
     // ═══════════════════════════════════════════════════════════════════════
     
     // Add instance, returns instance_id
-    int addInstance(int mesh_id, const float transform[12], int material_id, const std::string& name = "", void* source_hittable = nullptr);
+    int addInstance(int blas_id, const float transform[12], int material_id, InstanceType type = InstanceType::Mesh, const std::string& name = "", void* source_hittable = nullptr);
     
     // Update instance transform (fast - only TLAS rebuild needed)
     void updateInstanceTransform(int instance_id, const float transform[12]);
@@ -269,6 +321,9 @@ public:
                   const std::vector<OptixGeometryData::TextureBundle>& textures,
                   const std::vector<OptixGeometryData::VolumetricInfo>& volumetrics);
                  
+    // Synchronize material properties (emission, textures) into existing SBT without full rebuild
+    void syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain = true);
+
     // Apply wind deformation to foliage meshes (Kernel Launch + BLAS Refit)
     void applyWindDeformation(int mesh_id, const Vec3& direction, float strength, float speed, float time);
     
@@ -290,6 +345,7 @@ public:
     
     void cleanup();
     void clearInstances();  // Keep BLAS, clear instances and TLAS
+    void clearCurves();     // Clear all curve BLAS and their instances
     
     // ═══════════════════════════════════════════════════════════════════════
     // STATS
@@ -299,8 +355,21 @@ public:
 
     size_t getMeshCount() const { return mesh_blas_list.size(); }
     size_t getInstanceCount() const { return instances.size(); }
+    size_t getCurveInstanceCount() const {
+        size_t count = 0;
+        for (const auto& inst : instances) if (inst.type == InstanceType::Curve) count++;
+        return count;
+    }
     const std::vector<SceneInstance>& getInstances() const { return instances; }
     bool isBuilt() const { return tlas_handle != 0; }
+    
+    // Get mesh name by SBT index (for GPU picking)
+    std::string getMeshNameByIndex(int mesh_idx) const {
+        if (mesh_idx >= 0 && mesh_idx < static_cast<int>(mesh_blas_list.size())) {
+            return mesh_blas_list[mesh_idx].original_name;  // Use original_name (node name)
+        }
+        return "";
+    }
     
     // Callback for HUD messages
     // int argument is for message type: 0=Info, 1=Warning, 2=Error
@@ -314,9 +383,13 @@ private:
     OptixDeviceContext context = nullptr;
     CUstream stream = nullptr;
     OptixProgramGroup hit_program_group = nullptr;
+    OptixProgramGroup hit_shadow_program_group = nullptr;
+    OptixProgramGroup hair_hit_program_group = nullptr;
+    OptixProgramGroup hair_shadow_program_group = nullptr;
     
     // BLAS storage
     std::vector<MeshBLAS> mesh_blas_list;
+    std::vector<CurveBLAS> curve_blas_list;
     
     // Instance storage
     std::vector<SceneInstance> instances;
@@ -352,6 +425,7 @@ private:
     OptixShaderBindingTable sbt = {};
     std::vector<SbtRecord<HitGroupData>> hitgroup_records;
     CUdeviceptr d_hitgroup_records = 0;
+    size_t m_last_hitgroup_size = 0; // Track size to avoid reallocations
     
     // Foliage Deformation PTX Module
     CUmodule foliage_module = 0;

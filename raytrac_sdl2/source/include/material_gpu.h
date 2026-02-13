@@ -69,16 +69,65 @@ struct alignas(16) GpuMaterial {
     // Block 9: Advanced Water Details (16 bytes)
     float micro_detail_strength;      // 4 bytes
     float micro_detail_scale;         // 4 bytes
+    float micro_anim_speed;           // 4 bytes - Animation speed multiplier
+    float micro_morph_speed;          // 4 bytes - Shape morphing speed
+
+    // Block 10: Water Foam (16 bytes)
     float foam_noise_scale;           // 4 bytes
     float foam_threshold;             // 4 bytes
-
-    // Block 10: FFT Settings (16 bytes)
     float fft_ocean_size;             // 4 bytes
     float fft_choppiness;             // 4 bytes
-    float padding1;                   // 4 bytes
-    float padding2;                   // 4 bytes
+    
+    // Block 11: FFT Wind Settings (16 bytes)
+    float fft_wind_speed;             // 4 bytes
+    float fft_wind_direction;         // 4 bytes
+    float fft_amplitude;              // 4 bytes
+    float fft_time_scale;             // 4 bytes
 };  
-// Total: 160 bytes - well aligned (10 x 16-byte blocks)
+
+/**
+ * @brief GPU-friendly hair material
+ */
+struct alignas(16) GpuHairMaterial {
+    // Block 1: Color & Appearance (16 bytes)
+    float3 sigma_a;               // Absorption coefficient (12 bytes)
+    int colorMode;              // Color mode (4 bytes)
+
+    // Block 2: Physically Based Model (16 bytes)
+    float3 color;                 // Direct color (12 bytes)
+    float roughness;            // Longitudinal roughness (4 bytes)
+
+    // Block 3: Physical Properties (16 bytes)
+    float melanin;              // Melanin amount (4 bytes)
+    float melaninRedness;       // Melanin redness (4 bytes)
+    float ior;                  // Index of refraction (4 bytes)
+    float cuticleAngle;         // In radians (4 bytes)
+
+    // Block 4: Styling & Tint (16 bytes)
+    float3 tintColor;             // Tint color (12 bytes)
+    float tint;                 // Tint strength (4 bytes)
+
+    // Block 5: Azimuthal & Random (16 bytes)
+    float radialRoughness;      // Azimuthal roughness (4 bytes)
+    float randomHue;            // Variation (4 bytes)
+    float randomValue;          // Variation (4 bytes)
+    float emissionStrength;     // (4 bytes)
+
+    // Block 6: Emission & Variances (16 bytes)
+    float3 emission;              // (12 bytes)
+    float v_R;                  // Variance for R lobe (4 bytes)
+
+    // Block 7: More Variances & Misc (16 bytes)
+    float v_TT;                 // Variance for TT lobe (4 bytes)
+    float v_TRT;                // Variance for TRT lobe (4 bytes)
+    float s;                    // Logistic scale (4 bytes)
+    float pad0;                 // (4 bytes)
+
+    // Block 8: Textures (16 bytes)
+    cudaTextureObject_t albedo_tex;    // 8 bytes
+    cudaTextureObject_t roughness_tex; // 8 bytes
+};
+// Total: 176 bytes - well aligned (11 x 16-byte blocks)
 
 inline bool float3_equal(float3 a, float3 b, float epsilon = FLOAT_COMPARE_EPSILON) {  
     return fabsf(a.x - b.x) < epsilon && 
@@ -111,7 +160,11 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.foam_threshold - b.foam_threshold) < FLOAT_COMPARE_EPSILON &&
         // FFT Settings
         fabsf(a.fft_ocean_size - b.fft_ocean_size) < FLOAT_COMPARE_EPSILON &&
-        fabsf(a.fft_choppiness - b.fft_choppiness) < FLOAT_COMPARE_EPSILON;
+        fabsf(a.fft_choppiness - b.fft_choppiness) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.fft_wind_speed - b.fft_wind_speed) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.fft_wind_direction - b.fft_wind_direction) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.fft_amplitude - b.fft_amplitude) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.fft_time_scale - b.fft_time_scale) < FLOAT_COMPARE_EPSILON;
 }    
 
 namespace std {  
@@ -166,6 +219,10 @@ namespace std {
             // FFT Settings
             hash_combine(h, m.fft_ocean_size);
             hash_combine(h, m.fft_choppiness);
+            hash_combine(h, m.fft_wind_speed);
+            hash_combine(h, m.fft_wind_direction);
+            hash_combine(h, m.fft_amplitude);
+            hash_combine(h, m.fft_time_scale);
 
             return h;  
         }  

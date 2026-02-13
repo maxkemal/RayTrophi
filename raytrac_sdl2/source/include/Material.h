@@ -149,7 +149,7 @@ public:
    
 
     virtual ~Material() = default;
-    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const = 0;
+    virtual bool scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered, bool& is_specular) const = 0;
     
     virtual float get_metallic() const { return metallicProperty.intensity; }
     virtual Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
@@ -161,8 +161,11 @@ public:
     virtual bool hasOpacityTexture() const {
         return opacityProperty.texture != nullptr;
     }
+    virtual bool isTransparent() const {
+        return opacityProperty.alpha < 0.999f || opacityProperty.texture != nullptr;
+    }
     virtual float get_opacity(const Vec2& uv) const {
-        return 1.0f; // Varsayılan olarak tam opak
+        return opacityProperty.evaluateOpacity(uv);
     }
 
     void setTexture(std::shared_ptr<Texture> tex) { albedoProperty.texture = tex; }
@@ -194,6 +197,9 @@ public:
     // Advanced scattering methods
     virtual bool volumetric_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
     virtual bool sss_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
+    virtual bool sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
+    virtual bool clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
+    virtual bool translucent_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const;
 
     // Yeni: Anizotropik malzemeler için
     virtual Vec3 getAnisotropicDirection() const;
@@ -206,9 +212,10 @@ public:
     float artistic_albedo_response = 0.50f; // default fiziksel
     float ior = 1.5f; // Yeni: Varsayılan kırılma indeksi
     float normalStrength = 1.0f;
+    float roughness = 0.0f;
 protected:   
    
-    float roughness = 0.0f;
+  
    
     Vec3 f0 = Vec3(0.04f); // Yeni: Varsayılan Fresnel yansıma katsayısı
     

@@ -29,7 +29,7 @@
 namespace ForceFieldUI {
 
 // Currently selected force field for UI
-static std::shared_ptr<Physics::ForceField> selected_force_field = nullptr;
+inline std::shared_ptr<Physics::ForceField> selected_force_field = nullptr;
 
 /**
  * @brief Draw the Force Field panel content

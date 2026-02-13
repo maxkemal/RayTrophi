@@ -190,7 +190,7 @@ __host__ __device__ inline float3 decode_normal(float4 n) {
     float3 norm = make_float3(n.x, n.y, n.z);
     return norm * 2.0f - make_float3(1.0f, 1.0f, 1.0f);
 }
-__host__ __device__ void build_coordinate_system(const float3& N, float3& U, float3& V) {
+__host__ __device__ inline void build_coordinate_system(const float3& N, float3& U, float3& V) {
     if (fabsf(N.x) > fabsf(N.z)) {
         U = normalize(make_float3(-N.y, N.x, 0.0f));
     }
@@ -200,3 +200,18 @@ __host__ __device__ void build_coordinate_system(const float3& N, float3& U, flo
     V = cross(N, U);
 }
 
+// === HSV Utils ===
+__host__ __device__ inline float3 rgb_to_hsv(float3 rgb) {
+    float4 K = make_float4(0.0f, -1.0f / 3.0f, 2.0f / 3.0f, -1.0f);
+    float4 p = (rgb.y < rgb.z) ? make_float4(rgb.z, rgb.y, K.w, K.z) : make_float4(rgb.y, rgb.z, K.x, K.y);
+    float4 q = (rgb.x < p.x) ? make_float4(p.x, p.y, p.w, rgb.x) : make_float4(rgb.x, p.y, p.z, p.x);
+    float d = q.x - fminf(q.w, q.y);
+    float e = 1.0e-10f;
+    return make_float3(fabsf(q.z + (q.w - q.y) / (6.0f * d + e)), d / (q.x + e), q.x);
+}
+
+__host__ __device__ inline float3 hsv_to_rgb(float3 hsv) {
+    float4 K = make_float4(1.0f, 2.0f / 3.0f, 1.0f / 3.0f, 3.0f);
+    float3 p = abs(fract(make_float3(hsv.x, hsv.x, hsv.x) + make_float3(K.x, K.y, K.z)) * 6.0f - make_float3(K.w, K.w, K.w));
+    return hsv.z * lerp(make_float3(K.x, K.x, K.x), clamp(p - make_float3(K.x, K.x, K.x), 0.0f, 1.0f), hsv.y);
+}

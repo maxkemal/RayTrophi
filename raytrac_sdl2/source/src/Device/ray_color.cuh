@@ -2,6 +2,10 @@
 #include "trace_ray.cuh"
 #include <math_constants.h>
 
+#ifndef SCENE_EPSILON
+#define SCENE_EPSILON 0.001f
+#endif
+
 #ifndef M_1_PIf
 #define M_1_PIf 0.318309886183790671538f
 #endif
@@ -26,11 +30,13 @@
 __device__ float gpu_phase_dual_hg(float cos_theta, float g_forward, float g_back, float lobe_mix) {
     // Forward lobe
     float g2_fwd = g_forward * g_forward;
-    float phase_fwd = (1.0f - g2_fwd) / (4.0f * 3.14159f * powf(1.0f + g2_fwd - 2.0f * g_forward * cos_theta, 1.5f));
+    float denom_fwd = 1.0f + g2_fwd - 2.0f * g_forward * cos_theta;
+    float phase_fwd = (1.0f - g2_fwd) / (4.0f * M_PIf * powf(fmaxf(denom_fwd, 0.0001f), 1.5f));
     
     // Backward lobe
     float g2_back = g_back * g_back;
-    float phase_back = (1.0f - g2_back) / (4.0f * 3.14159f * powf(1.0f + g2_back - 2.0f * g_back * cos_theta, 1.5f));
+    float denom_back = 1.0f + g2_back - 2.0f * g_back * cos_theta;
+    float phase_back = (1.0f - g2_back) / (4.0f * M_PIf * powf(fmaxf(denom_back, 0.0001f), 1.5f));
     
     return lobe_mix * phase_fwd + (1.0f - lobe_mix) * phase_back;
 }
@@ -57,6 +63,7 @@ __device__ inline float smoothstep_cloud(float edge0, float edge1, float x) {
 
 // Forward declaration for ambient sky radiance
 __device__ float3 gpu_get_sky_radiance(const WorldData& world, const float3& dir);
+__device__ float3 gpu_get_ambient_radiance_volume(const WorldData& world, const float3& dir);
 
 // GPU helper: Get transmittance from LUT (Pfe-computed)
 __device__ float3 gpu_get_transmittance(const WorldData& world, float3 pos, float3 sunDir) {
@@ -836,20 +843,26 @@ __device__ float3 raymarch_vdb_volume(
     }
     
     // Step size - ADAPTIVE PRECISION
-    float step_size_local = vol.step_size;
-    float world_scale = 1.0f / fmaxf(1e-6f, length(make_float3(vol.inv_transform[0], vol.inv_transform[1], vol.inv_transform[2])));
-    float world_voxel_size = vol.voxel_size * world_scale;
-    float min_extent = fminf(fminf(vol.world_bbox_max.x - vol.world_bbox_min.x, vol.world_bbox_max.y - vol.world_bbox_min.y), vol.world_bbox_max.z - vol.world_bbox_min.z);
-    float step = fmaxf(0.0001f, fminf(step_size_local, fmaxf(world_voxel_size, min_extent / 64.0f)));
-    
     float world_t_enter = t_enter / dir_length;
     float world_t_exit = t_exit / dir_length;
-    float world_vol_extent = (t_exit - t_enter) / dir_length;
+    float world_vol_extent = world_t_exit - world_t_enter;
+
+    // Safety Step Calculation: Ensures we reach the exit before hitting max_steps
+    float min_step_to_cover = world_vol_extent / fmaxf(1.0f, (float)vol.max_steps - 1.0f);
+    float step = fmaxf(vol.step_size, min_step_to_cover);
+    
+    // Quality clamp: Ensure we don't use a step larger than the voxel size if requested small
+    float world_scale = 1.0f / fmaxf(1e-6f, length(make_float3(vol.inv_transform[0], vol.inv_transform[1], vol.inv_transform[2])));
+    float world_voxel_size = vol.voxel_size * world_scale;
+    step = fmaxf(0.0001f, fminf(step, fmaxf(world_voxel_size, world_vol_extent / 16.0f)));
+    
+    // Re-verify that step will actually cover the volume (final safety)
+    step = fmaxf(step, min_step_to_cover);
 
     // Raymarching State
     float jitter = curand_uniform(rng) * step;
     float t = world_t_enter + jitter;
-    float transmittance = 1.0f;
+    float3 transmittance = make_float3(1.0f);
     float3 accumulated_color = make_float3(0.0f);
     
     // Grid Setup
@@ -868,7 +881,7 @@ __device__ float3 raymarch_vdb_volume(
         reinterpret_cast<const nanovdb::FloatGrid*>(vol.temperature_grid) : nullptr;
     
     int steps = 0;
-    while (t < world_t_exit && steps < vol.max_steps && transmittance > 0.005f) {
+    while (t < world_t_exit && steps < vol.max_steps && (transmittance.x + transmittance.y + transmittance.z) > 0.015f) {
         float3 world_pos = ray_origin + ray_dir * t;
         float3 local_pos = transform_point_affine(world_pos, vol.inv_transform);
         
@@ -887,7 +900,12 @@ __device__ float3 raymarch_vdb_volume(
             float sigma_a = density * vol.absorption_coefficient;
             float sigma_s = density * vol.scatter_coefficient;
             float sigma_t = sigma_a + sigma_s;
-            float step_transmittance = expf(-sigma_t * step);
+            float albedo_avg = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
+            
+            // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
+            float T_single = expf(-sigma_t * step);
+            float T_multi_p = expf(-sigma_t * step * 0.25f);
+            float step_transmittance = T_single * (1.0f - vol.scatter_multi * albedo_avg) + T_multi_p * (vol.scatter_multi * albedo_avg);
             
             // Emission
             float3 emission = make_float3(0.0f);
@@ -910,17 +928,18 @@ __device__ float3 raymarch_vdb_volume(
             float3 total_light = make_float3(0.0f);
             
             // 1. Sun Lighting
+            // 1. Sun Lighting with Atmosphere Transmittance Parity
             {
+                float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, world_pos, optixLaunchParams.world.nishita.sun_direction);
+                float3 sun_color = sun_trans * sun_intensity;
+                
                 float cos_theta = dot(local_ray_dir, local_sun_dir);
-                float g1 = vol.scatter_anisotropy;
-                float g2 = vol.scatter_anisotropy_back;
-                float p1 = (1.0f - g1 * g1) / (4.0f * CUDART_PI_F * powf(1.0f + g1 * g1 - 2.0f * g1 * cos_theta, 1.5f));
-                float p2 = (1.0f - g2 * g2) / (4.0f * CUDART_PI_F * powf(1.0f + g2 * g2 - 2.0f * g2 * cos_theta, 1.5f));
-                float phase = p1 * vol.scatter_lobe_mix + p2 * (1.0f - vol.scatter_lobe_mix);
+                float phase = gpu_phase_dual_hg(cos_theta, vol.scatter_anisotropy, vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                float powder = gpu_powder_effect(density, cos_theta);
+                phase *= (1.0f + powder * 0.5f);
 
                 float shadow = 1.0f;
                 if (vol.shadow_steps > 0) {
-                    // Precompute local shadow step vector
                     float s_step_world = world_vol_extent / (float)(vol.shadow_steps * 2);
                     float3 local_s_step_vec = local_sun_dir * (s_step_world * dir_length);
                     float3 curr_local_s_pos = local_pos;
@@ -928,75 +947,57 @@ __device__ float3 raymarch_vdb_volume(
                     float s_trans = 0.0f;
                     for (int ls = 0; ls < vol.shadow_steps && s_trans < 5.0f; ++ls) {
                         curr_local_s_pos += local_s_step_vec;
-                        
-                        // Local boundary check is much faster
                         if (curr_local_s_pos.x < vol.local_bbox_min.x || curr_local_s_pos.x > vol.local_bbox_max.x || 
                             curr_local_s_pos.y < vol.local_bbox_min.y || curr_local_s_pos.y > vol.local_bbox_max.y || 
                             curr_local_s_pos.z < vol.local_bbox_min.z || curr_local_s_pos.z > vol.local_bbox_max.z) break;
                         
                         nanovdb::Vec3f s_idx = grid->worldToIndexF(nanovdb::Vec3f(curr_local_s_pos.x, curr_local_s_pos.y, curr_local_s_pos.z));
                         float sd = sampler(s_idx);
-                        if (isfinite(sd)) s_trans += fmaxf((sd - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier * s_step_world;
-                    }
-                    shadow = expf(-s_trans * vol.shadow_strength);
-                }
-                total_light += make_float3(sun_intensity) * shadow * phase;
-            }
-            
-            // 2. Scene Lights
-            if (optixLaunchParams.lights && optixLaunchParams.light_count > 0) {
-                for (int i = 0; i < optixLaunchParams.light_count; ++i) {
-                    const LightGPU& light = optixLaunchParams.lights[i];
-                    float3 L_world = light.position - world_pos;
-                    float dist_sq = dot(L_world, L_world);
-                    float dist_world = sqrtf(dist_sq);
-                    float3 L_dir_world = L_world / dist_world;
-                    float attenuation = 1.0f / (1.0f + 0.1f * dist_world + 0.01f * dist_sq);
-                    
-                    if (light.type == 1) { L_dir_world = -normalize(light.direction); dist_world = 1e9f; attenuation = 1.0f; }
-                    else if (light.type == 2) {
-                        if (dot(-L_dir_world, normalize(light.direction)) < light.outer_cone_cos) attenuation = 0.0f;
-                    }
-
-                    if (attenuation > 0.001f) {
-                        float3 local_L_dir = normalize(transform_vector_affine(L_dir_world, vol.inv_transform));
-                        float cos_theta = dot(local_ray_dir, local_L_dir);
-                        float phase = (1.0f - vol.scatter_anisotropy * vol.scatter_anisotropy) / (4.0f * CUDART_PI_F * powf(1.0f + vol.scatter_anisotropy * vol.scatter_anisotropy - 2.0f * vol.scatter_anisotropy * cos_theta, 1.5f));
-                        
-                        float shadow = 1.0f;
-                        if (vol.shadow_steps > 0) {
-                             float s_step_world = fminf(dist_world / (float)vol.shadow_steps, world_vol_extent / 10.0f);
-                             float3 local_s_step_vec = local_L_dir * (s_step_world * dir_length);
-                             float3 curr_local_s_pos = local_pos;
-                             float s_trans = 0.0f;
-                             
-                             for (int ls = 0; ls < vol.shadow_steps && s_trans < 5.0f; ++ls) {
-                                curr_local_s_pos += local_s_step_vec;
-                                if (curr_local_s_pos.x < vol.local_bbox_min.x || curr_local_s_pos.x > vol.local_bbox_max.x || 
-                                    curr_local_s_pos.y < vol.local_bbox_min.y || curr_local_s_pos.y > vol.local_bbox_max.y || 
-                                    curr_local_s_pos.z < vol.local_bbox_min.z || curr_local_s_pos.z > vol.local_bbox_max.z) break;
-                                
-                                float sd = sampler(grid->worldToIndexF(nanovdb::Vec3f(curr_local_s_pos.x, curr_local_s_pos.y, curr_local_s_pos.z)));
-                                if (isfinite(sd)) s_trans += fmaxf((sd - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier * s_step_world;
-                             }
-                             shadow = expf(-s_trans * vol.shadow_strength);
+                        if (isfinite(sd)) {
+                            float s_rem = fmaxf((sd - vol.density_remap_low) / remap_range, 0.0f);
+                            s_trans += s_rem * vol.density_multiplier * (vol.absorption_coefficient + vol.scatter_coefficient) * s_step_world;
                         }
-                        total_light += light.color * light.intensity * attenuation * shadow * phase;
                     }
+                    
+                    // --- MULTI-OCTAVE SHADOWING (Matches CPU 1.0 - strength * (1-T) ) ---
+                    float beers = expf(-s_trans);
+                    float beers_soft = expf(-s_trans * 0.25f);
+                    float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
+                    float phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
+                    shadow = 1.0f - vol.shadow_strength * (1.0f - phys_trans);
+                }
+                total_light += sun_color * shadow * phase;
+            }
+            
+            // 2. Extra Lights (Stable)
+            if (optixLaunchParams.lights && optixLaunchParams.light_count > 0) {
+                for (int j = 0; j < optixLaunchParams.light_count; ++j) {
+                    const LightGPU& light = optixLaunchParams.lights[j];
+                    float3 L_world = (light.type == 1) ? -light.direction : normalize(light.position - world_pos);
+                    float3 local_L_dir = normalize(transform_vector_affine(L_world, vol.inv_transform));
+                    float cos_th = dot(local_ray_dir, local_L_dir);
+                    float ph = gpu_phase_dual_hg(cos_th, vol.scatter_anisotropy, vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                    total_light += light.color * light.intensity * ph; 
                 }
             }
             
-            // 3. Ambient (Look up once or use a simple approximation)
-            total_light += gpu_get_sky_radiance(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.1f;
+            // 3. Sky/Ambient Lighting (CPU Parity)
+            total_light += gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f;
+
+            float3 albedo = vol.scatter_color;
+            float3 ms_boost = make_float3(1.0f) + albedo * vol.scatter_multi * 2.0f;
+            float3 source = (albedo * total_light * sigma_s * ms_boost + emission);
             
-            accumulated_color += (vol.scatter_color * total_light * sigma_s + emission) * transmittance * (1.0f - step_transmittance);
+            // 4. Energy-Stable Integration (Matches CPU line 3376)
+            float one_minus_T = 1.0f - step_transmittance;
+            accumulated_color += source * (one_minus_T * transmittance);
             transmittance *= step_transmittance;
         }
         t += step;
         steps++;
     }
     
-    out_transmittance = transmittance;
+    out_transmittance = (transmittance.x + transmittance.y + transmittance.z) / 3.0f;
     return accumulated_color;
 }
 
@@ -1213,7 +1214,7 @@ __device__ bool trace_shadow_test(float3 origin, float3 direction, float maxDist
     Ray shadow_ray(origin, direction);
     
     OptixHitResult shadow_payload = {};
-    trace_shadow_ray(shadow_ray, &shadow_payload, 0.1f, maxDist);
+    trace_shadow_ray(shadow_ray, &shadow_payload, SCENE_EPSILON, maxDist);
     
     return shadow_payload.hit;
 }
@@ -1348,6 +1349,23 @@ __device__ float3 gpu_get_sky_radiance(const WorldData& world, const float3& dir
     return make_float3(tex.x, tex.y, tex.z);
 }
 
+// Unified helper for ambient lighting in volumes (excl clouds)
+__device__ float3 gpu_get_ambient_radiance_volume(const WorldData& world, const float3& dir) {
+    if (world.mode == 0) return world.color * world.color_intensity;
+    if (world.mode == 1 && world.env_texture) {
+        float theta = acosf(dir.y);
+        float phi = atan2f(-dir.z, dir.x) + M_PIf;
+        float u = phi * (0.5f * M_1_PIf);
+        float v = theta * M_1_PIf;
+        u -= world.env_rotation / (2.0f * M_PIf);
+        u -= floorf(u);
+        float4 tex = tex2D<float4>(world.env_texture, u, v);
+        return make_float3(tex.x, tex.y, tex.z) * world.env_intensity;
+    }
+    if (world.mode == 2) return gpu_get_sky_radiance(world, dir);
+    return make_float3(0,0,0);
+}
+
 __device__ float3 gpu_get_aerial_perspective(const WorldData& world, float3 color, float3 origin, float3 dir, float dist) {
     if (world.mode != 2 || world.lut.transmittance_lut == 0 || dist > 1e6f) return color;
     
@@ -1437,7 +1455,7 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         float phaseM = (1.0f - g_mie * g_mie) / (4.0f * 3.14159f * powf(1.0f + g_mie * g_mie - 2.0f * g_mie * mu, 1.5f));
         
         // Soft halo contribution
-        float excessPhase = fmaxf(0.0f, phaseM - 1.0f);
+        float excessPhase = fmaxf(0.0f, phaseM - 2.0f);
         if (excessPhase > 0.0f) {
             // HALO LEAK PROTECTION: Add shadow test for halo to prevent bleeding through solid objects
             if (!trace_shadow_test(origin, sunDir, 100000.0f)) {
@@ -1452,7 +1470,7 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         if (world.advanced.multi_scatter_enabled) {
             float3 scatteringAlbedo = make_float3(0.8f, 0.85f, 0.9f);
             float3 ms = apply_multi_scattering(radiance, 0.5f, scatteringAlbedo, world.advanced.multi_scatter_factor); 
-            radiance = radiance + ms;
+            radiance = ms;
         }
 
         // --- SUN DISK ---
@@ -1465,11 +1483,23 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         
         float sun_radius = sunSizeDeg * (M_PIf / 180.0f) * 0.5f;
         if (dot(dir, sunDir) > cosf(sun_radius)) {
+            // Procedural Limb Darkening & Edge Softening (Matches CPU Exactly)
+            float mu_disk = dot(dir, sunDir);
+            float angular_dist = acosf(fminf(1.0f, mu_disk));
+            float radial_pos = angular_dist / fmaxf(1e-6f, sun_radius);
+            
+            float u_limb = 0.6f;
+            float cosine_mu = sqrtf(fmaxf(0.0f, 1.0f - radial_pos * radial_pos));
+            float limbDarkening = 1.0f - u_limb * (1.0f - cosine_mu);
+            
+            float edge_t = fmaxf(0.0f, fminf(1.0f, (radial_pos - 0.85f) / 0.15f));
+            float edgeSoftness = 1.0f - edge_t * edge_t * (3.0f - 2.0f * edge_t);
+
             float t_occ = get_stochastic_volumetric_occlusion(origin, dir, 200000.0f, rng, 0.0f);
             if (t_occ >= 200000.0f) {
                 float3 transSun = gpu_get_transmittance(world, origin, sunDir);
                 // BOOSTER: Sun disk needs much more power to punch through high exposure atmosphere
-                radiance += transSun * world.nishita.sun_intensity * 80000.0f; // Increased from 50k
+                radiance += transSun * world.nishita.sun_intensity * 80000.0f * limbDarkening * edgeSoftness;
             }
         }
 
@@ -1593,7 +1623,7 @@ __device__ float3 calculate_light_contribution(
     float3 wi;
     float distance = 1.0f;
     float attenuation = 1.0f;
-    const float shadow_bias = 1e-2f;
+    const float shadow_bias = SCENE_EPSILON;
 
     if (light.type == 0) { // Point Light
         float3 L = light.position - payload.position;
@@ -1643,7 +1673,7 @@ __device__ float3 calculate_light_contribution(
     Ray shadow_ray(origin, wi);
     OptixHitResult shadow_payload = {};
     
-    trace_shadow_ray(shadow_ray, &shadow_payload, 0.01f, distance);
+    trace_shadow_ray(shadow_ray, &shadow_payload, SCENE_EPSILON, distance);
     if (shadow_payload.hit) return make_float3(0.0f, 0.0f, 0.0f);
     
     // Check VDB Occlusion (Volumetric Shadow)
@@ -1919,14 +1949,17 @@ __device__ float3 raymarch_volumetric_object(
     
     // Initialize
     float3 accumulated_color = make_float3(0.0f, 0.0f, 0.0f);
-    float transmittance = 1.0f;
+    float3 transmittance = make_float3(1.0f);
     
-    // Adaptive step size based on volume size
-    float volume_size = length(aabb_max - aabb_min);
-    float actual_step_size = fmaxf(step_size, volume_size / (float)max_steps);
+    // Raymarching span
+    float volume_extent = t_exit - t_enter;
+    
+    // Safety Step Calculation: Ensures we reach the exit before hitting max_steps
+    float min_step_to_cover = volume_extent / fmaxf(1.0f, (float)max_steps - 1.0f);
+    float actual_step_size = fmaxf(step_size, min_step_to_cover);
     
     // Temporal jitter to reduce banding
-    float jitter = random_float(rng) * actual_step_size;
+    float jitter = curand_uniform(rng) * actual_step_size;
     float t = t_enter + jitter;
     int steps = 0;
     
@@ -1935,9 +1968,9 @@ __device__ float3 raymarch_volumetric_object(
     float sun_intensity = optixLaunchParams.world.nishita.sun_intensity;
     
     // Precompute light march step size
-    float light_step_size = volume_size / fmaxf((float)light_steps, 1.0f);
+    float light_step_size = volume_extent / fmaxf((float)light_steps, 1.0f);
     
-    while (t < t_exit && steps < max_steps && transmittance > 0.01f) {
+    while (t < t_exit && steps < max_steps && (transmittance.x + transmittance.y + transmittance.z) > 0.03f) {
         // --- STOCHASTIC EDGE SMOOTHING ---
         float threshold = curand_uniform(rng) * 0.01f;
         
@@ -2031,93 +2064,66 @@ __device__ float3 raymarch_volumetric_object(
             // Smooth falloff using smoothstep
             float edge_factor = 1.0f;
             if (d_edge < falloff_dist && falloff_dist > 0.001f) {
-                float t = d_edge / falloff_dist;
+                float t_f = d_edge / falloff_dist;
                 // Smoothstep: 3t^2 - 2t^3
-                edge_factor = t * t * (3.0f - 2.0f * t);
+                edge_factor = t_f * t_f * (3.0f - 2.0f * t_f);
             }
             
-        local_density *= edge_factor;
+            local_density *= edge_factor;
         }
         
         if (local_density > threshold) {
             // Compute extinction coefficient
-            float sigma_a = local_density * vol_absorption;
+            float sigma_a = local_density * vol_absorption; 
             float sigma_s = local_density * vol_scattering;
             float sigma_t = sigma_a + sigma_s;
+            float albedo_avg = vol_albedo.x * 0.2126f + vol_albedo.y * 0.7152f + vol_albedo.z * 0.0722f;
             
-            // Albedo average for multi-scatter
-            float albedo_avg = (vol_albedo.x + vol_albedo.y + vol_albedo.z) / 3.0f;
+            // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
+            float T_single = expf(-sigma_t * actual_step_size);
+            float T_multi_p = expf(-sigma_t * actual_step_size * 0.25f);
+            float step_transmittance = T_single * (1.0f - multi_scatter * albedo_avg) + T_multi_p * (multi_scatter * albedo_avg);
             
-            // Multi-scatter transmittance
-            float step_transmittance = gpu_multiscatter_transmittance(sigma_t, actual_step_size, multi_scatter, albedo_avg);
-            
-            // ═══════════════════════════════════════════════════════════
-            // LIGHT MARCHING (Self-Shadowing)
-            // ═══════════════════════════════════════════════════════════
-            float light_transmittance = 1.0f;
+            float shadow_trans = 1.0f;
             if (light_steps > 0) {
                 float density_accum = 0.0f;
                 for (int j = 1; j <= light_steps; ++j) {
                     float3 light_pos = pos + sun_dir * (light_step_size * (float)j);
-                    
-                    // Check if still in AABB
-                    if (light_pos.x < aabb_min.x || light_pos.x > aabb_max.x ||
-                        light_pos.y < aabb_min.y || light_pos.y > aabb_max.y ||
-                        light_pos.z < aabb_min.z || light_pos.z > aabb_max.z) {
-                        break;
-                    }
-                    
-                    // Simple density sample (skip noise for performance)
-                    float light_density = vol_density;
-                    density_accum += light_density * vol_absorption * light_step_size;
-                    
+                    if (light_pos.x < aabb_min.x || light_pos.x > aabb_max.x || light_pos.y < aabb_min.y || light_pos.y > aabb_max.y || light_pos.z < aabb_min.z || light_pos.z > aabb_max.z) break;
+                    density_accum += local_density * (vol_absorption + vol_scattering) * light_step_size;
                     if (density_accum > 5.0f) break;
                 }
-                
-                // Beer's Law + multi-scatter
+                // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
                 float beers = expf(-density_accum);
                 float beers_soft = expf(-density_accum * 0.25f);
-                light_transmittance = beers * (1.0f - multi_scatter * albedo_avg) + 
-                                      beers_soft * multi_scatter * albedo_avg;
-                light_transmittance = 1.0f - shadow_strength * (1.0f - light_transmittance);
+                float albedo_p = vol_albedo.x * 0.2126f + vol_albedo.y * 0.7152f + vol_albedo.z * 0.0722f;
+                float phys_trans = beers * (1.0f - multi_scatter * albedo_p) + beers_soft * (multi_scatter * albedo_p);
+                shadow_trans = 1.0f - shadow_strength * (1.0f - phys_trans);
             }
             
-            // ═══════════════════════════════════════════════════════════
-            // IN-SCATTERING (Dual-lobe phase + powder effect)
-            // ═══════════════════════════════════════════════════════════
             float cos_theta = dot(ray_dir, sun_dir);
-            
-            // Dual-lobe Henyey-Greenstein phase function
             float phase = gpu_phase_dual_hg(cos_theta, vol_g, g_back, lobe_mix);
-            
-            // Powder effect
             float powder = gpu_powder_effect(local_density, cos_theta);
+            phase *= (1.0f + powder * 0.5f);
+
+            float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, pos, sun_dir);
+            float3 sun_color = sun_trans * sun_intensity;
+            float3 shadow_radiance = sun_color * shadow_trans * phase;
+            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f;
+            float3 total_light = shadow_radiance + ambient;
+
+            float3 ms_boost = make_float3(1.0f) + vol_albedo * multi_scatter * 2.0f;
+            float3 source = (vol_albedo * total_light * sigma_s * ms_boost + vol_emission * local_density);
             
-            // Light contribution with self-shadowing
-            float3 Li = make_float3(sun_intensity, sun_intensity, sun_intensity);
-            float3 inscatter = vol_albedo * Li * phase * sigma_s * light_transmittance;
-            
-            // --- AMBIENT SKY LIGHTING ---
-            float3 sky_ambient = gpu_get_sky_radiance(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f;
-            inscatter += vol_albedo * sky_ambient * sigma_s;
-            
-            inscatter = inscatter * (1.0f + powder * 0.5f);
-            
-            // Emission
-            float3 emit = vol_emission;
-            
-            // Accumulate
-            float3 step_color = (inscatter + emit) * transmittance * (1.0f - step_transmittance);
-            accumulated_color += step_color;
-            
+            // Energy-stable integration (Parity with Renderer.cpp)
+            float one_minus_T = 1.0f - step_transmittance;
+            accumulated_color += source * (one_minus_T * transmittance);
             transmittance *= step_transmittance;
         }
-        
         t += actual_step_size;
         steps++;
     }
-    
-    out_transmittance = transmittance;
+    out_transmittance = (transmittance.x + transmittance.y + transmittance.z) / 3.0f;
     return accumulated_color;
 }
 
@@ -2165,15 +2171,17 @@ __device__ float3 raymarch_gas_volume(
     }
 
     float3 accumulated_color = make_float3(0.0f);
-    float transmittance = 1.0f;
+    float3 transmittance = make_float3(1.0f);
     
     // Convert step size to world space logic
     float3 vol_size = vol.local_bbox_max - vol.local_bbox_min;
     float world_t_enter = t_enter / dir_length;
     float world_t_exit = t_exit / dir_length;
     
-    float step = vol.step_size;
-    if (step < 0.001f) step = 0.05f; 
+    // Safety Step Calculation: Ensures we reach the exit before hitting max_steps
+    float volume_extent = world_t_exit - world_t_enter;
+    float min_step_to_cover = volume_extent / fmaxf(1.0f, (float)vol.max_steps - 1.0f);
+    float step = fmaxf(vol.step_size <= 0.0f ? 0.05f : vol.step_size, min_step_to_cover);
     
     // Jitter
     float jitter = curand_uniform(rng) * step;
@@ -2181,7 +2189,7 @@ __device__ float3 raymarch_gas_volume(
 
     int steps = 0;
     
-    while (t < world_t_exit && steps < vol.max_steps && transmittance > 0.01f) {
+    while (t < world_t_exit && steps < vol.max_steps && (transmittance.x + transmittance.y + transmittance.z) > 0.03f) {
         // --- STOCHASTIC EDGE SMOOTHING ---
         float threshold = curand_uniform(rng) * 0.01f;
         
@@ -2205,76 +2213,63 @@ __device__ float3 raymarch_gas_volume(
             float sigma_a = density * vol.absorption_coefficient;
             float sigma_s = density * vol.scatter_coefficient;
             float sigma_t = sigma_a + sigma_s;
+            float albedo_avg = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
             
-            // Energy-conserving transmittance
-            float step_transmittance = expf(-sigma_t * step);
+            // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
+            float T_single = expf(-sigma_t * step);
+            float T_multi_p = expf(-sigma_t * step * 0.25f);
+            float step_transmittance = T_single * (1.0f - vol.scatter_multi * albedo_avg) + T_multi_p * (vol.scatter_multi * albedo_avg);
             
-            // ═══════════════════════════════════════════════════════════
-            // LIGHTING (End-to-End Volumetric Shading)
-            // ═══════════════════════════════════════════════════════════
             float3 total_radiance = make_float3(0.0f);
-            
-            // Sun Light
             float cos_theta = dot(ray_dir, sun_dir);
+            float phase = gpu_phase_dual_hg(cos_theta, vol.scatter_anisotropy, vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
             
-            // Dual-Lobe Henyey-Greenstein (Industry Standard for Smoke/Gas)
-            float g1 = vol.scatter_anisotropy; 
-            float g2 = vol.scatter_anisotropy_back;
-            float phase1 = (1.0f - g1*g1) / (4.0f * CUDART_PI_F * powf(1.0f + g1*g1 - 2.0f*g1*cos_theta, 1.5f));
-            float phase2 = (1.0f - g2*g2) / (4.0f * CUDART_PI_F * powf(1.0f + g2*g2 - 2.0f*g2*cos_theta, 1.5f));
-            float phase = lerp(phase1, phase2, 1.0f - vol.scatter_lobe_mix); 
-            
-            // Shadow Ray
-            float light_transmittance = 1.0f;
+            float shadow_trans = 1.0f;
             if (vol.shadow_steps > 0) {
                  float shadow_step = vol.step_size * 2.0f; 
                  float shadow_density_sum = 0.0f;
-                 
                  for(int ls=0; ls < vol.shadow_steps; ++ls) {
                      float3 shadow_pos = world_pos + sun_dir * (shadow_step * (float)(ls + 1));
                      float3 l_shadow = transform_point_affine(shadow_pos, vol.inv_transform);
-                     
                      if (l_shadow.x < vol.local_bbox_min.x || l_shadow.x > vol.local_bbox_max.x ||
                          l_shadow.y < vol.local_bbox_min.y || l_shadow.y > vol.local_bbox_max.y ||
                          l_shadow.z < vol.local_bbox_min.z || l_shadow.z > vol.local_bbox_max.z) break;
-                           
                      float3 stcind = (l_shadow - vol.local_bbox_min) / (vol.local_bbox_max - vol.local_bbox_min);
                      float sd = tex3D<float>(vol.density_texture, stcind.x, stcind.y, stcind.z);
-                     sd = (sd - vol.density_remap_low)/remap_range * vol.density_multiplier;
-                     
+                     sd = (sd - vol.density_remap_low)/(vol.density_remap_high - vol.density_remap_low + 1e-6f) * vol.density_multiplier;
                      if(sd > 0.0f) shadow_density_sum += sd;
                      if(shadow_density_sum > 10.0f) break; 
                  }
-                 // Multiple Scattering Approximation (Shadow softening)
-                 float shadow_attenuation = sigma_t * shadow_step * (1.0f - vol.scatter_multi);
-                 light_transmittance = expf(-shadow_density_sum * shadow_attenuation * vol.shadow_strength);
+                 // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
+                 float beers = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient));
+                 float beers_soft = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient) * 0.25f);
+                 float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
+                 float phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
+                 shadow_trans = 1.0f - vol.shadow_strength * (1.0f - phys_trans);
             }
-            
-            // Combined Sun Radiance
-            total_radiance += make_float3(sun_intensity) * light_transmittance * phase;
+            float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, world_pos, sun_dir);
+            float3 sun_color = sun_trans * sun_intensity;
+            total_radiance = sun_color * shadow_trans * phase;
 
-            // --- AMBIENT / SKY OCCLUSION ---
-            float height_factor = (local_pos.y - vol.local_bbox_min.y) / (vol.local_bbox_max.y - vol.local_bbox_min.y);
-            float3 sky_ambient = gpu_get_sky_radiance(optixLaunchParams.world, make_float3(0, 1, 0)) * (0.05f + height_factor * 0.15f);
-            total_radiance += sky_ambient;
+            // --- RESTORED PARITY FEATURES (Powder + Ambient) ---
+            float powder = gpu_powder_effect(density, cos_theta);
+            total_radiance = total_radiance * (1.0f + powder * 0.5f);
             
-            // ═══════════════════════════════════════════════════════════
-            // EMISSION (Fire / Glow)
-            // ═══════════════════════════════════════════════════════════
+            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f;
+            total_radiance += ambient;
+            
             float3 emission = make_float3(0.0f);
             if (vol.emission_mode == 1) { // Constant
                 emission = vol.emission_color * vol.emission_intensity * density;
             }
             else if (vol.emission_mode == 2) { // Blackbody / Color Ramp
-                float temperature = density; // Use density as proxy for legacy
+                float temperature = density; 
                 if (vol.temperature_texture) {
                     temperature = tex3D<float>(vol.temperature_texture, tex_coord.x, tex_coord.y, tex_coord.z);
                     if (!isfinite(temperature)) temperature = density; 
                 }
                 
-                float3 e_color;
-                float kelvin;
-                float t_ramp_val;
+                float3 e_color; float kelvin; float t_ramp_val;
                 if (temperature > 20.0f) { // Likely physical Kelvin
                     kelvin = temperature * vol.temperature_scale;
                     t_ramp_val = (vol.max_temperature > 20.0f) ? (temperature / vol.max_temperature) : (temperature / 6000.0f);
@@ -2282,18 +2277,17 @@ __device__ float3 raymarch_gas_volume(
                     kelvin = (temperature * 3000.0f + 1000.0f) * vol.temperature_scale;
                     t_ramp_val = temperature;
                 }
-
-                if (vol.color_ramp_enabled) {
-                    e_color = sample_color_ramp_gas(vol, t_ramp_val * vol.temperature_scale);
-                } else {
-                    e_color = blackbody_to_rgb(kelvin);
-                }
+                if (vol.color_ramp_enabled) e_color = sample_color_ramp_gas(vol, t_ramp_val * vol.temperature_scale);
+                else e_color = blackbody_to_rgb(kelvin);
                 emission = e_color * density * vol.blackbody_intensity;
             }
 
-            float3 inscatter = vol.scatter_color * total_radiance * sigma_s;
-            float3 step_color = (inscatter + emission) * (1.0f - step_transmittance) / fmaxf(sigma_t, 0.0001f);
-            accumulated_color += step_color * transmittance;
+            float3 ms_boost = make_float3(1.0f) + vol.scatter_color * vol.scatter_multi * 2.0f;
+            float3 source = (vol.scatter_color * total_radiance * sigma_s * ms_boost + emission);
+            
+            // Energy-stable integration (Parity with Renderer.cpp)
+            float one_minus_T = 1.0f - step_transmittance;
+            accumulated_color += source * (one_minus_T * transmittance);
             transmittance *= step_transmittance;
         }
         
@@ -2301,7 +2295,7 @@ __device__ float3 raymarch_gas_volume(
         steps++;
     }
 
-    out_transmittance = transmittance;
+    out_transmittance = (transmittance.x + transmittance.y + transmittance.z) / 3.0f;
     return accumulated_color;
 }
 
@@ -2324,17 +2318,59 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
     const float MAX_CONTRIBUTION = 100.0f;
 
     for (int bounce = 0; bounce < max_depth; ++bounce) {
-
         OptixHitResult payload = {};
-        
-        // Use Viewport Clipping for primary rays
-        float t_min = (bounce == 0) ? optixLaunchParams.clip_near : 0.01f;
+        float t_min = (bounce == 0) ? optixLaunchParams.clip_near : SCENE_EPSILON;
         float t_max = (bounce == 0) ? optixLaunchParams.clip_far : 1e16f;
         
         trace_ray(ray, &payload, t_min, t_max);
+        
+        // --- 1. HANDLE HAIR (Unified Path) ---
+        if (payload.hit && payload.is_hair) {
+            color += throughput * payload.color;
+            
+            // For now, hair is treated as opaque to keep it simple and visible
+            // If it's a primary ray, we still need this for fog/picking
+            if (bounce == 0) {
+                first_hit_t = payload.t;
+                if (optixLaunchParams.pick_buffer != nullptr && optixLaunchParams.frame_number == 0) {
+                    const uint3 launch_idx = optixGetLaunchIndex();
+                    int pixel_idx = launch_idx.y * optixLaunchParams.image_width + launch_idx.x;
+                    optixLaunchParams.pick_buffer[pixel_idx] = payload.object_id;
+                }
+            }
+            break; // Stop path at hair
+        }
 
         if (bounce == 0 && payload.hit) {
             first_hit_t = payload.t;
+            
+            // ═══════════════════════════════════════════════════════════
+            // GPU PICKING - Write object ID to pick buffer on primary hit
+            // This enables O(1) viewport object selection from GPU render
+            // ═══════════════════════════════════════════════════════════
+            if (optixLaunchParams.pick_buffer != nullptr) {
+                const uint3 launch_idx = optixGetLaunchIndex();
+                int pixel_idx = launch_idx.y * optixLaunchParams.image_width + launch_idx.x;
+                
+                // Only update on first sample (frame_number == 0 or sample pass 0)
+                // This avoids race conditions and ensures stable pick results
+                if (optixLaunchParams.frame_number == 0) {
+                    optixLaunchParams.pick_buffer[pixel_idx] = payload.object_id;
+                    if (optixLaunchParams.pick_depth_buffer != nullptr) {
+                        optixLaunchParams.pick_depth_buffer[pixel_idx] = payload.t;
+                    }
+                }
+            }
+        } else if (bounce == 0 && !payload.hit) {
+            // Miss on primary ray - write -1 to pick buffer (no object)
+            if (optixLaunchParams.pick_buffer != nullptr && optixLaunchParams.frame_number == 0) {
+                const uint3 launch_idx = optixGetLaunchIndex();
+                int pixel_idx = launch_idx.y * optixLaunchParams.image_width + launch_idx.x;
+                optixLaunchParams.pick_buffer[pixel_idx] = -1;
+                if (optixLaunchParams.pick_depth_buffer != nullptr) {
+                    optixLaunchParams.pick_depth_buffer[pixel_idx] = -1.0f;
+                }
+            }
         }
 
         // === VOLUMETRIC ABSORPTION (Beer's Law) ===
@@ -2540,52 +2576,36 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                  float t = -ray.origin.y / ray.direction.y;
                  if (t > 0.0f) {
                      float3 p = ray.origin + ray.direction * t;
-                     
                      float scale_major = 1.0f;
                      float line_width = 0.02f;
-                     
                      float x_mod = fabsf(fmodf(p.x, scale_major));
                      float z_mod = fabsf(fmodf(p.z, scale_major));
-                     
                      bool x_line = x_mod < line_width || x_mod > (scale_major - line_width);
                      bool z_line = z_mod < line_width || z_mod > (scale_major - line_width);
-                     
                      bool x_axis = fabsf(p.z) < line_width * 2.0f;
                      bool z_axis = fabsf(p.x) < line_width * 2.0f;
-                     
                      float3 grid_color = make_float3(0.0f, 0.0f, 0.0f);
                      bool hit_grid = false;
-                     
                      if (x_axis) { grid_color = make_float3(0.8f, 0.2f, 0.2f); hit_grid = true; }
                      else if (z_axis) { grid_color = make_float3(0.2f, 0.8f, 0.2f); hit_grid = true; }
                      else if (x_line || z_line) { grid_color = make_float3(0.4f, 0.4f, 0.4f); hit_grid = true; }
-                     
                      if (hit_grid) {
                          float dist = t;
-                         float fade_start = 5.0f;
-                         float fade_end = optixLaunchParams.grid_fade_distance;
-                         float alpha = 1.0f - fminf(fmaxf((dist - fade_start) / (fade_end - fade_start), 0.0f), 1.0f);
-                         
+                         float alpha = 1.0f - fminf(fmaxf((dist - 5.0f) / (optixLaunchParams.grid_fade_distance - 5.0f), 0.0f), 1.0f);
                          bg_color = bg_color * (1.0f - alpha) + grid_color * alpha;
                      }
                  }
             }
-           
-            // Bounce bazlı arka plan azaltma - ilk bounce tam, sonrakiler azaltılmış
-            // Bu, yansımalarda arka plan renginin yüzeyleri boyamasını önler
-            float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
-            float3 bg_contribution = bg_color * bg_factor;
-            
-            color += throughput * bg_contribution;
+            color += throughput * bg_color;
             break;
         }
 
         float3 wo = -normalize(ray.direction);
-
         Ray scattered;
         float3 attenuation;
         float pdf;
         bool is_specular;
+        
         GpuMaterial mat = optixLaunchParams.materials[payload.material_id];
 
         // --- Scatter başarısızsa çık ---
@@ -2660,7 +2680,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             
             // Continue ray beyond the volume
             // Find exit point and continue
-            Ray exit_ray(payload.position + ray.direction * 0.01f, ray.direction);
+            Ray exit_ray(payload.position + ray.direction * SCENE_EPSILON, ray.direction);
             OptixHitResult exit_payload = {};
             trace_ray(exit_ray, &exit_payload,t_min,t_max);
             
@@ -2669,7 +2689,8 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             } else {
                 // Ray exited scene through volume
                 float3 bg_color = evaluate_background(optixLaunchParams.world, ray.origin, ray.direction, rng);
-                color += throughput * bg_color;
+                float bg_factor = (bounce == 0) ? 1.0f : fmaxf(0.1f, 1.0f / (1.0f + bounce * 0.5f));
+                color += throughput * bg_color * bg_factor;
                 break;
             }
             
@@ -2702,6 +2723,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
             emission = make_float3(tex.x, tex.y, tex.z) * mat.emission; // Tint with material emission color
         }
+       // emission *= 0.5f; // User optimization: add at half-rate to prevent over-emission
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
         if (light_count == 0) {           
            

@@ -828,7 +828,11 @@ public:
                 if (pbsdf->normalProperty.texture) { texBundle.normal_tex = getCudaTex(pbsdf->normalProperty.texture); texBundle.has_normal_tex = (texBundle.normal_tex != 0); }
                 if (pbsdf->metallicProperty.texture) { texBundle.metallic_tex = getCudaTex(pbsdf->metallicProperty.texture); texBundle.has_metallic_tex = (texBundle.metallic_tex != 0); }
                 if (pbsdf->emissionProperty.texture) { texBundle.emission_tex = getCudaTex(pbsdf->emissionProperty.texture); texBundle.has_emission_tex = (texBundle.emission_tex != 0); }
-                if (pbsdf->opacityProperty.texture) { texBundle.opacity_tex = getCudaTex(pbsdf->opacityProperty.texture); texBundle.has_opacity_tex = (texBundle.opacity_tex != 0); }
+                if (pbsdf->opacityProperty.texture) { 
+                    texBundle.opacity_tex = getCudaTex(pbsdf->opacityProperty.texture); 
+                    texBundle.has_opacity_tex = (texBundle.opacity_tex != 0); 
+                    texBundle.opacity_has_alpha = pbsdf->opacityProperty.texture->has_alpha ? 1 : 0;
+                }
                 if (pbsdf->transmissionProperty.texture) { texBundle.transmission_tex = getCudaTex(pbsdf->transmissionProperty.texture); texBundle.has_transmission_tex = (texBundle.transmission_tex != 0); }
                 
                 // DEBUG: Trace albedo texture assignment
@@ -1696,9 +1700,7 @@ private:
                     // DÜZELTME: Doğru render için sRGB rengi Linear uzaya çevir
                     // This prevents colors from looking washed out/dark
                     // Bu, renklerin soluk/koyu görünmesini önler
-                    color.x = powf(color.x, 2.2f);
-                    color.y = powf(color.y, 2.2f);
-                    color.z = powf(color.z, 2.2f);
+                   
                 } else {
                     SCENE_LOG_WARN("Light has zero color, using white fallback: " + name);
                     color = Vec3(1.0f);

@@ -126,6 +126,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
                 tri->getVertexNormal(0), tri->getVertexNormal(1), tri->getVertexNormal(2),
                 tri->t0, tri->t1, tri->t2,
                 tri->getMaterialID(),
+                tri->terrain_id,
                 tri.get() // Store original pointer
             });
         }
@@ -568,7 +569,7 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
                 }
             }
 
-            if (mat) {
+            if (mat && mat->isTransparent()) {
                 float opacity = mat->get_opacity(uv);
                 if (Vec3::random_float() > opacity) {
                     t_min = rayhit.ray.tfar + 0.001f;
@@ -661,6 +662,8 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
     rtcInitIntersectArguments(&args);
 
     // STOCHASTIC ALPHA TEST LOOP
+    Material* mat = nullptr;
+    Vec2 uv(0,0);
     while (true) {
         rayhit.ray.org_x = ray.origin.x;
         rayhit.ray.org_y = ray.origin.y;
@@ -680,8 +683,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
         if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
 
         // Check Alpha if it's a triangle
-        Material* mat = nullptr;
-        Vec2 uv(0,0);
+        mat = nullptr;
         if (rayhit.hit.geomID == triangle_geom_id) {
             const TriangleData& tri = triangle_data[rayhit.hit.primID];
             float u = rayhit.hit.u;
@@ -704,7 +706,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             }
         }
 
-        if (mat) {
+        if (mat && mat->isTransparent()) {
             float opacity = mat->get_opacity(uv);
             if (Vec3::random_float() > opacity) {
                 // Transparent: continue ray from this point
@@ -750,7 +752,9 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             rec.point = ray.at(rec.t); 
             rec.set_face_normal(ray, rec.normal);
             rec.material = tri.getMaterialShared();
+            rec.materialPtr = mat; // Use the raw pointer we already fetched
             rec.materialID = tri.materialID;
+            rec.terrain_id = tri.terrain_id;
             rec.is_instance_hit = false; // Local geometry (e.g. Terrain)
             rec.triangle = tri.original_ptr; // Restore identity
             return true;
@@ -787,7 +791,9 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                          rec.point = ray.at(rec.t); 
                          rec.set_face_normal(ray, rec.normal);
                          rec.material = tri.getMaterialShared();
+                         rec.materialPtr = mat; // Use the raw pointer we already fetched
                          rec.materialID = tri.materialID;
+                         rec.terrain_id = tri.terrain_id;
                          rec.triangle = tri.original_ptr; // Restore identity (Source Mesh)
                          return true;
                      }

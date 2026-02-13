@@ -178,9 +178,8 @@ UNIFIED_FUNC Vec3f evaluate_brdf_unified(
     // Diffuse coefficient (metals have no diffuse)
     Vec3f k_d = (Vec3f(1.0f) - F_avg) * (1.0f - metallic_sampled);
     
-    // Lambertian diffuse
-    // Lambertian diffuse (renormalized to albedo / PI)
-    Vec3f diffuse = k_d * albedo * (1.0f / UnifiedConstants::PI);
+    // Lambertian diffuse (Restored PI division for energy conservation)
+    Vec3f diffuse = (k_d * albedo) / UnifiedConstants::PI;
     
     // GPU-matching transmission handling:
     // When transmission >= 0.01, stochastically choose diffuse or specular

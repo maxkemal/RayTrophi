@@ -30,6 +30,37 @@
 
 namespace TerrainNodesV2 {
 
+    // C++14 compatible clamp helper (std::clamp requires C++17)
+    template<typename T>
+    inline T clampValue(T val, T lo, T hi) {
+        return (val < lo) ? lo : ((val > hi) ? hi : val);
+    }
+
+    /**
+     * @brief Apply a soft falloff to the edges of a 2D float array
+     */
+    inline void applyEdgeFalloff(std::vector<float>& data, int w, int h, float width, float targetValue) {
+        if (width <= 0.01f) return;
+        
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                // Distance to nearest edge in pixels
+                float dx = (float)std::min(x, w - 1 - x);
+                float dy = (float)std::min(y, h - 1 - y);
+                float dist = (std::min)(dx, dy);
+                
+                if (dist < width) {
+                    float t = dist / width;
+                    // Quadratic ease-in-out for smoother transition
+                    float smoothT = t * t * (3.0f - 2.0f * t);
+                    
+                    float& val = data[y * w + x];
+                    val = targetValue + (val - targetValue) * smoothT;
+                }
+            }
+        }
+    }
+
     // ============================================================================
     // TERRAIN EVALUATION CONTEXT
     // ============================================================================
@@ -98,6 +129,7 @@ namespace TerrainNodesV2 {
         Smooth,
         Normalize,
         Terrace,
+        EdgeFalloff,
         MaskCombine,
         Overlay,
         Screen,
@@ -220,6 +252,10 @@ namespace TerrainNodesV2 {
         int maxResolution = 2048; // Limit import resolution
         int smoothIterations = 0; // Smoothing pass count
         
+        // Edge Falloff Settings
+        float edgeFalloffWidth = 0.0f; // Width of the fade area in pixels
+        float edgeFalloffValue = 0.0f; // Target height at the absolute edge (0-1)
+        
         // Transient loaded data
         std::vector<float> rawHeightData; // Original loaded data (before processing)
         std::vector<float> loadedHeightData; // Processed data (smoothed)
@@ -299,6 +335,11 @@ namespace TerrainNodesV2 {
                 *result.data = terrain->heightmap.data;
             }
             
+            // Apply Edge Falloff if enabled
+            if (edgeFalloffWidth > 0.01f) {
+                applyEdgeFalloff(*result.data, w, h, edgeFalloffWidth, edgeFalloffValue);
+            }
+            
             return result;
         }
         
@@ -366,6 +407,17 @@ namespace TerrainNodesV2 {
                     if (fileLoaded) applySmoothing();
                     dirty = true;
                 }
+
+                ImGui::Separator();
+                ImGui::Text("Edge Falloff");
+                if (ImGui::DragFloat("Fade Width", &edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+                if (ImGui::SliderFloat("Fade Value", &edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
+            } else {
+                // Terrain mode also has edge falloff
+                ImGui::Separator();
+                ImGui::Text("Edge Falloff");
+                if (ImGui::DragFloat("Fade Width", &edgeFalloffWidth, 1.0f, 0.0f, 256.0f, "%.0f px")) dirty = true;
+                if (ImGui::SliderFloat("Fade Value", &edgeFalloffValue, 0.0f, 1.0f)) dirty = true;
             }
         }
         
@@ -384,6 +436,8 @@ namespace TerrainNodesV2 {
             j["maintainAspectRatio"] = maintainAspectRatio;
             j["maxResolution"] = maxResolution;
             j["smoothIterations"] = smoothIterations;
+            j["edgeFalloffWidth"] = edgeFalloffWidth;
+            j["edgeFalloffValue"] = edgeFalloffValue;
         }
         
         void deserializeFromJson(const nlohmann::json& j) override {
@@ -398,6 +452,8 @@ namespace TerrainNodesV2 {
             if (j.contains("maintainAspectRatio")) maintainAspectRatio = j["maintainAspectRatio"].get<bool>();
             if (j.contains("maxResolution")) maxResolution = j["maxResolution"].get<int>();
             if (j.contains("smoothIterations")) smoothIterations = j["smoothIterations"].get<int>();
+            if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
+            if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
             
             // Reload file if path exists
             if (sourceMode == SourceMode::File && strlen(filePath) > 0) {
@@ -534,6 +590,10 @@ namespace TerrainNodesV2 {
         HydraulicErosionParams params;
         bool useGPU = true;
         
+        // Edge Falloff Settings
+        float edgeFalloffWidth = 0.0f;
+        float edgeFalloffValue = 0.0f;
+        
         HydraulicErosionNode() {
             name = "Hydraulic Erosion";
             terrainNodeType = NodeType::HydraulicErosion;
@@ -555,6 +615,45 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.HydraulicErosion"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["useGPU"] = useGPU;
+            j["params"] = {
+                {"iterations", params.iterations},
+                {"dropletLifetime", params.dropletLifetime},
+                {"inertia", params.inertia},
+                {"sedimentCapacity", params.sedimentCapacity},
+                {"minSlope", params.minSlope},
+                {"erodeSpeed", params.erodeSpeed},
+                {"depositSpeed", params.depositSpeed},
+                {"evaporateSpeed", params.evaporateSpeed},
+                {"gravity", params.gravity},
+                {"erosionRadius", params.erosionRadius}
+            };
+            j["edgeFalloffWidth"] = edgeFalloffWidth;
+            j["edgeFalloffValue"] = edgeFalloffValue;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            if (j.contains("params")) {
+                const auto& p = j["params"];
+                params.iterations = p.value("iterations", params.iterations);
+                params.dropletLifetime = p.value("dropletLifetime", params.dropletLifetime);
+                params.inertia = p.value("inertia", params.inertia);
+                params.sedimentCapacity = p.value("sedimentCapacity", params.sedimentCapacity);
+                params.minSlope = p.value("minSlope", params.minSlope);
+                params.erodeSpeed = p.value("erodeSpeed", params.erodeSpeed);
+                params.depositSpeed = p.value("depositSpeed", params.depositSpeed);
+                params.evaporateSpeed = p.value("evaporateSpeed", params.evaporateSpeed);
+                params.gravity = p.value("gravity", params.gravity);
+                params.erosionRadius = p.value("erosionRadius", params.erosionRadius);
+            }
+            if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
+            if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
+        }
     };
 
     class ThermalErosionNode : public TerrainNodeBase {
@@ -562,7 +661,13 @@ namespace TerrainNodesV2 {
         ThermalErosionParams params;
         bool useGPU = true;
         
+        // Edge Falloff Settings
+        float edgeFalloffWidth = 0.0f;
+        float edgeFalloffValue = 0.0f;
+        
         ThermalErosionNode() {
+            params.iterations = 25; // Even more conservative default
+            params.erosionAmount = 0.2f;
             name = "Thermal Erosion";
             terrainNodeType = NodeType::ThermalErosion;
             
@@ -583,12 +688,41 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.ThermalErosion"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["useGPU"] = useGPU;
+            j["params"] = {
+                {"iterations", params.iterations},
+                {"talusAngle", params.talusAngle},
+                {"erosionAmount", params.erosionAmount}
+            };
+            j["edgeFalloffWidth"] = edgeFalloffWidth;
+            j["edgeFalloffValue"] = edgeFalloffValue;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            if (j.contains("params")) {
+                const auto& p = j["params"];
+                params.iterations = p.value("iterations", params.iterations);
+                params.talusAngle = p.value("talusAngle", params.talusAngle);
+                params.erosionAmount = p.value("erosionAmount", params.erosionAmount);
+            }
+            if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
+            if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
+        }
     };
 
     class FluvialErosionNode : public TerrainNodeBase {
     public:
         HydraulicErosionParams params;
-        bool useGPU = true;
+        bool useGPU = true; // Use GPU by default
+        
+        // Edge Falloff Settings
+        float edgeFalloffWidth = 0.0f;
+        float edgeFalloffValue = 0.0f;
         
         FluvialErosionNode() {
             name = "Fluvial Erosion";
@@ -614,14 +748,57 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.FluvialErosion"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["useGPU"] = useGPU;
+            j["params"] = {
+                {"iterations", params.iterations},
+                {"dropletLifetime", params.dropletLifetime},
+                {"inertia", params.inertia},
+                {"sedimentCapacity", params.sedimentCapacity},
+                {"minSlope", params.minSlope},
+                {"erodeSpeed", params.erodeSpeed},
+                {"depositSpeed", params.depositSpeed},
+                {"evaporateSpeed", params.evaporateSpeed},
+                {"gravity", params.gravity},
+                {"erosionRadius", params.erosionRadius}
+            };
+            j["edgeFalloffWidth"] = edgeFalloffWidth;
+            j["edgeFalloffValue"] = edgeFalloffValue;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            if (j.contains("params")) {
+                const auto& p = j["params"];
+                params.iterations = p.value("iterations", params.iterations);
+                params.dropletLifetime = p.value("dropletLifetime", params.dropletLifetime);
+                params.inertia = p.value("inertia", params.inertia);
+                params.sedimentCapacity = p.value("sedimentCapacity", params.sedimentCapacity);
+                params.minSlope = p.value("minSlope", params.minSlope);
+                params.erodeSpeed = p.value("erodeSpeed", params.erodeSpeed);
+                params.depositSpeed = p.value("depositSpeed", params.depositSpeed);
+                params.evaporateSpeed = p.value("evaporateSpeed", params.evaporateSpeed);
+                params.gravity = p.value("gravity", params.gravity);
+                params.erosionRadius = p.value("erosionRadius", params.erosionRadius);
+            }
+            if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
+            if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
+        }
     };
 
     class WindErosionNode : public TerrainNodeBase {
     public:
-        float strength = 0.5f;
+        float strength = 0.2f;   // Reduced default
         float direction = 45.0f;
-        int iterations = 20;
+        int iterations = 10;     // Reduced default
         bool useGPU = true;
+        
+        // Edge Falloff Settings
+        float edgeFalloffWidth = 0.0f;
+        float edgeFalloffValue = 0.0f;
         
         WindErosionNode() {
             name = "Wind Erosion";
@@ -644,6 +821,26 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.WindErosion"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["useGPU"] = useGPU;
+            j["strength"] = strength;
+            j["direction"] = direction;
+            j["iterations"] = iterations;
+            j["edgeFalloffWidth"] = edgeFalloffWidth;
+            j["edgeFalloffValue"] = edgeFalloffValue;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            if (j.contains("strength")) strength = j["strength"].get<float>();
+            if (j.contains("direction")) direction = j["direction"].get<float>();
+            if (j.contains("iterations")) iterations = j["iterations"].get<int>();
+            if (j.contains("edgeFalloffWidth")) edgeFalloffWidth = j["edgeFalloffWidth"].get<float>();
+            if (j.contains("edgeFalloffValue")) edgeFalloffValue = j["edgeFalloffValue"].get<float>();
+        }
     };
 
     // ============================================================================
@@ -686,6 +883,24 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.SedimentDeposition"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["iterations"] = iterations;
+            j["depositionRate"] = depositionRate;
+            j["transportCapacity"] = transportCapacity;
+            j["settlingSpeed"] = settlingSpeed;
+            j["useGPU"] = useGPU;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("iterations")) iterations = j["iterations"].get<int>();
+            if (j.contains("depositionRate")) depositionRate = j["depositionRate"].get<float>();
+            if (j.contains("transportCapacity")) transportCapacity = j["transportCapacity"].get<float>();
+            if (j.contains("settlingSpeed")) settlingSpeed = j["settlingSpeed"].get<float>();
+            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+        }
     };
     
     /**
@@ -723,6 +938,22 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.AlluvialFan"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["slopeThreshold"] = slopeThreshold;
+            j["fanSpreadAngle"] = fanSpreadAngle;
+            j["depositionStrength"] = depositionStrength;
+            j["fanLength"] = fanLength;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("slopeThreshold")) slopeThreshold = j["slopeThreshold"].get<float>();
+            if (j.contains("fanSpreadAngle")) fanSpreadAngle = j["fanSpreadAngle"].get<float>();
+            if (j.contains("depositionStrength")) depositionStrength = j["depositionStrength"].get<float>();
+            if (j.contains("fanLength")) fanLength = j["fanLength"].get<int>();
+        }
     };
     
     /**
@@ -760,6 +991,22 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.DeltaFormation"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["seaLevel"] = seaLevel;
+            j["deltaSpread"] = deltaSpread;
+            j["branchingFactor"] = branchingFactor;
+            j["sedimentRatio"] = sedimentRatio;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("seaLevel")) seaLevel = j["seaLevel"].get<float>();
+            if (j.contains("deltaSpread")) deltaSpread = j["deltaSpread"].get<float>();
+            if (j.contains("branchingFactor")) branchingFactor = j["branchingFactor"].get<int>();
+            if (j.contains("sedimentRatio")) sedimentRatio = j["sedimentRatio"].get<float>();
+        }
     };
     
     // ============================================================================
@@ -797,9 +1044,9 @@ namespace TerrainNodesV2 {
         float timeScaleMy = 10.0f;  // Millions of years
         
         // Climate modifiers (0-2 range, 1 = normal)
-        float rainfallFactor = 1.0f;      // Affects hydraulic erosion
-        float temperatureFactor = 1.0f;   // Affects thermal erosion
-        float windFactor = 1.0f;          // Affects wind erosion
+        float rainfallFactor = 0.2f;      // Affects hydraulic erosion
+        float temperatureFactor = 0.2f;   // Affects thermal erosion
+        float windFactor = 0.2f;          // Affects wind erosion
         
         // Quality/Performance
         int qualityLevel = 2;             // 1=Fast, 2=Medium, 3=High
@@ -851,6 +1098,30 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.ErosionWizard"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["preset"] = static_cast<int>(preset);
+            j["timeScaleMy"] = timeScaleMy;
+            j["rainfallFactor"] = rainfallFactor;
+            j["temperatureFactor"] = temperatureFactor;
+            j["windFactor"] = windFactor;
+            j["qualityLevel"] = qualityLevel;
+            j["useGPU"] = useGPU;
+            j["outputErosionMask"] = outputErosionMask;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("preset")) preset = static_cast<ErosionPreset>(j["preset"].get<int>());
+            if (j.contains("timeScaleMy")) timeScaleMy = j["timeScaleMy"].get<float>();
+            if (j.contains("rainfallFactor")) rainfallFactor = j["rainfallFactor"].get<float>();
+            if (j.contains("temperatureFactor")) temperatureFactor = j["temperatureFactor"].get<float>();
+            if (j.contains("windFactor")) windFactor = j["windFactor"].get<float>();
+            if (j.contains("qualityLevel")) qualityLevel = j["qualityLevel"].get<int>();
+            if (j.contains("useGPU")) useGPU = j["useGPU"].get<bool>();
+            if (j.contains("outputErosionMask")) outputErosionMask = j["outputErosionMask"].get<bool>();
+        }
     };
 
     // ============================================================================
@@ -874,6 +1145,14 @@ namespace TerrainNodesV2 {
         
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         std::string getTypeId() const override { return "TerrainV2.HeightOutput"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+        }
     };
 
     class SplatOutputNode : public TerrainNodeBase {
@@ -900,6 +1179,21 @@ namespace TerrainNodesV2 {
         void drawContent() override;
         void exportSplatMap(TerrainObject* terrain);
         std::string getTypeId() const override { return "TerrainV2.SplatOutput"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["exportPath"] = std::string(exportPath);
+            j["autoApplyToTerrain"] = autoApplyToTerrain;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("exportPath")) {
+                std::string path = j["exportPath"].get<std::string>();
+                strncpy(exportPath, path.c_str(), sizeof(exportPath) - 1);
+            }
+            if (j.contains("autoApplyToTerrain")) autoApplyToTerrain = j["autoApplyToTerrain"].get<bool>();
+        }
     };
 
     // ============================================================================
@@ -934,6 +1228,18 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Math"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["operation"] = static_cast<int>(operation);
+            j["factor"] = factor;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("operation")) operation = static_cast<MathOp>(j["operation"].get<int>());
+            if (j.contains("factor")) factor = j["factor"].get<float>();
+        }
     };
 
     class BlendNode : public TerrainNodeBase {
@@ -963,6 +1269,16 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Blend"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["alpha"] = alpha;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("alpha")) alpha = j["alpha"].get<float>();
+        }
     };
 
     class ClampNode : public TerrainNodeBase {
@@ -989,6 +1305,18 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Clamp"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minVal"] = minVal;
+            j["maxVal"] = maxVal;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("minVal")) minVal = j["minVal"].get<float>();
+            if (j.contains("maxVal")) maxVal = j["maxVal"].get<float>();
+        }
     };
 
     class InvertNode : public TerrainNodeBase {
@@ -1011,6 +1339,14 @@ namespace TerrainNodesV2 {
         
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         std::string getTypeId() const override { return "TerrainV2.Invert"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+        }
     };
 
     // ============================================================================
@@ -1043,6 +1379,20 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.SlopeMask"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minSlope"] = minSlope;
+            j["maxSlope"] = maxSlope;
+            j["falloff"] = falloff;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("minSlope")) minSlope = j["minSlope"].get<float>();
+            if (j.contains("maxSlope")) maxSlope = j["maxSlope"].get<float>();
+            if (j.contains("falloff")) falloff = j["falloff"].get<float>();
+        }
     };
 
     class HeightMaskNode : public TerrainNodeBase {
@@ -1071,6 +1421,20 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.HeightMask"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minHeight"] = minHeight;
+            j["maxHeight"] = maxHeight;
+            j["falloff"] = falloff;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("minHeight")) minHeight = j["minHeight"].get<float>();
+            if (j.contains("maxHeight")) maxHeight = j["maxHeight"].get<float>();
+            if (j.contains("falloff")) falloff = j["falloff"].get<float>();
+        }
     };
 
     class CurvatureMaskNode : public TerrainNodeBase {
@@ -1098,6 +1462,20 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.CurvatureMask"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minCurve"] = minCurve;
+            j["maxCurve"] = maxCurve;
+            j["selectConvex"] = selectConvex;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("minCurve")) minCurve = j["minCurve"].get<float>();
+            if (j.contains("maxCurve")) maxCurve = j["maxCurve"].get<float>();
+            if (j.contains("selectConvex")) selectConvex = j["selectConvex"].get<bool>();
+        }
     };
     
     /**
@@ -1131,6 +1509,22 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.FlowMask"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["iterations"] = iterations;
+            j["strength"] = strength;
+            j["decay"] = decay;
+            j["normalize"] = normalize;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("iterations")) iterations = j["iterations"].get<int>();
+            if (j.contains("strength")) strength = j["strength"].get<float>();
+            if (j.contains("decay")) decay = j["decay"].get<float>();
+            if (j.contains("normalize")) normalize = j["normalize"].get<bool>();
+        }
     };
     
     /**
@@ -1164,6 +1558,22 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.ExposureMask"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["sunAzimuth"] = sunAzimuth;
+            j["sunElevation"] = sunElevation;
+            j["contrast"] = contrast;
+            j["invert"] = invert;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("sunAzimuth")) sunAzimuth = j["sunAzimuth"].get<float>();
+            if (j.contains("sunElevation")) sunElevation = j["sunElevation"].get<float>();
+            if (j.contains("contrast")) contrast = j["contrast"].get<float>();
+            if (j.contains("invert")) invert = j["invert"].get<bool>();
+        }
     };
 
     // ============================================================================
@@ -1200,6 +1610,20 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Smooth"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["iterations"] = iterations;
+            j["strength"] = strength;
+            j["kernelSize"] = kernelSize;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("iterations")) iterations = j["iterations"].get<int>();
+            if (j.contains("strength")) strength = j["strength"].get<float>();
+            if (j.contains("kernelSize")) kernelSize = j["kernelSize"].get<int>();
+        }
     };
 
     /**
@@ -1230,6 +1654,20 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Normalize"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["minOutput"] = minOutput;
+            j["maxOutput"] = maxOutput;
+            j["autoRange"] = autoRange;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("minOutput")) minOutput = j["minOutput"].get<float>();
+            if (j.contains("maxOutput")) maxOutput = j["maxOutput"].get<float>();
+            if (j.contains("autoRange")) autoRange = j["autoRange"].get<bool>();
+        }
     };
 
     /**
@@ -1262,6 +1700,66 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Terrace"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["levels"] = levels;
+            j["sharpness"] = sharpness;
+            j["offset"] = offset;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("levels")) levels = j["levels"].get<int>();
+            if (j.contains("sharpness")) sharpness = j["sharpness"].get<float>();
+            if (j.contains("offset")) offset = j["offset"].get<float>();
+        }
+    };
+    
+    enum class FalloffMode { Linear, Smoothstep, Cosine };
+
+    /**
+     * @brief Edge Falloff - Smoothly fade terrain edges to a specific value
+     */
+    class EdgeFalloffNode : public TerrainNodeBase {
+    public:
+        float fadeWidth = 0.1f;
+        float fadeValue = 0.0f;
+        FalloffMode mode = FalloffMode::Smoothstep;
+
+        EdgeFalloffNode() {
+            name = "Edge Falloff";
+            terrainNodeType = NodeType::EdgeFalloff;
+
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+
+            metadata.displayName = "Edge Falloff";
+            metadata.category = "Filter";
+            metadata.headerColor = IM_COL32(180, 100, 100, 255);
+            headerColor = ImVec4(0.7f, 0.4f, 0.4f, 1.0f);
+        }
+
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        void drawContent() override;
+        std::string getTypeId() const override { return "TerrainV2.EdgeFalloff"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["fadeWidth"] = fadeWidth;
+            j["fadeValue"] = fadeValue;
+            j["mode"] = static_cast<int>(mode);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("fadeWidth")) fadeWidth = j["fadeWidth"].get<float>();
+            if (j.contains("fadeValue")) fadeValue = j["fadeValue"].get<float>();
+            if (j.contains("mode")) mode = static_cast<FalloffMode>(j["mode"].get<int>());
+        }
     };
 
     /**
@@ -1302,6 +1800,16 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.MaskCombine"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["operation"] = static_cast<int>(operation);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("operation")) operation = static_cast<MaskCombineOp>(j["operation"].get<int>());
+        }
     };
 
     /**
@@ -1335,6 +1843,16 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Overlay"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["strength"] = strength;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("strength")) strength = j["strength"].get<float>();
+        }
     };
 
     /**
@@ -1368,6 +1886,16 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Screen"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["strength"] = strength;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("strength")) strength = j["strength"].get<float>();
+        }
     };
 
     // ============================================================================
@@ -1430,6 +1958,48 @@ namespace TerrainNodesV2 {
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.AutoSplat"; }
         float getCustomWidth() const override { return 160.0f; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["normalizeOutput"] = normalizeOutput;
+            j["noiseSeed"] = noiseSeed;
+            nlohmann::json rulesArray = nlohmann::json::array();
+            for (int i = 0; i < 4; i++) {
+                rulesArray.push_back({
+                    {"heightMin", rules[i].heightMin},
+                    {"heightMax", rules[i].heightMax},
+                    {"slopeMin", rules[i].slopeMin},
+                    {"slopeMax", rules[i].slopeMax},
+                    {"heightWeight", rules[i].heightWeight},
+                    {"slopeWeight", rules[i].slopeWeight},
+                    {"falloff", rules[i].falloff},
+                    {"noiseAmount", rules[i].noiseAmount},
+                    {"enabled", rules[i].enabled}
+                });
+            }
+            j["rules"] = rulesArray;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("normalizeOutput")) normalizeOutput = j["normalizeOutput"].get<bool>();
+            if (j.contains("noiseSeed")) noiseSeed = j["noiseSeed"].get<int>();
+            if (j.contains("rules") && j["rules"].is_array()) {
+                const auto& rulesArray = j["rules"];
+                for (int i = 0; i < 4 && i < (int)rulesArray.size(); i++) {
+                    const auto& r = rulesArray[i];
+                    rules[i].heightMin = r.value("heightMin", rules[i].heightMin);
+                    rules[i].heightMax = r.value("heightMax", rules[i].heightMax);
+                    rules[i].slopeMin = r.value("slopeMin", rules[i].slopeMin);
+                    rules[i].slopeMax = r.value("slopeMax", rules[i].slopeMax);
+                    rules[i].heightWeight = r.value("heightWeight", rules[i].heightWeight);
+                    rules[i].slopeWeight = r.value("slopeWeight", rules[i].slopeWeight);
+                    rules[i].falloff = r.value("falloff", rules[i].falloff);
+                    rules[i].noiseAmount = r.value("noiseAmount", rules[i].noiseAmount);
+                    rules[i].enabled = r.value("enabled", rules[i].enabled);
+                }
+            }
+        }
     };
 
     /**
@@ -1479,6 +2049,31 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.MaskPaint"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["brushRadius"] = brushRadius;
+            j["brushStrength"] = brushStrength;
+            j["brushFalloff"] = brushFalloff;
+            j["bufferWidth"] = bufferWidth;
+            j["bufferHeight"] = bufferHeight;
+            if (!paintBuffer.empty()) {
+                j["paintBuffer"] = paintBuffer;
+            }
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("brushRadius")) brushRadius = j["brushRadius"].get<float>();
+            if (j.contains("brushStrength")) brushStrength = j["brushStrength"].get<float>();
+            if (j.contains("brushFalloff")) brushFalloff = j["brushFalloff"].get<float>();
+            if (j.contains("bufferWidth")) bufferWidth = j["bufferWidth"].get<int>();
+            if (j.contains("bufferHeight")) bufferHeight = j["bufferHeight"].get<int>();
+            if (j.contains("paintBuffer") && j["paintBuffer"].is_array()) {
+                paintBuffer = j["paintBuffer"].get<std::vector<float>>();
+                needsInit = false;
+            }
+        }
     };
 
     /**
@@ -1518,6 +2113,26 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.MaskImage"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["filePath"] = std::string(filePath);
+            j["contrast"] = contrast;
+            j["brightness"] = brightness;
+            j["invert"] = invert;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("filePath")) {
+                std::string path = j["filePath"].get<std::string>();
+                strncpy(filePath, path.c_str(), sizeof(filePath) - 1);
+                loadMaskFromFile();
+            }
+            if (j.contains("contrast")) contrast = j["contrast"].get<float>();
+            if (j.contains("brightness")) brightness = j["brightness"].get<float>();
+            if (j.contains("invert")) invert = j["invert"].get<bool>();
+        }
     };
 
     // ============================================================================
@@ -1558,6 +2173,24 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Fault"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["direction"] = direction;
+            j["offset"] = offset;
+            j["verticalOffset"] = verticalOffset;
+            j["width"] = width;
+            j["position"] = position;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("direction")) direction = j["direction"].get<float>();
+            if (j.contains("offset")) offset = j["offset"].get<float>();
+            if (j.contains("verticalOffset")) verticalOffset = j["verticalOffset"].get<float>();
+            if (j.contains("width")) width = j["width"].get<float>();
+            if (j.contains("position")) position = j["position"].get<float>();
+        }
     };
     
     /**
@@ -1594,6 +2227,24 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Mesa"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["threshold"] = threshold;
+            j["cliffSteepness"] = cliffSteepness;
+            j["plateauHeight"] = plateauHeight;
+            j["terraceCount"] = terraceCount;
+            j["noiseAmount"] = noiseAmount;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("threshold")) threshold = j["threshold"].get<float>();
+            if (j.contains("cliffSteepness")) cliffSteepness = j["cliffSteepness"].get<float>();
+            if (j.contains("plateauHeight")) plateauHeight = j["plateauHeight"].get<float>();
+            if (j.contains("terraceCount")) terraceCount = j["terraceCount"].get<int>();
+            if (j.contains("noiseAmount")) noiseAmount = j["noiseAmount"].get<float>();
+        }
     };
     
     /**
@@ -1630,6 +2281,24 @@ namespace TerrainNodesV2 {
         NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         std::string getTypeId() const override { return "TerrainV2.Shear"; }
+
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+            j["angle"] = angle;
+            j["strength"] = strength;
+            j["bands"] = bands;
+            j["bandWidth"] = bandWidth;
+            j["bidirectional"] = bidirectional;
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+            if (j.contains("angle")) angle = j["angle"].get<float>();
+            if (j.contains("strength")) strength = j["strength"].get<float>();
+            if (j.contains("bands")) bands = j["bands"].get<int>();
+            if (j.contains("bandWidth")) bandWidth = j["bandWidth"].get<float>();
+            if (j.contains("bidirectional")) bidirectional = j["bidirectional"].get<bool>();
+        }
     };
 
     // ============================================================================

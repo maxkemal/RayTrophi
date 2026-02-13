@@ -38,6 +38,7 @@
 #include "scene_data.h"
 #include "scene_ui_water.hpp"   // Water panel implementation
 #include "scene_ui_river.hpp"   // River spline editor
+#include "WaterSystem.h"        // Water Manager for update loop
 #include "scene_ui_terrain.hpp" // Terrain panel implementation
 #include "scene_ui_animgraph.hpp" // Animation Graph Editor
 #include "scene_ui_gas.hpp"     // Gas Simulation panel
@@ -64,6 +65,7 @@
 #include <shlobj.h>  // SHBrowseForFolder için
 #include <chrono>  // Playback timing için
 #include <filesystem>  // Frame dosyalarını kontrol için
+#include <unordered_map>
 
 bool show_documentation_window = false; // Global toggle (unused now, kept for linkage if needed or remove)
 
@@ -868,6 +870,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
         if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Force Fields");
         if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
+        if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Scene,      "Hair & Fur");
         if (show_system_tab)     drawTabButton(7, UIWidgets::IconType::System,     "System & UI");
         
         ImGui::EndChild();
@@ -882,45 +885,20 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         
         ImGui::BeginChild("PropContentArea", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
         
-        // ── TAB HEADER (Sticky & Flush) ──
-        const char* tab_names[] = { "SCENE HIERARCHY", "RENDER SETTINGS", "TERRAIN EDITOR", "WATER & RIVERS", "VOLUMETRICS", "FORCE FIELDS", "WORLD & SKY", "SYSTEM & UI" };
-        UIWidgets::IconType tab_icons[] = { 
-            UIWidgets::IconType::Scene, UIWidgets::IconType::Render, UIWidgets::IconType::Terrain, 
-            UIWidgets::IconType::Water, UIWidgets::IconType::Volumetric, UIWidgets::IconType::Force, 
-            UIWidgets::IconType::World, UIWidgets::IconType::System 
-        };
-
-        ImGui::BeginChild("TabHeader", ImVec2(0, 42), false, ImGuiWindowFlags_NoScrollbar);
-        
-        ImVec2 headerPos = ImGui::GetCursorScreenPos();
-        // Background for the sticky header
-        ImGui::GetWindowDrawList()->AddRectFilled(headerPos, ImVec2(headerPos.x + ImGui::GetContentRegionAvail().x, headerPos.y + 42), 
-            ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1, 0.02f)));
-
-        ImGui::SetCursorPos(ImVec2(12, 11)); // Precise alignment
-        UIWidgets::DrawIcon(tab_icons[active_properties_tab], ImGui::GetCursorScreenPos(), 20, ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)));
-        
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + 30);
-        ImGui::TextColored(ImVec4(0.9f, 0.9f, 1.0f, 1.0f), "%s", tab_names[active_properties_tab]);
-        
-        // Solid separation line
-        ImGui::GetWindowDrawList()->AddLine(
-            ImVec2(ImGui::GetWindowPos().x, ImGui::GetWindowPos().y + 41),
-            ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth(), ImGui::GetWindowPos().y + 41),
-            ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1, 0.12f))
-        );
-        
-        ImGui::EndChild();
 
         // ── MAIN CONTENT (Flush Scroll Area) ──
         ImGui::BeginChild("PropScrollArea", ImVec2(0, 0), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0)); // FLUSH LEFT
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 0)); // Adding safe padding to prevent clipping
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 12));
         
         // Start Global Indent for controls (leaving headers flush)
         ImGui::Indent(8.0f); 
         ImGui::Spacing();
         ImGui::Unindent(8.0f);
+
+        // --- CAPPED ITEM WIDTH ---
+        // Prevents sliders/inputs from stretching too far on wide panels, keeping labels legible
+        ImGui::PushItemWidth(UIWidgets::GetInspectorItemWidth());
 
         switch (active_properties_tab) {
             case 0: drawSceneHierarchy(ctx); break;
@@ -930,9 +908,18 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // ENGINE & BACKEND
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Render Engine", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+                        extern bool g_hasOptix;
+                        if (!g_hasOptix) {
+                            ImGui::BeginDisabled();
+                            ctx.render_settings.use_optix = false; // Force false if not supported
+                        }
                         if (ImGui::Checkbox("Use OptiX (GPU Acceleration)", &ctx.render_settings.use_optix)) {
                             if (!ctx.render_settings.use_optix) { extern bool g_cpu_sync_pending; g_cpu_sync_pending = true; }
                             ctx.start_render = true;
+                        }
+                        if (!g_hasOptix) {
+                            ImGui::EndDisabled();
+                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  [No Compatible GPU found]");
                         }
                         
                         if (!ctx.render_settings.use_optix) {
@@ -949,13 +936,13 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     }
 
                     // ─────────────────────────────────────────────────────────────────────────
-                    // SAMPLING (Cycles Style)
+                    // SAMPLING 
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Sampling", ImVec4(0.5f, 0.9f, 0.6f, 1.0f))) {
                         UIWidgets::ColoredHeader("Viewport", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
                         ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
                         if (ctx.render_settings.use_adaptive_sampling) {
-                            ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.5f, "%.3f");
+                            ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.8f, "%.3f");
                             ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
                         }
                         ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
@@ -989,9 +976,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
                         UIWidgets::EndSection();
                     }
+ Broadway:
 
                     // ─────────────────────────────────────────────────────────────────────────
-                    // FORMAT & OUTPUT (Previously in System)
+                    // FORMAT & OUTPUT
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Resolution & Output", ImVec4(0.9f, 0.4f, 0.5f, 1.0f))) {
                         // Presets
@@ -1019,7 +1007,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
                         bool resolution_changed = (new_width != last_applied_width) || (new_height != last_applied_height);
                         
-                        if (UIWidgets::PrimaryButton("Apply Settings", ImVec2(-1, 30), resolution_changed)) {
+                        if (UIWidgets::PrimaryButton("Apply Settings", ImVec2(UIWidgets::GetInspectorActionWidth(), 30), resolution_changed)) {
                             float ar = aspect_h ? float(aspect_w) / aspect_h : 1.0f;
                             pending_aspect_ratio = ar;
                             pending_width = new_width;
@@ -1030,7 +1018,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
 
                         UIWidgets::Divider();
-                        if (UIWidgets::SecondaryButton("Open Dedicated Render Window", ImVec2(-1, 30))) {
+                        if (UIWidgets::SecondaryButton("Open Dedicated Render Window", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
                             extern bool show_render_window;
                             show_render_window = true;
                         }
@@ -1041,48 +1029,138 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // ANIMATION RENDER (Sequence Export)
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Animation Render", ImVec4(1.0f, 0.4f, 0.7f, 1.0f))) {
-                        UIWidgets::ColoredHeader("Frame Range & Speed", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
-                        ImGui::PushItemWidth(80);
-                        ImGui::DragInt("Start", &ctx.render_settings.animation_start_frame, 1, 0, ctx.render_settings.animation_end_frame);
-                        ImGui::SameLine();
-                        ImGui::DragInt("End", &ctx.render_settings.animation_end_frame, 1, ctx.render_settings.animation_start_frame, 10000);
-                        ImGui::SameLine();
-                        ImGui::DragInt("FPS", &ctx.render_settings.animation_fps, 1, 1, 120);
-                        ImGui::PopItemWidth();
                         
-                        UIWidgets::Divider();
-                        UIWidgets::ColoredHeader("Quality", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
-                        ImGui::DragInt("Samples Per Frame", &ctx.render_settings.animation_samples_per_frame, 1, 1, 10000);
-                        
-                        UIWidgets::Divider();
-                        UIWidgets::ColoredHeader("Output Style (PNG Sequence)", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
-                        
-                        // Output Path Display & Browse
-                        ImGui::PushItemWidth(-50); // Leave room for browse button
-                        char folder_buf[512];
-                        strncpy(folder_buf, ctx.render_settings.animation_output_folder.c_str(), 511);
-                        if (ImGui::InputText("##outdir", folder_buf, 512)) {
-                            ctx.render_settings.animation_output_folder = folder_buf;
+                        // ═══════════════════════════════════════════════════════════════════
+                        // RENDERING IN PROGRESS - Show Status Panel
+                        // ═══════════════════════════════════════════════════════════════════
+                        if (rendering_in_progress && ctx.is_animation_mode) {
+                            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.2f, 1.0f));
+                            ImGui::BeginChild("AnimRenderStatus", ImVec2(0, 120), true);
+                            
+                            // Current Frame Info
+                            int cur = ctx.render_settings.animation_current_frame;
+                            int start = ctx.render_settings.animation_start_frame;
+                            int end = ctx.render_settings.animation_end_frame;
+                            int total = end - start + 1;
+                            int done = cur - start;
+                            float progress = (total > 0) ? (float)done / (float)total : 0.0f;
+                            
+                            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "RENDERING ANIMATION...");
+                            ImGui::Spacing();
+                            
+                            // Big progress bar
+                            char prog_text[64];
+                            snprintf(prog_text, sizeof(prog_text), "Frame %d / %d  (%.0f%%)", cur, end, progress * 100.0f);
+                            ImGui::ProgressBar(progress, ImVec2(-1, 24), prog_text);
+                            
+                            ImGui::Spacing();
+                            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Samples: %d | FPS: %d", 
+                                ctx.render_settings.animation_samples_per_frame,
+                                ctx.render_settings.animation_fps);
+                            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Output: %s", 
+                                ctx.render_settings.animation_output_folder.c_str());
+                            
+                            ImGui::Spacing();
+                            if (UIWidgets::DangerButton("STOP RENDERING", ImVec2(-1, 28))) {
+                                rendering_stopped_cpu = true;
+                                rendering_stopped_gpu = true;
+                                SCENE_LOG_WARN("Animation render stop requested by user.");
+                            }
+                            
+                            ImGui::EndChild();
+                            ImGui::PopStyleColor();
                         }
-                        ImGui::PopItemWidth();
-                        ImGui::SameLine();
-                        if (ImGui::Button("...##browse")) {
-                            std::string path = selectFolderDialogW(L"Select Animation Output Folder");
-                            if (!path.empty()) ctx.render_settings.animation_output_folder = path;
-                        }
-                        
-                        ImGui::Spacing();
-                        bool can_render = !ctx.render_settings.animation_output_folder.empty();
-                        if (UIWidgets::PrimaryButton("RENDER ANIMATION SEQUENCE", ImVec2(-1, 36), can_render)) {
-                            ctx.render_settings.start_animation_render = true;
-                            SCENE_LOG_INFO("Animation render sequence triggered...");
-                        }
-                        
-                        if (!can_render) {
-                            ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1.0f), "Set output folder to enable rendering.");
-                        } else {
+                        else {
+                            // ═══════════════════════════════════════════════════════════════════
+                            // NORMAL MODE - Setup Panel
+                            // ═══════════════════════════════════════════════════════════════════
+                            UIWidgets::ColoredHeader("Frame Range & Speed", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                            ImGui::PushItemWidth(80);
+                            ImGui::DragInt("Start", &ctx.render_settings.animation_start_frame, 1, 0, ctx.render_settings.animation_end_frame);
+                            ImGui::SameLine();
+                            ImGui::DragInt("End", &ctx.render_settings.animation_end_frame, 1, ctx.render_settings.animation_start_frame, 10000);
+                            ImGui::SameLine();
+                            ImGui::DragInt("FPS", &ctx.render_settings.animation_fps, 1, 1, 120);
+                            ImGui::PopItemWidth();
+                            
+                            // Auto-detect button
+                            if (!ctx.scene.animationDataList.empty() && ctx.scene.animationDataList[0]) {
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("Auto")) {
+                                    ctx.render_settings.animation_start_frame = ctx.scene.animationDataList[0]->startFrame;
+                                    ctx.render_settings.animation_end_frame = ctx.scene.animationDataList[0]->endFrame;
+                                    SCENE_LOG_INFO("Frame range auto-set from animation file.");
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("Auto-detect frame range from loaded animation");
+                                }
+                            }
+                            
+                            UIWidgets::Divider();
+                            UIWidgets::ColoredHeader("Quality", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                            ImGui::DragInt("Samples Per Frame", &ctx.render_settings.animation_samples_per_frame, 1, 1, 10000);
+                            
+                            // Quick presets
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Draft")) ctx.render_settings.animation_samples_per_frame = 16;
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Medium")) ctx.render_settings.animation_samples_per_frame = 64;
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("High")) ctx.render_settings.animation_samples_per_frame = 256;
+                            
+                            UIWidgets::Divider();
+                            UIWidgets::ColoredHeader("Output (PNG Sequence)", ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
+                            
+                            // Output Path Display & Browse
+                            ImGui::PushItemWidth(-50);
+                            char folder_buf[512];
+                            strncpy(folder_buf, ctx.render_settings.animation_output_folder.c_str(), 511);
+                            if (ImGui::InputText("##outdir", folder_buf, 512)) {
+                                ctx.render_settings.animation_output_folder = folder_buf;
+                            }
+                            ImGui::PopItemWidth();
+                            ImGui::SameLine();
+                            if (ImGui::Button("...##browse")) {
+                                std::string path = selectFolderDialogW(L"Select Animation Output Folder");
+                                if (!path.empty()) ctx.render_settings.animation_output_folder = path;
+                            }
+                            
+                            ImGui::Spacing();
+                            
+                            // Summary Info Box
                             int total_frames = ctx.render_settings.animation_end_frame - ctx.render_settings.animation_start_frame + 1;
-                            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Total: %d frames", total_frames);
+                            int samples = ctx.render_settings.animation_samples_per_frame;
+                            float est_time_per_frame = (samples / 64.0f) * 2.0f; // Rough estimate: 2 sec per 64 samples
+                            float est_total_minutes = (est_time_per_frame * total_frames) / 60.0f;
+                            
+                            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.1f, 0.1f, 0.15f, 1.0f));
+                            ImGui::BeginChild("RenderSummary", ImVec2(0, 50), true);
+                            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Summary:");
+                            ImGui::SameLine();
+                            ImGui::Text("%d frames x %d samples = ~%.1f min (estimated)", total_frames, samples, est_total_minutes);
+                            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Resolution: %dx%d", 
+                                ctx.render_settings.final_render_width, 
+                                ctx.render_settings.final_render_height);
+                            ImGui::EndChild();
+                            ImGui::PopStyleColor();
+                            
+                            ImGui::Spacing();
+                            
+                            bool can_render = !ctx.render_settings.animation_output_folder.empty();
+                            bool valid_range = (ctx.render_settings.animation_end_frame >= ctx.render_settings.animation_start_frame);
+                            
+                            if (!can_render) {
+                                ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1.0f), "! Set output folder");
+                            }
+                            if (!valid_range) {
+                                ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1.0f), "! Invalid frame range");
+                            }
+                            
+                            if (UIWidgets::PrimaryButton("RENDER ANIMATION SEQUENCE", ImVec2(UIWidgets::GetInspectorActionWidth(), 36), can_render && valid_range)) {
+                                ctx.render_settings.start_animation_render = true;
+                                ctx.render_settings.animation_total_frames = total_frames;
+                                SCENE_LOG_INFO("Animation render triggered: " + std::to_string(total_frames) + " frames @ " + std::to_string(samples) + " samples");
+                            }
                         }
 
                         UIWidgets::EndSection();
@@ -1095,7 +1173,101 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene); break;
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
             case 7: drawThemeSelector(); drawResolutionPanel(ctx); break;
+            case 8: if (show_hair_tab) {
+                // Get selected mesh triangles for hair generation target
+                static std::vector<std::shared_ptr<Triangle>> selectedMeshTriangles;
+                static std::string lastSelectedMeshName;
+                const std::vector<std::shared_ptr<Triangle>>* selectedTris = nullptr;
+                
+                // Check if we have a selected object
+                bool hasValidSelection = (ctx.selection.selected.type == SelectableType::Object && 
+                                         ctx.selection.selected.object != nullptr);
+                
+                if (hasValidSelection) {
+                    // Get the nodeName of selected object
+                    std::string selectedNodeName = ctx.selection.selected.object->getNodeName();
+                    
+                    // Only rebuild triangle list if selection changed
+                    if (selectedNodeName != lastSelectedMeshName) {
+                        lastSelectedMeshName = selectedNodeName;
+                        selectedMeshTriangles.clear();
+                        
+                        for (const auto& obj : ctx.scene.world.objects) {
+                            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                            if (tri && tri->getNodeName() == selectedNodeName) {
+                                selectedMeshTriangles.push_back(tri);
+                            }
+                        }
+                    }
+                    
+                    if (!selectedMeshTriangles.empty()) {
+                        selectedTris = &selectedMeshTriangles;
+                    }
+                } else {
+                    // Selection cleared - clear cached data
+                    if (!lastSelectedMeshName.empty()) {
+                        lastSelectedMeshName.clear();
+                        selectedMeshTriangles.clear();
+                    }
+                    selectedTris = nullptr;
+                }
+                
+                if (!hairUI.onOpenFileDialog) {
+                     hairUI.onOpenFileDialog = [](const wchar_t* filter) {
+                         return SceneUI::openFileDialogW(filter);
+                     };
+                }
+                hairUI.render(ctx.renderer.getHairSystem(), selectedTris, &ctx.renderer, [&ctx, this]() {
+                    // [FIX] Ensure CPU BVH is up to date before "Generate Full" so hair sits on the *current* mesh surface,
+                    // not the old one (if gizmo was just used).
+                    this->ensureCPUSyncForPicking(ctx);
+                });
+                
+                // [NEW] Sync hide children preference for performance during grooming
+                ctx.renderer.hideInterpolatedHair = hairUI.shouldHideChildren();
+                
+                // Track if material changed for render reset
+                static Hair::HairMaterialParams lastMaterial;
+                static bool firstFrame = true;
+                Hair::HairMaterialParams currentMaterial = hairUI.getMaterial();
+                
+                bool materialChanged = firstFrame ||
+                    (lastMaterial.colorMode != currentMaterial.colorMode) ||
+                    (lastMaterial.melanin != currentMaterial.melanin) ||
+                    (lastMaterial.melaninRedness != currentMaterial.melaninRedness) ||
+                    (lastMaterial.roughness != currentMaterial.roughness) ||
+                    (lastMaterial.radialRoughness != currentMaterial.radialRoughness) ||
+                    (lastMaterial.ior != currentMaterial.ior) ||
+                    (lastMaterial.cuticleAngle != currentMaterial.cuticleAngle) ||
+                    (lastMaterial.coat != currentMaterial.coat) ||
+                    (std::abs(lastMaterial.color.x - currentMaterial.color.x) > 0.001f) ||
+                    (std::abs(lastMaterial.color.y - currentMaterial.color.y) > 0.001f) ||
+                    (std::abs(lastMaterial.color.z - currentMaterial.color.z) > 0.001f) ||
+                    (std::abs(lastMaterial.coatTint.x - currentMaterial.coatTint.x) > 0.001f) ||
+                    (std::abs(lastMaterial.coatTint.y - currentMaterial.coatTint.y) > 0.001f) ||
+                    (std::abs(lastMaterial.coatTint.z - currentMaterial.coatTint.z) > 0.001f);
+                
+                if (materialChanged) {
+                    lastMaterial = currentMaterial;
+                    firstFrame = false;
+                }
+                
+                // [FIXED] Removed global ctx.renderer.setHairMaterial(currentMaterial) override
+                // Now each hair groom uses its own material from HairSystem during intersect.
+
+                
+                // Reset render accumulation if material changed
+                if (materialChanged) {
+                    ctx.renderer.setHairMaterial(currentMaterial); // [UPDATED] Keep GPU in sync
+                    ctx.renderer.resetCPUAccumulation();
+                    
+                    // Sync to GPU immediately for live feedback
+                    ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                    ctx.start_render = true; // [NEW] Trigger render pass immediately
+                }
+            } break;
         }
+        ImGui::PopItemWidth();
 
         // Safety: Disable brushes if tab changed
         if (active_properties_tab != 2) terrain_brush.enabled = false;
@@ -1176,7 +1348,19 @@ void SceneUI::draw(UIContext& ctx)
          }
     }
 
-    world_params_changed_this_frame = false; // Reset flag
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CENTRALIZED SCENE SYNC - Ensure selection cache is consistent
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (ctx.scene.world.objects.size() != last_scene_obj_count) {
+        if (last_scene_obj_count != 0) {
+            SCENE_LOG_INFO("Scene changed (Count: " + std::to_string(last_scene_obj_count) + 
+                           " -> " + std::to_string(ctx.scene.world.objects.size()) + "). Invalidating cache.");
+        }
+        mesh_cache_valid = false;
+        last_scene_obj_count = ctx.scene.world.objects.size();
+    }
+
+    world_params_changed_this_frame = false;
     ImGuiIO& io = ImGui::GetIO();
     float screen_x = io.DisplaySize.x;
     float screen_y = io.DisplaySize.y;
@@ -1188,17 +1372,68 @@ void SceneUI::draw(UIContext& ctx)
     drawPanels(ctx);
     left_offset = showSidePanel ? side_panel_width : 0.0f;
 
-    drawStatusAndBottom(ctx, screen_x, screen_y, left_offset);
+    float vp_width = ImGui::GetIO().DisplaySize.x;
+    float vp_height = ImGui::GetIO().DisplaySize.y;
+    drawStatusAndBottom(ctx, vp_width, vp_height, left_offset);
 
     bool gizmo_hit = drawOverlays(ctx);
     
     // --- ANIMATION UPDATE ---
     processAnimations(ctx);
 
+    // --- HAIR FORCE FIELD UPDATE (Global - runs regardless of panel focus) ---
+    {
+        static float lastHairForceTime = -999.0f;
+        static bool wasHairPlaying = false;
+        
+        bool isPlaying = timeline.isPlaying();
+        float currentTime = ctx.scene.timeline.current_frame / 24.0f; // Assume 24 FPS
+        bool timeChanged = (currentTime != lastHairForceTime);
+        
+        // Only update if: timeline is playing OR time changed (scrubbing)
+        if (ctx.scene.force_field_manager.getActiveCount() > 0 && 
+            ctx.renderer.getHairSystem().getGroomNames().size() > 0 &&
+            (isPlaying || timeChanged)) {
+            
+            for (const auto& groomName : ctx.renderer.getHairSystem().getGroomNames()) {
+                ctx.renderer.getHairSystem().restyleGroom(groomName, &ctx.scene.force_field_manager, currentTime);
+            }
+            lastHairForceTime = currentTime;
+            
+            // Rebuild hair BVH and upload to GPU
+            ctx.renderer.getHairSystem().buildBVH();
+            ctx.renderer.uploadHairToGPU();
+            ctx.renderer.resetCPUAccumulation();
+        }
+        
+        // If we just stopped playing, mark for one final update
+        if (wasHairPlaying && !isPlaying && ctx.renderer.getHairSystem().getGroomNames().size() > 0) {
+            ctx.renderer.getHairSystem().buildBVH();
+            ctx.renderer.uploadHairToGPU();
+        }
+        wasHairPlaying = isPlaying;
+    }
+
     drawSelectionGizmos(ctx);
     drawCameraGizmos(ctx);  // Draw camera frustum icons
     drawRiverGizmos(ctx, gizmo_hit);  // Draw river spline control points
     drawViewportControls(ctx);  // Blender-style viewport overlay
+    
+    // --- HAIR TRANSFORM SYNC (Global) ---
+    // Ensure hair follow objects even if the hair panel is closed.
+    if (ctx.renderer.getHairSystem().getTotalStrandCount() > 0) {
+        ctx.renderer.getHairSystem().updateAllTransforms(ctx.scene.world.objects);
+        
+        bool hairSystemDirty = ctx.renderer.getHairSystem().isBVHDirty();
+        // Check both system-level dirty (transform) and UI-level dirty (parameter changes)
+        if (hairUI.isDirty() || hairSystemDirty) {
+            ctx.renderer.getHairSystem().buildBVH();
+            ctx.renderer.uploadHairToGPU();
+            ctx.renderer.resetCPUAccumulation();
+            ctx.start_render = true;
+            hairUI.clearDirty();
+        }
+    }
     
     // --- BACKGROUND SAVE STATUS POLL ---
     static int last_save_state = 0;
@@ -1239,12 +1474,15 @@ void SceneUI::draw(UIContext& ctx)
     // Terrain Sculpting
     handleTerrainBrush(ctx);
     handleTerrainFoliageBrush(ctx);  // Foliage painting brush
+    
+    // Hair Brush System
+    handleHairBrush(ctx);      // Hair paint brush input + preview
 
     handleSceneInteraction(ctx, gizmo_hit);
     processDeferredSceneUpdates(ctx);
     
     // Update Water Animation
-    if (WaterManager::getInstance().update(io.DeltaTime)) {
+    if (WaterManager::getInstance().update(ImGui::GetIO().DeltaTime)) {
          if (ctx.optix_gpu_ptr) {
              ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
              ctx.optix_gpu_ptr->resetAccumulation();
@@ -1447,12 +1685,144 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::Text("Ready");
         }
 
+        // ═══════════════════════════════════════════════════════════════════════════════
+        // PROFESSIONAL RENDER STATUS INDICATOR (Right side of status bar)
+        // ═══════════════════════════════════════════════════════════════════════════════
         if (rendering_in_progress) {
-            float p = ctx.render_settings.render_progress * 100.0f;
-            std::string prog = "Rendering: " + std::to_string((int)p) + "%";
-            float w = ImGui::CalcTextSize(prog.c_str()).x;
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            
+            // Calculate right-aligned position
+            float status_width = 320.0f;  // Wider for lock indicator
+            float start_x = screen_x - status_width - 12.0f;
+            ImVec2 bar_pos = ImVec2(start_x, ImGui::GetCursorScreenPos().y + 2);
+            
+            // Show LOCKED indicator when animation render is active
+            if (ctx.render_settings.animation_render_locked) {
+                // Check if paused
+                bool is_paused = rendering_paused.load();
+                
+                if (is_paused) {
+                    // PAUSED pill (yellow/orange)
+                    ImVec2 pause_pos = ImVec2(start_x - 70, bar_pos.y - 1);
+                    dl->AddRectFilled(pause_pos, ImVec2(pause_pos.x + 65, pause_pos.y + 18), IM_COL32(200, 150, 30, 255), 4.0f);
+                    dl->AddText(ImVec2(pause_pos.x + 8, pause_pos.y + 2), IM_COL32(255, 255, 255, 255), "PAUSED");
+                    
+                    // P hint
+                    ImVec2 p_pos = ImVec2(pause_pos.x - 85, pause_pos.y);
+                    dl->AddRectFilled(p_pos, ImVec2(p_pos.x + 80, p_pos.y + 18), IM_COL32(60, 80, 60, 255), 4.0f);
+                    dl->AddText(ImVec2(p_pos.x + 6, p_pos.y + 2), IM_COL32(200, 255, 200, 255), "P=Resume");
+                } else {
+                    // Lock icon pill (red)
+                    ImVec2 lock_pos = ImVec2(start_x - 65, bar_pos.y - 1);
+                    dl->AddRectFilled(lock_pos, ImVec2(lock_pos.x + 60, lock_pos.y + 18), IM_COL32(180, 60, 60, 255), 4.0f);
+                    dl->AddText(ImVec2(lock_pos.x + 8, lock_pos.y + 2), IM_COL32(255, 255, 255, 255), "LOCKED");
+                    
+                    // P hint for pause
+                    ImVec2 p_pos = ImVec2(lock_pos.x - 60, lock_pos.y);
+                    dl->AddRectFilled(p_pos, ImVec2(p_pos.x + 55, p_pos.y + 18), IM_COL32(80, 70, 40, 255), 4.0f);
+                    dl->AddText(ImVec2(p_pos.x + 6, p_pos.y + 2), IM_COL32(200, 200, 150, 255), "P=Pause");
+                    
+                    // ESC hint
+                    ImVec2 esc_pos = ImVec2(p_pos.x - 70, p_pos.y);
+                    dl->AddRectFilled(esc_pos, ImVec2(esc_pos.x + 65, esc_pos.y + 18), IM_COL32(60, 60, 80, 255), 4.0f);
+                    dl->AddText(ImVec2(esc_pos.x + 6, esc_pos.y + 2), IM_COL32(200, 200, 200, 255), "ESC=Stop");
+                }
+            }
+            
+            if (ctx.is_animation_mode) {
+                // ─────────────────────────────────────────────────────────────────────
+                // ANIMATION RENDER MODE
+                // ─────────────────────────────────────────────────────────────────────
+                int cur_frame = ctx.render_settings.animation_current_frame;
+                int start_frame = ctx.render_settings.animation_start_frame;
+                int end_frame = ctx.render_settings.animation_end_frame;
+                int total_frames = end_frame - start_frame + 1;
+                int frames_done = cur_frame - start_frame;
+                
+                // Clamp progress to valid range
+                float progress = (total_frames > 0) ? std::clamp((float)frames_done / (float)total_frames, 0.0f, 1.0f) : 0.0f;
+                
+                // Background bar
+                ImVec2 bar_end = ImVec2(bar_pos.x + 180, bar_pos.y + 16);
+                dl->AddRectFilled(bar_pos, bar_end, IM_COL32(40, 40, 50, 255), 4.0f);
+                
+                // Progress fill (gradient: orange to green)
+                if (progress > 0.0f) {
+                    ImVec2 fill_end = ImVec2(bar_pos.x + 180 * progress, bar_pos.y + 16);
+                    ImU32 col_start = IM_COL32(255, 140, 50, 255);  // Orange
+                    ImU32 col_end = IM_COL32(100, 220, 100, 255);   // Green
+                    dl->AddRectFilledMultiColor(bar_pos, fill_end, col_start, col_end, col_end, col_start);
+                    dl->AddRect(bar_pos, fill_end, IM_COL32(255, 255, 255, 40), 4.0f);
+                }
+                
+                // Border
+                dl->AddRect(bar_pos, bar_end, IM_COL32(80, 80, 100, 255), 4.0f);
+                
+                // Frame text inside bar
+                char frame_text[32];
+                snprintf(frame_text, sizeof(frame_text), "Frame %d / %d", cur_frame, end_frame);
+                ImVec2 text_size = ImGui::CalcTextSize(frame_text);
+                ImVec2 text_pos = ImVec2(bar_pos.x + (180 - text_size.x) * 0.5f, bar_pos.y + 1);
+                dl->AddText(text_pos, IM_COL32(255, 255, 255, 255), frame_text);
+                
+                // Percentage on right
+                ImGui::SameLine(start_x + 188);
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "%.0f%%", progress * 100.0f);
+                
+                // Spinning indicator
+                static float spin_angle = 0.0f;
+                spin_angle += ImGui::GetIO().DeltaTime * 4.0f;
+                ImVec2 spin_center = ImVec2(start_x - 14, bar_pos.y + 8);
+                float r = 5.0f;
+                for (int i = 0; i < 8; i++) {
+                    float angle = spin_angle + i * (3.14159f * 2.0f / 8.0f);
+                    float alpha = 0.3f + 0.7f * (1.0f - (float)i / 8.0f);
+                    ImVec2 dot = ImVec2(spin_center.x + cosf(angle) * r, spin_center.y + sinf(angle) * r);
+                    dl->AddCircleFilled(dot, 2.0f, IM_COL32(255, 180, 50, (int)(alpha * 255)));
+                }
+            }
+            else {
+                // ─────────────────────────────────────────────────────────────────────
+                // SINGLE FRAME RENDER MODE
+                // ─────────────────────────────────────────────────────────────────────
+                int current_samples = ctx.render_settings.render_current_samples;
+                int target_samples = ctx.render_settings.render_target_samples;
+                if (target_samples <= 0) target_samples = ctx.render_settings.final_render_samples;
+                if (target_samples <= 0) target_samples = 128;
+                
+                // Clamp progress
+                float progress = std::clamp((float)current_samples / (float)target_samples, 0.0f, 1.0f);
+                
+                // Background bar
+                ImVec2 bar_end = ImVec2(bar_pos.x + 160, bar_pos.y + 16);
+                dl->AddRectFilled(bar_pos, bar_end, IM_COL32(40, 40, 50, 255), 4.0f);
+                
+                // Progress fill (blue gradient)
+                if (progress > 0.0f) {
+                    ImVec2 fill_end = ImVec2(bar_pos.x + 160 * progress, bar_pos.y + 16);
+                    dl->AddRectFilled(bar_pos, fill_end, IM_COL32(80, 150, 255, 255), 4.0f);
+                }
+                
+                // Border
+                dl->AddRect(bar_pos, bar_end, IM_COL32(80, 80, 100, 255), 4.0f);
+                
+                // Sample text inside bar
+                char sample_text[32];
+                snprintf(sample_text, sizeof(sample_text), "%d / %d spp", current_samples, target_samples);
+                ImVec2 text_size = ImGui::CalcTextSize(sample_text);
+                ImVec2 text_pos = ImVec2(bar_pos.x + (160 - text_size.x) * 0.5f, bar_pos.y + 1);
+                dl->AddText(text_pos, IM_COL32(255, 255, 255, 255), sample_text);
+                
+                // Percentage on right
+                ImGui::SameLine(start_x + 168);
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%.0f%%", progress * 100.0f);
+            }
+        }
+        else if (ctx.render_settings.is_final_render_mode) {
+            // Render just finished
+            float w = ImGui::CalcTextSize("Render Complete").x;
             ImGui::SameLine(screen_x - w - 20);
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", prog.c_str());
+            ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.5f, 1.0f), "Render Complete");
         }
     }
     ImGui::End();
@@ -1542,36 +1912,36 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             if (terrain_brush.active_terrain_id != -1) {
                 activeTerrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
             }
-            // Auto-create default graph if empty
-            if (activeTerrain && terrainNodeGraph.nodes.empty()) {
-                terrainNodeGraph.createDefaultGraph(activeTerrain);
+
+            if (activeTerrain) {
+                // Ensure graph exists
+                if (!activeTerrain->nodeGraph) {
+                    activeTerrain->nodeGraph = std::make_shared<TerrainNodesV2::TerrainNodeGraphV2>();
+                }
+                
+                // Auto-create default graph if empty
+                if (activeTerrain->nodeGraph->nodes.empty()) {
+                    activeTerrain->nodeGraph->createDefaultGraph(activeTerrain);
+                }
+                
+                // Set callbacks
+                if (!terrainNodeEditorUI.onOpenFileDialog) {
+                     terrainNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
+                         return SceneUI::openFileDialogW(filter);
+                     };
+                }
+                if (!terrainNodeEditorUI.onSaveFileDialog) {
+                     terrainNodeEditorUI.onSaveFileDialog = [](const wchar_t* filter, const wchar_t* defName) -> std::string {
+                         return SceneUI::saveFileDialogW(filter, L"png");
+                     };
+                }
+                terrainNodeEditorUI.draw(ctx, *activeTerrain->nodeGraph, activeTerrain);
             }
-            
-            // Set callback if not set to enable file dialogs
-            if (!terrainNodeEditorUI.onOpenFileDialog) {
-                 terrainNodeEditorUI.onOpenFileDialog = [](const wchar_t* filter) -> std::string {
-                     return SceneUI::openFileDialogW(filter);
-                 };
+            else {
+                 ImGui::TextColored(ImVec4(1, 1, 0, 1), "Please select a terrain to edit its node graph.");
+                 // Fallback to global graph just to show the UI (optional, or just show nothing)
+                 // terrainNodeEditorUI.draw(ctx, terrainNodeGraph, nullptr);
             }
-            if (!terrainNodeEditorUI.onSaveFileDialog) {
-                 terrainNodeEditorUI.onSaveFileDialog = [](const wchar_t* filter, const wchar_t* defName) -> std::string {
-                     // defName string'i saveFileDialogW'ye defExt olarak geçiliyor, 
-                     // ancak SceneUI::saveFileDialogW aslında uzantı bekliyor olabilir mi?
-                     // Bakalım: SceneUI::saveFileDialogW, lpstrDefExt kullanıyor.
-                     // Eğer defName "splat.png" gelirse, lpstrDefExt sadece uzantı ister genelde.
-                     // Ama varsayılan dosya adı (lpstrFile) da ayarlanabilir.
-                     // Mevcut SceneUI::saveFileDialogW implementasyonu lpstrFile'ı temizliyor.
-                     // Orayı da güncellemek gerekebilir ama şimdilik exportPath'i UI tarafında set ediyoruz.
-                     
-                     // Not: SceneUI::saveFileDialogW(filter, defExt) imzası var.
-                     // Bizim lambda (filter, defName) alıyor.
-                     // SplatOutputNode'da "splat_map.png" gönderiyoruz.
-                     // Bu durumda defExt olarak "png" göndermek daha doğru olur.
-                     
-                     return SceneUI::saveFileDialogW(filter, L"png");
-                 };
-            }
-            terrainNodeEditorUI.draw(ctx, terrainNodeGraph, activeTerrain);
         }
         else if (show_anim_graph) {
             // Animation Node Graph Editor
@@ -1853,16 +2223,22 @@ void SceneUI::drawControlsContent()
 
 
 void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    SCENE_LOG_INFO("Rebuilding selection cache for " + std::to_string(objects.size()) + " objects...");
     mesh_cache.clear();
     mesh_ui_cache.clear();
-    bbox_cache.clear();  // Clear bounding box cache too
-    material_slots_cache.clear();  // Clear material slots cache
+    this->tri_to_index.clear(); // Clear the lookup map
+    bbox_cache.clear();  
+    material_slots_cache.clear();
     
+    // Hint for potential large scenes (1.2M objects!)
+    tri_to_index.reserve(objects.size());
+
     for (size_t i = 0; i < objects.size(); ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
         if (tri) {
             std::string name = tri->nodeName.empty() ? "Unnamed" : tri->nodeName;
             mesh_cache[name].push_back({(int)i, tri});
+            this->tri_to_index[tri.get()] = (int)i; // Store const pointer to index mapping
         }
     }
     
@@ -1907,6 +2283,16 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     }
     
     mesh_cache_valid = true;
+    last_scene_obj_count = objects.size();
+}
+
+void SceneUI::invalidateCache() { 
+    mesh_cache_valid = false; 
+    mesh_cache.clear();
+    mesh_ui_cache.clear();
+    bbox_cache.clear();
+    material_slots_cache.clear();
+    SCENE_LOG_INFO("Selection cache fully cleared and invalidated");
 }
 
 // Update bounding box for a specific object (after transform)
@@ -1942,15 +2328,18 @@ void SceneUI::updateBBoxCache(const std::string& objectName) {
 // 1. Gizmo release is instant (no freeze)
 // 2. Sync only happens when user actually tries to pick something
 // 3. If user moves object multiple times without picking, we only sync once
-void SceneUI::ensureCPUSyncForPicking() {
+void SceneUI::ensureCPUSyncForPicking(UIContext& ctx) {
     if (objects_needing_cpu_sync.empty()) return;
     
-    // Update all pending objects
+    size_t synced_count = 0;
+    
+    // Update all pending objects - apply current transforms to vertices
     for (const auto& name : objects_needing_cpu_sync) {
         auto it = mesh_cache.find(name);
-        if (it != mesh_cache.end()) {
+        if (it != mesh_cache.end() && !it->second.empty()) {
             for (auto& pair : it->second) {
                 pair.second->updateTransformedVertices();
+                synced_count++;
             }
         }
     }
@@ -1958,11 +2347,11 @@ void SceneUI::ensureCPUSyncForPicking() {
     size_t count = objects_needing_cpu_sync.size();
     objects_needing_cpu_sync.clear();
     
-    // Trigger BVH rebuild for accurate picking
-    extern bool g_bvh_rebuild_pending;
-    g_bvh_rebuild_pending = true;
-    
-    SCENE_LOG_INFO("Lazy CPU sync completed for " + std::to_string(count) + " objects");
+    if (synced_count > 0) {
+        // [FIX] Force rebuild BVH so picking works with new vertex positions
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+       // SCENE_LOG_INFO("Lazy CPU sync: updated " + std::to_string(synced_count) + " triangles for " + std::to_string(count) + " objects");
+    }
 }
 
 // Global flag for Render Window visibility
@@ -2366,6 +2755,14 @@ void SceneUI::performNewProject(UIContext& ctx) {
      
      // 2. Reset UI-Side Persistent Data (Node Graphs, History, Cache)
      terrainNodeGraph.clear();
+     terrainNodeEditorUI.reset(); // Reset editor pan/zoom/selection
+     show_terrain_graph = false;  // Hide graph panel
+     show_anim_graph = false;     // Hide animation graph panel
+     ForceFieldUI::selected_force_field = nullptr; // Clear force field selection
+     resetMaterialUI();           // Reset material editor state
+     hairUI.clear();              // Clear hair UI state
+
+     
      history.clear();
      timeline.reset();
      active_messages.clear();
@@ -2375,6 +2772,7 @@ void SceneUI::performNewProject(UIContext& ctx) {
      viewport_settings = ViewportDisplaySettings();
      guide_settings = GuideSettings();
      sync_sun_with_light = true;
+     is_picking_focus = false;
      
      // 4. Reset Rendering State
      ctx.sample_count = 0;
@@ -2395,6 +2793,7 @@ void SceneUI::performNewProject(UIContext& ctx) {
      if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
      
      active_model_path = "Untitled";
+     ctx.active_model_path = "Untitled";
      ctx.start_render = true;
      
      SCENE_LOG_INFO("New project created.");
@@ -2426,6 +2825,14 @@ void SceneUI::performOpenProject(UIContext& ctx) {
 
         // 1. Reset UI-Side Persistent Data before loading new project
         terrainNodeGraph.clear();
+        terrainNodeEditorUI.reset(); // Reset editor pan/zoom/selection
+        show_terrain_graph = false;  // Hide graph panel
+        show_anim_graph = false;     // Hide animation graph panel
+        ForceFieldUI::selected_force_field = nullptr; // Clear force field selection
+        resetMaterialUI();           // Reset material editor state
+        hairUI.clear();              // Clear hair UI state
+
+        
         history.clear();
         timeline.reset();
         active_messages.clear();
@@ -2434,6 +2841,12 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         
         // Reset Animation Graph UI
         g_animGraphUI = AnimGraphUIState();
+        
+        // Reset Viewport & Guide Settings to default before loading
+        viewport_settings = ViewportDisplaySettings();
+        guide_settings = GuideSettings();
+        sync_sun_with_light = true;
+        is_picking_focus = false;
 
 
         g_scene_loading_in_progress = true;
@@ -2487,6 +2900,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                                     viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
                                     viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
                                     viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);
+                                    viewport_settings.focus_mode = vs.value("focus_mode", 1); // Reset to AF-S if missing
                                 }
 
                                 if (rootJson.contains("guide_settings")) {
@@ -2532,7 +2946,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
             invalidateCache();
             active_model_path = g_ProjectManager.getProjectName();
             
-            if (ctx.optix_gpu_ptr) cudaDeviceSynchronize();
+            if (ctx.optix_gpu_ptr && g_hasCUDA) cudaDeviceSynchronize();
             
             // Register animation clips with AnimationController
             // This ensures bone animations work immediately after project load
@@ -2552,11 +2966,24 @@ void SceneUI::performOpenProject(UIContext& ctx) {
             
             g_ProjectManager.getProjectData().is_modified = false;
 
+            // Trigger terrain graph evaluation after load
+            TerrainObject* terrain = nullptr;
+            auto& terrains = TerrainManager::getInstance().getTerrains();
+            if (!terrains.empty()) terrain = &terrains[0];
+            if (terrain) {
+                terrainNodeGraph.evaluateTerrain(terrain, ctx.scene);
+                SCENE_LOG_INFO("[Load] Terrain graph evaluated.");
+            }
+
+            // Reset Hair UI to force refresh from new data
+            hairUI.clear();
+
             // Ensure VDB parameters are synchronized to GPU after load
             SceneUI::syncVDBVolumesToGPU(ctx);
 
             scene_loading = false;
             scene_loading_done = true;
+            ctx.active_model_path = filepath; // Update project name for window title
             g_scene_loading_in_progress = false;
             rendering_stopped_cpu = false;
             rendering_stopped_gpu = false;
@@ -2795,4 +3222,390 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     }
 
     return changed;
+}
+
+// ============================================================================
+// Hair Brush Handling
+// ============================================================================
+
+void SceneUI::handleHairBrush(UIContext& ctx) {
+    // Check if hair paint mode is active
+    if (!hairUI.isPainting()) return;
+    
+    // [FIX] Ensure CPU BVH is in sync with GPU transforms for accurate painting
+    // Gizmo updates only GPU transforms in OptiX mode, leaving CPU vertices stale.
+    ensureCPUSyncForPicking(ctx);
+    
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) return; // UI interaction
+    
+    int x, y;
+    Uint32 buttons = SDL_GetMouseState(&x, &y);
+    bool is_left_down = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT));
+    
+    float win_w = (std::max)(1.0f, io.DisplaySize.x);
+    float win_h = (std::max)(1.0f, io.DisplaySize.y);
+    float u = (float)x / win_w;
+    float v = (float)(win_h - y) / win_h;
+    
+    if (!ctx.scene.camera || !std::isfinite(u) || !std::isfinite(v)) return;
+    Ray r = ctx.scene.camera->get_ray(u, v);
+    
+    // Safety check for ray
+    if (!std::isfinite(r.direction.x)) return;
+
+    // Raycast against scene (Meshes)
+    HitRecord rec;
+    bool sceneHit = (ctx.scene.bvh && std::isfinite(r.origin.x)) ? ctx.scene.bvh->hit(r, 0.001f, 1e6f, rec, false) : false;
+
+    // Raycast against hair (Curves) - MODERN: Use Volumetric intersection for styling
+    Hair::HairHitInfo hRec;
+    float searchRadius = hairUI.getBrushSettings().radius;
+    bool hairHit = false;
+    Hair::HairPaintMode mode = hairUI.getPaintMode();
+    bool preferHair = (mode == Hair::HairPaintMode::COMB || 
+                      mode == Hair::HairPaintMode::CUT || 
+                      mode == Hair::HairPaintMode::REMOVE || 
+                      mode == Hair::HairPaintMode::LENGTH || 
+                      mode == Hair::HairPaintMode::PUFF || 
+                      mode == Hair::HairPaintMode::CLUMP ||
+                      mode == Hair::HairPaintMode::WAVE ||
+                      mode == Hair::HairPaintMode::FRIZZ ||
+                      mode == Hair::HairPaintMode::SMOOTH ||
+                      mode == Hair::HairPaintMode::PINCH ||
+                      mode == Hair::HairPaintMode::SPREAD);
+    // -------------------------------------------------------------------------
+    // MODERN PICKING: Always prioritize the Scalp (Emitter) surface.
+    // This prevents the brush from "jumping" in depth when passing over hairs.
+    // -------------------------------------------------------------------------
+    bool hit = false;
+    Vec3 hitPoint, hitNormal;
+    std::string hitGroomName = "";
+
+    // 1. Try hitting the scene (Scalp Mesh) first
+    bool hitScalp = false;
+    if (sceneHit && rec.triangle) {
+        std::string meshName = rec.triangle->getNodeName();
+        if (hairUI.isSurfaceValid(ctx.renderer.getHairSystem(), meshName)) {
+            hitScalp = true;
+            hit = true;
+            hitPoint = rec.point;
+            hitNormal = rec.normal;
+            hitGroomName = hairUI.getSelectedGroom(ctx.renderer.getHairSystem()) ? hairUI.getSelectedGroom(ctx.renderer.getHairSystem())->name : "";
+        }
+    }
+
+    // 2. Fallback to Hair Hit if no scalp or if mode specifically requires hair (like CUT/REMOVE)
+    if (!hit && mode != Hair::HairPaintMode::ADD && mode != Hair::HairPaintMode::DENSITY) {
+        // Only use Volumetric for fallback or specific modes
+        bool useVolumetric = (mode != Hair::HairPaintMode::ADD && mode != Hair::HairPaintMode::DENSITY);
+        if (useVolumetric) {
+            hairHit = ctx.renderer.getHairSystem().intersectVolumetric(r.origin, r.direction, 0.001f, 1e6f, searchRadius, hRec);
+        } else {
+            hairHit = ctx.renderer.getHairSystem().intersect(r.origin, r.direction, 0.001f, 1e6f, hRec);
+        }
+
+        if (hairHit && hairUI.isGroomValid(hRec.groomName)) {
+            hit = true;
+            hitPoint = hRec.position;
+            hitNormal = hRec.normal;
+            hitGroomName = hRec.groomName;
+        }
+    }
+
+    // 3. Last fallback: Any scene hit
+    if (!hit && sceneHit) {
+        hit = true;
+        hitPoint = rec.point;
+        hitNormal = rec.normal;
+    }
+    
+    
+    if (hit && std::isfinite(hitPoint.x) && std::isfinite(hitNormal.x)) {
+        // [FIX] Ensure preview doesn't crash on invalid normals
+        if (hitNormal.length_squared() < 0.0001f) hitNormal = Vec3(0, 1, 0);
+        
+        drawHairBrushPreview(ctx, hitPoint, hitNormal);
+        
+        // Apply brush on mouse down
+        static Vec3 lastHitPos = Vec3(0,0,0);
+        static bool wasMouseDown = false;
+
+        if (is_left_down) {
+            float deltaTime = io.DeltaTime;
+            
+            // Calculate dynamic comb direction based on mouse movement
+            Vec3 dragDir(0,0,0);
+            if (wasMouseDown) {
+                Vec3 rawDrag = hitPoint - lastHitPos;
+                if (rawDrag.length() > 0.001f) {
+                    dragDir = rawDrag.normalize();
+                }
+            }
+            lastHitPos = hitPoint;
+            wasMouseDown = true;
+
+            // [FIX] Mirror Surface Projector (Ensures mirrored brush snaps to valid surface only)
+            auto surfaceProjector = [&](Vec3& pos, Vec3& norm) -> bool {
+                if (!ctx.scene.bvh) return false;
+                
+                // Increased tolerance for marginal hits
+                Ray probe(pos + norm * 1.0f, -norm);
+                HitRecord pRec;
+                
+                if (ctx.scene.bvh->hit(probe, 0.001f, 2.0f, pRec, false)) {
+                    if (pRec.triangle) {
+                        pos = pRec.point;
+                        norm = pRec.normal;
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            // [FIX] Sync Groom Transform for RIGID objects only
+            // This ensures new projects (Rigid Emitters) follow the object while painting,
+            // but Skinned Emitters rely on updateSkinnedGroom (avoiding conflicts).
+            if (rec.triangle && !rec.triangle->hasSkinData()) {
+                  ctx.renderer.getHairSystem().updateFromMeshTransform(rec.triangle->getNodeName(), rec.triangle->getTransformMatrix());
+            }
+
+            hairUI.setSurfaceProjector(surfaceProjector);
+            hairUI.applyBrush(ctx.renderer.getHairSystem(), hitPoint, hitNormal, deltaTime, dragDir);
+            hairUI.setSurfaceProjector(nullptr);
+            
+        } else {
+            wasMouseDown = false;
+            // Handle brush release
+            hairUI.applyBrush(ctx.renderer.getHairSystem(), Vec3(0,0,0), Vec3(0,1,0), 0.0f);
+        }
+
+        if (hairUI.isDirty()) {
+            ctx.renderer.uploadHairToGPU();  
+            ctx.renderer.resetCPUAccumulation(); 
+            hairUI.clearDirty();
+        }
+    }
+}
+
+void SceneUI::drawHairBrushPreview(UIContext& ctx, const Vec3& hitPoint, const Vec3& hitNormal) {
+    if (!hairUI.isPainting()) return;
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse) return;
+    
+    float win_w = io.DisplaySize.x;
+    float win_h = io.DisplaySize.y;
+    
+    if (!ctx.scene.camera) return;
+    
+    const Hair::HairBrushSettings& brush = hairUI.getBrushSettings();
+    
+    // Get brush color based on mode
+    ImVec4 brushColor;
+    switch (hairUI.getPaintMode()) {
+        case Hair::HairPaintMode::ADD:
+            brushColor = ImVec4(0.2f, 1.0f, 0.2f, 0.8f);  // Green
+            break;
+        case Hair::HairPaintMode::REMOVE:
+            brushColor = ImVec4(1.0f, 0.2f, 0.2f, 0.8f);  // Red
+            break;
+        case Hair::HairPaintMode::CUT:
+            brushColor = ImVec4(1.0f, 0.6f, 0.2f, 0.8f);  // Orange
+            break;
+        case Hair::HairPaintMode::COMB:
+            brushColor = ImVec4(0.2f, 0.6f, 1.0f, 0.8f);  // Blue
+            break;
+        case Hair::HairPaintMode::LENGTH:
+            brushColor = ImVec4(1.0f, 1.0f, 0.2f, 0.8f);  // Yellow
+            break;
+        case Hair::HairPaintMode::WAVE:
+        case Hair::HairPaintMode::FRIZZ:
+            brushColor = ImVec4(1.0f, 0.4f, 1.0f, 0.8f);  // Magenta/Pink
+            break;
+        case Hair::HairPaintMode::SMOOTH:
+            brushColor = ImVec4(0.4f, 1.0f, 1.0f, 0.8f);  // Cyan
+            break;
+        case Hair::HairPaintMode::PINCH:
+        case Hair::HairPaintMode::SPREAD:
+            brushColor = ImVec4(1.0f, 1.0f, 1.0f, 0.8f);  // White
+            break;
+        default:
+            brushColor = ImVec4(0.8f, 0.8f, 0.8f, 0.6f);  // Gray
+            break;
+    }
+    
+    ImU32 col = ImGui::ColorConvertFloat4ToU32(brushColor);
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    
+    // Project 3D circle to screen
+    Camera& cam = *ctx.scene.camera;
+    Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    Vec3 cam_right = Vec3::cross(cam_forward, cam.vup).normalize();
+    Vec3 cam_up = Vec3::cross(cam_right, cam_forward).normalize();
+    
+    auto Project = [&](Vec3 p) -> ImVec2 {
+        Vec3 d = p - cam.lookfrom;
+        float z = d.dot(cam_forward);
+        if (z < 0.1f) z = 0.1f;
+        
+        float fov_rad = cam.vfov * 3.14159f / 180.0f;
+        float h = 2.0f * z * tanf(std::clamp(fov_rad * 0.5f, 0.01f, 1.5f));
+        float w = (std::max)(0.001f, h * cam.aspect_ratio);
+        
+        float sx = d.dot(cam_right) / (w * 0.5f);
+        float sy = d.dot(cam_up) / (h * 0.5f);
+        
+        // Safety check for projection
+        if (!std::isfinite(sx) || !std::isfinite(sy)) return ImVec2(-10000, -10000);
+        
+        return ImVec2(
+            (0.5f + sx * 0.5f) * win_w,
+            (0.5f - sy * 0.5f) * win_h
+        );
+    };
+    
+    auto DrawBrushCircle = [&](const Vec3& center, const Vec3& n, bool is_mirror) {
+        ImU32 c = col;
+        if (is_mirror) {
+             // 50% opacity for mirror ghost
+             int alpha = (col >> 24) & 0xFF;
+             alpha /= 2;
+             c = (col & 0x00FFFFFF) | (alpha << 24);
+        }
+
+        int segments = 32;
+        Vec3 tangent = Vec3::cross(n, Vec3(0, 1, 0)).normalize();
+        if (tangent.length() < 0.1f) {
+            tangent = Vec3::cross(n, Vec3(1, 0, 0)).normalize();
+        }
+        Vec3 bitangent = Vec3::cross(n, tangent);
+        
+        for (int i = 0; i < segments; i++) {
+            float theta1 = (float)i / segments * 6.28318f;
+            float theta2 = (float)(i + 1) / segments * 6.28318f;
+            
+            Vec3 p1 = center + (tangent * cosf(theta1) + bitangent * sinf(theta1)) * brush.radius;
+            Vec3 p2 = center + (tangent * cosf(theta2) + bitangent * sinf(theta2)) * brush.radius;
+            
+            // Offset slightly above surface
+            p1 = p1 + n * 0.01f;
+            p2 = p2 + n * 0.01f;
+            
+            ImVec2 sp1 = Project(p1);
+            ImVec2 sp2 = Project(p2);
+            
+            dl->AddLine(sp1, sp2, c, is_mirror ? 1.0f : 2.0f);
+        }
+        
+        // Draw center dot
+        ImVec2 center_scr = Project(center + n * 0.01f);
+        dl->AddCircleFilled(center_scr, is_mirror ? 3.0f : 4.0f, c);
+    };
+
+    // Draw Volumetric Gizmo (3D Wireframe Sphere)
+    // 3 Perpendicular circles to give a 3D volume feel
+    auto DrawVolumetricBrush = [&](const Vec3& center, bool is_mirror) {
+        DrawBrushCircle(center, Vec3(1, 0, 0), is_mirror); // X plane
+        DrawBrushCircle(center, Vec3(0, 1, 0), is_mirror); // Y plane
+        DrawBrushCircle(center, Vec3(0, 0, 1), is_mirror); // Z plane
+    };
+
+    DrawVolumetricBrush(hitPoint, false);
+
+    // [MODERN] Visual Highlight: Color affected hair strands
+    auto HighlightStrands = [&](const Vec3& center, bool is_mirror) {
+        Hair::HairGroom* groom = hairUI.getSelectedGroom(ctx.renderer.getHairSystem());
+        if (!groom) return;
+        
+        Matrix4x4 localToWorld = groom->transform;
+        float brushRadSq = brush.radius * brush.radius;
+        
+        for (const auto& strand : groom->guides) {
+            // Safety: Skip empty or corrupt strands
+            if (strand.groomedPositions.empty()) continue;
+
+            // Quick culling
+            Vec3 rootWorld = localToWorld.transform_point(strand.baseRootPos);
+            float distToRootSq = (rootWorld - center).length_squared();
+            if (distToRootSq > (brush.radius + strand.baseLength) * (brush.radius + strand.baseLength) * 2.0f) continue;
+
+            float minDistSq = 1e30f;
+            for (const auto& p : strand.groomedPositions) {
+                Vec3 pW = localToWorld.transform_point(p);
+                float d2 = (pW - center).length_squared();
+                if (d2 < minDistSq) minDistSq = d2;
+                if (minDistSq < brushRadSq) break; // Optimization
+            }
+
+            if (minDistSq < brushRadSq) {
+                float dist = std::sqrt(minDistSq);
+                float falloff = (std::max)(0.0f, 1.0f - dist / brush.radius);
+                
+                ImVec4 heatColor = (falloff > 0.7f) ? ImVec4(1.0f, 0.2f, 0.2f, 0.8f) :
+                                   (falloff > 0.3f) ? ImVec4(1.0f, 0.8f, 0.0f, 0.6f) :
+                                                      ImVec4(0.2f, 1.0f, 0.2f, 0.4f);
+                
+                if (is_mirror) heatColor.w *= 0.5f;
+                ImU32 highlightCol = ImGui::ColorConvertFloat4ToU32(heatColor);
+                
+                if (strand.groomedPositions.size() > 1) {
+                    for (size_t i = 0; i < strand.groomedPositions.size() - 1; ++i) {
+                        Vec3 p1w = localToWorld.transform_point(strand.groomedPositions[i]);
+                        Vec3 p2w = localToWorld.transform_point(strand.groomedPositions[i+1]);
+                        
+                        if (!std::isfinite(p1w.x) || !std::isfinite(p2w.x)) continue;
+
+                        ImVec2 p1s = Project(p1w);
+                        ImVec2 p2s = Project(p2w);
+                        
+                        if (p1s.x > -5000 && p2s.x > -5000) {
+                            dl->AddLine(p1s, p2s, highlightCol, is_mirror ? 1.2f : 2.0f);
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    DrawVolumetricBrush(hitPoint, false);
+    HighlightStrands(hitPoint, false);
+
+    // Draw Mirror Brushes (Ghost)
+    if (brush.mirrorX || brush.mirrorY || brush.mirrorZ) {
+        if (Hair::HairGroom* groom = hairUI.getSelectedGroom(ctx.renderer.getHairSystem())) {
+            Matrix4x4 localToWorld = groom->transform;
+            float det = localToWorld.determinant();
+            if (std::abs(det) > 1e-12f) {
+                Matrix4x4 worldToLocal = localToWorld.inverse();
+                
+                Vec3 lp = worldToLocal.transform_point(hitPoint);
+                Vec3 ln = worldToLocal.transform_vector(hitNormal).normalize();
+                
+                for (int i = 1; i < 8; ++i) {
+                    bool mx = (i & 1) && brush.mirrorX;
+                    bool my = (i & 2) && brush.mirrorY;
+                    bool mz = (i & 4) && brush.mirrorZ;
+                    
+                    if ((i & 1) && !brush.mirrorX) continue;
+                    if ((i & 2) && !brush.mirrorY) continue;
+                    if ((i & 4) && !brush.mirrorZ) continue;
+                    
+                    Vec3 mP = lp;
+                    Vec3 mN = ln;
+                    if (mx) { mP.x = -mP.x; mN.x = -mN.x; }
+                    if (my) { mP.y = -mP.y; mN.y = -mN.y; }
+                    if (mz) { mP.z = -mP.z; mN.z = -mN.z; }
+                    
+                    Vec3 wP = localToWorld.transform_point(mP);
+                    Vec3 wN = localToWorld.transform_vector(mN).normalize();
+                    
+                    if (std::isfinite(wP.x) && std::isfinite(wN.x)) {
+                        DrawVolumetricBrush(wP, true);
+                        HighlightStrands(wP, true);
+                    }
+                }
+            }
+        }
+    }
 }

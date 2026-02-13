@@ -37,8 +37,9 @@ bool pending_resolution_change=false;
 bool render_finished = false;   
 std::atomic<bool> rendering_in_progress = false;
 std::atomic<bool> rendering_stopped_gpu = false;
+std::atomic<bool> rendering_stopped_cpu = false;
+std::atomic<bool> rendering_paused = false;  // Pause animation render
 
-std::atomic<bool> rendering_stopped_cpu=false;
 // Macros are defined in globals.h
 
 RenderSettings render_settings;  // Uses default values from header

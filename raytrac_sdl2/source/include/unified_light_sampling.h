@@ -252,6 +252,7 @@ UNIFIED_FUNC Vec3f calculate_light_contribution_unified(
     float metallic_sampled,
     float rand_u,
     float rand_v,
+    float pdf_select,
     ShadowFunc is_shadowed
 ) {
     Vec3f wi;
@@ -293,9 +294,12 @@ UNIFIED_FUNC Vec3f calculate_light_contribution_unified(
     
     // Light radiance
     Vec3f Li = light.color * light.intensity * attenuation;
-    
-    // Final contribution
-    return f * Li * NdotL * mis_weight;
+
+    // Final contribution (Corrected: Divide by pdf_light and pdf_select for standard PT)
+    // Formula: (f * Li * NdotL / pdf_light) * weight / pdf_select
+    // For analytic lights, Li is usually already irradiance, so we don't divide by pdf_light here.
+    // However, we MUST handle pdf_select.
+    return (f * Li * NdotL * mis_weight) / fmaxf(pdf_select, 1e-4f);
 }
 
 // =============================================================================
@@ -317,71 +321,120 @@ UNIFIED_FUNC int pick_smart_light_unified(
     const UnifiedLight* lights,
     int light_count,
     const Vec3f& hit_position,
-    float random_val
+    float random_val,
+    float* pdf_out = nullptr
 ) {
-    if (light_count == 0) return -1;
+    if (light_count == 0) {
+        if (pdf_out) *pdf_out = 0.0f;
+        return -1;
+    }
     
-    // Priority: Directional light (33% chance)
+    // Create a mutable random value we can consume
+    float rng_val = random_val;
+    
+    // --- Step 1: Directional Light Shortcut (Matches GPU) ---
+    // GPU iterates all lights and gives each Directional light a 33% chance.
+    // If multiple directional lights exist, they are checked sequentially.
+    
+    float prob_to_reach_weighted = 1.0f;
+    
     for (int i = 0; i < light_count; i++) {
         if (lights[i].type == 1) {  // Directional
-            if (random_val < 0.33f) {
+            // Check if we pick this light using the 33% shortcut
+            // To simulate "fresh" random usage like GPU would with random_float(rng),
+            // we slice the current random value. 
+            // However, since we only have single 'random_val', we map it.
+            // Simplified: If random_val is in [0, 0.33] of the CURRENT range.
+            
+            // For true parity with GPU which calls random_float() inside the loop:
+            // We can't strictly emulate multiple Independent calls from one float without hashing.
+            // But assuming 1 Directional Light (common case), we just need to check 0.33.
+            
+            // Let's use a hashed approach to simulate a new random number for the check if we have multiple
+            // For single directional light (standard), this collapses to simple check.
+            
+            // Standard approach: Use the passed random_val for the DECISION.
+            // If we have 1 Dir light, range [0, 0.33) picks it.
+            // Range [0.33, 1.0) proceeds to weighted.
+            
+            if (rng_val < 0.33f) {
+                if (pdf_out) *pdf_out = 0.33f * prob_to_reach_weighted; // GPU: 0.33 probability at this step
                 return i;
             }
-            break;  // Only check first directional
+            
+            // If not picked, we proceed.
+            // Renormalize rng_val for next steps?
+            // GPU generates NEW random number. 
+            // We map [0.33, 1.0] -> [0.0, 1.0]
+            rng_val = (rng_val - 0.33f) / 0.67f;
+            prob_to_reach_weighted *= 0.67f;
         }
     }
     
-    // Weighted selection for all lights
-    float weights[128];  // Assuming max 128 lights
+    // --- Step 2: Weighted Selection (Matches GPU) ---
+    // Directional lights get 0 weight here.
+    
+    float weights[128];
     float total_weight = 0.0f;
+    int max_lights = (light_count < 128) ? light_count : 128;
     
-    for (int i = 0; i < light_count && i < 128; i++) {
+    for (int i = 0; i < max_lights; i++) {
         const UnifiedLight& light = lights[i];
-        Vec3f delta = light.position - hit_position;
-        float dist = fmaxf(delta.length(), 1.0f);
-        float falloff = 1.0f / (dist * dist);
-        float intensity = light.color.luminance() * light.intensity;
         
-        if (light.type == 0) {  // Point
-            weights[i] = falloff * intensity;
-        }
-        else if (light.type == 1) {  // Directional Light (Sun)
-            // Modern approach: radiance-based weight instead of distance-based
-            // Sun has no position, use solid angle to estimate importance
-            float sun_angular_radius = fmaxf(light.radius, 0.01f);
-            float sun_solid_angle = 2.0f * UnifiedConstants::PI * (1.0f - cosf(sun_angular_radius));
-            float sun_radiance = intensity / fmaxf(sun_solid_angle, 0.0001f);
-            // Boost factor to compete with nearby point lights
-            weights[i] = sun_radiance * 0.2f;
-        }
-        else if (light.type == 2) {  // Area
-            float area = light.area_width * light.area_height;
-            weights[i] = falloff * intensity * fminf(area, 10.0f);
-        }
-        else if (light.type == 3) {  // Spot
-            weights[i] = falloff * intensity * 0.8f;
-        }
-        else {
-            weights[i] = 0.0f;
+        float weight = 0.0f;
+        
+        if (light.type != 1) { // Skip Directional (Weight 0)
+            Vec3f delta = light.position - hit_position;
+            float dist_sq = delta.length_squared();
+            float dist = sqrtf(dist_sq);
+            dist = fmaxf(dist, 1.0f);
+            
+            float intensity = light.color.luminance() * light.intensity;
+            
+            if (light.type == 0) { // Point
+                 float falloff = 1.0f / (dist * dist);
+                 weight = falloff * intensity;
+            }
+            else if (light.type == 2) { // Area
+                 float falloff = 1.0f / (dist * dist);
+                 float area = light.area_width * light.area_height;
+                 weight = falloff * intensity * fminf(area, 10.0f);
+            }
+            else if (light.type == 3) { // Spot
+                 float falloff = 1.0f / (dist * dist);
+                 weight = falloff * intensity * 0.8f;
+            }
         }
         
-        total_weight += weights[i];
+        weights[i] = weight;
+        total_weight += weight;
     }
     
-    // Fallback to uniform if weights are too small
+    // Pick from weighted
+    int selected_idx = max_lights - 1; // Default
+    
     if (total_weight < 1e-6f) {
-        return static_cast<int>(random_val * light_count) % light_count;
+        // Uniform fallback
+        selected_idx = static_cast<int>(rng_val * light_count) % light_count;
+        if (pdf_out) *pdf_out = prob_to_reach_weighted * (1.0f / (float)light_count);
+        return selected_idx;
     }
     
-    // Weighted selection
-    float r = random_val * total_weight;
+    float r = rng_val * total_weight;
     float accum = 0.0f;
-    for (int i = 0; i < light_count && i < 128; i++) {
+    
+    for (int i = 0; i < max_lights; i++) {
         accum += weights[i];
-        if (r <= accum) return i;
+        if (r <= accum) {
+            selected_idx = i;
+            break;
+        }
     }
     
-    // Safety fallback
-    return static_cast<int>(random_val * light_count) % light_count;
+    if (pdf_out) {
+        *pdf_out = prob_to_reach_weighted * (weights[selected_idx] / total_weight);
+    }
+    
+    return selected_idx;
 }
 

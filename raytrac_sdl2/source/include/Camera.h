@@ -171,7 +171,7 @@ public:
         
         // Aperture effect: wide open = more vignetting
         float aperture_vignette = 1.0f / (f_number * 0.5f);     // f/1.4 = 1.43, f/8 = 0.25
-        aperture_vignette = std::min(aperture_vignette, 1.0f);
+        aperture_vignette = (std::min)(aperture_vignette, 1.0f);
         
         // Quality reduces vignetting
         float quality_reduction = 1.0f - (lens_quality * 0.6f);
@@ -308,7 +308,7 @@ public:
         if (iso <= native_iso) return base_samples;
         
         float iso_factor = std::log2(static_cast<float>(iso) / 100.0f);
-        return base_samples * static_cast<int>(std::pow(2.0f, std::max(0.0f, iso_factor * 0.5f)));
+        return base_samples * static_cast<int>(std::pow(2.0f, (std::max)(0.0f, iso_factor * 0.5f)));
     }
     
     // ═══════════════════════════════════════════════════════════════════════════

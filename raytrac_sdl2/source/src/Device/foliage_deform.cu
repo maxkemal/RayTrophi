@@ -1,5 +1,5 @@
+﻿
 
-#include <optix.h>
 #include <cuda_runtime.h>
 #include <vector_types.h>
 #include <vector_functions.h>

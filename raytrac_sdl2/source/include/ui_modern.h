@@ -177,6 +177,11 @@ namespace UIWidgets {
 
     // -------- LAYOUT YARDIMCILARI --------
 
+    // Returns the ideal width for property items (sliders/inputs) in a panel
+    float GetInspectorItemWidth();
+    // Returns the ideal width for full-width action buttons in a panel
+    float GetInspectorActionWidth();
+
     // Sağa hizalı widget için boşluk hesapla
     float GetRightAlignOffset(float widgetWidth);
 

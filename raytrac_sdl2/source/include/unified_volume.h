@@ -30,9 +30,8 @@ struct UnifiedVolumeData {
     // Base parameters
     float density;       // Base density multiplier
     float absorption;    // Light absorption rate
+    float absorption_r, absorption_g, absorption_b;
     float scattering;    // Scattering coefficient
-    
-    // Color
     float albedo_r, albedo_g, albedo_b;      // Scattering color
     float emission_r, emission_g, emission_b; // Volume emission
     float emission_intensity;
@@ -67,7 +66,9 @@ struct UnifiedVolumeData {
     #ifndef __CUDA_ARCH__
     UnifiedVolumeData() :
         density_source(0),
-        density(1.0f), absorption(0.1f), scattering(0.5f),
+        density(1.0f), absorption(0.1f), 
+        absorption_r(1.0f), absorption_g(1.0f), absorption_b(1.0f),
+        scattering(0.5f),
         albedo_r(1.0f), albedo_g(1.0f), albedo_b(1.0f),
         emission_r(0.0f), emission_g(0.0f), emission_b(0.0f),
         emission_intensity(0.0f),
@@ -96,7 +97,7 @@ UNIFIED_FUNC void build_orthonormal_basis(const Vec3f& n, Vec3f& b1, Vec3f& b2) 
 UNIFIED_FUNC float phase_henyey_greenstein(float cos_theta, float g) {
     float g2 = g * g;
     float denom = 1.0f + g2 - 2.0f * g * cos_theta;
-    return (1.0f - g2) / (4.0f * UnifiedConstants::PI * powf(denom, 1.5f));
+    return (1.0f - g2) / (4.0f * UnifiedConstants::PI * powf(fmaxf(denom, 0.0001f), 1.5f));
 }
 
 // Sample Henyey-Greenstein Phase Function

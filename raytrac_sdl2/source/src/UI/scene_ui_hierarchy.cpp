@@ -50,8 +50,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     // Scene Tree
     // ─────────────────────────────────────────────────────────────────────────
     float available_h = ImGui::GetContentRegionAvail().y;
-    // Split: 25% for Tree, Rest for Properties (World/Material/etc)
-    ImGui::BeginChild("HierarchyTree", ImVec2(0, available_h * 0.25f), true);
+    
+    // Safety clamp for hierarchy height
+    if (hierarchy_panel_height > available_h - 100.0f) 
+        hierarchy_panel_height = std::max(100.0f, available_h - 100.0f);
+
+    ImGui::BeginChild("HierarchyTree", ImVec2(0, hierarchy_panel_height), true);
 
     // WORLD (Environment) - Selectable like any other object
     {
@@ -373,11 +377,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
     
     // Check for scene changes to invalidate cache
-    static size_t last_obj_count = 0;
-    if (ctx.scene.world.objects.size() != last_obj_count) {
-        mesh_cache_valid = false;
-        last_obj_count = ctx.scene.world.objects.size();
-    }
+    // Sync logic moved to SceneUI::draw() for centralized consistency
 
     // ─────────────────────────────────────────────────────────────────────────
     // VDB VOLUMES
@@ -1090,6 +1090,22 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
     }
 
     ImGui::EndChild(); // End HierarchyTree
+    
+    // --- VERTICAL RESIZE SPLITTER ---
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.05f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.1f, 0.9f, 0.8f, 0.4f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.9f, 0.8f, 0.6f));
+    
+    ImGui::Button("##H_Splitter", ImVec2(-1, 5)); // Thin horizontal bar
+    if (ImGui::IsItemActive()) {
+        hierarchy_panel_height += ImGui::GetIO().MouseDelta.y;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    ImGui::Spacing();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Selection Properties (Compact - Camera/Light only)
@@ -1749,7 +1765,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                 // Mouse Sensitivity
                 ImGui::Spacing();
-                if (SceneUI::DrawSmartFloat("msens", "Mouse Sens", &ctx.mouse_sensitivity, 0.01f, 5.0f, "%.3f", false, nullptr, 12)) {
+                if (SceneUI::DrawSmartFloat("msens", "Mouse Sens", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.3f", false, nullptr, 12)) {
                     // Value updated directly via reference
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Camera rotation/panning speed");

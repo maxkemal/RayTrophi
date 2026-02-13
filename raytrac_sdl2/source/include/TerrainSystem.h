@@ -3,7 +3,7 @@
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
 * File:          TerrainSystem.h
-* Author:        Kemal DemirtaÅŸ
+* Author:        Kemal Demirtas
 * Date:          June 2024
 * License:       [License Information - e.g. Proprietary / MIT / etc.]
 * =========================================================================
@@ -19,6 +19,10 @@
 #include "Triangle.h"
 #include "FoliageFwd.h"
 #include "WaterSystem.h" // For WaterWaveParams
+
+namespace TerrainNodesV2 {
+    class TerrainNodeGraphV2;
+}
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // TERRAIN DATA STRUCTURES
@@ -117,6 +121,9 @@ struct TerrainObject {
     // Hardness map for erosion: 0.0 = soft (sand/soil), 1.0 = hard (bedrock)
     std::vector<float> hardnessMap;  // Same resolution as heightmap
 
+    // Flow accumulation map: Higher values indicate streams/rivers
+    std::vector<float> flowMap;      // Same resolution as heightmap
+
     // Non-destructive editing support (Node Graph)
     std::vector<float> original_heightmap_data; // Initial state before node graph evaluation
     
@@ -142,6 +149,10 @@ struct TerrainObject {
     float am_height_min = 5.0f;
     float am_height_max = 20.0f;
     float am_slope = 5.0f;
+    float am_flow_threshold = 5.0f; // Threshold for flow accumulation masking
+
+    // Node Graph for non-destructive editing
+    std::shared_ptr<TerrainNodesV2::TerrainNodeGraphV2> nodeGraph;
 
     // Helper to mark a heightmap cell as dirty
     void markCellDirty(int gridX, int gridZ) {

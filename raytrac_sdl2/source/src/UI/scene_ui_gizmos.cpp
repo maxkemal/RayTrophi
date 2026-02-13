@@ -37,7 +37,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
 
-    // Helper lambda to draw a bounding box
+    // Helper lambda to draw a bounding box with granular occlusion
     auto DrawBoundingBox = [&](Vec3 bb_min, Vec3 bb_max, ImU32 color, float thickness) {
         Vec3 corners[8] = {
             Vec3(bb_min.x, bb_min.y, bb_min.z),
@@ -50,50 +50,98 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             Vec3(bb_min.x, bb_max.y, bb_max.z),
         };
 
-        ImVec2 screen_pts[8];
-        bool all_visible = true;
-
-        for (int i = 0; i < 8; i++) {
-            Vec3 to_corner = corners[i] - cam.lookfrom;
-            float depth = to_corner.dot(cam_forward);
-
-            if (depth <= 0.01f) {
-                all_visible = false;
-                break;
+        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+        
+        // Helper to draw a line with subdivision and occlusion check
+        auto DrawSegmentedLine = [&](const Vec3& p_start, const Vec3& p_end) {
+            const int segments = 8; // Subdivision level for accurate occlusion
+            Vec3 prev_p = p_start;
+            ImVec2 prev_scr;
+            
+            // Project start point
+            bool prev_vis = false;
+            {
+                Vec3 to_pt = prev_p - cam.lookfrom;
+                float depth = to_pt.dot(cam_forward);
+                if (depth > 0.01f) {
+                    float local_x = to_pt.dot(cam_right);
+                    float local_y = to_pt.dot(cam_up);
+                    float half_h = depth * tan_half_fov;
+                    float half_w = half_h * aspect_ratio;
+                    prev_scr.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
+                    prev_scr.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
+                    prev_vis = true;
+                }
             }
 
-            float local_x = to_corner.dot(cam_right);
-            float local_y = to_corner.dot(cam_up);
+            for (int i = 1; i <= segments; ++i) {
+                float t = (float)i / (float)segments;
+                Vec3 curr_p = p_start * (1.0f - t) + p_end * t;
+                
+                ImVec2 curr_scr;
+                bool curr_vis = false;
+                
+                // Project current point
+                Vec3 to_pt = curr_p - cam.lookfrom;
+                float depth = to_pt.dot(cam_forward);
+                if (depth > 0.01f) {
+                    float local_x = to_pt.dot(cam_right);
+                    float local_y = to_pt.dot(cam_up);
+                    float half_h = depth * tan_half_fov;
+                    float half_w = half_h * aspect_ratio;
+                    curr_scr.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
+                    curr_scr.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
+                    curr_vis = true;
+                }
 
-            float half_height = depth * tan_half_fov;
-            float half_width = half_height * aspect_ratio;
+                if (prev_vis && curr_vis) {
+                    // Check visibility of the segment midpoint
+                    Vec3 mid_p = (prev_p + curr_p) * 0.5f;
+                    ImU32 segment_color = color;
+                    
+                    extern bool g_bvh_rebuild_pending;
+                    if (ctx.scene.bvh && !g_bvh_rebuild_pending) {
+                        Vec3 to_mid = mid_p - cam.lookfrom;
+                        float dist = to_mid.length();
+                        if (dist > 0.1f) {
+                            Ray r(cam.lookfrom, to_mid / dist);
+                            HitRecord rec;
+                            // Check occlusion: if hit anything closer than the segment
+                            if (ctx.scene.bvh->hit(r, 0.001f, dist - 0.05f, rec, true)) {
+                                // Occluded: Fade out to 20%
+                                int alpha = (color >> 24) & 0xFF;
+                                alpha = alpha / 5;
+                                if (alpha < 30) alpha = 30; // Minimum visibility
+                                segment_color = (color & 0x00FFFFFF) | (alpha << 24);
+                            }
+                        }
+                    }
+                    
+                    draw_list->AddLine(prev_scr, curr_scr, segment_color, thickness);
+                }
 
-            float ndc_x = local_x / half_width;
-            float ndc_y = local_y / half_height;
-
-            screen_pts[i].x = (ndc_x * 0.5f + 0.5f) * screen_w;
-            screen_pts[i].y = (0.5f - ndc_y * 0.5f) * screen_h;
-        }
-
-        if (!all_visible) return;
-
-        ImDrawList* draw_list = ImGui::GetBackgroundDrawList();  // Draw behind UI panels
-
-        draw_list->AddLine(screen_pts[0], screen_pts[1], color, thickness);
-        draw_list->AddLine(screen_pts[1], screen_pts[2], color, thickness);
-        draw_list->AddLine(screen_pts[2], screen_pts[3], color, thickness);
-        draw_list->AddLine(screen_pts[3], screen_pts[0], color, thickness);
-
-        draw_list->AddLine(screen_pts[4], screen_pts[5], color, thickness);
-        draw_list->AddLine(screen_pts[5], screen_pts[6], color, thickness);
-        draw_list->AddLine(screen_pts[6], screen_pts[7], color, thickness);
-        draw_list->AddLine(screen_pts[7], screen_pts[4], color, thickness);
-
-        draw_list->AddLine(screen_pts[0], screen_pts[4], color, thickness);
-        draw_list->AddLine(screen_pts[1], screen_pts[5], color, thickness);
-        draw_list->AddLine(screen_pts[2], screen_pts[6], color, thickness);
-        draw_list->AddLine(screen_pts[3], screen_pts[7], color, thickness);
+                prev_p = curr_p;
+                prev_scr = curr_scr;
+                prev_vis = curr_vis;
+            }
         };
+
+        // Draw 12 edges of the box
+        DrawSegmentedLine(corners[0], corners[1]);
+        DrawSegmentedLine(corners[1], corners[2]);
+        DrawSegmentedLine(corners[2], corners[3]);
+        DrawSegmentedLine(corners[3], corners[0]);
+
+        DrawSegmentedLine(corners[4], corners[5]);
+        DrawSegmentedLine(corners[5], corners[6]);
+        DrawSegmentedLine(corners[6], corners[7]);
+        DrawSegmentedLine(corners[7], corners[4]);
+
+        DrawSegmentedLine(corners[0], corners[4]);
+        DrawSegmentedLine(corners[1], corners[5]);
+        DrawSegmentedLine(corners[2], corners[6]);
+        DrawSegmentedLine(corners[3], corners[7]);
+    };
 
     // ─────────────────────────────────────────────────────────────────────────
     // DRAW VDB GHOST BOUNDS (Always visible)
@@ -427,6 +475,25 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
             : IM_COL32(255, 255, 100, 180);
 
         Vec3 pos = light->position;
+
+        // [FIX] Depth/Occlusion Check for Light Gizmos
+        extern bool g_bvh_rebuild_pending;
+        if (ctx.scene.bvh && !g_bvh_rebuild_pending) {
+            Vec3 to_pos = pos - cam.lookfrom;
+            float dist = to_pos.length();
+             if (dist > 0.1f) {
+                 Ray r(cam.lookfrom, to_pos / dist);
+                 HitRecord rec;
+                 if (ctx.scene.bvh->hit(r, 0.001f, dist - 0.1f, rec, true)) {
+                     // Occluded: Fade out
+                     int alpha = (col >> 24) & 0xFF;
+                     alpha = alpha / 5;
+                     if (alpha < 20) alpha = 20;
+                     col = (col & 0x00FFFFFF) | (alpha << 24);
+                 }
+            }
+        }
+
         ImVec2 center = Project(pos);
         bool visible = IsOnScreen(center);
 
@@ -983,6 +1050,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     static LightState drag_start_light_state;
     static std::shared_ptr<Light> drag_light = nullptr;
     bool is_using = ImGuizmo::IsUsing();
+    is_dragging = is_using; // Sync class member
 
     // IDLE PREVIEW: Track when mouse stops moving during drag
     // NOTE: In TLAS mode, transforms are already updated in real-time via instance matrices.
@@ -1041,23 +1109,11 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     }
 
     if (is_using && !was_using_gizmo) {
-        // Manipulation started
-        if (ImGui::GetIO().KeyShift && sel.hasSelection()) {
+        // ═══════════════════════════════════════════════════════════════════════════
+        // MANIPULATION START
+        // ═══════════════════════════════════════════════════════════════════════════
+        if (io.KeyShift && sel.hasSelection()) {
             triggerDuplicate(ctx);
-            
-            // AFTER DUPLICATION: The selection now contains the NEW objects.
-            // We MUST update the drag state so the remainder of the drag applies to clones
-            if (sel.selected.type == SelectableType::Light && sel.selected.light) {
-                drag_light = sel.selected.light;
-                drag_start_light_state = LightState::capture(*drag_light);
-            }
-            else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-                auto transform = sel.selected.object->getTransformHandle();
-                if (transform) {
-                    drag_start_state.matrix = transform->base;
-                    drag_object_name = sel.selected.object->nodeName;
-                }
-            }
         }
         else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
             // START LIGHT TRANSFORM RECORDING
@@ -1138,6 +1194,16 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     }
 
     if (manipulated) {
+        // Mark objects for lazy CPU sync (re-enable picking accuracy later)
+        if (sel.selected.type == SelectableType::Object && sel.selected.object) {
+            objects_needing_cpu_sync.insert(sel.selected.object->nodeName);
+        }
+        for (const auto& item : sel.multi_selection) {
+            if (item.type == SelectableType::Object && item.object) {
+                objects_needing_cpu_sync.insert(item.object->nodeName);
+            }
+        }
+
         Vec3 newPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
 
         // -------------------------------------------------------------------------
@@ -1724,10 +1790,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     }
                 }
             }
-            if (!using_gpu_tlas) {
-                extern bool g_bvh_rebuild_pending;
-                g_bvh_rebuild_pending = true;
-            }
+            // BVH rebuild needed for both GPU and CPU - for accurate picking!
+            extern bool g_bvh_rebuild_pending;
+            g_bvh_rebuild_pending = true;
         } else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             std::string name = sel.selected.object->nodeName;
             if (name.empty()) name = "Unnamed";
@@ -1744,9 +1809,10 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         pair.second->updateTransformedVertices();
                     }
                 }
-                extern bool g_bvh_rebuild_pending;
-                g_bvh_rebuild_pending = true;
             }
+            // BVH rebuild needed for both GPU and CPU - for accurate picking!
+            extern bool g_bvh_rebuild_pending;
+            g_bvh_rebuild_pending = true;
         }
     }
 
