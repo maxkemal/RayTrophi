@@ -1,13 +1,13 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <CustomBuild Include="E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\cb630a9424c0373073a9f7ab76dd03fb\generate.stamp.rule">
+    <CustomBuild Include="E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\build\CMakeFiles\bb318a798d26f982412b99a4a94668fc\generate.stamp.rule">
       <Filter>CMake Rules</Filter>
     </CustomBuild>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="CMake Rules">
-      <UniqueIdentifier>{A0667A3D-5A81-328F-BD90-546F69C1E457}</UniqueIdentifier>
+      <UniqueIdentifier>{E02C0CC0-1255-3C97-801B-42C880E7202E}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

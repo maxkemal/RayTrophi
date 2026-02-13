@@ -256,6 +256,8 @@
     <ClInclude Include="source\include\VDBVolumeManager.h" />
     <ClInclude Include="source\src\Device\CloudNoise.cuh" />
     <ClInclude Include="source\src\Device\fft_ocean.cuh" />
+    <None Include="source\src\Device\hair_bsdf.cuh" />
+    <None Include="source\src\Device\hair_intersect.cuh" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
@@ -267,6 +269,7 @@
     <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h" />
     <ClInclude Include="source\external\imgui\imgui_internal.h" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
+    <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_water.hpp" />
     <ClInclude Include="source\src\Device\water_shaders.cuh" />
@@ -337,6 +340,10 @@
     <ClCompile Include="source\external\miniz_tdef.c" />
     <ClCompile Include="source\external\miniz_tinfl.c" />
     <ClCompile Include="source\external\miniz_zip.c" />
+    <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
+
+    <ClCompile Include="source\src\Hair\HairStrand.cpp" />
+    <ClCompile Include="source\src\Hair\HairSystem.cpp" />
     <ClCompile Include="source\src\Scene\AABB.cpp" />
     <ClCompile Include="source\src\Animation\AnimationController.cpp" />
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
@@ -431,6 +438,10 @@
   <ItemGroup>
     <CudaCompile Include="source\src\Device\fft_ocean.cu" />
     <CudaCompile Include="source\src\Device\foliage_deform.cu" />
+    <None Include="source\src\Device\hair_kernels.cu">
+      <FileType>Document</FileType>
+    </None>
+
     <CudaCompile Include="source\src\Device\skinning_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_fft_solver.cu" />

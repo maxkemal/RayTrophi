@@ -5,10 +5,6 @@
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
     </Filter>
-    <Filter Include="Ãœst Bilgi DosyalarÄ±">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
-    </Filter>
     <Filter Include="Kaynak Dosyalar\header_file">
       <UniqueIdentifier>{a178f398-6f42-4b10-b004-c04e1c92beb4}</UniqueIdentifier>
     </Filter>
@@ -49,10 +45,17 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Üst Bilgi Dosyaları">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Kaynak Dosyalar\Hair">
+      <UniqueIdentifier>{1b01040e-5f06-425a-8ca5-8ad61b6294d4}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\AABB.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -202,34 +205,34 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\src\Main.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\ui_modern.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\MaterialManager.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Transform.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\World.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_types.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_brdf.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_light_sampling.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_converters.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\unified_cpu_adapter.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\tinyexr.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -277,19 +280,22 @@
       <Filter>Kaynak Dosyalar\Device</Filter>
     </ClInclude>
     <ClInclude Include="source\include\TerrainFFT.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\VDBVolumeManager.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\src\UI\scene_ui_water.hpp">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\UI\scene_ui_river.hpp">
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -320,12 +326,21 @@
       <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
     <None Include="source\src\Device\scatter_volume_step.h">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
+      <Filter>Üst Bilgi Dosyaları</Filter>
     </None>
     <None Include="source\include\gas_kernels.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
     <None Include="source\include\gas_fft_solver.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </None>
+    <None Include="source\src\Device\hair_kernels.cu">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </None>
+    <None Include="source\src\Device\hair_intersect.cuh">
+      <Filter>Kaynak Dosyalar\Device</Filter>
+    </None>
+    <None Include="source\src\Device\hair_bsdf.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
     </None>
   </ItemGroup>
@@ -600,6 +615,15 @@
     </ClCompile>
     <ClCompile Include="source\external\imgui\imgui_widgets.cpp">
       <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairBSDF.cpp">
+      <Filter>Kaynak Dosyalar\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairStrand.cpp">
+      <Filter>Kaynak Dosyalar\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairSystem.cpp">
+      <Filter>Kaynak Dosyalar\Hair</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

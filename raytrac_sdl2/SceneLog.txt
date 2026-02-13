@@ -3,6 +3,7 @@
 [INFO] Device [0]: NVIDIA GeForce RTX 3060 (SM 8.6) - OptiX Capable
 [INFO] Selected: NVIDIA GeForce RTX 3060 (Hardware RT enabled)
 [INFO] --------------------------
+[INFO] [OptiX] JIT Multi-Module Creation took 0,029922 seconds
 [INFO] OptiX is ready!
 [INFO] Loading Default Scene Asset: assets/default.glb
 [INFO] ========================================
@@ -61,506 +62,90 @@
 [INFO] Scene initialization flag set to true.
 [INFO] Using camera from GLB file (total: 1)
 [INFO] Found Directional Light in default asset. Syncing Nishita Sun...
+[INFO] Selection cache fully cleared and invalidated
 [INFO] AtmosphereLUT: GPU Resources (2D & 3D) allocated successfully.
-[INFO] [OptiX TLAS] Building scene (Native Instancing Enabled)...
-[INFO] [OptiX] Geometry Source - Static Triangles: 2, Instances: 0
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2, Hair Strands: 0
 [INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptiX TLAS] Build complete. Instances: 1
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
+[INFO] [OptixAccelManager] Cleaned up and reset caches
 [INFO] History: Cleared
+[INFO] Selection cache fully cleared and invalidated
 [INFO] [InstanceManager] Cleared all instance groups
 [INFO] VDBVolumeManager: All volumes cleared and ID counter reset.
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2, Hair Strands: 0
+[ERROR] No material available!
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
 [INFO] New project created. Subsystems and animation caches cleared.
-[INFO] [ProjectManager] Loaded 1260070 triangles, 20 transforms from binary.
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266394528_1 (18107462 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266395632_5 (18108735 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266397840_1 (14695160 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266404464_5 (14695951 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266398944_1 (14609222 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266408880_5 (14610276 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266401152_1 (15702274 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266402256_5 (15702061 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266405568_1 (17746968 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266406672_5 (17744390 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266407776_1 (20807631 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266393424_5 (20809155 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266411088_1 (16822524 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266409984_5 (16821120 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266416608_1 (6042349 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266416608_5 (6042349 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266417712_1 (15060660 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266412192_5 (15059549 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266413296_1 (1777675 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266418816_5 (1778250 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266419920_1 (4168408 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266419920_5 (4168408 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266421024_1 (6392116 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266422128_5 (6392288 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266423232_1 (4051581 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303266424336_5 (4051870 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218407504_1 (3717293 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218407504_5 (3717293 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218426272_1 (1444782 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218425168_5 (1511977 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218419648_1 (21894881 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218410816_5 (21897795 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218427376_1 (2824883 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218427376_5 (2824883 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218420752_1 (6768837 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218421856_1 (6676096 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: embedded_home_style_2303218415232_5 (6677350 bytes)
-[INFO] [ProjectManager] Cached 37 embedded textures in memory (no temp files).
-[INFO] [MaterialManager] Deserialized 20 materials (format v1)
-[INFO] [MaterialManager] Synced 20 GPU materials
-[INFO] [ProjectManager] Loaded 0 lights.
-[INFO] [ProjectManager] Loaded 2 cameras.
+[INFO] [ProjectManager] Loaded 4 triangles, 2 transforms from binary.
+[INFO] [ProjectManager] Cached 1 embedded textures in memory (no temp files).
+[INFO] [MaterialManager] Deserialized 2 materials (format v1)
+[INFO] [MaterialManager] Synced 2 GPU materials
+[INFO] [ProjectManager] Loaded 1 lights.
+[INFO] [ProjectManager] Loaded 1 cameras.
 [INFO] [ProjectManager] Loaded render settings.
 [INFO] World settings loaded from project.
 [INFO] [WaterManager] Loaded 0 water surfaces (using existing geometry).
 [INFO] [ProjectManager] Loading terrain system from: E:\rt_k
-[INFO] [TerrainManager] Deserialized 0 terrains (format v1)
+[INFO] [TerrainManager] Deserialized 0 terrains (format v2)
 [INFO] [ProjectManager] Loaded 0 rivers
 [INFO] [InstanceManager] Cleared all instance groups
 [INFO] [ProjectManager] Loaded foliage system.
-[INFO] [ProjectManager] Loaded VDB volumes.
-[INFO] [ProjectManager] Loaded timeline with 0 tracks.
-[INFO] [ProjectManager] Loaded bone data: 0 bones.
-[INFO] [ProjectManager] Loaded 0 animation clips.
-[INFO] [OptiX TLAS] Building scene (Native Instancing Enabled)...
-[INFO] [OptiX] Geometry Source - Static Triangles: 1260070, Instances: 0
-[INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptiX TLAS] Build complete. Instances: 20
-[INFO] [OptiX] Geometry rebuilt (Snapshot) - 1260070 triangles
-[INFO] Project loaded: E:\rt_k\style.rtp (GPU rebuild pending on main thread)
-[INFO] [Load] Auxiliary settings loaded.
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] History: Cleared
-[INFO] [InstanceManager] Cleared all instance groups
-[INFO] VDBVolumeManager: All volumes cleared and ID counter reset.
-[INFO] New project created. Subsystems and animation caches cleared.
-[INFO] [ProjectManager] Loaded 277028 triangles, 2 transforms from binary.
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_blak_bark_Bauhinia_black_bark_01_Color.png (3327786 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_blak_bark_Bauhinia_black_bark_01_Normal.png (2916102 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_01_Bauhinia_black_pet_1_Color.png (198672 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_01_Bauhinia_black_pet_01_Normal.png (246055 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_01_Bauhinia_black_pet_01_Opacity.png (6803 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_02_Bauhinia_black_pet_2_Color.png (198767 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_02_Bauhinia_black_pet_02_Normal.png (240276 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_02_Bauhinia_black_pet_02_Opacity.png (6789 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_petal_03_Bauhinia_black_pet_03_Normal.png (231194 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_recept_01_Bauhinia_black_recept_01_Color.png (25777 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_recept_01_head_Bauhinia_black_recept_01_head_Color.png (258 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_flw_stalk_02_Bauhinia_black_flw_stalk_02_Color.png (258 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_flw_stalk_01_Bauhinia_black_flw_stalk_01_Color.png (11446 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_blak_twig_Bauhinia_black_twig_Color.png (2151441 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_recept_02_Bauhinia_black_recept_02_Color.png (25737 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_recept_03_Bauhinia_black_recept_03_Color.png (28845 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_recept_03_Bauhinia_black_recept_03_Normal.png (20232 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_organs_Bauhinia_black_organs_01_Color.png (175031 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_organs_Bauhinia_black_organs_01_Normal.png (267581 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_organs_Bauhinia_black_organs_01_Opacity.png (14370 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_leaf_atlas_04_Bauhinia_leaf_atlas_04_Color.png (1033179 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_leaf_atlas_04_Bauhinia_leaf_atlas_01_front_Normal.png (1215649 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_leaf_atlas_04_Bauhinia_leaf_atlas_01_Opacity.png (47580 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_leaf_atlas_03_Bauhinia_leaf_atlas_03_Color.png (1311963 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_leaf_atlas_02_Bauhinia_leaf_atlas_02_Color.png (1581888 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Bauhinia_blakeana_HD_V2_Bauhinia_leaf_atlas_01_Bauhinia_leaf_atlas_01_Color.png (1745006 bytes)
-[INFO] [ProjectManager] Cached 26 embedded textures in memory (no temp files).
-[INFO] [MaterialManager] Deserialized 18 materials (format v1)
-[INFO] [MaterialManager] Synced 18 GPU materials
-[INFO] [ProjectManager] Loaded 1 lights.
-[INFO] [ProjectManager] Loaded 1 cameras.
-[INFO] [ProjectManager] Loaded render settings.
-[INFO] [WaterManager] Loaded 0 water surfaces (using existing geometry).
-[INFO] [ProjectManager] Loading terrain system from: E:\rt_k
-[INFO] [TerrainManager] Deserialized 0 terrains (format v1)
-[INFO] [ProjectManager] Loaded 0 rivers
-[INFO] [ProjectManager] Loaded timeline with 0 tracks.
-[INFO] [ProjectManager] Loaded bone data: 2610 bones.
-[INFO] [ProjectManager] Loaded 0 animation clips.
-[INFO] [OptiX TLAS] Building scene (Native Instancing Enabled)...
-[INFO] [OptiX] Geometry Source - Static Triangles: 277028, Instances: 0
-[INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptiX TLAS] Build complete. Instances: 18
-[INFO] [OptiX] Geometry rebuilt (Snapshot) - 277028 triangles
-[INFO] Project loaded: E:\rt_k\cam_dof.rtp (GPU rebuild pending on main thread)
-[INFO] [Load] Auxiliary settings loaded.
-[INFO] OIDN buffers recreated for new resolution: 1280x720
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] [InstanceManager] Cleared all instance groups
-[INFO] VDBVolumeManager: All volumes cleared and ID counter reset.
-[INFO] New project created. Subsystems and animation caches cleared.
-[INFO] History: Cleared
-[INFO] Loading Default Scene Asset: assets/default.glb
-[INFO] ========================================
-[INFO] SCENE CLEANUP: Starting comprehensive cleanup...
-[INFO] ========================================
-[INFO] [SCENE CLEANUP] Scene data structures cleaned.
-[INFO] [MATERIAL CLEANUP] MaterialManager cleared: 0 materials removed.
-[INFO] [GPU CLEANUP] Destroyed 0 texture objects and 0 CUDA arrays.
-[INFO] [GPU CLEANUP] OptiX texture objects destroyed.
-[INFO] ========================================
-[INFO] SCENE CLEANUP: Completed successfully!
-[INFO] ========================================
-[INFO] Starting scene creation from: assets/default.glb
-[INFO] Base directory set to: assets/
-[INFO] Loading model geometry and animations...
-[INFO] Starting model loading: assets/default.glb (Prefix: assets_default)
-[INFO] Importing file with Assimp...
-[INFO] Assimp file loaded successfully. Processing scene data...
-[INFO] Clearing existing cameras, lights, and transform cache...
-[INFO] Building node map from scene hierarchy...
-[INFO] Node map built with 4 nodes.
-[INFO] Processing cameras...
-[INFO] Cameras processed: 1 camera(s) found.
-[INFO] Processing lights...
-[INFO] Lights processed: 1 light(s) found.
-[INFO] Building Bone Data...
-[INFO] Processing nodes to extract triangles...
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: assets_default_material.002 -> ID=0 | NO TEXTURE
-[INFO] Triangle extraction completed: 2 triangles processed.
-[INFO] Processing animations...
-[INFO] No animations found in file: assets/default.glb
-[INFO] Model loading completed. Summary - Triangles: 2, Animations: 0, Cameras: 1, Lights: 1
-[INFO] Successfully loaded triangles: 2
-[INFO] Loaded animations: 0
-[INFO] Total Bones (Merged): 0
-[INFO] Adding triangles to scene world...
-[INFO] Added 2 triangles to scene member list.
-[INFO] Loading camera and lighting data...
-[INFO] Loaded 1 camera(s). Active: Camera #0
-[INFO] Loaded lights: 1
-[INFO] World Sun synced with imported Directional Light (Forced Intensity: 10.0).
-[INFO] Building BVH structure...
-[INFO] [Embree] BVH structure built successfully.
-[INFO] OptiX GPU detected. Creating OptiX geometry data...
-[INFO] Converting 2 triangles to OptiX format.
-[INFO] Material indices validated.
-[INFO]  OptiX buildFromData is starting...
-[INFO] OptiX BVH and acceleration structures built.
-[INFO] Setting up OptiX camera parameters...
-[INFO] OptiX camera configured successfully.
-[INFO] Configuring 1 lights for OptiX...
-[INFO] OptiX light parameters set successfully.
-[INFO] World environment set for OptiX rendering.
-[INFO] Scene creation completed successfully.
-[INFO] Scene info - Triangles: 2, Lights: 1, Animations: 0
-[INFO] Scene initialization flag set to true.
-[INFO] Using camera from GLB file (total: 1)
-[INFO] Found Directional Light in default asset. Syncing Nishita Sun...
-[INFO] [OptiX TLAS] Building scene (Native Instancing Enabled)...
-[INFO] [OptiX] Geometry Source - Static Triangles: 2, Instances: 0
-[INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptiX TLAS] Build complete. Instances: 1
-[INFO] New project created.
-[INFO] Appending model to existing scene (no cleanup)
-[INFO] Starting scene creation from: E:\data\home\old_room.glb
-[INFO] Base directory set to: E:\data\home/
-[INFO] Loading model geometry and animations...
-[INFO] Starting model loading: E:\data\home\old_room.glb (Prefix: 1)
-[INFO] Importing file with Assimp...
-[INFO] Assimp file loaded successfully. Processing scene data...
-[INFO] Clearing existing cameras, lights, and transform cache...
-[INFO] Building node map from scene hierarchy...
-[INFO] Node map built with 45 nodes.
-[INFO] Processing cameras...
-[INFO] Cameras processed: 1 camera(s) found.
-[INFO] Processing lights...
-[INFO] Lights processed: 1 light(s) found.
-[INFO] Building Bone Data...
-[INFO] Processing nodes to extract triangles...
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 95ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 75ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 98ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 96ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_worn_wooden_whnfbg3 -> ID=1 | HAS ALBEDO TEX: embedded_1_2778543172432_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 353ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 97ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 302ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 289ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_historic_palace_interior_wall_wood_xgwidb2dw -> ID=2 | HAS ALBEDO TEX: embedded_1_2778543180160_1
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 76ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 116ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 121ms
-[INFO] COMPRESSED decode start: 2048x2048 (4194304 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2048x2048 | opaque | color | Single-threaded safe load | 114ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_decorative_picture_ukkocfnbw -> ID=3 | HAS ALBEDO TEX: embedded_1_2778543168016_1
-[INFO] COMPRESSED decode start: 909x598 (543582 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 909x598 | opaque | color | Single-threaded safe load | 9ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_material.001 -> ID=4 | HAS ALBEDO TEX: embedded_1_2778543185680_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 209ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 235ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 228ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 235ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_camera_01_strap -> ID=5 | HAS ALBEDO TEX: embedded_1_2778543182368_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 170ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 219ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 206ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 190ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_camera_01_lens_body -> ID=6 | HAS ALBEDO TEX: embedded_1_2778543184576_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_glass.005 -> ID=7 | NO TEXTURE
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 200ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 218ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 237ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 235ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_camera_01_body -> ID=8 | HAS ALBEDO TEX: embedded_1_2778543188992_1
-[INFO] COMPRESSED decode start: 2400x2400 (5760000 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2400x2400 | opaque | color | Single-threaded safe load | 100ms
-[INFO] COMPRESSED decode start: 2400x2400 (5760000 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2400x2400 | opaque | color | Single-threaded safe load | 88ms
-[INFO] COMPRESSED decode start: 2400x2400 (5760000 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2400x2400 | opaque | color | Single-threaded safe load | 130ms
-[INFO] COMPRESSED decode start: 2400x2400 (5760000 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 2400x2400 | opaque | color | Single-threaded safe load | 138ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wood.001 -> ID=9 | HAS ALBEDO TEX: embedded_1_2778828058864_1
-[INFO] COMPRESSED decode start: 8192x8192 (67108864 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 8192x8192 | opaque | color | Single-threaded safe load | 1215ms
-[INFO] COMPRESSED decode start: 8192x8192 (67108864 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 8192x8192 | opaque | grayscale | Single-threaded safe load | 1215ms
-[INFO] COMPRESSED decode start: 8192x8192 (67108864 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 8192x8192 | opaque | color | Single-threaded safe load | 2014ms
-[INFO] COMPRESSED decode start: 8192x8192 (67108864 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 8192x8192 | opaque | color | Single-threaded safe load | 1719ms
-[INFO] COMPRESSED decode start: 8192x8192 (67108864 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 8192x8192 | opaque | color | Single-threaded safe load | 1747ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_plush_carpet_umonbbqdy -> ID=10 | HAS ALBEDO TEX: embedded_1_2778828063280_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_006_glass -> ID=11 | NO TEXTURE
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_glass.003 -> ID=12 | NO TEXTURE
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 211ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 229ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 130ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 146ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_potted_plant_01_pot -> ID=13 | HAS ALBEDO TEX: embedded_1_2777818372736_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 426ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 228ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 124ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 118ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_potted_plant_01_leaves -> ID=14 | HAS ALBEDO TEX: embedded_1_2777818368320_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 250ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 265ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 282ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 296ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_brass_vase_02 -> ID=15 | HAS ALBEDO TEX: embedded_1_2777818379360_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 193ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 222ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 279ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 302ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_glass_orange -> ID=16 | HAS ALBEDO TEX: embedded_1_2777818377152_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 279ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_seal_cork -> ID=17 | HAS ALBEDO TEX: embedded_1_2777818382672_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_wine_red -> ID=18 | NO TEXTURE
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 243ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 451ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 218ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 217ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_ftero_vinea_02 -> ID=19 | HAS ALBEDO TEX: embedded_1_2777818389296_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_glass_yellow -> ID=20 | HAS ALBEDO TEX: embedded_1_2777818377152_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_wine_clear -> ID=21 | NO TEXTURE
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | grayscale | Single-threaded safe load | 247ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 192ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 201ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_clearwater -> ID=22 | HAS ALBEDO TEX: embedded_1_2777818384880_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_glass_clear -> ID=23 | HAS ALBEDO TEX: embedded_1_2777818377152_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_wine_light_red -> ID=24 | NO TEXTURE
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 215ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 195ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 195ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_intertwine -> ID=25 | HAS ALBEDO TEX: embedded_1_2777818387088_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_glass_green -> ID=26 | HAS ALBEDO TEX: embedded_1_2777818377152_1
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 264ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 248ms
-[INFO] COMPRESSED decode start: 4096x4096 (16777216 pixels)
-[INFO] [SUCCESS] COMPRESSED texture decoded -> 4096x4096 | opaque | color | Single-threaded safe load | 221ms
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_wine_bottles_01_ftero_vinea_01 -> ID=27 | HAS ALBEDO TEX: embedded_1_2777818374944_1
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_glass.004 -> ID=28 | NO TEXTURE
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_glass.001 -> ID=29 | NO TEXTURE
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_material.168 -> ID=30 | NO TEXTURE
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_material.167 -> ID=31 | NO TEXTURE
-[INFO] [MaterialManager] getOrCreateMaterialID NEW: 1_material.162 -> ID=32 | NO TEXTURE
-[INFO] Triangle extraction completed: 442539 triangles processed.
-[INFO] Processing animations...
-[INFO] No animations found in file: E:\data\home\old_room.glb
-[INFO] Model loading completed. Summary - Triangles: 442539, Animations: 0, Cameras: 1, Lights: 1
-[INFO] Successfully loaded triangles: 442539
-[INFO] Loaded animations: 0
-[INFO] Total Bones (Merged): 0
-[INFO] Adding triangles to scene world...
-[INFO] Added 442539 triangles to scene member list.
-[INFO] Loading camera and lighting data...
-[INFO] Append mode: Added camera (total: 2)
-[INFO] Append mode: Added 1 new lights (total: 2)
-[INFO] Building BVH structure...
-[INFO] [Embree] BVH structure built successfully.
-[INFO] OptiX disabled or not initialized. Using CPU-only path.
-[INFO] Scene creation completed successfully.
-[INFO] Scene info - Triangles: 442539, Lights: 2, Animations: 0
-[INFO] Scene initialization flag set to true.
-[INFO] Auto-activated imported camera: Camera #1
-[INFO] Model imported: old_room (ID: 1, 442539 objects)
-[INFO] [OptiX TLAS] Building scene (Native Instancing Enabled)...
-[INFO] [OptiX] Geometry Source - Static Triangles: 442541, Instances: 0
-[INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptiX TLAS] Build complete. Instances: 57
-[INFO] [OptiX] Geometry rebuilt (Snapshot) - 442541 triangles
-[INFO] GPU rebuild complete on main thread.
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] History: Cleared
-[INFO] [InstanceManager] Cleared all instance groups
-[INFO] VDBVolumeManager: All volumes cleared and ID counter reset.
-[INFO] New project created. Subsystems and animation caches cleared.
-[INFO] [ProjectManager] Loaded 168381 triangles, 2 transforms from binary.
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_trunk_Pinus_bark_16_Color.png (12975061 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_trunk_Pinus_bark_16_Normal.png (14425212 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_br_cut_Branch_cut_09_bark_16_Color.png (8330899 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_br_cut_Branch_cut_09_bark_16_Normal.png (12404891 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_br_01_Pinus_bark_16_branch_01_Color.png (2921681 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_br_01_Pinus_bark_16_branch_01_Normal.png (3611610 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_twig_Pinus_twig_01c_Color.png (793390 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_twig_Pinus_twig_01_Normal.png (881655 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_dead_br_Pinus_bark_16_dead_branch_01_Color.png (1388371 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pinus_pond_dead_br_Pinus_bark_16_dead_branch_01_Normal.png (1741234 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_con_scl_4_Pinus_cone_scale_01d_body_Color.png (509049 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_con_scl_4_Pinus_cone_scale_01_body_Normal.png (631004 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_con_scl_cp_4_Pinus_cone_scale_01d_cap_Color.png (634195 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_con_scl_cp_4_Pinus_cone_scale_01_cap_Normal.png (413107 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_con_scl_tp_4_Pinus_cone_scale_01d_Color.png (25592 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_cone_rost_4_Pinus_cone_rostrum_01d_Color.png (306426 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_cone_rost_4_Pinus_cone_rostrum_Normal.png (321973 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_need_1_Long_needle_3x_01a2b_Color.png (6640504 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_need_1_Long_needle_3x_01_Normal.png (10171408 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_need_1_Long_needle_3x_01_Opacity.png (205652 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_ponderosa_lone_LD_Pin_pond_need_2_Long_needle_3x_01b_Color.png (6353229 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\bridgeKlasoru\Downloaded\surface\ground_forest_pftlE0\pftlE_4K_Albedo.jpg (39386788 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\bridgeKlasoru\Downloaded\surface\ground_forest_pftlE0\pftlE_4K_Normal.jpg (60558133 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\bridgeKlasoru\Downloaded\surface\rock_rock_xicmeh0r\xicmeh0r_2K_Albedo.jpg (15952768 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\bridgeKlasoru\Downloaded\surface\rock_rock_xicmeh0r\xicmeh0r_2K_Normal.jpg (16167679 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pinus_pond_br_01_Pinus_bark_16_branch_01_Color.png (2921681 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pinus_pond_br_01_Pinus_bark_16_branch_01_Normal.png (3611610 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pinus_pond_twig_Pinus_twig_01c_Color.png (793390 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pinus_pond_twig_Pinus_twig_01_Normal.png (881655 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pinus_pond_br_cut_Branch_cut_09_bark_16_LD_Color.png (2258477 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pinus_pond_br_cut_Branch_cut_09_bark_16_n_LD_Normal.png (3277548 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pin_pond_need_1_Long_needle_3x_01a2b_Color.png (6640504 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pin_pond_need_1_Long_needle_3x_01_Normal.png (10171408 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pin_pond_need_1_Long_needle_3x_01_Opacity.png (205652 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Pinus_ponderosa_juvenile_LD_Pin_pond_need_2_Long_needle_3x_01b_Color.png (6353229 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_trunk_Pinus_bark_16b_Color.png (12984429 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_trunk_Pinus_bark_16_Normal.png (14586288 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_br_cut_Branch_cut_09_bark_16_Color.png (8330899 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_br_cut_Pinus_ponderosa_branch_cut_01_Normal.png (10731970 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_br_01_Pinus_bark_16b_branch_01_Color.png (2936049 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_br_01_Pinus_bark_16_branch_01_Normal.png (3611610 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_twig_Pinus_twig_01_for_bark_16b_Color.png (796557 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_twig_Pinus_twig_01_Normal.png (881655 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_dead_br_Pinus_bark_16_dead_branch_01_Color.png (1388371 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_dead_br_Pinus_bark_16_dead_branch_01_Normal.png (1741234 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_peeling_br_1_Pinus_bark_16b_peeling_branch_01_Color.png (2879578 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_peeling_br_1_Pinus_bark_16_peeling_branch_01_Normal.png (3513157 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_peeling_br_2_Pinus_bark_16b_peeling_branch_02_Color.png (2804720 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_peeling_br_2_Pinus_bark_16_peeling_branch_02_Normal.png (3225550 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_need_1_Long_needle_3x_01a4e_Color.png (6217261 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_need_1_Long_needle_3x_01_Normal.png (10171408 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_need_1_Long_needle_3x_01_Opacity.png (205652 bytes)
-[INFO] [EMBED CACHE] Stored texture in memory: E:\3d model_arsiv\plant_factore\Maps\Pinus_jeffreyi_forest_LD_Pin_jef_need_2_Long_needle_3x_01b_Color.png (6353229 bytes)
-[INFO] [ProjectManager] Cached 53 embedded textures in memory (no temp files).
-[INFO] [MaterialManager] Deserialized 45 materials (format v1)
-[INFO] [MaterialManager] Synced 45 GPU materials
-[INFO] [ProjectManager] Loaded 1 lights.
-[INFO] [ProjectManager] Loaded 1 cameras.
-[INFO] [ProjectManager] Loaded render settings.
-[INFO] [EXR LOAD] Loaded EXR texture: E:\hdr\hilly_terrain_01_4k.exr | 4096x2048
-[INFO] HDRI loaded: E:\hdr\hilly_terrain_01_4k.exr | is_hdr=TRUE (float)
-[INFO] HDRI uploaded to GPU: 4096x2048
-[INFO] World settings loaded from project.
-[INFO] [WaterManager] Loaded 0 water surfaces (using existing geometry).
-[INFO] [ProjectManager] Loading terrain system from: E:\rt_k
-[INFO] Loaded heightmap binary: E:\rt_k/heightmap_1.raw (1024x1024)
-[WARNING] [FILE CACHE MISS] 'SplatMap_Terrain_1' - will load from disk
-[ERROR] [FILE LOAD ERROR] Failed to load: SplatMap_Terrain_1
-Error: Couldn't open SplatMap_Terrain_1
-[INFO] [TerrainManager] Loaded splatmap: 1024x1024 for heightmap: 1024x1024
-[INFO] [TerrainManager] Deserialized 1 terrains (format v1)
-[INFO] [ProjectManager] Loaded 0 rivers
-[INFO] [InstanceManager] Cleared all instance groups
-[INFO] [InstanceManager] Built Centered BVH (Baked Transform) for restored source: 2_Pinus_ponderosa_juvenile_LD
-[INFO] [InstanceManager] Built Centered BVH (Baked Transform) for restored source: 3_Pinus_jeffreyi_forest_LD
-[INFO] [InstanceManager] Rebuilt 2341439 scene objects from foliage data.
-[INFO] [ProjectManager] Loaded foliage system.
-[INFO] VDBVolumeManager: OpenVDB initialized successfully
-[INFO] VDB loaded successfully: E:\vdb_collections\Cumulonimbus_Field_4\f192\Cumulonimbus_Field_4.f192.eighth.vdb (ID: 0)
-[INFO] [VDB] Auto-scaled massive bounds (71880,000000m) to 0,000100
-[INFO] VDBVolume: Loaded E:\vdb_collections\Cumulonimbus_Field_4\f192\Cumulonimbus_Field_4.f192.eighth.vdb (ID: 0)
-[INFO] VDB uploaded to GPU: Cumulonimbus_Field_4.f192.eighth (21 MB)
 [INFO] [ProjectManager] Loaded VDB volumes.
 [INFO] [ProjectManager] Loaded Gas volumes.
 [INFO] [ProjectManager] Loaded Force Fields.
-[INFO] [ProjectManager] Loaded timeline with 1 tracks.
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [ProjectManager] Loaded hair system with 1 grooms.
+[INFO] [ProjectManager] Loaded timeline with 0 tracks.
 [INFO] [ProjectManager] Loaded 0 animation graphs.
 [INFO] [ProjectManager] Loaded bone data: 0 bones.
-[INFO] [ProjectManager] Loaded 0 model contexts.
+[INFO] [ProjectManager] Loaded 1 model contexts.
 [INFO] [ProjectManager] Loaded 0 animation clips.
-[INFO] [OptiX TLAS] Building scene (Native Instancing Enabled)...
-[INFO] [OptiX] Geometry Source - Static Triangles: 2261439, Instances: 80000
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 4, Hair Strands: 214775
 [INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptiX TLAS] Build complete. Instances: 559479
-[INFO] [OptiX] Geometry rebuilt (Snapshot) - 2261439 triangles
-[INFO] Project loaded: E:\rt_k\god_rays.rtp (GPU rebuild pending on main thread)
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] Project loaded: E:\rt_k\hair_test.rtp (GPU rebuild pending on main thread)
 [INFO] [Load] Auxiliary settings loaded.
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
-[INFO] [CPU Sync] Updated vertices and performed SYNCHRONOUS BVH rebuild
+[INFO] Selection cache fully cleared and invalidated
+[INFO] Selection cache fully cleared and invalidated
+[INFO] Project visualization ready.
+[INFO] Scene changed (Count: 2 -> 4). Invalidating cache.
+[INFO] Rebuilding selection cache for 4 objects...
+[INFO] Selected via CPU Viewport: Plane_1
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[WARNING] [FILE CACHE MISS] 'E:\data\home\texure\1-31.png' - will load from disk
+[INFO] [FILE DECODE] Starting decode for: E:\data\home\texure\1-31.png | Resolution: 845x463
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 4, Hair Strands: 214775
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
+[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=1620000 Segs=1215000 PosPtr=68767711232 WidthPtr=68801265664
+[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
