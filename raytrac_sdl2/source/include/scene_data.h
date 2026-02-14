@@ -323,6 +323,10 @@ struct SceneData {
         camera = nullptr;
         active_camera_index = 0;
         bvh = nullptr;
+        
+        // Reset Post-Processing to defaults
+        color_processor = ColorProcessor();
+        
         initialized = false;
     }
 };

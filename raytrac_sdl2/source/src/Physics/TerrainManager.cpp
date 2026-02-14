@@ -1265,12 +1265,6 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
     float hmCellSizeX = scale / (float)(std::max(1, terrain->heightmap.width - 1));
     float hmCellSizeZ = scale / (float)(std::max(1, terrain->heightmap.height - 1));
 
-    // Get world position Y for global height check
-    float worldPosY = 0.0f;
-    if (terrain->transform) {
-        worldPosY = terrain->transform->position.y;
-    }
-    
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
             // Sample height and slope at this UV
@@ -1286,10 +1280,9 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
             
             hx = std::clamp(hx, 0, terrain->heightmap.width - 1);
             hy = std::clamp(hy, 0, terrain->heightmap.height - 1);
-            
+
             // getHeight already returns height * scale_y
             float local_height = terrain->heightmap.getHeight(hx, hy);
-            float global_height = local_height + worldPosY;
             
             // Calculate Slope
             // Neighbors in Heightmap Grid
@@ -1319,7 +1312,8 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
             // Layer 3 (A): Dirt (Transition/Noise)
             
             float w_rock = smoothstep(0.2f, 0.8f, normalizedSlope); // Adjusted thresholds for tangent slope
-            float w_snow = smoothstep(heightMin, heightMax, global_height);
+            // Fix: Use local_height so mask moves with terrain
+            float w_snow = smoothstep(heightMin, heightMax, local_height); 
             float w_rest = 1.0f - w_rock; // What remains for flat
             
             // Base layer gets the rest, masked by snow

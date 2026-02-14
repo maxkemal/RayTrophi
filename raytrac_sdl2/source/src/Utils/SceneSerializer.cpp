@@ -166,7 +166,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     out << "    \"max_bounces\": " << settings.max_bounces << ",\n";
     out << "    \"use_adaptive\": " << (settings.use_adaptive_sampling ? "true" : "false") << ",\n";
     out << "    \"use_denoiser\": " << (settings.use_denoiser ? "true" : "false") << ",\n";
-    out << "    \"use_optix\": " << (settings.use_optix ? "true" : "false") << "\n";
+    out << "    \"use_optix\": " << (settings.use_optix ? "true" : "false") << ",\n";
+    out << "    \"persistent_tonemap\": " << (settings.persistent_tonemap ? "true" : "false") << "\n"; 
     out << "  },\n";
 
     // Terrain System
@@ -349,6 +350,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.use_adaptive_sampling = s.value("use_adaptive", true);
         settings.use_denoiser = s.value("use_denoiser", false);
         settings.use_optix = s.value("use_optix", true);
+        settings.persistent_tonemap = s.value("persistent_tonemap", false);
     }
 
     // 6. PostFX (Color Processing)

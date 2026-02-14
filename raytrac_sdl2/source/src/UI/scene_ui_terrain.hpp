@@ -896,11 +896,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             float h_interp = (h00 * (1.0f - fx) + h10 * fx) * (1.0f - fz) + 
                                              (h01 * (1.0f - fx) + h11 * fx) * fz;
                                              
-                            // 3. World Height Check (vs Min/Max)
-                            float worldHeight = h_interp;
-                            if (t->transform) worldHeight += t->transform->position.y;
+                            // 3. Height Check (Local to Terrain)
+                            // Fix: Use local height so scattering works correctly even if terrain is moved
+                            float checkHeight = h_interp; 
                             
-                            if (worldHeight < group.brush_settings.height_min || worldHeight > group.brush_settings.height_max) {
+                            if (checkHeight < group.brush_settings.height_min || checkHeight > group.brush_settings.height_max) {
                                 continue;
                             }
 

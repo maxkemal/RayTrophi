@@ -23,7 +23,7 @@
 ### 🎯 Temel Özellikler
 
 - **Hibrit Rendering**: CPU (Embree/Özel BVH) ve GPU (OptiX) hızlandırması arasında sorunsuz geçiş
-- **Blender Cycles Kalitesi**: Path tracing, adaptive sampling ve progressive rendering
+
 - **Üretime Hazır**: Principled BSDF, gelişmiş materyaller, volumetric, subsurface scattering
 - **Yüksek Performans**: Optimize BVH yapısı (<1s 3.3M üçgen için), %75 bellek tasarruflu üçgen yapısı
 - **Gerçek Zamanlı Önizleme**: ImGui ile modern interaktif UI, animasyon timeline
@@ -31,35 +31,7 @@
 
 ---
 
-## 🆕 Son Güncellemeler (Ocak 2025)
 
-### 📸 Pro Kamera Sistemi & Fiziksel Lens
-
-- ✅ **Gelişmiş Pro Kamera HUD**: Profesyonel bir fotoğrafçılık deneyimi için kamera arayüzü tamamen yenilendi.
-  - **İnteraktif Netleme Halkası (Focus Ring)**: Hassas odak için fare tekerleğini kullanarak manuel odaklama.
-  - **Odak Modu Kontrolü**: Auto Focus (AF) ve Manual Focus (MF) arasında geçiş için özel slider.
-  - **Akıllı Otomatik Odaklama**: Ekranın ortasındaki objelere kilitlenirken yumuşak, sönümlü geçiş efekti.
-  - **Görsel Geri Bildirim**: Odak değişikliklerine tepki veren HUD (Yeşil = Kilitlendi, Beyaz = Arıyor/Manuel).
-
-- ✅ **Fiziksel Lens Distorsiyonu**:
-  - **Brown-Conrady Modeli**: Hem CPU hem GPU (OptiX) üzerinde gerçekçi radyal lens bükülmesi simülasyonu.
-  - **Otomatik Kusur Hesaplama**: Distorsiyon artık tamamen lensin fiziksel özelliklerine (Odak Uzaklığı) göre hesaplanıyor.
-  - **Geniş Açı (Barrel)**: 50mm'den geniş lensler doğal olarak fıçı bükülmesi (dışa doğru) gösterir.
-  - **Telefoto (Pincushion)**: Uzun lensler hafif yastık bükülmesi (içe doğru) gösterir.
-  - **Manuel Slider Yok**: "Distortion" ayarı kaldırılarak tam fiziksel doğrulukta otomatik davranışa geçildi.
-
-### Proje Serileştirme İyileştirmeleri (31 Aralık 2024)
-
-- ✅ **Gömülü Texture Serileştirme Düzeltmesi**: GLB gömülü texture'ları artık proje kaydet/aç döngüsünde doğru çalışıyor
-  - **Sorun**: GLB dosyalarındaki gömülü texture'lar proje kaydedilip açılınca kayboluyordu
-  - **Çözüm**: `serializeTextures()`'da `PrincipledBSDF*` cast ve texture referans güncellemeleri
-
-- ✅ **Normal Map Texture Tipi Düzeltmesi**: GPU rendering'de görsel hataları (bir üçgenin siyah görünmesi) çözdü
-  - **Sorun**: Proje yüklenince bir poligonun yarısı siyah/ters görünüyordu
-  - **Kök Neden**: Tüm texture'lar `TextureType::Albedo` olarak yükleniyordu, normal map'lere sRGB dönüşümü uygulanıyordu
-  - **Çözüm**: `deserializeProperty()` artık texture tipi parametresi alıyor, her property doğru tip ile yükleniyor
-
----
 
 ## ✨ Özellikler
 
@@ -71,6 +43,7 @@
   - ✅ Gürültü tabanlı yoğunluk ile volumetrik rendering
   - ✅ Subsurface Scattering (SSS)
   - ✅ Clearcoat, Anizotropik materyaller
+  - ✅ **Saç Sistemi**: GPU hızlandırmalı saç/kıl simülasyonu ve renderlaması
   
 - **Aydınlatma**
   - ✅ Nokta ışıklar, Yönlü ışıklar
@@ -130,6 +103,58 @@
 - Dinamik Çözünürlük Ayarları (Resolution Scaling)
 - Sahne hiyerarşi görüntüleyici ve Materyal editörü
 - Performans metrikleri (FPS, rays/s, bellek kullanımı)
+
+---
+
+## 🛠️ Prosedürel Araçlar ve Sistemler
+
+### 🏔️ Gelişmiş Arazi Editörü
+<img src="docs/images/terrain_header.jpg" width="100%" alt="Arazi Editörü Sistemi">
+
+- **Şekillendirme Fırçaları**: Arazi geometrisini gerçek zamanlı olarak yükseltmek, alçaltmak, yumuşatmak ve düzleştirmek için sezgisel fırçalar.
+- **Hidrolik & Nehir (Fluvial) Erozyonu**: 
+  - Gerçekçi su akışını ve tortu taşınımını simüle edin
+  - Doğal görünümlü nehir yatakları ve vadileri otomatik oluşturun
+  - Erozyon gücünü, yağmur miktarını ve çözünürlüğü kontrol edin
+- **Heightmap Desteği**: Harici iş akışları (World Machine, Gaea) için 16-bit yükseklik haritası içe/dışa aktarımı.
+- **Düğüm (Node) Tabanlı İş Akışı**: <img align="right" width="300" src="docs/images/terrain_nodegraph.jpg"> Güçlü bir düğüm grafiği editörü kullanarak tahribatsız (non-destructive) arazi oluşturma. Gürültüleri, filtreleri ve maskeleri birleştirin.
+
+### 🌿 Prosedürel Bitki Örtüsü & Dağılım
+<img src="docs/images/terrain_foliage_header.jpg" width="100%" alt="Bitki Örtüsü Sistemi">
+
+- **GPU Instancing**: OptiX donanım hızlandırması kullanarak milyonlarca çim, ağaç ve kayayı sıfır performans kaybıyla renderlayın.
+- **Akıllı Dağılım (Smart Scattering)**: 
+  - Kural tabanlı yerleşim (eğim, yükseklik, doku maskesi)
+  - Örneklerin üst üste binmesini önlemek için çarpışma (collision) engelleme
+- **Boyama Modu**: Fırça araçlarını kullanarak ormanları veya belirli ayrıntıları manuel olarak boyayın.
+- **Dinamik Rüzgar**: Tüm bitki örtüsü küresel rüzgar parametrelerine (güç, yön, ani rüzgar) tepki verir.
+
+### 💇 Saç & Kıl Sistemi (Yeni!)
+<img src="docs/images/hair_header.jpg" width="100%" alt="Saç Sistemi Özellikleri">
+
+
+- **GPU Simülasyon & Render**: Gerçek zamanlı performans için tamamen NVIDIA OptiX ile hızlandırılmıştır.
+- **Tarama (Grooming) Fırçaları**:
+  - **Tarak (Comb)**: Saç yönünü doğal bir şekilde şekillendirin
+  - **Kes/Uzat (Cut/Grow)**: Uzunluğu etkileşimli olarak ayarlayın
+  - **Yumuşat (Smooth)**: Saç tellerini gevşetin/düzeltin
+- **Fizik Entegrasyonu**: Saç telleri karakter ağlarıyla (mesh) çarpışır ve yerçekimine/kuvvetlere tepki verir.
+- **Materyal Desteği**: Gerçekçi renderlama için Melanin tabanlı saç BSDF materyali.
+
+### 🌊 Gerçekçi Su & Okyanus
+<img src="docs/images/water_header.jpg" width="100%" alt="Okyanus Simülasyonu">
+
+- **FFT Okyanus Simülasyonu**: Köpük oluşumu ile Hızlı Fourier Dönüşümü (FFT) tabanlı derin okyanus dalgaları.
+- **Caustics**: Deniz tabanında gerçekçi ışık kırılması ve kaustik desenleri.
+- **Su Altı Volumetrikleri**: Derinliğe bağlı sis yoğunluğu ve ışık emilimi (absorption).
+
+### 🏞️ Nehir Aracı
+<img src="docs/images/river_header.jpg" width="100%" alt="Nehir Aracı">
+
+- **Spline Tabanlı Oluşturma**: Sezgisel bezier eğrileri kullanarak nehirler çizin.
+- **Otomatik Oyma (Auto-Carving)**: Nehirler yollarını araziye otomatik olarak oyar.
+- **Akış Haritalama (Flow Mapping)**: Su dokusu, spline yönü boyunca doğal bir şekilde akar.
+- **Fizik Etkileşimi**: Nesneler nehir akış hızına göre sürüklenir ve yüzer.
 
 ---
 
@@ -272,31 +297,7 @@ RayTrophi/
 
 ---
 
-## ⚡ Performans
 
-### BVH İnşası (3.3M Üçgen)
-
-| BVH Türü       | İnşa Süresi | Kalite | Kullanım Alanı        |
-|----------------|-------------|--------|-----------------------|
-| Embree         | **872 ms**  | Yüksek | Üretim renderlaması   |
-| ParallelBVH    | ~2000 ms    | Yüksek | Özel araştırma/debug  |
-| OptiX (GPU)    | ~150 ms     | Çok Yüksek | Gerçek zamanlı GPU |
-
-### Rendering Hızı
-
-- **CPU (Embree)**: ~1-5 milyon rays/s (16 thread)
-- **GPU (OptiX RTX 3080)**: ~100-500 milyon rays/s
-- **Bellek**: 146 byte/üçgen (optimize düzen)
-
-### Uygulanan Optimizasyonlar
-
-- ✅ Doğrudan Embree buffer yazımları (ara vektörler yok)
-- ✅ `reserve()` ile vektör ön tahsisi
-- ✅ İki geçişli BVH inşası (say → tahsis et → oluştur)
-- ✅ Embree build kalite ayarlaması (hız için MEDIUM)
-- ✅ MaterialManager üzerinden Material ID araması (Triangle'da shared_ptr yok)
-
----
 
 ## 🎨 Galeri
 

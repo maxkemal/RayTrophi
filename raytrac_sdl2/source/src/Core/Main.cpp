@@ -138,6 +138,7 @@ bool rayhit = false;
 bool g_camera_dirty = true;
 bool g_lights_dirty = true;
 bool g_world_dirty = true;
+bool g_original_surface_needs_sync = true; 
 
 // ===========================================================================
 // DEFERRED REBUILD FLAGS - For optimized batched rebuilds
@@ -150,6 +151,18 @@ bool g_optix_rebuild_in_progress = false; // True while TLAS rebuild is happenin
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
+
+// Helper to ensure original_surface matches main surface dimensions
+// This prevents tonemap accumulation issues by giving us a clean "Raw" buffer
+void EnsureOriginalSurface(SDL_Surface* reference) {
+    if (!reference) return;
+    extern SDL_Surface* original_surface;
+    
+    if (!original_surface || original_surface->w != reference->w || original_surface->h != reference->h) {
+        if (original_surface) SDL_FreeSurface(original_surface);
+        original_surface = SDL_CreateRGBSurfaceWithFormat(0, reference->w, reference->h, 32, reference->format->format);
+    }
+}
 
 // ===========================================================================
 // SCENE LOADING FLAGS - Thread safety for project load/save operations
@@ -197,28 +210,76 @@ UIContext ui_ctx{
    reset_tonemap,
    mouse_control_enabled
 };
-void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor) {
+void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, ColorProcessor& processor, Renderer* renderer = nullptr) {
+    if (!surface || !surface->pixels) return;
     Uint32* pixels = (Uint32*)surface->pixels;
-    Uint32* src = (Uint32*)original->pixels;
     int width = surface->w;
     int height = surface->h;
     SDL_PixelFormat* fmt = surface->format;
 
-    for (int j = 0; j < height; ++j) {
-        for (int i = 0; i < width; ++i) {
-            Uint8 r, g, b;
-            SDL_GetRGB(src[j * width + i], fmt, &r, &g, &b);
+    // Use High-Precision Float Buffer (CPU HDR) if available
+    // This fixes "weird transitions" during progressive accumulation by avoiding 8-bit quantization.
+    // Note: cpu_accumulation_buffer is valid ONLY if we are using CPU renderer.
+    const bool use_float_buffer = (renderer != nullptr) && 
+                                  renderer->cpu_accumulation_valid && 
+                                  (renderer->cpu_accumulation_buffer.size() == (size_t)(width * height));
 
-            Vec3 raw_color(r / 255.0f, g / 255.0f, b / 255.0f);
-            Vec3 final_color = processor.processColor(raw_color, i, j);
-            if (processor.params.enable_vignette)
-                final_color = applyVignette(final_color, i, j, width, height, processor.params.vignette_strength);
-            r = static_cast<Uint8>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
-            g = static_cast<Uint8>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
-            b = static_cast<Uint8>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
+    Uint32* src = (original && original->pixels) ? (Uint32*)original->pixels : nullptr;
+    if (!use_float_buffer && !src) return; // Must have EITHER float buffer OR original surface
 
-            pixels[j * width + i] = SDL_MapRGB(fmt, r, g, b);
+    // Parallel processing to speed up CPU tonemapping
+    int num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4; // Fallback
+    
+    std::vector<std::future<void>> futures;
+    int chunk_size = height / num_threads;
+
+    auto process_chunk = [=, &processor, &renderer](int start_y, int end_y) {
+        for (int j = start_y; j < end_y; ++j) {
+            // Fix for SDL Y-axis inversion when reading from CPU buffer
+            // GPU/SDL Surface (LDR) is Top-Down (j).
+            // CPU Float Buffer is Bottom-Up (Ray Tracing coords).
+            // So when reading from float buffer, we must flip Y.
+            int buffer_y = height - 1 - j;
+            
+            for (int i = 0; i < width; ++i) {
+                Vec3 raw_color;
+                
+                if (use_float_buffer) {
+                    // Read directly from HDR float buffer (linear color) using flipped Y
+                    const auto& pixel_data = renderer->cpu_accumulation_buffer[buffer_y * width + i];
+                    raw_color = Vec3(pixel_data.x, pixel_data.y, pixel_data.z);
+                } else {
+                    // Fallback to LDR surface (sRGB/Gamma usually) - already Top-Down
+                    if (!src) continue;
+                    Uint8 r, g, b;
+                    SDL_GetRGB(src[j * width + i], fmt, &r, &g, &b);
+                    raw_color = Vec3(r / 255.0f, g / 255.0f, b / 255.0f);
+                }
+
+                Vec3 final_color = processor.processColor(raw_color, i, j);
+                
+                if (processor.params.enable_vignette)
+                    final_color = applyVignette(final_color, i, j, width, height, processor.params.vignette_strength);
+                
+                Uint8 r = static_cast<Uint8>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
+                Uint8 g = static_cast<Uint8>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
+                Uint8 b = static_cast<Uint8>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
+
+                pixels[j * width + i] = SDL_MapRGB(fmt, r, g, b);
+            }
         }
+    };
+
+    for (int t = 0; t < num_threads; ++t) {
+        int start_y = t * chunk_size;
+        int end_y = (t == num_threads - 1) ? height : start_y + chunk_size;
+        futures.push_back(std::async(std::launch::async, process_chunk, start_y, end_y));
+    }
+
+    // Wait for all threads to complete
+    for (auto& f : futures) {
+        f.get();
     }
 }
 void reset_render_resolution(int w, int h)
@@ -254,6 +315,7 @@ void reset_render_resolution(int w, int h)
     // Siyah ekranla başla
     SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
     SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
+    g_original_surface_needs_sync = true;
     
     // Texture'ı güncelle
     SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
@@ -619,6 +681,8 @@ int main(int argc, char* argv[]) {
 
     SDL_Event e;
     while (!quit) {
+        bool did_render_this_frame = false; 
+        bool post_processing_happened = false;
         // =========================================================================
         // POWER MANAGEMENT - Prevent sleep during render but allow screen off
         // =========================================================================
@@ -1341,6 +1405,7 @@ int main(int argc, char* argv[]) {
                  }
                  else {
                      // Safe to start new render
+                     did_render_this_frame = true;
                      start_render = false;
 
                      // Reset stop flags for new render
@@ -1464,13 +1529,20 @@ int main(int argc, char* argv[]) {
                        if (g_hasOptix && render_settings.use_optix) {
                      // Check if we are playing animation
                      int loop_count = 1;
+                     // Ensure we have a valid Raw Buffer (original_surface) for OptiX output
+                     EnsureOriginalSurface(surface);
+                     
+                     // Mark frame as rendered so display update logic works
+                     did_render_this_frame = true;
+
                      if (timeline_playing) {
                          loop_count = std::max(1, render_settings.animation_samples_per_frame);
                      }
                      
                      for (int i = 0; i < loop_count; ++i) {
+                         // Render to original_surface (Raw LDR) instead of surface (Display/TM)
                          optix_gpu.launch_random_pixel_mode_progressive(
-                             surface, window, renderer, 
+                             original_surface, window, renderer, 
                              image_width, image_height, 
                              framebuffer, raytrace_texture
                          );
@@ -1478,8 +1550,9 @@ int main(int argc, char* argv[]) {
                      // Debug Log (Temporary)
                      // if (timeline_playing) SCENE_LOG_INFO("Preview Loop: " + std::to_string(loop_count));
                 } else {
+                        // Render to original_surface (Raw LDR)
                         optix_gpu.launch_random_pixel_mode_progressive(
-                            surface, window, renderer, 
+                            original_surface, window, renderer, 
                             image_width, image_height, 
                             framebuffer, raytrace_texture
                         );
@@ -1520,7 +1593,8 @@ int main(int argc, char* argv[]) {
                         }
                         
                         if (effective_denoiser && optix_gpu.getAccumulatedSamples() > 0) {
-                                ray_renderer.applyOIDNDenoising(surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                                // Must denoise the Raw Buffer (original_surface) so Tonemapper gets clean input
+                                ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
                             }
                         }
                     else {
@@ -1583,7 +1657,15 @@ int main(int argc, char* argv[]) {
                         for (int i = 0; i < loop_count; ++i) {
                             if (!ui_ctx.render_settings.use_optix) {
                                 // Forced to scalar for stability and brightness fix
-                                ray_renderer.render_progressive_pass(surface, window, scene, 1);
+                                // Ensure we have a valid Raw Buffer (original_surface) to render into
+                                EnsureOriginalSurface(surface);
+                                
+                                // Mark frame as rendered so display update logic works
+                                did_render_this_frame = true;
+                                
+                                // Render to original_surface (Raw LDR) instead of surface (Display/Tonemapped)
+                                // This prevents "Accumulating Tonemap" corruption.
+                                ray_renderer.render_progressive_pass(original_surface, window, scene, 1);
                                 /*
                                 if (ui_ctx.render_settings.use_vectorized_renderer) {
                                     ray_renderer.render_progressive_pass_packet(surface, window, scene, 1);
@@ -1630,7 +1712,9 @@ int main(int argc, char* argv[]) {
                         }
                         
                         if (effective_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0) {
-                                 ray_renderer.applyOIDNDenoising(surface, 0, true,
+                                 // Denoise the Raw Buffer
+                                 EnsureOriginalSurface(surface);
+                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true,
                                      ui_ctx.render_settings.denoiser_blend_factor);
                              }
                         }
@@ -1638,21 +1722,46 @@ int main(int argc, char* argv[]) {
                  }
             }
 
-        // Tonemap reset ve apply
-        if (!start_render) {
-            if (reset_tonemap) {
-                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);               
-                reset_tonemap = false;
-                SCENE_LOG_INFO("Tonemap reset applied.");
-            }
+        // ===========================================================================
+        // POST-PROCESSING: Tonemap & Color Grading
+        // ===========================================================================
+        
+        // 1. Sync RAW copy (original_surface) logic REMOVED.
+        // We now render directly to 'original_surface', preventing the feedback loop.
+        // if (did_render_this_frame ...) { SDL_BlitSurface... } -> Removed.
+        
+        // Ensure original_surface exists for fallback logic
+        if (!original_surface && surface) EnsureOriginalSurface(surface);
 
+        // 2. Handle Tonemap Reset (F11/UI)
+        if (reset_tonemap) {
+            if (original_surface && surface) {
+                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
+            }
+            reset_tonemap = false;
+            post_processing_happened = true;
+            SCENE_LOG_INFO("Tonemap reset applied.");
+        }
+
+        // 3. Handle Tonemap Apply OR Display Update
+        if (apply_tonemap || (ui_ctx.render_settings.persistent_tonemap && did_render_this_frame)) {
+            if (original_surface && surface) {
+                // Pass renderer to use float buffer if available (prevents quantization artifacts)
+                // Pass nullptr if using OptiX (OptiX handles its own buffer or falls back to surface)
+                applyToneMappingToSurface(surface, original_surface, color_processor, 
+                    ui_ctx.render_settings.use_optix ? nullptr : &ray_renderer);
+            }
             if (apply_tonemap) {
-                applyToneMappingToSurface(surface, original_surface, color_processor);               
                 apply_tonemap = false;
                 SCENE_LOG_INFO("Tonemap applied.");
             }
+            post_processing_happened = true;
+        } 
+        else if (did_render_this_frame && original_surface && surface) {
+            // If tonemapping is disabled, we must still copy the Raw Render (original_surface)
+            // to the Display Surface (surface) so the user sees the output!
+            SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
         }
-
 
         // Image save
         if (ui_ctx.render_settings.save_image_requested && original_surface) {
@@ -1835,17 +1944,20 @@ int main(int argc, char* argv[]) {
             accumulation_done_for_display = ray_renderer.isCPUAccumulationComplete();
         }
         
-        // Only update texture if rendering is active or UI needs it
+        // Only update texture if rendering is active, if we just applied a tonemap, or if UI needs it
         static bool last_texture_updated = false;
-        bool needs_texture_update = !accumulation_done_for_display || !last_texture_updated || ImGui::GetIO().WantCaptureMouse;
+        
+        // Force update if accumulation count changed, if we are in final render, 
+        // if explicitly requested, OR if post-processing just happened.
+        bool needs_texture_update = !accumulation_done_for_display || !last_texture_updated || 
+                                     ImGui::GetIO().WantCaptureMouse || did_render_this_frame || post_processing_happened;
         
         if (needs_texture_update) {
             SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
             last_texture_updated = !accumulation_done_for_display;
         }
         
-        // SDL_FreeSurface(original_surface);
-        // original_surface = SDL_ConvertSurface(surface, surface->format, 0);
+        // original_surface handles are now managed in the post-processing block for better sync
         ImGui::Render();       
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);

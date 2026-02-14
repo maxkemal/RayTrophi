@@ -3,7 +3,7 @@
 [INFO] Device [0]: NVIDIA GeForce RTX 3060 (SM 8.6) - OptiX Capable
 [INFO] Selected: NVIDIA GeForce RTX 3060 (Hardware RT enabled)
 [INFO] --------------------------
-[INFO] [OptiX] JIT Multi-Module Creation took 0,029922 seconds
+[INFO] [OptiX] JIT Multi-Module Creation took 0,032977 seconds
 [INFO] OptiX is ready!
 [INFO] Loading Default Scene Asset: assets/default.glb
 [INFO] ========================================
@@ -77,75 +77,198 @@
 [INFO] [OptixAccelManager] Cleaned up and reset caches
 [INFO] [OptixAccelManager] Cleaned up and reset caches
 [INFO] New project created. Subsystems and animation caches cleared.
-[INFO] [ProjectManager] Loaded 4 triangles, 2 transforms from binary.
-[INFO] [ProjectManager] Cached 1 embedded textures in memory (no temp files).
-[INFO] [MaterialManager] Deserialized 2 materials (format v1)
-[INFO] [MaterialManager] Synced 2 GPU materials
+[INFO] [ProjectManager] Loaded 27691 triangles, 1 transforms from binary.
+[INFO] [ProjectManager] Cached 21 embedded textures in memory (no temp files).
+[INFO] [MaterialManager] Deserialized 16 materials (format v1)
+[INFO] [MaterialManager] Synced 16 GPU materials
 [INFO] [ProjectManager] Loaded 1 lights.
 [INFO] [ProjectManager] Loaded 1 cameras.
 [INFO] [ProjectManager] Loaded render settings.
+[INFO] [EXR LOAD] Loaded EXR texture: E:\hdr\hilly_terrain_01_4k.exr | 4096x2048
+[INFO] HDRI loaded: E:\hdr\hilly_terrain_01_4k.exr | is_hdr=TRUE (float)
+[INFO] HDRI uploaded to GPU: 4096x2048
 [INFO] World settings loaded from project.
 [INFO] [WaterManager] Loaded 0 water surfaces (using existing geometry).
 [INFO] [ProjectManager] Loading terrain system from: E:\rt_k
-[INFO] [TerrainManager] Deserialized 0 terrains (format v2)
+[INFO] [TerrainManager] Loaded splatmap: 1024x1024 for Terrain_1
+[INFO] [GPU Erosion] Initializing CUDA...
+[INFO] [GPU Erosion] CUDA Initialized Successfully (with post-processing kernels)
+[INFO] [GPU Fluvial] Starting CPU-Parity Simulation...
+[INFO] [GPU Fluvial] Simulating 10000 steps...
+[INFO] [GPU Fluvial] Simulating 1 passes on GPU...
+[INFO] [GPU Fluvial] Performing Edge Smoothing and Thermal finish...
+[INFO] Thermal erosion completed
+[INFO] [GPU Fluvial] Complete. Parity achieved.
+[INFO] [TerrainManager] Deserialized 1 terrains (format v2)
 [INFO] [ProjectManager] Loaded 0 rivers
 [INFO] [InstanceManager] Cleared all instance groups
+[INFO] [InstanceManager] Built Centered BVH (Baked Transform) for restored source: 1_Pinus_ponderosa_juvenile_LD
+[INFO] [InstanceManager] Rebuilt 2220749 scene objects from foliage data.
 [INFO] [ProjectManager] Loaded foliage system.
 [INFO] [ProjectManager] Loaded VDB volumes.
 [INFO] [ProjectManager] Loaded Gas volumes.
 [INFO] [ProjectManager] Loaded Force Fields.
 [INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
 [INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [ProjectManager] Loaded hair system with 1 grooms.
+[INFO] [ProjectManager] Loaded hair system with 0 grooms.
 [INFO] [ProjectManager] Loaded timeline with 0 tracks.
 [INFO] [ProjectManager] Loaded 0 animation graphs.
 [INFO] [ProjectManager] Loaded bone data: 0 bones.
-[INFO] [ProjectManager] Loaded 1 model contexts.
+[INFO] [ProjectManager] Loaded 2 model contexts.
 [INFO] [ProjectManager] Loaded 0 animation clips.
-[INFO] [OptiX Rebuild] Start Rebuild. Objects: 4, Hair Strands: 214775
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
 [INFO] [OptixAccelManager] Cleaned up and reset caches
 [INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
-[INFO] Project loaded: E:\rt_k\hair_test.rtp (GPU rebuild pending on main thread)
+[INFO] Project loaded: E:\rt_k\lanspace.rtp (GPU rebuild pending on main thread)
 [INFO] [Load] Auxiliary settings loaded.
 [INFO] Selection cache fully cleared and invalidated
+[INFO] [Load] Terrain graph evaluated.
 [INFO] Selection cache fully cleared and invalidated
 [INFO] Project visualization ready.
-[INFO] Scene changed (Count: 2 -> 4). Invalidating cache.
-[INFO] Rebuilding selection cache for 4 objects...
-[INFO] Selected via CPU Viewport: Plane_1
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=69185044480
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[WARNING] [FILE CACHE MISS] 'E:\data\home\texure\1-31.png' - will load from disk
-[INFO] [FILE DECODE] Starting decode for: E:\data\home\texure\1-31.png | Resolution: 845x463
-[INFO] [OptiX Rebuild] Start Rebuild. Objects: 4, Hair Strands: 214775
+[INFO] Scene changed (Count: 2 -> 2220749). Invalidating cache.
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
 [INFO] [OptixAccelManager] Cleaned up and reset caches
 [INFO] [OptixAccelManager] Cleaned up and reset caches
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
+[INFO] Rebuilding selection cache for 2220749 objects...
+[INFO] [autoMask] SplatMap: 1024x1024, Heightmap: 1024x1024, scale_xz=1000,000000, scale_y=10,000000
+[INFO] Auto-mask generated for: Terrain_1
+[INFO] [Scatter] Instanced 100000 objects (Multi-Source).
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [autoMask] SplatMap: 1024x1024, Heightmap: 1024x1024, scale_xz=1000,000000, scale_y=10,000000
+[INFO] Auto-mask generated for: Terrain_1
+[INFO] [Scatter] Instanced 100000 objects (Multi-Source).
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [Scatter] Instanced 100000 objects (Multi-Source).
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [GPU Fluvial] Starting CPU-Parity Simulation...
+[INFO] [GPU Fluvial] Simulating 10000 steps...
+[INFO] [GPU Fluvial] Simulating 1 passes on GPU...
+[INFO] [GPU Fluvial] Performing Edge Smoothing and Thermal finish...
+[INFO] Thermal erosion completed
+[INFO] [GPU Fluvial] Complete. Parity achieved.
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [GPU Fluvial] Starting CPU-Parity Simulation...
+[INFO] [GPU Fluvial] Simulating 10000 steps...
+[INFO] [GPU Fluvial] Simulating 1 passes on GPU...
+[INFO] [GPU Fluvial] Performing Edge Smoothing and Thermal finish...
+[INFO] Thermal erosion completed
+[INFO] [GPU Fluvial] Complete. Parity achieved.
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [GPU Fluvial] Starting CPU-Parity Simulation...
+[INFO] [GPU Fluvial] Simulating 10000 steps...
+[INFO] [GPU Fluvial] Simulating 1 passes on GPU...
+[INFO] [GPU Fluvial] Performing Edge Smoothing and Thermal finish...
+[INFO] Thermal erosion completed
+[INFO] [GPU Fluvial] Complete. Parity achieved.
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [GPU Fluvial] Starting CPU-Parity Simulation...
+[INFO] [GPU Fluvial] Simulating 10000 steps...
+[INFO] [GPU Fluvial] Simulating 20 passes on GPU...
+[INFO] [GPU Fluvial] Performing Edge Smoothing and Thermal finish...
+[INFO] Thermal erosion completed
+[INFO] [GPU Fluvial] Complete. Parity achieved.
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2220749, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [InstanceManager] Cleared all instance groups
+[INFO] VDBVolumeManager: All volumes cleared and ID counter reset.
 [INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=2577300 Segs=1932975 PosPtr=69153587200 WidthPtr=68801265664
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
-[INFO] [OptiX] Hair geometry cleared and TLAS rebuilt
-[INFO] [OptixAccelManager] Building Curve GAS: ABI=87 Verts=1620000 Segs=1215000 PosPtr=68767711232 WidthPtr=68801265664
-[INFO] [Hair GPU] Integrated 1 hair grooms into TLAS
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 127691, Hair Strands: 0
+[ERROR] No material available!
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] New project created. Subsystems and animation caches cleared.
+[INFO] History: Cleared
+[INFO] Selection cache fully cleared and invalidated
+[INFO] Loading Default Scene Asset: assets/default.glb
+[INFO] ========================================
+[INFO] SCENE CLEANUP: Starting comprehensive cleanup...
+[INFO] ========================================
+[INFO] [SCENE CLEANUP] Scene data structures cleaned.
+[INFO] [MATERIAL CLEANUP] MaterialManager cleared: 0 materials removed.
+[INFO] [GPU CLEANUP] Destroyed 0 texture objects and 0 CUDA arrays.
+[INFO] [GPU CLEANUP] OptiX texture objects destroyed.
+[INFO] ========================================
+[INFO] SCENE CLEANUP: Completed successfully!
+[INFO] ========================================
+[INFO] Starting scene creation from: assets/default.glb
+[INFO] Base directory set to: assets/
+[INFO] Loading model geometry and animations...
+[INFO] Starting model loading: assets/default.glb (Prefix: assets_default)
+[INFO] Importing file with Assimp...
+[INFO] Assimp file loaded successfully. Processing scene data...
+[INFO] Clearing existing cameras, lights, and transform cache...
+[INFO] Building node map from scene hierarchy...
+[INFO] Node map built with 4 nodes.
+[INFO] Processing cameras...
+[INFO] Cameras processed: 1 camera(s) found.
+[INFO] Processing lights...
+[INFO] Lights processed: 1 light(s) found.
+[INFO] Building Bone Data...
+[INFO] Processing nodes to extract triangles...
+[INFO] [MaterialManager] getOrCreateMaterialID NEW: assets_default_material.002 -> ID=0 | NO TEXTURE
+[INFO] Triangle extraction completed: 2 triangles processed.
+[INFO] Processing animations...
+[INFO] No animations found in file: assets/default.glb
+[INFO] Model loading completed. Summary - Triangles: 2, Animations: 0, Cameras: 1, Lights: 1
+[INFO] Successfully loaded triangles: 2
+[INFO] Loaded animations: 0
+[INFO] Total Bones (Merged): 0
+[INFO] Adding triangles to scene world...
+[INFO] Added 2 triangles to scene member list.
+[INFO] Loading camera and lighting data...
+[INFO] Loaded 1 camera(s). Active: Camera #0
+[INFO] Loaded lights: 1
+[INFO] World Sun synced with imported Directional Light (Forced Intensity: 10.0).
+[INFO] Building BVH structure...
+[INFO] [Embree] BVH structure built successfully.
+[INFO] OptiX GPU detected. Creating OptiX geometry data...
+[INFO] Converting 2 triangles to OptiX format.
+[INFO] Material indices validated.
+[INFO]  OptiX buildFromData is starting...
+[INFO] OptiX BVH and acceleration structures built.
+[INFO] Setting up OptiX camera parameters...
+[INFO] OptiX camera configured successfully.
+[INFO] Configuring 1 lights for OptiX...
+[INFO] OptiX light parameters set successfully.
+[INFO] World environment set for OptiX rendering.
+[INFO] Scene creation completed successfully.
+[INFO] Scene info - Triangles: 2, Lights: 1, Animations: 0
+[INFO] Scene initialization flag set to true.
+[INFO] Using camera from GLB file (total: 1)
+[INFO] Found Directional Light in default asset. Syncing Nishita Sun...
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] New project created.
+[INFO] Scene changed (Count: 2220749 -> 2). Invalidating cache.
+[INFO] Rebuilding selection cache for 2 objects...
+[INFO] Selection cache fully cleared and invalidated
+[INFO] Rebuilding selection cache for 0 objects...
+[INFO] [MaterialManager] getOrCreateMaterialID NEW: TerrainMat_1 -> ID=1 | NO TEXTURE
+[INFO] Terrain created: Terrain_1
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 32258, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] Rebuilding selection cache for 32258 objects...
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 32258, Hair Strands: 0
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [TerrainManager] Resizing splatmap from 512x512 to 1024x1024
+[INFO] [OptiX Rebuild] Start Rebuild. Objects: 2093058, Hair Strands: 0
+[INFO] Scene changed (Count: 32258 -> 2093058). Invalidating cache.
+[INFO] Rebuilding selection cache for 2093058 objects...
+[INFO] [OptixAccelManager] Cleaned up and reset caches
+[INFO] [OptixAccelManager] Cleaned up and reset caches
