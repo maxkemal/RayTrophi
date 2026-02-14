@@ -130,7 +130,7 @@
 - **Dinamik Rüzgar**: Tüm bitki örtüsü küresel rüzgar parametrelerine (güç, yön, ani rüzgar) tepki verir.
 
 ### 💇 Saç & Kıl Sistemi (Yeni!)
-<img src="docs/images/hair_header.jpg" width="100%" alt="Saç Sistemi Özellikleri">
+<img src="docs/images/hair_header.png" width="100%" alt="Saç Sistemi Özellikleri">
 
 
 - **GPU Simülasyon & Render**: Gerçek zamanlı performans için tamamen NVIDIA OptiX ile hızlandırılmıştır.

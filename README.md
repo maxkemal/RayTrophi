@@ -159,7 +159,7 @@
 - **Dynamic Wind**: All foliage responds to global wind parameters (strength, direction, gust).
 
 ### 💇 Hair & Fur System (New!)
-<img src="docs/images/hair_header.jpg" width="100%" alt="Hair System Features">
+<img src="docs/images/hair_header.png" width="100%" alt="Hair System Features">
 
 
 - **GPU Simulated & Rendered**: Fully accelerated by NVIDIA OptiX for real-time performance.
