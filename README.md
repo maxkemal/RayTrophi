@@ -275,54 +275,53 @@ The UI will appear. Use File > Load Scene to import models (GLTF recommended).
 RayTrophi/
 ├── raytrac_sdl2/                  # Main project
 │   ├── source/
-│   │   ├── cpp_file/              # Implementation files
-│   │   │   ├── Renderer.cpp       # Main rendering loop
-│   │   │   ├── EmbreeBVH.cpp     # Embree BVH wrapper
-│   │   │   ├── ParallelBVHNode.cpp # Custom SAH BVH
-│   │   │   ├── OptixWrapper.cpp   # OptiX GPU backend
-│   │   │   ├── AssimpLoader.cpp   # Model/texture loader
-│   │   │   ├── PrincipledBSDF.cpp # Disney BSDF
+│   │   ├── src/                   # Source files by module
+│   │   │   ├── Core/              # Main entry (Main.cpp), Project Management
+│   │   │   ├── Render/            # Renderer, OptiX Wrapper, BVH Builders
+│   │   │   ├── Scene/             # Scene Objects, Lights, Materials
+│   │   │   ├── Physics/           # Terrain, Water, Gas, VDB, Physics Engines
+│   │   │   ├── Device/            # CUDA Kernels (.cu) & GPU Logic
+│   │   │   ├── UI/                # ImGui Panels & Editor Logic
+│   │   │   ├── Utils/             # Helper Utilities (Loaders, Math)
 │   │   │   └── ...
-│   │   ├── header/                # Header files
-│   │   │   ├── Ray.h, Vec3.h     # Math primitives
-│   │   │   ├── Material.h         # Material base
-│   │   │   ├── Triangle.h         # Optimized triangle
-│   │   │   ├── Camera.h           # Camera & DOF
+│   │   ├── include/               # Header files (.h)
+│   │   │   ├── Renderer.h
+│   │   │   ├── Material.h
 │   │   │   └── ...
-│   │   ├── imgui/                 # ImGui library
-│   │   └── res/                   # Resources (icons, etc.)
-│   ├── raytrac_sdl2.vcxproj      # Visual Studio project
-│   ├── CMakeLists.txt             # CMake build (has issues)
+│   │   ├── raygen.ptx             # Compiled OptiX kernels
+│   │   └── ...
+│   ├── raytrac_sdl2.vcxproj       # Visual Studio project
+│   ├── CMakeLists.txt             # CMake build configuration
 │   └── raygen.ptx                 # OptiX shader
 └── README.md                      # This file
 ```
 
 ### Core Components
 
-1. **Renderer** (`Renderer.cpp`)
+1. **Renderer** (`src/Render/Renderer.cpp`)
    - Tile-based multi-threaded rendering
    - Progressive refinement
    - Denoising integration
 
 2. **BVH Systems**
-   - **EmbreeBVH**: Industry-standard, optimized for speed
-   - **ParallelBVHNode**: Custom SAH-based, OpenMP parallel build
-   - **OptiX BVH**: GPU-accelerated structure
+   - **EmbreeBVH** (`src/Render/EmbreeBVH.cpp`): Industry-standard, optimized for speed
+   - **ParallelBVHNode** (`src/Render/ParallelBVHNode.cpp`): Custom SAH-based, OpenMP parallel build
+   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): GPU-accelerated structure
 
-3. **Material System** (`Material.h`, `PrincipledBSDF.cpp`)
+3. **Material System** (`src/Scene/PrincipledBSDF.cpp`)
    - Modular property-based materials
    - Texture support (albedo, roughness, metallic, normal, emission)
    - sRGB/Linear color space handling
 
-4. **OptixWrapper** (`OptixWrapper.cpp`)
+4. **OptixWrapper** (`src/Render/OptixWrapper.cpp`, `src/Device/*.cu`)
    - CUDA/OptiX backend
    - SBT (Shader Binding Table) management
    - Texture object caching
 
-5. **AssimpLoader** (`AssimpLoader.cpp`)
-   - Supports 40+ formats
-   - Embedded texture extraction
-   - Material conversion to Principled BSDF
+5. **Physics & Procedural** (`src/Physics/*`)
+   - **TerrainManager**: Hydraulic erosion, sculpting
+   - **WaterManager**: FFT Ocean simulation
+   - **EmitterSystem**: Particle systems & forces
 
 ---
 

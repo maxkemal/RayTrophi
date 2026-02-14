@@ -246,54 +246,53 @@ UI açılacaktır. Model içe aktarmak için File > Load Scene kullanın (GLTF �
 RayTrophi/
 ├── raytrac_sdl2/                  # Ana proje
 │   ├── source/
-│   │   ├── cpp_file/              # İmplementasyon dosyaları
-│   │   │   ├── Renderer.cpp       # Ana rendering döngüsü
-│   │   │   ├── EmbreeBVH.cpp     # Embree BVH wrapper
-│   │   │   ├── ParallelBVHNode.cpp # Özel SAH BVH
-│   │   │   ├── OptixWrapper.cpp   # OptiX GPU backend
-│   │   │   ├── AssimpLoader.cpp   # Model/texture yükleyici
-│   │   │   ├── PrincipledBSDF.cpp # Disney BSDF
+│   │   ├── src/                   # Modüllere ayrılmış kaynak dosyalar
+│   │   │   ├── Core/              # Ana giriş (Main.cpp), Proje Yönetimi
+│   │   │   ├── Render/            # Renderer, OptiX Wrapper, BVH İnşası
+│   │   │   ├── Scene/             # Sahne Objeleri, Işıklar, Materyaller
+│   │   │   ├── Physics/           # Arazi, Su, Gaz Simülasyonu, Fizik Motoru
+│   │   │   ├── Device/            # CUDA Kernel (.cu) & GPU Mantığı
+│   │   │   ├── UI/                # ImGui Panelleri & Editör Mantığı
+│   │   │   ├── Utils/             # Yardımcı Araçlar (Yükleyiciler, Matematik)
 │   │   │   └── ...
-│   │   ├── header/                # Header dosyaları
-│   │   │   ├── Ray.h, Vec3.h     # Matematiksel primitifler
-│   │   │   ├── Material.h         # Materyal base
-│   │   │   ├── Triangle.h         # Optimize üçgen
-│   │   │   ├── Camera.h           # Kamera & DOF
+│   │   ├── include/               # Header (.h) dosyaları
+│   │   │   ├── Renderer.h
+│   │   │   ├── Material.h
 │   │   │   └── ...
-│   │   ├── imgui/                 # ImGui kütüphanesi
-│   │   └── res/                   # Kaynaklar (ikonlar, vb.)
-│   ├── raytrac_sdl2.vcxproj      # Visual Studio projesi
-│   ├── CMakeLists.txt             # CMake derleme (sorunlu)
+│   │   ├── raygen.ptx             # Derlenmiş OptiX kernelleri
+│   │   └── ...
+│   ├── raytrac_sdl2.vcxproj       # Visual Studio projesi
+│   ├── CMakeLists.txt             # CMake derleme yapılandırması
 │   └── raygen.ptx                 # OptiX shader
 └── README.md                      # Bu dosya
 ```
 
 ### Temel Bileşenler
 
-1. **Renderer** (`Renderer.cpp`)
-   - Tile tabanlı çok thread'li rendering
-   - Progressive refinement
+1. **Renderer** (`src/Render/Renderer.cpp`)
+   - Tile (kare) tabanlı çok thread'li rendering
+   - Progressive refinement (Aşamalı iyileştirme)
    - Denoising entegrasyonu
 
 2. **BVH Sistemleri**
-   - **EmbreeBVH**: Endüstri standardı, hız için optimize
-   - **ParallelBVHNode**: Özel SAH tabanlı, OpenMP paralel build
-   - **OptiX BVH**: GPU hızlandırmalı yapı
+   - **EmbreeBVH** (`src/Render/EmbreeBVH.cpp`): Endüstri standardı, hız için optimize
+   - **ParallelBVHNode** (`src/Render/ParallelBVHNode.cpp`): Özel SAH tabanlı, OpenMP paralel build
+   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): GPU hızlandırmalı yapı
 
-3. **Materyal Sistemi** (`Material.h`, `PrincipledBSDF.cpp`)
+3. **Materyal Sistemi** (`src/Scene/PrincipledBSDF.cpp`)
    - Modüler özellik tabanlı materyaller
    - Texture desteği (albedo, roughness, metallic, normal, emission)
    - sRGB/Linear renk uzayı işleme
 
-4. **OptixWrapper** (`OptixWrapper.cpp`)
+4. **OptixWrapper** (`src/Render/OptixWrapper.cpp`, `src/Device/*.cu`)
    - CUDA/OptiX backend
    - SBT (Shader Binding Table) yönetimi
    - Texture object önbellekleme
 
-5. **AssimpLoader** (`AssimpLoader.cpp`)
-   - 40+ format desteği
-   - Gömülü texture çıkarma
-   - Materyal dönüşümü Principled BSDF'ye
+5. **Fizik & Prosedürel** (`src/Physics/*`)
+   - **TerrainManager**: Hidrolik erozyon, şekillendirme
+   - **WaterManager**: FFT Okyanus simülasyonu
+   - **EmitterSystem**: Parçacık sistemleri & kuvvetler
 
 ---
 
