@@ -691,16 +691,18 @@ static void DrawRenderWindowToneMapControls(UIContext& ctx) {
     UIWidgets::ColoredHeader("Post-Processing Controls", ImVec4(1.0f, 0.65f, 0.6f, 1.0f));
     UIWidgets::Divider();
 
+    bool changed = false;
+
     // -------- Main Parameters --------
     if (UIWidgets::BeginSection("Main Post-Processing", ImVec4(0.8f, 0.6f, 0.5f, 1.0f))) {
-        UIWidgets::SliderWithHelp("Gamma", &ctx.color_processor.params.global_gamma, 
-                                   0.5f, 3.0f, "Controls overall image brightness curve");
-        UIWidgets::SliderWithHelp("Exposure", &ctx.color_processor.params.global_exposure, 
-                                   0.1f, 5.0f, "Adjusts overall brightness level");
-        UIWidgets::SliderWithHelp("Saturation", &ctx.color_processor.params.saturation, 
-                                   0.0f, 2.0f, "Controls color intensity");
-        UIWidgets::SliderWithHelp("Temperature (K)", &ctx.color_processor.params.color_temperature, 
-                                   1000.0f, 10000.0f, "Color temperature in Kelvin", "%.0f");
+        if (UIWidgets::SliderWithHelp("Gamma", &ctx.color_processor.params.global_gamma, 
+                                   0.5f, 3.0f, "Controls overall image brightness curve")) changed = true;
+        if (UIWidgets::SliderWithHelp("Exposure", &ctx.color_processor.params.global_exposure, 
+                                   0.1f, 5.0f, "Adjusts overall brightness level")) changed = true;
+        if (UIWidgets::SliderWithHelp("Saturation", &ctx.color_processor.params.saturation, 
+                                   0.0f, 2.0f, "Controls color intensity")) changed = true;
+        if (UIWidgets::SliderWithHelp("Temperature (K)", &ctx.color_processor.params.color_temperature, 
+                                   1000.0f, 10000.0f, "Color temperature in Kelvin", "%.0f")) changed = true;
         UIWidgets::EndSection();
     }
 
@@ -710,6 +712,7 @@ static void DrawRenderWindowToneMapControls(UIContext& ctx) {
         int selected_tone = static_cast<int>(ctx.color_processor.params.tone_mapping_type);
         if (ImGui::Combo("Tonemapping", &selected_tone, tone_names, IM_ARRAYSIZE(tone_names))) {
             ctx.color_processor.params.tone_mapping_type = static_cast<ToneMappingType>(selected_tone);
+            changed = true;
         }
         UIWidgets::HelpMarker("AGX: Balanced look | ACES: Cinema standard | Filmic: Classic film");
         UIWidgets::EndSection();
@@ -717,10 +720,10 @@ static void DrawRenderWindowToneMapControls(UIContext& ctx) {
 
     // -------- Effects --------
     if (UIWidgets::BeginSection("Effects", ImVec4(0.7f, 0.5f, 0.8f, 1.0f))) {
-        ImGui::Checkbox("Vignette", &ctx.color_processor.params.enable_vignette);
+        if (ImGui::Checkbox("Vignette", &ctx.color_processor.params.enable_vignette)) changed = true;
         if (ctx.color_processor.params.enable_vignette) {
-            UIWidgets::SliderWithHelp("Vignette Strength", &ctx.color_processor.params.vignette_strength, 
-                                       0.0f, 2.0f, "Darkening around image edges");
+            if (UIWidgets::SliderWithHelp("Vignette Strength", &ctx.color_processor.params.vignette_strength, 
+                                       0.0f, 2.0f, "Darkening around image edges")) changed = true;
         }
         UIWidgets::EndSection();
     }
@@ -728,8 +731,23 @@ static void DrawRenderWindowToneMapControls(UIContext& ctx) {
     // -------- Actions --------
     UIWidgets::Divider();
     
-    if (UIWidgets::PrimaryButton("Apply Tonemap", ImVec2(120, 0))) 
+    // Checkbox controls the persistent flag
+    ImGui::Checkbox("Enable Post-Processing", &ctx.render_settings.persistent_tonemap);
+    UIWidgets::HelpMarker("Keep post-processing active during rendering/navigation.");
+
+    // If enabled, any parameter change triggers a refresh
+    if (ctx.render_settings.persistent_tonemap && changed) {
         ctx.apply_tonemap = true;
+    }
+
+    // Force Apply button:
+    // 1. Applies effect immediately
+    // 2. ENABLES persistence so it doesn't vanish on next frame
+    if (UIWidgets::PrimaryButton("Force Apply", ImVec2(120, 0))) {
+        ctx.apply_tonemap = true;
+        ctx.render_settings.persistent_tonemap = true;
+    }
+        
     ImGui::SameLine();
     if (UIWidgets::SecondaryButton("Reset", ImVec2(80, 0))) 
         ctx.reset_tonemap = true;
@@ -1024,6 +1042,11 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
                         UIWidgets::EndSection();
                     }
+
+                    // ─────────────────────────────────────────────────────────────────────────
+                    // POST-PROCESSING & TONEMAPPING
+                    // ─────────────────────────────────────────────────────────────────────────
+                    DrawRenderWindowToneMapControls(ctx);
 
                     // ─────────────────────────────────────────────────────────────────────────
                     // ANIMATION RENDER (Sequence Export)
@@ -2568,11 +2591,8 @@ void SceneUI::drawRenderWindow(UIContext& ctx) {
             ImGui::SameLine();
             ImGui::BeginChild("RenderSettingsSidebar", ImVec2(sidebar_width, 0), true);
             
-            ImGui::TextDisabled("Render Adjustment");
-            ImGui::Separator();
-            
-            // Draw controls
-            DrawRenderWindowToneMapControls(ctx);
+            // Post-Processing moved to main window only
+            // DrawRenderWindowToneMapControls(ctx); // Removed as requested
             
             ImGui::Spacing();
             ImGui::Separator();

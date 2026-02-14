@@ -23,7 +23,7 @@
 ### 🎯 Key Highlights
 
 - **Hybrid Rendering**: Seamlessly switch between CPU (Embree/Custom BVH) and GPU (OptiX) acceleration
-- **Blender Cycles Quality**: Path tracing, adaptive sampling, and progressive rendering competing with top-tier renderers
+
 - **Production-Ready**: Principled BSDF, advanced materials, volumetrics, subsurface scattering
 - **High Performance**: Optimized BVH construction (<1s for 3.3M triangles), 75% memory-optimized triangle structure
 - **Real-time Preview**: Modern interactive UI with ImGui, animation timeline
@@ -31,72 +31,7 @@
 
 ---
 
-## 🆕 Recent Updates (Alpha - December 2024)
 
-> **Note**: This project is in **active alpha development**. Features and APIs may change.
-
-### 🎮 Expanded GPU Support (NEW!)
-
-- ✅ **Non-RTX GPU Support**: OptiX now works on GTX series GPUs using compute-based ray tracing
-  - **GTX 9xx (Maxwell)**: SM 5.0+ supported
-  - **GTX 10xx (Pascal)**: Fully supported (GTX 1080 Ti, 1070, 1060, etc.)
-  - **GTX 16xx (Turing)**: Fully supported
-  - **RTX Series**: Full hardware RT core acceleration
-  - **HUD Notification**: GPU mode displayed at startup (RTX vs Compute Mode)
-
-### 📸 Pro Camera System & Physical Lens (January 2025)
-
-- ✅ **Advanced Pro Camera HUD**: Complete overhaul of the camera interface for a professional photography experience.
-  - **Interactive Focus Ring**: Use the mouse wheel to manually pull focus with precision.
-  - **Focus Mode Control**: Dedicated slider to switch between Auto Focus (AF) and Manual Focus (MF).
-  - **Smart Auto-Focus**: Smooth, dampened transition when locking onto objects in the center of the frame.
-  - **Visual Feedback**: HUD elements react to focus changes (Green = Locked, White = Searching/Manual).
-
-- ✅ **Physically Correct Lens Distortion**:
-  - **Brown-Conrady Model**: Implemented realistic radial distortion simulation on both CPU and GPU (OptiX).
-  - **Auto-Calculated Defects**: Distortion is now derived purely from physical lens properties (Focal Length/FOV).
-  - **Wide Angle (Barrel)**: Lenses wider than 50mm naturally exhibit barrel distortion.
-  - **Telephoto (Pincushion)**: Long lenses exhibit slight pincushion distortion.
-  - **No Manual Sliders**: The "Distortion" slider has been removed in favor of this physically accurate, automatic behavior.
-
-### Project Serialization Improvements (December 31, 2024)
-
-- ✅ **Embedded Texture Serialization Fix**: GLB embedded textures now correctly saved and loaded with projects
-  - **Issue**: Embedded textures from GLB files were lost when saving/loading projects
-  - **Root Cause 1**: Member shadowing - `Material*` base pointer accessed wrong texture properties
-  - **Root Cause 2**: `MaterialManager::getOrCreateMaterialID` didn't update existing materials' textures
-  - **Solution**: Proper `PrincipledBSDF*` cast in `serializeTextures()` and texture reference updates
-
-- ✅ **Normal Map Texture Type Fix**: Fixed GPU rendering artifacts caused by incorrect texture type loading
-  - **Issue**: One triangle per polygon appeared black/inverted after project load
-  - **Root Cause**: All textures were loaded as `TextureType::Albedo`, causing sRGB conversion on normal maps
-  - **Solution**: `deserializeProperty()` now accepts texture type parameter, each property uses correct type
-
-### Animation System Improvements
-
-- ✅ **Material Keyframe Rendering Fix**: Fixed batch animation rendering where material property keyframes (albedo, emission, roughness, etc.) were not being applied during OptiX-based animation output
-  - **Issue**: Viewport playback correctly animated materials, but batch rendering showed only initial material states
-  - **Root Cause**: Missing timeline frame synchronization and GPU material buffer upload in `render_Animation` loop
-  - **Solution**: Added `render_settings.animation_current_frame` sync and `updateOptiXMaterialsOnly` call before each frame render
-  
-- ✅ **Animation Render Cancel Button**: Added functional "Stop Animation" button in UI
-  - **Issue**: No way to cancel ongoing batch animation renders
-  - **Solution**: Wired "Stop Animation" button to set `rendering_stopped_cpu` and `rendering_stopped_gpu` flags that the render loop checks
-  - **Location**: System & Output panel, visible during animation rendering
-
-### Technical Details
-
-**Files Modified**:
-- `Main.cpp`: Added `isOptixCapable()` for SM 5.0+ detection, GPU mode HUD notification
-- `compile_ptx.bat`: Updated to compile for `compute_50` (Maxwell+) compatibility
-- `Renderer.cpp`: Added timeline frame sync and material GPU upload in batch render loop
-- `scene_ui.cpp`: Connected "Stop Animation" button to rendering stop flags
-
-**Known Limitations**:
-- Non-RTX GPUs use compute-based ray tracing (2-3x slower than RTX hardware acceleration)
-- CPU viewport rendering can be slow during intensive scenes (GPU recommended)
-
----
 
 ## ✨ Features
 
@@ -108,6 +43,7 @@
   - ✅ Volumetric rendering with noise-based density
   - ✅ Subsurface Scattering (SSS)
   - ✅ Clearcoat, Anisotropic materials
+  - ✅ **Hair System**: GPU-accelerated hair rendering and simulation
   
 - **Lighting**
   - ✅ Point lights, Directional lights
@@ -199,7 +135,59 @@
 
 ---
 
-## 🚦 Quick Start
+## �️ Procedural Tools & Systems
+
+### 🏔️ Advanced Terrain Editor
+<img src="docs/images/terrain_header.jpg" width="100%" alt="Terrain Editor System">
+
+- **Sculpting Brushes**: Intuitive brushes for raising, lowering, smoothing, and flattening terrain geometry in real-time.
+- **Hydraulic & Fluvial Erosion**: 
+  - Simulate realistic water flow and sediment transport
+  - Create natural-looking riverbeds and valleys automatically
+  - Control erosion strength, rain amount, and solubility
+- **Heightmap Support**: Import/Export 16-bit heightmaps for external workflows (World Machine, Gaea).
+- **Node-Based Workflow**: <img align="right" width="300" src="docs/images/terrain_nodegraph.jpg"> Non-destructive terrain generation using a powerful node graph editor. Combine noise, filters, and masks.
+
+### 🌿 Procedural Vegetation & Foliage
+<img src="docs/images/terrain_foliage_header.jpg" width="100%" alt="Foliage System">
+
+- **GPU Instancing**: Render millions of grass blades, trees, and rocks with zero performance cost using OptiX hardware acceleration.
+- **Smart Scattering**: 
+  - Rule-based placement (slope, height, texture mask)
+  - Collision avoidance to prevent overlapping instances
+- **Paint Mode**: Manually paint forests or specific details using brush tools.
+- **Dynamic Wind**: All foliage responds to global wind parameters (strength, direction, gust).
+
+### 💇 Hair & Fur System (New!)
+<img src="docs/images/hair_header.jpg" width="100%" alt="Hair System Features">
+
+
+- **GPU Simulated & Rendered**: Fully accelerated by NVIDIA OptiX for real-time performance.
+- **Grooming Brushes**:
+  - **Comb**: Style hair direction naturally
+  - **Cut/Grow**: Adjust length interactively
+  - **Smooth**: Relax hair strands
+- **Physics Integration**: Hair strands collide with character meshes and respond to gravity/forces.
+- **Material Support**: Melanin-based hair BSDF for realistic rendering.
+
+### 🌊 Realistic Water & Ocean
+<img src="docs/images/water_header.jpg" width="100%" alt="Ocean Simulation">
+
+- **FFT Ocean Simulation**: Fast Fourier Transform based deep ocean waves with foam generation.
+- **Caustics**: Realistic light refraction and caustic patterns on the seabed.
+- **Underwater Volumetrics**: Fog density and absorption based on depth.
+
+### 🏞️ River Tool
+<img src="docs/images/river_header.jpg" width="100%" alt="River Tool">
+
+- **Spline-Based Generation**: Draw rivers using intuitive bezier curves.
+- **Auto-Carving**: Rivers automatically carve their path into the terrain.
+- **Flow Mapping**: Water texture flows along the spline direction naturally.
+- **Physics Interaction**: Objects float and drift according to river flow velocity.
+
+---
+
+## �🚦 Quick Start
 
 ### Prerequisites
 
@@ -338,31 +326,7 @@ RayTrophi/
 
 ---
 
-## ⚡ Performance
 
-### BVH Construction (3.3M Triangles)
-
-| BVH Type       | Build Time | Quality | Use Case              |
-|----------------|------------|---------|------------------------|
-| Embree         | **872 ms** | High    | Production rendering   |
-| ParallelBVH    | ~2000 ms   | High    | Custom research/debug  |
-| OptiX (GPU)    | ~150 ms    | Very High | Real-time GPU        |
-
-### Rendering Speed
-
-- **CPU (Embree)**: ~1-5 million rays/s (16 threads)
-- **GPU (OptiX RTX 3080)**: ~100-500 million rays/s
-- **Memory**: 146 bytes/triangle (optimized layout)
-
-### Optimizations Applied
-
-- ✅ Direct Embree buffer writes (no intermediate vectors)
-- ✅ Vector pre-allocation with `reserve()`
-- ✅ Two-pass BVH construction (count → allocate → build)
-- ✅ Embree build quality tuning (MEDIUM for speed)
-- ✅ Material ID lookup via MaterialManager (no shared_ptr in Triangle)
-
----
 
 ## 🎨 Gallery
 

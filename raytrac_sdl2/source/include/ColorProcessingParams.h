@@ -169,26 +169,52 @@ private:
             std::clamp(color.z * b_factor, 0.0f, 1.0f)
         );
     }
-    Vec3 FilmicTonemap(const Vec3& x) {
-        const float A = 2.0f;
-        return x / (x + Vec3(A));
+    Vec3 FilmicTonemap(const Vec3& color) {
+        // "Filmic" curve based on Jim Hejl and Richard Burgess-Dawson (HBD)
+        // Matches typical "Filmic" value response.
+        
+        // Linearize input (color - 0.004)
+        Vec3 x = color - Vec3(0.004f);
+        x.x = (std::max)(0.0f, x.x);
+        x.y = (std::max)(0.0f, x.y);
+        x.z = (std::max)(0.0f, x.z);
+
+        // HBD Formula: (x*(6.2x + 0.5)) / (x*(6.2x + 1.7) + 0.06)
+        // Applied component-wise to avoid vector operator ambiguity
+        auto curve = [](float v) {
+            return (v * (6.2f * v + 0.5f)) / (v * (6.2f * v + 1.7f) + 0.06f);
+        };
+        
+        // HBD outputs Gamma 2.2 encoded color. We linearize it with pow 2.2
+        // because the pipeline applies Global Gamma later.
+        return Vec3(
+            std::pow(curve(x.x), 2.2f),
+            std::pow(curve(x.y), 2.2f),
+            std::pow(curve(x.z), 2.2f)
+        );
     }
     Vec3 UnchartedFilmic(const Vec3& x) {
-        const float A = 0.15f;
-        const float B = 0.50f;
-        const float C = 0.10f;
-        const float D = 0.20f;
-        const float E = 0.02f;
-        const float F = 0.30f;
+        float A = 0.15f;
+        float B = 0.50f;
+        float C = 0.10f;
+        float D = 0.20f;
+        float E = 0.02f;
+        float F = 0.30f;
+        float W = 11.2f;
 
         auto tonemap = [&](float v) {
             return ((v * (A * v + C * B) + D * E) / (v * (A * v + B) + D * F)) - E / F;
-            };
+        };
 
+        // Pre-exposure bias 2.0 (standard for Uncharted 2 implementation)
+        Vec3 curr = x * 2.0f;
+        
+        float whiteScale = 1.0f / tonemap(W);
+        
         return Vec3(
-            std::clamp(tonemap(x.x), 0.0f, 1.0f),
-            std::clamp(tonemap(x.y), 0.0f, 1.0f),
-            std::clamp(tonemap(x.z), 0.0f, 1.0f)
+            tonemap(curr.x) * whiteScale,
+            tonemap(curr.y) * whiteScale,
+            tonemap(curr.z) * whiteScale
         );
     }
 
