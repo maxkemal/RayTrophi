@@ -16,6 +16,7 @@
 #include "VDBVolume.h"
 #include "GasVolume.h"
 #include "ForceField.h"
+#include "MeshModifiers.h"
 
 #include <string>
 
@@ -45,6 +46,10 @@ struct SceneData {
     HittableList world;                                    // All renderable objects
     std::shared_ptr<Hittable> bvh;                         // Acceleration structure
     
+    // Non-destructive Modeling Cache
+    std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> base_mesh_cache; // nodeName -> list of Triangles
+    std::unordered_map<std::string, MeshModifiers::ModifierStack> mesh_modifiers;          // nodeName -> Modifier Stack
+
     // =========================================================================
     // Animation Data
     // =========================================================================

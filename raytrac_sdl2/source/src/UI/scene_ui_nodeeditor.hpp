@@ -70,7 +70,8 @@ public:
         categories = {
             {"Input", ImVec4(0.2f, 0.7f, 0.3f, 1.0f), {
                 {NodeType::HeightmapInput, "Heightmap"},
-                {NodeType::NoiseGenerator, "Noise Generator"}
+                {NodeType::NoiseGenerator, "Noise Generator"},
+                {NodeType::HardnessInput, "Hardness Input"}
             }},
             {"Erosion", ImVec4(0.3f, 0.5f, 0.9f, 1.0f), {
                 {NodeType::ErosionWizard, "Erosion Wizard"},
@@ -112,7 +113,8 @@ public:
             }},
             {"Output", ImVec4(0.9f, 0.3f, 0.3f, 1.0f), {
                 {NodeType::HeightOutput, "Height Output"},
-                {NodeType::SplatOutput, "Splat Output"}
+                {NodeType::SplatOutput, "Splat Output"},
+                {NodeType::HardnessOutput, "Hardness Output"}
             }},
             {"Texture", ImVec4(0.8f, 0.6f, 0.2f, 1.0f), {
                 {NodeType::AutoSplat, "Auto Splat"}

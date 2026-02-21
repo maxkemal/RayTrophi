@@ -588,6 +588,8 @@ void OptixWrapper::setupPipeline(const PtxData& ptx_data) {
     hair_shadow_desc.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hair_shadow_desc.hitgroup.moduleCH = hitgroup_module;
     hair_shadow_desc.hitgroup.entryFunctionNameCH = "__closesthit__shadow";
+    hair_shadow_desc.hitgroup.moduleAH = hitgroup_module;
+    hair_shadow_desc.hitgroup.entryFunctionNameAH = "__anyhit__hair_shadow";
     hair_shadow_desc.hitgroup.moduleIS = curveIS_module;
     log_size = sizeof(log);
     OPTIX_CHECK(optixProgramGroupCreate(context, &hair_shadow_desc, 1, &pg_options, log, &log_size, &hair_shadow_pg));
@@ -769,6 +771,9 @@ void OptixWrapper::buildFromData(const OptixGeometryData& data) {
         size_t mat_size = data.materials.size() * sizeof(GpuMaterial);
         cudaMalloc(reinterpret_cast<void**>(&d_materials), mat_size);
         cudaMemcpy(reinterpret_cast<void*>(d_materials), data.materials.data(), mat_size, cudaMemcpyHostToDevice);
+        m_material_count = static_cast<int>(data.materials.size());
+    } else {
+        m_material_count = 0;
     }
 
     // GpuVolumetricInfo verilerini GPU'ya gönder (YENİ!!)
@@ -1970,20 +1975,38 @@ void OptixWrapper::updateMaterialBuffer(const std::vector<GpuMaterial>& material
         return;
     }
     
-    if (!d_materials) {
-        SCENE_LOG_WARN("[OptiX] updateMaterialBuffer: d_materials not allocated");
-        return;
+    size_t new_count = materials.size();
+    size_t new_size_bytes = new_count * sizeof(GpuMaterial);
+
+    // If we have a valid pointer but need to resize
+    if (d_materials && new_count > (size_t)m_material_count) {
+        cudaFree(d_materials);
+        d_materials = nullptr;
     }
-    
-    size_t mat_size = materials.size() * sizeof(GpuMaterial);
-    cudaError_t err = cudaMemcpy(d_materials, materials.data(), mat_size, cudaMemcpyHostToDevice);
-    m_material_count = static_cast<int>(materials.size());
+
+    // Allocate if needed
+    if (!d_materials) {
+        cudaError_t err = cudaMalloc(&d_materials, new_size_bytes);
+        if (err != cudaSuccess) {
+            SCENE_LOG_ERROR("[OptiX] Failed to allocate material buffer: " + std::string(cudaGetErrorString(err)));
+            return;
+        }
+        
+        // Update Params Pointer and mark dirty
+        params.materials = d_materials;
+        params_dirty = true;
+        
+        SCENE_LOG_INFO("[OptiX] Material buffer allocated. New Count: " + std::to_string(new_count));
+    }
+
+    // Upload Data
+    cudaError_t err = cudaMemcpy(d_materials, materials.data(), new_size_bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         SCENE_LOG_ERROR("[OptiX] updateMaterialBuffer failed: " + std::string(cudaGetErrorString(err)));
         return;
     }
     
-   // SCENE_LOG_INFO("[OptiX] Material buffer updated: " + std::to_string(materials.size()) + " materials");
+    m_material_count = static_cast<int>(new_count);
 }
 
 void OptixWrapper::syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain) {
@@ -2021,6 +2044,12 @@ void OptixWrapper::updateSBTMaterialBindings(const std::vector<int>& material_in
     }
     
   //  SCENE_LOG_INFO("[OptiX] SBT material bindings updated: " + std::to_string(material_indices.size()) + " triangles");
+}
+
+void OptixWrapper::updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id) {
+    if (accel_manager) {
+        accel_manager->updateMeshMaterialBinding(node_name, old_mat_id, new_mat_id);
+    }
 }
 
 void OptixWrapper::updateSBTVolumetricData(const std::vector<OptixGeometryData::VolumetricInfo>& volumetric_info) {
@@ -2374,6 +2403,12 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
         auto mesh_groups = OptixAccelManager::groupTrianglesByMesh(static_triangles);
         
         for (const auto& mesh : mesh_groups) {
+            // Determine if this mesh part is skinned
+            bool isSkinned = false;
+            if (!mesh.triangle_indices.empty()) {
+                isSkinned = static_triangles[mesh.triangle_indices[0]]->hasSkinData();
+            }
+
             // Extract geometry (WORLD SPACE - using getVertexPosition)
             // This ensures static geometry matches exactly what is on CPU
             MeshGeometry geom;
@@ -2420,20 +2455,30 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                 geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
                 geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
                 
-                // SKINNING DATA
-                if (tri->hasSkinData()) {
-                    for (int k = 0; k < 3; ++k) {
-                        const auto& weights = tri->getSkinBoneWeights(k);
-                        int4 bi = make_int4(-1, -1, -1, -1);
-                        float4 bw = make_float4(0, 0, 0, 0);
-                        for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
-                            if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
-                            else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
-                            else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
-                            else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                // SKINNING DATA: Only push if the triangle and group are skinned
+                // (Guaranteed to match because of grouping key (_skinned vs _static))
+                if (isSkinned) {
+                    if (tri->hasSkinData()) {
+                        for (int k = 0; k < 3; ++k) {
+                            const auto& weights = tri->getSkinBoneWeights(k);
+                            int4 bi = make_int4(-1, -1, -1, -1);
+                            float4 bw = make_float4(0, 0, 0, 0);
+                            for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
+                                if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                                else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                                else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                                else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                            }
+                            geom.boneIndices.push_back(bi);
+                            geom.boneWeights.push_back(bw);
                         }
-                        geom.boneIndices.push_back(bi);
-                        geom.boneWeights.push_back(bw);
+                    } else {
+                        // Group is skinned but this triangle has no skin data (unlikely but possible)
+                        // Push identity weights to maintain vertex/bone buffer alignment
+                        for (int k = 0; k < 3; ++k) {
+                            geom.boneIndices.push_back(make_int4(-1, -1, -1, -1));
+                            geom.boneWeights.push_back(make_float4(0, 0, 0, 0));
+                        }
                     }
                 }
                 
@@ -2462,12 +2507,12 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                      transform[8] = m.m[2][0]; transform[9] = m.m[2][1]; transform[10] = m.m[2][2]; transform[11] = m.m[2][3];
                  }
 
-                                   int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, InstanceType::Mesh, geom.mesh_name, (void*)(mesh.triangle_indices.empty() ? nullptr : static_triangles[mesh.triangle_indices[0]].get()));
+                                   int inst_id = accel_manager->addInstance(mesh_id, transform, geom.material_id, InstanceType::Mesh, geom.original_name, (void*)(mesh.triangle_indices.empty() ? nullptr : static_triangles[mesh.triangle_indices[0]].get()));
 
                  
                  if (inst_id >= 0) {
-                     node_to_instance[geom.mesh_name].push_back(inst_id);
-                     instance_to_node[inst_id] = geom.mesh_name;
+                     node_to_instance[geom.original_name].push_back(inst_id);
+                     instance_to_node[inst_id] = geom.original_name;
                  }
             }
         }
@@ -2494,7 +2539,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             mesh_ids = processed_sources[source_key];
         } 
         else {
-            // Group source triangles by Mesh/Material manually
+            // Group source triangles by Mesh/Material/Skinning
             std::unordered_map<std::string, MeshData> groups;
             for (size_t i = 0; i < inst->source_triangles->size(); ++i) {
                 Triangle* tri = (*inst->source_triangles)[i].get();
@@ -2503,9 +2548,11 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                 std::string base = tri->getNodeName();
                 if (base.empty()) base = "inst_source";
                 int mat = tri->getMaterialID();
+                bool hasSkin = tri->hasSkinData();
                 
-                // Unique key for this part
-                std::string key = base + "_mat_" + std::to_string(mat);
+                // Unique key for this part (matches OptixAccelManager logic)
+                std::string key = base + "_mat_" + std::to_string(mat) + 
+                                 (hasSkin ? "_skinned" : "_static");
                 
                 auto& m = groups[key];
                 if (m.mesh_name.empty()) {
@@ -2518,8 +2565,11 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
             
             // Build/Find BLAS for each group
             for (const auto& [key, grp] : groups) {
-                // Check if BLAS already exists (from Step 3)
-                int existing_id = accel_manager->findBLAS(grp.original_name, grp.material_id);
+                // Determine skinning status for this group
+                bool isSkinned = (key.find("_skinned") != std::string::npos);
+                
+                // Check if BLAS already exists (from Step 3 or previous instance)
+                int existing_id = accel_manager->findBLAS(grp.original_name, grp.material_id, isSkinned);
                 
                 if (existing_id != -1) {
                     mesh_ids.push_back(existing_id);
@@ -2532,8 +2582,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                     
                     for (int idx : grp.triangle_indices) {
                         Triangle* tri = (*inst->source_triangles)[idx].get();
-                        // Use Original/Local positions for Instances using Lazy Scatter
-                        // Instance Transform will place them.
+                        // ...
                         Vec3 v0 = tri->getOriginalVertexPosition(0);
                         Vec3 v1 = tri->getOriginalVertexPosition(1);
                         Vec3 v2 = tri->getOriginalVertexPosition(2);
@@ -2557,20 +2606,29 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
                         geom.colors.push_back(toFloat3(tri->getVertexColor(1)));
                         geom.colors.push_back(toFloat3(tri->getVertexColor(2)));
 
-                        // SKINNING DATA
-                        if (tri->hasSkinData()) {
-                            for (int k = 0; k < 3; ++k) {
-                                const auto& weights = tri->getSkinBoneWeights(k);
-                                int4 bi = make_int4(-1, -1, -1, -1);
-                                float4 bw = make_float4(0, 0, 0, 0);
-                                for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
-                                    if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
-                                    else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
-                                    else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
-                                    else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                        // SKINNING DATA: Ensure we always push data if the group is skinned to maintain buffer alignment
+                        if (isSkinned) {
+                            if (tri->hasSkinData()) {
+                                for (int k = 0; k < 3; ++k) {
+                                    const auto& weights = tri->getSkinBoneWeights(k);
+                                    int4 bi = make_int4(-1, -1, -1, -1);
+                                    float4 bw = make_float4(0, 0, 0, 0);
+                                    for (size_t w = 0; w < (std::min)(weights.size(), (size_t)4); ++w) {
+                                        if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
+                                        else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
+                                        else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
+                                        else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                                    }
+                                    geom.boneIndices.push_back(bi);
+                                    geom.boneWeights.push_back(bw);
                                 }
-                                geom.boneIndices.push_back(bi);
-                                geom.boneWeights.push_back(bw);
+                            } else {
+                                // Group is skinned but this triangle has no skin data (unlikely but possible)
+                                // Push identity weights to maintain vertex/bone buffer alignment
+                                for (int k = 0; k < 3; ++k) {
+                                    geom.boneIndices.push_back(make_int4(-1, -1, -1, -1));
+                                    geom.boneWeights.push_back(make_float4(0, 0, 0, 0));
+                                }
                             }
                         }
 
@@ -2889,24 +2947,24 @@ std::vector<int> OptixWrapper::cloneInstancesByNodeName(const std::string& sourc
 void OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, TerrainObject* terrain) {
     if (!accel_manager || !terrain || !use_tlas_mode) return;
     
-    // 1. Find the BLAS ID for this terrain
-    int blas_id = accel_manager->findBLAS(node_name, terrain->material_id);
+    // 1. Find the BLAS ID for this terrain (Terrain is never skinned)
+    int blas_id = accel_manager->findBLAS(std::string(node_name), (int)terrain->material_id, false);
     if (blas_id == -1) {
         // Fallback 1: Try with "_Chunk" suffix (Common for TerrainMgr chunks)
         std::string chunk_name = node_name + "_Chunk";
-        blas_id = accel_manager->findBLAS(chunk_name, terrain->material_id);
+        blas_id = accel_manager->findBLAS(std::string(chunk_name), (int)terrain->material_id, false);
         
         if (blas_id == -1) {
              // Fallback 2: Try explicit material suffix
              std::string alt_name = node_name;
              if (terrain->material_id > 0) alt_name += "_mat_" + std::to_string(terrain->material_id);
-             blas_id = accel_manager->findBLAS(alt_name, terrain->material_id);
+             blas_id = accel_manager->findBLAS(std::string(alt_name), (int)terrain->material_id, false);
              
              if (blas_id == -1) {
                  // Fallback 3: Chunk + Material Suffix
                  std::string chunk_mat = chunk_name;
                  if (terrain->material_id > 0) chunk_mat += "_mat_" + std::to_string(terrain->material_id);
-                 blas_id = accel_manager->findBLAS(chunk_mat, terrain->material_id);
+                 blas_id = accel_manager->findBLAS(std::string(chunk_mat), (int)terrain->material_id, false);
                  
                  if (blas_id == -1) {
                      SCENE_LOG_ERROR("updateTerrainBLASPartial: FAILED to find BLAS for terrain: " + node_name + " (MatID: " + std::to_string(terrain->material_id) + ")");
@@ -2961,19 +3019,19 @@ void OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, con
 
     for (const auto& group : groups) {
          // 2. Find BLAS ID
-         // Try exact match first
-         int blas_id = accel_manager->findBLAS(group.mesh_name, group.material_id);
+         // Try original name with correct skinning status first
+         int blas_id = accel_manager->findBLAS(std::string(group.original_name), (int)group.material_id, (bool)group.has_skinning);
          
          if (blas_id == -1) {
              // Fallback: Try constructing name from node_name + material
              std::string alt_name = node_name;
              if (group.material_id > 0) alt_name += "_mat_" + std::to_string(group.material_id);
              
-             blas_id = accel_manager->findBLAS(alt_name, group.material_id);
+             blas_id = accel_manager->findBLAS(std::string(alt_name), (int)group.material_id, (bool)group.has_skinning);
              
              if (blas_id == -1) {
                   // Fallback 2: Try original name
-                  blas_id = accel_manager->findBLAS(group.original_name, group.material_id);
+                  blas_id = accel_manager->findBLAS(std::string(group.original_name), (int)group.material_id, (bool)group.has_skinning);
              }
          }
 
@@ -3238,6 +3296,7 @@ void OptixWrapper::buildHairGeometry(
     const uint32_t* strand_ids,
     const float3* tangents,
     const float2* root_uvs,
+    const float* strand_v,
     size_t vertex_count,
     size_t segment_count,
     const GpuHairMaterial& material,
@@ -3280,6 +3339,10 @@ void OptixWrapper::buildHairGeometry(
     
     if (root_uvs) {
         curve_geom.root_uvs.assign(root_uvs, root_uvs + segment_count);
+    }
+    
+    if (strand_v) {
+        curve_geom.strand_v.assign(strand_v, strand_v + segment_count);
     }
 
     int curve_blas_id = accel_manager->buildCurveBLAS(curve_geom);

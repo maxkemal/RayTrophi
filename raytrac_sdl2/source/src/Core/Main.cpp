@@ -123,6 +123,7 @@ float pitch = 0.0f;
 bool dragging = false;
 int last_mouse_x = 0;
 int last_mouse_y = 0;
+float current_nav_dist = 10.0f; // NEW: Dynamic distance for sensitivity scaling
 float move_speed = 0.5f;
 HitRecord hit_record;
 Ray ray;
@@ -535,12 +536,26 @@ void init_RayTrophi_Pro_Dark_Thema()
 
 int main(int argc, char* argv[]) {
     setlocale(LC_ALL, "Turkish");
+    
+    // Save project path passed via command line
+    std::string project_to_load = "";
+    if (argc > 1) {
+        project_to_load = std::filesystem::absolute(argv[1]).string();
+    }
+    
 #ifdef _WIN32
-
     // Konsolu tamamen kapat
     FreeConsole();
-
+    
+    char exePath[MAX_PATH];
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    std::filesystem::current_path(std::filesystem::path(exePath).parent_path());
+#else
+    if (argc > 0) {
+        std::filesystem::current_path(std::filesystem::path(argv[0]).parent_path());
+    }
 #endif
+
    // SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
  // Önce SDL açılacak
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
@@ -631,9 +646,20 @@ int main(int argc, char* argv[]) {
         SCENE_LOG_WARN("Falling back to CPU rendering.");
     }
 
-    // Create Default Scene
-    if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
-    createDefaultScene(scene, ray_renderer, g_hasOptix ? &optix_gpu : nullptr);
+    // Load Project or Create Default Scene
+    if (!project_to_load.empty() && std::filesystem::exists(project_to_load)) {
+        if (splashOk) { splash.setStatus("Loading Project..."); splash.render(); }
+        ProjectManager::getInstance().openProject(project_to_load, scene, render_settings, ray_renderer, g_hasOptix ? &optix_gpu : nullptr,
+            [&](int progress, const std::string& msg) {
+                if (splashOk) {
+                    splash.setStatus(msg);
+                    splash.render();
+                }
+            });
+    } else {
+        if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
+        createDefaultScene(scene, ray_renderer, g_hasOptix ? &optix_gpu : nullptr);
+    }
     ui.invalidateCache(); // Ensure procedural objects are listed/selectable
     
     // Build initial BVH and OptiX structures
@@ -763,6 +789,44 @@ int main(int argc, char* argv[]) {
                 dragging = true;
                 last_mouse_x = e.button.x;
                 last_mouse_y = e.button.y;
+
+                // --- Navigation Distance Calibration ---
+                // We raycast on middle-click to determine what the user is interacting with.
+                // This updates 'current_nav_dist' to provide perfect panning/rotation speed.
+                if (scene.initialized && scene.camera && scene.bvh && !ImGui::GetIO().WantCaptureMouse) {
+                    int win_w, win_h;
+                    SDL_GetWindowSize(window, &win_w, &win_h);
+                    
+                    // Convert screen pixels to NDC-like coordinates [0, 1] for get_ray
+                    float u = (float)e.button.x / (float)win_w;
+                    float v = (float)(win_h - e.button.y) / (float)win_h;
+                    
+                    Ray r = scene.camera->get_ray(u, v);
+                    HitRecord rec;
+
+                    // FIX: Always sync current yaw/pitch from camera direction to prevent "one-time snap" 
+                    // if the camera was moved by presets or other logic since last drag.
+                    Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
+                    pitch = asinf(std::clamp(dir.y, -0.999f, 0.999f)) * 180.0f / 3.1415926535f;
+                    yaw = atan2f(dir.z, dir.x) * 180.0f / 3.1415926535f;
+
+                    if (scene.bvh->hit(r, 0.001f, 10000.0f, rec)) {
+                        // Cap the nav distance to something sane for panning/sensitivity (prevents "extreme movement")
+                        current_nav_dist = std::min(rec.t, 500.0f);
+                        
+                        // If not in Manual Focus mode (mode 0), sync pivot and focus_dist
+                        if (ui.viewport_settings.focus_mode != 0) {
+                            scene.camera->focus_dist = rec.t;
+                            // FIXED: Use current forward direction instead of ray 'r' to prevent camera "turn snap"
+                            scene.camera->lookat = scene.camera->lookfrom + dir * rec.t;
+                            scene.camera->update_camera_vectors();
+                            g_camera_dirty = true;
+                        }
+                    } else {
+                        // Fallback to existing focus distance if hitting background
+                        current_nav_dist = std::min(scene.camera->focus_dist, 500.0f);
+                    }
+                }
             }
             if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT && !input_locked) {
                 if (!ImGui::GetIO().WantCaptureMouse) {
@@ -789,8 +853,11 @@ int main(int argc, char* argv[]) {
                     bool is_shift_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
 
                     if (is_shift_pressed) {
-                        float pan_speed = (0.015f + render_settings.mouse_sensitivity * 0.04f) * scene.camera->focus_dist; 
-                        Vec3 offset = scene.camera->u * -(float)dx * pan_speed + scene.camera->v * (float)dy * pan_speed;
+                    // Optimized pan speed calculation: smaller base constant and dynamic distance scaling
+                    float pan_multiplier = 0.0015f + render_settings.mouse_sensitivity * 0.015f;
+                    float pan_speed = pan_multiplier * current_nav_dist;
+                    
+                    Vec3 offset = scene.camera->u * -(float)dx * pan_speed + scene.camera->v * (float)dy * pan_speed;
                         scene.camera->lookfrom += offset;
                         scene.camera->lookat += offset;
                         scene.camera->update_camera_vectors();
@@ -798,7 +865,7 @@ int main(int argc, char* argv[]) {
                     else {
                         bool is_ctrl_pressed = state[SDL_SCANCODE_LCTRL] || state[SDL_SCANCODE_RCTRL];
                         if (is_ctrl_pressed) {
-                            float zoom_speed = 0.05f * scene.camera->focus_dist;
+                            float zoom_speed = 0.04f * current_nav_dist;
                             float zoom_amount = -(float)dy * zoom_speed * 0.1f; 
                             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                             scene.camera->lookfrom += forward * zoom_amount;
@@ -1238,7 +1305,7 @@ int main(int argc, char* argv[]) {
         bool keyboard_locked = ui_ctx.render_settings.animation_render_locked || 
                               (rendering_in_progress && ui_ctx.is_animation_mode);
 
-        if (mouse_control_enabled && scene.camera && !keyboard_locked) {
+        if (mouse_control_enabled && scene.camera && !keyboard_locked && !ImGui::GetIO().WantCaptureKeyboard) {
 
             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();
             Vec3 right = Vec3::cross(forward, scene.camera->vup).normalize();
@@ -1421,17 +1488,15 @@ int main(int argc, char* argv[]) {
                         // ============ SYNCHRONOUS OPTIX RENDER (No Thread) ============
                         // Each pass is ~10-50ms for 1 sample, fast enough for UI
                         
-                        // OPTIMIZATION: Only update animation state when timeline frame changed
-                        // Skip during camera-only movement to avoid expensive geometry updates
-                        // ALSO: Skip for manual keyframes - TimelineWidget::draw() handles those
-                        static int last_anim_frame = -1;
+                        // OPTIMIZATION: Call every frame to allow AnimGraph autonomous playback
+                        // (breathing, idle, or node-graph based movement) even when timeline is stopped.
+                        // Renderer::updateAnimationState now internaly manages deltas.
                         bool geometry_updated = false;
                         bool has_file_animations = !scene.animationDataList.empty();
                         
-                        if (current_f != last_anim_frame && has_file_animations) {
-                            geometry_updated = ray_renderer.updateAnimationState(scene, time);
-                            last_anim_frame = current_f;
-                        }
+                        // We still need to pass the target timeline time
+                        bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
+                        geometry_updated = ray_renderer.updateAnimationState(scene, time, false, force_bind_pose);
 
                         // WIND ANIMATION (Independent of FBX animations)
                         // Checks if any InstanceGroup has wind enabled and updates matrices
@@ -1631,11 +1696,13 @@ int main(int argc, char* argv[]) {
                         // AND when we have file-based animations (not manual keyframes)
                         static int last_cpu_anim_frame = -1;
                         bool has_file_animations = !scene.animationDataList.empty();
-                        if (current_f != last_cpu_anim_frame && has_file_animations) {
-                             if (ray_renderer.updateAnimationState(scene, time)) {
+                        if (has_file_animations) {
+                             // CPU mode: apply CPU vertex skinning for ray-triangle intersection
+                             bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
+                             if (ray_renderer.updateAnimationState(scene, time, true, force_bind_pose)) {
                                  // Geometry changed (skinning applied), trigger BVH update
-                                 g_cpu_bvh_refit_pending = true; 
-                                 ray_renderer.resetCPUAccumulation();
+                                 g_cpu_bvh_refit_pending = true;
+                                 // Note: resetCPUAccumulation already called inside updateAnimationWithGraph
                              }
                              last_cpu_anim_frame = current_f;
                         }
@@ -1836,7 +1903,7 @@ int main(int argc, char* argv[]) {
                     
                     if (has_file_animations) {
                         // File-based animations present - need full update (Assimp skinning, node hierarchy)
-                        bool geometry_modified = ray_renderer.updateAnimationState(scene, time);
+                        bool geometry_modified = ray_renderer.updateAnimationState(scene, time, !ui_ctx.render_settings.use_optix);
                         
                         // CRITICAL: Update CPU BVH so viewport 'sees' the new pose (Fixes BBox/Selection)
                         if (geometry_modified && !ui_ctx.render_settings.use_optix) {

@@ -2,6 +2,7 @@
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 namespace AnimationGraph {
     
@@ -91,6 +92,9 @@ namespace AnimationGraph {
         metadata.typeId = "AnimClip";
         metadata.headerColor = COLOR_INPUT;
         
+        isPlaying = true;  // Default to playing for immediate feedback
+        loop = true;       // Standard for clips
+        
         setupPins();
     }
     
@@ -108,98 +112,125 @@ namespace AnimationGraph {
     PoseData AnimClipNode::computePose(AnimationEvalContext& ctx) {
         PoseData result;
         
-        if (clipName.empty() || !ctx.clipsPtr) {
+        if (clipName.empty() || !ctx.clipsPtr || !ctx.boneData) {
             return result;
         }
         
-        // Find the clip
+        // 1. Find the clip
         const AnimationClip* clip = nullptr;
         for (auto& c : *ctx.clipsPtr) {
-            if (c.name == clipName) {
-                clip = &c;
-                break;
-            }
+            if (c.name == clipName) { clip = &c; break; }
         }
         
-        if (!clip || !clip->sourceData) {
-            return result;
-        }
+        if (!clip || !clip->sourceData) return result;
         
-        // Update time
+        // 2. Update time (Unreal Style)
+        float prevTime = currentTime;
+        float currTimeTemp = currentTime;
+        
         if (isPlaying) {
-            currentTime += ctx.deltaTime * playbackSpeed;
-            
-            // Handle looping
+            currTimeTemp += ctx.deltaTime * playbackSpeed;
             float duration = clip->getDurationInSeconds();
-            if (duration > 0.0f) {
-                if (loop) {
-                    currentTime = fmodf(currentTime, duration);
-                    if (currentTime < 0) currentTime += duration;
-                } else {
-                    currentTime = std::max(0.0f, std::min(currentTime, duration));
+            
+            // --- ROOT MOTION EXTRACTION ---
+            if (ctx.useRootMotion && clip->sourceData) {
+                double tps = clip->sourceData->ticksPerSecond;
+                auto extractRM = [&](float startT, float endT) {
+                    float startTicks = startT * (float)tps;
+                    float endTicks = endT * (float)tps;
+                    auto posIt = clip->sourceData->positionKeys.find(ctx.rootMotionBone);
+                    if (posIt != clip->sourceData->positionKeys.end() && !posIt->second.empty()) {
+                        Vec3 posPrev = sampleVectorKey(posIt->second, startTicks, clip->sourceData->duration, false);
+                        Vec3 posCurr = sampleVectorKey(posIt->second, endTicks, clip->sourceData->duration, false);
+                        result.rootMotion.positionDelta = result.rootMotion.positionDelta + (posCurr - posPrev);
+                        result.rootMotion.hasPosition = true;
+                    }
+                };
+                
+                if (loop && duration > 0.0f && currTimeTemp >= duration) {
+                    extractRM(prevTime, duration);
+                    extractRM(0.0f, fmodf(currTimeTemp, duration));
+                } else if (duration > 0.0f) {
+                    extractRM(prevTime, currTimeTemp);
                 }
             }
+            
+            currentTime = currTimeTemp;
+            if (duration > 0.0f) {
+                if (loop) currentTime = fmodf(currentTime, duration);
+                else currentTime = std::clamp(currentTime, 0.0f, duration);
+            }
         }
         
-        // Sample animation at current time
-        if (!ctx.boneData) {
-            return result;
-        }
+        // 3. Sample Animation to TRS (Industry Standard)
+        size_t boneCount = ctx.boneData->boneNameToIndex.size();
+        result.trsTransforms.resize(boneCount);
+        result.boneTransforms.resize(boneCount);
+        result.wasUpdated = isPlaying && (ctx.deltaTime > 0.0f);
         
         float timeInTicks = currentTime * clip->ticksPerSecond;
-        std::shared_ptr<AnimationData> anim = clip->sourceData;
+        auto anim = clip->sourceData;
         
-        // Initialize result
-        size_t boneCount = ctx.boneData->boneNameToIndex.size();
-        result.boneTransforms.resize(boneCount, Matrix4x4::identity());
-        result.boneNames.resize(boneCount);
-        
-        // Sample each bone
         for (const auto& [boneName, boneIndex] : ctx.boneData->boneNameToIndex) {
-            result.boneNames[boneIndex] = boneName;
-            
-            // Get animated transform
-            Matrix4x4 transform = Matrix4x4::identity();
-            bool hasAnimation = false;
-            
-            // Position
+            BoneTransform trs;
+            // Match AnimationController: when a clip is active, we build from tracks directly.
+            // Omitted tracks remain Identity. Do not fallback to Bind Pose values, as 
+            // the legacy controller ignores defaultTransform if the clip exists.
+
+            // Override with Animation Keys if they exist
             auto posIt = anim->positionKeys.find(boneName);
-            if (posIt != anim->positionKeys.end() && !posIt->second.empty()) {
-                const auto& keys = posIt->second;
-                Vec3 pos = sampleVectorKey(keys, timeInTicks, anim->duration);
-                transform = Matrix4x4::translation(pos);
-                hasAnimation = true;
-            }
+            if (posIt != anim->positionKeys.end() && !posIt->second.empty())
+                trs.translation = sampleVectorKey(posIt->second, timeInTicks, anim->duration);
             
-            // Rotation
             auto rotIt = anim->rotationKeys.find(boneName);
-            if (rotIt != anim->rotationKeys.end() && !rotIt->second.empty()) {
-                const auto& keys = rotIt->second;
-                Quaternion rot = sampleQuatKey(keys, timeInTicks, anim->duration);
-                transform = transform * rot.toMatrix();
-                hasAnimation = true;
-            }
+            if (rotIt != anim->rotationKeys.end() && !rotIt->second.empty())
+                trs.rotation = sampleQuatKey(rotIt->second, timeInTicks, anim->duration);
             
-            // Scale
             auto sclIt = anim->scalingKeys.find(boneName);
-            if (sclIt != anim->scalingKeys.end() && !sclIt->second.empty()) {
-                const auto& keys = sclIt->second;
-                Vec3 scl = sampleVectorKey(keys, timeInTicks, anim->duration);
-                transform = transform * Matrix4x4::scaling(scl);
-                hasAnimation = true;
+            if (sclIt != anim->scalingKeys.end() && !sclIt->second.empty())
+                trs.scale = sampleVectorKey(sclIt->second, timeInTicks, anim->duration, true);
+            
+            // ROOT MOTION ZEROING
+            if (ctx.useRootMotion && boneName == ctx.rootMotionBone) {
+                trs.translation = Vec3(0, 0, 0);
             }
             
-            if (hasAnimation) {
-                // Apply offset matrix
-                auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
-                if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
-                    result.boneTransforms[boneIndex] = transform * offsetIt->second;
-                } else {
-                    result.boneTransforms[boneIndex] = transform;
-                }
-            }
+            result.trsTransforms[boneIndex] = trs;
+            result.boneTransforms[boneIndex] = trs.toMatrix();
         }
         
+        // Include animated nodes that aren't in boneNameToIndex (e.g. Armature, RootNode that lack skin weights)
+        std::unordered_set<std::string> extraNodes;
+        for (const auto& pair : anim->positionKeys) extraNodes.insert(pair.first);
+        for (const auto& pair : anim->rotationKeys) extraNodes.insert(pair.first);
+        for (const auto& pair : anim->scalingKeys) extraNodes.insert(pair.first);
+        
+        for (const std::string& nodeName : extraNodes) {
+             if (ctx.boneData->boneNameToIndex.count(nodeName) > 0) continue;
+             
+             BoneTransform trs;
+             // Match AnimationController: tracks only.
+             
+             auto posIt = anim->positionKeys.find(nodeName);
+             if (posIt != anim->positionKeys.end() && !posIt->second.empty())
+                 trs.translation = sampleVectorKey(posIt->second, timeInTicks, anim->duration);
+             
+             auto rotIt = anim->rotationKeys.find(nodeName);
+             if (rotIt != anim->rotationKeys.end() && !rotIt->second.empty())
+                 trs.rotation = sampleQuatKey(rotIt->second, timeInTicks, anim->duration);
+             
+             auto sclIt = anim->scalingKeys.find(nodeName);
+             if (sclIt != anim->scalingKeys.end() && !sclIt->second.empty())
+                 trs.scale = sampleVectorKey(sclIt->second, timeInTicks, anim->duration, true);
+                 
+             // ROOT MOTION ZEROING for Extra Nodes too (e.g. root bone without skin weights)
+             if (ctx.useRootMotion && nodeName == ctx.rootMotionBone) {
+                 trs.translation = Vec3(0, 0, 0);
+             }
+                 
+             result.extraTransforms[nodeName] = trs;
+        }
+
         if (clip->getDurationInSeconds() > 0.0f) {
             result.normalizedTime = currentTime / clip->getDurationInSeconds();
         }
@@ -209,13 +240,10 @@ namespace AnimationGraph {
     
     void AnimClipNode::drawContent() {
         // Dropdown to select from all available clips in the scene
-        // We need to access the context-wide clips list
         static std::vector<const char*> clipNames;
         clipNames.clear();
         
-        // This is a bit of a hack to get global clips into the node UI
-        // In a full system, we'd pass this via a UI context
-        extern std::vector<std::shared_ptr<AnimationData>>* g_uiClipsRef; // Reference to scene->animationDataList
+        extern std::vector<std::shared_ptr<AnimationData>>* g_uiClipsRef; 
         
         if (g_uiClipsRef) {
             for (auto& clipData : *g_uiClipsRef) {
@@ -229,27 +257,52 @@ namespace AnimationGraph {
                 if (clipName == clipNames[i]) { currentIdx = i; break; }
             }
 
+            ImGui::PushItemWidth(150);
             if (ImGui::Combo("Select Clip", &currentIdx, clipNames.data(), (int)clipNames.size())) {
                 clipName = clipNames[currentIdx];
+                reset(); // Start from beginning on change
             }
+            ImGui::PopItemWidth();
         } else {
             InputTextString("Clip Name", clipName);
             ImGui::TextDisabled("(No clips loaded in scene)");
         }
         
         ImGui::Separator();
+        
+        // --- Playback Visualizer ---
+        if (!clipName.empty()) {
+            float normTime = 0.0f;
+            // Get current duration from clips if possible
+            if (g_uiClipsRef) {
+                for(auto& c : *g_uiClipsRef) {
+                    if(c && c->name == clipName && c->duration > 0) {
+                        float duration = c->duration / (c->ticksPerSecond > 0 ? c->ticksPerSecond : 24.0f);
+                        normTime = (duration > 0) ? (currentTime / duration) : 0.0f;
+                        if (loop) normTime = fmodf(normTime, 1.0f);
+                        else normTime = std::clamp(normTime, 0.0f, 1.0f);
+                        break;
+                    }
+                }
+            }
+            
+            char overlay[32];
+            snprintf(overlay, sizeof(overlay), "%.2fs", currentTime);
+            ImGui::ProgressBar(normTime, ImVec2(-1, 15), overlay);
+        }
+
         ImGui::SliderFloat("Speed", &playbackSpeed, -2.0f, 2.0f);
         ImGui::Checkbox("Loop", &loop);
         
         // Playback controls
-        if (ImGui::Button(isPlaying ? "||" : ">")) {
+        if (ImGui::Button(isPlaying ? "Pause" : "Play")) {
             isPlaying = !isPlaying;
         }
         ImGui::SameLine();
-        if (ImGui::Button("<<")) {
+        if (ImGui::Button("Reset")) {
             reset();
         }
-        
+
         ImGui::Text("Time: %.2fs", currentTime);
     }
     
@@ -257,15 +310,19 @@ namespace AnimationGraph {
     // HELPER: Sample animation keys
     // ============================================================================
     
-    Vec3 sampleVectorKey(const std::vector<aiVectorKey>& keys, float time, double duration) {
+    Vec3 sampleVectorKey(const std::vector<aiVectorKey>& keys, float time, double duration, bool wrap) {
         if (keys.empty()) return Vec3(0, 0, 0);
         if (keys.size() == 1) {
             return Vec3(keys[0].mValue.x, keys[0].mValue.y, keys[0].mValue.z);
         }
         
-        // Wrap time
-        double t = fmod((double)time, duration);
-        if (t < 0) t += duration;
+        double t = (double)time;
+        if (wrap) {
+            t = fmod(t, duration);
+            if (t < 0) t += duration;
+        } else {
+            t = std::max(0.0, std::min(t, duration));
+        }
         
         // Find surrounding keyframes
         size_t keyIndex = 0;
@@ -397,44 +454,81 @@ namespace AnimationGraph {
         // Get alpha from input or use property
         float blendAlpha = useInputAlpha ? alpha : alpha;  // TODO: Get from input
         
-        return blendPoses(poseA, poseB, blendAlpha);
+        return blendPoses(poseA, poseB, blendAlpha, ctx);
     }
     
-    PoseData BlendNode::blendPoses(const PoseData& a, const PoseData& b, float t) {
+    PoseData BlendNode::blendPoses(const PoseData& a, const PoseData& b, float t, const AnimationEvalContext& ctx) {
         PoseData result;
         
         if (!a.isValid()) return b;
         if (!b.isValid()) return a;
         
-        size_t count = std::max(a.boneTransforms.size(), b.boneTransforms.size());
+        size_t count = std::max(a.boneCount(), b.boneCount());
+        result.trsTransforms.resize(count);
         result.boneTransforms.resize(count);
         result.boneNames.resize(count);
         result.blendWeight = 1.0f;
         
-        // Linear interpolation of matrices
-        // NOTE: For proper animation, we should decompose to TRS and slerp rotations
+        // Blend Root Motion
+        if (a.rootMotion.hasPosition && b.rootMotion.hasPosition) {
+            result.rootMotion.positionDelta = Vec3::lerp(a.rootMotion.positionDelta, b.rootMotion.positionDelta, t);
+            result.rootMotion.hasPosition = true;
+        } else if (a.rootMotion.hasPosition) {
+            result.rootMotion.positionDelta = a.rootMotion.positionDelta * (1.0f - t);
+            result.rootMotion.hasPosition = true;
+        } else if (b.rootMotion.hasPosition) {
+            result.rootMotion.positionDelta = b.rootMotion.positionDelta * t;
+            result.rootMotion.hasPosition = true;
+        }
+        
+        // TRS Interpolation (Smooth and Correct)
         for (size_t i = 0; i < count; ++i) {
-            const Matrix4x4& matA = (i < a.boneTransforms.size()) ? a.boneTransforms[i] : Matrix4x4::identity();
-            const Matrix4x4& matB = (i < b.boneTransforms.size()) ? b.boneTransforms[i] : Matrix4x4::identity();
+            BoneTransform trsA = (i < a.trsTransforms.size()) ? a.trsTransforms[i] : BoneTransform::identity();
+            BoneTransform trsB = (i < b.trsTransforms.size()) ? b.trsTransforms[i] : BoneTransform::identity();
             
-            // Simple matrix lerp (not ideal but fast)
-            for (int row = 0; row < 4; ++row) {
-                for (int col = 0; col < 4; ++col) {
-                    result.boneTransforms[i].m[row][col] = 
-                        matA.m[row][col] * (1.0f - t) + matB.m[row][col] * t;
-                }
+            result.trsTransforms[i].translation = Vec3::lerp(trsA.translation, trsB.translation, t);
+            result.trsTransforms[i].scale = Vec3::lerp(trsA.scale, trsB.scale, t);
+            result.trsTransforms[i].rotation = Quaternion::slerp(trsA.rotation, trsB.rotation, t);
+            
+            // Get bone name for offset lookup
+            std::string boneName = "";
+            if (i < a.boneNames.size()) boneName = a.boneNames[i];
+            else if (i < b.boneNames.size()) boneName = b.boneNames[i];
+            result.boneNames[i] = boneName;
+            
+            // Generate matrix and apply offset
+            Matrix4x4 localMat = result.trsTransforms[i].toMatrix();
+            auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
+            if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
+                result.boneTransforms[i] = localMat * offsetIt->second;
+            } else {
+                result.boneTransforms[i] = localMat;
             }
             
-            // Use A's bone name
-            if (i < a.boneNames.size()) {
-                result.boneNames[i] = a.boneNames[i];
-            } else if (i < b.boneNames.size()) {
-                result.boneNames[i] = b.boneNames[i];
+        }
+        
+        for (const auto& [nodeName, trsA] : a.extraTransforms) {
+            auto itB = b.extraTransforms.find(nodeName);
+            if (itB != b.extraTransforms.end()) {
+                 const BoneTransform& trsB = itB->second;
+                 BoneTransform blended;
+                 blended.translation = Vec3::lerp(trsA.translation, trsB.translation, t);
+                 blended.rotation = Quaternion::slerp(trsA.rotation, trsB.rotation, t);
+                 blended.scale = Vec3::lerp(trsA.scale, trsB.scale, t);
+                 result.extraTransforms[nodeName] = blended;
+            } else {
+                 result.extraTransforms[nodeName] = trsA;
+            }
+        }
+        for (const auto& [nodeName, trsB] : b.extraTransforms) {
+            if (a.extraTransforms.find(nodeName) == a.extraTransforms.end()) {
+                 result.extraTransforms[nodeName] = trsB;
             }
         }
         
         return result;
     }
+
     
     void BlendNode::drawContent() {
         ImGui::Checkbox("Use Input Alpha", &useInputAlpha);
@@ -468,13 +562,54 @@ namespace AnimationGraph {
         if (!additive.isValid()) return base;
         
         PoseData result = base;
-        size_t count = std::min(base.boneTransforms.size(), additive.boneTransforms.size());
+        size_t count = std::min(base.boneCount(), additive.boneCount());
+        
         for (size_t i = 0; i < count; ++i) {
-            // Additive matrix math (simplified)
-            // In a real additive setup, we'd decompose to TRS, apply delta, then recompose.
-            // For now, simple multiplication as a placeholder for "applying delta"
-            result.boneTransforms[i] = base.boneTransforms[i] * additive.boneTransforms[i];
+            BoneTransform trsBase = (i < base.trsTransforms.size()) ? base.trsTransforms[i] : BoneTransform::identity();
+            BoneTransform trsAdd = (i < additive.trsTransforms.size()) ? additive.trsTransforms[i] : BoneTransform::identity();
+            
+            result.trsTransforms[i].translation = trsBase.translation + trsAdd.translation;
+            result.trsTransforms[i].rotation = trsAdd.rotation * trsBase.rotation;
+            result.trsTransforms[i].scale = trsBase.scale * trsAdd.scale;
+            
+            result.boneTransforms[i] = result.trsTransforms[i].toMatrix();
+            // TODO: properly adjust base offsets if needed, but in standard additive, 
+            // base offsets are applied AFTER blending, so TRS is enough.
         }
+        
+        // Additive Blend Root Motion
+        if (additive.rootMotion.hasPosition) {
+            result.rootMotion.positionDelta = base.rootMotion.positionDelta + additive.rootMotion.positionDelta;
+            result.rootMotion.hasPosition = true;
+        }
+        
+        for (const auto& [nodeName, trsAdd] : additive.extraTransforms) {
+            // Get bone name for offset lookup
+            std::string boneName = (i < result.boneNames.size()) ? result.boneNames[i] : "";
+            
+            Matrix4x4 localMat = result.trsTransforms[i].toMatrix();
+            auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
+            if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
+                result.boneTransforms[i] = localMat * offsetIt->second;
+            } else {
+                result.boneTransforms[i] = localMat;
+            }
+        }
+        
+        for (const auto& [nodeName, trsAdditive] : additive.extraTransforms) {
+            auto baseIt = base.extraTransforms.find(nodeName);
+            if (baseIt != base.extraTransforms.end()) {
+                const BoneTransform& trsBase = baseIt->second;
+                BoneTransform resultTrs;
+                resultTrs.translation = trsBase.translation + trsAdditive.translation;
+                resultTrs.rotation = trsAdditive.rotation * trsBase.rotation;
+                resultTrs.scale = trsBase.scale * trsAdditive.scale;
+                result.extraTransforms[nodeName] = resultTrs;
+            } else {
+                result.extraTransforms[nodeName] = trsAdditive;
+            }
+        }
+        
         return result;
     }
     
@@ -513,11 +648,33 @@ namespace AnimationGraph {
         
         PoseData result = basePose;  // Start with base
         
+        // Layered Blend Root Motion (assuming root bone is in the mask, interpolate it)
+        float rootWeight = 0.0f;
+        auto getRootWeight = [&]() -> float {
+            if (affectedBones.empty()) return 1.0f;
+            for (const auto& bone : affectedBones) {
+                if (bone == ctx.rootMotionBone || bone == "RootNode") return 1.0f;
+            }
+            return 0.0f;
+        };
+        rootWeight = getRootWeight() * alpha;
+        
+        if (layerPose.rootMotion.hasPosition) {
+            result.rootMotion.positionDelta = Vec3::lerp(basePose.rootMotion.positionDelta, layerPose.rootMotion.positionDelta, rootWeight);
+            result.rootMotion.hasPosition = true;
+        }
+        
+        // Blend in layer poses wherever weight > 0
+        // Ensure result has TRS and matrices
+        size_t count = std::max(basePose.boneCount(), layerPose.boneCount());
+        result.trsTransforms.resize(count);
+        result.boneTransforms.resize(count);
+        
         // Check if bone is affected
         auto isAffected = [this](const std::string& boneName) -> float {
-            if (affectedBones.empty()) return 1.0f;  // All bones affected
+            if (affectedBones.empty()) return 1.0f;  // All bones affected if no list
             
-            // Check if bone or parent is in list
+            // Check if bone or parent is in list (simple name-based check for now)
             for (const auto& affected : affectedBones) {
                 if (boneName.find(affected) != std::string::npos) {
                     return 1.0f;
@@ -526,24 +683,54 @@ namespace AnimationGraph {
             return 0.0f;
         };
         
-        // Blend affected bones
-        for (size_t i = 0; i < result.boneTransforms.size(); ++i) {
-            if (i >= layerPose.boneTransforms.size()) break;
+        // Blend affected bones in TRS space
+        for (size_t i = 0; i < count; ++i) {
+            BoneTransform trsBase = (i < basePose.trsTransforms.size()) ? basePose.trsTransforms[i] : BoneTransform::identity();
+            BoneTransform trsLayer = (i < layerPose.trsTransforms.size()) ? layerPose.trsTransforms[i] : BoneTransform::identity();
             
             std::string boneName = (i < result.boneNames.size()) ? result.boneNames[i] : "";
             float weight = isAffected(boneName) * alpha;
             
             if (weight > 0.0f) {
-                // Blend this bone
-                const Matrix4x4& base = result.boneTransforms[i];
-                const Matrix4x4& layer = layerPose.boneTransforms[i];
+                // Blend TRS components
+                result.trsTransforms[i].translation = Vec3::lerp(trsBase.translation, trsLayer.translation, weight);
+                result.trsTransforms[i].scale = Vec3::lerp(trsBase.scale, trsLayer.scale, weight);
+                result.trsTransforms[i].rotation = Quaternion::slerp(trsBase.rotation, trsLayer.rotation, weight);
                 
-                for (int row = 0; row < 4; ++row) {
-                    for (int col = 0; col < 4; ++col) {
-                        result.boneTransforms[i].m[row][col] = 
-                            base.m[row][col] * (1.0f - weight) + layer.m[row][col] * weight;
-                    }
+                // Update matrix and apply offset
+                Matrix4x4 localMat = result.trsTransforms[i].toMatrix();
+                auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
+                if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
+                    result.boneTransforms[i] = localMat * offsetIt->second;
+                } else {
+                    result.boneTransforms[i] = localMat;
                 }
+            } else {
+                result.trsTransforms[i] = trsBase;
+                result.boneTransforms[i] = (i < basePose.boneTransforms.size()) ? basePose.boneTransforms[i] : Matrix4x4::identity();
+            }
+        }
+        
+        for (const auto& [nodeName, trsBase] : basePose.extraTransforms) {
+            float weight = isAffected(nodeName) * alpha;
+            auto itLayer = layerPose.extraTransforms.find(nodeName);
+            
+            if (weight > 0.0f && itLayer != layerPose.extraTransforms.end()) {
+                const BoneTransform& trsLayer = itLayer->second;
+                BoneTransform blended;
+                blended.translation = Vec3::lerp(trsBase.translation, trsLayer.translation, weight);
+                blended.scale = Vec3::lerp(trsBase.scale, trsLayer.scale, weight);
+                blended.rotation = Quaternion::slerp(trsBase.rotation, trsLayer.rotation, weight);
+                result.extraTransforms[nodeName] = blended;
+            } else {
+                result.extraTransforms[nodeName] = trsBase;
+            }
+        }
+        
+        for (const auto& [nodeName, trsLayer] : layerPose.extraTransforms) {
+            float weight = isAffected(nodeName) * alpha;
+            if (weight > 0.0f && basePose.extraTransforms.find(nodeName) == basePose.extraTransforms.end()) {
+                result.extraTransforms[nodeName] = trsLayer; // Assume base is identity effectively? No, rely on fallback if needed, or just insert it.
             }
         }
         
@@ -605,10 +792,10 @@ namespace AnimationGraph {
 
         // 1. Get current state pose FIRST (to know its normalized time)
         auto getStatePose = [&](const std::string& stateName) -> PoseData {
-            for (const auto& s : states) {
-                if (s.name == stateName) {
-                    AnimNodeBase* node = ctx.graph->findNodeById(s.nodeId);
-                    if (node) return node->computePose(ctx);
+            for (size_t i = 0; i < states.size(); ++i) {
+                if (states[i].name == stateName) {
+                    // Start reading from inputs. Assume pins were added in order of states.
+                    return getInputPose(i, ctx);
                 }
             }
             return PoseData{};
@@ -642,22 +829,8 @@ namespace AnimationGraph {
             updateTransition(ctx.deltaTime);
             PoseData targetPose = getStatePose(targetStateName);
             
-            if (!currentPose.isValid()) return targetPose;
-            if (!targetPose.isValid()) return currentPose;
-            
-            size_t count = std::max(currentPose.boneTransforms.size(), targetPose.boneTransforms.size());
-            PoseData blended;
-            blended.boneTransforms.resize(count);
-            blended.boneNames = currentPose.boneNames;
-            
             float t = std::clamp(transitionProgress, 0.0f, 1.0f);
-            for (size_t i = 0; i < count; ++i) {
-                const Matrix4x4& matA = (i < currentPose.boneTransforms.size()) ? currentPose.boneTransforms[i] : Matrix4x4::identity();
-                const Matrix4x4& matB = (i < targetPose.boneTransforms.size()) ? targetPose.boneTransforms[i] : Matrix4x4::identity();
-                for (int r=0; r<4; ++r) for (int c=0; c<4; ++c) 
-                    blended.boneTransforms[i].m[r][c] = matA.m[r][c] * (1.0f - t) + matB.m[r][c] * t;
-            }
-            return blended;
+            return BlendNode::blendPoses(currentPose, targetPose, t, ctx);
         }
         
         return currentPose;
@@ -694,6 +867,9 @@ namespace AnimationGraph {
         if (isDefault || currentStateName.empty()) {
             currentStateName = name;
         }
+        
+        // Add an input pin for this state so it can be connected
+        addInput(name + " Pose", NodeSystem::DataType::Custom);
     }
     
     void StateMachineNode::addTransition(const Transition& transition) {
@@ -843,8 +1019,26 @@ namespace AnimationGraph {
     void PoseSwitchNode::drawContent() {
         if (ImGui::InputInt("Pose Count", &poseCount)) {
             poseCount = std::clamp(poseCount, 1, 10);
-            inputs.clear();
-            setupPins();
+            
+            // Rebuild pins safely without destroying all of them if possible. 
+            // The first input is "Index". Keep it.
+            if (inputs.size() > 0) {
+                // Resize to poseCount + 1 (1 for Index, poseCount for Poses)
+                size_t targetSize = poseCount + 1;
+                if (inputs.size() > targetSize) {
+                    inputs.resize(targetSize);
+                } else {
+                    for (int i = (int)inputs.size() - 1; i < poseCount; ++i) {
+                        NodeSystem::Pin p = NodeSystem::Pin::createInput("Pose " + std::to_string(i), NodeSystem::DataType::Custom);
+                        // We must assign a pin ID to prevent failure, though we don't have graph access here.
+                        // Rely on save/load or graph update mechanism, but giving it a dummy ID is dangerous.
+                        // Actually, animation graphs usually sweep for 0 IDs and assign them on next interact.
+                        inputs.push_back(std::move(p));
+                    }
+                }
+            } else {
+                setupPins(); // fallback
+            }
         }
         ImGui::SliderInt("Active", &activeIndex, 0, poseCount - 1);
     }
@@ -944,9 +1138,90 @@ namespace AnimationGraph {
     }
     
     PoseData FinalPoseNode::computePose(AnimationEvalContext& ctx) {
-        PoseData result = getInputPose(0, ctx);
-        ctx.outputPose = result;  // Store in context
-        return result;
+        PoseData localPose = getInputPose(0, ctx);
+        if (!localPose.isValid() || !ctx.boneData) return localPose;
+        
+        // --- THE MISSING LINK: GLOBAL HIERARCHY RESOLUTION ---
+        // We need to transform all local TRS hits into global matrices 
+        // using the character's actual bone hierarchy.
+        
+        size_t count = localPose.boneCount();
+        PoseData finalPose = localPose;
+        finalPose.boneTransforms.resize(count);
+        
+        // Cache for global matrices during hierarchy traversal
+        std::unordered_map<std::string, Matrix4x4> globalCache;
+        
+        // Match AnimationController logic: Use globalInverseTransform directly
+        // This matrix (Scale 100/Inverse Root) combined with the AnimatedGlobal (which likely lacks Root)
+        // produces the correct result in the legacy system. We mirror it here.
+        Matrix4x4 globalCorrection = ctx.globalInverseTransform;
+
+        for (const auto& [boneName, boneIndex] : ctx.boneData->boneNameToIndex) {
+            // 1. Calculate the pure animated global transform (World space relative to character origin)
+            // This traversal simulates the skeleton hierarchy
+            Matrix4x4 animatedGlobal = resolveGlobalMatrix(
+                boneName, ctx.boneData, localPose, globalCache, ctx);
+            
+            // 2. APPLY GLOBAL CORRECTION (Legacy Standard)
+            Matrix4x4 finalMat = globalCorrection * animatedGlobal;
+            
+            // 3. APPLY BONE OFFSET (Bind Pose Inverse)
+            // Corrects the bone from Bind Pose to Origin for skinning
+            auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
+            if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
+                finalMat = finalMat * offsetIt->second;
+            }
+            
+            finalPose.boneTransforms[boneIndex] = finalMat;
+        }
+        
+        ctx.outputPose = finalPose; // Final result for the renderer
+        return finalPose;
+    }
+
+    Matrix4x4 FinalPoseNode::resolveGlobalMatrix(
+        const std::string& boneName, 
+        const BoneData* boneData, 
+        const PoseData& localPose,
+        std::unordered_map<std::string, Matrix4x4>& cache,
+        const AnimationEvalContext& ctx
+    ) {
+        // 1. Check cache
+        auto it = cache.find(boneName);
+        if (it != cache.end()) return it->second;
+        
+        // 2. Get local transform from graph result
+        Matrix4x4 localMat = Matrix4x4::identity();
+        auto idxIt = boneData->boneNameToIndex.find(boneName);
+        if (idxIt != boneData->boneNameToIndex.end() && idxIt->second < localPose.trsTransforms.size()) {
+            localMat = localPose.trsTransforms[idxIt->second].toMatrix();
+        } else {
+            auto extraIt = localPose.extraTransforms.find(boneName);
+            if (extraIt != localPose.extraTransforms.end()) {
+                 localMat = extraIt->second.toMatrix();
+            } else {
+                 // Match AnimationController: if animation is playing, missing tracks yield Identity,
+                 // NOT Bind Pose, because bone offset and existing tracks already contain the space transforms.
+                 localMat = Matrix4x4::identity();
+            }
+        }
+        
+        // 3. Get parent's global transform
+        // BASE CASE: Skeleton root starts from Identity
+        // 3. Get parent's global transform
+        // BASE CASE: Skeleton root starts from Identity
+        Matrix4x4 parentGlobal = Matrix4x4::identity(); 
+        
+        auto parentIt = boneData->boneParents.find(boneName);
+        if (parentIt != boneData->boneParents.end()) {
+            parentGlobal = resolveGlobalMatrix(parentIt->second, boneData, localPose, cache, ctx);
+        }
+        
+        // 4. Combine: Global = ParentGlobal * Local
+        Matrix4x4 globalResult = parentGlobal * localMat;
+        cache[boneName] = globalResult;
+        return globalResult;
     }
     
     void FinalPoseNode::drawContent() {
@@ -958,6 +1233,33 @@ namespace AnimationGraph {
     // ============================================================================
     
     bool AnimationNodeGraph::connect(uint32_t outputPinId, uint32_t inputPinId) {
+        NodeSystem::Pin* outPin = findPinById(outputPinId);
+        NodeSystem::Pin* inPin = findPinById(inputPinId);
+        
+        if (!outPin || !inPin) return false;
+        
+        // Enforce output -> input direction
+        if (outPin->kind == NodeSystem::PinKind::Input && inPin->kind == NodeSystem::PinKind::Output) {
+            std::swap(outPin, inPin);
+            std::swap(outputPinId, inputPinId);
+        }
+        
+        // Validation
+        if (outPin->kind != NodeSystem::PinKind::Output || inPin->kind != NodeSystem::PinKind::Input) {
+            return false;
+        }
+        
+        if (!outPin->canConnectTo(*inPin)) {
+            return false;
+        }
+        
+        // Remove existing links to the input pin if it does not allow multiple connections
+        if (!inPin->allowMultipleConnections) {
+            links.erase(std::remove_if(links.begin(), links.end(),
+                [inputPinId](const NodeSystem::Link& l) { return l.endPinId == inputPinId; }),
+                links.end());
+        }
+
         NodeSystem::Link link;
         link.id = nextLinkId++;
         link.startPinId = outputPinId;
@@ -984,16 +1286,22 @@ namespace AnimationGraph {
         // Remove connected links
         links.erase(std::remove_if(links.begin(), links.end(),
             [this, nodeId](const NodeSystem::Link& l) {
-                auto* node = findNodeByPinId(l.startPinId);
-                if (node && node->id == nodeId) return true;
-                node = findNodeByPinId(l.endPinId);
-                if (node && node->id == nodeId) return true;
-                return false;
+                auto* startNode = findNodeByPinId(l.startPinId);
+                auto* endNode = findNodeByPinId(l.endPinId);
+                return (startNode && startNode->id == nodeId) || 
+                       (endNode && endNode->id == nodeId);
             }), links.end());
         
         // Remove node
-        nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-            [nodeId](const std::unique_ptr<AnimNodeBase>& n) { return n->id == nodeId; }), nodes.end());
+        auto it = std::find_if(nodes.begin(), nodes.end(),
+            [nodeId](const std::unique_ptr<AnimNodeBase>& n) { return n->id == nodeId; });
+            
+        if (it != nodes.end()) {
+            if (it->get() == outputNode) {
+                outputNode = nullptr;
+            }
+            nodes.erase(it);
+        }
         
         needsRebuild = true;
     }

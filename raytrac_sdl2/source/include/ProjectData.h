@@ -90,6 +90,7 @@ struct ProjectData {
     // Project state
     bool is_modified = false;                // Unsaved changes flag
     std::string current_file_path;           // Currently open .rtp file path
+    std::string ui_layout_data;              // Serialized UI state (ImGui INI + SceneUI state)
     
     // Helper methods
     void clear() {

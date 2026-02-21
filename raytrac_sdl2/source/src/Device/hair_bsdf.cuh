@@ -60,12 +60,32 @@ struct alignas(16) GpuHairMaterial {
     // Block 7: More Variances & Misc (16 bytes)
     float v_TT;                   // Variance for TT lobe (4 bytes)
     float v_TRT;                  // Variance for TRT lobe (4 bytes)
-    float s;                      // Logistic scale (4 bytes)
-    float pad0;                   // (4 bytes)
+    float s_R;                    // Logistic scale for R lobe (4 bytes)
+    float s_TT;                   // Logistic scale for TT lobe (4 bytes)
 
-    // Block 8: Textures (16 bytes)
+    // Block 8: More Azimuthal & Textures (16 bytes)
+    float s_TRT;                  // Logistic scale for TRT lobe (4 bytes)
+    float s_MS;                   // Logistic scale for MS lobe (4 bytes)
     cudaTextureObject_t albedo_tex;    // 8 bytes
+    
+    // Block 9: Remaining Textures (16 bytes)
     cudaTextureObject_t roughness_tex; // 8 bytes
+    float coat;                   // Coat strength for fur (4 bytes)
+    float specularTint;           // Tint primary highlight by hair color (4 bytes)
+
+    // Block 10: Coat & Gradient (16 bytes)
+    float3 coatTint;              // Coat reflection tint (12 bytes)
+    float diffuseSoftness;        // MS weight: 0=hard specular, 1=soft diffuse (4 bytes)
+
+    // Block 11: Root-Tip Gradient (16 bytes)
+    float3 tipSigma;              // Absorption at tip (12 bytes)
+    float rootTipBalance;         // 0=root color, 1=tip color at tip (4 bytes)
+
+    // Block 12: Flags & Padding (16 bytes)
+    int enableRootTipGradient;    // 0 or 1 (4 bytes)
+    float pad1;                   // (4 bytes)
+    float pad2;                   // (4 bytes)
+    float pad3;                   // (4 bytes)
 };
 
 // ============================================================================
@@ -170,7 +190,7 @@ __device__ __forceinline__ void world_to_hair_coords(
     float3 wi_perp = normalize(wi - sinThetaI * tangent);
     
     cosPhi = dot(wo_perp, wi_perp);
-    sinPhi = safe_sqrt(1.0f - cosPhi * cosPhi);
+    sinPhi = dot(cross(wo_perp, wi_perp), tangent); // Use cross product for robust signed sine
 }
 
 // ============================================================================
@@ -207,18 +227,17 @@ __device__ __forceinline__ float eval_M_TRT(
     return gaussian(sinThetaSum, 2.0f * variance);
 }
 
-// Azimuthal distribution (N)
-__device__ __forceinline__ float eval_N(float phi, float s, int lobe) {
-    // Approximate using logistic distribution
-    float phiShift;
-    switch (lobe) {
-        case 0: phiShift = 0.0f; break;       // R
-        case 1: phiShift = HAIR_PI; break;    // TT
-        case 2: phiShift = 0.0f; break;       // TRT (same as R but broader)
-        default: phiShift = 0.0f;
-    }
+// Azimuthal scattering (N term)
+__device__ __forceinline__ float eval_N(float phi, float s, float phiTarget) {
+    float diff = phi - phiTarget;
+    // Faster wrap to [-PI, PI]
+    diff -= 2.0f * HAIR_PI * floorf(diff * (0.5f * HAIR_INV_PI) + 0.5f);
     
-    return logistic_pdf(phi - phiShift, s);
+    // Energy conservation: Normalize the logistic distribution over [-PI, PI]
+    // The integral of logistic PDF from -PI to PI is (CDF(PI) - CDF(-PI))
+    float norm = (1.0f / (1.0f + expf(-HAIR_PI / s))) - (1.0f / (1.0f + expf(HAIR_PI / s)));
+    
+    return logistic_pdf(diff, s) / fmaxf(norm, 0.1f);
 }
 
 // ============================================================================
@@ -230,74 +249,131 @@ __device__ float3 hair_bsdf_eval(
     const float3& wi,           // Incoming (toward light)
     const float3& tangent,      // Hair direction
     const GpuHairMaterial& mat,
-    float h                     // Hit offset from center [-1, 1]
+    float h,                    // Hit offset from center [-1, 1]
+    float v = 0.5f              // Position along strand (0=root, 1=tip)
 ) {
-    float sinThetaO, cosThetaO, sinThetaI, cosThetaI, cosPhi, sinPhi;
-    world_to_hair_coords(wo, wi, tangent,
-        sinThetaO, cosThetaO, sinThetaI, cosThetaI, cosPhi, sinPhi);
+    // 1. Convert to hair coordinates
+    float sinThetaO = dot(wo, tangent);
+    float sinThetaI = dot(wi, tangent);
+    
+    float cosThetaO = safe_sqrt(1.0f - sinThetaO * sinThetaO);
+    float cosThetaI = safe_sqrt(1.0f - sinThetaI * sinThetaI);
     
     // Early exit for grazing angles
     if (cosThetaO < 1e-4f || cosThetaI < 1e-4f) {
         return make_float3(0.0f, 0.0f, 0.0f);
     }
     
-    float phi = acosf(fminf(fmaxf(cosPhi, -1.0f), 1.0f));
-    if (sinPhi < 0.0f) phi = -phi;
+    // Azimuthal planes
+    float3 wo_perp = normalize(wo - sinThetaO * tangent);
+    float3 wi_perp = normalize(wi - sinThetaI * tangent);
+    
+    float cosPhi = dot(wo_perp, wi_perp);
+    float sinPhi = dot(cross(wo_perp, wi_perp), tangent);
+    float phi = atan2f(sinPhi, cosPhi);
     
     // Material parameters
     float alpha = mat.cuticleAngle;
     float eta = mat.ior;
     float3 sigma_a = mat.sigma_a;
     
-    // Compute gamma angles for absorption path length
+    // --- Root-to-Tip Gradient ---
+    if (mat.enableRootTipGradient) {
+        float t = v * mat.rootTipBalance;
+        sigma_a = sigma_a * (1.0f - t) + mat.tipSigma * t;
+    }
+    
+    // Compute gamma angles for absorption path length and azimuthal shifts
     float gammaO = safe_asin(h);
     float gammaT = safe_asin(h / eta);
     
+    float cosGammaO = cosf(gammaO);
+    float cosGammaT = cosf(gammaT);
+    
     // ========================================================================
-    // R Lobe (Primary Reflection)
+    // Fresnel
     // ========================================================================
     float F_R = fresnel_dielectric(cosThetaO, eta);
-    float M_R = eval_M_R(sinThetaI, sinThetaO, cosThetaI, cosThetaO, alpha, mat.v_R); 
-    float N_R = eval_N(phi, mat.s, 0);
-    float scalar_R = F_R * M_R * N_R;
-    float3 R = make_float3(scalar_R, scalar_R, scalar_R);
+    float M_R = eval_M_R(sinThetaI, sinThetaO, cosThetaO, cosThetaI, alpha, mat.v_R); 
+    
+    float phi_R = -2.0f * gammaO;
+    float N_R = eval_N(phi, mat.s_R, phi_R);
+    
+    // --- Specular Tint: blend white highlight with hair body color ---
+    float3 hairBodyColor = make_float3(
+        expf(-sigma_a.x * 0.5f),
+        expf(-sigma_a.y * 0.5f),
+        expf(-sigma_a.z * 0.5f)
+    );
+    float3 specColor = make_float3(1.0f, 1.0f, 1.0f) * (1.0f - mat.specularTint) 
+                     + hairBodyColor * mat.specularTint;
+    float3 R = specColor * (F_R * M_R * N_R);
     
     // ========================================================================
-    // TT Lobe (Transmission)
+    // TT Lobe (Transmission - Back-lit highlight)
     // ========================================================================
-    float cosThetaT = cosf(gammaT);
-    float3 T = make_float3(expf(-sigma_a.x * 2.0f * cosThetaT),
-                           expf(-sigma_a.y * 2.0f * cosThetaT),
-                           expf(-sigma_a.z * 2.0f * cosThetaT));
+    float cosThetaD = cosf((asinf(sinThetaO) - asinf(sinThetaI)) * 0.5f);
+    float path_L = 2.0f * cosGammaT / fmaxf(cosThetaD, 0.1f);
+    float3 A = make_float3(expf(-sigma_a.x * path_L),
+                           expf(-sigma_a.y * path_L),
+                           expf(-sigma_a.z * path_L));
     
-    float F_TT = (1.0f - F_R) * (1.0f - fresnel_dielectric(cosThetaT, 1.0f / eta));
-    float M_TT = eval_M_TT(sinThetaI, sinThetaO, cosThetaI, cosThetaO, alpha, mat.v_TT); 
-    float N_TT = eval_N(phi, mat.s, 1);
-    float3 TT = T * F_TT * M_TT * N_TT; // [FIX] TT is ONE pass (T)
+    float F_TT = (1.0f - F_R) * (1.0f - fresnel_dielectric(cosGammaT, 1.0f / eta));
+    float M_TT = eval_M_TT(sinThetaI, sinThetaO, cosThetaO, cosThetaI, alpha, mat.v_TT); 
+    
+    float phi_TT = HAIR_PI + 2.0f * gammaT - 2.0f * gammaO;
+    float N_TT = eval_N(phi, mat.s_TT, phi_TT);
+    float3 TT = A * (F_TT * M_TT * N_TT); 
     
     // ========================================================================
-    // TRT Lobe (Internal Reflection - Secondary Highlight)
+    // TRT Lobe (Internal Reflection - Front-lit colored specular)
     // ========================================================================
-    float F_TRT = (1.0f - F_R) * F_R * (1.0f - fresnel_dielectric(cosThetaT, 1.0f / eta));
-    float M_TRT = eval_M_TRT(sinThetaI, sinThetaO, cosThetaI, cosThetaO, alpha, mat.v_TRT); 
-    float N_TRT = eval_N(phi, mat.s * 2.0f, 2); // CPU uses broader N for TRT
-    float3 TRT = (T * T) * F_TRT * M_TRT * N_TRT; // [FIX] TRT is TWO passes (T*T)
+    float F_internal = fresnel_dielectric(cosGammaT, 1.0f / eta);
+    float F_TRT = (1.0f - F_R) * F_internal * (1.0f - fresnel_dielectric(cosGammaT, 1.0f / eta));
+    float M_TRT = eval_M_TRT(sinThetaI, sinThetaO, cosThetaO, cosThetaI, alpha, mat.v_TRT); 
     
-    // Combine lobes with standardized weights (Synchronized with HairBSDF.cpp)
-    // CPU uses: bsdf = TT * 2.1f + TRT * 1.5f + R * 1.3f;
-    float3 bsdf = R * 1.3f + TT * 2.1f + TRT * 1.5f;
+    float phi_TRT = 4.0f * gammaT - 2.0f * gammaO; 
+    float N_TRT = eval_N(phi, mat.s_TRT, phi_TRT); 
+    float3 TRT = (A * A) * (F_TRT * M_TRT * N_TRT);
+    
+    // ========================================================================
+    // Multiple Scattering / Cortex Diffusion (Bulk Body Color)
+    // ========================================================================
+    float N_MS = eval_N(phi, mat.s_MS, 0.0f); 
+    // --- Diffuse Softness controls MS weight ---
+    float msWeight = mat.diffuseSoftness * 1.2f;
+    float3 MS = (A * A) * (msWeight * N_MS); 
+    
+    // Combine lobes
+    float3 bsdf = R + TT + TRT + MS;
+    
+    // --- Apply Artistic Tint ---
+    if (mat.tint > 0.0f) {
+        float3 tinted = bsdf * mat.tintColor;
+        bsdf = bsdf * (1.0f - mat.tint) + tinted * mat.tint;
+    }
+    
+    // --- Apply Coat Layer (fur gloss) ---
+    if (mat.coat > 0.0f) {
+        float coatF = fresnel_dielectric(cosThetaO, 1.35f) * mat.coat;
+        bsdf = bsdf * (1.0f - coatF) + mat.coatTint * (coatF * 0.5f);
+    }
     
     // Add emission if present
     if (mat.emissionStrength > 0.0f) {
         bsdf = bsdf + mat.emission * mat.emissionStrength;
     }
     
-    // Final normalization (Synchronized with CPU: bsdf / (cosSqThetaD * cosThetaI))
-    // Standard Marschner normalization for cylindrical fibers
-    float cosThetaD = cosf((asinf(sinThetaO) - asinf(sinThetaI)) * 0.5f);
-    float denominator = fmaxf(cosThetaD * cosThetaD * cosThetaI, 0.01f);
+    // Final normalization
+    float denominator = fmaxf(cosThetaD * cosThetaD, 0.001f);
+    bsdf = bsdf / denominator;
     
-    return bsdf / denominator; 
+    // Firefly clamp (matching CPU)
+    bsdf.x = fminf(bsdf.x, 100.0f);
+    bsdf.y = fminf(bsdf.y, 100.0f);
+    bsdf.z = fminf(bsdf.z, 100.0f);
+    
+    return bsdf; 
 }
 
 // ============================================================================
@@ -335,9 +411,9 @@ __device__ float3 hair_bsdf_sample(
     float variance;
     float alphaShift;
     switch (lobe) {
-        case 0: variance = mat.v_R;   alphaShift = -2.0f * alpha; break;
-        case 1: variance = mat.v_TT;  alphaShift = alpha; break; 
-        case 2: variance = mat.v_TRT; alphaShift = -4.0f * alpha; break; 
+        case 0: variance = mat.v_R;        alphaShift = -2.0f * alpha; break;
+        case 1: variance = 0.5f * mat.v_TT;  alphaShift = alpha; break; 
+        case 2: variance = 2.0f * mat.v_TRT; alphaShift = -4.0f * alpha; break; 
         default: variance = mat.v_R;  alphaShift = 0.0f;
     }
     
@@ -348,7 +424,7 @@ __device__ float3 hair_bsdf_sample(
     
     // Sample azimuthal (N term) - Matching CPU Lobe Targets
     float phiTarget = (lobe == 1) ? HAIR_PI : 0.0f; // TT is forward-scattering (PI), R/TRT are backward (0)
-    float lobeS = (lobe == 2) ? mat.s * 2.0f : mat.s;
+    float lobeS = (lobe == 0) ? mat.s_R : (lobe == 1 ? mat.s_TT : mat.s_TRT);
     float phi = sample_logistic(fmaxf(lobeS, 0.01f), u2) + phiTarget;
     
     // Reconstruct wi from spherical coords relative to tangent
@@ -362,7 +438,8 @@ __device__ float3 hair_bsdf_sample(
     // Compute PDF matching sampling distribution
     float M = gaussian(sinThetaI - sinThetaO - alphaShift, variance);
     float N = logistic_pdf(fmodf(phi - phiTarget + HAIR_PI, 2.0f * HAIR_PI) - HAIR_PI, fmaxf(lobeS, 0.01f));
-    out_pdf = fmaxf(M * N * lobe_weights[lobe], 0.0001f);
+    float norm = (1.0f / (1.0f + expf(-HAIR_PI / fmaxf(lobeS, 0.01f)))) - (1.0f / (1.0f + expf(HAIR_PI / fmaxf(lobeS, 0.01f))));
+    out_pdf = fmaxf(M * (N / fmaxf(norm, 0.1f)) * lobe_weights[lobe], 0.0001f);
     
     // Evaluate full BSDF with correct hit information (center hit assumed for sampling)
     float3 bsdf = hair_bsdf_eval(wo, out_wi, tangent, mat, 0.0f);

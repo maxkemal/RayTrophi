@@ -3,6 +3,8 @@
 #include "AABB.h"
 #include "globals.h"
 #include <cmath>
+#include "TerrainManager.h"
+#include "PrincipledBSDF.h"
 
 // ============================================================================
 // Constructors
@@ -209,7 +211,13 @@ void Triangle::initializeSkinData() {
 void Triangle::setSkinBoneWeights(int vertexIndex, const std::vector<std::pair<int, float>>& weights) {
     initializeSkinData();
     if (vertexIndex >= 0 && vertexIndex < 3) {
-        skinData->vertexBoneWeights[vertexIndex] = weights;
+        std::vector<std::pair<int, float>> sortedWeights = weights;
+        // Sort descending by weight (the second element of the pair)
+        std::sort(sortedWeights.begin(), sortedWeights.end(), 
+            [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+                return a.second > b.second;
+            });
+        skinData->vertexBoneWeights[vertexIndex] = sortedWeights;
     }
 }
 
@@ -233,16 +241,24 @@ std::vector<Vec3>& Triangle::getOriginalVertexPositions() {
 }
 
 Vec3 Triangle::apply_bone_to_vertex(int vi, const std::vector<Matrix4x4>& finalBoneMatrices) const {
-    if (!hasSkinData()) return vertices[vi].position;
+    if (!hasSkinData() || vi >= skinData->vertexBoneWeights.size()) return vertices[vi].position;
     
     const auto& boneWeights = skinData->vertexBoneWeights[vi];
+    if (boneWeights.empty()) return vertices[vi].position; // Fallback to current position (usually original if not yet moved)
+    
     const auto& origPosition = skinData->originalVertexPositions[vi];
     
     Vec3 blended = Vec3(0);
+    float totalWeight = 0.0f;
     for (const auto& [boneIdx, weight] : boneWeights) {
-        Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(origPosition);
-        blended += transformed * weight;
+        if (boneIdx >= 0 && boneIdx < (int)finalBoneMatrices.size()) {
+            Vec3 transformed = finalBoneMatrices[boneIdx].transform_point(origPosition);
+            blended += transformed * weight;
+            totalWeight += weight;
+        }
     }
+    
+    if (totalWeight < 1e-4f) return vertices[vi].position;
     return blended;
 }
 
@@ -279,17 +295,36 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
 
         // Linear Blend Skinning (standard approach)
         Matrix4x4 blendedBoneMatrix = Matrix4x4::zero();
+        float totalWeight = 0.0f;
         
+        // Calculate total weight for normalization
         for (const auto& [boneIdx, weight] : boneWeights[vi]) {
-            if (boneIdx >= static_cast<int>(finalBoneMatrices.size()) || weight < 1e-6f) {
+            if (boneIdx >= 0 && boneIdx < static_cast<int>(finalBoneMatrices.size())) {
+                totalWeight += weight;
+            }
+        }
+
+        if (totalWeight < 1e-5f) {
+            // Fallback: If no valid weights, use root transform as if unweighted
+            vertices[vi].position = rootTransform.transform_point(vertices[vi].original);
+            vertices[vi].normal = rootNormalTransform.transform_vector(vertices[vi].originalNormal).normalize();
+            continue;
+        }
+
+        float invWeight = 1.0f / totalWeight;
+
+        for (const auto& [boneIdx, weight] : boneWeights[vi]) {
+            if (boneIdx >= static_cast<int>(finalBoneMatrices.size()) || weight < 1e-7f) {
                 continue;
             }
             
+            float normalizedWeight = weight * invWeight;
+
             // Blend bone matrices
             const Matrix4x4& boneMatrix = finalBoneMatrices[boneIdx];
             for (int i = 0; i < 4; ++i) {
                 for (int j = 0; j < 4; ++j) {
-                    blendedBoneMatrix.m[i][j] += boneMatrix.m[i][j] * weight;
+                    blendedBoneMatrix.m[i][j] += boneMatrix.m[i][j] * normalizedWeight;
                 }
             }
         }
@@ -384,22 +419,78 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool 
     rec.v = uv.v;
     
     // --- HIGH PERFORMANCE MATERIAL ACCESS & ALPHA TESTING ---
-    if (!cachedMaterial) {
-        cachedMaterial = MaterialManager::getInstance().getMaterial(materialID);
-    }
+    Material* currentMat = MaterialManager::getInstance().getMaterial(materialID);
 
     // --- ALPHA TESTING ---
-    if (cachedMaterial && cachedMaterial->isTransparent()) {
-        float opacity = cachedMaterial->get_opacity(rec.uv);
+    if (currentMat && currentMat->isTransparent()) {
+        float opacity = currentMat->get_opacity(rec.uv);
         if (Vec3::random_float() > opacity) {
             return false; // Transparent hit, ignore and let BVH continue
         }
     }
 
-    rec.materialPtr = cachedMaterial;
+    rec.materialPtr = currentMat;
     rec.material = MaterialManager::getInstance().getMaterialShared(materialID);
     rec.materialID = materialID;
     rec.terrain_id = terrain_id;
+
+    // --- TERRAIN BLENDING (CPU) ---
+    if (terrain_id != -1) {
+        TerrainObject* terrain = TerrainManager::getInstance().getTerrain(terrain_id);
+        if (terrain && terrain->splatMap && terrain->layers.size() > 0) {
+            Vec3 rgb = terrain->splatMap->get_color(rec.u, rec.v);
+            float a = terrain->splatMap->get_alpha(rec.u, rec.v);
+            float weights[4] = { rgb.x, rgb.y, rgb.z, a };
+            
+            Vec3 blended_albedo(0.0f);
+            float blended_roughness = 0.0f;
+            float blended_metallic = 0.0f;
+            float blended_clearcoat = 0.0f;
+            float blended_clearcoat_roughness = 0.0f;
+            float blended_subsurface = 0.0f;
+            Vec3 blended_subsurface_color(0.0f);
+            float blended_transmission = 0.0f;
+            float blended_ior = 0.0f;
+            float total_weight = 0.0f;
+
+            for (size_t i = 0; i < 4 && i < terrain->layers.size(); ++i) {
+                float w = weights[i];
+                if (w > 0.001f) {
+                    auto mat = std::dynamic_pointer_cast<PrincipledBSDF>(terrain->layers[i]);
+                    if (mat) {
+                        float scale = (i < terrain->layer_uv_scales.size()) ? terrain->layer_uv_scales[i] : 1.0f;
+                        Vec2 layerUV = rec.uv * scale;
+                        
+                        blended_albedo = blended_albedo + mat->getPropertyValue(mat->albedoProperty, layerUV) * w;
+                        blended_roughness += mat->getPropertyValue(mat->roughnessProperty, layerUV).y * w;
+                        blended_metallic += mat->getPropertyValue(mat->metallicProperty, layerUV).z * w;
+                        blended_clearcoat += mat->clearcoat * w;
+                        blended_clearcoat_roughness += mat->clearcoatRoughness * w;
+                        blended_subsurface += mat->subsurface * w;
+                        blended_subsurface_color = blended_subsurface_color + mat->subsurfaceColor * w;
+                        blended_transmission += mat->transmission * w;
+                        blended_ior += mat->getIndexOfRefraction() * w;
+                        
+                        total_weight += w;
+                    }
+                }
+            }
+
+            if (total_weight > 0.001f) {
+                float inv_w = 1.0f / total_weight;
+                rec.use_custom_data = true;
+                rec.custom_albedo = blended_albedo * inv_w;
+                rec.custom_roughness = blended_roughness * inv_w;
+                rec.custom_metallic = blended_metallic * inv_w;
+                rec.custom_clearcoat = blended_clearcoat * inv_w;
+                rec.custom_clearcoat_roughness = blended_clearcoat_roughness * inv_w;
+                rec.custom_subsurface = blended_subsurface * inv_w;
+                rec.custom_subsurface_color = blended_subsurface_color * inv_w;
+                rec.custom_transmission = blended_transmission * inv_w;
+                rec.custom_ior = blended_ior * inv_w;
+            }
+        }
+    }
 
     return true;
 }

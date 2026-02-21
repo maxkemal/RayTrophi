@@ -28,7 +28,8 @@
 #include <windows.h>
 #include <shellapi.h>
 #endif
-extern bool show_controls_window; // Assume defined elsewhere
+// extern bool show_controls_window; // Assume defined elsewhere
+
 
 
 
@@ -394,6 +395,14 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                      addProceduralCube(ctx);
                      g_ProjectManager.markModified();
                  }
+                 if (ImGui::MenuItem("UV Sphere")) {
+                     addProceduralSphere(ctx);
+                     g_ProjectManager.markModified();
+                 }
+                 if (ImGui::MenuItem("Cylinder")) {
+                     addProceduralCylinder(ctx);
+                     g_ProjectManager.markModified();
+                 }
                  ImGui::EndMenu();
              }
              
@@ -571,6 +580,9 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             if (ImGui::MenuItem("World Tab", nullptr, &show_world_tab)) { 
                 if (show_world_tab) tab_to_focus = "World"; 
             }
+            if (ImGui::MenuItem("Modifiers & Sculpt Tab", nullptr, &show_modifiers_tab)) {
+                if (show_modifiers_tab) tab_to_focus = "Modifiers"; 
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("System Tab", nullptr, &show_system_tab)) { 
                 // if (show_system_tab) tab_to_focus = "System"; 
@@ -609,6 +621,9 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 void SceneUI::updateProjectFromScene(UIContext& ctx) {
     // Delegate to ProjectManager for robust sync (Deletions, Transforms, Procedurals)
     g_ProjectManager.syncProjectToScene(ctx.scene);
+    
+    // Serialize UI
+    g_ProjectManager.getProjectData().ui_layout_data = serialize();
 }
 
 // Add a procedural plane to the scene
@@ -733,6 +748,216 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
     
     SCENE_LOG_INFO("Added Cube: " + name);
     addViewportMessage("Added Cube: " + name);
+}
+
+
+// Add a procedural UV sphere to the scene
+void SceneUI::addProceduralSphere(UIContext& ctx) {
+    std::shared_ptr<Transform> t = std::make_shared<Transform>();
+    t->setBase(Matrix4x4::translation(Vec3(0,0,0)));
+    
+    auto def_mat = std::make_shared<PrincipledBSDF>();
+    auto gpu = std::make_shared<GpuMaterial>();
+    gpu->albedo = make_float3(0.8f, 0.8f, 0.8f);
+    gpu->roughness = 0.5f;
+    gpu->metallic = 0.0f;
+    def_mat->gpuMaterial = gpu;
+
+    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+
+    std::string name = "Sphere_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
+
+    int latitudeBands = 30;
+    int longitudeBands = 30;
+    float radius = 1.0f;
+
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<Vec2> uvs;
+
+    for (int latNumber = 0; latNumber <= latitudeBands; ++latNumber) {
+        float theta = latNumber * 3.1415926535f / latitudeBands;
+        float sinTheta = sin(theta);
+        float cosTheta = cos(theta);
+
+        for (int longNumber = 0; longNumber <= longitudeBands; ++longNumber) {
+            float phi = longNumber * 2.0f * 3.1415926535f / longitudeBands;
+            float sinPhi = sin(phi);
+            float cosPhi = cos(phi);
+
+            float x = cosPhi * sinTheta;
+            float y = cosTheta;
+            float z = sinPhi * sinTheta;
+            float u = 1.0f - ((float)longNumber / (float)longitudeBands);
+            float v = 1.0f - ((float)latNumber / (float)latitudeBands);
+
+            positions.push_back(Vec3(radius * x, radius * y, radius * z));
+            normals.push_back(Vec3(x, y, z));
+            uvs.push_back(Vec2(u, v));
+        }
+    }
+
+    for (int latNumber = 0; latNumber < latitudeBands; ++latNumber) {
+        for (int longNumber = 0; longNumber < longitudeBands; ++longNumber) {
+            int first = (latNumber * (longitudeBands + 1)) + longNumber;
+            int second = first + longitudeBands + 1;
+
+            auto tri1 = std::make_shared<Triangle>(
+                positions[first], positions[first + 1], positions[second],
+                normals[first], normals[first + 1], normals[second],
+                uvs[first], uvs[first + 1], uvs[second], mat_id);
+            tri1->setTransformHandle(t);
+            tri1->setNodeName(name);
+            tri1->update_bounding_box();
+            ctx.scene.world.objects.push_back(tri1);
+
+            auto tri2 = std::make_shared<Triangle>(
+                positions[first + 1], positions[second + 1], positions[second],
+                normals[first + 1], normals[second + 1], normals[second],
+                uvs[first + 1], uvs[second + 1], uvs[second], mat_id);
+            tri2->setTransformHandle(t);
+            tri2->setNodeName(name);
+            tri2->update_bounding_box();
+            ctx.scene.world.objects.push_back(tri2);
+        }
+    }
+
+    ProceduralObjectData proc;
+    proc.id = g_ProjectManager.getProjectData().generateObjectId();
+    proc.mesh_type = ProceduralMeshType::Sphere;
+    proc.display_name = name;
+    proc.transform = t->base;
+    proc.material_id = mat_id;
+    g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
+
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+    
+    SCENE_LOG_INFO("Added Sphere: " + name);
+    addViewportMessage("Added Sphere: " + name);
+}
+
+// Add a procedural cylinder to the scene
+void SceneUI::addProceduralCylinder(UIContext& ctx) {
+    std::shared_ptr<Transform> t = std::make_shared<Transform>();
+    t->setBase(Matrix4x4::translation(Vec3(0,0,0)));
+    
+    auto def_mat = std::make_shared<PrincipledBSDF>();
+    auto gpu = std::make_shared<GpuMaterial>();
+    gpu->albedo = make_float3(0.8f, 0.8f, 0.8f);
+    gpu->roughness = 0.5f;
+    gpu->metallic = 0.0f;
+    def_mat->gpuMaterial = gpu;
+
+    uint16_t mat_id = MaterialManager::getInstance().getOrCreateMaterialID("Default", def_mat);
+
+    std::string name = "Cylinder_" + std::to_string(g_ProjectManager.getProjectData().next_object_id);
+
+    int segments = 32;
+    float radius = 1.0f;
+    float halfHeight = 1.0f;
+
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    std::vector<Vec2> uvs;
+
+    // Body
+    for (int i = 0; i <= segments; ++i) {
+        float theta = (float)i / segments * 2.0f * 3.1415926535f;
+        float x = radius * cos(theta);
+        float z = radius * sin(theta);
+        float u = (float)i / segments;
+        
+        positions.push_back(Vec3(x, halfHeight, z));
+        normals.push_back(Vec3(cos(theta), 0.0f, sin(theta)));
+        uvs.push_back(Vec2(u, 1.0f));
+
+        positions.push_back(Vec3(x, -halfHeight, z));
+        normals.push_back(Vec3(cos(theta), 0.0f, sin(theta)));
+        uvs.push_back(Vec2(u, 0.0f));
+    }
+
+    // Caps
+    int capStartIndex = positions.size();
+    Vec3 topCenter(0, halfHeight, 0);
+    Vec3 bottomCenter(0, -halfHeight, 0);
+    
+    // Create triangles for body
+    for (int i = 0; i < segments; ++i) {
+        int idx = i * 2;
+        auto tri1 = std::make_shared<Triangle>(
+            positions[idx], positions[idx + 1], positions[idx + 2],
+            normals[idx], normals[idx + 1], normals[idx + 2],
+            uvs[idx], uvs[idx + 1], uvs[idx + 2], mat_id);
+        tri1->setTransformHandle(t);
+        tri1->setNodeName(name);
+        tri1->update_bounding_box();
+        ctx.scene.world.objects.push_back(tri1);
+
+        auto tri2 = std::make_shared<Triangle>(
+            positions[idx + 1], positions[idx + 3], positions[idx + 2],
+            normals[idx + 1], normals[idx + 3], normals[idx + 2],
+            uvs[idx + 1], uvs[idx + 3], uvs[idx + 2], mat_id);
+        tri2->setTransformHandle(t);
+        tri2->setNodeName(name);
+        tri2->update_bounding_box();
+        ctx.scene.world.objects.push_back(tri2);
+    }
+    
+    // Top cap
+    for (int i = 0; i < segments; ++i) {
+        Vec3 v0 = topCenter;
+        Vec3 v1 = positions[i * 2];
+        Vec3 v2 = positions[(i * 2 + 2) % (segments * 2 + 2)];
+        Vec3 n(0, 1, 0);
+        Vec2 uv0(0.5f, 0.5f);
+        Vec2 uv1(0.5f + 0.5f * cos(i * 2.0f * 3.1415926535f / segments), 0.5f + 0.5f * sin(i * 2.0f * 3.1415926535f / segments));
+        Vec2 uv2(0.5f + 0.5f * cos((i + 1) * 2.0f * 3.1415926535f / segments), 0.5f + 0.5f * sin((i + 1) * 2.0f * 3.1415926535f / segments));
+        
+        auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, uv0, uv1, uv2, mat_id);
+        tri->setTransformHandle(t);
+        tri->setNodeName(name);
+        tri->update_bounding_box();
+        ctx.scene.world.objects.push_back(tri);
+    }
+
+    // Bottom cap
+    for (int i = 0; i < segments; ++i) {
+        Vec3 v0 = bottomCenter;
+        Vec3 v1 = positions[(i * 2 + 3) % (segments * 2 + 2)];
+        Vec3 v2 = positions[i * 2 + 1];
+        Vec3 n(0, -1, 0);
+        Vec2 uv0(0.5f, 0.5f);
+        // Correcting the UV assignments to prevent warning
+        float angle1 = (i + 1) * 2.0f * 3.1415926535f / segments;
+        float angle2 = i * 2.0f * 3.1415926535f / segments;
+        Vec2 uv1(0.5f + 0.5f * cos(angle1), 0.5f + 0.5f * sin(angle1));
+        Vec2 uv2(0.5f + 0.5f * cos(angle2), 0.5f + 0.5f * sin(angle2));
+        
+        auto tri = std::make_shared<Triangle>(v0, v1, v2, n, n, n, uv0, uv1, uv2, mat_id);
+        tri->setTransformHandle(t);
+        tri->setNodeName(name);
+        tri->update_bounding_box();
+        ctx.scene.world.objects.push_back(tri);
+    }
+
+    ProceduralObjectData proc;
+    proc.id = g_ProjectManager.getProjectData().generateObjectId();
+    proc.mesh_type = ProceduralMeshType::Cylinder;
+    proc.display_name = name;
+    proc.transform = t->base;
+    proc.material_id = mat_id;
+    g_ProjectManager.getProjectData().procedural_objects.push_back(proc);
+
+    rebuildMeshCache(ctx.scene.world.objects);
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+    
+    SCENE_LOG_INFO("Added Cylinder: " + name);
+    addViewportMessage("Added Cylinder: " + name);
 }
 
 #endif

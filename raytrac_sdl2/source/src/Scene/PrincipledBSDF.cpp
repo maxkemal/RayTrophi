@@ -190,16 +190,16 @@ bool PrincipledBSDF::scatter(
     
 
     float translucentValue = translucent; 
-
-    // Subsurface Scattering
-    // getSubsurface() olmadığı için skalar.
     float sssValue = subsurface; 
-    
-    // Clearcoat
-    // ClearcoatProperty tanımlı değil, skalar.
     float clearcoatValue = clearcoat;
+
+    if (rec.use_custom_data) {
+        translucentValue = rec.custom_translucent;
+        sssValue = rec.custom_subsurface;
+        clearcoatValue = rec.custom_clearcoat;
+    }
     
-    float ior = getIOR();
+    float ior = (rec.use_custom_data) ? rec.custom_ior : getIOR();
 
     Vec3 N = rec.normal;                  // Oriented normal (points against ray)
     Vec3 V = -r_in.direction.normalize(); // View vector
@@ -243,30 +243,48 @@ bool PrincipledBSDF::scatter(
     }
 
     // 5. STANDARD DIFFUSE + SPECULAR (Base layer)
-    // GPU Parity: GPU uses a simplified (albedo/PI + Fresnel) attenuation for indirect bounces
-    Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), roughness, N);
-    Vec3 L = Vec3::reflect(-V, H).normalize();
-    
-    // Ensure L is in the upper hemisphere
-    if (Vec3::dot(N, L) < 0.0f) L = -L;
-
-    float VdotH = std::fmax(Vec3::dot(V, H), 0.001f);
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
-    Vec3 F = fresnelSchlickRoughness(VdotH, F0, roughness);
+    float F_avg_scalar = std::clamp(F0.length() * 0.577f, 0.04f, 0.95f);
+    float fresnel_factor = F_avg_scalar + (1.0f - F_avg_scalar) * std::pow(1.0f - std::max(Vec3::dot(V, N), 0.0f), 5.0f);
+    
+    // Decide between Diffuse and Specular stochasticly
+    float specular_prob = std::clamp(fresnel_factor + metallic, 0.1f, 0.9f);
+    
+    if (Vec3::random_float() > specular_prob) {
+        // DIFFUSE LOBE (Lambertian)
+        Vec3 L = Vec3::random_cosine_direction(N);
+        scattered = Ray(rec.point + N * 0.001f, L);
+        
+        // PDF = cosTheta / PI. Weight = (albedo / PI * cosTheta) / (cosTheta / PI) = albedo
+        // Account for lobe selection probability
+        attenuation = albedo * (1.0f - metallic) / (1.0f - specular_prob);
+    } else {
+        // SPECULAR LOBE (GGX)
+        Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), roughness, N);
+        Vec3 L = Vec3::reflect(-V, H).normalize();
+        if (Vec3::dot(N, L) < 0.0f) L = (L - 2.0f * Vec3::dot(N, L) * N).normalize(); // Reflect back if below horizon
 
-    // Energy conservation
-    Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
-    Vec3 k_d = (Vec3(1.0f) - F_avg) * (1.0f - metallic);
-
-    // GPU matching weighting: (albedo/PI) * kd + Fresnel (Restored PI for energy conservation)
-    attenuation = (albedo * k_d * (1.0f / M_PI)) + F;
+        float VdotH = std::max(Vec3::dot(V, H), 0.001f);
+        float NdotL = std::max(Vec3::dot(N, L), 0.001f);
+        float NdotV = std::max(Vec3::dot(N, V), 0.001f);
+        
+        Vec3 F_spec = fresnelSchlickRoughness(VdotH, F0, roughness);
+        float G = GeometrySmith(N, V, L, roughness);
+        
+        // PDF = (D * NdotH) / (4 * VdotH). 
+        // Weight = (F * D * G / (4 * NdotL * NdotV)) * NdotL / PDF 
+        //        = (F * G * VdotH) / (NdotV * NdotH)
+        float NdotH = std::max(Vec3::dot(N, H), 0.001f);
+        Vec3 weight = F_spec * G * VdotH / (NdotV * NdotH + 0.0001f);
+        
+        // Account for lobe selection probability
+        attenuation = weight / specular_prob;
+        scattered = Ray(rec.point + N * 0.001f, L);
+    }
 
     // Sanity check
-    if (std::isnan(attenuation.x) || std::isnan(attenuation.y) || std::isnan(attenuation.z)) {
-         attenuation = Vec3(0.0f);
-    }
+    if (std::isnan(attenuation.x) || std::isinf(attenuation.x)) attenuation = Vec3(0.0f);
     
-    scattered = Ray(rec.point + N * 0.001f, L);
     return true;
 }
 float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const  {
@@ -690,7 +708,7 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     float cc_f0 = ((cc_ior - 1.0f) / (cc_ior + 1.0f));
     cc_f0 *= cc_f0;
     
-    float cc_rough = std::max(this->clearcoatRoughness, 0.001f);
+    float cc_rough = (rec.use_custom_data) ? std::max(rec.custom_clearcoat_roughness, 0.001f) : std::max(this->clearcoatRoughness, 0.001f);
     Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), cc_rough, N);
     Vec3 L = Vec3::reflect(-V, H).normalize();
     
@@ -713,7 +731,7 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     // However, GPU scatter_material returns the full BRDF term directly for attenuation 
     // and let ray_color handle it.
     float spec = (fresnel * D * G) / (4.0f * NdotV * NdotL + 0.001f);
-    attenuation = Vec3(spec) * this->clearcoat;
+    attenuation = Vec3(spec) * ((rec.use_custom_data) ? rec.custom_clearcoat : this->clearcoat);
     scattered = Ray(rec.point + N * 0.001f, L);
     
     return true;
@@ -722,7 +740,7 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
 bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     Vec3 N = rec.normal;
     
-    Vec3 sss_color = this->subsurfaceColor;
+    Vec3 sss_color = (rec.use_custom_data) ? rec.custom_subsurface_color : this->subsurfaceColor;
     Vec3 sss_radius = this->subsurfaceRadius;
     float sss_scale = std::max(this->subsurfaceScale, 0.001f);
     float sss_anisotropy = this->subsurfaceAnisotropy;
@@ -763,7 +781,12 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
 bool PrincipledBSDF::translucent_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     Vec3 N = rec.normal;
     Vec2 uv = applyTextureTransform(rec.u, rec.v);
-    Vec3 albedo = getPropertyValue(albedoProperty, uv);
+    Vec3 albedo;
+    if (rec.use_custom_data) {
+        albedo = rec.custom_albedo;
+    } else {
+        albedo = getPropertyValue(albedoProperty, uv);
+    }
     
     Vec3 trans_dir = Vec3::random_cosine_direction(-N);
     

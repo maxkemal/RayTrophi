@@ -386,7 +386,9 @@ void Renderer::initializeAnimationSystem(SceneData& scene) {
             ctx.animator->registerClips(modelClips);
 
             if (!modelClips.empty()) {
-                ctx.animator->play(modelClips[0]->name, 0.0f);
+                // [FIX] Do NOT auto-play on import. 
+                // Keep character in Bind Pose (T-Pose) until an animation node is added to AnimGraph.
+                // ctx.animator->play(modelClips[0]->name, 0.0f);
                 SCENE_LOG_INFO("[Renderer] Created animator for model: " + ctx.importName + " (Clips: " + std::to_string(modelClips.size()) + ")");
             }
         }
@@ -397,26 +399,97 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
     bool anyChanged = false;
 
     // Resize internal matrix buffer to match scene total bone count
+    // (kept for global access, e.g. GPU upload)
+    // IMPORTANT: Use resize(), NOT assign()! When a second model is imported,
+    // totalBones increases. assign() would destroy Model A's existing bone matrices,
+    // causing its skinned mesh to collapse to origin on the next GPU skinning pass
+    // (before Model A's animator re-computes). resize() preserves existing entries.
     size_t totalBones = scene.boneData.boneNameToIndex.size();
-    if (this->finalBoneMatrices.size() != totalBones) {
-        this->finalBoneMatrices.assign(totalBones, Matrix4x4::identity());
+    if (this->finalBoneMatrices.size() < totalBones) {
+        this->finalBoneMatrices.resize(totalBones, Matrix4x4::identity());
     }
+    // Optimization: avoid resizing every frame, but ensure identity for non-animated models
+    // Actually, AnimationController::update already fills with identity.
 
     // Update each model context independently
     for (auto& ctx : scene.importedModelContexts) {
+        // Per-model bone matrices for isolated skinning
+        std::vector<Matrix4x4> modelBoneMatrices;
+        bool modelChanged = false;
+
         if (ctx.useAnimGraph && ctx.graph) {
             // EVALUATE NODE GRAPH (Unity/Unreal style)
-            // Passes deltaTime and clips to the graph for full logic execution
             if (ctx.animator) {
                 ctx.graph->evalContext.clipsPtr = &ctx.animator->getAllClips();
             }
+
+            // CRITICAL FIX: Fetch robust global inverse transform from boneData
+            // ImportedModelContext's copy might be uninitialized identity
+            Matrix4x4 finalInv = scene.boneData.globalInverseTransform;
+            if (!ctx.importName.empty()) {
+                 auto invIt = scene.boneData.perModelInverses.find(ctx.importName);
+                 if (invIt != scene.boneData.perModelInverses.end()) finalInv = invIt->second;
+            }
+            ctx.globalInverseTransform = finalInv; // Update cache
+            ctx.graph->evalContext.globalInverseTransform = finalInv;
+            
+            // --- ROOT MOTION PREPARATION FOR ANIM GRAPH ---
+            ctx.graph->evalContext.useRootMotion = ctx.useRootMotion;
+            if (ctx.useRootMotion && ctx.animator) {
+                auto clips = ctx.animator->getAllClips();
+                if (!clips.empty() && clips[0].sourceData) {
+                    ctx.graph->evalContext.rootMotionBone = ctx.animator->findBestRootMotionBone(clips[0].name);
+                }
+            }
+            ctx.graph->evalContext.rootMotion = RootMotionDelta(); // reset
+
             AnimationGraph::PoseData pose = ctx.graph->evaluate(deltaTime, scene.boneData);
 
             if (pose.isValid()) {
-                anyChanged = true;
-                for (size_t i = 0; i < pose.boneTransforms.size() && i < this->finalBoneMatrices.size(); ++i) {
-                    if (!(pose.boneTransforms[i] == Matrix4x4::identity())) {
-                        this->finalBoneMatrices[i] = pose.boneTransforms[i];
+                if (pose.wasUpdated) {
+                    modelChanged = true;
+                    anyChanged = true; 
+                    
+                    // --- APPLY ROOT MOTION FOR ANIM GRAPH ---
+                    if (ctx.useRootMotion && pose.rootMotion.hasPosition && !ctx.members.empty()) {
+                        std::vector<Transform*> processed;
+                        for (auto& member : ctx.members) {
+                            if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
+                                auto h = tri->getTransformHandle();
+                                if (h && std::find(processed.begin(), processed.end(), h.get()) == processed.end()) {
+                                    h->position = h->position + pose.rootMotion.positionDelta;
+                                    h->updateMatrix();
+                                    h->markDirty();
+                                    processed.push_back(h.get());
+                                }
+                            }
+                        }
+                    }
+                }
+                modelBoneMatrices = pose.boneTransforms;
+
+                // ═══════════════════════════════════════════════════════════════════════════
+                // CRITICAL FIX: Direct bone-to-index merging for AnimGraph
+                // Graph pose.boneTransforms order matches the order in boneData.boneIndexToName
+                // but we must ONLY update the indices that belong to THIS model.
+                // CRITICAL FIX: Always copy the matrix.
+                // If it's identity, it means the bone IS at origin/bind pose.
+                // Skipping identity used to cause "stuck" bones from previous poses.
+                // ═══════════════════════════════════════════════════════════════════════════
+                for (size_t localIdx = 0; localIdx < modelBoneMatrices.size(); ++localIdx) {
+                    const std::string& boneName = scene.boneData.getBoneNameByIndex(localIdx);
+                    
+                    // Only update if this bone belongs to this model prefix
+                    if (boneName.find(ctx.importName + "_") == 0) {
+                        // Find the global index for this bone (it should match localIdx here 
+                        // IF scene.boneData was built in the same order, but let's be safe)
+                        auto it = scene.boneData.boneNameToIndex.find(boneName);
+                        if (it != scene.boneData.boneNameToIndex.end()) {
+                            unsigned int globalIdx = it->second;
+                            if (globalIdx < this->finalBoneMatrices.size()) {
+                                this->finalBoneMatrices[globalIdx] = modelBoneMatrices[localIdx];
+                            }
+                        }
                     }
                 }
             }
@@ -433,18 +506,39 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             }
 
             bool changed = ctx.animator->update(deltaTime, scene.boneData);
-            if (changed) {
-                anyChanged = true;
 
-                // Merge model matrices into global buffer
-                const auto& modelMatrices = ctx.animator->getFinalBoneMatrices();
-                for (size_t i = 0; i < modelMatrices.size() && i < this->finalBoneMatrices.size(); ++i) {
-                    // MERGE LOGIC: copy only non-identity values or use bone prefix check
-                    // Here we use identity check as a simple heuristic because bone indices are unique per model
-                    if (!(modelMatrices[i] == Matrix4x4::identity())) {
-                        this->finalBoneMatrices[i] = modelMatrices[i];
+            // Get this model's bone matrices (current state)
+            modelBoneMatrices = ctx.animator->getFinalBoneMatrices();
+
+            // ═══════════════════════════════════════════════════════════════════════════
+            // CRITICAL FIX: Map Animator Local Indices to Global Indices
+            // The animator's matrices are per-model. We must map them to global slots.
+            // ═══════════════════════════════════════════════════════════════════════════
+            const auto& allClips = ctx.animator->getAllClips();
+            if (!allClips.empty()) {
+                // We can use the bone mapping from the first clip as a reference for node names
+                const auto& source = allClips[0].sourceData;
+                if (source) {
+                    // This is more complex because Animator doesn't easily expose local-to-global mapping
+                    // But we can iterate over ALL bones in the scene and see which ones belong to this model
+            // MODEL ISOLATION FIX: 
+            // In the AnimationController, cachedFinalBoneMatrices is already sized for the global bone count.
+            // However, it only contains valid data for bones that belong to the model it's controlling.
+            // We need to copy ONLY the bones that this model 'owns' to avoid overwriting 
+            // other models' poses with the fallback Identity pose from this animator's cache.
+            for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
+                if (boneName.find(ctx.importName + "_") == 0) {
+                    if (globalIdx < this->finalBoneMatrices.size() && globalIdx < modelBoneMatrices.size()) {
+                        this->finalBoneMatrices[globalIdx] = modelBoneMatrices[globalIdx];
                     }
                 }
+            }
+                }
+            }
+
+            if (changed) {
+                modelChanged = true;
+
 
                 // --- ROOT MOTION (Pivot movement) ---
                 if (ctx.useRootMotion) {
@@ -465,27 +559,53 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 }
             }
         }
-    }
-
-    if (!anyChanged && !this->finalBoneMatrices.empty()) {
-        // Even if no clip changed, we might need initial matrices
-        // Check if we need to return early or re-pose
-    }
-
-    // Apply skinning to triangles if CPU skinning is requested
-    if (apply_cpu_skinning) {
-        for (auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri && tri->hasSkinData()) {
-                // No longer forcing identity here! 
-                // The TransformHandle stores the model's root placement.
-                tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(this->finalBoneMatrices));
+        
+        if (modelChanged) {
+            anyChanged = true;
+            
+            // ============================================================
+            // PER-MODEL SKINNING: Apply ONLY to this model's own members
+            // If ctx.members is empty (e.g. after project load), lazy-init
+            // by matching triangle nodeName prefix to ctx.importName.
+            // ============================================================
+            if (apply_cpu_skinning && !modelBoneMatrices.empty()) {
+                // Lazy populate members if empty (project load doesn't serialize them)
+                if (ctx.members.empty() && !ctx.importName.empty()) {
+                    std::string prefix = ctx.importName + "_";
+                    for (auto& obj : scene.world.objects) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                        if (tri && tri->nodeName.find(prefix) == 0) {
+                            ctx.members.push_back(tri);
+                        }
+                    }
+                }
+                
+                for (auto& member : ctx.members) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(member);
+                    if (tri && tri->hasSkinData()) {
+                        tri->apply_skinning(modelBoneMatrices);
+                    }
+                }
             }
         }
     }
 
-    // Reset CPU accumulation since geometry changed
-    resetCPUAccumulation();
+    if (!anyChanged && !this->finalBoneMatrices.empty()) {
+        // Even if no clip changed, we might need initial matrices
+    }
+
+    // ============================================================
+    // POST-SKINNING: Update hair system to follow deformed mesh
+    // Hair must be updated AFTER skinning so it reads fresh vertex positions.
+    // ============================================================
+    // NOTE: hairSystem.updateAllTransforms now called at the end of updateAnimationState
+    // to ensure it runs for both Graph and Legacy/Manual animations.
+
+    // Only reset CPU accumulation when geometry actually changed
+    // Otherwise sample counter keeps resetting to 0 every frame
+    if (anyChanged) {
+        resetCPUAccumulation();
+    }
 
     // Clear dirty flags for all animators
     for (auto& ctx : scene.importedModelContexts) {
@@ -494,11 +614,11 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
         }
     }
 
-    return true;  // Geometry changed
+    return anyChanged;  // Only report geometry change when it actually happened
 }
 
 
-bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool apply_cpu_skinning) {
+bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool apply_cpu_skinning, bool force_bind_pose) {
     // ═══════════════════════════════════════════════════════════════════════════
     // GEOMETRY CHANGE TRACKING (Animation Performance Optimization)
     // ═══════════════════════════════════════════════════════════════════════════
@@ -506,14 +626,75 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     // Return false for camera-only or material-only animations to avoid unnecessary BVH rebuilds.
     bool geometry_changed = false;
 
-    // Optimization: Skip update if time hasn't changed significantly
-    if (std::abs(current_time - lastAnimationUpdateTime) < 0.0001f) {
-        return false;
+    static bool was_in_bind_pose = false;
+    if (force_bind_pose) {
+        if (!was_in_bind_pose) {
+            was_in_bind_pose = true;
+            geometry_changed = true;
+            
+            if (!scene.boneData.boneNameToIndex.empty()) {
+                this->finalBoneMatrices.assign(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
+            }
+
+            // Ensure animation groups are built
+            if (animation_groups_dirty || animation_groups.empty()) {
+                animation_groups.clear();
+                std::unordered_map<void*, size_t> transformToGroup;
+                for (auto& obj : scene.world.objects) {
+                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                    if (!tri) continue;
+                    void* transformKey = tri->getTransformHandle().get();
+                    if (transformToGroup.find(transformKey) == transformToGroup.end()) {
+                        transformToGroup[transformKey] = animation_groups.size();
+                        AnimatableGroup newGroup;
+                        newGroup.nodeName = tri->getNodeName();
+                        newGroup.isSkinned = tri->hasSkinData();
+                        newGroup.transformHandle = tri->getTransformHandle();
+                        animation_groups.push_back(newGroup);
+                    }
+                    animation_groups[transformToGroup[transformKey]].triangles.push_back(tri);
+                }
+                animation_groups_dirty = false;
+            }
+
+            for (auto& group : animation_groups) {
+                if (group.isSkinned) {
+                    if (apply_cpu_skinning) {
+                        for (auto& tri : group.triangles) {
+                            tri->apply_skinning(static_cast<const std::vector<Matrix4x4>&>(this->finalBoneMatrices));
+                        }
+                    }
+                }
+            }
+            
+            // Rebuild BVHs
+            auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
+            if (embree_ptr) {
+                embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+            }
+            
+            if (hairSystem.getTotalStrandCount() > 0) {
+                hairSystem.updateAllTransforms(scene.world.objects, this->finalBoneMatrices);
+                if (hairSystem.isBVHDirty()) {
+                    hairSystem.buildBVH(true);
+                    uploadHairToGPU();
+                }
+            }
+        }
+        return geometry_changed;
+    } else {
+        if (was_in_bind_pose) {
+            was_in_bind_pose = false;
+            // Force animation resync
+        }
     }
 
-    // Time changed - Force Accumulation Reset for CPU Render
-    // This prevents ghosting during animation playback
-    resetCPUAccumulation();
+
+    // Unified Animation Check: If we have clips and bones, use the Controller
+
+    // NOTE: resetCPUAccumulation is now called inside updateAnimationWithGraph
+    // only when geometry actually changes. Calling it here unconditionally
+    // was preventing sample accumulation beyond 1.
 
     lastAnimationUpdateTime = current_time;
 
@@ -522,19 +703,47 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     if (useAnimationController) {
         static float last_sim_time = -1.0f;
+        static int last_timeline_frame = -1;
+        static auto last_wall_time = std::chrono::steady_clock::now();
+
+        auto now = std::chrono::steady_clock::now();
+        float wallDelta = std::chrono::duration<float>(now - last_wall_time).count();
+        last_wall_time = now;
+        if (wallDelta > 0.1f) wallDelta = 1.0f / 60.0f;
+
         float deltaTime = (last_sim_time >= 0.0f) ? (current_time - last_sim_time) : (1.0f / 60.0f);
-        if (deltaTime < 0.0f || deltaTime > 0.5f) deltaTime = 0.0f;
-        last_sim_time = current_time;
+        if (deltaTime < -0.5f || deltaTime > 0.5f) deltaTime = 0.0f;
+
+        // SCRUBBING FIX: Absolute time seek support
+        // If current_time changed drastically or timeline was scrubbed, sync animators
+        bool timelineScrubbed = (scene.timeline.current_frame != last_timeline_frame);
+        
+        if (!timelineScrubbed && std::abs(deltaTime) < 0.0001f) {
+            deltaTime = wallDelta;
+        }
+
+        if (timelineScrubbed) {
+            for (auto& modelCtx : scene.importedModelContexts) {
+                if (modelCtx.animator) {
+                    modelCtx.animator->setTime(current_time, 0); // Seek to current simulation time
+                }
+            }
+            // Use zero delta for seek frames to avoid double-advancing
+            deltaTime = 0.0f; 
+        }
 
         // Drive the animation
-
-        // Use the new AnimationController system
-        // ALWAYS use this if animations exist, legacy path is too unreliable
-        geometry_changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning);
-
-        // Return result
-        return geometry_changed;
+        bool changed = updateAnimationWithGraph(scene, deltaTime, apply_cpu_skinning);
+        
+        geometry_changed = changed || timelineScrubbed;
+        
+        last_sim_time = current_time;
+        last_timeline_frame = scene.timeline.current_frame;
     }
+    else {
+        // --- LEGACY FALLBACK PATH ---
+        // This part is only reached if useAnimationController is false.
+
 
     // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
     std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
@@ -995,12 +1204,29 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         }
     }
 
+    } // End of Legacy Else
+    
     // --- 4. Adım: BVH Güncelle (only if geometry changed) ---
     // OPTIMIZATION: Skip CPU BVH rebuild for camera-only or material-only animations
     if (geometry_changed) {
         auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
         if (embree_ptr) {
             embree_ptr->updateGeometryFromTrianglesFromSource(scene.world.objects);
+        }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HAIR SYSTEM UPDATE (Rigid & Skeletal Synchronization)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // This MUST run after ALL bone/rigid transformations are final.
+    if (hairSystem.getTotalStrandCount() > 0) {
+        // We pass the final calculated bone matrices.
+        // This handles guide skinning and BVH updates.
+        hairSystem.updateAllTransforms(scene.world.objects, this->finalBoneMatrices);
+        
+        if (hairSystem.isBVHDirty()) {
+            hairSystem.buildBVH(true);
+            uploadHairToGPU();
         }
     }
 
@@ -1448,7 +1674,7 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     // IMPORTANT: Always rebuild hair BVH when main BVH is rebuilt
     // This ensures hair-to-mesh and mesh-to-hair shadows are accurate
     if (hairSystem.getTotalStrandCount() > 0) {
-        hairSystem.buildBVH();
+        hairSystem.buildBVH(!hideInterpolatedHair);
     }
 }
 
@@ -2060,9 +2286,30 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     Vec2 uv = Vec2(rec.u, rec.v);
 
     // Malzeme özellikleri
-    Vec3 albedo = rec.material->getPropertyValue(rec.material->albedoProperty, uv);
-    float metallic = rec.material->getPropertyValue(rec.material->metallicProperty, uv).z;
-    float roughness = rec.material->getPropertyValue(rec.material->roughnessProperty, uv).y;
+    // Malzeme özellikleri (Blending Support)
+    Vec3 albedo;
+    float metallic;
+    float roughness;
+    float clearcoat = 0.0f;
+    float clearcoatRoughness = 0.03f;
+
+    if (rec.use_custom_data) {
+        albedo = rec.custom_albedo;
+        metallic = rec.custom_metallic;
+        roughness = rec.custom_roughness;
+        clearcoat = rec.custom_clearcoat;
+        clearcoatRoughness = rec.custom_clearcoat_roughness;
+    } else {
+        albedo = rec.material->getPropertyValue(rec.material->albedoProperty, uv);
+        metallic = rec.material->getPropertyValue(rec.material->metallicProperty, uv).z;
+        roughness = rec.material->getPropertyValue(rec.material->roughnessProperty, uv).y;
+        
+        // Try to get clearcoat from material
+        if (auto pMat = std::dynamic_pointer_cast<PrincipledBSDF>(rec.material)) {
+            clearcoat = pMat->clearcoat;
+            clearcoatRoughness = pMat->clearcoatRoughness;
+        }
+    }
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
 
     Vec3 V = -r_in.direction.normalize();
@@ -2442,6 +2689,15 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     // Toplam BRDF
     Vec3 brdf = diffuse + specular;
 
+    // Clearcoat Contribution
+    if (clearcoat > 0.001f) {
+        psdf.clearcoatRoughness = clearcoatRoughness;
+        // Check signature: computeClearcoat(V, L, N)
+        // V is view vector (-ray.dir), L is light vector, N is normal
+        Vec3 cc = psdf.computeClearcoat(V, L, N); 
+        brdf = brdf + cc * clearcoat;
+    }
+
     // --- MIS (Multiple Importance Sampling) ---
     // PDF BRDF hesapla
     Vec3 incoming = -L; // Light direction (incoming to surface)
@@ -2595,10 +2851,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     // End if (!usedCustomTexture)
                 } // End if (hairMat.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP) 
 
-        // Apply Color Tint (Artistic overlay)
-                if (hairMat.tint > 0.0f) {
-                    hairMat.color = Vec3::mix(hairMat.color, hairMat.tintColor, hairMat.tint);
-                }
+        // Note: Tint is now applied inside HairBSDF::evaluate() as post-process
+        // Do NOT modify hairMat.color here to avoid double-tinting
 
                 if (hairMat.randomHue > 0.0f || hairMat.randomValue > 0.0f) {
                     uint32_t id = hairHit.strandID;
@@ -2733,7 +2987,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 // Pass longitudinal (v) and azimuthal (u) correctly
                 // Final Color = BSDF * LightColor * Shadow + Ambient
                 Vec3 bsdf = Hair::HairBSDF::evaluate(wo, mainLightDir, T, hairMat, hairHit.v, hairHit.u);
-                Vec3 hair_color = (bsdf * totalShadow + baseHairColor * 0.05f) * mainLightColor;
+                
+                // Physically plausible ambient: Small portion of sunlight as 'sky' contribution
+                Vec3 hair_color = (bsdf * totalShadow * mainLightColor) + (baseHairColor * mainLightColor * 0.02f);
 
 
 
@@ -3257,10 +3513,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     }
 
                     float d_remapped = std::max(0.0f, (density - remap_low) / remap_range);
+                    float d = d_remapped * density_scale; 
 
-                    if (d_remapped > threshold) {
-                        float d = d_remapped * density_scale; 
-                        
+                    if (d > threshold) {
                         if (bounce == 0 && first_vol_t < 0.0f && d > 0.05f) {
                             first_vol_t = t;
                         }
@@ -3343,8 +3598,13 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                         }
 
                                         float beers = exp(-density_accum);
-                                        float beers_soft = exp(-density_accum * 0.25f);
-                                        float phys_trans = beers * (1.0f - multi_scatter * albedo_avg) + beers_soft * (multi_scatter * albedo_avg);
+                                        float phys_trans = beers;
+                                        
+                                        // Match GPU Fix: Only use multi-scatter softening if scattering is actually present
+                                        if (scattering_intensity > 1e-6f && multi_scatter > 1e-6f) {
+                                            float beers_soft = exp(-density_accum * 0.25f);
+                                            phys_trans = beers * (1.0f - multi_scatter * albedo_avg) + beers_soft * (multi_scatter * albedo_avg);
+                                        }
                                         shadow_transmittance = 1.0f - shadow_strength * (1.0f - phys_trans);
                                     }
                                 }
@@ -3366,8 +3626,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             }
                         }
 
-                        // Sky Lighting
-                        total_radiance += toVec3f(world.evaluate(Vec3(0, 1, 0))) * 0.15f;
+                        // Sky Lighting (Physical Parity: Sample atmospheric color)
+                        total_radiance += toVec3f(world.evaluate(Vec3(0, 1, 0))) * 0.15f * world.data.nishita.sun_intensity;
 
                         // --- EMISSION ---
                         Vec3f step_emission(0.0f);
@@ -4058,9 +4318,41 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         Ray shadow_ray(shadow_origin, toVec3(wi));
                         bool meshOccluded = bvh->occluded(shadow_ray, UnifiedConstants::SHADOW_BIAS, distance);
                         
+                        // --- VOLUMETRIC SHADOWING (VDB & Gas) ---
+                        float volShadowTransmittance = 1.0f;
+                        if (!meshOccluded && (!scene.vdb_volumes.empty() || !scene.gas_volumes.empty())) {
+                            for (const auto& v_ptr : scene.vdb_volumes) {
+                                if (!v_ptr || !v_ptr->visible) continue;
+                                float t0_v, t1_v;
+                                if (v_ptr->intersectTransformedAABB(shadow_ray, 0.001f, distance, t0_v, t1_v)) {
+                                    // Use a coarser step for shadow marching to preserve performance
+                                    float s_step = (v_ptr->volume_shader ? v_ptr->volume_shader->quality.step_size : 0.25f) * 2.5f;
+                                    float t_v = t0_v + 0.001f;
+                                    auto& mgr = VDBVolumeManager::getInstance();
+                                    int vid = v_ptr->getVDBVolumeID();
+                                    Matrix4x4 inv = v_ptr->getInverseTransform();
+                                    float ds = (v_ptr->volume_shader ? v_ptr->volume_shader->density.multiplier : 1.0f) * v_ptr->density_scale;
+                                    float sigma_t = (v_ptr->volume_shader ? (v_ptr->volume_shader->scattering.coefficient + v_ptr->volume_shader->absorption.coefficient) : 1.1f);
+                                    
+                                    while (t_v < t1_v) {
+                                        Vec3 sp = shadow_ray.at(t_v);
+                                        Vec3 local_sp = inv.transform_point(sp);
+                                        float dens = mgr.sampleDensityCPU(vid, local_sp.x, local_sp.y, local_sp.z);
+                                        if (dens > 0.01f) volShadowTransmittance *= expf(-dens * ds * sigma_t * s_step);
+                                        if (volShadowTransmittance < 0.01f) {
+                                            volShadowTransmittance = 0.0f;
+                                            break;
+                                        }
+                                        t_v += s_step;
+                                    }
+                                }
+                                if (volShadowTransmittance < 0.01f) break;
+                            }
+                        }
+
                         // Hair shadow check (hair can cast shadows on meshes)
                         float hairShadowTransmittance = 1.0f;
-                        if (!meshOccluded && hairSystem.getTotalStrandCount() > 0 && !hairSystem.isBVHDirty()) {
+                        if (!meshOccluded && volShadowTransmittance > 0.01f && hairSystem.getTotalStrandCount() > 0 && !hairSystem.isBVHDirty()) {
                             Hair::HairHitInfo hsh;
                             Vec3 hairShadowOrigin = shadow_origin;
                             Vec3 hairShadowDir = toVec3(wi);
@@ -4076,10 +4368,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             }
                         }
                         
-                        if (!meshOccluded && hairShadowTransmittance > 0.01f) {
+                        if (!meshOccluded && hairShadowTransmittance > 0.01f && volShadowTransmittance > 0.01f) {
 
                             // Light Radiance (Intensity * Color * Attenuation)
-                            Vec3f Li = light.color * light.intensity * light_attenuation * hairShadowTransmittance;
+                            Vec3f Li = light.color * light.intensity * light_attenuation * hairShadowTransmittance * volShadowTransmittance;
 
                             // Evaluate BRDF and PDF for MIS
                             Vec3f f = evaluate_brdf_unified(N, wo, wi, albedo, roughness, metallic, transmission, Vec3::random_float());
@@ -4222,12 +4514,29 @@ void Renderer::uploadHairToGPU() {
         std::vector<uint32_t> hairStrandIDs;
         std::vector<float> hairTangents3;
         std::vector<float> hairRootUVs2;
-        size_t vertexCount = 0, segmentCount = 0;
+        std::vector<float> hairStrandVs;
+        size_t vertexCount = 0;
+        size_t segmentCount = 0;
         Hair::HairMaterialParams matParams;
         int hairMatID = 0;
         int meshMatID = -1;
         
-        bool isSpline = hairSystem.getOptiXCurveDataByGroom(name, hairVertices4, hairIndices, hairStrandIDs, hairTangents3, hairRootUVs2, vertexCount, segmentCount, matParams, hairMatID, meshMatID, !hideInterpolatedHair);
+        // Call with all 13 arguments explicitly
+        bool isSpline = hairSystem.getOptiXCurveDataByGroom(
+            name,                   // 1
+            hairVertices4,          // 2
+            hairIndices,            // 3
+            hairStrandIDs,          // 4
+            hairTangents3,          // 5
+            hairRootUVs2,           // 6
+            hairStrandVs,           // 7
+            vertexCount,            // 8
+            segmentCount,           // 9
+            matParams,              // 10
+            hairMatID,              // 11
+            meshMatID,              // 12
+            !hideInterpolatedHair   // 13
+        );
         
         if (segmentCount > 0) {
             // Convert to float4/float3 arrays
@@ -4256,6 +4565,7 @@ void Renderer::uploadHairToGPU() {
                 hairStrandIDs.data(),
                 tangents3.data(),
                 rootUVs2.data(),
+                hairStrandVs.data(),
                 vertexCount,
                 segmentCount,
                 hairMat,
@@ -4441,7 +4751,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
     // Auto-rebuild hair BVH for live updates
     if (hairSystem.isBVHDirty()) {
-        hairSystem.buildBVH();
+        hairSystem.buildBVH(!hideInterpolatedHair);
     }
 
     // Check if already complete
@@ -4877,12 +5187,30 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
                 std::vector<uint32_t> hairStrandIDs;
                 std::vector<float> hairTangents3;
                 std::vector<float> hairRootUVs2;
-                size_t vertexCount = 0, segmentCount = 0;
+                std::vector<float> hairStrandVs;
+                size_t vertexCount = 0;
+                size_t segmentCount = 0;
                 
                 Hair::HairMaterialParams matParams;
                 int matID = 0;
                 int meshMatID = -1;
-                bool isSpline = hairSystem.getOptiXCurveDataByGroom(groomName, hairVertices4, hairIndices, hairStrandIDs, hairTangents3, hairRootUVs2, vertexCount, segmentCount, matParams, matID, meshMatID);
+                
+                // Call with all 13 arguments explicitly
+                bool isSpline = hairSystem.getOptiXCurveDataByGroom(
+                    groomName,          // 1
+                    hairVertices4,      // 2
+                    hairIndices,        // 3
+                    hairStrandIDs,      // 4
+                    hairTangents3,      // 5
+                    hairRootUVs2,       // 6
+                    hairStrandVs,       // 7
+                    vertexCount,        // 8
+                    segmentCount,       // 9
+                    matParams,          // 10
+                    matID,              // 11
+                    meshMatID,          // 12
+                    true                // 13 (includeInterpolated)
+                );
                 
                 if (segmentCount > 0) {
                     CurveGeometry curve_geom;
@@ -4894,6 +5222,15 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
                     // Determine material ID from this groom
                     curve_geom.material_id = matID;
                     curve_geom.mesh_material_id = meshMatID;
+                    curve_geom.hair_material = Hair::HairBSDF::convertToGpu(matParams); // Fix: assign material properly on load
+                    curve_geom.strand_v = hairStrandVs;
+                    curve_geom.strand_ids = hairStrandIDs;
+                    
+                    // Copy Root UVs
+                    curve_geom.root_uvs.resize(segmentCount);
+                    for (size_t i = 0; i < segmentCount; ++i) {
+                        curve_geom.root_uvs[i] = make_float2(hairRootUVs2[i*2], hairRootUVs2[i*2+1]);
+                    }
 
                     // Copy to CurveGeometry vectors
                     curve_geom.vertices.resize(vertexCount);
@@ -5013,21 +5350,77 @@ void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gp
                     }
                 }
             }
-            else if (mat->gpuMaterial) {
-                // PrincipledBSDF with gpuMaterial
-                gpu_mat = *mat->gpuMaterial;
-                vol_info.is_volumetric = 0;
-            }
             else {
-                // Fallback default material
-                gpu_mat.albedo = make_float3(0.8f, 0.8f, 0.8f);
-                gpu_mat.roughness = 0.5f;
-                gpu_mat.metallic = 0.0f;
-                gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
-                gpu_mat.ior = 1.5f;
-                gpu_mat.transmission = 0.0f;
-                gpu_mat.opacity = 1.0f;
-                vol_info.is_volumetric = 0;
+                 // Helper to get CUDA texture object (uploads if needed)
+                auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
+                    extern bool g_hasOptix; // Access global
+                    if (tex && tex->is_loaded()) {
+                         if (!tex->is_gpu_uploaded && g_hasOptix) {
+                             tex->upload_to_gpu();
+                         }
+                         return tex->get_cuda_texture();
+                    }
+                    return 0;
+                };
+
+                // Calculate GpuMaterial properties from PrincipledBSDF
+                if (mat->type() == MaterialType::PrincipledBSDF) {
+                    PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+                    Vec3 alb = pbsdf->albedoProperty.color;
+                    gpu_mat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+                    gpu_mat.roughness = (float)pbsdf->roughnessProperty.color.x;
+                    gpu_mat.metallic = (float)pbsdf->metallicProperty.intensity;
+                    Vec3 em = pbsdf->emissionProperty.color;
+                    float emStr = pbsdf->emissionProperty.intensity;
+                    gpu_mat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+                    gpu_mat.ior = pbsdf->ior;
+                    gpu_mat.transmission = pbsdf->transmission;
+                    gpu_mat.opacity = pbsdf->opacityProperty.alpha;
+                    
+                    // SSS
+                    gpu_mat.subsurface = pbsdf->subsurface;
+                    Vec3 sssColor = pbsdf->subsurfaceColor;
+                    gpu_mat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+                    Vec3 sssRadius = pbsdf->subsurfaceRadius;
+                    gpu_mat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+                    gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
+                    gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
+                    gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
+                    
+                    // Clearcoat & Translucent
+                    gpu_mat.clearcoat = pbsdf->clearcoat;
+                    gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
+                    gpu_mat.translucent = pbsdf->translucent;
+                    gpu_mat.anisotropic = pbsdf->anisotropic;
+                    gpu_mat.sheen = pbsdf->sheen;
+                    gpu_mat.sheen_tint = pbsdf->sheen_tint;
+
+                    // Bindless Textures Population
+                    gpu_mat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
+                    gpu_mat.normal_tex      = getCudaTex(pbsdf->normalProperty.texture);
+                    gpu_mat.roughness_tex   = getCudaTex(pbsdf->roughnessProperty.texture);
+                    gpu_mat.metallic_tex    = getCudaTex(pbsdf->metallicProperty.texture);
+                    gpu_mat.emission_tex    = getCudaTex(pbsdf->emissionProperty.texture);
+                    gpu_mat.opacity_tex     = getCudaTex(pbsdf->opacityProperty.texture);
+                    gpu_mat.transmission_tex= getCudaTex(pbsdf->transmissionProperty.texture);
+                    gpu_mat.height_tex      = getCudaTex(pbsdf->heightProperty.texture); // Displacement
+                }
+                else if (mat->gpuMaterial) {
+                    // PrincipledBSDF with gpuMaterial (Fallback if manually set)
+                    gpu_mat = *mat->gpuMaterial;
+                    vol_info.is_volumetric = 0;
+                }
+                else {
+                    // Fallback default material
+                    gpu_mat.albedo = make_float3(0.8f, 0.8f, 0.8f);
+                    gpu_mat.roughness = 0.5f;
+                    gpu_mat.metallic = 0.0f;
+                    gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
+                    gpu_mat.ior = 1.5f;
+                    gpu_mat.transmission = 0.0f;
+                    gpu_mat.opacity = 1.0f;
+                    vol_info.is_volumetric = 0;
+                }
             }
 
             gpu_materials.push_back(gpu_mat);
@@ -5038,6 +5431,11 @@ void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gp
         if (!gpu_materials.empty()) {
             optix_gpu_ptr->updateMaterialBuffer(gpu_materials);
             
+            // Also update volumetric data (cloud density, etc.)
+            if (!volumetric_info.empty()) {
+                optix_gpu_ptr->updateSBTVolumetricData(volumetric_info);
+            }
+
             // CRASH FIX: Also sync SBT material data (Emission + Terrain textures)
             // This is FAST and avoids full OptiX rebuild when only textures change.
             optix_gpu_ptr->syncSBTMaterialData(gpu_materials, true);
@@ -5046,10 +5444,6 @@ void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gp
         // 4. Update Hair Materials (Per-Groom)
         optix_gpu_ptr->updateHairMaterialsOnly(hairSystem);
 
-        // Update volumetric SBT data
-        if (!volumetric_info.empty()) {
-            optix_gpu_ptr->updateSBTVolumetricData(volumetric_info);
-        }
 
         // --- NEW: Sync Hair Material Parameters (includes color mode & textures) ---
         setHairMaterial(hairMaterial);
@@ -5233,4 +5627,12 @@ void Renderer::updateWind(SceneData& scene, float time) {
 // ─────────────────────────────────────────────────────────────────────────────
 void Renderer::updateOptiXGasVolumes(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
     VolumetricRenderer::syncVolumetricData(scene, optix_gpu_ptr);
+}
+
+void Renderer::updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id) {
+    if (optix_gpu_ptr) {
+        optix_gpu_ptr->updateMeshMaterialBinding(node_name, old_mat_id, new_mat_id);
+        optix_gpu_ptr->resetAccumulation();
+    }
+    resetCPUAccumulation(); // Ensure CPU path also resets
 }

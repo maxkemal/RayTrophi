@@ -115,6 +115,7 @@ struct CurveBLAS {
     std::string name;
     bool use_bspline = false;
     CUdeviceptr d_root_uvs = 0;       // Per-segment root UV (float2)
+    CUdeviceptr d_strand_v = 0;       // Per-segment strand position (float, 0=root, 1=tip)
 
     // Temporary storage for refit pointers to ensure they stay valid for async builds
     CUdeviceptr d_refit_vertices = 0;
@@ -127,6 +128,7 @@ struct CurveBLAS {
         if (d_tangents) { cudaFree(reinterpret_cast<void*>(d_tangents)); d_tangents = 0; }
         if (d_strand_ids) { cudaFree(reinterpret_cast<void*>(d_strand_ids)); d_strand_ids = 0; }
         if (d_root_uvs) { cudaFree(reinterpret_cast<void*>(d_root_uvs)); d_root_uvs = 0; }
+        if (d_strand_v) { cudaFree(reinterpret_cast<void*>(d_strand_v)); d_strand_v = 0; }
         if (d_gas_output) { cudaFree(reinterpret_cast<void*>(d_gas_output)); d_gas_output = 0; }
         handle = 0;
     }
@@ -259,8 +261,15 @@ public:
     const MeshBLAS* getBLAS(int mesh_id) const;
     
     // Find BLAS ID by name and material (returns -1 if not found)
-    int findBLAS(const std::string& name, int material_id) const;
+    int findBLAS(const std::string& name, int material_id, bool hasSkinning = false) const;
     
+    // Targeted BLAS Update for Terrain Sculpting (Avoids full scene rebuild)
+    void updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
+    void updateTerrainBLASPartial(const std::string& node_name, class TerrainObject* terrain);
+
+    // Update material binding for a specific mesh node (Fast Path)
+    void updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id);
+
     // Static helper: Group triangles by nodeName for per-mesh BLAS building
     static std::vector<MeshData> groupTrianglesByMesh(
         const std::vector<std::shared_ptr<Triangle>>& triangles);
@@ -416,8 +425,7 @@ private:
     // Mapping for fast transform sync
     struct InstanceTransformCache {
         int instance_id;
-        std::string node_name;
-        std::shared_ptr<Triangle> representative_tri; // Fetch transform from here
+        std::shared_ptr<Hittable> representative_hittable; // Fetch transform from here
     };
     std::vector<InstanceTransformCache> m_instance_sync_cache;
     

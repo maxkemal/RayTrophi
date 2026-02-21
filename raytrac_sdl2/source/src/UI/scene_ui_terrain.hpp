@@ -31,19 +31,11 @@
 // TERRAIN PANEL UI
 // ===============================================================================
 
-// Texture Graveyard: Holds textures that are replaced until a rebuild confirms they are safe to delete
-static std::vector<std::shared_ptr<Texture>> texture_graveyard;
+// Texture Graveyard: MOVED TO SceneUI MEMBER
+// static std::vector<std::shared_ptr<Texture>> texture_graveyard; // Deprecated
 
 static void ManageTextureGraveyard() {
-    // Only clear invalid textures when NO rebuild is pending
-    // This assumes that if rebuild_pending is false, the last rebuild has definitely finished
-    // and the SBT has been updated to point to new textures.
-    // CAUTION: This requires g_optix_rebuild_pending to be managed reliably in the main loop.
-    
-    if (!g_optix_rebuild_pending && !texture_graveyard.empty()) {
-        texture_graveyard.clear();
-        // SCENE_LOG_INFO("Texture graveyard cleared. Old textures released.");
-    }
+    // Deprecated - Use SceneUI::manageTextureGraveyard()
 }
 
 void SceneUI::drawTerrainPanel(UIContext& ctx) {
@@ -181,8 +173,6 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
         UIWidgets::EndSection();
     }
 
-    ImGui::Spacing();
-
     // -----------------------------------------------------------------------------
     // 2. MESH QUALITY SETTINGS
     // -----------------------------------------------------------------------------
@@ -228,13 +218,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
             }
             
             ImGui::Spacing();
-            
-            ImGui::Spacing();
 
             // 3. LAYER MANAGEMENT
             if (UIWidgets::BeginSection("Materials & Layers", ImVec4(0.5f, 0.8f, 1.0f, 1.0f), true)) {
                 ImGui::SameLine(); UIWidgets::HelpMarker("Manages which materials (grass, rock, snow, etc.) are used at different heights and slopes.");
-
             if (t->layers.empty()) {
                 if (UIWidgets::PrimaryButton("Initialize Layers", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
                     TerrainManager::getInstance().initLayers(t);
@@ -265,7 +252,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     else if (i == 2) { layerName = "Layer 2 (Snow/Peak)"; layerColor = ImVec4(0.9, 0.9, 1.0, 1); }
                     else { layerName = "Layer 3 (Flow/River)"; layerColor = ImVec4(0.5, 0.7, 1.0, 1); }
 
-                    ImGui::TextColored(layerColor, "%s", layerName.c_str());
+                    if (UIWidgets::BeginSection(layerName.c_str(), layerColor)) {
 
                     // Material Selector
                     std::string currentMatName = "None";
@@ -339,114 +326,15 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         }
                      }
 
-                    // Inline Material Editing (Textures)
+                    // Inline Material Editing (Full PrincipledBSDF)
                     if (t->layers[i]) {
                         auto pMat = std::dynamic_pointer_cast<PrincipledBSDF>(t->layers[i]);
                         if (pMat) {
-                            ImGui::Indent();
-                            
-                            // Helper lambda for texture slot
-                            auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& texSlot, bool isNormal = false) {
-                                // 1. Label column (Fixed width)
-                                ImGui::Text("%s:", label); 
-                                ImGui::SameLine(80); // Fixed start for value
+                            // Get Material ID for keyframing/updates
+                            uint16_t matID = MaterialManager::getInstance().getMaterialID(pMat->materialName);
 
-                                // 2. Value (Filename only)
-                                std::string dispName = "[None]";
-                                std::string tooltipPath = "";
-                                if (texSlot && !texSlot->name.empty()) {
-                                    dispName = std::filesystem::path(texSlot->name).filename().string();
-                                    tooltipPath = texSlot->name;
-                                }
-                                
-                                // Truncate if too long to fit before buttons
-                                float availWidth = ImGui::GetContentRegionAvail().x;
-                                float buttonsWidth = 70.0f; // Space for Load + X
-                                float textWidth = availWidth - buttonsWidth;
-                                
-                                ImGui::TextDisabled("%s", dispName.c_str());
-
-                                if (!tooltipPath.empty() && ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("%s", tooltipPath.c_str());
-                                }
-
-                                // 3. Buttons (Right Aligned)
-                                ImGui::SameLine();
-                                float xTarget = ImGui::GetWindowContentRegionMax().x - buttonsWidth;
-                                if (xTarget > ImGui::GetCursorPosX()) {
-                                    ImGui::SetCursorPosX(xTarget);
-                                }
-
-                                if (ImGui::SmallButton((std::string("Load##") + label).c_str())) {
-                                    std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
-                                    if (!path.empty()) {
-                                        // CRITICAL: Stop rendering before modifying GPU resources to prevent "illegal memory access"
-                                        ctx.renderer.stopRendering();
-                                        // Wait a tiny bit to ensure kernel finished
-                                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                                                        if (g_hasCUDA) cudaDeviceSynchronize(); // Force GPU idle
-                                        
-                                        TextureType type = isNormal ? TextureType::Normal : TextureType::Albedo;
-                                        if (std::string(label) == "Roughness") type = TextureType::Roughness;
-                                        // GRAVEYARD: Keep old texture alive until rebuild completes
-                                        if (texSlot) {
-                                            texture_graveyard.push_back(texSlot);
-                                        }
-                                        
-                                        texSlot = std::make_shared<Texture>(path, type);
-                                        
-                                        // Update Material properties (scalars)
-                                        if (ctx.optix_gpu_ptr) {
-                                            ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                                        }
-
-                                        // CRITICAL: Request Geometry/SBT Rebuild to update texture handles in SBT
-                                        // g_optix_rebuild_pending = true; // Fast sync handles this now
-
-                                        ctx.renderer.resetCPUAccumulation();
-                                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                                        
-                                        ctx.renderer.resumeRendering();
-                                    }
-                                }
-                                
-                                if (texSlot) {
-                                    ImGui::SameLine();
-                                    if (ImGui::SmallButton((std::string("X##") + label).c_str())) {
-                                        ctx.renderer.stopRendering();
-                                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                                        // GRAVEYARD: Keep old texture alive until rebuild completes
-                                        // This prevents GPU accessing destroyed texture handle before SBT update
-                                        if (texSlot) {
-                                            texture_graveyard.push_back(texSlot);
-                                        }
-
-                                                        if (g_hasCUDA) cudaDeviceSynchronize(); // Force GPU idle
-
-                                        texSlot = nullptr;
-
-                                        // Update Material properties (scalars)
-                                        if (ctx.optix_gpu_ptr) {
-                                            ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                                        }
-
-                                        // CRITICAL: Request Geometry/SBT Rebuild to update texture handles in SBT
-                                        // The main loop will handle this, ensuring synchronization.
-                                        // g_optix_rebuild_pending = true; // Fast sync handles this now
-
-                                        ctx.renderer.resetCPUAccumulation();
-                                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                                        
-                                        ctx.renderer.resumeRendering();
-                                    }
-                                }
-                            };
-
-                            DrawTextureSlot("Albedo", pMat->albedoProperty.texture);
-                            DrawTextureSlot("Normal", pMat->normalProperty.texture, true);
-                            DrawTextureSlot("Roughness", pMat->roughnessProperty.texture); 
-                            
-                            ImGui::Unindent();
+                            // Call the reusable editor (member of SceneUI)
+                            drawPrincipledBSDFEditor(pMat.get(), matID, ctx);
                         }
                     }
                     
@@ -454,13 +342,12 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     if (false);
                     
                     ImGui::Separator();
-                    ImGui::PopID();
+                    UIWidgets::EndSection(); // Close Layer Section
                 }
+                ImGui::PopID();
             }
             UIWidgets::EndSection();
         }
-
-            ImGui::Spacing();
 
             // 4. CENTRALIZED FOLIAGE SYSTEM
             if (UIWidgets::BeginSection("Foliage System", ImVec4(0.3f, 0.9f, 0.4f, 1.0f), true)) {
@@ -796,7 +683,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                              ImGui::DragFloat("Threshold##Ex", &group.brush_settings.exclusion_threshold, 0.05f, 0.0f, 1.0f);
                         }
 
-                        if (UIWidgets::PrimaryButton("Scatter Procedurally", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
+                        if (UIWidgets::PrimaryButton("Scatter", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.32f, 30))) {
                         // Clear existing instances to ensure fresh generation (Replace vs Append)
                         group.clearInstances();
 
@@ -1040,14 +927,14 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         ctx.renderer.resetCPUAccumulation();
                      }
                      ImGui::SameLine();
-                         if (UIWidgets::DangerButton("Clear Instances", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
-                             group.clearInstances();
-                             SceneUI::syncInstancesToScene(ctx, group, true);
-                             g_optix_rebuild_pending = true;
-                             ctx.renderer.resetCPUAccumulation();
-                         }
+                     if (UIWidgets::SecondaryButton("Clear", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.32f, 30))) {
+                         group.clearInstances();
+                         SceneUI::syncInstancesToScene(ctx, group, true);
+                         g_optix_rebuild_pending = true;
+                         ctx.renderer.resetCPUAccumulation();
+                     }
                      ImGui::SameLine();
-                     if (ImGui::Button("Delete Layer", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 0))) {
+                     if (UIWidgets::DangerButton("Delete", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.32f, 30))) {
                          fol_remove_id = group.id;
                      }
                     
@@ -1124,13 +1011,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
 
                 }
             }
-            ImGui::Unindent();
             UIWidgets::EndSection();
         }
 
             // 5. PROCEDURAL TOOLS & MASKS
             if (UIWidgets::BeginSection("Procedural Generators", ImVec4(0.8f, 0.4f, 1.0f, 1.0f), true)) {
-                ImGui::Indent();
 
                 UIWidgets::ColoredHeader("Auto-Mask Generation", ImVec4(0.7f, 0.9f, 0.8f, 1.0f));
                 ImGui::PushItemWidth(160.0f);
@@ -1197,8 +1082,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     }
                 }
 
-                ImGui::SameLine();
-                if (ImGui::Button("Export Splat Map", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.6f, 30))) {
+                if (ImGui::Button("Export Splat Map", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
                     if (t->splatMap && !t->splatMap->pixels.empty()) {
                         std::string path = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
                         if (!path.empty()) {
@@ -1208,46 +1092,11 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     }
                 }
 
-                ImGui::Unindent();
                 UIWidgets::EndSection();
-            
-            // ===============================================================
-            // ROCK HARDNESS (for realistic erosion)
-            // ===============================================================
-            UIWidgets::ColoredHeader("      Rock Hardness", ImVec4(0.7f, 0.5f, 0.3f, 1.0f));
-            
-            static float defaultHardness = 0.3f;
-            ImGui::PushItemWidth(160.0f);
-            if (SceneUI::DrawSmartFloat("hard", "Def Hardness", &defaultHardness, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) {}
-            ImGui::PopItemWidth();
-            UIWidgets::HelpMarker("0 = Soft (sand/soil), 1 = Hard (bedrock)");
-            
-            bool hasHardness = !t->hardnessMap.empty();
-            if (hasHardness) {
-                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Hardness Map: Active (%dx%d)", 
-                    t->heightmap.width, t->heightmap.height);
-            } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.5f, 1.0f), "Hardness Map: Not initialized");
             }
-            
-            if (ImGui::Button("Init Hardness Map", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
-                TerrainManager::getInstance().initHardnessMap(t, defaultHardness);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Auto-Generate", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.48f, 30))) {
-                TerrainManager::getInstance().autoGenerateHardness(t, 0.7f, 0.15f);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-            }
-            ImGui::Unindent(12.0f);
-            UIWidgets::EndSection();
-        }
- 
+        
             // 6. TIMELINE & EXPORT
             if (UIWidgets::BeginSection("Timeline & Export", ImVec4(0.7f, 0.4f, 0.8f, 1.0f), true)) {
-                ImGui::Indent();
                 
                 // Timeline Integration
                 UIWidgets::ColoredHeader("Timeline & Keyframes", ImVec4(0.7f, 0.4f, 0.8f, 1.0f));
@@ -1268,16 +1117,14 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 }
                 
                 if (hasTrack) {
-                    ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Track Exists");
+                    ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Track Status: Active");
                     
                     // Show keyframe count for this track
                     int kf_count = (int)ctx.scene.timeline.tracks[trackName].keyframes.size();
                     ImGui::SameLine();
-                    ImGui::TextDisabled("(%d keys)", kf_count);
+                    ImGui::TextDisabled("(%d total keyframes)", kf_count);
                 } else {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("(No Track)");
+                    ImGui::TextDisabled("Track Status: No Track Found");
                 }
 
                 // Heightmap Export
@@ -1288,20 +1135,18 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         TerrainManager::getInstance().exportHeightmap(t, path);
                     }
                 }
-                ImGui::Unindent();
                 UIWidgets::EndSection();
-            } 
-    } 
+            }
+        }
 
     // -----------------------------------------------------------------------------
     // 8. SCULPTING & PAINTING
     // -----------------------------------------------------------------------------
     if (terrain_brush.active_terrain_id != -1) {
-        if (UIWidgets::BeginSection("      Sculpting & Painting Tools (EXPERIMENTAL)", ImVec4(1.0f, 0.7f, 0.4f, 1.0f), true)) {
+        if (UIWidgets::BeginSection("Sculpting & Painting Tools", ImVec4(1.0f, 0.7f, 0.4f, 1.0f), true)) {
             ImVec2 hp = ImGui::GetItemRectMin();
             UIWidgets::DrawIcon(UIWidgets::IconType::Magnet, ImVec2(hp.x + 8, hp.y + 4), 16, 0xFFBBBBBB);
-            ImGui::Indent(12.0f);
-                    ImGui::SameLine(); UIWidgets::HelpMarker("Use these tools to manually shape the terrain geometry or paint texture layers and physical properties.");
+            UIWidgets::HelpMarker("Use these tools to manually shape the terrain geometry or paint texture layers.");
 
                     ImGui::Checkbox("Enable Brush", &terrain_brush.enabled);
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Activates the mouse brush in the viewport.");
@@ -1412,7 +1257,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
         }
     }
 }
-
+}
 // ===============================================================================
 // TERRAIN INTERACTION (Viewport)
 // ===============================================================================

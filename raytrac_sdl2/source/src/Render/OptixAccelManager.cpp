@@ -4,11 +4,13 @@
 #include <optix_stubs.h>
 #include <iostream>
 #include <algorithm>
+#include <unordered_set>
 #include "TerrainManager.h"
 #include "Texture.h"
 #include "TerrainManager.h"
 #include "Texture.h"
 #include "Material.h"
+#include "MaterialManager.h" // Ensure this is present
 #include "ParallelBVHNode.h"
 #include "HittableInstance.h" // Added for syncInstanceTransforms
 #include "InstanceManager.h"  // For foliage wind flag detection
@@ -79,15 +81,19 @@ std::vector<MeshData> OptixAccelManager::groupTrianglesByMesh(
         
         int mat_id = tri->getMaterialID();
         
-        // Critical Fix: Group by Name AND Material ID
-        // This ensures parts with different materials are split into separate BLAS
-        std::string unique_key = base_name + "_mat_" + std::to_string(mat_id);
+        // Critical Fix: Group by Name, Material ID AND Skinning Status
+        // This prevents "disappearing static meshes" when lumped with skinned ones.
+        // Also helps with "structure added to other meshes" issue.
+        bool hasSkin = tri->hasSkinData();
+        std::string unique_key = base_name + "_mat_" + std::to_string(mat_id) + 
+                                (hasSkin ? "_skinned" : "_static");
         
         auto& mesh = mesh_map[unique_key];
         if (mesh.mesh_name.empty()) {
             mesh.mesh_name = unique_key; // Use unique name to distinguish sub-meshes
             mesh.original_name = base_name; // Store original name for instance mapping
             mesh.material_id = mat_id;
+            mesh.has_skinning = hasSkin; // Store skinning status
         }
         mesh.triangle_indices.push_back(static_cast<int>(i));
     }
@@ -263,19 +269,20 @@ const MeshBLAS* OptixAccelManager::getBLAS(int mesh_id) const {
     return &mesh_blas_list[mesh_id];
 }
 
-int OptixAccelManager::findBLAS(const std::string& name, int material_id) const {
-    // If name is empty, we can't search well, but try matching mat ID? No.
+int OptixAccelManager::findBLAS(const std::string& name, int material_id, bool hasSkinning) const {
     if (name.empty()) return -1;
     
-    // Standard key format used in build: name + "_mat_" + mat_id
-    std::string key = name + "_mat_" + std::to_string(material_id);
+    // Key format must match groupTrianglesByMesh: name + "_mat_" + mat_id + suffix
+    std::string key = name + "_mat_" + std::to_string(material_id) + 
+                     (hasSkinning ? "_skinned" : "_static");
     
     for (size_t i = 0; i < mesh_blas_list.size(); ++i) {
         if (mesh_blas_list[i].mesh_name == key) {
             return static_cast<int>(i);
         }
-        // Also check if mesh_name is just the name (for single-material objects)
-        if (mesh_blas_list[i].mesh_name == name && mesh_blas_list[i].material_id == material_id) {
+        // Fallback check for exact name match (safety)
+        if (mesh_blas_list[i].mesh_name == name && 
+            mesh_blas_list[i].material_id == material_id) {
              return static_cast<int>(i);
         }
     }
@@ -361,6 +368,15 @@ int OptixAccelManager::buildCurveBLAS(const CurveGeometry& geometry) {
         CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_root_uvs), geometry.root_uvs.data(), ruv_size, cudaMemcpyHostToDevice, stream));
     } else {
         blas.d_root_uvs = 0;
+    }
+
+    // Upload strand V (per-segment root-to-tip factor)
+    if (!geometry.strand_v.empty()) {
+        size_t sv_size = geometry.strand_v.size() * sizeof(float);
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&blas.d_strand_v), sv_size));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(blas.d_strand_v), geometry.strand_v.data(), sv_size, cudaMemcpyHostToDevice, stream));
+    } else {
+        blas.d_strand_v = 0;
     }
 
     // Build Curve GAS
@@ -679,36 +695,51 @@ void OptixAccelManager::syncInstanceTransforms(const std::vector<std::shared_ptr
             
             InstanceTransformCache cache_item;
             cache_item.instance_id = static_cast<int>(i);
+            cache_item.representative_hittable = nullptr; // Explicitly null
             
             // Priority 1: Direct Pointer Sync (Fastest & most accurate)
-            if (instances[i].source_hittable && ptr_to_obj.count(instances[i].source_hittable)) {
-                auto obj = ptr_to_obj[instances[i].source_hittable];
-                cache_item.representative_tri = std::dynamic_pointer_cast<Triangle>(obj);
-                m_instance_sync_cache.push_back(cache_item);
+            if (ptr_to_obj.count(instances[i].source_hittable)) {
+                cache_item.representative_hittable = ptr_to_obj[instances[i].source_hittable];
             }
-            // Priority 2: Name-based Fallback (for compat)
-            else if (!instances[i].node_name.empty()) {
+            // Priority 2: Name-based Fallback (SAFE ONLY FOR UNIQUE INSTANCES like characters)
+            if (!cache_item.representative_hittable && !instances[i].node_name.empty()) {
                 std::string name = instances[i].node_name;
                 size_t mat_pos = name.find("_mat_");
                 if (mat_pos != std::string::npos) name = name.substr(0, mat_pos);
                 
                 for (const auto& obj : objects) {
-                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (tri && tri->getNodeName() == name) {
-                        cache_item.representative_tri = tri;
-                        m_instance_sync_cache.push_back(cache_item);
-                        break;
+                    // ONLY match named instances (characters/props), NEVER individual triangles by name.
+                    // Doing so for thousands of triangles named "default" causes them to all collapse
+                    // to the same world position (the first one found).
+                    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                        if (inst->node_name == name) {
+                            cache_item.representative_hittable = inst;
+                            break;
+                        }
                     }
                 }
+            }
+
+            if (cache_item.representative_hittable) {
+                m_instance_sync_cache.push_back(cache_item);
             }
         }
     }
 
     // 2. FAST SYNC USING CACHE
     for (const auto& item : m_instance_sync_cache) {
-        if (!item.representative_tri) continue;
+        if (!item.representative_hittable) continue;
         
-        Matrix4x4 m = item.representative_tri->getTransformMatrix();
+        Matrix4x4 m;
+        // Correct matrix retrieval based on object type
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(item.representative_hittable)) {
+            m = tri->getTransformMatrix();
+        } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(item.representative_hittable)) {
+            m = inst->transform;
+        } else {
+            continue;
+        }
+
         float t[12];
         t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
         t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
@@ -726,15 +757,37 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
     if (m_topology_dirty || m_cached_triangles.empty()) {
         m_cached_triangles.clear();
         m_cached_triangles.reserve(objects.size());
+        std::unordered_set<void*> seen_triangles;
         for (const auto& obj : objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-            if (tri) m_cached_triangles.push_back(tri);
+             if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                 if (seen_triangles.insert(tri.get()).second) {
+                     m_cached_triangles.push_back(tri);
+                 }
+             } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                 // Add triangles from instanced models (essential for skinning updates)
+                 if (inst->source_triangles) {
+                     for (auto& t : *inst->source_triangles) {
+                         if (t && seen_triangles.insert(t.get()).second) {
+                             m_cached_triangles.push_back(t);
+                         }
+                     }
+                 }
+             }
+        }
+        
+        if (m_topology_dirty) {
+            SCENE_LOG_INFO("[OptixAccelManager] Topology changed. Synced " + 
+                           std::to_string(m_cached_triangles.size()) + " unique triangles.");
         }
         
         std::vector<MeshData> groups = groupTrianglesByMesh(m_cached_triangles);
         m_cached_groups.clear();
         for (const auto& g : groups) {
-            int blas_idx = findBLAS(g.mesh_name, g.material_id);
+            // Find BLAS index using the FULL unique key (including _skinned/_static suffix)
+            // findBLAS will construct the key from original_name + mat + skin_status
+            bool isSkinned = (g.mesh_name.find("_skinned") != std::string::npos);
+            int blas_idx = findBLAS(g.original_name, g.material_id, isSkinned);
+            
             if (blas_idx >= 0) {
                 m_cached_groups.push_back({blas_idx, g.triangle_indices});
             }
@@ -1219,41 +1272,33 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
                      SCENE_LOG_WARN("[TERRAIN SBT] No splatMap for terrain '" + terrain.name + "'");
                 }
                 
-                // 2. Layers - use dynamic_cast to access PrincipledBSDF texture properties
+                // 2. Layers - Use Material IDs for full PBR blending (Albedo, Rough, DISPLACEMENT, etc.)
                 for (int i = 0; i < 4; ++i) {
+                    rec.data.layer_material_ids[i] = -1; // Default to invalid
+                    
                     if (i < terrain.layers.size() && terrain.layers[i]) {
-                        // Try PrincipledBSDF first (most common for surface materials)
+                        // Get Material ID from Manager
+                        // Note: Material name is crucial here. 
+                        std::string matName = terrain.layers[i]->materialName;
+                        int layerID = MaterialManager::getInstance().getMaterialID(matName);
+                        
+                        rec.data.layer_material_ids[i] = layerID;
+                        
+                        // Ensure textures are resident if they haven't been uploaded yet
+                        // Even though we pass ID, the specific texture objects inside that material 
+                        // might not have been uploaded to GPU if they weren't used elsewhere.
                         PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(terrain.layers[i].get());
-                        
                         if (pbsdf) {
-                            // ALBEDO
-                            if (pbsdf->albedoProperty.texture) {
-                                 if (!pbsdf->albedoProperty.texture->is_gpu_uploaded) 
-                                     pbsdf->albedoProperty.texture->upload_to_gpu();
-                                 rec.data.layer_albedo_tex[i] = pbsdf->albedoProperty.texture->get_cuda_texture();
-                            } else {
-                                 rec.data.layer_albedo_tex[i] = 0;
-                            }
-                            
-                            // NORMAL
-                            if (pbsdf->normalProperty.texture) {
-                                 if (!pbsdf->normalProperty.texture->is_gpu_uploaded) 
-                                     pbsdf->normalProperty.texture->upload_to_gpu();
-                                 rec.data.layer_normal_tex[i] = pbsdf->normalProperty.texture->get_cuda_texture();
-                            } else {
-                                 rec.data.layer_normal_tex[i] = 0;
-                            }
-                            
-                            // ROUGHNESS
-                            if (pbsdf->roughnessProperty.texture) {
-                                 if (!pbsdf->roughnessProperty.texture->is_gpu_uploaded) 
-                                     pbsdf->roughnessProperty.texture->upload_to_gpu();
-                                 rec.data.layer_roughness_tex[i] = pbsdf->roughnessProperty.texture->get_cuda_texture();
-                            } else {
-                                 rec.data.layer_roughness_tex[i] = 0;
-                            }
+                            if (pbsdf->albedoProperty.texture && !pbsdf->albedoProperty.texture->is_gpu_uploaded)
+                                pbsdf->albedoProperty.texture->upload_to_gpu();
+                            if (pbsdf->normalProperty.texture && !pbsdf->normalProperty.texture->is_gpu_uploaded)
+                                pbsdf->normalProperty.texture->upload_to_gpu();
+                            if (pbsdf->roughnessProperty.texture && !pbsdf->roughnessProperty.texture->is_gpu_uploaded)
+                                pbsdf->roughnessProperty.texture->upload_to_gpu();
+                            if (pbsdf->heightProperty.texture && !pbsdf->heightProperty.texture->is_gpu_uploaded)
+                                pbsdf->heightProperty.texture->upload_to_gpu();
                         }
-                        
+
                         // UV SCALE
                         if (i < terrain.layer_uv_scales.size()) {
                             rec.data.layer_uv_scale[i] = terrain.layer_uv_scales[i];
@@ -1299,6 +1344,8 @@ void OptixAccelManager::buildSBT(const std::vector<GpuMaterial>& materials,
         rec.data.strand_ids = reinterpret_cast<const uint32_t*>(blas.d_strand_ids);
         rec.data.root_uvs = reinterpret_cast<const float2*>(blas.d_root_uvs);
         rec.data.has_root_uvs = (blas.d_root_uvs != 0) ? 1 : 0;
+        rec.data.strand_v = reinterpret_cast<const float*>(blas.d_strand_v);
+        rec.data.has_strand_v = (blas.d_strand_v != 0) ? 1 : 0;
         rec.data.material_id = blas.material_id;
         rec.data.mesh_material_id = blas.mesh_material_id; // [NEW] Set scalp material ID
         rec.data.hair_material = blas.hair_material; // [NEW] Set per-groom hair material
@@ -1414,11 +1461,41 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                         rec.data.metallic_tex = 0;
                         rec.data.has_metallic_tex = 0;
                     }
+                // Emission
+                if (pbsdf->emissionProperty.texture) {
+                    if (!pbsdf->emissionProperty.texture->is_gpu_uploaded) pbsdf->emissionProperty.texture->upload_to_gpu();
+                    rec.data.emission_tex = pbsdf->emissionProperty.texture->get_cuda_texture();
+                    rec.data.has_emission_tex = 1;
+                } else {
+                    rec.data.emission_tex = 0;
+                    rec.data.has_emission_tex = 0;
+                }
+
+                // Opacity
+                if (pbsdf->opacityProperty.texture) {
+                    if (!pbsdf->opacityProperty.texture->is_gpu_uploaded) pbsdf->opacityProperty.texture->upload_to_gpu();
+                    rec.data.opacity_tex = pbsdf->opacityProperty.texture->get_cuda_texture();
+                    rec.data.has_opacity_tex = 1;
+                    rec.data.opacity_has_alpha = (pbsdf->opacityProperty.texture->has_alpha);
+                } else {
+                    rec.data.opacity_tex = 0;
+                    rec.data.has_opacity_tex = 0;
+                }
+
+                // Transmission
+                if (pbsdf->transmissionProperty.texture) {
+                    if (!pbsdf->transmissionProperty.texture->is_gpu_uploaded) pbsdf->transmissionProperty.texture->upload_to_gpu();
+                    rec.data.transmission_tex = pbsdf->transmissionProperty.texture->get_cuda_texture();
+                    rec.data.has_transmission_tex = 1;
+                } else {
+                    rec.data.transmission_tex = 0;
+                    rec.data.has_transmission_tex = 0;
                 }
             }
         }
+    }
 
-        // 2. Terrain System Sync (Textures & SplatMap)
+    // 2. Terrain System Sync (Textures & SplatMap)
         if (sync_terrain && rec.data.is_terrain) {
             auto& terrains = TerrainManager::getInstance().getTerrains();
             for (auto& terrain : terrains) {
@@ -1431,38 +1508,28 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                         rec.data.splat_map_tex = 0;
                     }
 
-                    // Sync Layers (Textured Layers)
+                    // Sync Layers (Textured Layers) - Use Material IDs
                     for (int i = 0; i < 4; ++i) {
                         rec.data.layer_uv_scale[i] = terrain.layer_uv_scales[i];
+                        rec.data.layer_material_ids[i] = -1;
+
                         if (i < terrain.layers.size() && terrain.layers[i]) {
+                             // Get Material ID from Manager
+                             std::string matName = terrain.layers[i]->materialName;
+                             int layerID = MaterialManager::getInstance().getMaterialID(matName);
+                             rec.data.layer_material_ids[i] = layerID;
+
+                             // Ensure textures are uploaded (SBT sync is usually for runtime changes)
                              PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(terrain.layers[i].get());
                              if (pbsdf) {
-                                  // Albedo
-                                  if (pbsdf->albedoProperty.texture) {
-                                      if (!pbsdf->albedoProperty.texture->is_gpu_uploaded) 
-                                          pbsdf->albedoProperty.texture->upload_to_gpu();
-                                      rec.data.layer_albedo_tex[i] = pbsdf->albedoProperty.texture->get_cuda_texture();
-                                  } else {
-                                      rec.data.layer_albedo_tex[i] = 0;
-                                  }
-                                  
-                                  // Normal
-                                  if (pbsdf->normalProperty.texture) {
-                                      if (!pbsdf->normalProperty.texture->is_gpu_uploaded) 
-                                          pbsdf->normalProperty.texture->upload_to_gpu();
-                                      rec.data.layer_normal_tex[i] = pbsdf->normalProperty.texture->get_cuda_texture();
-                                  } else {
-                                      rec.data.layer_normal_tex[i] = 0;
-                                  }
-
-                                  // Roughness
-                                  if (pbsdf->roughnessProperty.texture) {
-                                      if (!pbsdf->roughnessProperty.texture->is_gpu_uploaded) 
-                                          pbsdf->roughnessProperty.texture->upload_to_gpu();
-                                      rec.data.layer_roughness_tex[i] = pbsdf->roughnessProperty.texture->get_cuda_texture();
-                                  } else {
-                                      rec.data.layer_roughness_tex[i] = 0;
-                                  }
+                                 if (pbsdf->albedoProperty.texture && !pbsdf->albedoProperty.texture->is_gpu_uploaded)
+                                     pbsdf->albedoProperty.texture->upload_to_gpu();
+                                 if (pbsdf->normalProperty.texture && !pbsdf->normalProperty.texture->is_gpu_uploaded)
+                                     pbsdf->normalProperty.texture->upload_to_gpu();
+                                 if (pbsdf->roughnessProperty.texture && !pbsdf->roughnessProperty.texture->is_gpu_uploaded)
+                                     pbsdf->roughnessProperty.texture->upload_to_gpu();
+                                 if (pbsdf->heightProperty.texture && !pbsdf->heightProperty.texture->is_gpu_uploaded)
+                                     pbsdf->heightProperty.texture->upload_to_gpu();
                              }
                         }
                     }
@@ -1870,5 +1937,71 @@ void OptixAccelManager::applyWindDeformation(int mesh_id, const Vec3& direction,
     
     if (any_update) {
         tlas_needs_rebuild = true;
+    }
+}
+
+// Update material binding for a specific mesh node (Fast Path)
+// Called when user assigns a new material to a slot in UI
+void OptixAccelManager::updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id) {
+    if (new_mat_id < 0) return;
+    
+    // Iterate through all mesh BLAS entries
+    size_t count = mesh_blas_list.size();
+    bool any_change = false;
+    
+    for (size_t i = 0; i < count; ++i) {
+        MeshBLAS& blas = mesh_blas_list[i];
+        
+        // Match node name (original name from file or unique mesh name)
+        // Check both original_name (e.g. "Sphere") and mesh_name (e.g. "Sphere_mat_0")
+        bool name_match = (blas.original_name == node_name) || (blas.mesh_name == node_name);
+        
+        if (name_match) {
+            // Match old material ID (or update any if old_mat_id is -1)
+            // Crucial: Only update the BLAS that corresponds to the changed slot
+            if (blas.material_id == old_mat_id || old_mat_id == -1) {
+                
+                blas.material_id = new_mat_id;
+                
+                // Update SBT Records directly
+                // Mesh BLAS uses records [2*i] (Radiance) and [2*i+1] (Shadow)
+                size_t rec_idx_rad = 2 * i;
+                size_t rec_idx_shadow = 2 * i + 1;
+                
+                if (rec_idx_shadow < hitgroup_records.size()) {
+                    hitgroup_records[rec_idx_rad].data.material_id = new_mat_id;
+                    hitgroup_records[rec_idx_shadow].data.material_id = new_mat_id;
+                    
+                    // Reset flags (will be populated by syncSBTMaterialData)
+                    // Importantly, if we switch to Volumetric, we want to ensure we don't carry over Surface textures 
+                    // that might confuse the shader until full sync happens.
+                    hitgroup_records[rec_idx_rad].data.has_albedo_tex = 0;
+                    hitgroup_records[rec_idx_rad].data.has_normal_tex = 0;
+                    hitgroup_records[rec_idx_shadow].data.has_albedo_tex = 0;
+                    
+                    // Determine if Volumetric (Quick check via Manager)
+                    if (MaterialManager::getInstance().getMaterial(new_mat_id)) {
+                        Material* m = MaterialManager::getInstance().getMaterial(new_mat_id);
+                        int isVol = (m->type() == MaterialType::Volumetric) ? 1 : 0;
+                        hitgroup_records[rec_idx_rad].data.is_volumetric = isVol;
+                        hitgroup_records[rec_idx_shadow].data.is_volumetric = isVol;
+                    }
+
+                    any_change = true;
+                }
+            }
+        }
+    }
+    
+    // Also check curves (Hair)
+    for (size_t i = 0; i < curve_blas_list.size(); ++i) {
+        CurveBLAS& blas = curve_blas_list[i];
+        // Curves might not have original_name set correctly, assumes logical link
+        // If needed, add name check here. For now, assume mainly mesh changes.
+    }
+
+    if (any_change) {
+        // Trigger upload of updated records
+        uploadHitGroupRecords();
     }
 }

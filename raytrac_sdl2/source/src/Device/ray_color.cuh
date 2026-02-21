@@ -904,8 +904,13 @@ __device__ float3 raymarch_vdb_volume(
             
             // --- BLENDED MULTI-SCATTER TRANSMITTANCE (Matches CPU Scalar Model) ---
             float T_single = expf(-sigma_t * step);
-            float T_multi_p = expf(-sigma_t * step * 0.25f);
-            float step_transmittance = T_single * (1.0f - vol.scatter_multi * albedo_avg) + T_multi_p * (vol.scatter_multi * albedo_avg);
+            float step_transmittance = T_single;
+            
+            // Only use multi-scatter softening if there is actually scattering happening
+            if (vol.scatter_coefficient > 1e-6f && vol.scatter_multi > 1e-6f) {
+                float T_multi_p = expf(-sigma_t * step * 0.25f);
+                step_transmittance = T_single * (1.0f - vol.scatter_multi * albedo_avg) + T_multi_p * (vol.scatter_multi * albedo_avg);
+            }
             
             // Emission
             float3 emission = make_float3(0.0f);
@@ -2095,9 +2100,14 @@ __device__ float3 raymarch_volumetric_object(
                 }
                 // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
                 float beers = expf(-density_accum);
-                float beers_soft = expf(-density_accum * 0.25f);
-                float albedo_p = vol_albedo.x * 0.2126f + vol_albedo.y * 0.7152f + vol_albedo.z * 0.0722f;
-                float phys_trans = beers * (1.0f - multi_scatter * albedo_p) + beers_soft * (multi_scatter * albedo_p);
+                float phys_trans = beers;
+                
+                // Multi-scatter softening guard
+                if (sigma_s > 1e-6f && multi_scatter > 1e-6f) {
+                    float beers_soft = expf(-density_accum * 0.25f);
+                    float albedo_p = vol_albedo.x * 0.2126f + vol_albedo.y * 0.7152f + vol_albedo.z * 0.0722f;
+                    phys_trans = beers * (1.0f - multi_scatter * albedo_p) + beers_soft * (multi_scatter * albedo_p);
+                }
                 shadow_trans = 1.0f - shadow_strength * (1.0f - phys_trans);
             }
             
@@ -2109,7 +2119,9 @@ __device__ float3 raymarch_volumetric_object(
             float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, pos, sun_dir);
             float3 sun_color = sun_trans * sun_intensity;
             float3 shadow_radiance = sun_color * shadow_trans * phase;
-            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f;
+            
+            // Physical Parity: Ambient sky light should scale with Sun Intensity to match CPU/Atmosphere model
+            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f * sun_intensity;
             float3 total_light = shadow_radiance + ambient;
 
             float3 ms_boost = make_float3(1.0f) + vol_albedo * multi_scatter * 2.0f;
@@ -2242,9 +2254,14 @@ __device__ float3 raymarch_gas_volume(
                  }
                  // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
                  float beers = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient));
-                 float beers_soft = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient) * 0.25f);
-                 float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
-                 float phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
+                 float phys_trans = beers;
+                 
+                 // Multi-scatter softening guard: Only soften shadow if scattering is present
+                 if (vol.scatter_coefficient > 1e-6f && vol.scatter_multi > 1e-6f) {
+                     float beers_soft = expf(-shadow_density_sum * shadow_step * (vol.absorption_coefficient + vol.scatter_coefficient) * 0.25f);
+                     float albedo_lum = vol.scatter_color.x * 0.2126f + vol.scatter_color.y * 0.7152f + vol.scatter_color.z * 0.0722f;
+                     phys_trans = beers * (1.0f - vol.scatter_multi * albedo_lum) + beers_soft * (vol.scatter_multi * albedo_lum);
+                 }
                  shadow_trans = 1.0f - vol.shadow_strength * (1.0f - phys_trans);
             }
             float3 sun_trans = gpu_get_transmittance(optixLaunchParams.world, world_pos, sun_dir);
@@ -2255,7 +2272,7 @@ __device__ float3 raymarch_gas_volume(
             float powder = gpu_powder_effect(density, cos_theta);
             total_radiance = total_radiance * (1.0f + powder * 0.5f);
             
-            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f;
+            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, make_float3(0, 1, 0)) * 0.15f * sun_intensity;
             total_radiance += ambient;
             
             float3 emission = make_float3(0.0f);
@@ -2607,6 +2624,21 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
         bool is_specular;
         
         GpuMaterial mat = optixLaunchParams.materials[payload.material_id];
+
+        // --- GPU Terrain Blending Override ---
+        if (payload.use_blended_data) {
+             mat.albedo = payload.blended_albedo;
+             mat.roughness = payload.blended_roughness;
+             mat.metallic = payload.blended_metallic;
+             mat.clearcoat = payload.blended_clearcoat;
+             mat.clearcoat_roughness = payload.blended_clearcoat_roughness;
+             mat.subsurface = payload.blended_subsurface;
+             mat.subsurface_color = payload.blended_subsurface_color;
+             mat.transmission = payload.blended_transmission;
+             mat.translucent = payload.blended_translucent;
+             mat.emission = payload.blended_emission;
+             mat.ior = payload.blended_ior;
+        }
 
         // --- Scatter başarısızsa çık ---
         if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular))

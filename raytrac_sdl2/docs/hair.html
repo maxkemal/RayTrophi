@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Hair & Fur</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="hair.html" class="nav-link active">Hair & Fur</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Hair & Fur System</h1>
+
+            <div class="screenshot-area">
+                <img src="images/hair_header.jpg" alt="Hair Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🦁 Please save a Hair Render as <code>docs/images/hair_header.jpg</code>
+                </div>
+            </div>
+
+            <div class="screenshot-area">
+                <img src="images/hair_header1.jpg" alt="Hair Header Alternate"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🦁 Please save a Hair Render as <code>docs/images/hair_header1.jpg</code>
+                </div>
+            </div>
+
+            <p>Advanced physically-based hair system featuring Marschner scattering and interactive grooming tools.</p>
+
+            <h2 id="grooming">1. Interactive Grooming & Brushes</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/hair_brush_ui.jpg" alt="Grooming Brushes"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Grooming Brush UI</div>
+                </div>
+                <div>
+                    <p>Shape and style hair strands directly in the viewport using intuitive brush tools. Brushes
+                        support custom radius, strength, and falloff settings.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Tool</th>
+                            <th>Action</th>
+                        </tr>
+                        <tr>
+                            <td>Comb</td>
+                            <td>Guides strands in the direction of the brush stroke.</td>
+                        </tr>
+                        <tr>
+                            <td>Length / Cut</td>
+                            <td>Add length or trim hair strands within the brush radius.</td>
+                        </tr>
+                        <tr>
+                            <td>Density</td>
+                            <td>Interactively add or remove strands based on surface area.</td>
+                        </tr>
+                        <tr>
+                            <td>Clump / Braid</td>
+                            <td>Create natural clustering or advanced rotational braiding patterns.</td>
+                        </tr>
+                        <tr>
+                            <td>Smooth</td>
+                            <td>Relaxes strand orientations for more uniform distributions.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="shading">2. Hair Materials (Marschner BSDF)</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/hair_mat_ui.jpg" alt="Material Settings"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Hair Material UI</div>
+                </div>
+                <div>
+                    <p>Physically based shading via the Marschner model, providing realistic light transport through
+                        hair fibers.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Melanin</td>
+                            <td>Natural pigment concentration (0.0 to 1.0).</td>
+                        </tr>
+                        <tr>
+                            <td>Roughness</td>
+                            <td>Surface micro-detail for specular highlights (R lobe).</td>
+                        </tr>
+                        <tr>
+                            <td>Absorption</td>
+                            <td>Controls light energy loss as it passes through the fiber.</td>
+                        </tr>
+                        <tr>
+                            <td>Specular Shift</td>
+                            <td>Highlights offset due to the scale-like structure of hair.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="layers">3. Layer Management & Selection</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/hair_ui.jpg" alt="Hair UI Management"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Hair Layer / UI List</div>
+                </div>
+                <div>
+                    <p>RayTrophi allows for a non-destructive multi-layer grooming workflow:</p>
+                    <ul>
+                        <li><strong>Layer List:</strong> Create, delete, and hide individual hair grooms.</li>
+                        <li><strong>Renaming:</strong> Double-click any layer name to rename it instantly.</li>
+                        <li><strong>Shared Materials:</strong> Assign shared material presets across different grooms
+                            for consistency.</li>
+                        <li><strong>Mesh Sync:</strong> Grooms are automatically linked to their parent mesh transforms.
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>

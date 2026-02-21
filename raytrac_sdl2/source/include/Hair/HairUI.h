@@ -15,6 +15,9 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <algorithm>
+#include <deque>
+#include <cmath>
 #include "Renderer.h"
 
 // Forward declarations
@@ -52,7 +55,8 @@ enum class HairPaintMode {
     FRIZZ,      // Add random detail/frizz
     SMOOTH,     // Straighten/relax hair
     PINCH,      // Bunch points together
-    SPREAD      // Spread points apart
+    SPREAD,     // Spread points apart
+    BRAID       // Braid/twist strands together
 };
 
 // ODR-safe helper for brush mode info
@@ -79,11 +83,25 @@ struct HairBrushSettings {
     
     // Comb mode specific  
     Vec3 combDirection = Vec3(0, -1, 0);
-    bool useViewDirection = true; // Use camera as comb direction
+    bool useViewDirection = true; // Use mouse drag direction as comb direction
+    
+    // Advanced Comb Parameters
+    int   combTeethCount = 8;       // Number of virtual comb teeth (4-32). More = finer combing
+    float combCatchRadius = 1.0f;   // Multiplier for how eagerly teeth catch strands (0.5-2.0)
+    float combLift = 0.0f;          // Lift strands along normal while combing (0-1)
+    float combRootStiffness = 0.7f; // Root resistance to combing (0=free, 1=locked root)
+    bool  combFollowDrag = true;    // Follow mouse drag direction instead of fixed combDirection
     
     // Procedural (Wave/Curl/Frizz)
     float frequency = 1.0f;
     float amplitude = 0.5f;
+
+    // Braid parameters
+    int   braidGroupCount = 3;      // Number of strand groups (2=rope/fishtail, 3=standard, 4-5=complex)
+    float braidTightness = 0.7f;    // How tight the braid is (0=loose, 1=very tight)
+    float braidFrequency = 3.0f;    // Crossings per strand length (higher = more twists)
+    float braidAmplitude = 0.5f;    // Width of the braid pattern (0=thin, 1=wide)
+    int   braidType = 0;            // 0=Standard, 1=Fishtail, 2=Rope Twist, 3=French
 
     // Mirroring
     bool mirrorX = false;
@@ -91,6 +109,16 @@ struct HairBrushSettings {
     bool mirrorZ = false;
 };
 
+/**
+ * @brief Snapshot of guide strand data for undo/redo
+ * Captures the state of all guide strands in a groom before a brush stroke.
+ */
+struct HairUndoState {
+    std::string groomName;
+    std::vector<HairStrand> guides;         // Full copy of guide strands
+    size_t guideCount = 0;                  // Number of guides at snapshot time
+    std::string description;                // Human-readable label (e.g. "Comb", "Cut")
+};
 
 class HairUI {
 public:
@@ -168,6 +196,37 @@ public:
     bool shouldHideChildren() const { return m_paintMode != HairPaintMode::NONE && m_hideChildrenDuringPaint; }
     const HairBrushSettings& getBrushSettings() const { return m_brushSettings; }
     
+    // ========================================================================
+    // Undo / Redo
+    // ========================================================================
+    
+    /** @brief Begin a brush stroke - captures snapshot of current guide state */
+    void beginStroke(HairSystem& hairSystem);
+    
+    /** @brief End a brush stroke - pushes snapshot to undo stack if changed */
+    void endStroke(HairSystem& hairSystem);
+    
+    /** @brief Undo last brush stroke */
+    bool undo(HairSystem& hairSystem);
+    
+    /** @brief Redo previously undone stroke */
+    bool redo(HairSystem& hairSystem);
+    
+    /** @brief Check if undo is available */
+    bool canUndo() const { return !m_undoStack.empty(); }
+    
+    /** @brief Check if redo is available */
+    bool canRedo() const { return !m_redoStack.empty(); }
+    
+    /** @brief Get undo stack depth */
+    size_t undoDepth() const { return m_undoStack.size(); }
+    
+    /** @brief Get redo stack depth */
+    size_t redoDepth() const { return m_redoStack.size(); }
+    
+    /** @brief Clear undo/redo history */
+    void clearUndoHistory() { m_undoStack.clear(); m_redoStack.clear(); }
+    
     HairGroom* getSelectedGroom(HairSystem& sys) {
         if (m_selectedGroomName.empty()) return nullptr;
         return sys.getGroom(m_selectedGroomName);
@@ -201,6 +260,7 @@ public:
 private:
     // Current editing state
     std::string m_selectedGroomName;
+    std::string m_selectedSharedMaterialName;
     HairGenerationParams m_editParams;
     HairMaterialParams m_currentMaterial;
     
@@ -218,6 +278,16 @@ private:
 
     std::function<bool(Vec3&, Vec3&)> m_projector = nullptr;
     
+    // Comb tracking state
+    Vec3 m_combDragDirection = Vec3(0, 0, 0);     // Current frame mouse drag direction
+    Vec3 m_combSmoothedDir = Vec3(0, 0, 0);       // Smoothed (momentum) drag direction
+    bool m_combHasMomentum = false;                // Has accumulated drag momentum
+    
+    // Braid stroke tracking
+    Vec3 m_braidStrokeDir = Vec3(0, 0, 0);        // Averaged braid stroke direction
+    Vec3 m_braidStrokeCenter = Vec3(0, 0, 0);     // Center of braid stroke
+    bool m_braidActive = false;                    // Braid stroke is in progress
+
     // Presets
     struct HairPreset {
         std::string name;
@@ -225,6 +295,21 @@ private:
         HairMaterialParams matParams;
     };
     std::vector<HairPreset> m_presets;
+    
+    // ========================================================================
+    // Undo / Redo State
+    // ========================================================================
+    static constexpr size_t MAX_UNDO_DEPTH = 32;
+    std::deque<HairUndoState> m_undoStack;
+    std::deque<HairUndoState> m_redoStack;
+    HairUndoState m_strokeSnapshot;              // Snapshot taken at stroke begin
+    bool m_strokeActive = false;                 // True between beginStroke/endStroke
+    
+    /** @brief Take a snapshot of guide strands for undo */
+    HairUndoState captureState(const HairSystem& hairSystem, const std::string& desc = "") const;
+    
+    /** @brief Restore guide strand state from snapshot */
+    void restoreState(HairSystem& hairSystem, const HairUndoState& state);
     
     // Internal methods
     void drawGenerationPanel(HairSystem& hairSystem, 
@@ -249,6 +334,11 @@ private:
     // Tracking state
     std::string m_lastSelectedMeshName;
     char m_groomNameBuffer[64];
+    char m_materialNameBuffer[64];
+    
+    // Rename state
+    std::string m_renamingGroomName = "";
+    char m_renameBuffer[64];
 };
 
 
@@ -281,6 +371,7 @@ inline HairUI::HairUI() {
     m_currentMaterial.ior = 1.55f;
     
     m_groomNameBuffer[0] = '\0';
+    m_materialNameBuffer[0] = '\0';
     initializePresets();
 }
 
@@ -465,13 +556,15 @@ inline void HairUI::render(
                     m_currentMaterial = existing->material;
                     if (renderer) renderer->setHairMaterial(m_currentMaterial);
                     strncpy(m_groomNameBuffer, existing->name.c_str(), sizeof(m_groomNameBuffer));
+                    m_selectedSharedMaterialName = existing->materialName;
+                    strncpy(m_materialNameBuffer, m_selectedSharedMaterialName.c_str(), sizeof(m_materialNameBuffer));
+                } else {
+                    // Suggest a new name only if no groom exists
+                    std::string suggested = meshName + "_Hair";
+                    strncpy(m_groomNameBuffer, suggested.c_str(), sizeof(m_groomNameBuffer));
+                    m_selectedGroomName = ""; // Clear selection if no groom
                 }
             }
-
-
-                // Suggest a new name
-                std::string suggested = meshName + "_Hair";
-                strncpy(m_groomNameBuffer, suggested.c_str(), sizeof(m_groomNameBuffer));
             
         }
     } else if (selectedMeshTriangles && selectedMeshTriangles->empty()) {
@@ -541,9 +634,9 @@ inline void HairUI::render(
     // Show paint mode indicator if active
     if (m_paintMode != HairPaintMode::NONE) {
         ImGui::Separator();
-        const char* modeNames[] = { 
+        const char* modeNames[] = {
             "None", "Add", "Remove", "Cut", "Comb", "Length", "Density", "Clump", "Puff",
-            "Wave", "Frizz", "Smooth", "Pinch", "Spread"
+            "Wave", "Frizz", "Smooth", "Pinch", "Spread", "Braid"
         };
         ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), 
                           "PAINT MODE: %s (ESC to exit)", modeNames[static_cast<int>(m_paintMode)]);
@@ -701,7 +794,17 @@ inline void HairUI::drawGenerationPanel(
     ImGui::Separator();
     
     // Generation Buttons
-    ImGui::InputText("Groom Name", m_groomNameBuffer, sizeof(m_groomNameBuffer));
+    ImGui::Text("Layer Setup");
+    bool nameChanged = ImGui::InputText("Name Buffer", m_groomNameBuffer, sizeof(m_groomNameBuffer), ImGuiInputTextFlags_EnterReturnsTrue);
+    if (nameChanged && !m_selectedGroomName.empty()) {
+        if (m_groomNameBuffer[0] != '\0' && std::string(m_groomNameBuffer) != m_selectedGroomName) {
+            if (hairSystem.renameGroom(m_selectedGroomName, m_groomNameBuffer)) {
+                m_selectedGroomName = m_groomNameBuffer;
+                m_needsRebuild = true;
+            }
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Press Enter to rename the current selected layer.");
     
     bool canGenerate = triangles && !triangles->empty();
     if (!canGenerate) ImGui::BeginDisabled();
@@ -709,14 +812,23 @@ inline void HairUI::drawGenerationPanel(
     ImGui::Columns(2, "GenButtons", false);
     
     if (ImGui::Button("Generate Full", ImVec2(-1, 40))) {
-        if (onPreGenerate) onPreGenerate(); // [FIX] Sync CPU BVH before generating to avoid offset hair
+        if (onPreGenerate) onPreGenerate();
         std::string groomNameStr = m_groomNameBuffer[0] == '\0' ? "hair_groom" : m_groomNameBuffer;
-        hairSystem.generateOnMesh(*triangles, m_editParams, groomNameStr);
-        if (HairGroom* g = hairSystem.getGroom(groomNameStr)) {
+        
+        // Ensure unique name for new groom if buffer matches existing but we want a new one
+        std::string finalName = groomNameStr;
+        int counter = 1;
+        while (hairSystem.exists(finalName)) {
+            finalName = groomNameStr + "_" + std::to_string(counter++);
+        }
+
+        hairSystem.generateOnMesh(*triangles, m_editParams, finalName);
+        if (HairGroom* g = hairSystem.getGroom(finalName)) {
             g->material = m_currentMaterial;
         }
         hairSystem.buildBVH();
-        m_selectedGroomName = groomNameStr;
+        m_selectedGroomName = finalName;
+        strncpy(m_groomNameBuffer, finalName.c_str(), sizeof(m_groomNameBuffer));
         m_needsRebuild = true;
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Distribute guide strands across entire mesh based on count");
@@ -762,7 +874,152 @@ inline void HairUI::drawGenerationPanel(
 }
 
 inline void HairUI::drawMaterialPanel(Renderer* renderer) {
+    if (!renderer) return;
+    HairSystem& hairSystem = renderer->getHairSystem();
     bool changed = false;
+    
+    // ========================================================================
+    // Material Management (Shared Library)
+    // ========================================================================
+    ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Hair Material Library");
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 4));
+    
+    std::vector<std::string> matNames = hairSystem.getMaterialNames();
+    std::string preview = m_selectedSharedMaterialName.empty() ? "Unique (Per-Groom)" : m_selectedSharedMaterialName;
+    
+    // Material Selection Combo
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 100.0f);
+    if (ImGui::BeginCombo("##MaterialSelector", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
+        if (ImGui::Selectable("None / Unique (Unshared)", m_selectedSharedMaterialName.empty())) {
+            m_selectedSharedMaterialName = "";
+            m_materialNameBuffer[0] = '\0';
+            if (!m_selectedGroomName.empty()) {
+                if (HairGroom* g = hairSystem.getGroom(m_selectedGroomName)) {
+                    g->materialName = "";
+                    m_currentMaterial = g->material;
+                }
+            }
+            changed = true;
+        }
+
+        for (const auto& matName : matNames) {
+            bool isSelected = (m_selectedSharedMaterialName == matName);
+            if (ImGui::Selectable(matName.c_str(), isSelected)) {
+                m_selectedSharedMaterialName = matName;
+                strncpy(m_materialNameBuffer, matName.c_str(), sizeof(m_materialNameBuffer));
+                if (const auto* sharedMat = hairSystem.getSharedMaterial(matName)) {
+                    m_currentMaterial = *sharedMat;
+                }
+                if (!m_selectedGroomName.empty()) {
+                    hairSystem.assignMaterialToGroom(m_selectedGroomName, matName);
+                }
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    
+    ImGui::SameLine();
+    if (ImGui::Button("New", ImVec2(45, 0))) {
+        ImGui::OpenPopup("CreateNewHairMaterial");
+    }
+    
+    if (!m_selectedSharedMaterialName.empty()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", ImVec2(45, 0))) {
+            hairSystem.removeMaterial(m_selectedSharedMaterialName);
+            m_selectedSharedMaterialName = "";
+            m_materialNameBuffer[0] = '\0';
+            changed = true;
+        }
+    }
+
+    // New Material Popup
+    if (ImGui::BeginPopup("CreateNewHairMaterial")) {
+        static char newMatBuf[64] = "";
+        
+        // Initialize buffer with a unique name if empty
+        if (newMatBuf[0] == '\0') {
+            int counter = 1;
+            std::string baseName = "Hair_Material";
+            std::string finalName = baseName + "_" + std::to_string(counter);
+            while (hairSystem.getSharedMaterial(finalName) != nullptr) {
+                finalName = baseName + "_" + std::to_string(++counter);
+            }
+            strncpy(newMatBuf, finalName.c_str(), sizeof(newMatBuf));
+        }
+
+        ImGui::Text("Enter Material Name:");
+        ImGui::InputText("##newmatname", newMatBuf, sizeof(newMatBuf));
+        
+        if (ImGui::Button("Create & Assign", ImVec2(-1, 0))) {
+            if (newMatBuf[0] != '\0') {
+                std::string nameStr = newMatBuf;
+                // If user entered a name that exists, we update it, 
+                // but usually they want a new one.
+                hairSystem.addMaterial(nameStr, m_currentMaterial);
+                m_selectedSharedMaterialName = nameStr;
+                strncpy(m_materialNameBuffer, nameStr.c_str(), sizeof(m_materialNameBuffer));
+                if (!m_selectedGroomName.empty()) {
+                    hairSystem.assignMaterialToGroom(m_selectedGroomName, nameStr);
+                }
+                newMatBuf[0] = '\0'; // Clear for next time
+                ImGui::CloseCurrentPopup();
+                changed = true;
+            }
+        }
+        ImGui::EndPopup();
+    } else {
+        // Clear buffer when popup is closed so it regenerates next time
+        static bool wasOpen = false;
+        bool isOpen = ImGui::IsPopupOpen("CreateNewHairMaterial");
+        if (wasOpen && !isOpen) {
+            // Popup just closed, we could clear something here if needed
+        }
+        wasOpen = isOpen;
+    }
+
+    // Rename option for shared materials
+    if (!m_selectedSharedMaterialName.empty()) {
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::InputText("##RenameMat", m_materialNameBuffer, sizeof(m_materialNameBuffer), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            if (m_materialNameBuffer[0] != '\0' && std::string(m_materialNameBuffer) != m_selectedSharedMaterialName) {
+                // Perform rename in library
+                auto* mat = hairSystem.getSharedMaterial(m_selectedSharedMaterialName);
+                if (mat) {
+                    std::string oldName = m_selectedSharedMaterialName;
+                    std::string newName = m_materialNameBuffer;
+                    HairMaterialParams clonedParams = *mat;
+                    
+                    hairSystem.removeMaterial(oldName);
+                    hairSystem.addMaterial(newName, clonedParams);
+                    
+                    // Re-link all grooms
+                    for (const auto& gName : hairSystem.getGroomNames()) {
+                        if (auto* g = hairSystem.getGroom(gName)) {
+                            if (g->materialName == oldName) {
+                                g->materialName = newName;
+                            }
+                        }
+                    }
+                    m_selectedSharedMaterialName = newName;
+                    changed = true;
+                }
+            }
+        }
+        if (ImGui::IsItemActive()) {
+             // User is typing, keep it active
+        } else if (!ImGui::IsItemHovered()) {
+             // If selector changed elsewhere, sync buffer (safety)
+             if (std::string(m_materialNameBuffer) != m_selectedSharedMaterialName) {
+                 strncpy(m_materialNameBuffer, m_selectedSharedMaterialName.c_str(), sizeof(m_materialNameBuffer));
+             }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Press Enter to rename the shared material");
+    }
+
+    ImGui::PopStyleVar();
+    ImGui::Separator();
     
     // Color Mode
     const char* colorModes[] = { "Direct Color", "Melanin (Physical)", "Absorption", "Root UV Map" };
@@ -847,7 +1104,6 @@ inline void HairUI::drawMaterialPanel(Renderer* renderer) {
     };
 
     // Albedo Map
-    static char albedoBuf[256] = ""; 
     ImGui::Text("Albedo Map:");
     if (m_currentMaterial.customAlbedoTexture) {
          std::string shortName = GetFileName(m_currentMaterial.customAlbedoTexture->name);
@@ -917,6 +1173,51 @@ inline void HairUI::drawMaterialPanel(Renderer* renderer) {
         }
     }
     
+    // --- Specular & Diffuse Controls ---
+    ImGui::Separator();
+    ImGui::Text("Highlight & Scattering");
+    
+    if (ImGui::SliderFloat("Specular Tint", &m_currentMaterial.specularTint, 0.0f, 1.0f,
+                     "%.2f (0=White, 1=Colored)")) changed = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tints the primary specular highlight by hair body color.\n0 = pure white highlight (physically accurate)\n1 = fully tinted by hair color");
+    
+    if (ImGui::SliderFloat("Diffuse Softness", &m_currentMaterial.diffuseSoftness, 0.0f, 1.0f,
+                     "%.2f")) changed = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls multiple scattering weight.\n0 = hard specular only\n0.5 = balanced (default)\n1.0 = strong diffuse/body color");
+    
+    // --- Root-to-Tip Gradient ---
+    ImGui::Separator();
+    ImGui::Text("Root-to-Tip Gradient");
+    
+    if (ImGui::Checkbox("Enable Gradient", &m_currentMaterial.enableRootTipGradient)) changed = true;
+    if (m_currentMaterial.enableRootTipGradient) {
+        float tipCol[3] = {m_currentMaterial.tipColor.x, 
+                          m_currentMaterial.tipColor.y,
+                          m_currentMaterial.tipColor.z};
+        if (ImGui::ColorEdit3("Tip Color", tipCol)) {
+            m_currentMaterial.tipColor = Vec3(tipCol[0], tipCol[1], tipCol[2]);
+            changed = true;
+        }
+        if (ImGui::SliderFloat("Root/Tip Balance", &m_currentMaterial.rootTipBalance, 0.0f, 1.0f,
+                         "%.2f")) changed = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = all root color\n1 = full transition to tip color at the tip");
+    }
+    
+    // --- Emission ---
+    ImGui::Separator();
+    ImGui::Text("Emission");
+    
+    if (ImGui::SliderFloat("Emission Strength", &m_currentMaterial.emissionStrength, 0.0f, 10.0f, "%.2f")) changed = true;
+    if (m_currentMaterial.emissionStrength > 0.0f) {
+        float emCol[3] = {m_currentMaterial.emission.x,
+                         m_currentMaterial.emission.y,
+                         m_currentMaterial.emission.z};
+        if (ImGui::ColorEdit3("Emission Color", emCol)) {
+            m_currentMaterial.emission = Vec3(emCol[0], emCol[1], emCol[2]);
+            changed = true;
+        }
+    }
+    
     // Random variation
     ImGui::Separator();
     ImGui::Text("Variation");
@@ -925,18 +1226,24 @@ inline void HairUI::drawMaterialPanel(Renderer* renderer) {
 
     // Sync with renderer if something changed
     if (changed) {
-        if (!m_selectedGroomName.empty()) {
-            // Need a way to get the hair system here, but drawMaterialPanel doesn't take it.
-            // However, Renderer has it!
-            if (renderer) {
-                if (HairGroom* g = renderer->getHairSystem().getGroom(m_selectedGroomName)) {
-                    g->material = m_currentMaterial;
-                }
-                renderer->setHairMaterial(m_currentMaterial);
-                // Ensure instant visual feedback by clearing old samples
-                renderer->resetCPUAccumulation();
+        if (renderer) {
+            HairSystem& hairSystem = renderer->getHairSystem();
+            
+            // Update shared pool if using shared material
+            if (!m_selectedSharedMaterialName.empty()) {
+                hairSystem.addMaterial(m_selectedSharedMaterialName, m_currentMaterial);
             }
-        } else if (renderer) {
+
+            if (!m_selectedGroomName.empty()) {
+                if (HairGroom* g = hairSystem.getGroom(m_selectedGroomName)) {
+                    // Update per-groom material only if no shared material is assigned
+                    if (m_selectedSharedMaterialName.empty()) {
+                        g->material = m_currentMaterial;
+                    }
+                    g->materialName = m_selectedSharedMaterialName;
+                }
+            }
+            
             renderer->setHairMaterial(m_currentMaterial);
             renderer->resetCPUAccumulation();
         }
@@ -959,27 +1266,71 @@ inline void HairUI::drawGroomList(HairSystem& hairSystem, Renderer* renderer) {
             bool isSelected = (name == m_selectedGroomName);
             ImGui::PushID(name.c_str());
             
-            // Format: [MeshName] GroomName (Count)
-            char label[128];
-            snprintf(label, sizeof(label), "[%s] %s (%zu)", 
-                     g->boundMeshName.c_str(), name.c_str(), g->guides.size());
-
-            if (ImGui::Selectable(label, isSelected)) {
-                m_selectedGroomName = name;
-                m_editParams = g->params;
-                m_currentMaterial = g->material;
-                if (renderer) renderer->setHairMaterial(m_currentMaterial);
-                strncpy(m_groomNameBuffer, name.c_str(), sizeof(m_groomNameBuffer));
+            bool visible = g->isVisible;
+            if (ImGui::Checkbox("##vis", &visible)) {
+                g->isVisible = visible;
+                m_needsRebuild = true;
             }
-
-
-
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle grooming visibility/rendering");
+            ImGui::SameLine();
             
-            if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("Delete Groom")) {
-                    groomToDelete = name;
+            // If renaming this groom, show InputText
+            if (m_renamingGroomName == name) {
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText("##Rename", m_renameBuffer, sizeof(m_renameBuffer), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                    if (hairSystem.renameGroom(name, m_renameBuffer)) {
+                        m_selectedGroomName = m_renameBuffer;
+                        strncpy(m_groomNameBuffer, m_renameBuffer, sizeof(m_groomNameBuffer));
+                    }
+                    m_renamingGroomName = "";
                 }
-                ImGui::EndPopup();
+                // Stop renaming if focus lost
+                if (ImGui::IsItemDeactivated() && !ImGui::IsAnyItemActive()) m_renamingGroomName = "";
+            } else {
+                // Format: [MeshName] GroomName (Count)
+                char label[128];
+                snprintf(label, sizeof(label), "[%s] %s (%zu)", 
+                         g->boundMeshName.c_str(), name.c_str(), g->guides.size());
+
+                if (ImGui::Selectable(label, isSelected)) {
+                    m_selectedGroomName = name;
+                    m_editParams = g->params;
+                    m_selectedSharedMaterialName = g->materialName;
+                    strncpy(m_materialNameBuffer, g->materialName.c_str(), sizeof(m_materialNameBuffer));
+                    
+                    // If shared material assigned, use it
+                    if (!g->materialName.empty()) {
+                        if (const auto* sharedMat = hairSystem.getSharedMaterial(g->materialName)) {
+                            m_currentMaterial = *sharedMat;
+                        } else {
+                            m_currentMaterial = g->material;
+                        }
+                    } else {
+                        m_currentMaterial = g->material;
+                    }
+
+                    if (renderer) renderer->setHairMaterial(m_currentMaterial);
+                    strncpy(m_groomNameBuffer, name.c_str(), sizeof(m_groomNameBuffer));
+                }
+
+                // Double click to rename
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    m_renamingGroomName = name;
+                    strncpy(m_renameBuffer, name.c_str(), sizeof(m_renameBuffer));
+                }
+
+                // Context Menu
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Rename")) {
+                        m_renamingGroomName = name;
+                        strncpy(m_renameBuffer, name.c_str(), sizeof(m_renameBuffer));
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Delete Groom", nullptr, false, true)) {
+                        groomToDelete = name;
+                    }
+                    ImGui::EndPopup();
+                }
             }
             ImGui::PopID();
         }
@@ -1081,6 +1432,7 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
     DrawSafeBtn(HairPaintMode::SMOOTH,  "_ Smth",    "Relax/Straighten hair", 10);
     DrawSafeBtn(HairPaintMode::PINCH,   "> Pnc",     "Bunch points together", 11);
     DrawSafeBtn(HairPaintMode::SPREAD,  "< Spr",     "Spread points apart", 12);
+    DrawSafeBtn(HairPaintMode::BRAID,   "B Brd",     "Braid/twist strands together", 13);
     
     // Exit button
     if (m_paintMode != HairPaintMode::NONE) {
@@ -1090,6 +1442,55 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
             m_needsRebuild = true;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Improves performance by only showing guide strands while grooming.");
+
+        // --- Undo / Redo Buttons ---
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "History");
+        
+        float undoRedoBtnW = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        
+        // Undo button
+        {
+            bool canUndoNow = canUndo();
+            if (!canUndoNow) {
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
+            }
+            if (ImGui::Button("Undo (Ctrl+Z)", ImVec2(undoRedoBtnW, 28)) && canUndoNow) {
+                if (undo(hairSystem)) {
+                    // restoreState already sets m_needsRebuild
+                }
+            }
+            if (ImGui::IsItemHovered() && canUndoNow && !m_undoStack.empty()) {
+                ImGui::SetTooltip("Undo: %s (%zu steps)", m_undoStack.back().description.c_str(), m_undoStack.size());
+            }
+            if (!canUndoNow) {
+                ImGui::PopStyleVar();
+            }
+        }
+        
+        ImGui::SameLine();
+        
+        // Redo button
+        {
+            bool canRedoNow = canRedo();
+            if (!canRedoNow) {
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, 0.4f);
+            }
+            if (ImGui::Button("Redo (Ctrl+Y)", ImVec2(undoRedoBtnW, 28)) && canRedoNow) {
+                if (redo(hairSystem)) {
+                    // restoreState already sets m_needsRebuild
+                }
+            }
+            if (ImGui::IsItemHovered() && canRedoNow && !m_redoStack.empty()) {
+                ImGui::SetTooltip("Redo: %s (%zu steps)", m_redoStack.back().description.c_str(), m_redoStack.size());
+            }
+            if (!canRedoNow) {
+                ImGui::PopStyleVar();
+            }
+        }
+        
+        // History depth indicator
+        ImGui::TextDisabled("Undo: %zu  |  Redo: %zu", m_undoStack.size(), m_redoStack.size());
 
         if (ImGui::Button("Exit Paint Mode (ESC)", ImVec2(-1, 30))) {
             m_paintMode = HairPaintMode::NONE;
@@ -1133,9 +1534,9 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
             break;
             
         case HairPaintMode::COMB:
-            ImGui::Checkbox("Use View Direction", &m_brushSettings.useViewDirection);
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Comb in the hit direction. Affects points closest to brush first.");
-            if (!m_brushSettings.useViewDirection) {
+            ImGui::Checkbox("Follow Mouse Drag", &m_brushSettings.combFollowDrag);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Comb follows your mouse drag direction (recommended).\nDisable to use a fixed direction.");
+            if (!m_brushSettings.combFollowDrag) {
                 float dir[3] = { m_brushSettings.combDirection.x, 
                                 m_brushSettings.combDirection.y, 
                                 m_brushSettings.combDirection.z };
@@ -1143,6 +1544,16 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
                     m_brushSettings.combDirection = Vec3(dir[0], dir[1], dir[2]).normalize();
                 }
             }
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Comb Teeth Settings");
+            ImGui::SliderInt("Teeth Count", &m_brushSettings.combTeethCount, 4, 32, "%d teeth");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("More teeth = finer, smoother combing.\nFewer teeth = rougher styling.");
+            ImGui::SliderFloat("Catch Radius", &m_brushSettings.combCatchRadius, 0.2f, 2.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How eagerly teeth catch nearby strands.\nHigher = catches more strands.");
+            ImGui::SliderFloat("Root Stiffness", &m_brushSettings.combRootStiffness, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Controls root resistance to combing.\n0 = loose, 1 = roots locked in place.");
+            ImGui::SliderFloat("Lift", &m_brushSettings.combLift, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adds volume by lifting strands off scalp while combing.");
             break;
             
         case HairPaintMode::WAVE:
@@ -1154,6 +1565,38 @@ inline void HairUI::drawPaintPanel(HairSystem& hairSystem) {
         case HairPaintMode::ADD:
             ImGui::Checkbox("Affect Only Guides", &m_brushSettings.affectGuides);
             break;
+        
+        case HairPaintMode::BRAID: {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Braid Settings");
+            const char* braidTypes[] = { "Standard 3-Strand", "Fishtail", "Rope Twist", "French" };
+            ImGui::Combo("Braid Type", &m_brushSettings.braidType, braidTypes, 4);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip(
+                    "Standard: Classic 3-strand braid\n"
+                    "Fishtail: 2 groups, alternating thin sections\n"
+                    "Rope Twist: 2 strands twisted together\n"
+                    "French: Progressively incorporates strands"
+                );
+            }
+            
+            // Auto-set group count based on type
+            if (m_brushSettings.braidType == 0) m_brushSettings.braidGroupCount = 3;
+            else if (m_brushSettings.braidType <= 2) m_brushSettings.braidGroupCount = 2;
+            else m_brushSettings.braidGroupCount = 3;
+            
+            ImGui::SliderInt("Groups", &m_brushSettings.braidGroupCount, 2, 5);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of strand groups in the braid.\n2 = rope/fishtail, 3 = standard, 4-5 = complex.");
+            ImGui::SliderFloat("Tightness", &m_brushSettings.braidTightness, 0.0f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How tight the braid is.\n0 = loose and flowing, 1 = very tight.");
+            ImGui::SliderFloat("Twist Frequency", &m_brushSettings.braidFrequency, 1.0f, 10.0f, "%.1f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Number of crossings per strand length.\nHigher = more twists.");
+            ImGui::SliderFloat("Width", &m_brushSettings.braidAmplitude, 0.1f, 1.0f, "%.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Width of the braid pattern.\nSmaller = tighter braid, larger = more spread.");
+            
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Tip: Click and drag to define\nbraid direction. Strands within\nthe brush will be braided.");
+            break;
+        }
             
         default:
             break;
@@ -1188,9 +1631,38 @@ inline void HairUI::applyBrush(HairSystem& hairSystem, const Vec3& worldPos, con
     HairGroom* groom = hairSystem.getGroom(m_selectedGroomName);
     if (!groom) return;
 
+    // --- COMB / BRAID: Track mouse drag direction with momentum smoothing ---
+    Vec3 effectiveCombDir = m_brushSettings.combDirection;
+    bool useDragDir = (m_paintMode == HairPaintMode::COMB && m_brushSettings.combFollowDrag) ||
+                      (m_paintMode == HairPaintMode::BRAID);
+    if (useDragDir) {
+        if (customDir.length_squared() > 0.0001f) {
+            m_combDragDirection = customDir;
+            // Smooth with momentum (exponential moving average)
+            if (m_combHasMomentum) {
+                m_combSmoothedDir = m_combSmoothedDir * 0.6f + customDir * 0.4f;
+                float len = m_combSmoothedDir.length();
+                if (len > 1e-5f) m_combSmoothedDir = m_combSmoothedDir / len;
+            } else {
+                m_combSmoothedDir = customDir;
+                m_combHasMomentum = true;
+            }
+            effectiveCombDir = m_combSmoothedDir;
+        } else {
+            // No drag this frame — use momentum if available
+            if (m_combHasMomentum) {
+                effectiveCombDir = m_combSmoothedDir;
+            }
+        }
+    } else {
+        // Reset momentum when not combing/braiding or when using fixed direction
+        m_combHasMomentum = false;
+        m_combSmoothedDir = Vec3(0, 0, 0);
+        m_braidActive = false;
+    }
 
     // Apply primary brush
-    applyBrushInternal(hairSystem, worldPos, normal, m_brushSettings.strength, m_brushSettings.radius, m_brushSettings.combDirection, deltaTime);
+    applyBrushInternal(hairSystem, worldPos, normal, m_brushSettings.strength, m_brushSettings.radius, effectiveCombDir, deltaTime);
     // Apply mirrored brushes relative to Object Pivot
     if (m_brushSettings.mirrorX || m_brushSettings.mirrorY || m_brushSettings.mirrorZ) {
         Matrix4x4 localToWorld = groom->transform;
@@ -1210,7 +1682,7 @@ inline void HairUI::applyBrush(HairSystem& hairSystem, const Vec3& worldPos, con
             
             Vec3 mirroredLocalPos = localPos;
             Vec3 mirroredLocalNormal = localNormal;
-            Vec3 mirroredCombDir = m_brushSettings.combDirection;
+            Vec3 mirroredCombDir = effectiveCombDir;
             
             if (mx) { mirroredLocalPos.x *= -1.0f; mirroredLocalNormal.x *= -1.0f; mirroredCombDir.x *= -1.0f; }
             if (my) { mirroredLocalPos.y *= -1.0f; mirroredLocalNormal.y *= -1.0f; mirroredCombDir.y *= -1.0f; }
@@ -1345,70 +1817,141 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 Matrix4x4 localToWorld = groom->transform;
                 Matrix4x4 worldToLocal = localToWorld.inverse();
                 
-                // Project world comb dir to surface tangent, then move to local
+                // Project world comb dir to surface tangent plane, then transform to local
                 float dotN = combDir.dot(normal);
-                combDir = (combDir - normal * dotN).normalize();
+                combDir = (combDir - normal * dotN);
+                float combDirLen = combDir.length();
+                if (combDirLen < 1e-5f) break; // No valid comb direction
+                combDir = combDir / combDirLen;
                 Vec3 localCombDir = worldToLocal.transform_vector(combDir).normalize();
+                
+                // Comb lift direction (along surface normal, in local space)
+                Vec3 localLiftDir = worldToLocal.transform_vector(normal).normalize();
 
+                // Comb parameters
                 float brushRadiusSq = brushRadius * brushRadius;
+                float catchMultiplier = m_brushSettings.combCatchRadius;
+                float rootStiffness = m_brushSettings.combRootStiffness;
+                float liftAmount = m_brushSettings.combLift;
+                int teethCount = std::clamp(m_brushSettings.combTeethCount, 4, 32);
+                
+                // Teeth spacing in world units: brush diameter / teeth count
+                // Strands within a tooth slot are "caught" and dragged together
+                float toothSpacing = (brushRadius * 2.0f) / (float)teethCount;
+                float toothCatchHalf = toothSpacing * 0.5f * catchMultiplier;
+                
+                // Local brush position for tooth grid alignment
+                Vec3 localBrushPos = worldToLocal.transform_point(worldPos);
+                
+                // Perpendicular to comb direction on surface plane (tooth row axis)
+                Vec3 toothRowAxis = Vec3::cross(localCombDir, localLiftDir);
+                float toothRowLen = toothRowAxis.length();
+                if (toothRowLen < 1e-5f) {
+                    // Fallback: any perpendicular to comb direction
+                    toothRowAxis = Vec3::cross(localCombDir, Vec3(0, 1, 0));
+                    toothRowLen = toothRowAxis.length();
+                    if (toothRowLen < 1e-5f) toothRowAxis = Vec3::cross(localCombDir, Vec3(1, 0, 0));
+                    toothRowLen = toothRowAxis.length();
+                }
+                if (toothRowLen > 1e-5f) toothRowAxis = toothRowAxis / toothRowLen;
+
                 for (auto& strand : groom->guides) {
-                    // OPTIMIZATION: Quick box/root check
+                    // OPTIMIZATION: Quick root-distance early exit
                     Vec3 strandRootWorld = localToWorld.transform_point(strand.baseRootPos);
                     if ((strandRootWorld - worldPos).length() > (brushRadius + strand.baseLength * 1.5f)) continue;
 
-                    // Modern Volume Hit Check
+                    if (strand.groomedPositions.size() <= 1) continue;
+                    
+                    // Volume hit check: any point within brush?
                     float minDistSq = 1e30f;
-                    for (const auto& p : strand.groomedPositions) {
-                        Vec3 worldP = localToWorld.transform_point(p);
+                    int closestIdx = -1;
+                    for (size_t pi = 0; pi < strand.groomedPositions.size(); ++pi) {
+                        Vec3 worldP = localToWorld.transform_point(strand.groomedPositions[pi]);
                         float d2 = (worldP - worldPos).length_squared();
-                        if (d2 < minDistSq) minDistSq = d2;
+                        if (d2 < minDistSq) { minDistSq = d2; closestIdx = (int)pi; }
                     }
                     
-                    if (minDistSq < brushRadiusSq && strand.groomedPositions.size() > 1) {
-                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
+                    if (minDistSq >= brushRadiusSq) continue;
 
-                        for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
-                            Vec3 worldSegP = localToWorld.transform_point(strand.groomedPositions[i]);
-                            float segDist = (worldSegP - worldPos).length();
-                            
-                            // Quadratic falloff for smoother feel
-                            float normDist = std::clamp(segDist / brushRadius, 0.0f, 1.0f);
-                            float segFalloff = (1.0f - normDist) * (1.0f - normDist);
-                            
-                            // Magnetic bending: Apply falloff per control point based on hit proximity
-                            float segmentStrength = effectStrength * segFalloff * effectiveDelta * 10.0f; 
-                            
-                            // 1. Tangential displacement (LOCAL SPACE)
-                            strand.groomedPositions[i] = strand.groomedPositions[i] + localCombDir * segmentStrength;
-                            
-                            // 2. [COLLISION] Keep hair ABOVE the emitter surface
-                            Vec3 rel = strand.groomedPositions[i] - strand.groomedPositions[0];
-                            float distFromRootPlane = rel.dot(strand.rootNormal);
-                            if (distFromRootPlane < 0.002f) {
-                                strand.groomedPositions[i] = strand.groomedPositions[i] + strand.rootNormal * (0.0025f - distFromRootPlane);
-                            }
+                    // --- COMB TOOTH CATCH TEST ---
+                    // Project strand midpoint onto tooth row axis to determine
+                    // which tooth slot it falls into. Strands in the "gap" between
+                    // teeth are not caught (simulates teeth).
+                    Vec3 localMidPoint = strand.groomedPositions[strand.groomedPositions.size() / 2];
+                    float toothProjection = (localMidPoint - localBrushPos).dot(toothRowAxis);
+                    
+                    // Which tooth slot does this strand fall into?
+                    float slotPos = std::fmod(std::abs(toothProjection), toothSpacing);
+                    float distToToothCenter = std::abs(slotPos - toothSpacing * 0.5f);
+                    
+                    // Strand is "caught" if it's within the tooth catch radius
+                    if (distToToothCenter > toothCatchHalf) continue;
+                    
+                    // Tooth catch strength (closer to tooth center = stronger catch)
+                    float toothCatchFactor = 1.0f - (distToToothCenter / toothCatchHalf);
+                    toothCatchFactor = toothCatchFactor * toothCatchFactor; // Quadratic for smoother feel
 
-                            // 3. Length Constraint (Per segment)
-                            Vec3 prev = strand.groomedPositions[i-1];
-                            Vec3 segDir = strand.groomedPositions[i] - prev;
-                            float currentLen = segDir.length();
-                            if (currentLen > 1e-6f) {
-                                strand.groomedPositions[i] = prev + (segDir / currentLen) * segmentTargetLen;
-                            }
+                    float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
+                    size_t numPts = strand.groomedPositions.size();
+
+                    for (size_t i = 1; i < numPts; ++i) {
+                        Vec3 worldSegP = localToWorld.transform_point(strand.groomedPositions[i]);
+                        float segDist = (worldSegP - worldPos).length();
+                        
+                        // Spatial falloff: quadratic from brush center
+                        float normDist = std::clamp(segDist / brushRadius, 0.0f, 1.0f);
+                        float spatialFalloff = (1.0f - normDist) * (1.0f - normDist);
+                        
+                        // Depth falloff: v-parameter along strand
+                        // Root (v=0) moves less, tip (v=1) moves more (like real combing)
+                        float v = (float)i / (float)(numPts - 1);  // 0..1
+                        float depthFalloff = std::pow(v, rootStiffness * 2.0f + 0.1f);
+                        // rootStiffness=0 -> depthFalloff≈v^0.1 ≈ uniform
+                        // rootStiffness=1 -> depthFalloff=v^2.1 -> root barely moves
+                        
+                        // Combined strength with tooth catch
+                        float totalStrength = effectStrength * spatialFalloff * depthFalloff * toothCatchFactor * effectiveDelta * 12.0f;
+                        
+                        // 1. Tangential displacement: DRAG along comb direction (LOCAL SPACE)
+                        strand.groomedPositions[i] = strand.groomedPositions[i] + localCombDir * totalStrength;
+                        
+                        // 2. Optional LIFT: raise strand along normal while combing
+                        if (liftAmount > 0.001f) {
+                            float liftStrength = liftAmount * spatialFalloff * depthFalloff * toothCatchFactor * effectiveDelta * 3.0f;
+                            strand.groomedPositions[i] = strand.groomedPositions[i] + localLiftDir * liftStrength;
+                        }
+                        
+                        // 3. [COLLISION] Keep hair ABOVE the emitter surface
+                        Vec3 rel = strand.groomedPositions[i] - strand.groomedPositions[0];
+                        float distFromRootPlane = rel.dot(strand.rootNormal);
+                        if (distFromRootPlane < 0.002f) {
+                            strand.groomedPositions[i] = strand.groomedPositions[i] + strand.rootNormal * (0.0025f - distFromRootPlane);
                         }
 
-                        // [NEW] Relaxation pass to prevent jagged strands
-                        for (int iter = 0; iter < 2; ++iter) {
-                            for (size_t i = 1; i < strand.groomedPositions.size() - 1; ++i) {
-                                Vec3 avg = (strand.groomedPositions[i-1] + strand.groomedPositions[i+1]) * 0.5f;
-                                strand.groomedPositions[i] = strand.groomedPositions[i] * 0.9f + avg * 0.1f;
-                                
-                                // Re-apply length constraint after smoothing
-                                Vec3 prev = strand.groomedPositions[i-1];
-                                Vec3 segDir = (strand.groomedPositions[i] - prev);
-                                float l = segDir.length();
-                                if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
-                            }
+                        // 4. Length Constraint (Per segment — preserve strand length)
+                        Vec3 prev = strand.groomedPositions[i-1];
+                        Vec3 segDir = strand.groomedPositions[i] - prev;
+                        float currentLen = segDir.length();
+                        if (currentLen > 1e-6f) {
+                            strand.groomedPositions[i] = prev + (segDir / currentLen) * segmentTargetLen;
+                        }
+                    }
+
+                    // Multi-pass relaxation to prevent jagged/kinked strands
+                    // 3 passes for smoother results than the old 2-pass approach
+                    for (int iter = 0; iter < 3; ++iter) {
+                        // Pair-wise smoothing
+                        for (size_t i = 1; i < numPts - 1; ++i) {
+                            Vec3 avg = (strand.groomedPositions[i-1] + strand.groomedPositions[i+1]) * 0.5f;
+                            // Progressive blend: more smoothing on later iterations
+                            float blendFactor = 0.08f + 0.04f * (float)iter;
+                            strand.groomedPositions[i] = strand.groomedPositions[i] * (1.0f - blendFactor) + avg * blendFactor;
+                            
+                            // Re-apply length constraint after smoothing
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = (strand.groomedPositions[i] - prev);
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
                 }
@@ -1693,6 +2236,217 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
             m_needsRebuild = true;
             break;
         }
+        case HairPaintMode::BRAID: {
+            if (HairGroom* groom = hairSystem.getGroom(m_selectedGroomName)) {
+                Matrix4x4 localToWorld = groom->transform;
+                Matrix4x4 worldToLocal = localToWorld.inverse();
+                float brushRadiusSq = brushRadius * brushRadius;
+                
+                // Braid parameters
+                int groupCount = std::clamp(m_brushSettings.braidGroupCount, 2, 5);
+                float tightness = m_brushSettings.braidTightness;
+                float freq = m_brushSettings.braidFrequency;
+                float ampScale = m_brushSettings.braidAmplitude;
+                int braidType = m_brushSettings.braidType;
+                
+                // Braid axis: use mouse drag direction (smoothed)
+                Vec3 braidAxisWorld = combDirection;
+                if (braidAxisWorld.length_squared() < 0.0001f) {
+                    braidAxisWorld = Vec3(0, -1, 0); // Fallback: downward
+                }
+                // Project to surface tangent plane
+                float dotN = braidAxisWorld.dot(normal);
+                braidAxisWorld = braidAxisWorld - normal * dotN;
+                float axisLen = braidAxisWorld.length();
+                if (axisLen < 1e-5f) break;
+                braidAxisWorld = braidAxisWorld / axisLen;
+                
+                // Track braid stroke direction with smoothing
+                if (m_braidActive) {
+                    m_braidStrokeDir = m_braidStrokeDir * 0.7f + braidAxisWorld * 0.3f;
+                    float sl = m_braidStrokeDir.length();
+                    if (sl > 1e-5f) m_braidStrokeDir = m_braidStrokeDir / sl;
+                    m_braidStrokeCenter = m_braidStrokeCenter * 0.8f + worldPos * 0.2f;
+                } else {
+                    m_braidStrokeDir = braidAxisWorld;
+                    m_braidStrokeCenter = worldPos;
+                    m_braidActive = true;
+                }
+                
+                // Transform to local space
+                Vec3 localBraidDir = worldToLocal.transform_vector(m_braidStrokeDir).normalize();
+                Vec3 localNormal = worldToLocal.transform_vector(normal).normalize();
+                Vec3 localBrushPos = worldToLocal.transform_point(worldPos);
+                
+                // Cross axis: perpendicular to braid direction on surface
+                Vec3 crossAxis = Vec3::cross(localBraidDir, localNormal);
+                float crossLen = crossAxis.length();
+                if (crossLen < 1e-5f) {
+                    crossAxis = Vec3::cross(localBraidDir, Vec3(0, 1, 0));
+                    crossLen = crossAxis.length();
+                    if (crossLen < 1e-5f) crossAxis = Vec3::cross(localBraidDir, Vec3(1, 0, 0));
+                    crossLen = crossAxis.length();
+                }
+                if (crossLen > 1e-5f) crossAxis = crossAxis / crossLen;
+                
+                // Over/under axis (surface normal direction in local space)
+                Vec3 overUnderAxis = Vec3::cross(crossAxis, localBraidDir);
+                float ouLen = overUnderAxis.length();
+                if (ouLen > 1e-5f) overUnderAxis = overUnderAxis / ouLen;
+                
+                // Braid displacement amplitude in world units
+                float braidWidth = brushRadius * ampScale * 0.3f;
+                
+                // --- Collect and sort strands by angular position ---
+                struct StrandInfo {
+                    size_t strandIdx;
+                    float angle;       // Angle around braid center
+                    float distToBrush; // Distance to brush center
+                };
+                std::vector<StrandInfo> caughtStrands;
+                
+                for (size_t si = 0; si < groom->guides.size(); ++si) {
+                    auto& strand = groom->guides[si];
+                    if (strand.groomedPositions.size() <= 1) continue;
+                    
+                    // Quick root distance check
+                    Vec3 rootWorld = localToWorld.transform_point(strand.baseRootPos);
+                    if ((rootWorld - worldPos).length() > (brushRadius + strand.baseLength * 1.5f)) continue;
+                    
+                    // Volume hit check
+                    float minDistSq = 1e30f;
+                    for (const auto& p : strand.groomedPositions) {
+                        Vec3 worldP = localToWorld.transform_point(p);
+                        float d2 = (worldP - worldPos).length_squared();
+                        if (d2 < minDistSq) minDistSq = d2;
+                    }
+                    
+                    if (minDistSq < brushRadiusSq) {
+                        // Calculate angle of strand root relative to brush center
+                        Vec3 localRoot = strand.groomedPositions[0];
+                        Vec3 toStrand = localRoot - localBrushPos;
+                        float angleOnCross = toStrand.dot(crossAxis);
+                        float angleOnOU = toStrand.dot(overUnderAxis);
+                        float angle = std::atan2(angleOnOU, angleOnCross);
+                        
+                        caughtStrands.push_back({si, angle, std::sqrt(minDistSq)});
+                    }
+                }
+                
+                if (caughtStrands.empty()) break;
+                
+                // Sort by angle for group assignment
+                std::sort(caughtStrands.begin(), caughtStrands.end(), 
+                          [](const StrandInfo& a, const StrandInfo& b) { return a.angle < b.angle; });
+                
+                // Assign groups: divide angular range evenly
+                for (size_t ci = 0; ci < caughtStrands.size(); ++ci) {
+                    auto& info = caughtStrands[ci];
+                    auto& strand = groom->guides[info.strandIdx];
+                    
+                    // Group assignment based on sorted position
+                    int group = (int)(ci * groupCount / caughtStrands.size()) % groupCount;
+                    
+                    // Spatial falloff from brush center
+                    float normDist = std::clamp(info.distToBrush / brushRadius, 0.0f, 1.0f);
+                    float spatialFalloff = (1.0f - normDist) * (1.0f - normDist);
+                    
+                    size_t numPts = strand.groomedPositions.size();
+                    float segmentTargetLen = strand.baseLength / (numPts - 1);
+                    
+                    // Phase offset for this group
+                    float phaseOffset = (float)group * 6.2831853f / (float)groupCount;
+                    
+                    for (size_t i = 1; i < numPts; ++i) {
+                        float v = (float)i / (float)(numPts - 1); // 0..1 along strand
+                        
+                        // Braid pattern based on type
+                        float crossDisp = 0.0f; // Lateral displacement
+                        float overDisp = 0.0f;  // Over/under displacement  
+                        float phase = v * freq * 6.2831853f + phaseOffset;
+                        
+                        switch (braidType) {
+                            case 0: { // Standard 3-strand braid
+                                crossDisp = std::sin(phase) * braidWidth;
+                                overDisp = std::cos(phase) * braidWidth * 0.3f;
+                                break;
+                            }
+                            case 1: { // Fishtail: tighter alternation, sharp crossings
+                                float sharpSin = std::sin(phase);
+                                sharpSin = (sharpSin > 0.0f ? 1.0f : -1.0f) * std::pow(std::abs(sharpSin), 0.5f);
+                                crossDisp = sharpSin * braidWidth * 0.7f;
+                                overDisp = std::cos(phase * 2.0f) * braidWidth * 0.2f;
+                                break;
+                            }
+                            case 2: { // Rope Twist: circular helix
+                                crossDisp = std::sin(phase) * braidWidth;
+                                overDisp = std::cos(phase) * braidWidth;
+                                break;
+                            }
+                            case 3: { // French: progressive incorporation
+                                // Effect gets stronger toward tip (simulates gathering)
+                                float frenchScale = v * v; // Quadratic ramp-up
+                                crossDisp = std::sin(phase) * braidWidth * frenchScale;
+                                overDisp = std::cos(phase) * braidWidth * 0.3f * frenchScale;
+                                break;
+                            }
+                        }
+                        
+                        // Apply tightness: tighter braids pull strands closer to braid center
+                        Vec3 toBraidCenter = localBrushPos - strand.groomedPositions[i];
+                        float tightenPull = tightness * spatialFalloff * effectiveDelta * 3.0f;
+                        
+                        // Combined displacement
+                        float strength = effectStrength * spatialFalloff * effectiveDelta * 8.0f;
+                        Vec3 displacement = crossAxis * (crossDisp * strength) + 
+                                           overUnderAxis * (overDisp * strength);
+                        
+                        // Apply braid displacement
+                        strand.groomedPositions[i] = strand.groomedPositions[i] + displacement;
+                        
+                        // Apply tightness pull (toward braid center line)
+                        Vec3 projOnAxis = localBrushPos + localBraidDir * (strand.groomedPositions[i] - localBrushPos).dot(localBraidDir);
+                        Vec3 toAxis = projOnAxis - strand.groomedPositions[i];
+                        strand.groomedPositions[i] = strand.groomedPositions[i] + toAxis * std::min(1.0f, tightenPull);
+                        
+                        // Surface collision
+                        Vec3 rel = strand.groomedPositions[i] - strand.groomedPositions[0];
+                        float distFromRootPlane = rel.dot(strand.rootNormal);
+                        if (distFromRootPlane < 0.002f) {
+                            strand.groomedPositions[i] = strand.groomedPositions[i] + strand.rootNormal * (0.0025f - distFromRootPlane);
+                        }
+                        
+                        // Length constraint
+                        Vec3 prev = strand.groomedPositions[i-1];
+                        Vec3 segDir = strand.groomedPositions[i] - prev;
+                        float currentLen = segDir.length();
+                        if (currentLen > 1e-6f) {
+                            strand.groomedPositions[i] = prev + (segDir / currentLen) * segmentTargetLen;
+                        }
+                    }
+                    
+                    // Relaxation pass for smooth braid shape
+                    for (int iter = 0; iter < 2; ++iter) {
+                        for (size_t i = 1; i < numPts - 1; ++i) {
+                            Vec3 avg = (strand.groomedPositions[i-1] + strand.groomedPositions[i+1]) * 0.5f;
+                            strand.groomedPositions[i] = strand.groomedPositions[i] * 0.85f + avg * 0.15f;
+                            
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = (strand.groomedPositions[i] - prev);
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
+                        }
+                    }
+                }
+                
+                groom->isDirty = true;
+                hairSystem.bakeGroomToRest(m_selectedGroomName);
+                hairSystem.restyleGroom(m_selectedGroomName);
+            }
+            m_needsRebuild = true;
+            break;
+        }
+
         default:
             break;
     }
@@ -1710,6 +2464,159 @@ inline void HairUI::drawStats(const HairSystem& hairSystem) {
     size_t memoryBytes = pointCount * sizeof(HairPoint) + strandCount * sizeof(HairStrand);
     float memoryMB = memoryBytes / (1024.0f * 1024.0f);
     ImGui::Text("Estimated Memory: %.2f MB", memoryMB);
+}
+
+// ============================================================================
+// Undo / Redo Implementation
+// ============================================================================
+
+inline HairUndoState HairUI::captureState(const HairSystem& hairSystem, const std::string& desc) const {
+    HairUndoState state;
+    state.groomName = m_selectedGroomName;
+    state.description = desc;
+    
+    const HairGroom* groom = hairSystem.getGroom(m_selectedGroomName);
+    if (groom) {
+        state.guides = groom->guides;  // Deep copy of all guide strands
+        state.guideCount = groom->guides.size();
+    }
+    return state;
+}
+
+inline void HairUI::restoreState(HairSystem& hairSystem, const HairUndoState& state) {
+    HairGroom* groom = hairSystem.getGroom(state.groomName);
+    if (!groom) return;
+    
+    // Restore guide strands
+    groom->guides = state.guides;
+    groom->isDirty = true;
+    
+    // Regenerate interpolated children from restored guides
+    hairSystem.regenerateInterpolated(state.groomName);
+    
+    // Rebuild BVH 
+    hairSystem.buildBVH();
+    
+    m_needsRebuild = true;
+}
+
+inline void HairUI::beginStroke(HairSystem& hairSystem) {
+    if (m_selectedGroomName.empty()) return;
+    if (m_strokeActive) return; // Already in a stroke
+    
+    // Get brush mode name for description
+    const char* modeName = "Brush";
+    switch (m_paintMode) {
+        case HairPaintMode::ADD:      modeName = "Add"; break;
+        case HairPaintMode::REMOVE:   modeName = "Remove"; break;
+        case HairPaintMode::CUT:      modeName = "Cut"; break;
+        case HairPaintMode::COMB:     modeName = "Comb"; break;
+        case HairPaintMode::LENGTH:   modeName = "Length"; break;
+        case HairPaintMode::DENSITY:  modeName = "Density"; break;
+        case HairPaintMode::PUFF:     modeName = "Puff"; break;
+        case HairPaintMode::CLUMP:    modeName = "Clump"; break;
+        case HairPaintMode::FRIZZ:    modeName = "Frizz"; break;
+        case HairPaintMode::SMOOTH:   modeName = "Smooth"; break;
+        case HairPaintMode::PINCH:    modeName = "Pinch"; break;
+        case HairPaintMode::SPREAD:   modeName = "Spread"; break;
+        case HairPaintMode::BRAID:    modeName = "Braid"; break;
+        default: break;
+    }
+    
+    m_strokeSnapshot = captureState(hairSystem, modeName);
+    m_strokeActive = true;
+}
+
+inline void HairUI::endStroke(HairSystem& hairSystem) {
+    if (!m_strokeActive) return;
+    m_strokeActive = false;
+    
+    if (m_selectedGroomName.empty()) return;
+    
+    const HairGroom* groom = hairSystem.getGroom(m_selectedGroomName);
+    if (!groom) return;
+    
+    // Check if anything actually changed
+    bool changed = false;
+    
+    // Guide count changed (ADD/REMOVE/DENSITY)
+    if (groom->guides.size() != m_strokeSnapshot.guideCount) {
+        changed = true;
+    }
+    
+    // Check positions (sample a few strands for performance)
+    if (!changed && !groom->guides.empty() && !m_strokeSnapshot.guides.empty()) {
+        size_t checkCount = std::min(groom->guides.size(), (size_t)20);
+        size_t step = std::max((size_t)1, groom->guides.size() / checkCount);
+        
+        for (size_t s = 0; s < groom->guides.size() && !changed; s += step) {
+            if (s >= m_strokeSnapshot.guides.size()) { changed = true; break; }
+            
+            const auto& current = groom->guides[s];
+            const auto& snapshot = m_strokeSnapshot.guides[s];
+            
+            // Compare groomed positions (what the brush modifies)
+            if (current.groomedPositions.size() != snapshot.groomedPositions.size()) {
+                changed = true;
+                break;
+            }
+            for (size_t p = 0; p < current.groomedPositions.size(); ++p) {
+                Vec3 diff = current.groomedPositions[p] - snapshot.groomedPositions[p];
+                if (diff.length_squared() > 1e-10f) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if (changed) {
+        // Push pre-stroke state to undo stack
+        m_undoStack.push_back(std::move(m_strokeSnapshot));
+        
+        // Enforce max depth
+        while (m_undoStack.size() > MAX_UNDO_DEPTH) {
+            m_undoStack.pop_front();
+        }
+        
+        // Clear redo stack (new action invalidates redo history)
+        m_redoStack.clear();
+    }
+}
+
+inline bool HairUI::undo(HairSystem& hairSystem) {
+    if (m_undoStack.empty()) return false;
+    
+    // Save current state to redo stack
+    HairUndoState currentState = captureState(hairSystem, "Redo");
+    m_redoStack.push_back(std::move(currentState));
+    
+    // Enforce max redo depth
+    while (m_redoStack.size() > MAX_UNDO_DEPTH) {
+        m_redoStack.pop_front();
+    }
+    
+    // Pop and restore from undo stack
+    HairUndoState undoState = std::move(m_undoStack.back());
+    m_undoStack.pop_back();
+    
+    restoreState(hairSystem, undoState);
+    return true;
+}
+
+inline bool HairUI::redo(HairSystem& hairSystem) {
+    if (m_redoStack.empty()) return false;
+    
+    // Save current state to undo stack
+    HairUndoState currentState = captureState(hairSystem, "Undo");
+    m_undoStack.push_back(std::move(currentState));
+    
+    // Pop and restore from redo stack
+    HairUndoState redoState = std::move(m_redoStack.back());
+    m_redoStack.pop_back();
+    
+    restoreState(hairSystem, redoState);
+    return true;
 }
 
 } // namespace Hair

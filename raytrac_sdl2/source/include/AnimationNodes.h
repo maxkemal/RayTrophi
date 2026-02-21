@@ -41,7 +41,7 @@
 namespace AnimationGraph {
 
     // Forward declarations for animation sampling helpers
-    Vec3 sampleVectorKey(const std::vector<aiVectorKey>& keys, float time, double duration);
+    Vec3 sampleVectorKey(const std::vector<aiVectorKey>& keys, float time, double duration, bool wrap = true);
     Quaternion sampleQuatKey(const std::vector<aiQuatKey>& keys, float time, double duration);
 
     // ============================================================================
@@ -62,16 +62,44 @@ namespace AnimationGraph {
     };
     
     /**
-     * @brief Pose data - array of bone transforms
+     * @brief Individual bone transform in TRS format for high-quality blending
+     */
+    struct BoneTransform {
+        Vec3 translation = Vec3(0, 0, 0);
+        Quaternion rotation = Quaternion(1, 0, 0, 0);
+        Vec3 scale = Vec3(1, 1, 1);
+
+        static BoneTransform identity() { return BoneTransform(); }
+        
+        Matrix4x4 toMatrix() const {
+            return Matrix4x4::translation(translation) * rotation.toMatrix() * Matrix4x4::scaling(scale);
+        }
+    };
+
+    /**
+     * @brief Pose data - array of bone transforms in TRS and Matrix formats
      */
     struct PoseData {
-        std::vector<Matrix4x4> boneTransforms;
-        std::vector<std::string> boneNames;  // For debugging
+        std::vector<BoneTransform> trsTransforms;
+        std::vector<Matrix4x4> boneTransforms; // Cached matrices for final output
+        std::unordered_map<std::string, BoneTransform> extraTransforms; // For animated nodes without skin weights
+        std::vector<std::string> boneNames;    // For debugging
         float blendWeight = 1.0f;
-        float normalizedTime = 0.0f;        // 0-1 playback progress
+        float normalizedTime = 0.0f;          // 0-1 playback progress
+        bool wasUpdated = false;              // NEW: True if the animation actually progressed this frame
+        RootMotionDelta rootMotion;           // Tracks extracted root motion from clips
         
-        bool isValid() const { return !boneTransforms.empty(); }
-        size_t boneCount() const { return boneTransforms.size(); }
+        bool isValid() const { return !trsTransforms.empty() || !boneTransforms.empty(); }
+        size_t boneCount() const { return std::max(trsTransforms.size(), boneTransforms.size()); }
+        
+        // Ensure matrices are up to date from TRS
+        void updateMatrices() {
+            if (trsTransforms.empty()) return;
+            boneTransforms.resize(trsTransforms.size());
+            for (size_t i = 0; i < trsTransforms.size(); ++i) {
+                boneTransforms[i] = trsTransforms[i].toMatrix();
+            }
+        }
     };
     
     /**
@@ -116,6 +144,9 @@ namespace AnimationGraph {
         // Graph back-reference for connection traversal
         class AnimationNodeGraph* graph = nullptr;
 
+        // Model Global Inverse Transform (to fix scale/axis from FBX)
+        Matrix4x4 globalInverseTransform;
+
         // Animation clips (from scene)
         const std::vector<AnimationClip>* clipsPtr = nullptr;
         
@@ -124,6 +155,10 @@ namespace AnimationGraph {
         std::unordered_map<std::string, bool> boolParams;
         std::unordered_map<std::string, int> intParams;
         std::unordered_map<std::string, std::string> triggerParams;
+        
+        // Root Motion Settings
+        bool useRootMotion = false;
+        std::string rootMotionBone = "RootNode";
         
         // Output
         PoseData outputPose;
@@ -335,8 +370,8 @@ namespace AnimationGraph {
         
         std::string getTypeId() const override { return "AnimBlend"; }
         
-    private:
-        PoseData blendPoses(const PoseData& a, const PoseData& b, float t);
+    public:
+        static PoseData blendPoses(const PoseData& a, const PoseData& b, float t, const AnimationEvalContext& ctx);
         
     public:
         void onSave(nlohmann::json& j) const override {
@@ -666,6 +701,7 @@ namespace AnimationGraph {
         void setupPins();
         
         PoseData computePose(AnimationEvalContext& ctx) override;
+        Matrix4x4 resolveGlobalMatrix(const std::string& boneName, const BoneData* boneData, const PoseData& localPose, std::unordered_map<std::string, Matrix4x4>& cache, const AnimationEvalContext& ctx);
         void drawContent() override;
         
         std::string getTypeId() const override { return "FinalPose"; }

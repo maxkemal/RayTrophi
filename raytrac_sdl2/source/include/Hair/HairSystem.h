@@ -94,8 +94,10 @@ struct HairGroom {
     Matrix4x4 transform;                    // Delta transform (from initial position)
     Matrix4x4 initialMeshTransform;         // Mesh transform when hair was generated
     
+    std::string materialName;               // Shared material reference
     HairMaterialParams material;            // Per-groom material settings
     bool isDirty = true;                    // Needs rebuild
+    bool isVisible = true;                  // Render toggle
 };
 
 /**
@@ -111,6 +113,18 @@ class HairSystem {
 public:
     HairSystem();
     ~HairSystem();
+    
+    // ========================================================================
+    // Material Management
+    // ========================================================================
+    
+    void addMaterial(const std::string& name, const HairMaterialParams& params);
+    HairMaterialParams* getSharedMaterial(const std::string& name);
+    const HairMaterialParams* getSharedMaterial(const std::string& name) const;
+    void removeMaterial(const std::string& name);
+    std::vector<std::string> getMaterialNames() const;
+    void assignMaterialToGroom(const std::string& groomName, const std::string& materialName);
+
     
     // ========================================================================
     // Generation
@@ -152,7 +166,7 @@ public:
      * @brief Build acceleration structure for all grooms
      * Uses Embree's curve primitives (RTC_GEOMETRY_TYPE_ROUND_BEZIER_CURVE)
      */
-    void buildBVH();
+    void buildBVH(bool includeInterpolated = true);
     
     /**
      * @brief Ray-hair intersection (CPU)
@@ -223,6 +237,7 @@ public:
         std::vector<uint32_t>& outStrandIDs,
         std::vector<float>& outTangents3,   // x,y,z packed
         std::vector<float>& outRootUVs2,    // u,v packed per-segment
+        std::vector<float>& outStrandV,
         size_t& outVertexCount,
         size_t& outSegmentCount,
         bool includeInterpolated = true
@@ -235,6 +250,7 @@ public:
         std::vector<uint32_t>& outStrandIDs,
         std::vector<float>& outTangents3,
         std::vector<float>& outRootUVs2,
+        std::vector<float>& outStrandV,
         size_t& outVertexCount,
         size_t& outSegmentCount,
         HairMaterialParams& outMatParams,
@@ -259,6 +275,7 @@ public:
     void clearAll();
 
     void removeGroom(const std::string& name);
+    bool renameGroom(const std::string& oldName, const std::string& newName);
     
     // ========================================================================
     // Styling (real-time editing)
@@ -306,7 +323,7 @@ public:
     /**
      * @brief Update all grooms from their bound meshes
      */
-    void updateAllTransforms(const std::vector<std::shared_ptr<Hittable>>& sceneObjects);
+    void updateAllTransforms(const std::vector<std::shared_ptr<Hittable>>& sceneObjects, const std::vector<Matrix4x4>& boneMatrices);
     
     /**
      * @brief Update groom that is bound to a specific mesh by its boundMeshName
@@ -317,7 +334,7 @@ public:
     /**
      * @brief Update hair strands to follow skinned mesh deformation
      */
-    void updateSkinnedGroom(const std::string& groomName);
+    void updateSkinnedGroom(const std::string& groomName, const std::vector<Matrix4x4>& boneMatrices);
     
     /**
      * @brief Find groom bound to a specific mesh
@@ -338,6 +355,7 @@ public:
     
 private:
     std::unordered_map<std::string, HairGroom> m_grooms;
+    std::unordered_map<std::string, HairMaterialParams> m_materials; // Shared material pool
     std::unordered_map<unsigned int, std::string> m_geomToGroom; // Map Embree geomID to groom name
     std::unordered_map<unsigned int, size_t> m_geomToTangentOffset; // Map Embree geomID to tangent buffer offset
     

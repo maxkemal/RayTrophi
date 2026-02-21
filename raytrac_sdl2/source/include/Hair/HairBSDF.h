@@ -69,6 +69,19 @@ struct HairMaterialParams {
     Vec3 emission = Vec3(0, 0, 0);
     float emissionStrength = 0.0f;
     
+    // --- NEW: Root-to-Tip Color Gradient ---
+    // Blend absorption towards tipColor at the tip end
+    bool  enableRootTipGradient = false;
+    Vec3  tipColor = Vec3(0.6f, 0.4f, 0.25f); // Lighter tip default
+    float rootTipBalance = 0.5f;               // 0=all root color, 1=all tip color at tip
+    
+    // --- NEW: Specular Tint ---
+    // Tints the R (primary specular) highlight  
+    float specularTint = 0.0f;          // 0=white highlight (physical), 1=tinted by hair color
+    
+    // --- NEW: Diffuse Softness (Multiple Scattering Weight) ---
+    float diffuseSoftness = 0.5f;       // 0=hard specular only, 1=strong diffuse/MS component
+    
     // Custom Textures (Optional overrides)
     std::shared_ptr<Texture> customAlbedoTexture = nullptr;
     std::shared_ptr<Texture> customRoughnessTexture = nullptr;

@@ -151,7 +151,10 @@ namespace TerrainNodesV2 {
         ErosionWizard,       // All-in-one erosion with presets
         // Outputs
         HeightOutput,
-        SplatOutput
+        SplatOutput,
+        HardnessOutput,
+        // Inputs
+        HardnessInput
     };
 
     // ============================================================================
@@ -462,6 +465,36 @@ namespace TerrainNodesV2 {
         }
     };
 
+    /**
+     * @brief Hardness Input Node - reads the current hardness map from terrain
+     */
+    class HardnessInputNode : public TerrainNodeBase {
+    public:
+        HardnessInputNode() {
+            name = "Hardness Input";
+            terrainNodeType = NodeType::HardnessInput;
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Hardness Input";
+            metadata.category = "Input";
+            metadata.headerColor = IM_COL32(50, 100, 150, 255);
+            headerColor = ImVec4(0.2f, 0.4f, 0.6f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        std::string getTypeId() const override { return "TerrainV2.HardnessInput"; }
+        
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+        }
+    };
+
     // ============================================================================
     // NOISE GENERATOR
     // ============================================================================
@@ -588,7 +621,7 @@ namespace TerrainNodesV2 {
     class HydraulicErosionNode : public TerrainNodeBase {
     public:
         HydraulicErosionParams params;
-        bool useGPU = true;
+        bool useGPU = false;
         
         // Edge Falloff Settings
         float edgeFalloffWidth = 0.0f;
@@ -602,6 +635,8 @@ namespace TerrainNodesV2 {
                 "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
@@ -675,6 +710,8 @@ namespace TerrainNodesV2 {
                 "Height In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
             inputs.push_back(NodeSystem::Pin::createInput(
                 "Mask", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask, true));
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
@@ -1196,6 +1233,42 @@ namespace TerrainNodesV2 {
         }
     };
 
+    /**
+     * @brief Hardness Output Node - Drives the physical hardness of the terrain
+     * 
+     * Values from 0 (Soft/Soil) to 1 (Hard/Bedrock).
+     * This data is used by erosion algorithms and physics simulations.
+     */
+    class HardnessOutputNode : public TerrainNodeBase {
+    public:
+        HardnessOutputNode() {
+            name = "Hardness Output";
+            terrainNodeType = NodeType::HardnessOutput;
+            
+            inputs.push_back(NodeSystem::Pin::createInput(
+                "Hardness", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
+            
+            metadata.displayName = "Hardness Output";
+            metadata.category = "Output";
+            metadata.headerColor = IM_COL32(120, 130, 140, 255);
+            headerColor = ImVec4(0.5f, 0.55f, 0.6f, 1.0f);
+        }
+        
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
+        std::string getTypeId() const override { return "TerrainV2.HardnessOutput"; }
+        
+        void serializeToJson(nlohmann::json& j) const override {
+            TerrainNodeBase::serializeToJson(j);
+        }
+
+        void deserializeFromJson(const nlohmann::json& j) override {
+            TerrainNodeBase::deserializeFromJson(j);
+        }
+    };
+
     // ============================================================================
     // MATH NODES
     // ============================================================================
@@ -1326,10 +1399,10 @@ namespace TerrainNodesV2 {
             terrainNodeType = NodeType::Invert;
             
             inputs.push_back(NodeSystem::Pin::createInput(
-                "In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "In", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             
             outputs.push_back(NodeSystem::Pin::createOutput(
-                "Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+                "Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             
             metadata.displayName = "Invert";
             metadata.category = "Math";

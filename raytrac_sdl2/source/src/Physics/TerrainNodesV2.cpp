@@ -511,9 +511,15 @@ namespace TerrainNodesV2 {
             mask = *maskInput.data;
         }
         
+        // NEW: Get optional Hardness input
+        auto hardnessInput = getHeightInput(2, ctx);
+        if (hardnessInput.isValid() && hardnessInput.data->size() == terrain->heightmap.data.size()) {
+            terrain->hardnessMap = *hardnessInput.data;
+        }
+        
         // Run erosion via TerrainManager
         if (useGPU) {
-            mgr.fluvialErosionGPU(terrain, params, mask);
+            mgr.hydraulicErosionGPU(terrain, params, mask);
         } else {
             mgr.hydraulicErosion(terrain, params, mask);
         }
@@ -608,6 +614,12 @@ namespace TerrainNodesV2 {
         auto maskInput = getHeightInput(1, ctx);
         if (maskInput.isValid() && maskInput.data->size() == terrain->heightmap.data.size()) {
             mask = *maskInput.data;
+        }
+        
+        // NEW: Get optional Hardness input
+        auto hardnessInput = getHeightInput(2, ctx);
+        if (hardnessInput.isValid() && hardnessInput.data->size() == terrain->heightmap.data.size()) {
+            terrain->hardnessMap = *hardnessInput.data;
         }
         
         if (useGPU) {
@@ -1540,6 +1552,58 @@ namespace TerrainNodesV2 {
         stbi_write_png(exportPath, sw, sh, 4, rgba.data(), sw * 4);
     }
 
+    // HARDNESS OUTPUT
+    NodeSystem::PinValue HardnessOutputNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        auto hardnessInput = getHeightInput(0, ctx);
+        if (!hardnessInput.isValid()) {
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        int w = hardnessInput.width;
+        int h = hardnessInput.height;
+        
+        // Ensure hardness map matches size
+        if (terrain->hardnessMap.size() != (size_t)(w * h)) {
+            terrain->hardnessMap.resize(w * h, 0.5f);
+        }
+        
+        // Copy data directly to terrain hardness map
+        terrain->hardnessMap = *hardnessInput.data;
+        
+        // Pass-through for chaining
+        return hardnessInput;
+    }
+
+    // HARDNESS INPUT
+    NodeSystem::PinValue HardnessInputNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        auto* tctx = getTerrainContext(ctx);
+        if (!tctx || !tctx->terrain) {
+            ctx.addError(id, "No terrain context");
+            return NodeSystem::PinValue{};
+        }
+        
+        TerrainObject* terrain = tctx->terrain;
+        int w = terrain->heightmap.width;
+        int h = terrain->heightmap.height;
+        
+        auto result = createMaskOutput(w, h);
+        
+        // If terrain doesn't have a hardness map, create a default one (0.5)
+        if (terrain->hardnessMap.size() != (size_t)(w * h)) {
+            terrain->hardnessMap.assign(w * h, 0.5f);
+        }
+        
+        *result.data = terrain->hardnessMap;
+        return result;
+    }
+
     // ============================================================================
     // MATH NODE IMPLEMENTATIONS
     // ============================================================================
@@ -1668,17 +1732,10 @@ namespace TerrainNodesV2 {
             return NodeSystem::PinValue{};
         }
         
-        auto result = createHeightOutput(input.width, input.height);
-        
-        // Find min/max
-        float minH = FLT_MAX, maxH = -FLT_MAX;
-        for (float h : *input.data) {
-            minH = (std::min)(minH, h);
-            maxH = (std::max)(maxH, h);
-        }
+        auto result = createMaskOutput(input.width, input.height);
         
         for (size_t i = 0; i < input.data->size(); i++) {
-            (*result.data)[i] = maxH - ((*input.data)[i] - minH);
+            (*result.data)[i] = 1.0f - (*input.data)[i];
         }
         
         return result;
@@ -3051,6 +3108,8 @@ namespace TerrainNodesV2 {
             case NodeType::WindErosion: node = addNode<WindErosionNode>(); break;
             case NodeType::HeightOutput: node = addNode<HeightOutputNode>(); break;
             case NodeType::SplatOutput: node = addNode<SplatOutputNode>(); break;
+            case NodeType::HardnessOutput: node = addNode<HardnessOutputNode>(); break;
+            case NodeType::HardnessInput: node = addNode<HardnessInputNode>(); break;
             case NodeType::Add:
             case NodeType::Subtract:
             case NodeType::Multiply:
@@ -3129,9 +3188,10 @@ namespace TerrainNodesV2 {
         ctx.clearErrors();
         markAllDirty();
 
-        // Find Height Output Node and pull data
+        // Find output nodes
         HeightOutputNode* heightOutputNode = nullptr;
         std::vector<SplatOutputNode*> splatOutputNodes;
+        std::vector<HardnessOutputNode*> hardnessOutputNodes;
 
         for (auto& node : nodes) {
             std::string typeId = node->getTypeId();
@@ -3141,12 +3201,20 @@ namespace TerrainNodesV2 {
                 if (auto* splat = dynamic_cast<SplatOutputNode*>(node.get())) {
                     splatOutputNodes.push_back(splat);
                 }
+            } else if (typeId == "TerrainV2.HardnessOutput") {
+                if (auto* hardness = dynamic_cast<HardnessOutputNode*>(node.get())) {
+                    hardnessOutputNodes.push_back(hardness);
+                }
             }
         }
         
-        // Evaluate Splat Outputs first (optional but good for data flow consistency)
+        // Evaluate secondary outputs first (Splat, Hardness)
+        // These use pull-based evaluation through the connected graph
         for (auto* splatNode : splatOutputNodes) {
             splatNode->compute(0, ctx);
+        }
+        for (auto* hardNode : hardnessOutputNodes) {
+            hardNode->compute(0, ctx);
         }
 
         if (!heightOutputNode) {

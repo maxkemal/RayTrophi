@@ -727,22 +727,34 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         
         int gridIdx = nodeY * p.mapWidth + nodeX;
         
-        // Normalize gradient by cellSize to ensure consistent force across resolutions
-        // Using central difference for better stability
-        float gradX = (heightmap[gridIdx + 1] - heightmap[gridIdx - 1]) * 0.5f * invCellSize;
-        float gradY = (heightmap[gridIdx + p.mapWidth] - heightmap[gridIdx - p.mapWidth]) * 0.5f * invCellSize;
+        // INDUSTRY STANDARD: Bilinear Gradient sampling for smooth movement
+        // Using the 4 surrounding nodes to get a smooth force vector
+        float h00 = heightmap[gridIdx];
+        float h10 = heightmap[gridIdx + 1];
+        float h01 = heightmap[gridIdx + p.mapWidth];
+        float h11 = heightmap[gridIdx + p.mapWidth + 1];
+        
+        float u = posX - nodeX;
+        float v = posY - nodeY;
+        
+        float gradX = (h10 - h00) * (1.0f - v) + (h11 - h01) * v;
+        float gradY = (h01 - h00) * (1.0f - u) + (h11 - h10) * u;
+        
+        // Normalize by physical scale
+        gradX *= invCellSize;
+        gradY *= invCellSize;
         
         // Update direction with inertia
         dirX = dirX * p.inertia - gradX * (1.0f - p.inertia);
         dirY = dirY * p.inertia - gradY * (1.0f - p.inertia);
         
         float len = sqrtf(dirX*dirX + dirY*dirY);
-        if (len < 0.0001f) {
-            dirX = curand_uniform(&state) * 2.0f - 1.0f;
-            dirY = curand_uniform(&state) * 2.0f - 1.0f;
-            len = sqrtf(dirX*dirX + dirY*dirY);
+        if (len < 1e-6f) {
+            dirX = curand_uniform(&state) * 0.2f - 0.1f;
+            dirY = curand_uniform(&state) * 0.2f - 0.1f;
+        } else {
+            dirX /= len; dirY /= len;
         }
-        dirX /= len; dirY /= len;
         
         float newPosX = posX + dirX;
         float newPosY = posY + dirY;

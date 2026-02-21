@@ -108,14 +108,18 @@ namespace Hair {
         while (diff > PI) diff -= TWO_PI;
         while (diff < -PI) diff += TWO_PI;
 
+        // Energy conservation: Normalize the logistic distribution over [-PI, PI]
+        // The integral of logistic PDF from -PI to PI is (CDF(PI) - CDF(-PI))
+        float norm = (1.0f / (1.0f + std::exp(-PI / s))) - (1.0f / (1.0f + std::exp(PI / s)));
+        
         // Logistic distribution for azimuthal scattering
-        return logisticPDF(diff, s);
+        return logisticPDF(diff, s) / std::max(norm, 0.1f);
     }
 
     // Absorption for transmission through fiber
-    Vec3 HairBSDF::evalAbsorption(const Vec3& sigma, float cosGammaO, float cosGammaT) {
-        // Physical path length: 2 * R * cos(gammaT)
-        float pathLength = 2.0f * std::abs(cosGammaT);
+    Vec3 HairBSDF::evalAbsorption(const Vec3& sigma, float cosGammaT, float cosThetaD) {
+        // Physical path length inside fiber: 2 * cos(gammaT) / cos(thetaD)
+        float pathLength = 2.0f * std::abs(cosGammaT) / std::max(cosThetaD, 0.1f);
 
         return Vec3(
             std::exp(-sigma.x * pathLength),
@@ -134,11 +138,11 @@ namespace Hair {
     }
 
     float HairBSDF::phi_TT(float gammaO, float gammaT) {
-        return PI - 2.0f * gammaT;
+        return PI + 2.0f * gammaT - 2.0f * gammaO;
     }
 
     float HairBSDF::phi_TRT(float gammaO, float gammaT) {
-        return PI - 2.0f * (gammaO - gammaT);
+        return 4.0f * gammaT - 2.0f * gammaO;
     }
 
     // ============================================================================
@@ -173,7 +177,6 @@ namespace Hair {
         float h
     ) {
         // Longitudinal angles (Theta: angle from normal to tangent)
-        // wo/wi are directions TO light/eye.
         float sinThetaO = std::clamp(Vec3::dot(wo, tangent), -0.999f, 0.999f);
         float sinThetaI = std::clamp(Vec3::dot(wi, tangent), -0.999f, 0.999f);
 
@@ -188,21 +191,20 @@ namespace Hair {
         float cosSqThetaD = cosThetaD * cosThetaD;
 
         // Material parameters
-        float alpha = params.cuticleAngle * PI / 180.0f;  // Slant angle
-        
-        // Use a slightly wider base roughness to avoid the "fast pop to matte"
+        float alpha = params.cuticleAngle * PI / 180.0f;
         float baseRoughness = std::max(params.roughness, 0.08f);
         float eta = params.ior;
 
-        // Get absorption coefficient
+        // Get absorption coefficient (root color)
         Vec3 sigma;
         switch (params.colorMode) {
             case HairMaterialParams::ColorMode::DIRECT_COLORING:
+            case HairMaterialParams::ColorMode::ROOT_UV_MAP:
                 sigma = Vec3(
                     -std::log(std::max(0.001f, params.color.x)),
                     -std::log(std::max(0.001f, params.color.y)),
                     -std::log(std::max(0.001f, params.color.z))
-                ) * 2.5f; 
+                ) * 0.5f; 
                 break;
             case HairMaterialParams::ColorMode::MELANIN:
                 sigma = melaninToAbsorption(params.melanin, params.melaninRedness);
@@ -210,6 +212,17 @@ namespace Hair {
             case HairMaterialParams::ColorMode::ABSORPTION:
                 sigma = params.absorptionCoefficient;
                 break;
+        }
+
+        // --- Root-to-Tip Gradient ---
+        if (params.enableRootTipGradient) {
+            Vec3 tipSigma(
+                -std::log(std::max(0.001f, params.tipColor.x)) * 0.5f,
+                -std::log(std::max(0.001f, params.tipColor.y)) * 0.5f,
+                -std::log(std::max(0.001f, params.tipColor.z)) * 0.5f
+            ) ;
+            float t = u * params.rootTipBalance; // u is 0 at root, 1 at tip
+            sigma = sigma * (1.0f - t) + tipSigma * t;
         }
 
         // h is the azimuthal offset [-1, 1]
@@ -223,37 +236,56 @@ namespace Hair {
         Vec3 woPerp = (wo - tangent * sinThetaO).normalize();
         Vec3 wiPerp = (wi - tangent * sinThetaI).normalize();
         
-        // Signed angle around tangent
         float cosPhi = std::clamp(Vec3::dot(woPerp, wiPerp), -1.0f, 1.0f);
         float sinPhi = Vec3::dot(Vec3::cross(woPerp, wiPerp), tangent);
         float phi = std::atan2(sinPhi, cosPhi);
 
         // ========================================================================
-        // Component Weights (Frensel)
+        // Fresnel
         // ========================================================================
         float F_R = fresnel(cosThetaO, eta);
 
         // R: Reflection Lobe (Primary Specular)
         float M_R = evalM(baseRoughness * 1.2f, sinThetaI, sinThetaO - 2.0f * alpha, cosThetaO);
         float N_R = evalN(baseRoughness * 1.8f, phi, phi_R(gammaO, gammaT));
-        Vec3 R = Vec3(F_R * M_R * N_R, F_R * M_R * N_R, F_R * M_R * N_R);
+        
+        // --- Specular Tint: blend white highlight with hair body color ---
+        Vec3 hairBodyColor(
+            std::exp(-sigma.x * 0.5f),
+            std::exp(-sigma.y * 0.5f),
+            std::exp(-sigma.z * 0.5f)
+        );
+        Vec3 specColor = Vec3(1, 1, 1) * (1.0f - params.specularTint) + hairBodyColor * params.specularTint;
+        Vec3 R = specColor * (F_R * M_R * N_R);
 
         // TT: Transmission Lobe (Through hair)
-        Vec3 A = evalAbsorption(sigma, cosGammaO, cosGammaT);
+        Vec3 A = evalAbsorption(sigma, cosGammaT, cosThetaD);
         float F_TT = (1.0f - F_R) * (1.0f - fresnel(cosGammaT, 1.0f / eta));
-        float M_TT = evalM(baseRoughness * 0.6f, sinThetaI, sinThetaO + alpha, cosThetaO);
-        float N_TT = evalN(baseRoughness * 1.2f, phi, phi_TT(gammaO, gammaT));
+        float M_TT = evalM(baseRoughness * 0.707f, sinThetaI, sinThetaO + alpha, cosThetaO);
+        float N_TT = evalN(baseRoughness * 0.7f, phi, phi_TT(gammaO, gammaT));
         Vec3 TT = A * (F_TT * M_TT * N_TT);
 
         // TRT: Internal Reflection (Secondary highlight)
-        float F_TRT = (1.0f - F_R) * F_R * (1.0f - fresnel(cosGammaT, 1.0f / eta));
-        float M_TRT = evalM(baseRoughness * 2.2f, sinThetaI, sinThetaO - 4.0f * alpha, cosThetaO);
+        float F_TRT = (1.0f - F_R) * fresnel(cosGammaT, 1.0f / eta) * (1.0f - fresnel(cosGammaT, 1.0f / eta));
+        float M_TRT = evalM(baseRoughness * 1.414f, sinThetaI, sinThetaO - 4.0f * alpha, cosThetaO);
         float N_TRT = evalN(baseRoughness * 2.2f, phi, phi_TRT(gammaO, gammaT));
         Vec3 TRT = (A * A) * (F_TRT * M_TRT * N_TRT);
 
+        // MS: Multiple Scattering / Cortex Diffusion (Bulk Body Color)
+        float s_ms = std::max(baseRoughness * 0.7f * 10.0f, 0.2f);
+        float N_MS = evalN(s_ms, phi, 0.0f); 
+        // --- Diffuse Softness controls MS weight ---
+        float msWeight = params.diffuseSoftness * 1.2f; // 0.5 default -> 0.6 (close to previous 0.6*0.8=0.48)
+        Vec3 MS = (A * A) * (msWeight * N_MS);
+
         // Final result: Marschner model lobes
-        // Standard normalization for cylindrical fibers involves 1/cos^2(theta_d)
-        Vec3 bsdf = TT * 2.1f + TRT * 1.5f + R * 1.3f;
+        Vec3 bsdf = R + TT + TRT + MS;
+
+        // --- Apply Artistic Tint ---
+        if (params.tint > 0.0f) {
+            Vec3 tinted = bsdf * params.tintColor;
+            bsdf = bsdf * (1.0f - params.tint) + tinted * params.tint;
+        }
 
         // Apply coat layer (fur gloss)
         if (params.coat > 0.0f) {
@@ -266,13 +298,11 @@ namespace Hair {
             bsdf = bsdf + params.emission * params.emissionStrength;
         }
 
-        // Final normalization and protection
-        // Cylindrical hair BSDF is normalized by cos^2(theta_d) * cos(theta_i) 
-        // We use a robust clamp to avoid division by zero at grazing angles
-        float denominator = std::max(cosSqThetaD * cosThetaI, 0.01f);
+        // Final normalization
+        float denominator = std::max(cosSqThetaD, 0.001f);
         bsdf = bsdf / denominator;
         
-        // Firefly clamp (increased for high-range HDR)
+        // Firefly clamp
         float maxVal = 100.0f;
         bsdf.x = std::min(bsdf.x, maxVal);
         bsdf.y = std::min(bsdf.y, maxVal);
@@ -310,16 +340,16 @@ Vec3 HairBSDF::sample(
         random1 = (random1 - lobeWeights[0] - lobeWeights[1]) / lobeWeights[2];
     }
     
-    float roughness = params.roughness;
+    float baseRoughness = std::max(params.roughness, 0.08f);
     float alpha = params.cuticleAngle * M_PI / 180.0f;
     
     // Get longitudinal parameters for chosen lobe
     float variance, alphaShift;
     switch (lobe) {
-    case 0: variance = Hair::sqr(roughness); alphaShift = -2.0f * alpha; break;
-        case 1: variance = Hair::sqr(roughness * 0.5f); alphaShift = alpha; break;
-        case 2: variance = Hair::sqr(roughness * 2.0f); alphaShift = -4.0f * alpha; break;
-        default: variance = Hair::sqr(roughness); alphaShift = 0.0f;
+        case 0: variance = sqr(baseRoughness * 1.2f); alphaShift = -2.0f * alpha; break;
+        case 1: variance = 0.5f * sqr(baseRoughness); alphaShift = alpha; break;
+        case 2: variance = 2.0f * sqr(baseRoughness); alphaShift = -4.0f * alpha; break;
+        default: variance = sqr(baseRoughness); alphaShift = 0.0f;
     }
     
     // Sample longitudinal
@@ -330,7 +360,11 @@ Vec3 HairBSDF::sample(
     
     // Sample azimuthal
     float phiTarget = (lobe == 1) ? M_PI : 0.0f;
-    float s = roughness * ((lobe == 2) ? 1.0f : 0.5f);
+    float s;
+    if (lobe == 0) s = 0.9f * baseRoughness;
+    else if (lobe == 1) s = 0.35f * baseRoughness;
+    else s = 1.1f * baseRoughness;
+    
     float phi = Hair::HairBSDF::sampleLogistic(s, random2) + phiTarget;
     
     // Reconstruct wi
@@ -347,10 +381,11 @@ Vec3 HairBSDF::sample(
             bitangent * (cosThetaI * std::sin(phi));
     outWi = outWi.normalize();
     
-    // Compute PDF
+    // Compute PDF (with azimuthal normalization)
     float M = gaussian(sinThetaI - sinThetaO - alphaShift, std::sqrt(variance));
     float N = logisticPDF(phi - phiTarget, s);
-    outPdf = M * N * lobeWeights[lobe];
+    float norm = (1.0f / (1.0f + std::exp(-PI / s))) - (1.0f / (1.0f + std::exp(PI / s)));
+    outPdf = M * (N / std::max(norm, 0.1f)) * lobeWeights[lobe];
     
     // Return BSDF value
     return evaluate(wo, outWi, tangent, params, 0.5f, 0.0f);
@@ -375,41 +410,26 @@ float HairBSDF::pdf(
     float cosPhi = Vec3::dot(woPerp, wiPerp);
     float phi = std::acos(std::clamp(cosPhi, -1.0f, 1.0f));
     
-    float roughness = params.roughness;
-    float alpha = params.cuticleAngle * PI / 180.0f;
+    float baseRoughness = std::max(params.roughness, 0.08f);
+    float alpha = params.cuticleAngle * M_PI / 180.0f;
     
     float lobeWeights[3] = {0.4f, 0.3f, 0.3f};
     float totalPdf = 0.0f;
     
-    // Sum PDF over all lobes
     for (int lobe = 0; lobe < 3; ++lobe) {
-        float variance, alphaShift, phiTarget, s;
+        float variance, alphaShift, s;
+        float phiTarget = (lobe == 1) ? M_PI : 0.0f; // Determine phiTarget based on lobe
         switch (lobe) {
-            case 0: 
-                variance = sqr(roughness); 
-                alphaShift = -2.0f * alpha;
-                phiTarget = 0.0f;
-                s = roughness * 0.5f;
-                break;
-            case 1: 
-                variance = sqr(roughness * 0.5f); 
-                alphaShift = alpha;
-                phiTarget = PI;
-                s = roughness * 0.5f;
-                break;
-            case 2: 
-                variance = sqr(roughness * 2.0f); 
-                alphaShift = -4.0f * alpha;
-                phiTarget = 0.0f;
-                s = roughness;
-                break;
-            default:
-                continue;
+            case 0: variance = sqr(baseRoughness * 1.2f); alphaShift = -2.0f * alpha; s = 0.9f * baseRoughness; break;
+            case 1: variance = 0.5f * sqr(baseRoughness); alphaShift = alpha; s = 0.35f * baseRoughness; break;
+            case 2: variance = 2.0f * sqr(baseRoughness); alphaShift = -4.0f * alpha; s = 1.1f * baseRoughness;  break;
+            default: variance = sqr(baseRoughness); alphaShift = 0.0f; s = 0.5f * baseRoughness; break; // Should not happen
         }
         
         float M = gaussian(sinThetaI - sinThetaO - alphaShift, std::sqrt(variance));
-        float N = logisticPDF(phi - phiTarget, s);
-        totalPdf += M * N * lobeWeights[lobe];
+        float N_val = logisticPDF(phi - phiTarget, s);
+        float norm = (1.0f / (1.0f + std::exp(-M_PI / s))) - (1.0f / (1.0f + std::exp(M_PI / s))); // Use M_PI
+        totalPdf += M * (N_val / std::max(norm, 0.1f)) * lobeWeights[lobe];
     }
     
     return totalPdf;
@@ -418,7 +438,7 @@ float HairBSDF::pdf(
 
 
     GpuHairMaterial HairBSDF::convertToGpu(const HairMaterialParams& params) {
-        GpuHairMaterial gpu;
+        GpuHairMaterial gpu = {};
         
         // 1. Color Mode & Base Color
         gpu.colorMode = static_cast<int>(params.colorMode);
@@ -429,7 +449,7 @@ float HairBSDF::pdf(
         gpu.melanin = params.melanin;
         gpu.melaninRedness = params.melaninRedness;
         gpu.ior = params.ior;
-        gpu.cuticleAngle = params.cuticleAngle * PI / 180.0f; // Slant to radians
+        gpu.cuticleAngle = params.cuticleAngle * PI / 180.0f;
         
         // 3. Styling & Tint
         gpu.tintColor = make_float3(params.tintColor.x, params.tintColor.y, params.tintColor.z);
@@ -442,7 +462,7 @@ float HairBSDF::pdf(
         gpu.emission = make_float3(params.emission.x, params.emission.y, params.emission.z);
         gpu.emissionStrength = params.emissionStrength;
         
-        // 5. Calculate Absorption (Sigma_a)
+        // 5. Calculate Root Absorption (Sigma_a)
         Vec3 sigma;
         switch (params.colorMode) {
             case HairMaterialParams::ColorMode::DIRECT_COLORING:
@@ -451,7 +471,7 @@ float HairBSDF::pdf(
                     -std::log(std::max(0.001f, params.color.x)),
                     -std::log(std::max(0.001f, params.color.y)),
                     -std::log(std::max(0.001f, params.color.z))
-                ) * 2.5f; 
+                ) * 0.5f; 
                 break;
             case HairMaterialParams::ColorMode::MELANIN:
                 sigma = Hair::HairBSDF::melaninToAbsorption(params.melanin, params.melaninRedness);
@@ -462,20 +482,44 @@ float HairBSDF::pdf(
         }
         gpu.sigma_a = make_float3(sigma.x, sigma.y, sigma.z);
         
-        // 6. Precompute Lobe Variances (Derived from longitudinal roughness)
-        // Matches CPU evalM usages
-        gpu.v_R = sqr(std::max(params.roughness, 0.08f) * 1.2f);
-        gpu.v_TT = sqr(std::max(params.roughness, 0.08f) * 0.6f);
-        gpu.v_TRT = sqr(std::max(params.roughness, 0.08f) * 2.2f);
+        // 6. Precompute Lobe Variances (Longitudinal)
+        float baseR = std::max(params.roughness, 0.08f);
+        gpu.v_R   = sqr(baseR * 1.2f);
+        gpu.v_TT  = sqr(baseR);
+        gpu.v_TRT = sqr(baseR * 1.0f);
         
-        // Azimuthal width: logistic scale s
-        gpu.s = std::max(params.roughness * 0.5f, 0.01f);
+        // 7. Precompute Azimuthal Widths (Logistic scale s)
+        gpu.s_R   = baseR * 1.8f * 0.5f;
+        gpu.s_TT  = baseR * 0.7f * 0.5f;
+        gpu.s_TRT = baseR * 2.2f * 0.5f;
+        gpu.s_MS  = std::max(baseR * 0.7f * 10.0f, 0.2f) * 0.5f;
         
-        // 7. Textures
+        // 8. Textures
         gpu.albedo_tex = params.customAlbedoTexture ? params.customAlbedoTexture->get_cuda_texture() : 0;
         gpu.roughness_tex = params.customRoughnessTexture ? params.customRoughnessTexture->get_cuda_texture() : 0;
         
-        gpu.pad0 = 0.0f;
+        // 9. NEW: Coat parameters
+        gpu.coat = params.coat;
+        gpu.coatTint = make_float3(params.coatTint.x, params.coatTint.y, params.coatTint.z);
+        
+        // 10. NEW: Specular Tint & Diffuse Softness
+        gpu.specularTint = params.specularTint;
+        gpu.diffuseSoftness = params.diffuseSoftness;
+        
+        // 11. NEW: Root-Tip Gradient
+        gpu.enableRootTipGradient = params.enableRootTipGradient ? 1 : 0;
+        gpu.rootTipBalance = params.rootTipBalance;
+        Vec3 tipSigma(
+            -std::log(std::max(0.001f, params.tipColor.x)) * 0.5f,
+            -std::log(std::max(0.001f, params.tipColor.y)) * 0.5f,
+            -std::log(std::max(0.001f, params.tipColor.z)) * 0.5f
+        );
+        gpu.tipSigma = make_float3(tipSigma.x, tipSigma.y, tipSigma.z);
+        
+        // 12. Padding
+        gpu.pad1 = 0.0f;
+        gpu.pad2 = 0.0f;
+        gpu.pad3 = 0.0f;
         
         return gpu;
     }
@@ -502,7 +546,13 @@ float HairBSDF::pdf(
             {"coat", p.coat},
             {"coatTint", {p.coatTint.x, p.coatTint.y, p.coatTint.z}},
             {"emission", {p.emission.x, p.emission.y, p.emission.z}},
-            {"emissionStrength", p.emissionStrength}
+            {"emissionStrength", p.emissionStrength},
+            // NEW parameters
+            {"enableRootTipGradient", p.enableRootTipGradient},
+            {"tipColor", {p.tipColor.x, p.tipColor.y, p.tipColor.z}},
+            {"rootTipBalance", p.rootTipBalance},
+            {"specularTint", p.specularTint},
+            {"diffuseSoftness", p.diffuseSoftness}
         };
         if (p.customAlbedoTexture && !p.customAlbedoTexture->name.empty()) {
             j["customAlbedoTexture"] = p.customAlbedoTexture->name;
@@ -530,6 +580,13 @@ float HairBSDF::pdf(
         if (j.contains("coatTint")) p.coatTint = Vec3(j["coatTint"][0], j["coatTint"][1], j["coatTint"][2]);
         if (j.contains("emission")) p.emission = Vec3(j["emission"][0], j["emission"][1], j["emission"][2]);
         p.emissionStrength = j.value("emissionStrength", 0.0f);
+
+        // NEW parameters (backward compatible defaults)
+        p.enableRootTipGradient = j.value("enableRootTipGradient", false);
+        if (j.contains("tipColor")) p.tipColor = Vec3(j["tipColor"][0], j["tipColor"][1], j["tipColor"][2]);
+        p.rootTipBalance = j.value("rootTipBalance", 0.5f);
+        p.specularTint = j.value("specularTint", 0.0f);
+        p.diffuseSoftness = j.value("diffuseSoftness", 0.5f);
 
         // Texture Restoration
         auto loadTex = [&](const std::string& key, std::shared_ptr<Texture>& tex, TextureType type) {

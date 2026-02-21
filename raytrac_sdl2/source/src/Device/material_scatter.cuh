@@ -42,20 +42,27 @@ __device__ float3 float3_min(const float3& a, const float3& b) {
         fminf(a.y, b.y),
         fminf(a.z, b.z));
 }
-__device__ float get_alpha_gpu(const OptixHitResult& payload, const float2& uv)
+__device__ float get_alpha_gpu(const GpuMaterial& material, const OptixHitResult& payload, const float2& uv)
 {
-    // If we have an explicit opacity map, use it exclusively (matches CPU)
+    // 1. Try Bindless Opacity from Material (Fast Path - No SBT sync needed)
+    if (material.opacity_tex) {
+        float4 tex = tex2D<float4>(material.opacity_tex, uv.x, uv.y);
+        // Fallback: Use Alpha if available, otherwise Red
+        float val = tex.w; // Default to W (Alpha)
+        // If it's a dedicated opacity map (grayscale), it might be in R
+        if (val < 0.001f) val = tex.x; 
+
+        return (val < 0.1f) ? 0.0f : val;
+    }
+
+    // 2. Legacy SBT Path (Fallback)
     if (payload.opacity_tex) {
         float4 tex = tex2D<float4>(payload.opacity_tex, uv.x, uv.y);
-        
-        // Robust grayscale/alpha detection: use alpha if texture has alpha, else red/luminance
         float val = (payload.opacity_has_alpha) ? tex.w : tex.x;
-        
-        // 0.1 Cutoff to ignore compression noise/artifacts
         return (val < 0.1f) ? 0.0f : val;
     }
     
-    return 1.0f; // Fallback to scalar opacity handled in calling function
+    return 1.0f; 
 }
 
 
@@ -81,6 +88,11 @@ __device__ float3 evaluate_brdf(
     if (payload.use_blended_data) {
         albedo = payload.blended_albedo;
     }
+    else if (material.albedo_tex) {
+        // Fast Bindless Path
+        float4 tex = tex2D<float4>(material.albedo_tex, uv.x, uv.y);
+        albedo = make_float3(tex.x, tex.y, tex.z);
+    }
     else if (payload.has_albedo_tex) {
         float4 tex = tex2D<float4>(payload.albedo_tex, uv.x, uv.y);
         albedo = (fabsf(tex.x - tex.y) < 1e-3f && fabsf(tex.x - tex.z) < 1e-3f) ?
@@ -95,6 +107,10 @@ __device__ float3 evaluate_brdf(
     if (payload.use_blended_data) {
         roughness = payload.blended_roughness;
     }
+    else if (material.roughness_tex) {
+        // Fast Bindless Path
+        roughness = tex2D<float4>(material.roughness_tex, uv.x, uv.y).y; // Green channel (Standard ORM)
+    }
     else if (payload.has_roughness_tex) {
         roughness = tex2D<float4>(payload.roughness_tex, uv.x, uv.y).y;
     }
@@ -108,9 +124,16 @@ __device__ float3 evaluate_brdf(
 
     }*/
     float metallic = material.metallic;
-    if (payload.has_metallic_tex) {
+    if (payload.use_blended_data) {
+        metallic = payload.blended_metallic;
+    }
+    else if (material.metallic_tex) {
+        // Fast Bindless Path
+        metallic = tex2D<float4>(material.metallic_tex, uv.x, uv.y).z; // Blue channel (Standard ORM)
+    }
+    else if (payload.has_metallic_tex) {
+        // Legacy SBT Fallback
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
-       
     }
   
 
@@ -133,10 +156,16 @@ __device__ float3 evaluate_brdf(
     float3 diffuse = k_d * albedo/M_PIf;
   
    
-    if (material.transmission >= 0.01f)
+    float transmission = material.transmission;
+    if (payload.use_blended_data) {
+        transmission = payload.blended_transmission;
+    }
+    // Bindless texture support for transmission can be added here if needed
+
+    if (transmission >= 0.01f)
     {
         curandState rng;
-        if (random_float(&rng) > material.transmission)
+        if (random_float(&rng) > transmission)
         {
             return diffuse;
         }
@@ -234,6 +263,8 @@ __device__ bool sss_random_walk_scatter(
     
     // Get SSS parameters
     float3 sss_color = material.subsurface_color;
+    if (payload.use_blended_data) sss_color = payload.blended_subsurface_color;
+
     float3 sss_radius = material.subsurface_radius;
     float sss_scale = fmaxf(material.subsurface_scale, 0.001f);
     float sss_anisotropy = material.subsurface_anisotropy;
@@ -398,7 +429,10 @@ __device__ bool transmission_scatter(
     float3 unit_direction = normalize(ray_in.direction);
     float2 uv = payload.uv;
 
-    float eta = dot(V, N) > 0.0f ? (1.0f / material.ior) : material.ior;
+    float ior = material.ior;
+    if (payload.use_blended_data) ior = payload.blended_ior;
+
+    float eta = dot(V, N) > 0.0f ? (1.0f / ior) : ior;
 
     float cos_theta = fminf(dot(-unit_direction, outward_normal), 1.0f);
     float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));
@@ -471,8 +505,12 @@ __device__ bool transmission_scatter(
     );
     
     // Fresnel katkısını ekle - yüksek transmission'da daha fazla geçiş
+    // Fresnel katkısını ekle - yüksek transmission'da daha fazla geçiş
+    float transmission = material.transmission;
+    if (payload.use_blended_data) transmission = payload.blended_transmission;
+
     float fresnel = schlick(cos_theta, eta);
-    float transmission_factor = 1.0f - fresnel * (1.0f - material.transmission);
+    float transmission_factor = 1.0f - fresnel * (1.0f - transmission);
     
     // Şeffaf camlar için tint yerine transmission_color kullan
     // Transmission = 1.0 ise neredeyse tam ışık geçisi (hafif tint ile)
@@ -515,7 +553,7 @@ __device__ bool scatter_material(
         N = make_float3(0.0f, 0.0f, 1.0f); // Normal is zero, orient to Z axis
     }
     float opacity = material.opacity;
-    opacity *= get_alpha_gpu(payload, uv);
+    opacity *= get_alpha_gpu(material, payload, uv);
 
 
     if (opacity < 1.0f) {
@@ -558,7 +596,10 @@ __device__ bool scatter_material(
     
   
     float metallic = material.metallic;
-    if (payload.has_metallic_tex)
+    if (payload.use_blended_data) {
+        metallic = payload.blended_metallic;
+    }
+    else if (payload.has_metallic_tex)
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
 
     float transmission = material.transmission;

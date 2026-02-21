@@ -12,7 +12,9 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "WaterSystem.h"
+#include "MeshModifiers.h"
 #include "json.hpp"
+#include "simdjson.h"
 #include <fstream>
 #include <filesystem>
 #include <sstream>
@@ -99,6 +101,58 @@ static void writeStringBinary(std::ofstream& out, const std::string& str) {
     uint16_t len = static_cast<uint16_t>(str.length());
     out.write(reinterpret_cast<const char*>(&len), sizeof(len));
     if (len > 0) out.write(str.data(), len);
+}
+
+// simdjson helpers
+static json sjsonToNlohmann(simdjson::dom::element el) {
+    return json::parse(std::string(simdjson::minify(el)));
+}
+static json sjsonToNlohmann(simdjson::simdjson_result<simdjson::dom::element> res) {
+    simdjson::dom::element el;
+    if (res.get(el)) return json();
+    return sjsonToNlohmann(el);
+}
+
+static Vec3 sjsonToVec3(simdjson::dom::element el) {
+    simdjson::dom::array arr;
+    if (el.get_array().get(arr)) return Vec3(0, 0, 0);
+    float x = 0, y = 0, z = 0;
+    size_t i = 0;
+    for (simdjson::dom::element val : arr) {
+        double d = 0;
+        val.get(d);
+        if (i == 0) x = (float)d;
+        else if (i == 1) y = (float)d;
+        else if (i == 2) z = (float)d;
+        i++;
+    }
+    return Vec3(x, y, z);
+}
+static Vec3 sjsonToVec3(simdjson::simdjson_result<simdjson::dom::element> res) {
+    simdjson::dom::element el;
+    if (res.get(el)) return Vec3(0, 0, 0);
+    return sjsonToVec3(el);
+}
+
+static Matrix4x4 sjsonToMat4(simdjson::dom::element el) {
+    Matrix4x4 m;
+    simdjson::dom::array arr;
+    if (el.get_array().get(arr) || arr.size() != 16) return m;
+    int idx = 0;
+    for (simdjson::dom::element val : arr) {
+        int r = idx / 4;
+        int c = idx % 4;
+        double d = 0;
+        val.get(d);
+        m.m[r][c] = (float)d;
+        idx++;
+    }
+    return m;
+}
+static Matrix4x4 sjsonToMat4(simdjson::simdjson_result<simdjson::dom::element> res) {
+    simdjson::dom::element el;
+    if (res.get(el)) return Matrix4x4();
+    return sjsonToMat4(el);
 }
 
 static std::string readStringBinary(std::ifstream& in) {
@@ -381,6 +435,11 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         
         // Render Settings
         root["render_settings"] = serializeRenderSettings(settings);
+
+        // UI Layout (ImGui state)
+        if (!g_project.ui_layout_data.empty()) {
+            root["ui_layout"] = g_project.ui_layout_data; 
+        }
         
         // Timeline/Animation (keyframes)
         if (progress_callback) progress_callback(82, "Saving animation keyframes...");
@@ -544,6 +603,18 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         root["rivers"] = RiverManager::getInstance().serialize();
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
         
+        // Mesh Modifiers System
+        if (progress_callback) progress_callback(84, "Saving mesh modifiers...");
+        root["mesh_modifiers"] = json::object();
+        for (const auto& [nodeName, stack] : scene.mesh_modifiers) {
+            if (!stack.modifiers.empty()) {
+                json stackJson;
+                stack.serialize(stackJson);
+                root["mesh_modifiers"][nodeName] = stackJson;
+            }
+        }
+        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.mesh_modifiers.size()) + " mesh modifiers.");
+
         // Foliage System
         if (progress_callback) progress_callback(84, "Saving foliage system...");
         root["instances"] = InstanceManager::getInstance().serialize();
@@ -592,7 +663,8 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         root["textures"] = serializeTextures(out_bin, save_settings.embed_textures);
         
         // Write JSON - Use error handler to replace invalid UTF-8 characters
-        out_json << root.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+        // Write JSON - Use minified output (-1) for maximum performance and smallest size
+        out_json << root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
         
         out_json.flush();
         out_bin.flush();
@@ -634,23 +706,17 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                                   OptixWrapper* optix_gpu,
                                   std::function<void(int, const std::string&)> progress_callback) {
     
-    if (progress_callback) progress_callback(0, "Opening project file...");
+    if (progress_callback) progress_callback(0, "Opening project file with turbo parser...");
     
-    // 1. Read JSON Metadata
-    std::ifstream in(filepath);
-    if (!in.is_open()) {
-        SCENE_LOG_ERROR("Failed to open project: " + filepath);
+    // 1. Read JSON Metadata with simdjson
+    simdjson::dom::parser parser;
+    simdjson::dom::element root;
+    
+    auto error = parser.load(filepath).get(root);
+    if (error) {
+        SCENE_LOG_ERROR("Failed to parse project file with simdjson: " + std::string(simdjson::error_message(error)));
         return false;
     }
-    
-    json root;
-    try {
-        in >> root;
-    } catch (const std::exception& e) {
-        SCENE_LOG_ERROR("Failed to parse project file: " + std::string(e.what()));
-        return false;
-    }
-    in.close();
 
     // 2. Prepare Binary Stream
     std::string bin_path = filepath + ".bin";
@@ -660,35 +726,20 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // Clear current project and scene
     if (progress_callback) progress_callback(5, "Clearing scene...");
     
-    // =========================================================================
-    // SYNCHRONIZATION: Ensure all GPU operations complete before clearing
-    // =========================================================================
     if (optix_gpu) {
-        cudaError_t err = cudaDeviceSynchronize();  // Wait for all pending CUDA work
+        cudaError_t err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("cudaDeviceSynchronize failed during project close: " + std::string(cudaGetErrorString(err)));
-            // Attempt to reset device if context is corrupted?
-            // cudaDeviceReset(); // Risky as it destroys everything including textures
+            SCENE_LOG_ERROR("cudaDeviceSynchronize failed: " + std::string(cudaGetErrorString(err)));
         }
-        
-        // Clear any sticky errors
-        cudaError_t lastErr = cudaGetLastError();
-        if (lastErr != cudaSuccess) {
-            SCENE_LOG_ERROR("Clearing sticky CUDA error: " + std::string(cudaGetErrorString(lastErr)));
-        }
+        cudaGetLastError();
     }
     
-    // Brief wait to allow render threads to fully stop
-    // (rendering_stopped_* flags are set by caller before this function)
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     
     newProject(scene, renderer);
     TerrainManager::getInstance().removeAllTerrains(scene);
     scene.clear();
     
-    // CRITICAL: Create a temporary placeholder camera immediately after clear()
-    // This prevents null pointer crashes if render threads access scene.camera
-    // during the brief period before cameras are loaded from project file
     auto temp_camera = std::make_shared<Camera>(
         Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
         60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 6);
@@ -699,71 +750,83 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     if (optix_gpu) optix_gpu->resetAccumulation();
     
     try {
+
         // Load metadata
-        // Load format version safely (handle potential number/string mismatch from prev versions)
-        if (root.contains("format_version")) {
-             if (root["format_version"].is_number()) {
-                 g_project.format_version = std::to_string(root["format_version"].get<float>()).substr(0, 3); // "2.0"
-             } else {
-                 g_project.format_version = root.value("format_version", "2.0");
-             }
-        } else {
-             g_project.format_version = "2.0";
+        {
+            std::string_view fv_sv = "2.0";
+            simdjson::dom::element fv_el;
+            if (!root["format_version"].get(fv_el)) {
+                if (fv_el.is_number()) {
+                    double fv_val = 2.0;
+                    fv_el.get(fv_val);
+                    g_project.format_version = std::to_string(fv_val).substr(0, 3);
+                } else {
+                    fv_el.get(fv_sv);
+                    g_project.format_version = std::string(fv_sv);
+                }
+            } else {
+                g_project.format_version = "2.0";
+            }
         }
-        g_project.project_name = root.value("project_name", "Untitled");
-        g_project.author = root.value("author", "");
-        g_project.description = root.value("description", "");
-        g_project.next_model_id = root.value("next_model_id", 1);
-        g_project.next_object_id = root.value("next_object_id", 1);
-        g_project.next_texture_id = root.value("next_texture_id", 1);
+        
+        {
+            std::string_view name_sv = "Untitled", author_sv = "", desc_sv = "";
+            root["project_name"].get(name_sv);
+            root["author"].get(author_sv);
+            root["description"].get(desc_sv);
+            g_project.project_name = std::string(name_sv);
+            g_project.author = std::string(author_sv);
+            g_project.description = std::string(desc_sv);
+        }
+
+        int64_t next_model = 1, next_obj = 1, next_tex = 1;
+        root["next_model_id"].get(next_model);
+        root["next_object_id"].get(next_obj);
+        root["next_texture_id"].get(next_tex);
+        g_project.next_model_id = (uint32_t)next_model;
+        g_project.next_object_id = (uint32_t)next_obj;
+        g_project.next_texture_id = (uint32_t)next_tex;
         
         fs::path project_folder = fs::path(filepath).parent_path();
         
-        // Check if this is v3.0 format (self-contained geometry)
-        bool is_v3 = (g_project.format_version == "3.0" || g_project.format_version == "3.0");
-        bool has_geometry = root.value("has_geometry", false);
+        bool is_v3 = (g_project.format_version == "3.0");
+        bool has_geometry = false;
+        root["has_geometry"].get(has_geometry);
         
         if (is_v3 && has_geometry && has_binary) {
-            // ============================================================
-            // V3.0 FORMAT: Load geometry from binary
-            // ============================================================
             if (progress_callback) progress_callback(10, "Loading geometry...");
-
             if (!readGeometryBinary(in_bin, scene)) {
                 SCENE_LOG_ERROR("Failed to read geometry from binary file.");
                 return false;
             }
 
-            // Load Textures FIRST (so materials can find them)
-            if (root.contains("textures")) {
+            // Textures
+            simdjson::dom::element tex_el;
+            if (!root["textures"].get(tex_el)) {
                 if (progress_callback) progress_callback(35, "Restoring textures...");
-                deserializeTextures(root["textures"], in_bin, project_folder.string());
+                deserializeTextures(sjsonToNlohmann(tex_el), in_bin, project_folder.string());
             }
 
-            if (progress_callback) progress_callback(40, "Loading materials...");
-
-            // Load Materials
-            if (root.contains("materials")) {
-                MaterialManager::getInstance().deserialize(root["materials"], project_folder.string());
-                // NOTE: GPU material update moved to AFTER rebuildOptiXGeometry (line ~505)
-                // to ensure SBT records are valid before material buffer update.
+            // Materials
+            simdjson::dom::element mat_el;
+            if (!root["materials"].get(mat_el)) {
+                if (progress_callback) progress_callback(40, "Loading materials...");
+                MaterialManager::getInstance().deserialize(sjsonToNlohmann(mat_el), project_folder.string());
             }
 
-            if (progress_callback) progress_callback(50, "Loading lights...");
-
-            // Load Lights
-            if (root.contains("lights")) {
-                deserializeLights(root["lights"], scene.lights);
+            // Lights
+            simdjson::dom::element lights_el;
+            if (!root["lights"].get(lights_el)) {
+                if (progress_callback) progress_callback(50, "Loading lights...");
+                deserializeLights(sjsonToNlohmann(lights_el), scene.lights);
             }
 
-            if (progress_callback) progress_callback(60, "Loading cameras...");
-
-            // Load Cameras
-            if (root.contains("cameras")) {
-                deserializeCameras(root["cameras"], scene);
-            }
-            else {
-                // Create default camera if none exists
+            // Cameras
+            simdjson::dom::element cams_el;
+            if (!root["cameras"].get(cams_el)) {
+                if (progress_callback) progress_callback(60, "Loading cameras...");
+                deserializeCameras(sjsonToNlohmann(cams_el), scene);
+            } else {
                 auto default_cam = std::make_shared<Camera>(
                     Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
                     60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 10);
@@ -771,196 +834,212 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 scene.addCamera(default_cam);
             }
 
-            if (progress_callback) progress_callback(70, "Loading render settings...");
-
-
-            // Load Render Settings
-            if (root.contains("render_settings")) {
-                deserializeRenderSettings(root["render_settings"], settings);
+            // Render Settings
+            simdjson::dom::element rs_el;
+            if (!root["render_settings"].get(rs_el)) {
+                if (progress_callback) progress_callback(70, "Loading render settings...");
+                deserializeRenderSettings(sjsonToNlohmann(rs_el), settings);
+            }
+            
+            // UI Layout
+            std::string_view ui_layout;
+            if (!root["ui_layout"].get(ui_layout)) {
+                g_project.ui_layout_data = std::string(ui_layout);
             }
 
-            // Load World Settings (Atmosphere, Godrays)
-            if (root.contains("world")) {
-                renderer.world.deserialize(root["world"]);
-                SCENE_LOG_INFO("World settings loaded from project.");
+            // World Settings
+            simdjson::dom::element world_el;
+            if (!root["world"].get(world_el)) {
+                renderer.world.deserialize(sjsonToNlohmann(world_el));
             }
 
-            // Load Water Surfaces
-            if (root.contains("water")) {
-                WaterManager::getInstance().deserialize(root["water"], scene);
+            // Water Surfaces
+            simdjson::dom::element water_el;
+            if (!root["water"].get(water_el)) {
+                WaterManager::getInstance().deserialize(sjsonToNlohmann(water_el), scene);
             }
 
-            // Load Terrain System (Must be before Timeline so tracks can find terrains)
-            if (root.contains("terrain_system")) {
+            // Terrain System
+            simdjson::dom::element ts_el;
+            if (!root["terrain_system"].get(ts_el)) {
                 if (progress_callback) progress_callback(75, "Loading terrain system...");
                 auto abs_path = std::filesystem::absolute(filepath);
                 std::string terrainDir = abs_path.parent_path().string();
-                SCENE_LOG_INFO("[ProjectManager] Loading terrain system from: " + terrainDir);
-                TerrainManager::getInstance().deserialize(root["terrain_system"], terrainDir, scene);
+                TerrainManager::getInstance().deserialize(sjsonToNlohmann(ts_el), terrainDir, scene);
             }
 
-            // Load River System (After terrain so rivers can follow terrain)
-            if (root.contains("rivers")) {
+            // River System
+            simdjson::dom::element rivers_el;
+            if (!root["rivers"].get(rivers_el)) {
                 if (progress_callback) progress_callback(76, "Loading river system...");
-                RiverManager::getInstance().clear(&scene);  // Pass scene for proper WaterSurface cleanup
-                RiverManager::getInstance().deserialize(root["rivers"], scene);
-                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
+                RiverManager::getInstance().clear(&scene);
+                RiverManager::getInstance().deserialize(sjsonToNlohmann(rivers_el), scene);
             }
 
-            // Load Foliage System
-            if (root.contains("instances")) {
+            // Foliage System
+            simdjson::dom::element inst_el;
+            if (!root["instances"].get(inst_el)) {
                 if (progress_callback) progress_callback(77, "Loading foliage system...");
-                InstanceManager::getInstance().deserialize(root["instances"], scene);
-                // Rebuild visual objects from data
+                InstanceManager::getInstance().deserialize(sjsonToNlohmann(inst_el), scene);
                 InstanceManager::getInstance().rebuildSceneObjects(scene);
-                SCENE_LOG_INFO("[ProjectManager] Loaded foliage system.");
             }
 
-            // Load VDB Volumes
-            if (root.contains("vdb_volumes")) {
-                if (progress_callback) progress_callback(78, "Loading VDB volumes...");
-                deserializeVDBVolumes(root["vdb_volumes"], scene);
-                SCENE_LOG_INFO("[ProjectManager] Loaded VDB volumes.");
+            // Mesh Modifiers System
+            scene.mesh_modifiers.clear();
+            scene.base_mesh_cache.clear();
+            simdjson::dom::element modRoot;
+            if (!root["mesh_modifiers"].get(modRoot)) {
+                if (progress_callback) progress_callback(78, "Loading mesh modifiers...");
+                nlohmann::json nlohmannMods = sjsonToNlohmann(modRoot);
+                for (auto it = nlohmannMods.begin(); it != nlohmannMods.end(); ++it) {
+                    std::string nodeName = it.key();
+                    MeshModifiers::ModifierStack stack;
+                    stack.deserialize(it.value());
+                    scene.mesh_modifiers[nodeName] = stack;
+                }
+
+                // We must lazily build base_mesh_cache for these modifiers, evaluate them and set new objects
+                for(const auto& [nodeName, stack] : scene.mesh_modifiers) {
+                    std::vector<std::shared_ptr<Triangle>> baseTriangles;
+                    std::vector<std::shared_ptr<Hittable>> remainingObjects;
+
+                    for (const auto& obj : scene.world.objects) {
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                            if (tri->getNodeName() == nodeName) {
+                                baseTriangles.push_back(tri);
+                            } else {
+                                remainingObjects.push_back(obj);
+                            }
+                        } else {
+                            remainingObjects.push_back(obj);
+                        }
+                    }
+
+                    if (!baseTriangles.empty() && !stack.modifiers.empty()) {
+                        scene.base_mesh_cache[nodeName] = baseTriangles;
+                        auto newMesh = stack.evaluate(baseTriangles);
+                        for (const auto& tri : newMesh) {
+                            remainingObjects.push_back(tri);
+                        }
+                        scene.world.objects = remainingObjects;
+                    }
+                }
             }
 
-            // Load Gas Volumes
-            if (root.contains("gas_volumes")) {
-                if (progress_callback) progress_callback(78, "Loading Gas volumes...");
-                deserializeGasVolumes(root["gas_volumes"], scene);
-                SCENE_LOG_INFO("[ProjectManager] Loaded Gas volumes.");
-            }
+            // VDB / Gas / Force Fields
+            simdjson::dom::element vdb_el, gas_el, ff_el;
+            if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
+            if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
+            if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
 
-            // Load Force Fields
-            if (root.contains("force_fields")) {
-                if (progress_callback) progress_callback(78, "Loading Force Fields...");
-                deserializeForceFields(root["force_fields"], scene);
-                SCENE_LOG_INFO("[ProjectManager] Loaded Force Fields.");
-            }
-
-            // Load Hair System
+            // Hair System
             renderer.getHairSystem().clearAll();
             renderer.uploadHairToGPU();
             
-            if (root.contains("hair")) {
+            simdjson::dom::element hair_el;
+            if (!root["hair"].get(hair_el)) {
                 if (progress_callback) progress_callback(78, "Loading hair system...");
-                renderer.getHairSystem().deserialize(root["hair"], &in_bin);
-                if (root.contains("hair_material")) {
-                    renderer.setHairMaterial(root["hair_material"].get<Hair::HairMaterialParams>());
+                renderer.getHairSystem().deserialize(sjsonToNlohmann(hair_el), &in_bin);
+                
+                simdjson::dom::element hm_el;
+                if (!root["hair_material"].get(hm_el)) {
+                    auto j_hm = sjsonToNlohmann(hm_el);
+                    renderer.setHairMaterial(j_hm.get<Hair::HairMaterialParams>());
                 }
                 renderer.getHairSystem().buildBVH();
                 renderer.uploadHairToGPU();
-                SCENE_LOG_INFO("[ProjectManager] Loaded hair system with " + std::to_string(renderer.getHairSystem().getGroomCount()) + " grooms.");
             }
 
-
-
-            // Load Timeline/Animation (keyframes) - AFTER Objects are created
-            if (root.contains("timeline")) {
-                scene.timeline.deserialize(root["timeline"]);
-                SCENE_LOG_INFO("[ProjectManager] Loaded timeline with " + std::to_string(scene.timeline.tracks.size()) + " tracks.");
+            // Timeline
+            simdjson::dom::element timeline_el;
+            if (!root["timeline"].get(timeline_el)) {
+                scene.timeline.deserialize(sjsonToNlohmann(timeline_el));
             }
 
-            // Load Animation Graphs
-            if (root.contains("animationGraphs")) {
-                g_animGraphUI = AnimGraphUIState(); // Clear first
-
-                for (auto& [name, j_graph] : root["animationGraphs"].items()) {
+            // Animation Graphs
+            simdjson::dom::element anim_graphs_el;
+            if (!root["animationGraphs"].get(anim_graphs_el)) {
+                g_animGraphUI = AnimGraphUIState();
+                auto j_graphs = sjsonToNlohmann(anim_graphs_el);
+                for (auto& [name, j_graph] : j_graphs.items()) {
                     auto graph = std::make_unique<AnimationGraph::AnimationNodeGraph>();
                     graph->loadFromJson(j_graph);
                     g_animGraphUI.graphs[name] = std::move(graph);
                 }
-
-                g_animGraphUI.activeCharacter = root.value("activeGraphCharacter", "");
-                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(g_animGraphUI.graphs.size()) + " animation graphs.");
+                std::string_view active_graph;
+                if (!root["activeGraphCharacter"].get(active_graph)) {
+                    g_animGraphUI.activeCharacter = std::string(active_graph);
+                }
             }
 
-            // Load BoneData (skeleton/skinning information)
-            if (root.contains("boneData")) {
-                if (progress_callback) progress_callback(78, "Loading bone data...");
-                auto& j_bones = root["boneData"];
-
-                // Clear existing bone data
+            // Bone Data
+            simdjson::dom::element bone_el;
+            if (!root["boneData"].get(bone_el)) {
                 scene.boneData.clear();
-
-                // Load bone name to index mapping
+                auto j_bones = sjsonToNlohmann(bone_el);
                 for (auto& [name, idx] : j_bones["boneNameToIndex"].items()) {
                     scene.boneData.boneNameToIndex[name] = idx.get<int>();
                 }
-
-
-                // Load bone offset matrices
                 if (j_bones.contains("boneOffsetMatrices")) {
                     for (auto& [name, mat] : j_bones["boneOffsetMatrices"].items()) {
                         scene.boneData.boneOffsetMatrices[name] = jsonToMat4(mat);
                     }
                 }
-
-                // Load bone default transforms
                 if (j_bones.contains("boneDefaultTransforms")) {
                     for (auto& [name, mat] : j_bones["boneDefaultTransforms"].items()) {
                         scene.boneData.boneDefaultTransforms[name] = jsonToMat4(mat);
                     }
                 }
-
-                // Load bone hierarchy
                 if (j_bones.contains("boneParents")) {
                     for (auto& [child, parent] : j_bones["boneParents"].items()) {
                         scene.boneData.boneParents[child] = parent.get<std::string>();
                     }
                 }
-
                 if (j_bones.contains("perModelInverses")) {
                     for (auto& [prefix, mat] : j_bones["perModelInverses"].items()) {
                         scene.boneData.perModelInverses[prefix] = jsonToMat4(mat);
                     }
                 }
-
-                // Load global inverse transform
                 if (j_bones.contains("globalInverseTransform")) {
                     scene.boneData.globalInverseTransform = jsonToMat4(j_bones["globalInverseTransform"]);
                 }
-
-                // Rebuild reverse lookup for O(1) access
                 scene.boneData.rebuildReverseLookup();
-
-                SCENE_LOG_INFO("[ProjectManager] Loaded bone data: " + std::to_string(scene.boneData.boneNameToIndex.size()) + " bones.");
             }
 
-            // Load UI Settings
-            if (root.contains("ui_settings")) {
-                scene.ui_settings_json_str = root["ui_settings"].dump();
-                scene.load_counter++; // Signal SceneUI to reload settings
+            // UI Settings
+            simdjson::dom::element ui_set_el;
+            if (!root["ui_settings"].get(ui_set_el)) {
+                scene.ui_settings_json_str = std::string(simdjson::minify(ui_set_el));
+                scene.load_counter++;
             }
 
-            // Load Imported Model Contexts
-            if (root.contains("importedModelContexts")) {
+            // Imported Models Contexts
+            simdjson::dom::array imc_arr;
+            if (!root["importedModelContexts"].get(imc_arr)) {
                 scene.importedModelContexts.clear();
-                for (const auto& j_ctx : root["importedModelContexts"]) {
+                for (auto j_ctx_el : imc_arr) {
+                    auto j_ctx = sjsonToNlohmann(j_ctx_el);
                     SceneData::ImportedModelContext ctx;
                     ctx.importName = j_ctx.value("importName", "");
                     ctx.hasAnimation = j_ctx.value("hasAnimation", false);
                     if (j_ctx.contains("globalInverseTransform")) {
                         ctx.globalInverseTransform = jsonToMat4(j_ctx["globalInverseTransform"]);
-                    }
-                    else {
+                    } else {
                         ctx.globalInverseTransform = Matrix4x4::identity();
                     }
                     ctx.useRootMotion = j_ctx.value("useRootMotion", false);
                     ctx.useAnimGraph = j_ctx.value("useAnimGraph", false);
                     ctx.visible = j_ctx.value("visible", true);
-                    // Note: ctx.loader remains null as aiScene is not serialized, 
-                    // the fallback animation system will handle this.
                     scene.importedModelContexts.push_back(ctx);
                 }
-                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.importedModelContexts.size()) + " model contexts.");
             }
 
-            // Load AnimationData (bone animation keyframes)
-            if (root.contains("animationDataList")) {
-                if (progress_callback) progress_callback(79, "Loading animation data...");
+            // Animation Data List
+            simdjson::dom::array adl_arr;
+            if (!root["animationDataList"].get(adl_arr)) {
                 scene.animationDataList.clear();
-
-                for (const auto& j_anim : root["animationDataList"]) {
+                for (auto j_anim_el : adl_arr) {
+                    auto j_anim = sjsonToNlohmann(j_anim_el);
                     AnimationData anim;
                     anim.name = j_anim.value("name", "");
                     anim.modelName = j_anim.value("modelName", "");
@@ -968,85 +1047,59 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     anim.ticksPerSecond = j_anim.value("ticksPerSecond", 24.0);
                     anim.startFrame = j_anim.value("startFrame", 0);
                     anim.endFrame = j_anim.value("endFrame", 0);
-
-                    // Position keys
+                    
                     if (j_anim.contains("positionKeys")) {
-                        for (auto& [nodeName, j_keys] : j_anim["positionKeys"].items()) {
-                            std::vector<aiVectorKey> keys;
-                            for (const auto& k : j_keys) {
-                                aiVectorKey key;
-                                key.mTime = k.value("time", 0.0);
-                                key.mValue.x = k.value("x", 0.0f);
-                                key.mValue.y = k.value("y", 0.0f);
-                                key.mValue.z = k.value("z", 0.0f);
-                                keys.push_back(key);
-                            }
-                            anim.positionKeys[nodeName] = keys;
-                        }
+                         for (auto& [nodeName, j_keys] : j_anim["positionKeys"].items()) {
+                             std::vector<aiVectorKey> keys;
+                             for (const auto& k : j_keys) {
+                                 aiVectorKey key;
+                                 key.mTime = k.value("time", 0.0);
+                                 key.mValue.x = k.value("x", 0.0f);
+                                 key.mValue.y = k.value("y", 0.0f);
+                                 key.mValue.z = k.value("z", 0.0f);
+                                 keys.push_back(key);
+                             }
+                             anim.positionKeys[nodeName] = keys;
+                         }
                     }
-
-                    // Rotation keys
                     if (j_anim.contains("rotationKeys")) {
-                        for (auto& [nodeName, j_keys] : j_anim["rotationKeys"].items()) {
-                            std::vector<aiQuatKey> keys;
-                            for (const auto& k : j_keys) {
-                                aiQuatKey key;
-                                key.mTime = k.value("time", 0.0);
-                                key.mValue.w = k.value("w", 1.0f);
-                                key.mValue.x = k.value("x", 0.0f);
-                                key.mValue.y = k.value("y", 0.0f);
-                                key.mValue.z = k.value("z", 0.0f);
-                                keys.push_back(key);
-                            }
-                            anim.rotationKeys[nodeName] = keys;
-                        }
+                         for (auto& [nodeName, j_keys] : j_anim["rotationKeys"].items()) {
+                             std::vector<aiQuatKey> keys;
+                             for (const auto& k : j_keys) {
+                                 aiQuatKey key;
+                                 key.mTime = k.value("time", 0.0);
+                                 key.mValue.w = k.value("w", 1.0f);
+                                 key.mValue.x = k.value("x", 0.0f);
+                                 key.mValue.y = k.value("y", 0.0f);
+                                 key.mValue.z = k.value("z", 0.0f);
+                                 keys.push_back(key);
+                             }
+                             anim.rotationKeys[nodeName] = keys;
+                         }
                     }
-
-                    // Scaling keys
                     if (j_anim.contains("scalingKeys")) {
-                        for (auto& [nodeName, j_keys] : j_anim["scalingKeys"].items()) {
-                            std::vector<aiVectorKey> keys;
-                            for (const auto& k : j_keys) {
-                                aiVectorKey key;
-                                key.mTime = k.value("time", 0.0);
-                                key.mValue.x = k.value("x", 1.0f);
-                                key.mValue.y = k.value("y", 1.0f);
-                                key.mValue.z = k.value("z", 1.0f);
-                                keys.push_back(key);
-                            }
-                            anim.scalingKeys[nodeName] = keys;
-                        }
+                         for (auto& [nodeName, j_keys] : j_anim["scalingKeys"].items()) {
+                             std::vector<aiVectorKey> keys;
+                             for (const auto& k : j_keys) {
+                                 aiVectorKey key;
+                                 key.mTime = k.value("time", 0.0);
+                                 key.mValue.x = k.value("x", 1.0f);
+                                 key.mValue.y = k.value("y", 1.0f);
+                                 key.mValue.z = k.value("z", 1.0f);
+                                 keys.push_back(key);
+                             }
+                             anim.scalingKeys[nodeName] = keys;
+                         }
                     }
-
+                    
                     scene.animationDataList.push_back(std::make_shared<AnimationData>(anim));
                 }
-
-                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.animationDataList.size()) + " animation clips.");
             }
-
-            // Load Procedural Objects (still supported)
-            if (root.contains("procedural_objects")) {
-                for (const auto& p : root["procedural_objects"]) {
-                    ProceduralObjectData proc;
-                    proc.id = p.value("id", 0);
-                    proc.mesh_type = static_cast<ProceduralMeshType>(p.value("mesh_type", 0));
-                    proc.display_name = p.value("display_name", "Procedural");
-                    if (p.contains("transform")) proc.transform = jsonToMat4(p["transform"]);
-                    proc.material_id = p.value("material_id", 0);
-                    proc.visible = p.value("visible", true);
-                    g_project.procedural_objects.push_back(proc);
-
-                    // Create procedural geometry...
-                    // (Same logic as legacy, but can be skipped if already in geometry binary)
-                }
-
-            }
-            else {
-                // No geometry in binary - cannot load
-                SCENE_LOG_ERROR("Project file is in legacy format. Please re-import your models.");
-                return false;
-            }
+        } else {
+            SCENE_LOG_ERROR("Project file is in legacy format. Please re-import your models.");
+            return false;
         }
+
     } catch (const std::exception& e) {
         SCENE_LOG_ERROR("Error during project loading: " + std::string(e.what()));
         return false;
@@ -1059,38 +1112,32 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     
     if (progress_callback) progress_callback(90, "Preparing for GPU sync...");
 
-    // Mark scene as ID-Ready before rebuilding
     scene.initialized = true;
     
-    // =========================================================================
-    // THREAD SAFETY: DO NOT call OptiX rebuild from thread!
-    // Set flags and let Main loop handle GPU operations on main thread.
-    // =========================================================================
-    // =========================================================================
-    // GPU SYNCHRONIZATION: Explicit Rebuild
-    // =========================================================================
-    // Instead of relying on g_needs_geometry_rebuild which waits for next frame,
-    // we force a rebuild immediately to ensure foliage/instances are uploaded correctly.
-    // This fixes the issue where instances appeared rotated until a scene update occurred.
-    // Resume animation system and force initial pose sync (Independent of GPU availability)
+    // Rebuild members
+    for (auto& ctx : scene.importedModelContexts) {
+        if (ctx.importName.empty()) continue;
+        ctx.members.clear();
+        std::string prefix = ctx.importName + "_";
+        for (auto& obj : scene.world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->nodeName.find(prefix) == 0) {
+                ctx.members.push_back(tri);
+            }
+        }
+    }
+
     if (!scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty()) {
         renderer.initializeAnimationSystem(scene);
-        // Settle bone matrices for frame 0, applying per-model inverses
         renderer.updateAnimationWithGraph(scene, 0.0f, true);
     }
 
     if (optix_gpu) {
         if (progress_callback) progress_callback(95, "Uploading to GPU...");
-        
-        // Full rebuild to handle new geometry/instances
         renderer.rebuildOptiXGeometry(scene, optix_gpu);
-        
-        // Sync bone matrices to GPU if they were computed
         if (!renderer.finalBoneMatrices.empty() && optix_gpu && optix_gpu->isUsingTLAS()) {
              optix_gpu->updateTLASGeometry(scene.world.objects, renderer.finalBoneMatrices);
         }
-        
-        // Update auxiliary params
         optix_gpu->setLightParams(scene.lights);
         if (scene.camera) {
             optix_gpu->setCameraParams(*scene.camera);
@@ -1098,24 +1145,19 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         optix_gpu->resetAccumulation();
     }
     
-    // Legacy flags - still useful for other systems but GPU is done
-    g_needs_geometry_rebuild = true; // CPU BVH needed for Autofocus/Picking
-    g_needs_optix_sync = false;       // We just did it
-    
-    // Mark dirty flags for other subsystems (e.g. hierarchy UI)
+    g_needs_geometry_rebuild = true;
+    g_needs_optix_sync = false;
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
 
-    // Force initial camera update to GPU to prevent stale camera glitch
-    // This ensures the renderer uses the newly loaded camera immediately, preventing the 'default camera' flash
     if (scene.camera) {
         scene.camera->update_camera_vectors();
         if (optix_gpu) optix_gpu->setCameraParams(*scene.camera);
     }
     
     if (progress_callback) progress_callback(100, "Done.");
-    SCENE_LOG_INFO("Project loaded: " + filepath + " (GPU rebuild pending on main thread)");
+    SCENE_LOG_INFO("Project loaded with turbo parser: " + filepath);
     return true;
 }
 
@@ -1354,6 +1396,9 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         }
     }
 
+    // Track processed nodeNames so we don't save the base mesh multiple times if skipping modified instances
+    std::unordered_set<std::string> nodes_processed;
+
     for (const auto& obj : scene.world.objects) {
         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             // Skip terrain chunks
@@ -1362,13 +1407,30 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
             // Skip foliage instances (they are serialized via InstanceManager)
             if (tri->nodeName.find("_inst_") != std::string::npos) continue;
 
-            triangles.push_back(tri);
-            
-            // Track unique transforms
-            auto th = tri->getTransformHandle();
-            if (th && transform_map.find(th) == transform_map.end()) {
-                transform_map[th] = static_cast<uint32_t>(transforms.size());
-                transforms.push_back(th);
+            const std::string& nodeName = tri->nodeName;
+
+            // Check if we have a base mesh cache for this node
+            if (scene.base_mesh_cache.find(nodeName) != scene.base_mesh_cache.end()) {
+                if (nodes_processed.find(nodeName) == nodes_processed.end()) {
+                    nodes_processed.insert(nodeName);
+                    for (const auto& baseTri : scene.base_mesh_cache.at(nodeName)) {
+                        triangles.push_back(baseTri);
+                        auto th = baseTri->getTransformHandle();
+                        if (th && transform_map.find(th) == transform_map.end()) {
+                            transform_map[th] = static_cast<uint32_t>(transforms.size());
+                            transforms.push_back(th);
+                        }
+                    }
+                }
+            } else {
+                triangles.push_back(tri);
+                
+                // Track unique transforms
+                auto th = tri->getTransformHandle();
+                if (th && transform_map.find(th) == transform_map.end()) {
+                    transform_map[th] = static_cast<uint32_t>(transforms.size());
+                    transforms.push_back(th);
+                }
             }
         }
     }

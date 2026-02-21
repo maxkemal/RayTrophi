@@ -45,12 +45,14 @@ struct __align__(16) HitGroupData
     const float2* uvs = nullptr;
     const uint32_t* strand_ids = nullptr;
     const float2* root_uvs = nullptr;     // Per-segment root UV (hair only)
+    const float* strand_v = nullptr;      // Per-segment strand position (0=root, 1=tip)
 
     // Existence flags (bool kırıldı, int ile sabitiz)
     int has_normals = 0;
     int has_uvs = 0;
     int has_tangents = 0;
     int has_root_uvs = 0; // 1 = root_uvs pointer is valid
+    int has_strand_v = 0; // 1 = strand_v pointer is valid
 
     // Texture objects (OptiX bunları seviyor)
     cudaTextureObject_t albedo_tex = 0;
@@ -84,9 +86,9 @@ struct __align__(16) HitGroupData
     
     // Arrays for 4 layers (Albedo, Normal, Roughness)
     // 4 * 8 bytes = 32 bytes (16-byte aligned)
-    cudaTextureObject_t layer_albedo_tex[4] = {0}; 
-    cudaTextureObject_t layer_normal_tex[4] = {0};
-    cudaTextureObject_t layer_roughness_tex[4] = {0};
+    // Arrays for 4 layers (Material IDs)
+    int layer_material_ids[4] = {-1, -1, -1, -1}; // 16 bytes
+
     
     // Tiling scales for each layer
     float layer_uv_scale[4] = {1.0f, 1.0f, 1.0f, 1.0f}; // 16 bytes

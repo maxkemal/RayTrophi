@@ -963,36 +963,38 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 }
 
                 if (node_open) {
-
                     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
                     ImGui::Indent();
                     
+                    // Identify model context for prefix-based filtering
+                    SceneData::ImportedModelContext* model_ctx = nullptr;
+                    for (auto& mctx : ctx.scene.importedModelContexts) {
+                        if (!mctx.importName.empty() && name.find(mctx.importName + "_") == 0) {
+                            model_ctx = &mctx;
+                            break;
+                        }
+                    }
+                    std::string prefix = (model_ctx ? model_ctx->importName : "") + "_";
+
                     // === SKINNING INFO (for skinned meshes) ===
                     if (has_skinning) {
-                        // Show bone count
-                        size_t bone_count = ctx.scene.boneData.boneNameToIndex.size();
-                        ImGui::TextDisabled("Skinned Mesh (%zu bones)", bone_count);
-                        
                         // Bones sub-tree
-                        if (!ctx.scene.boneData.boneNameToIndex.empty()) {
+                        bool has_bones = false;
+                        for (const auto& [bn, bi] : ctx.scene.boneData.boneNameToIndex) {
+                            if (bn.find(prefix) == 0) { has_bones = true; break; }
+                        }
+
+                        if (has_bones) {
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.9f, 0.6f, 0.3f, 1.0f));
-                            if (ImGui::TreeNode("Bones##skinned")) {
+                            if (ImGui::TreeNodeEx("Bones##skinned", ImGuiTreeNodeFlags_SpanAvailWidth)) {
                                 ImGui::PopStyleColor();
                                 
-                                // Sort bones by index
-                                std::vector<std::pair<std::string, unsigned int>> sorted_bones(
-                                    ctx.scene.boneData.boneNameToIndex.begin(),
-                                    ctx.scene.boneData.boneNameToIndex.end()
-                                );
-                                std::sort(sorted_bones.begin(), sorted_bones.end(),
-                                    [](const auto& a, const auto& b) { return a.second < b.second; });
-                                
-                                for (const auto& [boneName, boneIdx] : sorted_bones) {
-                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.65f, 0.45f, 1.0f));
-                                    ImGui::BulletText("%d: %s", boneIdx, boneName.c_str());
-                                    ImGui::PopStyleColor();
+                                // Show only bones for this model
+                                for (const auto& [boneName, boneIdx] : ctx.scene.boneData.boneNameToIndex) {
+                                    if (boneName.find(prefix) == 0) {
+                                        ImGui::BulletText("%d: %s", boneIdx, boneName.c_str());
+                                    }
                                 }
-                                
                                 ImGui::TreePop();
                             } else {
                                 ImGui::PopStyleColor();
@@ -1000,35 +1002,32 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         }
                         
                         // Animations sub-tree
-                        if (!ctx.scene.animationDataList.empty()) {
-                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
-                            if (ImGui::TreeNode("Animations##skinned")) {
-                                ImGui::PopStyleColor();
-                                
-                                for (size_t ai = 0; ai < ctx.scene.animationDataList.size(); ++ai) {
-                                    const auto& anim = ctx.scene.animationDataList[ai];
-                                    if (!anim) continue;
-                                    ImGui::PushID((int)ai);
+                        if (model_ctx && model_ctx->animator) {
+                            auto& clips = model_ctx->animator->getAllClips();
+                            if (!clips.empty()) {
+                                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+                                if (ImGui::TreeNodeEx("Animations##skinned", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                                    ImGui::PopStyleColor();
                                     
-                                    std::string animName = anim->name.empty() ? "Animation " + std::to_string(ai) : anim->name;
-                                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.95f, 0.7f, 1.0f));
-                                    
-                                    if (ImGui::TreeNode(animName.c_str())) {
-                                        ImGui::PopStyleColor();
-                                        ImGui::TextDisabled("Duration: %.2f sec", anim->duration / std::max(1.0, anim->ticksPerSecond));
-                                        ImGui::TextDisabled("Frames: %d - %d", anim->startFrame, anim->endFrame);
-                                        ImGui::TextDisabled("Channels: %zu", anim->positionKeys.size() + anim->rotationKeys.size());
-                                        ImGui::TreePop();
-                                    } else {
-                                        ImGui::PopStyleColor();
+                                    std::string currentClip = model_ctx->animator->getCurrentClipName();
+                                    for (size_t ai = 0; ai < clips.size(); ++ai) {
+                                        auto& clip = clips[ai];
+                                        bool is_active = (clip.name == currentClip);
+                                        
+                                        ImGui::PushID((int)ai);
+                                        if (is_active) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.8f, 0.0f, 1.0f));
+                                        
+                                        if (ImGui::Selectable(clip.name.c_str(), is_active)) {
+                                            model_ctx->animator->play(clip.name, 0.3f);
+                                        }
+                                        
+                                        if (is_active) ImGui::PopStyleColor();
+                                        ImGui::PopID();
                                     }
-                                    
-                                    ImGui::PopID();
+                                    ImGui::TreePop();
+                                } else {
+                                    ImGui::PopStyleColor();
                                 }
-                                
-                                ImGui::TreePop();
-                            } else {
-                                ImGui::PopStyleColor();
                             }
                         }
                         
@@ -1197,6 +1196,125 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                 }
                 ImGui::PopStyleColor();
+                
+                // ─────────────────────────────────────────────────────────────────
+                // MANUAL TRANSFORM CONTROLS (POS / ROT / SCALE)
+                // ─────────────────────────────────────────────────────────────────
+                if (sel.selected.type == SelectableType::Object || sel.selected.type == SelectableType::Light || 
+                    sel.selected.type == SelectableType::Camera || sel.selected.type == SelectableType::VDBVolume ||
+                    sel.selected.type == SelectableType::GasVolume || sel.selected.type == SelectableType::ForceField ||
+                    sel.selected.type == SelectableType::CameraTarget) 
+                {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Transform");
+                    
+                    static bool lock_scale = false;
+                    
+                    bool transform_changed = false;
+                    ImGui::PushItemWidth(std::max(100.0f, ImGui::GetContentRegionAvail().x - 60.0f));
+                    
+                    if (ImGui::DragFloat3("Pos", &sel.selected.position.x, 0.1f)) transform_changed = true;
+                    if (ImGui::DragFloat3("Rot", &sel.selected.rotation.x, 1.0f)) transform_changed = true;
+                    
+                    Vec3 old_scale = sel.selected.scale;
+                    if (ImGui::DragFloat3("Scl", &sel.selected.scale.x, 0.05f)) {
+                        transform_changed = true;
+                        
+                        if (lock_scale) {
+                            float ratio = 1.0f;
+                            float delta = 0.0f;
+                            
+                            if (sel.selected.scale.x != old_scale.x) {
+                                if (old_scale.x != 0.0f) ratio = sel.selected.scale.x / old_scale.x;
+                                else delta = sel.selected.scale.x - old_scale.x;
+                            } else if (sel.selected.scale.y != old_scale.y) {
+                                if (old_scale.y != 0.0f) ratio = sel.selected.scale.y / old_scale.y;
+                                else delta = sel.selected.scale.y - old_scale.y;
+                            } else if (sel.selected.scale.z != old_scale.z) {
+                                if (old_scale.z != 0.0f) ratio = sel.selected.scale.z / old_scale.z;
+                                else delta = sel.selected.scale.z - old_scale.z;
+                            }
+                            
+                            if (ratio != 1.0f) {
+                                sel.selected.scale = old_scale * ratio;
+                            } else if (delta != 0.0f) {
+                                sel.selected.scale.x = old_scale.x + delta;
+                                sel.selected.scale.y = old_scale.y + delta;
+                                sel.selected.scale.z = old_scale.z + delta;
+                            }
+                        }
+                    }
+                    
+                    ImGui::PopItemWidth();
+                    ImGui::SameLine();
+                    
+                    // Simple lock toggle button
+                    ImGui::PushStyleColor(ImGuiCol_Button, lock_scale ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f) : ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                    if (ImGui::Button(lock_scale ? " L " : " U ")) {
+                        lock_scale = !lock_scale;
+                    }
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Uniform Scale Lock (L=Locked, U=Unlocked)");
+                    
+                    if (transform_changed) {
+                        for (auto& item : sel.multi_selection) {
+                            // Apply same modified absolute transform
+                            item.position = sel.selected.position;
+                            item.rotation = sel.selected.rotation;
+                            item.scale = sel.selected.scale;
+
+                            if (item.type == SelectableType::Object && item.object) {
+                                auto transform = item.object->getTransformHandle();
+                                if (transform) {
+                                    transform->setBase(Matrix4x4::fromTRS(item.position, item.rotation, item.scale));
+                                    item.object->updateTransformedVertices();
+                                }
+                            } else if (item.type == SelectableType::Light && item.light) {
+                                item.light->position = item.position;
+                            } else if (item.type == SelectableType::Camera && item.camera) {
+                                Vec3 delta = item.position - item.camera->lookfrom;
+                                item.camera->lookfrom = item.position;
+                                item.camera->lookat = item.camera->lookat + delta;
+                                item.camera->update_camera_vectors();
+                            } else if (item.type == SelectableType::CameraTarget && item.camera) {
+                                item.camera->lookat = item.position;
+                                item.camera->update_camera_vectors();
+                            } else if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
+                                item.vdb_volume->setPosition(item.position);
+                                item.vdb_volume->setRotation(item.rotation);
+                                item.vdb_volume->setScale(item.scale);
+                            } else if (item.type == SelectableType::GasVolume && item.gas_volume) {
+                                item.gas_volume->setPosition(item.position);
+                                item.gas_volume->setRotation(item.rotation);
+                                item.gas_volume->setScale(item.scale);
+                            } else if (item.type == SelectableType::ForceField && item.force_field) {
+                                item.force_field->position = item.position;
+                                item.force_field->rotation = item.rotation;
+                                item.force_field->scale = item.scale;
+                            }
+                        }
+
+                        // Trigger global visual updates
+                        extern bool g_bvh_rebuild_pending;
+                        if (sel.selected.type == SelectableType::Object) {
+                            g_bvh_rebuild_pending = true;
+                            sel.selected.has_cached_aabb = false;
+                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                        } else if (sel.selected.type == SelectableType::Light) {
+                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                        } else if (sel.selected.type == SelectableType::Camera || sel.selected.type == SelectableType::CameraTarget) {
+                            if (ctx.optix_gpu_ptr && sel.selected.camera) ctx.optix_gpu_ptr->setCameraParams(*sel.selected.camera);
+                        } else if (sel.selected.type == SelectableType::VDBVolume) {
+                            SceneUI::syncVDBVolumesToGPU(ctx);
+                        } else if (sel.selected.type == SelectableType::GasVolume) {
+                            ctx.renderer.updateOptiXGasVolumes(ctx.scene, ctx.optix_gpu_ptr);
+                        }
+
+                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                        ctx.renderer.resetCPUAccumulation();
+                        ProjectManager::getInstance().markModified();
+                    }
+                }
             } // End World check block
 
 

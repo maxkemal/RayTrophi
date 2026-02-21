@@ -322,6 +322,7 @@
     <ClInclude Include="source\include\CPUInfo.h" />
     <ClInclude Include="source\include\ColorProcessingParams.h" />
     <ClInclude Include="source\include\MaterialManager.h" />
+    <ClInclude Include="source\include\MeshModifiers.h" />
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
@@ -340,10 +341,11 @@
     <ClCompile Include="source\external\miniz_tdef.c" />
     <ClCompile Include="source\external\miniz_tinfl.c" />
     <ClCompile Include="source\external\miniz_zip.c" />
+    <ClCompile Include="source\src\simdjson.cpp" />
     <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
-
     <ClCompile Include="source\src\Hair\HairStrand.cpp" />
     <ClCompile Include="source\src\Hair\HairSystem.cpp" />
+    <ClCompile Include="source\src\Hair\HairSystem_Skinning.cpp" />
     <ClCompile Include="source\src\Scene\AABB.cpp" />
     <ClCompile Include="source\src\Animation\AnimationController.cpp" />
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
@@ -378,6 +380,7 @@
     <ClCompile Include="source\src\Render\Renderer.cpp" />
     <ClCompile Include="source\src\Physics\RiverManager.cpp" />
     <ClCompile Include="source\src\Utils\SceneCommand.cpp" />
+    <ClCompile Include="source\src\Utils\MeshModifiers.cpp" />
     <ClCompile Include="source\src\Utils\SceneExporter.cpp" />
     <ClCompile Include="source\src\Utils\SceneHistory.cpp" />
     <ClCompile Include="source\src\UI\SceneSelection.cpp" />
@@ -389,6 +392,7 @@
     <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_materials.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_modifiers.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_scatter.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_selection.cpp" />
@@ -441,7 +445,6 @@
     <None Include="source\src\Device\hair_kernels.cu">
       <FileType>Document</FileType>
     </None>
-
     <CudaCompile Include="source\src\Device\skinning_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_kernels.cu" />
     <CudaCompile Include="source\src\Device\gas_fft_solver.cu" />

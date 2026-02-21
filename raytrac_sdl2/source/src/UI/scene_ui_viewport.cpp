@@ -193,7 +193,7 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.1f, 0.1f, 0.1f, 0.3f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.15f, 0.15f, 0.15f, 0.4f));
 
-    if (ImGui::SliderFloat("##MouseSensOverlay", &ctx.render_settings.mouse_sensitivity, 0.01f, 5.0f, "%.2f")) {
+    if (ImGui::SliderFloat("##MouseSensOverlay", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f")) {
         // Updated
     }
     ImGui::PopStyleColor(3);

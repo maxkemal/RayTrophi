@@ -807,7 +807,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "Volumetric" || tab_to_focus == "VDB" || tab_to_focus == "Gas") { active_properties_tab = 4; tab_to_focus = ""; }
         if (tab_to_focus == "Force Field"){ active_properties_tab = 5; tab_to_focus = ""; }
         if (tab_to_focus == "World")      { active_properties_tab = 6; tab_to_focus = ""; }
-        if (tab_to_focus == "System")     { active_properties_tab = 7; tab_to_focus = ""; }
+        if (tab_to_focus == "Modifiers")  { active_properties_tab = 7; tab_to_focus = ""; }
+        if (tab_to_focus == "System")     { active_properties_tab = 8; tab_to_focus = ""; }
 
         float sidebar_width = 46.0f;
         
@@ -889,7 +890,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Force Fields");
         if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
         if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Scene,      "Hair & Fur");
-        if (show_system_tab)     drawTabButton(7, UIWidgets::IconType::System,     "System & UI");
+        drawTabButton(7, UIWidgets::IconType::Sculpt, "Modifiers & Sculpt"); 
+        if (show_system_tab)     drawTabButton(9, UIWidgets::IconType::System,     "System & UI");
         
         ImGui::EndChild();
         ImGui::PopStyleColor();
@@ -1195,7 +1197,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
             case 4: if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
             case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene); break;
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
-            case 7: drawThemeSelector(); drawResolutionPanel(ctx); break;
+            case 7: drawModifiersPanel(ctx); break;
+            case 9: drawThemeSelector(); drawResolutionPanel(ctx); break;
             case 8: if (show_hair_tab) {
                 // Get selected mesh triangles for hair generation target
                 static std::vector<std::shared_ptr<Triangle>> selectedMeshTriangles;
@@ -1313,6 +1316,18 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
 void SceneUI::draw(UIContext& ctx)
 {
+    // Check if background loading just finished
+    if (scene_loading_done.exchange(false)) {
+        if (!g_project.ui_layout_data.empty()) {
+            // Disable auto-save to ini momentarily to avoid conflicts
+            ImGui::GetIO().IniFilename = nullptr; 
+            deserialize(g_project.ui_layout_data);
+        }
+    }
+
+    // Texture Safety Cleanup
+    manageTextureGraveyard();
+
     // Export Popup Logic
     if (SceneExporter::getInstance().drawExportPopup(ctx.scene)) {
          std::wstring filter = SceneExporter::getInstance().settings.binary_mode ? L"GLTF Binary (.glb)\0*.glb\0" : L"GLTF Text (.gltf)\0*.gltf\0";
@@ -1424,14 +1439,14 @@ void SceneUI::draw(UIContext& ctx)
             lastHairForceTime = currentTime;
             
             // Rebuild hair BVH and upload to GPU
-            ctx.renderer.getHairSystem().buildBVH();
+            ctx.renderer.getHairSystem().buildBVH(!ctx.renderer.hideInterpolatedHair);
             ctx.renderer.uploadHairToGPU();
             ctx.renderer.resetCPUAccumulation();
         }
         
         // If we just stopped playing, mark for one final update
         if (wasHairPlaying && !isPlaying && ctx.renderer.getHairSystem().getGroomNames().size() > 0) {
-            ctx.renderer.getHairSystem().buildBVH();
+            ctx.renderer.getHairSystem().buildBVH(!ctx.renderer.hideInterpolatedHair);
             ctx.renderer.uploadHairToGPU();
         }
         wasHairPlaying = isPlaying;
@@ -1443,19 +1458,27 @@ void SceneUI::draw(UIContext& ctx)
     drawViewportControls(ctx);  // Blender-style viewport overlay
     
     // --- HAIR TRANSFORM SYNC (Global) ---
-    // Ensure hair follow objects even if the hair panel is closed.
-    if (ctx.renderer.getHairSystem().getTotalStrandCount() > 0) {
-        ctx.renderer.getHairSystem().updateAllTransforms(ctx.scene.world.objects);
-        
-        bool hairSystemDirty = ctx.renderer.getHairSystem().isBVHDirty();
-        // Check both system-level dirty (transform) and UI-level dirty (parameter changes)
-        if (hairUI.isDirty() || hairSystemDirty) {
-            ctx.renderer.getHairSystem().buildBVH();
-            ctx.renderer.uploadHairToGPU();
-            ctx.renderer.resetCPUAccumulation();
-            ctx.start_render = true;
-            hairUI.clearDirty();
-        }
+    // Skinned groom updates are handled in Renderer::updateAnimationWithGraph (after skinning).
+    // Here we only handle:
+    //   1. UI parameter changes (hairUI.isDirty)
+    //   2. Rigid-body transform following (non-skinned grooms moved via gizmo)
+    // We do NOT call updateAllTransforms every frame to avoid setting m_bvhDirty
+    // and causing resetCPUAccumulation on every frame.
+    bool needsUpdate = hairUI.isDirty();
+    
+    // Check if any non-skinned groom's mesh transform changed
+    // (This covers gizmo drag, etc. - happens rarely, not every frame)
+    if (!needsUpdate && ctx.renderer.getHairSystem().getTotalStrandCount() > 0) {
+        ctx.renderer.getHairSystem().updateAllTransforms(ctx.scene.world.objects, ctx.renderer.finalBoneMatrices);
+        needsUpdate = ctx.renderer.getHairSystem().isBVHDirty();
+    }
+    
+    if (needsUpdate) {
+        ctx.renderer.getHairSystem().buildBVH(!ctx.renderer.hideInterpolatedHair);
+        ctx.renderer.uploadHairToGPU();
+        ctx.renderer.resetCPUAccumulation();
+        ctx.start_render = true;
+        hairUI.clearDirty();
     }
     
     // --- BACKGROUND SAVE STATUS POLL ---
@@ -1522,8 +1545,7 @@ void SceneUI::draw(UIContext& ctx)
     drawRenderWindow(ctx);
     drawExitConfirmation(ctx);
     
-    // NOTE: Animation Graph Editor is now in the bottom panel (like Terrain Graph)
-    // The floating window version (drawAnimationEditorPanel) is kept for optional use via View menu
+    // NOTE: Animation Graph Editor is now strictly in the bottom panel
         }
     
 void SceneUI::handleEditorShortcuts(UIContext& ctx)
@@ -1913,7 +1935,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::SetNextWindowBgAlpha(panel_alpha);
     // ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f)); // Removed hardcoded
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0)); // No padding for thin look
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8)); // Added padding to prevent "stuck to left" look
     if (ImGui::Begin("BottomPanel", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoResize |
@@ -2673,6 +2695,7 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
             }
 
             if (!path.empty()) {
+                updateProjectFromScene(ctx);
                 rendering_stopped_cpu = true;
                 bool success = ProjectManager::getInstance().saveProject(path, ctx.scene, ctx.render_settings, ctx.renderer);
                 
@@ -3293,7 +3316,8 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
                       mode == Hair::HairPaintMode::FRIZZ ||
                       mode == Hair::HairPaintMode::SMOOTH ||
                       mode == Hair::HairPaintMode::PINCH ||
-                      mode == Hair::HairPaintMode::SPREAD);
+                      mode == Hair::HairPaintMode::SPREAD ||
+                      mode == Hair::HairPaintMode::BRAID);
     // -------------------------------------------------------------------------
     // MODERN PICKING: Always prioritize the Scalp (Emitter) surface.
     // This prevents the brush from "jumping" in depth when passing over hairs.
@@ -3354,6 +3378,11 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
         if (is_left_down) {
             float deltaTime = io.DeltaTime;
             
+            // --- UNDO: Begin stroke on first mouse-down ---
+            if (!wasMouseDown) {
+                hairUI.beginStroke(ctx.renderer.getHairSystem());
+            }
+            
             // Calculate dynamic comb direction based on mouse movement
             Vec3 dragDir(0,0,0);
             if (wasMouseDown) {
@@ -3395,6 +3424,10 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
             hairUI.setSurfaceProjector(nullptr);
             
         } else {
+            // --- UNDO: End stroke on mouse-up ---
+            if (wasMouseDown) {
+                hairUI.endStroke(ctx.renderer.getHairSystem());
+            }
             wasMouseDown = false;
             // Handle brush release
             hairUI.applyBrush(ctx.renderer.getHairSystem(), Vec3(0,0,0), Vec3(0,1,0), 0.0f);
@@ -3404,6 +3437,30 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
             ctx.renderer.uploadHairToGPU();  
             ctx.renderer.resetCPUAccumulation(); 
             hairUI.clearDirty();
+        }
+    }
+    
+    // --- UNDO/REDO Keyboard Shortcuts (Ctrl+Z / Ctrl+Y) ---
+    if (hairUI.isPainting() && !io.WantCaptureKeyboard) {
+        bool ctrlHeld = io.KeyCtrl;
+        
+        // Ctrl+Z = Undo
+        if (ctrlHeld && ImGui::IsKeyPressed(ImGuiKey_Z) && !io.KeyShift) {
+            if (hairUI.undo(ctx.renderer.getHairSystem())) {
+                ctx.renderer.uploadHairToGPU();
+                ctx.renderer.resetCPUAccumulation();
+                hairUI.clearDirty();
+            }
+        }
+        
+        // Ctrl+Y or Ctrl+Shift+Z = Redo
+        if (ctrlHeld && (ImGui::IsKeyPressed(ImGuiKey_Y) || 
+            (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyShift))) {
+            if (hairUI.redo(ctx.renderer.getHairSystem())) {
+                ctx.renderer.uploadHairToGPU();
+                ctx.renderer.resetCPUAccumulation();
+                hairUI.clearDirty();
+            }
         }
     }
 }
@@ -3449,6 +3506,9 @@ void SceneUI::drawHairBrushPreview(UIContext& ctx, const Vec3& hitPoint, const V
         case Hair::HairPaintMode::PINCH:
         case Hair::HairPaintMode::SPREAD:
             brushColor = ImVec4(1.0f, 1.0f, 1.0f, 0.8f);  // White
+            break;
+        case Hair::HairPaintMode::BRAID:
+            brushColor = ImVec4(1.0f, 0.8f, 0.3f, 0.8f);  // Gold/Amber
             break;
         default:
             brushColor = ImVec4(0.8f, 0.8f, 0.8f, 0.6f);  // Gray
@@ -3627,5 +3687,98 @@ void SceneUI::drawHairBrushPreview(UIContext& ctx, const Vec3& hitPoint, const V
                 }
             }
         }
+    }
+}
+
+// ============================================================================
+// UI SERIALIZAION
+// ============================================================================
+
+std::string SceneUI::serialize() {
+    nlohmann::json j;
+    // Save state variables
+    j["show_animation_panel"] = show_animation_panel;
+    j["show_foliage_tab"] = show_foliage_tab;
+    j["show_water_tab"] = show_water_tab;
+    j["show_terrain_tab"] = show_terrain_tab;
+    j["show_system_tab"] = show_system_tab;
+    j["show_terrain_graph"] = show_terrain_graph;
+    j["show_anim_graph"] = show_anim_graph;
+    j["show_volumetric_tab"] = show_volumetric_tab;
+    j["show_forcefield_tab"] = show_forcefield_tab;
+    j["show_world_tab"] = show_world_tab;
+    j["show_hair_tab"] = show_hair_tab;
+    j["show_modifiers_tab"] = show_modifiers_tab;
+    j["pivot_mode"] = pivot_mode;
+    j["active_properties_tab"] = active_properties_tab;
+    j["showSidePanel"] = showSidePanel;
+    
+    // extern bool show_controls_window;
+    j["show_controls_window"] = show_controls_window; 
+
+    j["show_scene_log"] = show_scene_log;
+
+    // Save panel dimensions
+    j["side_panel_width"] = side_panel_width;
+    j["bottom_panel_height"] = bottom_panel_height;
+    j["hierarchy_panel_height"] = hierarchy_panel_height;
+
+    // Save ImGui Settings (Window Layout)
+    size_t size = 0;
+    const char* ini_data = ImGui::SaveIniSettingsToMemory(&size);
+    if (ini_data && size > 0) {
+        j["imgui_ini"] = std::string(ini_data, size);
+    }
+
+    return j.dump();
+}
+
+void SceneUI::deserialize(const std::string& data) {
+    if (data.empty()) return;
+    try {
+        nlohmann::json j = nlohmann::json::parse(data);
+        
+        // Restore state variables with checks
+        if (j.contains("show_animation_panel")) show_animation_panel = j["show_animation_panel"];
+        if (j.contains("show_foliage_tab")) show_foliage_tab = j["show_foliage_tab"];
+        if (j.contains("show_water_tab")) show_water_tab = j["show_water_tab"];
+        if (j.contains("show_terrain_tab")) show_terrain_tab = j["show_terrain_tab"];
+        if (j.contains("show_system_tab")) show_system_tab = j["show_system_tab"];
+        if (j.contains("show_terrain_graph")) show_terrain_graph = j["show_terrain_graph"];
+        if (j.contains("show_anim_graph")) show_anim_graph = j["show_anim_graph"];
+        if (j.contains("show_volumetric_tab")) show_volumetric_tab = j["show_volumetric_tab"];
+        if (j.contains("show_forcefield_tab")) show_forcefield_tab = j["show_forcefield_tab"];
+        if (j.contains("show_world_tab")) show_world_tab = j["show_world_tab"];
+        if (j.contains("show_hair_tab")) show_hair_tab = j["show_hair_tab"];
+        if (j.contains("show_modifiers_tab")) show_modifiers_tab = j["show_modifiers_tab"];
+        
+        if (j.contains("pivot_mode")) pivot_mode = j["pivot_mode"];
+        if (j.contains("active_properties_tab")) active_properties_tab = j["active_properties_tab"];
+        if (j.contains("showSidePanel")) showSidePanel = j["showSidePanel"];
+        
+        // extern bool show_controls_window;
+        if (j.contains("show_controls_window")) show_controls_window = j["show_controls_window"];
+        
+        if (j.contains("show_scene_log")) show_scene_log = j["show_scene_log"];
+
+        if (j.contains("side_panel_width")) side_panel_width = j["side_panel_width"];
+        if (j.contains("bottom_panel_height")) bottom_panel_height = j["bottom_panel_height"];
+        if (j.contains("hierarchy_panel_height")) hierarchy_panel_height = j["hierarchy_panel_height"];
+
+        // Restore ImGui Settings
+        if (j.contains("imgui_ini")) {
+             std::string ini_str = j["imgui_ini"];
+             if (!ini_str.empty()) {
+                 ImGui::LoadIniSettingsFromMemory(ini_str.c_str(), ini_str.size());
+                 SCENE_LOG_INFO("Restored ImGui layout (Size: " + std::to_string(ini_str.size()) + ")");
+             } else {
+                 SCENE_LOG_WARN("ImGui layout string is empty in project data.");
+             }
+        } else {
+             SCENE_LOG_WARN("No imgui_ini found in project data.");
+        }
+        SCENE_LOG_INFO("UI layout restored from project file.");
+    } catch (const std::exception& e) {
+        SCENE_LOG_ERROR("Failed to deserialize UI layout: " + std::string(e.what()));
     }
 }
