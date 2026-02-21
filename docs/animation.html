@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Animation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="hair.html" class="nav-link">Hair & Fur</a>
+        <a href="animation.html" class="nav-link active">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Animation System</h1>
+
+            <div class="screenshot-area">
+                <img src="images/anim_header.jpg" alt="Animation Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    🎬 Please save an Animation Render as <code>docs/images/anim_header.jpg</code>
+                </div>
+            </div>
+
+            <h2 id="timeline">1. Timeline & Property Keyframing</h2>
+            <div class="card">
+                <img src="images/anim_timeline.jpg" alt="Timeline"
+                    style="width:100%; border-radius:8px; margin-bottom:15px;" onerror="this.style.display='none';">
+                <p>RayTrophi features a powerful timeline for animating object transforms, light intensities, and
+                    material parameters. Use the <strong>Diamond Icon</strong> (Keyframe) button next to properties to
+                    capture state at the current frame.</p>
+                <ul>
+                    <li><strong>Scrubbing:</strong> Real-time viewport updates while dragging the playhead.</li>
+                    <li><strong>Interpolation:</strong> Smooth linear or spline-based transitions between keyframes.
+                    </li>
+                    <li><strong>Looping:</strong> Define custom playback ranges for iterative design.</li>
+                </ul>
+            </div>
+
+            <h2 id="skinning">2. Character Skinning & Bone Deformation</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/Character_Skinning.jpg" alt="Skinning UI"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Character Skinning / Bone UI</div>
+                </div>
+                <div>
+                    <p>Support for skeletal meshes and vertex skinning (up to 4 bones per vertex प्रभाव).</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Feature</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Bone Hierarchy</td>
+                            <td>Full support for parent-child bone relationships and matrix transforms.</td>
+                        </tr>
+                        <tr>
+                            <td>GPU Skinning</td>
+                            <td>Hardware-accelerated vertex deformation via Optix and CUDA.</td>
+                        </tr>
+                        <tr>
+                            <td>Hair Sync</td>
+                            <td>Dynamic hair strands automatically follow the animated mesh surface using Root-UV
+                                skinning.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="animgraph">3. Advanced Anim Graph (Logic & Blending)</h2>
+            <p>The Anim Graph system allows for sophisticated character logic using a state-machine based approach.</p>
+
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/anim_graph.jpg" alt="Anim Graph"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Anim Graph Node Editor</div>
+                </div>
+                <div>
+                    <h3>State Machines & Node Editor</h3>
+                    <p>Define logic flows between states like <strong>Idle</strong>, <strong>Walk</strong>, and
+                        <strong>Run</strong> with custom transition rules in the visual node graph.
+                    </p>
+                </div>
+            </div>
+
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/state_machine_ui.jpg" alt="State Machine UI"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">State Machine Parameters UI</div>
+                </div>
+                <div>
+                    <h3>Parameters & Blending</h3>
+                    <p>Seamlessly blend multiple animations based on parameters like <code>Speed</code> or
+                        <code>Direction</code> using the intuitive parameters panel.
+                    </p>
+                    <ul>
+                        <li><strong>Float:</strong> Smooth blending (e.g., Velocity).</li>
+                        <li><strong>Bool:</strong> Conditional states (e.g., IsFalling).</li>
+                        <li><strong>Trigger:</strong> One-time events (e.g., Attack/Jump).</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>
