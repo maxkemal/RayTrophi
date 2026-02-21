@@ -15,19 +15,41 @@
 
 /* Animations */
 @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 @keyframes slideIn {
-    from { transform: translateX(-20px); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
+    from {
+        transform: translateX(-20px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
 }
 
 @keyframes glow {
-    0% { box-shadow: 0 0 5px rgba(0, 210, 255, 0.2); }
-    50% { box-shadow: 0 0 20px rgba(0, 210, 255, 0.4); }
-    100% { box-shadow: 0 0 5px rgba(0, 210, 255, 0.2); }
+    0% {
+        box-shadow: 0 0 5px rgba(0, 210, 255, 0.2);
+    }
+
+    50% {
+        box-shadow: 0 0 20px rgba(0, 210, 255, 0.4);
+    }
+
+    100% {
+        box-shadow: 0 0 5px rgba(0, 210, 255, 0.2);
+    }
 }
 
 body {
@@ -42,14 +64,23 @@ body {
 }
 
 /* Custom Scrollbar */
-::-webkit-scrollbar { width: 8px; }
-::-webkit-scrollbar-track { background: var(--bg-color); }
-::-webkit-scrollbar-thumb { 
-    background: var(--border-color); 
-    border-radius: 10px;
-    border: 2px solid var(--bg-color); 
+::-webkit-scrollbar {
+    width: 8px;
 }
-::-webkit-scrollbar-thumb:hover { background: var(--accent-color); }
+
+::-webkit-scrollbar-track {
+    background: var(--bg-color);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 10px;
+    border: 2px solid var(--bg-color);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--accent-color);
+}
 
 /* Sidebar - Glassmorphism style */
 #sidebar {
@@ -183,7 +214,7 @@ p {
     position: relative;
     border-radius: 16px;
     overflow: hidden;
-    box-shadow: 0 15px 35px rgba(0,0,0,0.5);
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.5);
     border: 1px solid var(--border-color);
     transition: all 0.4s;
 }
@@ -199,6 +230,8 @@ p {
 }
 
 .missing-img {
+    display: none;
+    /* Hidden by default, shown by onerror in HTML */
     background: #1a202c;
     color: #718096;
     padding: 60px;
@@ -215,7 +248,7 @@ p {
     border-radius: 12px;
     overflow: hidden;
     border: 1px solid var(--border-color);
-    background: rgba(0,0,0,0.2);
+    background: rgba(0, 0, 0, 0.2);
 }
 
 .param-table th {
@@ -258,7 +291,10 @@ p {
 .feature-box::before {
     content: '';
     position: absolute;
-    top: 0; left: 0; width: 100%; height: 100%;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     background: linear-gradient(135deg, var(--accent-color) 0%, transparent 100%);
     opacity: 0;
     transition: opacity 0.3s;
@@ -271,15 +307,20 @@ p {
     box-shadow: 0 10px 40px rgba(0, 210, 255, 0.15);
 }
 
-.feature-box:hover::before { opacity: 0.05; }
+.feature-box:hover::before {
+    opacity: 0.05;
+}
 
-.feature-box > * { position: relative; z-index: 1; }
+.feature-box>* {
+    position: relative;
+    z-index: 1;
+}
 
 .feature-icon {
     font-size: 3.5rem;
     margin-bottom: 25px;
     display: block;
-    filter: drop-shadow(0 5px 15px rgba(0,0,0,0.3));
+    filter: drop-shadow(0 5px 15px rgba(0, 0, 0, 0.3));
 }
 
 .tag {
@@ -308,8 +349,21 @@ p {
 }
 
 @media (max-width: 800px) {
-    #sidebar { width: 80px; padding: 20px 10px; }
-    #sidebar h2, .nav-link span { display: none; }
-    #content { padding: 30px; }
-    h1 { font-size: 2.5rem; }
+    #sidebar {
+        width: 80px;
+        padding: 20px 10px;
+    }
+
+    #sidebar h2,
+    .nav-link span {
+        display: none;
+    }
+
+    #content {
+        padding: 30px;
+    }
+
+    h1 {
+        font-size: 2.5rem;
+    }
 }
