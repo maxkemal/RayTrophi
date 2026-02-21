@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Render Settings</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="hair.html" class="nav-link">Hair & Fur</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link active">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Render Settings</h1>
+
+            <div class="screenshot-area">
+                <img src="images/render_header.jpg" alt="Render Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">🚀 Render Header</div>
+            </div>
+
+            <h2 id="sampling">1. Sampling</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/render_main.jpg" alt="Sampling UI"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Please save a screenshot of the Sampling & Quality Panel as
+                        <code>docs/images/render_main.jpg</code>
+                    </div>
+                </div>
+                <div>
+                    <p>Configure the path tracing quality and ray depth.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Samples</td>
+                            <td>Total rays per pixel. 1000+ for final.</td>
+                        </tr>
+                        <tr>
+                            <td>Bounces</td>
+                            <td>Max light bounces (Depth). 4 to 12.</td>
+                        </tr>
+                        <tr>
+                            <td>Russian Roulette</td>
+                            <td>Min depth before random termination (optimization).</td>
+                        </tr>
+                        <tr>
+                            <td>Clamp</td>
+                            <td>Limits max brightness to reduce fireflies.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="denoise">2. Denoiser (OIDN)</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/render_denoise.jpg" alt="Denoiser UI"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Please save a screenshot of the Denoiser Panel as
+                        <code>docs/images/render_denoise.jpg</code>
+                    </div>
+                </div>
+                <div>
+                    <p>Intel Open Image Denoise integration.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Setting</th>
+                            <th>Description</th>
+                        </tr>
+                        <tr>
+                            <td>Enable</td>
+                            <td>Activates AI Denoising post-process.</td>
+                        </tr>
+                        <tr>
+                            <td>Prefilter</td>
+                            <td>Uses Albedo/Normal passes to preserve texture detail.</td>
+                        </tr>
+                        <tr>
+                            <td>Quality</td>
+                            <td>High (Slower) vs Fast.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="hw">3. Hardware</h2>
+            <div class="card">
+                <h3>OptiX (GPU) vs Embree (CPU)</h3>
+                <p><strong>OptiX:</strong> Uses NVIDIA RT Cores for max speed on RTX cards.</p>
+                <p><strong>Embree:</strong> CPU fallback for compatibility or debugging.</p>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>

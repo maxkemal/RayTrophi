@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RayTrophi Manual - Terrain Nodes</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <h2>RayTrophi</h2>
+        <a href="index.html" class="nav-link">Home / Overview</a>
+        <a href="world.html" class="nav-link">World & Sky</a>
+        <a href="water.html" class="nav-link">Water System</a>
+        <a href="nodes.html" class="nav-link active">Terrain Nodes</a>
+        <a href="terrain.html" class="nav-link">Terrain System</a>
+        <a href="hair.html" class="nav-link">Hair & Fur</a>
+        <a href="animation.html" class="nav-link">Animation</a>
+        <a href="render.html" class="nav-link">Render Settings</a>
+        <a href="camera.html" class="nav-link">Pro Camera</a>
+        <a href="system.html" class="nav-link">System & File</a>
+    </div>
+
+    <div id="content">
+        <div class="container">
+            <h1>Terrain Node Reference</h1>
+
+            <div class="screenshot-area" style="margin-bottom: 30px;">
+                <img src="images/terrain_header.jpg" alt="Terrain Nodes Header"
+                    onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                <div class="missing-img">
+                    ⛰️ Please save a Node Graph Render as <code>docs/images/terrain_header.jpg</code>
+                </div>
+            </div>
+
+            <h2 id="input">Input Nodes</h2>
+
+            <div class="card">
+                <h3>Perlin Noise</h3>
+                <p>Standard coherent noise for mountains/hills.</p>
+                <ul>
+                    <li><strong>Scale:</strong> Feature size.</li>
+                    <li><strong>Persistence:</strong> Roughness.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>Worley Noise</h3>
+                <p>Cellular/Voronoi noise for rocks and cracks.</p>
+            </div>
+
+            <div class="card">
+                <h3>Image Input</h3>
+                <p>Load Heightmaps (PNG/EXR).</p>
+            </div>
+
+            <h2 id="ops">Operations</h2>
+
+            <div class="card">
+                <h3>Mix (Math)</h3>
+                <p>Combine two inputs.</p>
+                <ul>
+                    <li>Add, Subtract, Multiply (Mask), Max, Min.</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>Curve</h3>
+                <div class="split-layout">
+                    <div class="screenshot-area">
+                        <img src="images/node_curve.jpg" alt="Curve Node"
+                            onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                        <div class="missing-img">Curve Node UI</div>
+                    </div>
+                    <div>
+                        <p>Remap height values visually to create terraces or plateaus.</p>
+                        <p>Use control points to define the transfer function.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Erosion</h3>
+                <p>Runs the hydraulic erosion simulation on the graph data.</p>
+            </div>
+
+            <div style="height: 50px;"></div>
+        </div>
+    </div>
+</body>
+
+</html>
