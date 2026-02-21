@@ -297,7 +297,8 @@ ImGuiTreeNodeFlags GetSectionFlags(bool defaultOpen) {
         ImGuiTreeNodeFlags_Framed |
         ImGuiTreeNodeFlags_SpanFullWidth |
         ImGuiTreeNodeFlags_AllowItemOverlap |
-        ImGuiTreeNodeFlags_FramePadding;
+        ImGuiTreeNodeFlags_FramePadding |
+        ImGuiTreeNodeFlags_NoTreePushOnOpen; // Disable default tree indentation
     
     if (defaultOpen)
         flags |= ImGuiTreeNodeFlags_DefaultOpen;
@@ -352,9 +353,8 @@ bool BeginSection(const char* title, const ImVec4& accentColor, bool defaultOpen
         // Push state for EndSection to draw the surrounding border
         s_SectionStack.push_back({cursorPos, width, borderColor, opened});
         
-        // Add a bit of spacing after header
-        ImGui::Indent(8.0f); // Slight indent for content
-        ImGui::Spacing();
+        // Add a small indent for content (reduced from 8.0f to 4.0f)
+        ImGui::Indent(4.0f);
     } else {
         ImGui::PopID();
     }
@@ -369,25 +369,12 @@ void EndSection() {
     s_SectionStack.pop_back();
     
     if (state.isOpen) {
-        ImGui::Unindent(8.0f);
-        ImGui::Spacing();
-        ImGui::TreePop(); 
+        ImGui::Unindent(4.0f);
+        // TreePop is NOT needed when using ImGuiTreeNodeFlags_NoTreePushOnOpen
         
         // Draw the Border around the whole open section
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         ImVec2 endPos = ImGui::GetCursorScreenPos();
-        
-        // Close the box from header start to current cursor position
-        // We exclude the top edge because we already drew a styled header there
-        // Actually, let's draw a full rect border excluding top? Or just a full rect with rounding?
-        // Let's do a full rect from Header Start to End Content
-        
-        // Header height was approx GetFrameHeight()
-        // We want the border to encompass the header + content.
-        
-        // Rect logic:
-        // Top-Left: state.startPos
-        // Bottom-Right: (state.startPos.x + state.width, endPos.y)
         
         drawList->AddRect(
             state.startPos,
@@ -398,9 +385,6 @@ void EndSection() {
 
         ImGui::PopID();
     }
-    
-    // Extra spacing between sections
-    ImGui::Spacing();
 }
 
 bool BeginColoredSection(const char* title, const ImVec4& titleColor, bool defaultOpen) {
@@ -683,6 +667,12 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             break;
         case IconType::Terrain:
             dl->AddTriangleFilled(ImVec2(p.x, p.y + is), ImVec2(p.x + is*0.5f, p.y), ImVec2(p.x + is, p.y + is), col);
+            break;
+        case IconType::Sculpt:
+            // Draw a basic sculpting tool/brush icon (stylized brush/chisel)
+            dl->AddLine(ImVec2(p.x + is*0.2f, p.y + is*0.8f), ImVec2(p.x + is*0.8f, p.y + is*0.2f), col, thickness * 1.5f);
+            dl->AddCircleFilled(ImVec2(p.x + is*0.2f, p.y + is*0.8f), thickness * 1.5f, col); // Brush tip
+            dl->AddRectFilled(ImVec2(p.x + is*0.6f, p.y + is*0.1f), ImVec2(p.x + is*0.9f, p.y + is*0.4f), col); // Handle
             break;
         case IconType::Water:
             for(int i=0; i<3; i++) {

@@ -37,39 +37,58 @@ __global__ void skinningKernel(
 
     // Load vertex data
     float3 inPos = inputPositions[idx];
-    float3 inNorm = inputNormals[idx];
+    float3 inNorm = (inputNormals != nullptr) ? inputNormals[idx] : make_float3(0.0f, 1.0f, 0.0f);
     int4 indices = boneIndices[idx];
     float4 weights = boneWeights[idx];
 
     // Accumulators
     float3 finalPos = { 0.0f, 0.0f, 0.0f };
     float3 finalNorm = { 0.0f, 0.0f, 0.0f };
+    float totalWeight = 0.0f;
 
     // Process 4 bones manually (unrolled)
     // Structure of access: indices.x, y, z, w
     int boneIDs[4] = { indices.x, indices.y, indices.z, indices.w };
     float boneWts[4] = { weights.x, weights.y, weights.z, weights.w };
 
+    // First pass: check total weight
     for (int i = 0; i < 4; i++) {
-        int boneID = boneIDs[i];
-        float w = boneWts[i];
+        if (boneIDs[i] >= 0 && boneIDs[i] < numBones) {
+            totalWeight += boneWts[i];
+        }
+    }
 
-        if (boneID >= 0 && boneID < numBones && w > 0.0001f) {
-            const float* mat = &boneMatrices[boneID * 16];
+    if (totalWeight < 1e-6f) {
+        // Fallback: If no valid weights, keep original position
+        finalPos = inPos;
+        finalNorm = inNorm;
+    } else {
+        // Second pass: apply skinning with normalization
+        float invTotalWeight = 1.0f / totalWeight;
 
-            // Linear Blend Skinning:
-            // v' = sum(w_i * (M_i * v))
-            float3 tPos = transform_point(mat, inPos);
-            
-            finalPos.x += tPos.x * w;
-            finalPos.y += tPos.y * w;
-            finalPos.z += tPos.z * w;
+        for (int i = 0; i < 4; i++) {
+            int boneID = boneIDs[i];
+            float w = boneWts[i] * invTotalWeight; // Use normalized weight (most significant 4 bones)
 
-            // Normal transformation (approximation)
-            float3 tNorm = transform_vector(mat, inNorm);
-            finalNorm.x += tNorm.x * w;
-            finalNorm.y += tNorm.y * w;
-            finalNorm.z += tNorm.z * w;
+            if (boneID >= 0 && boneID < numBones && w > 1e-7f) {
+                const float* mat = &boneMatrices[boneID * 16];
+
+                // Linear Blend Skinning:
+                // v' = sum(w_i * (M_i * v))
+                float3 tPos = transform_point(mat, inPos);
+                
+                finalPos.x += tPos.x * w;
+                finalPos.y += tPos.y * w;
+                finalPos.z += tPos.z * w;
+
+                // Normal transformation (approximation)
+                if (inputNormals != nullptr) {
+                    float3 tNorm = transform_vector(mat, inNorm);
+                    finalNorm.x += tNorm.x * w;
+                    finalNorm.y += tNorm.y * w;
+                    finalNorm.z += tNorm.z * w;
+                }
+            }
         }
     }
 

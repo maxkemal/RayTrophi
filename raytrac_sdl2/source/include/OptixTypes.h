@@ -33,6 +33,7 @@ struct MeshData {
     std::string original_name;              // Original node name (e.g. "Car")
     std::vector<int> triangle_indices;      // Indices into global triangle list
     int material_id = 0;                    // Primary material ID for this mesh
+    bool has_skinning = false;              // True if this mesh part has bone skinning
 };
 
 // Per-hair curve geometry data for BLAS building
@@ -42,6 +43,7 @@ struct CurveGeometry {
     std::vector<float3> tangents;
     std::vector<uint32_t> strand_ids;
     std::vector<float2> root_uvs;   // Per-segment root UV (from scalp mesh)
+    std::vector<float> strand_v;    // Per-segment position along strand (0=root, 1=tip)
     size_t vertex_count = 0;
     size_t segment_count = 0;
     bool use_bspline = false;

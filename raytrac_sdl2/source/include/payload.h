@@ -100,6 +100,16 @@ struct OptixHitResult {
     int use_blended_data;      // 1 = use baked values below instead of sampling textures again
     float3 blended_albedo;
     float blended_roughness;
+    float blended_metallic;
+    // Extended blended PBR data
+    float blended_clearcoat;
+    float blended_clearcoat_roughness;
+    float blended_subsurface;
+    float3 blended_subsurface_color;
+    float3 blended_emission;
+    float blended_transmission;
+    float blended_translucent;
+    float blended_ior; // NEW: Blended metallic value
     float3 blended_normal;     // Tangent space or World space? Let's assume standard logic handles Normal.
                                // Actually, normal is already computed and stored in 'normal' field above.
                                // So we don't need blended_normal.

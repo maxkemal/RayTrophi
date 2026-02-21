@@ -1069,11 +1069,33 @@ void TerrainManager::initLayers(TerrainObject* terrain) {
 
     // 2. Initialize Layers (if empty)
     if (terrain->layers.empty()) {
-        terrain->layers.resize(4);
+        terrain->layers.resize(4, nullptr);
         terrain->layer_uv_scales.resize(4, 50.0f); // Default tiling
         
-        // Assign placeholders or leave null
-        // Users will assign materials via UI
+        static const char* defLayerNames[4] = {"Grass", "Rock", "Snow", "Flow"};
+        static const Vec3 defLayerColors[4] = {
+            Vec3(0.3f, 0.5f, 0.2f),  // Grass
+            Vec3(0.4f, 0.4f, 0.4f),  // Rock
+            Vec3(0.9f, 0.9f, 0.95f), // Snow
+            Vec3(0.5f, 0.35f, 0.2f)  // Flow
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            std::string matName = terrain->name + "_" + defLayerNames[i];
+            
+            // Check if material already exists in manager (e.g. from previous run or load)
+            if (MaterialManager::getInstance().hasMaterial(matName)) {
+                terrain->layers[i] = MaterialManager::getInstance().getMaterialShared(
+                    MaterialManager::getInstance().getMaterialID(matName)
+                );
+            } else {
+                // Create default PBR material
+                auto mat = std::make_shared<PrincipledBSDF>(defLayerColors[i], 0.8f, 0.0f);
+                mat->materialName = matName;
+                MaterialManager::getInstance().addMaterial(matName, mat);
+                terrain->layers[i] = mat;
+            }
+        }
     }
 }
 
@@ -2483,73 +2505,65 @@ void TerrainManager::autoGenerateHardness(TerrainObject* terrain, float slopeWei
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<float> noise(-noiseAmount, noiseAmount);
-    
-    float maxH = terrain->heightmap.scale_y;
-    
+   
     // Find min/max height for normalization
-    float minHeight = *std::min_element(terrain->heightmap.data.begin(), terrain->heightmap.data.end());
-    float maxHeight = *std::max_element(terrain->heightmap.data.begin(), terrain->heightmap.data.end());
-    float heightRange = maxHeight - minHeight;
+    float minH = FLT_MAX, maxH = -FLT_MAX;
+    for (float hv : terrain->heightmap.data) {
+        if (hv < minH) minH = hv;
+        if (hv > maxH) maxH = hv;
+    }
+    float heightRange = maxH - minH;
     if (heightRange < 0.001f) heightRange = 1.0f;
     
+    std::vector<float> rawHardness(w * h, 0.5f);
+    float terrainScaleY = terrain->heightmap.scale_y;
+    float cellSize = terrain->heightmap.scale_xz / (float)w;
+
+    #pragma omp parallel for
     for (int y = 1; y < h - 1; y++) {
         for (int x = 1; x < w - 1; x++) {
             int idx = y * w + x;
             
-            // Get normalized height (0-1)
-            float normalizedHeight = (terrain->heightmap.data[idx] - minHeight) / heightRange;
+            // Normalized height (0-1)
+            float normH = (terrain->heightmap.data[idx] - minH) / heightRange;
             
-            // Calculate slope from height differences
-            float hl = terrain->heightmap.data[idx - 1];
-            float hr = terrain->heightmap.data[idx + 1];
-            float hu = terrain->heightmap.data[idx - w];
-            float hd = terrain->heightmap.data[idx + w];
+            // Slope calculation
+            float hl = terrain->heightmap.data[idx - 1] * terrainScaleY;
+            float hr = terrain->heightmap.data[idx + 1] * terrainScaleY;
+            float hu = terrain->heightmap.data[idx - w] * terrainScaleY;
+            float hd = terrain->heightmap.data[idx + w] * terrainScaleY;
             
-            float dX = fabsf(hr - hl) * maxH;
-            float dZ = fabsf(hd - hu) * maxH;
-            float slope = sqrtf(dX * dX + dZ * dZ);
+            float dzdx = (hr - hl) / (2.0f * cellSize);
+            float dzdy = (hd - hu) / (2.0f * cellSize);
+            float slopeRad = std::atan(sqrtf(dzdx * dzdx + dzdy * dzdy));
+            float slopeNorm = std::min(slopeRad * 2.0f / 3.14159f, 1.0f);
             
-            // Normalize slope (0-1 range, clamped)
-            slope = std::min(slope * 2.0f, 1.0f);
+            // Base hardness from height (Stratification)
+            float hHardness = 0.1f + 0.8f * std::pow(normH, 1.5f);
             
-            // ============================================
-            // GEOLOGICAL LAYERING
-            // ============================================
-            // Low areas (valleys, plains) = soft sediment/soil
-            // Mid areas = mixed rock/soil
-            // High areas (mountains) = hard bedrock
-            // Steep slopes anywhere = exposed hard rock
+            // Combine: take the harder of the two
+            float combined = fmaxf(hHardness, slopeNorm * slopeWeight);
             
-            float heightHardness = 0.0f;
+            // Add noise
+            combined += noise(gen);
             
-            if (normalizedHeight < 0.25f) {
-                // Low areas: soft sediment (alluvial deposits, soil)
-                heightHardness = 0.1f + normalizedHeight * 0.4f;  // 0.1 - 0.2
+            rawHardness[idx] = std::clamp(combined, 0.05f, 1.0f);
+        }
+    }
+    
+    // Blur to remove salt-and-pepper noise and create smooth transitions
+    terrain->hardnessMap.resize(w * h);
+    #pragma omp parallel for
+    for (int y = 1; y < h - 1; y++) {
+        for (int x = 1; x < w - 1; x++) {
+            int idx = y * w + x;
+            float sum = 0.0f;
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    sum += rawHardness[(y + dy) * w + (x + dx)];
+                }
             }
-            else if (normalizedHeight < 0.5f) {
-                // Lower-mid: mixed soft rock
-                heightHardness = 0.2f + (normalizedHeight - 0.25f) * 0.8f;  // 0.2 - 0.4
-            }
-            else if (normalizedHeight < 0.75f) {
-                // Upper-mid: harder rock
-                heightHardness = 0.4f + (normalizedHeight - 0.5f) * 1.2f;  // 0.4 - 0.7
-            }
-            else {
-                // High areas: very hard bedrock
-                heightHardness = 0.7f + (normalizedHeight - 0.75f) * 1.2f;  // 0.7 - 1.0
-            }
-            
-            // Steep slopes = exposed hard rock
-            float slopeHardness = slope * slopeWeight;
-            
-            // Combine: take the harder of the two (rock exposed by slope or by elevation)
-            float hardness = fmaxf(heightHardness, slopeHardness);
-            
-            // Add some noise for variation
-            hardness += noise(gen);
-            
-            // Clamp to valid range
-            terrain->hardnessMap[idx] = std::clamp(hardness, 0.0f, 1.0f);
+            terrain->hardnessMap[idx] = sum / 9.0f;
         }
     }
     
@@ -2904,16 +2918,24 @@ json TerrainManager::serialize(const std::string& terrainDir) const {
         // Remove spaces for safer filenames
         std::replace(safeProjName.begin(), safeProjName.end(), ' ', '_');
 
+        std::string hmFilename = safeProjName + "_" + t.name + "_heightmap_" + std::to_string(t.id) + ".png";
+        std::string binFilename = safeProjName + "_" + t.name + "_heightmap_" + std::to_string(t.id) + ".rthm";
+
         tJson["heightmap"] = {
             {"width", t.heightmap.width},
             {"height", t.heightmap.height},
             {"scale_xz", t.heightmap.scale_xz},
             {"scale_y", t.heightmap.scale_y},
-            {"file", safeProjName + "_" + t.name + "_heightmap_" + std::to_string(t.id) + ".png"}
+            {"file", hmFilename},
+            {"binary_file", binFilename}
         };
         
-        // Save heightmap as PNG (Note: 8-bit for compatibility, potential precision loss)
-        std::string hmPath = (std::filesystem::path(terrainDir) / (safeProjName + "_" + t.name + "_heightmap_" + std::to_string(t.id) + ".png")).string();
+        // Save binary heightmap (Float32 fidelity)
+        std::string binPath = (std::filesystem::path(terrainDir) / binFilename).string();
+        saveHeightmapBinary(&t, binPath);
+
+        // Save heightmap as PNG (Preview / Legacy)
+        std::string hmPath = (std::filesystem::path(terrainDir) / hmFilename).string();
         saveMapPNG(t.heightmap.data, t.heightmap.width, t.heightmap.height, hmPath);
         
         // Splat map
@@ -3087,11 +3109,33 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
             terrain.heightmap.scale_y = hm.value("scale_y", 10.0f);
             
             // Load heightmap (Binary for v1, PNG for v2+)
-            if (hm.contains("file")) {
-                std::string hmFilename = hm["file"].get<std::string>();
-                std::string hmPath = (std::filesystem::path(terrainDir) / hmFilename).string();
+            if (hm.contains("binary_file")) {
+                 std::string binFile = hm["binary_file"];
+                 std::string binPath = (std::filesystem::path(terrainDir) / binFile).string();
+                 if (std::filesystem::exists(binPath)) {
+                     SCENE_LOG_INFO("Loading binary heightmap: " + binFile);
+                     loadHeightmapBinary(&terrain, binPath);
+                 } else {
+                     SCENE_LOG_WARN("Binary heightmap missing, falling back to PNG: " + binFile);
+                     // Fallback to PNG below
+                     if (hm.contains("file")) {
+                         std::string hmFile = hm["file"];
+                         std::string hmPath = (std::filesystem::path(terrainDir) / hmFile).string();
+                         int w, h; // Need to declare w, h for loadMapPNG
+                         loadMapPNG(terrain.heightmap.data, w, h, hmPath);
+                         terrain.heightmap.width = w;
+                         terrain.heightmap.height = h;
+                     } else {
+                         // Initialize flat heightmap if no file found
+                         terrain.heightmap.data.resize(terrain.heightmap.width * terrain.heightmap.height, 0.0f);
+                     }
+                 }
+            }
+            else if (hm.contains("file")) {
+                std::string hmFile = hm["file"];
+                std::string hmPath = (std::filesystem::path(terrainDir) / hmFile).string();
                 if (std::filesystem::exists(hmPath)) {
-                    if (version < 2 && hmFilename.find(".raw") != std::string::npos) {
+                    if (version < 2 && hmFile.find(".raw") != std::string::npos) { // Original v1 raw check
                         loadHeightmapBinary(&terrain, hmPath);
                     } else {
                         int w, h;
@@ -3682,15 +3726,14 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     auto& height = terrain->heightmap.data;
     float cellSize = terrain->heightmap.scale_xz / (float)w;
     
-    SCENE_LOG_INFO("[GPU Fluvial] Starting CPU-Parity Simulation...");
+    SCENE_LOG_INFO("[GPU Fluvial] Starting High-Power River Carver...");
     
     // Alloc temporary buffers
-    // GPU Buffers
-    CUdeviceptr d_height, d_flow, d_hardness, d_mask;
+    CUdeviceptr d_height, d_flow, d_mask, d_hardness;
     cuMemAlloc(&d_height, numPixels * sizeof(float));
     cuMemAlloc(&d_flow, numPixels * sizeof(float));
-    cuMemAlloc(&d_hardness, numPixels * sizeof(float));
     cuMemAlloc(&d_mask, numPixels * sizeof(float));
+    cuMemAlloc(&d_hardness, numPixels * sizeof(float));
     
     if (!terrain->hardnessMap.empty()) {
         cuMemcpyHtoD(d_hardness, terrain->hardnessMap.data(), numPixels * sizeof(float));
@@ -3698,10 +3741,9 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
         cuMemsetD8(d_hardness, 0, numPixels * sizeof(float));
     }
 
-    if (!mask.empty() && mask.size() == numPixels) {
+    if (!mask.empty()) {
         cuMemcpyHtoD(d_mask, mask.data(), numPixels * sizeof(float));
     } else {
-        // Create full-white mask if none provided
         std::vector<float> fullMask(numPixels, 1.0f);
         cuMemcpyHtoD(d_mask, fullMask.data(), numPixels * sizeof(float));
     }
@@ -3715,36 +3757,17 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     sp.minSlope = p.minSlope;
     sp.erosionRadius = p.erosionRadius;
     
-    // Multipass Stream Power Simulation
-
-    int tx = 16, ty = 16;
-    int bx = (w + tx - 1) / tx;
-    int by = (h + ty - 1) / ty;
-    
-    // Simulation Loop - Use user's iterations directly (scaled)
-    int steps = p.iterations; // Direct user control
-    if (steps < 200) steps = 200; // Minimum for anything to happen
-    if (steps > 10000) steps = 10000; // Increased cap for channel formation
-
-    SCENE_LOG_INFO("[GPU Fluvial] Simulating " + std::to_string(steps) + " steps...");
-    
-    // Simulation passes
-    
-    // Old loop removed
-    
-    // Clean post-processing
-
-    // Helper to update flow (Enhanced MFD + Organic Jitter)
+    // --------------------------------------------------------
+    // Step 1: Flow Accumulation (CPU for accuracy, then HtoD)
+    // --------------------------------------------------------
     auto updateFlowCPU = [&]() {
         std::vector<float> filledHeight = height;
-        std::vector<int> drainageParent(numPixels, -1);
         std::vector<bool> processed(numPixels, false);
         std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> pq;
-        const float eps = 0.00001f;
+        const float eps = 0.0001f;
         int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
         int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
 
-        // 1. Pit Filling (Priority Flood) - Essential for drainage
         for (int x = 0; x < w; x++) {
             pq.push({filledHeight[x], x}); pq.push({filledHeight[(h-1)*w + x], (h-1)*w + x});
             processed[x] = processed[(h-1)*w + x] = true;
@@ -3761,80 +3784,42 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 if (processed[nIdx]) continue;
-                // Add micro-jitter to heights during drainage calculation to break grid
-                float jitter = ((float)(nIdx * 1103515245 + 12345) / 2147483647.0f) * 0.000001f;
-                float tH = fmaxf(filledHeight[nIdx], cH + eps + jitter);
-                filledHeight[nIdx] = tH; drainageParent[nIdx] = idx;
+                float tH = fmaxf(filledHeight[nIdx], cH + eps);
+                filledHeight[nIdx] = tH; 
                 processed[nIdx] = true; pq.push({tH, nIdx});
             }
         }
 
-        // 2. Multi-Directional Flow Accumulation (MFD)
         std::vector<int> indices(numPixels);
         for (int i = 0; i < numPixels; i++) indices[i] = i;
-        // Sort descending
         std::sort(indices.begin(), indices.end(), [&](int a, int b) { return filledHeight[a] > filledHeight[b]; });
         
-        if (terrain->flowMap.size() != numPixels) terrain->flowMap.assign(numPixels, 1.0f);
-        std::fill(terrain->flowMap.begin(), terrain->flowMap.end(), 1.0f);
-
+        terrain->flowMap.assign(numPixels, 1.0f);
         for (int i : indices) {
             int x = i % w, y = i / w;
             float currentH = filledHeight[i];
-            float totalP = 0.0f;
-            struct Neighbor { int id; float p; };
-            std::vector<Neighbor> candidates;
-
+            int bestN = -1; float maxSlope = 0.0f;
             for (int d = 0; d < 8; d++) {
                 int nx = x + dx8[d], ny = y + dy8[d];
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 float dist = (abs(dx8[d]) + abs(dy8[d]) == 2) ? 1.414f : 1.0f;
                 float slope = (currentH - filledHeight[nIdx]) / (dist * cellSize);
-                
-                if (slope > 0.0f) {
-                    // MFD weight: slope^p where p=1.1-1.3 for organic look
-                    float p = powf(slope, 1.3f); 
-                    candidates.push_back({nIdx, p});
-                    totalP += p;
-                }
+                if (slope > maxSlope) { maxSlope = slope; bestN = nIdx; }
             }
-
-            if (totalP > 0.0f) {
-                for (auto& n : candidates) {
-                    terrain->flowMap[n.id] += terrain->flowMap[i] * (n.p / totalP);
-                }
-            } else if (drainageParent[i] != -1) {
-                // FLAT AREA: Diffuse drainage to avoid 'circuit board' lines
-                float parentWeight = 0.6f;
-                float neighborWeight = (1.0f - parentWeight) / 8.0f;
-                terrain->flowMap[drainageParent[i]] += terrain->flowMap[i] * parentWeight;
-                for (int d = 0; d < 8; d++) {
-                    int nx = x + dx8[d], ny = y + dy8[d];
-                    if (nx >= 0 && nx < w && ny >= 0 && ny < h)
-                        terrain->flowMap[ny * w + nx] += terrain->flowMap[i] * neighborWeight;
-                }
-            }
+            if (bestN != -1) terrain->flowMap[bestN] += terrain->flowMap[i];
         }
-        
-        // 3. Flow Diffusion Pass (Prevents 'Circuit Board' artifacts)
-        std::vector<float> diffused = terrain->flowMap;
-        for (int y = 1; y < h - 1; y++) {
-            for (int x = 1; x < w - 1; x++) {
-                int idx = y * w + x;
-                float sum = terrain->flowMap[idx] * 2.0f;
-                for (int d = 0; d < 8; d++) sum += terrain->flowMap[(y + dy8[d]) * w + (x + dx8[d])];
-                diffused[idx] = sum / 10.0f;
-            }
-        }
-        terrain->flowMap = diffused;
     };
 
-    // ========================================================
-    // MULTI-PASS SIMULATION
-    // ========================================================
-    int numPasses = std::clamp(p.iterations / 25000, 1, 20);
-    SCENE_LOG_INFO("[GPU Fluvial] Simulating " + std::to_string(numPasses) + " passes on GPU...");
+    // --------------------------------------------------------
+    // Step 2: Multi-Pass Carving
+    // --------------------------------------------------------
+    int numPasses = std::max(1, p.iterations / 1000); // 1 pass per 1000 iterations for carving
+    if (numPasses > 10) numPasses = 10;
+    
+    int tx = 16, ty = 16;
+    int bx = (w + tx - 1) / tx;
+    int by = (h + ty - 1) / ty;
 
     for (int pass = 0; pass < numPasses; pass++) {
         updateFlowCPU();
@@ -3848,44 +3833,17 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
         cuMemcpyDtoH(height.data(), d_height, numPixels * sizeof(float));
     }
 
-    // ========================================================
-    // CLEANUP & POST-PROC
-    // ========================================================
+    // Cleanup
     cuMemFree(d_height);
     cuMemFree(d_flow);
-    cuMemFree(d_hardness);
     cuMemFree(d_mask);
+    cuMemFree(d_hardness);
 
-    SCENE_LOG_INFO("[GPU Fluvial] Performing Edge Smoothing and Thermal finish...");
-    
-    // Edge fade-out (CPU)
-    int edgeFadeWidth = std::max(5, w / 50);
-    #pragma omp parallel for
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = y * w + x;
-            int distFromEdge = std::min({x, y, w - 1 - x, h - 1 - y});
-            if (distFromEdge < edgeFadeWidth) {
-                float t = (float)distFromEdge / (float)edgeFadeWidth;
-                float smoothT = t * t * (3.0f - 2.0f * t);
-                int inwardX = std::clamp(x + (x < w/2 ? edgeFadeWidth : -edgeFadeWidth), 0, w-1);
-                int inwardY = std::clamp(y + (y < h/2 ? edgeFadeWidth : -edgeFadeWidth), 0, h-1);
-                float inwardHeight = height[inwardY * w + inwardX];
-                height[idx] = height[idx] * smoothT + inwardHeight * (1.0f - smoothT);
-            }
-        }
-    }
-
-    // Thermal finish (CPU)
-    ThermalErosionParams tp;
-    tp.iterations = 15;
-    tp.talusAngle = 0.4f;
-    tp.erosionAmount = 0.4f;
-    thermalErosion(terrain, tp, mask); // This also calls updateTerrainMesh
-
+    updateTerrainMesh(terrain);
     terrain->dirty_mesh = true;
-    SCENE_LOG_INFO("[GPU Fluvial] Complete. Parity achieved.");
+    SCENE_LOG_INFO("[GPU Fluvial] River Carving Complete.");
 }
+
 
 void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask) {
     if (!terrain) return;

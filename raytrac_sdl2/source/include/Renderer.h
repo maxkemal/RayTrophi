@@ -114,7 +114,7 @@ public:
         const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
         const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
         OptixWrapper* optix_gpu = nullptr, bool use_optix = false, UIContext* ui_ctx = nullptr);
-    bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true);
+    bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true, bool force_bind_pose = false);
     std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame
     
     // Wind Animation System
@@ -155,6 +155,9 @@ public:
     // Update OptiX Gas Volumes (fast path - no geometry rebuild)
     // Updates texture handles, transforms, and shader parameters for gas volumes
     void updateOptiXGasVolumes(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+
+    // Fast update for mesh material binding (avoids full rebuild)
+    void updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id);
    
     void initializeBuffers(int image_width, int image_height);
     World world;

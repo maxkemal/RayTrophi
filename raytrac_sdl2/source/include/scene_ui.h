@@ -113,6 +113,7 @@ public:
     bool show_forcefield_tab = true;   // Force Field tab (Default open)
     bool show_world_tab = true;        // World & Sky tab (Default open)
     bool show_hair_tab = true;         // Hair & Fur tab (Default open)
+    bool show_modifiers_tab = true;    // Modifiers & Sculpt tab (Default open)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Hair/Fur System
@@ -172,7 +173,9 @@ public:
      void drawControlsContent(); // New method for controls/help tab
      void drawWorldContent(UIContext& ctx);
      void drawSceneHierarchy(UIContext& ctx);  // Scene hierarchy / outliner panel
+     void drawModifiersPanel(UIContext& ctx);  // Modifiers & Sculpting panel
      void drawMaterialPanel(UIContext& ctx);   // Material/Texture editor for selected object
+     void drawPrincipledBSDFEditor(class PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx); // Reusable editor widget
      void drawSelectionBoundingBox(UIContext& ctx);  // Draw bounding box for selected object
      void drawTransformGizmo(UIContext& ctx);  // ImGuizmo transform gizmo   
      void drawCameraGizmos(UIContext& ctx);    // Draw camera icons in viewport
@@ -237,6 +240,8 @@ public:
      void updateProjectFromScene(UIContext& ctx);  // Sync scene state to project data
      void addProceduralPlane(UIContext& ctx);      // Add a procedural plane mesh
      void addProceduralCube(UIContext& ctx);       // Add a procedural cube mesh
+     void addProceduralSphere(UIContext& ctx);     // Add a procedural UV sphere mesh
+     void addProceduralCylinder(UIContext& ctx);   // Add a procedural cylinder mesh
      float panel_alpha = 0.9f; // Default transparency (0.9 = mostly opaque)
      
      // Scene loading state (public for Main.cpp popup access)
@@ -432,6 +437,9 @@ private:
     float titleResetTime = 0.0f;
     bool titleChanged = false;
 
+    std::string serialize();  // Serialize ImGui layout and SceneUI state
+    void deserialize(const std::string& data); // Deserialize and apply UI state
+
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
     // Fast lookup from Triangle pointer to its index in world.objects (for BVH Picking)
     std::unordered_map<const class Triangle*, int> tri_to_index;
@@ -476,6 +484,10 @@ private:
     void drawMarqueeRect();  // Draw the selection rectangle
     
    
+    
+    // Texture Safety
+    std::vector<std::shared_ptr<class Texture>> texture_graveyard;
+    void manageTextureGraveyard();
     
     // Terrain Node Graph (V2 System)
     TerrainNodesV2::TerrainNodeGraphV2 terrainNodeGraph;

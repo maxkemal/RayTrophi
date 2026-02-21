@@ -64,6 +64,54 @@ HairSystem::~HairSystem() {
     }
 }
 
+void HairSystem::addMaterial(const std::string& name, const HairMaterialParams& params) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_materials[name] = params;
+}
+
+HairMaterialParams* HairSystem::getSharedMaterial(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    auto it = m_materials.find(name);
+    return (it != m_materials.end()) ? &it->second : nullptr;
+}
+
+const HairMaterialParams* HairSystem::getSharedMaterial(const std::string& name) const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    auto it = m_materials.find(name);
+    return (it != m_materials.end()) ? &it->second : nullptr;
+}
+
+void HairSystem::removeMaterial(const std::string& name) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_materials.erase(name);
+    
+    // Unassign from all grooms using it
+    for (auto& [gName, groom] : m_grooms) {
+        if (groom.materialName == name) {
+            groom.materialName = "";
+        }
+    }
+}
+
+std::vector<std::string> HairSystem::getMaterialNames() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    std::vector<std::string> names;
+    names.reserve(m_materials.size());
+    for (const auto& [name, mat] : m_materials) {
+        names.push_back(name);
+    }
+    return names;
+}
+
+void HairSystem::assignMaterialToGroom(const std::string& groomName, const std::string& materialName) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    auto it = m_grooms.find(groomName);
+    if (it != m_grooms.end()) {
+        it->second.materialName = materialName;
+    }
+}
+
+
 std::vector<std::string> HairSystem::getGroomNames() const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     std::vector<std::string> names;
@@ -330,7 +378,7 @@ void HairSystem::interpolateChildren(HairGroom& groom) {
 // BVH Building (Embree Curves)
 // ============================================================================
 
-void HairSystem::buildBVH() {
+void HairSystem::buildBVH(bool includeInterpolated) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     // Get Embree device (assuming it's available globally or passed in)
     // For now, we'll create a local device - in production, share with EmbreeBVH
@@ -357,10 +405,13 @@ void HairSystem::buildBVH() {
     
     // Add hair geometry for each groom
     for (auto& [name, groom] : m_grooms) {
+        if (!groom.isVisible) continue;
         // ... (rest of the logic remains similar but with mapping data)
         std::vector<const HairStrand*> allStrands;
         for (const auto& s : groom.guides) allStrands.push_back(&s);
-        for (const auto& s : groom.interpolated) allStrands.push_back(&s);
+        if (includeInterpolated) {
+            for (const auto& s : groom.interpolated) allStrands.push_back(&s);
+        }
         
         if (allStrands.empty()) continue;
         
@@ -534,6 +585,11 @@ void HairSystem::buildBVH() {
     
     rtcCommitScene(m_embreeScene);
     m_bvhDirty = false;
+    
+    // Clear dirty flags for all grooms now that they are in the BVH
+    for (auto& [name, groom] : m_grooms) {
+        groom.isDirty = false;
+    }
 }
 
 // ============================================================================
@@ -652,8 +708,19 @@ bool HairSystem::intersect(
     auto it = m_geomToGroom.find(rayhit.hit.geomID);
     if (it != m_geomToGroom.end()) {
         const HairGroom& groom = m_grooms.at(it->second);
-        hitInfo.material = groom.material;
         hitInfo.groomName = it->second;
+
+        // Use shared material if assigned, otherwise fallback to per-groom material
+        if (!groom.materialName.empty()) {
+            auto matIt = m_materials.find(groom.materialName);
+            if (matIt != m_materials.end()) {
+                hitInfo.material = matIt->second;
+            } else {
+                hitInfo.material = groom.material;
+            }
+        } else {
+            hitInfo.material = groom.material;
+        }
     }
 
 
@@ -709,6 +776,7 @@ bool HairSystem::intersectVolumetric(
     };
 
     for (const auto& [name, groom] : m_grooms) {
+        if (!groom.isVisible) continue;
         Matrix4x4 l2w = groom.transform;
         
         for (const auto& strand : groom.guides) {
@@ -741,7 +809,19 @@ bool HairSystem::intersectVolumetric(
                         hitInfo.t = t;
                         hitInfo.position = pOnSeg;
                         hitInfo.groomName = name;
-                        hitInfo.material = groom.material;
+                        
+                        // Use shared material if assigned
+                        if (!groom.materialName.empty()) {
+                            auto matIt = m_materials.find(groom.materialName);
+                            if (matIt != m_materials.end()) {
+                                hitInfo.material = matIt->second;
+                            } else {
+                                hitInfo.material = groom.material;
+                            }
+                        } else {
+                            hitInfo.material = groom.material;
+                        }
+
                         hitInfo.strandID = strand.strandID;
                         
                         float baseV = (float)i / (strand.groomedPositions.size() - 1);
@@ -808,6 +888,7 @@ HairGPUData HairSystem::prepareGPUData() const {
     
     std::vector<HairStrand> allStrands;
     for (const auto& [name, groom] : m_grooms) {
+        if (!groom.isVisible) continue;
         allStrands.insert(allStrands.end(), groom.guides.begin(), groom.guides.end());
         allStrands.insert(allStrands.end(), groom.interpolated.begin(), groom.interpolated.end());
     }
@@ -826,6 +907,7 @@ bool HairSystem::getOptiXCurveData(
     std::vector<uint32_t>& outStrandIDs,
     std::vector<float>& outTangents3,
     std::vector<float>& outRootUVs2,
+    std::vector<float>& outStrandV,
     size_t& outVertexCount,
     size_t& outSegmentCount,
     bool includeInterpolated
@@ -835,23 +917,26 @@ bool HairSystem::getOptiXCurveData(
     outStrandIDs.clear();
     outTangents3.clear();
     outRootUVs2.clear();
+    outStrandV.clear();
     outVertexCount = 0;
     outSegmentCount = 0;
 
     bool globalUseBSpline = false;
     
     for (const auto& [name, groom] : m_grooms) {
+        if (!groom.isVisible) continue;
         std::vector<float> v4;
         std::vector<unsigned int> indices;
-        std::vector<uint32_t> strands;
+        std::vector<uint32_t> strands_uint;
         std::vector<float> tangents;
         std::vector<float> uvs;
+        std::vector<float> strandVs;
         size_t vc = 0, sc = 0;
         HairMaterialParams dummyParams;
         int dummyID = 0;
         int dummyMeshID = -1;
         
-        bool isBSpline = getOptiXCurveDataByGroom(name, v4, indices, strands, tangents, uvs, vc, sc, dummyParams, dummyID, dummyMeshID, includeInterpolated);
+        bool isBSpline = getOptiXCurveDataByGroom(name, v4, indices, strands_uint, tangents, uvs, strandVs, vc, sc, dummyParams, dummyID, dummyMeshID, includeInterpolated);
         if (isBSpline) globalUseBSpline = true;
         
         // Offset indices for global buffer
@@ -860,9 +945,10 @@ bool HairSystem::getOptiXCurveData(
         
         outVertices4.insert(outVertices4.end(), v4.begin(), v4.end());
         outIndices.insert(outIndices.end(), indices.begin(), indices.end());
-        outStrandIDs.insert(outStrandIDs.end(), strands.begin(), strands.end());
+        outStrandIDs.insert(outStrandIDs.end(), strands_uint.begin(), strands_uint.end());
         outTangents3.insert(outTangents3.end(), tangents.begin(), tangents.end());
         outRootUVs2.insert(outRootUVs2.end(), uvs.begin(), uvs.end());
+        outStrandV.insert(outStrandV.end(), strandVs.begin(), strandVs.end());
         
         outVertexCount += vc;
         outSegmentCount += sc;
@@ -877,6 +963,7 @@ bool HairSystem::getOptiXCurveDataByGroom(
     std::vector<uint32_t>& outStrandIDs,
     std::vector<float>& outTangents3,
     std::vector<float>& outRootUVs2,
+    std::vector<float>& outStrandV,
     size_t& outVertexCount,
     size_t& outSegmentCount,
     HairMaterialParams& outMatParams,
@@ -889,6 +976,7 @@ bool HairSystem::getOptiXCurveDataByGroom(
     if (it == m_grooms.end()) return false;
     
     const auto& groom = it->second;
+    if (!groom.isVisible) return false;
     outMatParams = groom.material;
     outMatID = groom.params.defaultMaterialID;
     
@@ -969,6 +1057,10 @@ bool HairSystem::getOptiXCurveDataByGroom(
                 outTangents3.push_back(tangent.x); outTangents3.push_back(tangent.y); outTangents3.push_back(tangent.z);
                 outStrandIDs.push_back(strand->strandID);
                 outRootUVs2.push_back(strand->rootUV.u); outRootUVs2.push_back(strand->rootUV.v);
+                
+                // Calculate V for the segment (middle of the segment)
+                float v_segment = static_cast<float>(i + 0.5f) / (nPoints - 1);
+                outStrandV.push_back(v_segment);
             }
         } else {
             for (const auto& pt : strand->points) {
@@ -989,6 +1081,10 @@ bool HairSystem::getOptiXCurveDataByGroom(
                 outTangents3.push_back(tangent.x); outTangents3.push_back(tangent.y); outTangents3.push_back(tangent.z);
                 outStrandIDs.push_back(strand->strandID);
                 outRootUVs2.push_back(strand->rootUV.u); outRootUVs2.push_back(strand->rootUV.v);
+                
+                // Calculate V for the segment (middle of the segment)
+                float v_segment = static_cast<float>(i + 0.5f) / (nPoints - 1);
+                outStrandV.push_back(v_segment);
             }
         }
     }
@@ -1067,6 +1163,38 @@ void HairSystem::removeGroom(const std::string& name) {
         
         m_bvhDirty = true;
     }
+}
+
+bool HairSystem::renameGroom(const std::string& oldName, const std::string& newName) {
+    if (oldName == newName || newName.empty()) return false;
+    
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    
+    // Check if new name is already taken
+    if (m_grooms.count(newName)) return false;
+    
+    auto it = m_grooms.find(oldName);
+    if (it != m_grooms.end()) {
+        // Create new entry
+        HairGroom groom = std::move(it->second);
+        groom.name = newName;
+        
+        // Remove old entry and insert new one
+        m_grooms.erase(it);
+        m_grooms[newName] = std::move(groom);
+        
+        // Update auxiliary mappings if they point to this name
+        for (auto& pair : m_geomToGroom) {
+            if (pair.second == oldName) {
+                pair.second = newName;
+            }
+        }
+        
+        m_bvhDirty = true; 
+        return true;
+    }
+    
+    return false;
 }
 
 
@@ -1199,7 +1327,7 @@ void HairSystem::markDirty(const std::string& groomName) {
     }
 }
 
-void HairSystem::updateAllTransforms(const std::vector<std::shared_ptr<Hittable>>& sceneObjects) {
+void HairSystem::updateAllTransforms(const std::vector<std::shared_ptr<Hittable>>& sceneObjects, const std::vector<Matrix4x4>& boneMatrices) {
     if (m_grooms.empty()) return;
 
     // 1. First pass: Update from cached pointers where possible
@@ -1209,7 +1337,7 @@ void HairSystem::updateAllTransforms(const std::vector<std::shared_ptr<Hittable>
 
         // Check if we have skinning data
         if (!groom.boundTriangles.empty() && groom.boundTriangles[0]->hasSkinData()) {
-            updateSkinnedGroom(name);
+            updateSkinnedGroom(name, boneMatrices);
             continue; // Skip rigid transform update
         }
 
@@ -1325,6 +1453,27 @@ void HairSystem::addStrandsAtPosition(const std::string& groomName, const Vec3& 
             strand.groomedPositions[p] = rootPos + localNormal * (t * length);
         }
         
+        // --- SKINNING FIX FOR BRUSH-ADDED STRANDS ---
+        // We need barycentric coords and triangle index for skinning to work.
+        // For now, we find the closest triangle in boundTriangles.
+        strand.triangleIndex = 0;
+        strand.barycentricUV = Vec2(0.33f, 0.33f); // Fallback
+        strand.restGroomedPositions = strand.groomedPositions;
+        
+        float minDistSq = 1e30f;
+        for (size_t tIdx = 0; tIdx < groom.boundTriangles.size(); ++tIdx) {
+            const auto& tri = groom.boundTriangles[tIdx];
+            Vec3 cnt = (tri->getV0() + tri->getV1() + tri->getV2()) * 0.333333f;
+            Vec3 cntLocal = inverseTransform.transform_point(cnt);
+            float distSq = (cntLocal - rootPos).length_squared();
+            if (distSq < minDistSq) {
+                minDistSq = distSq;
+                strand.triangleIndex = (uint32_t)tIdx;
+                // Rough barycentric approximation, ideally we project rootPos onto the triangle
+                strand.barycentricUV = Vec2(0.33f, 0.33f);
+            }
+        }
+        
         groom.guides.push_back(std::move(strand));
     }
 
@@ -1389,13 +1538,14 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
     for (auto& strand : groom.guides) {
         strand.points.resize(params.pointsPerStrand);
         
-        Vec3 rootPos = strand.baseRootPos;
-        Vec3 normal = strand.rootNormal;
-        float strandLength = strand.baseLength;
-        
         // Initialize groomedPositions if they don't exist or if point count changed
+        // IMPORTANT: We do NOT do this every time, because skinning modifies groomedPositions.
+        // We only initialize it here once (or if points count changes) using Bind Pose.
         if (strand.groomedPositions.size() != params.pointsPerStrand) {
             strand.groomedPositions.resize(params.pointsPerStrand);
+            Vec3 rootPos = strand.baseRootPos;
+            Vec3 normal = strand.rootNormal;
+            float strandLength = strand.baseLength;
             float div = (params.pointsPerStrand > 1) ? (float)(params.pointsPerStrand - 1) : 1.0f;
             for (uint32_t p = 0; p < params.pointsPerStrand; ++p) {
                 float t = static_cast<float>(p) / div;
@@ -1412,6 +1562,11 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
             // Re-apply the same logic as generateOnMesh
             point.position = strand.groomedPositions[p];
 
+            // Extract implied normal and length from groomed positions for styling
+            Vec3 impliedDiff = strand.groomedPositions.back() - strand.groomedPositions.front();
+            float strandLength = impliedDiff.length();
+            Vec3 normal = impliedDiff.normalize();
+            if (strandLength < 1e-4f) { normal = Vec3(0, 1, 0); strandLength = 1e-4f; }
             
             if (params.waveAmplitude > 0.0f && params.waveFrequency > 0.0f) {
                 float wave = sinf(t * params.waveFrequency * TWO_PI + strand.randomSeed * TWO_PI);
@@ -1656,6 +1811,7 @@ static Matrix4x4 jsonToMat4(const nlohmann::json& j) {
 nlohmann::json HairSystem::serialize(std::ostream* binaryOut) const {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     nlohmann::json j;
+    j["materials"] = m_materials;
     nlohmann::json grooms_arr = nlohmann::json::array();
 
     for (const auto& [name, groom] : m_grooms) {
@@ -1665,6 +1821,7 @@ nlohmann::json HairSystem::serialize(std::ostream* binaryOut) const {
         g["params"] = groom.params;
         g["transform"] = mat4ToJson(groom.transform);
         g["initialMeshTransform"] = mat4ToJson(groom.initialMeshTransform);
+        g["materialName"] = groom.materialName;
         g["material"] = groom.material;
 
         if (binaryOut) {
@@ -1763,6 +1920,10 @@ void HairSystem::deserialize(const nlohmann::json& j, std::istream* binaryIn) {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     clearAll();
 
+    if (j.contains("materials")) {
+        m_materials = j["materials"].get<std::unordered_map<std::string, HairMaterialParams>>();
+    }
+
     if (j.contains("grooms")) {
         for (const auto& g : j["grooms"]) {
             std::string name = g.value("name", "undefined");
@@ -1773,6 +1934,7 @@ void HairSystem::deserialize(const nlohmann::json& j, std::istream* binaryIn) {
             if (g.contains("params")) groom.params = g["params"];
             if (g.contains("transform")) groom.transform = jsonToMat4(g["transform"]);
             if (g.contains("initialMeshTransform")) groom.initialMeshTransform = jsonToMat4(g["initialMeshTransform"]);
+            groom.materialName = g.value("materialName", "");
             if (g.contains("material")) groom.material = g["material"];
             
             std::string storage = g.value("storage", "json");
@@ -1844,103 +2006,6 @@ void HairSystem::deserialize(const nlohmann::json& j, std::istream* binaryIn) {
     m_statsDirty = true;
 }
 
-// ============================================================================
-// Skinning / Animation Update
-// ============================================================================
-
-void HairSystem::updateSkinnedGroom(const std::string& groomName) {
-    if (groomName.empty()) return;
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    auto it = m_grooms.find(groomName);
-    if (it == m_grooms.end()) return;
-    
-    HairGroom& groom = it->second;
-    if (groom.boundTriangles.empty()) return;
-
-    bool anyChange = false;
-
-    // Helper to get position from barycentrics
-    auto getPos = [](const Triangle& tri, float u, float v, bool original) {
-        float w = 1.0f - u - v;
-        if (original) {
-            return tri.getOriginalVertexPosition(0) * w + 
-                   tri.getOriginalVertexPosition(1) * u + 
-                   tri.getOriginalVertexPosition(2) * v;
-        } else {
-            return tri.getVertexPosition(0) * w + 
-                   tri.getVertexPosition(1) * u + 
-                   tri.getVertexPosition(2) * v;
-        }
-    };
-    
-    // Helper to get normal from barycentrics
-    auto getNorm = [](const Triangle& tri, float u, float v, bool original) {
-        float w = 1.0f - u - v;
-        if (original) {
-            return (tri.getOriginalVertexNormal(0) * w + 
-                    tri.getOriginalVertexNormal(1) * u + 
-                    tri.getOriginalVertexNormal(2) * v).normalize();
-        } else {
-            return (tri.getVertexNormal(0) * w + 
-                    tri.getVertexNormal(1) * u + 
-                    tri.getVertexNormal(2) * v).normalize();
-        }
-    };
-
-    // Update guides based on skin deformation
-    for (auto& strand : groom.guides) {
-        if (strand.triangleIndex >= groom.boundTriangles.size()) continue;
-        
-        const auto& tri = *groom.boundTriangles[strand.triangleIndex];
-        
-        // 1. Calculate Old Frame (Bind Pose) - Apply Initial Transform to match World Space Rest positions
-        Vec3 rawP0 = getPos(tri, strand.barycentricUV.u, strand.barycentricUV.v, true);
-        Vec3 rawN0 = getNorm(tri, strand.barycentricUV.u, strand.barycentricUV.v, true);
-        Vec3 P0 = groom.initialMeshTransform.transform_point(rawP0);
-        Vec3 N0 = groom.initialMeshTransform.transform_vector(rawN0).normalize();
-        
-        // 2. Calculate New Frame (Current Pose)
-        Vec3 P1 = getPos(tri, strand.barycentricUV.u, strand.barycentricUV.v, false);
-        Vec3 N1 = getNorm(tri, strand.barycentricUV.u, strand.barycentricUV.v, false);
-        
-        // 3. Compute Rotation (align N0 to N1)
-        Quaternion rot = Quaternion::rotationBetween(N0, N1);
-        Matrix4x4 R = rot.toMatrix();
-        
-        // 4. Update all control points
-        // Use restGroomedPositions as the source of truth for the shape
-        if (strand.restGroomedPositions.empty()) {
-            strand.restGroomedPositions = strand.groomedPositions;
-        }
-        
-        // Just in case size changed (e.g. painting added points)
-        if (strand.restGroomedPositions.size() != strand.groomedPositions.size()) {
-             strand.restGroomedPositions = strand.groomedPositions;
-             continue; // Skip update this frame, wait for next where size matches or re-init
-        }
-
-        for (size_t i = 0; i < strand.groomedPositions.size(); ++i) {
-            // Transform point: New = P1 + R * (Old - P0)
-            Vec3 oldPt = strand.restGroomedPositions[i];
-            Vec3 localOffset = oldPt - P0;
-            Vec3 revolvedOffset = R.transform_vector(localOffset); 
-            strand.groomedPositions[i] = P1 + revolvedOffset;
-        }
-        anyChange = true;
-    }
-
-    if (anyChange) {
-        // Re-interpolate children to follow new guide positions
-        interpolateChildren(groom);
-        
-        // Important: Update BVH
-        m_bvhDirty = true;
-        
-        // Reset transform since we baked the deformation into the points
-        // NOTE: This assumes groomedPositions are now in World Space
-        groom.transform.setIdentity(); 
-    }
-}
 
 // ============================================================================
 // GPU Grooming / Brushing Implementation

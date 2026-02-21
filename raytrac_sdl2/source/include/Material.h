@@ -82,14 +82,8 @@ struct MaterialProperty {
 
 };
 
-// Forward declaration
-namespace MaterialNodes { class MaterialNodeGraph; }
-
 class Material {
 public:
-    // Node Graph for procedural generation
-    std::shared_ptr<MaterialNodes::MaterialNodeGraph> nodeGraph;
-    
     virtual float pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const {
         // Default: Cosine-weighted hemisphere
         float cos_theta = std::fmax(Vec3::dot(rec.normal, outgoing), 0.0);
@@ -131,8 +125,9 @@ public:
     MaterialProperty metallicProperty;
     MaterialProperty normalProperty;
     MaterialProperty opacityProperty;
-	MaterialProperty transmissionProperty;
+    MaterialProperty transmissionProperty;
     MaterialProperty emissionProperty;
+    MaterialProperty heightProperty; // Displacement / Height map
     virtual Vec2 applyTextureTransform(float u, float v) const {
         return Vec2(u, v);  // Varsayılan olarak dönüşüm uygulamaz
     }

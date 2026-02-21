@@ -62,6 +62,12 @@ struct HitRecord {
     float custom_roughness = 0.5f;
     float custom_metallic = 0.0f;
     float custom_transmission = 0.0f;
+    float custom_clearcoat = 0.0f;
+    float custom_clearcoat_roughness = 0.0f;
+    float custom_subsurface = 0.0f;
+    Vec3 custom_subsurface_color;
+    float custom_translucent = 0.0f;
+    float custom_ior = 1.45f;
  
     inline void set_face_normal(const Ray& r, const Vec3& outward_normal) {
         front_face = Vec3::dot(r.direction, outward_normal) < 0;

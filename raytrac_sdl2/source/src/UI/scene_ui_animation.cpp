@@ -64,7 +64,9 @@ void SceneUI::processAnimations(UIContext& ctx) {
                          // we skip EVALUATING the position track so the animator can drive it.
                          bool skip_eval_pos = false;
                          for (const auto& mctx : ctx.scene.importedModelContexts) {
-                             if (mctx.importName == name && mctx.useRootMotion) {
+                             // Match either the model name exactly (root node) or a prefixed node name
+                             bool nameMatch = (mctx.importName == name) || (name.find(mctx.importName + "_") == 0);
+                             if (nameMatch && mctx.useRootMotion) {
                                  skip_eval_pos = true;
                                  break;
                              }

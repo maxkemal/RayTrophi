@@ -16,22 +16,33 @@
 #include "scene_data.h"
 #include "VDBVolumeManager.h"
 #include "HittableInstance.h"
-#include "Triangle.h"
-#include "scene_ui_material_nodeeditor.hpp"
 #include "Texture.h" 
+#include "Triangle.h"
+#include "TerrainManager.h"
 
 // Static editor instance
-static MaterialNodes::MaterialNodeEditorUI matNodeEditor;
 static bool showMatNodeEditor = false;
 
 void SceneUI::resetMaterialUI() {
-    matNodeEditor.reset();
     showMatNodeEditor = false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MATERIAL & TEXTURE EDITOR PANEL
 // ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════
+// IMPLEMENTATION: manageTextureGraveyard
+// ═══════════════════════════════════════════════════════════════════════════════
+extern bool g_optix_rebuild_pending; // Ensure this is available
+
+void SceneUI::manageTextureGraveyard() {
+    // Only clear invalid textures when NO rebuild is pending
+    if (!g_optix_rebuild_pending && !texture_graveyard.empty()) {
+        texture_graveyard.clear();
+        // SCENE_LOG_INFO("Texture graveyard cleared. Old textures released.");
+    }
+}
+
 void SceneUI::drawMaterialPanel(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
 
@@ -122,7 +133,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
     }
     // Current pointer to the active material
-    uint16_t active_mat_id = used_material_ids[active_slot_index];
+    uint16_t active_mat_id = (active_slot_index < (int)used_material_ids.size()) ? used_material_ids[active_slot_index] : MaterialManager::INVALID_MATERIAL_ID;
     Material* active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
     std::string current_mat_name = active_mat_ptr ? active_mat_ptr->materialName : "None";
 
@@ -339,11 +350,29 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                         " (ID: " + std::to_string(active_mat_id) + " -> " + std::to_string(i) +
                         "). Triangles updated: " + std::to_string(count_replaced));
 
-                    // Trigger Rebuilds
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    // SYNC WITH TERRAIN MANAGER
+                    // If this object is a terrain, update the redundant material_id in TerrainObject
+                    // so it persists across rebuilds (erosion, resizing, etc.)
+                   if (!cache_it->second.empty()) {
+                        auto first_tri = cache_it->second[0].second;
+                        if (first_tri && first_tri->terrain_id != -1) {
+                            TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first_tri->terrain_id);
+                            if (terrain) {
+                                terrain->material_id = (uint16_t)i;
+                                // Also update name suffix if strictly following naming convention? Not needed.
+                                SCENE_LOG_INFO("Synced TerrainObject Material ID for: " + terrain->name);
+                            }
+                        }
+                    }
+
+                    // Trigger Updates (Optimized)
                     ctx.renderer.resetCPUAccumulation();
+                    
+                    // Update bindings on GPU (Fast Path) - CRITICAL FIX
+                    ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, (uint16_t)i);
+
                     if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                        ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
                         ctx.optix_gpu_ptr->resetAccumulation();
                     }
                     g_ProjectManager.markModified();
@@ -385,16 +414,31 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     pair.second->setMaterialID(new_id);
                 }
             }
+
+            // SYNC WITH TERRAIN MANAGER
+            if (!cache_it->second.empty()) {
+                auto first_tri = cache_it->second[0].second;
+                if (first_tri && first_tri->terrain_id != -1) {
+                    TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first_tri->terrain_id);
+                    if (terrain) {
+                        terrain->material_id = new_id;
+                        SCENE_LOG_INFO("Synced TerrainObject Material ID (New Surf) for: " + terrain->name);
+                    }
+                }
+            }
             
             // UPDATE CACHE IN-PLACE
             if (active_slot_index < (int)slots_it->second.size()) {
                 slots_it->second[active_slot_index] = new_id;
             }
-            // Trigger updates
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+            // Trigger updates (Optimized)
             ctx.renderer.resetCPUAccumulation();
+            
+            // Update bindings on GPU (Fast Path)
+            ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, new_id);
+
             if (ctx.optix_gpu_ptr) {
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
@@ -425,16 +469,31 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     pair.second->setMaterialID(new_id);
                 }
             }
+
+            // SYNC WITH TERRAIN MANAGER
+            if (!cache_it->second.empty()) {
+                auto first_tri = cache_it->second[0].second;
+                if (first_tri && first_tri->terrain_id != -1) {
+                    TerrainObject* terrain = TerrainManager::getInstance().getTerrain(first_tri->terrain_id);
+                    if (terrain) {
+                        terrain->material_id = new_id;
+                        SCENE_LOG_INFO("Synced TerrainObject Material ID (New Vol) for: " + terrain->name);
+                    }
+                }
+            }
             
             // UPDATE CACHE IN-PLACE
             if (active_slot_index < (int)slots_it->second.size()) {
                 slots_it->second[active_slot_index] = new_id;
             }
-            // Trigger updates
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+            // Trigger updates (Optimized)
             ctx.renderer.resetCPUAccumulation();
+            
+            // Update bindings on GPU (Fast Path)
+            ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, new_id);
+
             if (ctx.optix_gpu_ptr) {
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
@@ -500,12 +559,6 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                      
                      Vec3 size = max_pt - min_pt;
                      Vec3 center = min_pt + size * 0.5f;
-                     
-                     // Update selected object transform if it's a HittableInstance
-                     #include "HittableInstance.h" 
-                     // (Ideally include at top, but for snippet correctness here inside function is messy. 
-                     //  I will rely on the user to move it or I should have added it at top.
-                     //  Actually, I'll allow this snippet if the tool supports it, but better to just use correct type logic.)
                      
                      // Update selected object using generic TransformHandle interface
                      auto transform_handle = sel.selected.object->getTransformHandle();
@@ -720,658 +773,580 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
     }
 
-    // ... inside SceneUI::drawMaterialPanel ...
-
     else if (pbsdf) {
-        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "[Surface Properties]");
-        
-        bool changed = false;
-        bool texture_changed = false;
-        
-        // Node Editor Toggle
-       /* ImGui::SameLine();
-        if (ImGui::Button("Edit Nodes")) {
-            showMatNodeEditor = !showMatNodeEditor;
-        }*/
-        
-        // ensure graph exists if we are going to edit it
-        if (!active_mat_ptr->nodeGraph) {
-            active_mat_ptr->nodeGraph = std::make_shared<MaterialNodes::MaterialNodeGraph>();
-            
-            // AUTO-IMPORT Logic
-            auto* graph = active_mat_ptr->nodeGraph.get();
-            graph->clear();
-            
-            auto* outNode = graph->addNode<MaterialNodes::MaterialOutputNode>();
-            outNode->x = 600; outNode->y = 200;
-            
-            int yPos = 50;
-            
-            auto ProcessProp = [&](MaterialProperty& prop, int inputIdx, const char* name, bool isColor) {
-                 if (prop.texture && !prop.texture->name.empty()) {
-                     auto* texNode = graph->addNode<MaterialNodes::ImageTextureNode>();
-                     texNode->x = 200;
-                     texNode->y = (float)yPos;
-                     texNode->name = std::string(name) + " Tex";
-                     texNode->filePath = prop.texture->name;
-                     texNode->loadFile();
-                     
-                     // Connect
-                     graph->addLink(texNode->outputs[0].id, outNode->inputs[inputIdx].id);
-                 } else {
-                     if (isColor) {
-                         auto* rgbNode = graph->addNode<MaterialNodes::RGBNode>();
-                         rgbNode->x = 200;
-                         rgbNode->y = (float)yPos;
-                         rgbNode->name = std::string(name) + " Color";
-                         rgbNode->color = ImVec4(prop.color.x, prop.color.y, prop.color.z, 1.0f);
-                         graph->addLink(rgbNode->outputs[0].id, outNode->inputs[inputIdx].id);
-                     } else {
-                         auto* valNode = graph->addNode<MaterialNodes::ValueNode>();
-                         valNode->x = 200;
-                         valNode->y = (float)yPos;
-                         valNode->name = std::string(name) + " Val";
-                         valNode->value = (name == "Metallic") ? prop.intensity : prop.intensity; // Roughness uses color.x effectively in generic prop, but intensity is safer for single val
-                         
-                         // Check special cases
-                         if (std::string(name) == "Roughness") valNode->value = prop.color.x; // Roughness stored in color.x usually? Or intensity?
-                         // MaterialProperty: color, intensity.
-                         // PrincipledBSDF sets roughnessProperty.color.x = roughness.
-                         
-                         graph->addLink(valNode->outputs[0].id, outNode->inputs[inputIdx].id);
-                     }
-                 }
-                 yPos += 150;
-            };
-            
-            // 0:BaseColor, 1:Metallic, 2:Roughness, 3:Emission
-            ProcessProp(pbsdf->albedoProperty, 0, "Albedo", true);
-            ProcessProp(pbsdf->metallicProperty, 1, "Metallic", false);
-            ProcessProp(pbsdf->roughnessProperty, 2, "Roughness", false);
-            ProcessProp(pbsdf->emissionProperty, 3, "Emission", true);
-            
-            // active_mat_ptr->nodeGraph->createDefaultGraph(); // Only if we failed? No, auto-import overrides default.
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // HELPER LAMBDAS (Moved before Node Editor for Auto-Update)
-        // ─────────────────────────────────────────────────────────────────────
-
-        // 1. Sync GPU Material
-        auto SyncGpuMaterial = [&](PrincipledBSDF* mat) {
-            if (!mat->gpuMaterial) mat->gpuMaterial = std::make_shared<GpuMaterial>();
-
-            Vec3 alb = mat->albedoProperty.color;
-            mat->gpuMaterial->albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-            mat->gpuMaterial->roughness = (float)mat->roughnessProperty.color.x;
-            mat->gpuMaterial->metallic = (float)mat->metallicProperty.intensity;
-
-            Vec3 em = mat->emissionProperty.color;
-            float emStr = mat->emissionProperty.intensity;
-            mat->gpuMaterial->emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-
-            mat->gpuMaterial->ior = mat->ior;
-            mat->gpuMaterial->transmission = mat->transmission;
-            mat->gpuMaterial->opacity = mat->opacityProperty.alpha;
-            
-            // SSS (Random Walk)
-            mat->gpuMaterial->subsurface = mat->subsurface;
-            Vec3 sssColor = mat->subsurfaceColor;
-            mat->gpuMaterial->subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-            Vec3 sssRadius = mat->subsurfaceRadius;
-            mat->gpuMaterial->subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-            mat->gpuMaterial->subsurface_scale = mat->subsurfaceScale;
-            mat->gpuMaterial->subsurface_anisotropy = mat->subsurfaceAnisotropy;
-            mat->gpuMaterial->subsurface_ior = mat->subsurfaceIOR;
-            
-            // Clear Coat
-            mat->gpuMaterial->clearcoat = mat->clearcoat;
-            mat->gpuMaterial->clearcoat_roughness = mat->clearcoatRoughness;
-            
-            // Translucent
-            mat->gpuMaterial->translucent = mat->translucent;
-            
-            // Anisotropic
-            mat->gpuMaterial->anisotropic = mat->anisotropic;
-            };
-
-        // 2. Update Texture Bundle for a Triangle
-        auto UpdateTriangleTextureBundle = [&](std::shared_ptr<Triangle> target_tri, PrincipledBSDF* mat) {
-            OptixGeometryData::TextureBundle bundle = {};
-
-            auto SetupTex = [&](std::shared_ptr<Texture>& tex, cudaTextureObject_t& out_tex, int& out_has) {
-                if (tex && tex->is_loaded()) {
-                    tex->upload_to_gpu();
-                    out_tex = tex->get_cuda_texture();
-                    out_has = 1;
-                }
-                else {
-                    out_tex = 0;
-                    out_has = 0;
-                }
-                };
-
-            SetupTex(mat->albedoProperty.texture, bundle.albedo_tex, bundle.has_albedo_tex);
-            SetupTex(mat->normalProperty.texture, bundle.normal_tex, bundle.has_normal_tex);
-            SetupTex(mat->roughnessProperty.texture, bundle.roughness_tex, bundle.has_roughness_tex);
-            SetupTex(mat->metallicProperty.texture, bundle.metallic_tex, bundle.has_metallic_tex);
-            SetupTex(mat->emissionProperty.texture, bundle.emission_tex, bundle.has_emission_tex);
-            SetupTex(mat->opacityProperty.texture, bundle.opacity_tex, bundle.has_opacity_tex);
-
-            target_tri->textureBundle = bundle;
-            };
-
-        // 3. Trigger Update
-        auto TriggerMaterialUpdate = [&](bool needs_texture_update) {
-            SyncGpuMaterial(pbsdf);
-
-            if (needs_texture_update) {
-                // Update all triangles using this material ID
-                for (auto& obj : ctx.scene.world.objects) {
-                    auto t = std::dynamic_pointer_cast<Triangle>(obj);
-                    if (t && t->getMaterialID() == active_mat_id) {
-                        UpdateTriangleTextureBundle(t, pbsdf);
-                    }
-                }
-            }
-
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) {
-                // OPTIMIZED: Material property change - use fast update path
-                if (needs_texture_update) {
-                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                }
-                else {
-                    ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                }
-                ctx.optix_gpu_ptr->resetAccumulation();
-            }
-            };
-
-        // 4. Load Texture Dialog
-        auto LoadTextureFromDialog = [&](TextureType type, const std::string& initialDir = "", const std::string& defaultFile = "") -> std::shared_ptr<Texture> {
-
-            std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0", initialDir, defaultFile);
-            if (path.empty()) return nullptr;
-
-            auto tex = std::make_shared<Texture>(path, type);
-            if (tex && tex->is_loaded()) {
-                tex->upload_to_gpu();
-                return tex;
-            }
-            SCENE_LOG_WARN("Failed to load texture: " + path);
-            addViewportMessage("Failed to load texture: " + path, 3.0f, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-            return nullptr;
-            };
-
-        // Draw Node Editor Window
-        if (showMatNodeEditor) {
-            ImGui::SetNextWindowSize(ImVec2(800, 600), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("Material Nodes", &showMatNodeEditor)) {
-                
-                // Toolbar
-                if (ImGui::Button("Bake to Material (1024x)")) {
-                     int w = 1024;
-                     int h = 1024;
-                     auto res = MaterialNodes::bakeGraph(*active_mat_ptr->nodeGraph, w, h);
-                     
-                     // Helper helper
-                     auto AssignTex = [&](std::vector<unsigned char>& data, std::shared_ptr<Texture>& target, const char* suffix, int channels, TextureType type) {
-                         // Check if empty (skipped baking)
-                         if (data.empty()) return;
-                         
-                         // Create unique name
-                         std::string name = active_mat_ptr->materialName + "_" + suffix;
-                         
-                         // Create Texture
-                         auto newTex = std::make_shared<Texture>(w, h, channels, data, type, name);
-                         target = newTex;
-                     };
-                     
-                     AssignTex(res.albedo, active_mat_ptr->albedoProperty.texture, "Albedo", 4, TextureType::Albedo);
-                     AssignTex(res.roughness, active_mat_ptr->roughnessProperty.texture, "Roughness", 1, TextureType::Roughness);
-                     AssignTex(res.metallic, active_mat_ptr->metallicProperty.texture, "Metallic", 1, TextureType::Metallic);
-                     AssignTex(res.emission, active_mat_ptr->emissionProperty.texture, "Emission", 3, TextureType::Emission);
-                     AssignTex(res.alpha, active_mat_ptr->opacityProperty.texture, "Opacity", 1, TextureType::Opacity);
-                     AssignTex(res.normal, active_mat_ptr->normalProperty.texture, "Normal", 3, TextureType::Normal);
-                     
-                     // TODO: Support Transmission, IOR, SSS textures
-                      
-                     SCENE_LOG_INFO("Baked procedural graph to textures for: " + active_mat_ptr->materialName);
-                     
-                     // Trigger Updates
-                     changed = true;
-                     texture_changed = true; // Use existing logic to upload
-                }
-                ImGui::Separator();
-            
-                // Determine active graph (from active material)
-                if (active_mat_ptr->nodeGraph) {
-                    matNodeEditor.onOpenFileDialog = [](const wchar_t* filter) {
-                         return SceneUI::openFileDialogW(filter, "", "");
-                    };
-                    matNodeEditor.draw(*active_mat_ptr->nodeGraph);
-                    
-                    // ═══════════════════════════════════════════════════════════════
-                    // AUTO-UPDATE: Check if any node changed and auto-rebake
-                    // ═══════════════════════════════════════════════════════════════
-                    bool needsRebake = false;
-                    for (auto& node : active_mat_ptr->nodeGraph->nodes) {
-                        if (node->dirty) {
-                            needsRebake = true;
-                            node->dirty = false; // Clear flag
-                        }
-                    }
-                    
-                    if (needsRebake) {
-                        // Auto-bake at lower resolution for real-time preview (256x256)
-                        int w = 256;
-                        int h = 256;
-                        auto res = MaterialNodes::bakeGraph(*active_mat_ptr->nodeGraph, w, h);
-                        
-                        // Helper to assign texture
-                        auto AssignTex = [&](std::vector<unsigned char>& data, std::shared_ptr<Texture>& target, const char* suffix, int channels, TextureType type) {
-                            if (data.empty()) return;
-                            std::string name = active_mat_ptr->materialName + "_" + suffix + "_preview";
-                            auto newTex = std::make_shared<Texture>(w, h, channels, data, type, name);
-                            target = newTex;
-                        };
-                        
-                        AssignTex(res.albedo, active_mat_ptr->albedoProperty.texture, "Albedo", 4, TextureType::Albedo);
-                        AssignTex(res.roughness, active_mat_ptr->roughnessProperty.texture, "Roughness", 1, TextureType::Roughness);
-                        AssignTex(res.metallic, active_mat_ptr->metallicProperty.texture, "Metallic", 1, TextureType::Metallic);
-                        AssignTex(res.emission, active_mat_ptr->emissionProperty.texture, "Emission", 3, TextureType::Emission);
-                        AssignTex(res.alpha, active_mat_ptr->opacityProperty.texture, "Opacity", 1, TextureType::Opacity);
-                        AssignTex(res.normal, active_mat_ptr->normalProperty.texture, "Normal", 3, TextureType::Normal);
-                        
-                        // Fix CPU/GPU Sync: Trigger full update with texture upload
-                        TriggerMaterialUpdate(true); 
-                        
-                        changed = true;
-                        texture_changed = true;
-                    }
-                } else {
-                    ImGui::Text("No active graph.");
-                }
-            }
-            ImGui::End();
-            
-            // Re-trigger update if we baked
-            if (texture_changed) {
-                // Reuse the existing update logic below
-                // We set 'changed' and 'texture_changed' which will trigger SyncGpuMaterial and UpdateTriangleTextureBundle
-            }
-        }
-
-        // ── DISTINCT INPUT FIELD STYLING FOR MATERIAL PANEL ──────────────────
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.35f, 0.65f, 0.45f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.45f, 0.75f, 0.55f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.40f, 0.38f, 0.8f));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
-
-        // ─────────────────────────────────────────────────────────────────────
-        // ─────────────────────────────────────────────────────────────────────
-
-
-        // ─── PROPERTIES UI ───────────────────────────────────────────────────
-
-        // Base Color (Albedo) - No LCD slider for Color yet, keeping standard UI
-        Vec3 albedo = pbsdf->albedoProperty.color;
-        float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
-        bool albKeyed = isMatKeyed(active_mat_id, true, false, false, false, false, false, false, false);
-        if (KeyframeButton("##MAlb", albKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, true, false, false, false, false, false, false, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(albKeyed ? "REMOVE Base Color key" : "ADD Base Color key");
-        ImGui::SameLine();
-        if (ImGui::ColorEdit3("Base Color", albedo_arr)) {
-            pbsdf->albedoProperty.color = Vec3(albedo_arr[0], albedo_arr[1], albedo_arr[2]);
-            changed = true;
-        }
-
-        // Metallic
-        float metallic = pbsdf->metallicProperty.intensity;
-        bool metKeyed = isMatKeyed(active_mat_id, false, false, false, true, false, false, false, false);
-        if (SceneUI::DrawSmartFloat("met", "Metal", &metallic, 0.0f, 1.0f, "%.3f", metKeyed, 
-            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, true, false, false, false, false); }, 16)) {
-            pbsdf->metallicProperty.intensity = metallic;
-            changed = true;
-        }
-
-        // Roughness
-        float roughness = (float)pbsdf->roughnessProperty.color.x;
-        bool rghKeyed = isMatKeyed(active_mat_id, false, false, true, false, false, false, false, false);
-        if (SceneUI::DrawSmartFloat("rgh", "Rough", &roughness, 0.0f, 1.0f, "%.3f", rghKeyed,
-            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, true, false, false, false, false, false); }, 16)) {
-            pbsdf->roughnessProperty.color = Vec3(roughness);
-            changed = true;
-        }
-
-        // IOR
-        float ior = pbsdf->ior;
-        bool iorKeyed = isMatKeyed(active_mat_id, false, false, false, false, false, false, true, false);
-        if (SceneUI::DrawSmartFloat("ior", "IOR", &ior, 1.0f, 3.0f, "%.3f", iorKeyed,
-            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, false, true, false); }, 16)) {
-            pbsdf->ior = ior;
-            changed = true;
-        }
-
-        // Transmission
-        float transmission = pbsdf->transmission;
-        bool trnKeyed = isMatKeyed(active_mat_id, false, false, false, false, false, true, false, false);
-        if (SceneUI::DrawSmartFloat("trans", "Trans", &transmission, 0.0f, 1.0f, "%.3f", trnKeyed,
-            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, true, false, false); }, 16)) {
-            pbsdf->setTransmission(transmission, pbsdf->ior);
-            changed = true;
-        }
-
-        // Specular
-        float specular = pbsdf->specularProperty.intensity;
-        bool specKeyed = isMatKeyed(active_mat_id, false, false, false, false, false, false, false, true);
-        if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
-            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, false, false, false, true); }, 16)) {
-            pbsdf->specularProperty.intensity = specular;
-            changed = true;
-        }
-
-        // Opacity
-        float opacity = pbsdf->opacityProperty.alpha;
-        bool opKeyed = isMatKeyed(active_mat_id, false, true, false, false, false, false, false, false);
-        if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,
-            [&](){ insertMatPropKey(active_mat_ptr, active_mat_id, false, true, false, false, false, false, false, false); }, 16)) {
-            pbsdf->opacityProperty.alpha = opacity;
-            changed = true;
-        }
-
-        // Emission
-        Vec3 emission = pbsdf->emissionProperty.color;
-        float emission_arr[3] = { (float)emission.x, (float)emission.y, (float)emission.z };
-        bool emsKeyed = isMatKeyed(active_mat_id, false, false, false, false, true, false, false, false);
-        if (KeyframeButton("##MEms", emsKeyed)) { insertMatPropKey(active_mat_ptr, active_mat_id, false, false, false, false, true, false, false, false); }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip(emsKeyed ? "REMOVE Emission key" : "ADD Emission key");
-        ImGui::SameLine();
-        if (ImGui::ColorEdit3("Emission", emission_arr)) {
-            pbsdf->emissionProperty.color = Vec3(emission_arr[0], emission_arr[1], emission_arr[2]);
-            changed = true;
-        }
-
-        float emissionStr = pbsdf->emissionProperty.intensity;
-        if (SceneUI::DrawSmartFloat("mems", "EmStr", &emissionStr, 0.0f, 1000.0f, "%.1f", false, nullptr, 12)) {
-            pbsdf->emissionProperty.intensity = emissionStr;
-            changed = true;
-        }
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // SUBSURFACE SCATTERING (Random Walk)
-        // ═══════════════════════════════════════════════════════════════════════
-        ImGui::Separator();
-        // ═══════════════════════════════════════════════════════════════════════
-        // SUBSURFACE SCATTERING (Random Walk)
-        // ═══════════════════════════════════════════════════════════════════════
-        ImGui::Separator();
-        if (UIWidgets::BeginSection("Subsurface Scattering", ImVec4(1.0f, 0.7f, 0.4f, 1.0f))) {
-            
-            // SSS Amount
-            float sss_amount = pbsdf->subsurface;
-            if (SceneUI::DrawSmartFloat("sss", "Subsurf", &sss_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-                pbsdf->subsurface = sss_amount;
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Amount of subsurface scattering (0=off, 1=full)");
-            
-            // SSS Color
-            Vec3 sss_color = pbsdf->subsurfaceColor;
-            float sss_color_arr[3] = {(float)sss_color.x, (float)sss_color.y, (float)sss_color.z};
-            if (ImGui::ColorEdit3("SSS Color", sss_color_arr)) {
-                pbsdf->subsurfaceColor = Vec3(sss_color_arr[0], sss_color_arr[1], sss_color_arr[2]);
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Color of scattered light inside the material");
-            
-            // SSS Radius (Per RGB channel)
-            Vec3 sss_radius = pbsdf->subsurfaceRadius;
-            float sss_radius_arr[3] = {(float)sss_radius.x, (float)sss_radius.y, (float)sss_radius.z};
-            if (ImGui::DragFloat3("Radius (RGB)", sss_radius_arr, 0.01f, 0.001f, 10.0f, "%.3f")) {
-                pbsdf->subsurfaceRadius = Vec3(sss_radius_arr[0], sss_radius_arr[1], sss_radius_arr[2]);
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Scatter distance per RGB channel.\nSkin: R=1.0, G=0.2, B=0.1 (red scatters far, blue stays near surface)");
-            
-            // SSS Scale
-            float sss_scale = pbsdf->subsurfaceScale;
-            if (SceneUI::DrawSmartFloat("sscl", "Scale", &sss_scale, 0.001f, 2.0f, "%.4f", false, nullptr, 12)) {
-                pbsdf->subsurfaceScale = sss_scale;
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Global multiplier for SSS radius (adjust based on object size)");
-            
-            // SSS Anisotropy
-            float sss_aniso = pbsdf->subsurfaceAnisotropy;
-            if (SceneUI::DrawSmartFloat("ssani", "Aniso", &sss_aniso, -0.9f, 0.9f, "%.2f", false, nullptr, 12)) {
-                pbsdf->subsurfaceAnisotropy = sss_aniso;
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Scatter direction bias:\n0 = Isotropic\n+ve = Forward scattering (deeper)\n-ve = Backward scattering");
-            
-            // Presets
-            ImGui::Separator();
-            ImGui::Text("Presets:");
-            if (ImGui::SmallButton("Skin")) {
-                pbsdf->subsurface = 0.3f;
-                pbsdf->subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);
-                pbsdf->subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);
-                pbsdf->subsurfaceScale = 0.05f;
-                pbsdf->subsurfaceAnisotropy = 0.0f;
-                changed = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Wax")) {
-                pbsdf->subsurface = 0.5f;
-                pbsdf->subsurfaceColor = Vec3(1.0f, 0.9f, 0.6f);
-                pbsdf->subsurfaceRadius = Vec3(0.3f, 0.3f, 0.2f);
-                pbsdf->subsurfaceScale = 0.1f;
-                pbsdf->subsurfaceAnisotropy = 0.0f;
-                changed = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Milk")) {
-                pbsdf->subsurface = 0.8f;
-                pbsdf->subsurfaceColor = Vec3(1.0f, 1.0f, 1.0f);
-                pbsdf->subsurfaceRadius = Vec3(0.5f, 0.5f, 0.5f);
-                pbsdf->subsurfaceScale = 0.2f;
-                pbsdf->subsurfaceAnisotropy = 0.8f;
-                changed = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Jade")) {
-                pbsdf->subsurface = 0.4f;
-                pbsdf->subsurfaceColor = Vec3(0.3f, 0.8f, 0.4f);
-                pbsdf->subsurfaceRadius = Vec3(0.2f, 0.5f, 0.2f);
-                pbsdf->subsurfaceScale = 0.05f;
-                pbsdf->subsurfaceAnisotropy = 0.3f;
-                changed = true;
-            }
-            
-            UIWidgets::EndSection();
-        }
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // CLEAR COAT (Car paint lacquer layer)
-        // ═══════════════════════════════════════════════════════════════════════
-        // ═══════════════════════════════════════════════════════════════════════
-        // CLEAR COAT (Car paint lacquer layer)
-        // ═══════════════════════════════════════════════════════════════════════
-        if (UIWidgets::BeginSection("Clear Coat", ImVec4(0.8f, 0.2f, 0.8f, 1.0f))) {
-            
-            float cc_amount = pbsdf->clearcoat;
-            if (SceneUI::DrawSmartFloat("cc", "ClearCt", &cc_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-                pbsdf->clearcoat = cc_amount;
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Extra glossy layer on top (like car paint lacquer)");
-            
-            float cc_roughness = pbsdf->clearcoatRoughness;
-            if (SceneUI::DrawSmartFloat("ccr", "CCRough", &cc_roughness, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-                pbsdf->clearcoatRoughness = cc_roughness;
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Roughness of the clear coat layer (0=mirror, 1=matte)");
-            
-            // Preset
-            ImGui::Separator();
-            if (ImGui::SmallButton("Car Paint")) {
-                pbsdf->clearcoat = 1.0f;
-                pbsdf->clearcoatRoughness = 0.03f;
-                changed = true;
-            }
-            
-            UIWidgets::EndSection();
-        }
-
-        // ═══════════════════════════════════════════════════════════════════════
-        // TRANSLUCENT (Thin surface light pass-through)
-        // ═══════════════════════════════════════════════════════════════════════
-        // ═══════════════════════════════════════════════════════════════════════
-        // TRANSLUCENT (Thin surface light pass-through)
-        // ═══════════════════════════════════════════════════════════════════════
-        if (UIWidgets::BeginSection("Translucent", ImVec4(0.5f, 0.9f, 0.9f, 1.0f))) {
-            
-            float trans = pbsdf->translucent;
-            if (SceneUI::DrawSmartFloat("trns", "Transl", &trans, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-                pbsdf->translucent = trans;
-                changed = true;
-            }
-            UIWidgets::HelpMarker("Thin surface light pass-through (leaves, paper, fabric, curtains)");
-            
-            UIWidgets::EndSection();
-        }
-
-
-        // ─── TEXTURES UI ─────────────────────────────────────────────────────
-        if (UIWidgets::BeginSection("Texture Maps", ImVec4(0.4f, 1.0f, 0.6f, 1.0f))) {
-
-            // Texture Clipboard (Static to persist across frames/slots)
-            static std::shared_ptr<Texture> texture_clipboard = nullptr;
-
-            auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type) {
-                ImGui::PushID(label);
-
-                // Label column (fixed width for alignment)
-                ImGui::Text("%s", label);
-                ImGui::SameLine(70);
-
-                if (tex_ref && tex_ref->is_loaded()) {
-                    // Show texture info - short file name (keeps panel compact)
-                    std::string name = tex_ref->name;
-                    std::string shortName = name;
-                    size_t lastSlash = name.find_last_of("/\\");
-                    if (lastSlash != std::string::npos) shortName = name.substr(lastSlash + 1);
-                    // Short but readable (15 chars)
-                    if (shortName.length() > 15) shortName = shortName.substr(0, 12) + "...";
-
-                    ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", shortName.c_str());
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
-
-                    // Buttons with reasonable size (not too small)
-                    ImGui::SameLine();
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));  // Bigger than before
-                    
-                    // Delete button (X)
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.2f, 0.2f, 1.0f));
-                    if (ImGui::SmallButton("X")) {
-                        tex_ref = nullptr;
-                        texture_changed = true;
-                    }
-                    ImGui::PopStyleColor();
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove");
-
-                    // Copy button (C)
-                    ImGui::SameLine(0, 4);
-                    if (ImGui::SmallButton("C")) {
-                        texture_clipboard = tex_ref;
-                    }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy");
-                    
-                    ImGui::PopStyleVar();
-                }
-                else {
-                    ImGui::TextDisabled("-");
-
-                    // Buttons for empty slot
-                    ImGui::SameLine();
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-                    
-                    // Paste Button (Only if clipboard has content)
-                    if (texture_clipboard) {
-                        if (ImGui::SmallButton("P")) {
-                            tex_ref = texture_clipboard;
-                            texture_changed = true;
-                        }
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste");
-                        ImGui::SameLine(0, 4);
-                    }
-                    
-                    ImGui::PopStyleVar();
-                }
-
-                // Load button - always visible
-                ImGui::SameLine(0, 4);
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-                if (ImGui::SmallButton("+")) {
-                    std::string initialDir = "";
-                    std::string defaultFile = "";
-
-                    if (tex_ref && !tex_ref->name.empty()) {
-                        std::string fullPath = tex_ref->name;
-                        size_t lastSlash = fullPath.find_last_of("/\\");
-                        if (lastSlash != std::string::npos) {
-                            initialDir = fullPath.substr(0, lastSlash);
-                            defaultFile = fullPath.substr(lastSlash + 1);
-                        }
-                    }
-                    else if (texture_clipboard && !texture_clipboard->name.empty()) {
-                        std::string fullPath = texture_clipboard->name;
-                        size_t lastSlash = fullPath.find_last_of("/\\");
-                        if (lastSlash != std::string::npos) {
-                            initialDir = fullPath.substr(0, lastSlash);
-                        }
-                    }
-
-                    auto new_tex = LoadTextureFromDialog(type, initialDir, defaultFile);
-                    if (new_tex) {
-                        tex_ref = new_tex;
-                        texture_changed = true;
-                    }
-                }
-                ImGui::PopStyleVar();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load texture...");
-                
-                ImGui::PopID();
-                };
-
-            DrawTextureSlot("Albedo", pbsdf->albedoProperty.texture, TextureType::Albedo);
-            DrawTextureSlot("Normal", pbsdf->normalProperty.texture, TextureType::Normal);
-            DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness);
-            DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic);
-            DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission);
-            DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity);
-
-            UIWidgets::EndSection();
-        }
-
-        if (changed || texture_changed) {
-            TriggerMaterialUpdate(texture_changed);
-            g_ProjectManager.markModified();
-        }
-        
-        // Pop all styling for Surface Properties
-        ImGui::PopStyleVar(3);
-        ImGui::PopStyleColor(6);
+        drawPrincipledBSDFEditor(pbsdf, active_mat_id, ctx);
     }
     else {
         ImGui::TextDisabled("Unknown material type.");
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REUSABLE MATERIAL EDITOR WIDGET
+// ═══════════════════════════════════════════════════════════════════════════════
+void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx) {
+    if (!pbsdf) return;
+    
+    bool changed = false;
+    bool texture_changed = false;
+
+    // Helper functions re-implemented locally to Context
+    auto SyncGpuMaterial = [&](PrincipledBSDF* mat) -> void {
+        if (!mat->gpuMaterial) mat->gpuMaterial = std::make_shared<GpuMaterial>();
+
+        Vec3 alb = mat->albedoProperty.color;
+        mat->gpuMaterial->albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+        mat->gpuMaterial->roughness = (float)mat->roughnessProperty.color.x;
+        mat->gpuMaterial->metallic = (float)mat->metallicProperty.intensity;
+
+        Vec3 em = mat->emissionProperty.color;
+        float emStr = mat->emissionProperty.intensity;
+        mat->gpuMaterial->emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+
+        mat->gpuMaterial->ior = mat->ior;
+        mat->gpuMaterial->transmission = mat->transmission;
+        mat->gpuMaterial->opacity = mat->opacityProperty.alpha;
+        
+        // SSS (Random Walk)
+        mat->gpuMaterial->subsurface = mat->subsurface;
+        Vec3 sssColor = mat->subsurfaceColor;
+        mat->gpuMaterial->subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+        Vec3 sssRadius = mat->subsurfaceRadius;
+        mat->gpuMaterial->subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+        mat->gpuMaterial->subsurface_scale = mat->subsurfaceScale;
+        mat->gpuMaterial->subsurface_anisotropy = mat->subsurfaceAnisotropy;
+        mat->gpuMaterial->subsurface_ior = mat->subsurfaceIOR;
+        
+        // Clear Coat
+        mat->gpuMaterial->clearcoat = mat->clearcoat;
+        mat->gpuMaterial->clearcoat_roughness = mat->clearcoatRoughness;
+        
+        // Translucent
+        mat->gpuMaterial->translucent = mat->translucent;
+        
+        // Anisotropic
+        mat->gpuMaterial->anisotropic = mat->anisotropic;
+
+        // Sheen (Water flags)
+        mat->gpuMaterial->sheen = mat->sheen;
+        mat->gpuMaterial->sheen_tint = mat->sheen_tint;
+    };
+
+    auto UpdateTriangleTextureBundle = [&](std::shared_ptr<Triangle> target_tri, PrincipledBSDF* mat) {
+        OptixGeometryData::TextureBundle bundle = {};
+
+        auto SetupTex = [&](std::shared_ptr<Texture>& tex, cudaTextureObject_t& out_tex, int& out_has) {
+            if (tex && tex->is_loaded()) {
+                tex->upload_to_gpu();
+                out_tex = tex->get_cuda_texture();
+                out_has = 1;
+            }
+            else {
+                out_tex = 0;
+                out_has = 0;
+            }
+        };
+
+        SetupTex(mat->albedoProperty.texture, bundle.albedo_tex, bundle.has_albedo_tex);
+        SetupTex(mat->normalProperty.texture, bundle.normal_tex, bundle.has_normal_tex);
+        SetupTex(mat->roughnessProperty.texture, bundle.roughness_tex, bundle.has_roughness_tex);
+        SetupTex(mat->metallicProperty.texture, bundle.metallic_tex, bundle.has_metallic_tex);
+        SetupTex(mat->emissionProperty.texture, bundle.emission_tex, bundle.has_emission_tex);
+        SetupTex(mat->opacityProperty.texture, bundle.opacity_tex, bundle.has_opacity_tex);
+
+        target_tri->textureBundle = bundle;
+    };
+
+    auto TriggerMaterialUpdate = [&](bool needs_texture_update) {
+        SyncGpuMaterial(pbsdf);
+
+        if (needs_texture_update) {
+            // Update all triangles using this material ID
+            for (auto& obj : ctx.scene.world.objects) {
+                auto t = std::dynamic_pointer_cast<Triangle>(obj);
+                if (t && t->getMaterialID() == mat_id) {
+                    UpdateTriangleTextureBundle(t, pbsdf);
+                }
+            }
+        }
+
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.optix_gpu_ptr) {
+            ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+            ctx.optix_gpu_ptr->resetAccumulation();
+        }
+    };
+
+    auto LoadTextureFromDialog = [&](TextureType type, const std::string& initialDir = "", const std::string& defaultFile = "") -> std::shared_ptr<Texture> {
+        std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0", initialDir, defaultFile);
+        if (path.empty()) return nullptr;
+
+        auto tex = std::make_shared<Texture>(path, type);
+        if (tex && tex->is_loaded()) {
+            tex->upload_to_gpu();
+            return tex;
+        }
+        SCENE_LOG_WARN("Failed to load texture: " + path);
+        // Assuming addViewportMessage is available (member function) or global? It is member.
+        // We are in SceneUI member function, so we can call addViewportMessage directly? YES.
+        return nullptr; 
+    };
+    
+    // Keyframe helpers from drawMaterialPanel (simplified or copied)
+    // We need access to ctx.selection.selected.name which is available via ctx
+    std::string obj_n = ctx.selection.selected.name;
+    
+    auto KeyframeButton = [&](const char* id, bool keyed) -> bool {
+        ImGui::PushID(id);
+        float s = ImGui::GetFrameHeight();
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        bool clicked = ImGui::InvisibleButton("kbtn", ImVec2(s, s));
+
+        ImU32 bg = keyed ? IM_COL32(255, 200, 0, 255) : IM_COL32(40, 40, 40, 255);
+        ImU32 border = IM_COL32(180, 180, 180, 255);
+
+        if (ImGui::IsItemHovered()) {
+            border = IM_COL32(255, 255, 255, 255);
+            bg = keyed ? IM_COL32(255, 220, 50, 255) : IM_COL32(70, 70, 70, 255);
+        }
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float cx = pos.x + s * 0.5f;
+        float cy = pos.y + s * 0.5f;
+        float r = s * 0.22f;
+
+        ImVec2 p[4] = { ImVec2(cx, cy - r), ImVec2(cx + r, cy), ImVec2(cx, cy + r), ImVec2(cx - r, cy) };
+        dl->AddQuadFilled(p[0], p[1], p[2], p[3], bg);
+        dl->AddQuad(p[0], p[1], p[2], p[3], border, 1.0f);
+
+        ImGui::PopID();
+        return clicked;
+    };
+
+    // Need to copy/reimpl isMatKeyed and insertMatPropKey since they were lambdas in drawMaterialPanel
+    // Or we can just adapt the code to run directly.
+    // For brevity and reuse, I'll adapt the logic inline or re-define lambdas.
+    
+    auto isMatKeyed = [&](uint16_t mid, bool check_alb, bool check_opac, bool check_rgh, bool check_met, bool check_ems, bool check_trn, bool check_ior, bool check_spec) {
+       if (obj_n.empty()) return false;
+       auto it = ctx.scene.timeline.tracks.find(obj_n);
+       if (it == ctx.scene.timeline.tracks.end()) return false;
+
+       int cf = ctx.render_settings.animation_current_frame;
+       for (auto& kf : it->second.keyframes) {
+           if (kf.frame == cf && kf.has_material && kf.material.material_id == mid) {
+               if (check_alb && kf.material.has_albedo) return true;
+               if (check_opac && kf.material.has_opacity) return true; 
+               if (check_rgh && kf.material.has_roughness) return true;
+               if (check_met && kf.material.has_metallic) return true;
+               if (check_ems && kf.material.has_emission) return true;
+               if (check_trn && kf.material.has_transmission) return true;
+               if (check_ior && kf.material.has_ior) return true;
+               if (check_spec && kf.material.has_specular) return true;
+           }
+       }
+       return false;
+    };
+
+    auto insertMatPropKey = [&](PrincipledBSDF* mat, uint16_t mid, bool k_alb, bool k_opac, bool k_rgh, bool k_met, bool k_ems, bool k_trn, bool k_ior, bool k_spec) {
+        if (obj_n.empty()) return;
+        int current_frame = ctx.render_settings.animation_current_frame;
+        auto& track = ctx.scene.timeline.tracks[obj_n];
+
+        // TOGGLE BEHAVIOR
+        for (auto it = track.keyframes.begin(); it != track.keyframes.end(); ++it) {
+            if (it->frame == current_frame && it->has_material && it->material.material_id == mid) {
+                bool removed = false;
+                if (k_alb && it->material.has_albedo) { it->material.has_albedo = false; removed = true; }
+                if (k_opac && it->material.has_opacity) { it->material.has_opacity = false; removed = true; }
+                if (k_rgh && it->material.has_roughness) { it->material.has_roughness = false; removed = true; }
+                if (k_met && it->material.has_metallic) { it->material.has_metallic = false; removed = true; }
+                if (k_ems && it->material.has_emission) { it->material.has_emission = false; removed = true; }
+                if (k_trn && it->material.has_transmission) { it->material.has_transmission = false; removed = true; }
+                if (k_ior && it->material.has_ior) { it->material.has_ior = false; removed = true; }
+                if (k_spec && it->material.has_specular) { it->material.has_specular = false; removed = true; }
+
+                if (removed) {
+                    bool hasAny = it->material.has_albedo || it->material.has_opacity || it->material.has_roughness ||
+                        it->material.has_metallic || it->material.has_emission || it->material.has_transmission ||
+                        it->material.has_ior || it->material.has_specular;
+                    if (!hasAny) {
+                        it->has_material = false;
+                        if (!it->has_transform && !it->has_camera && !it->has_light && !it->has_world) {
+                            track.keyframes.erase(it);
+                        }
+                    }
+                    SCENE_LOG_INFO("Removed material property keyframe.");
+                    return;
+                }
+            }
+        }
+
+        if (mat && mat->gpuMaterial) {
+            Keyframe kf(current_frame);
+            kf.has_material = true;
+            kf.material = MaterialKeyframe(*mat->gpuMaterial);
+            kf.material.material_id = mid;
+            kf.material.has_albedo = k_alb;
+            kf.material.has_opacity = k_opac;
+            kf.material.has_roughness = k_rgh;
+            kf.material.has_metallic = k_met;
+            kf.material.has_emission = k_ems;
+            kf.material.has_transmission = k_trn;
+            kf.material.has_ior = k_ior;
+            kf.material.has_specular = k_spec;
+
+            bool found = false;
+            for (auto& existing : track.keyframes) {
+                if (existing.frame == current_frame) {
+                    existing.has_material = true;
+                    if (existing.material.material_id == mid) {
+                        if (k_alb) { existing.material.has_albedo = true; existing.material.albedo = kf.material.albedo; }
+                        if (k_opac) { existing.material.has_opacity = true; existing.material.opacity = kf.material.opacity; }
+                        if (k_rgh) { existing.material.has_roughness = true; existing.material.roughness = kf.material.roughness; }
+                        if (k_met) { existing.material.has_metallic = true; existing.material.metallic = kf.material.metallic; }
+                        if (k_ems) { existing.material.has_emission = true; existing.material.emission = kf.material.emission; existing.material.emission_strength = kf.material.emission_strength; }
+                        if (k_trn) { existing.material.has_transmission = true; existing.material.transmission = kf.material.transmission; }
+                        if (k_ior) { existing.material.has_ior = true; existing.material.ior = kf.material.ior; }
+                        if (k_spec) { existing.material.has_specular = true; existing.material.specular = kf.material.specular; }
+                    } else {
+                        existing.material = kf.material;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) track.addKeyframe(kf);
+            SCENE_LOG_INFO("Added material property keyframe.");
+        }
+    };
+
+    // Style
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.35f, 0.65f, 0.45f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.45f, 0.75f, 0.55f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.35f, 0.40f, 0.38f, 0.8f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
+
+
+    // Scalar Properties
+    Vec3 albedo = pbsdf->albedoProperty.color;
+    float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
+    bool albKeyed = isMatKeyed(mat_id, true, false, false, false, false, false, false, false);
+    if (KeyframeButton("##MAlb", albKeyed)) { insertMatPropKey(pbsdf, mat_id, true, false, false, false, false, false, false, false); }
+    ImGui::SameLine();
+    if (ImGui::ColorEdit3("Base Color", albedo_arr)) {
+        pbsdf->albedoProperty.color = Vec3(albedo_arr[0], albedo_arr[1], albedo_arr[2]);
+        changed = true;
+    }
+
+    float metallic = pbsdf->metallicProperty.intensity;
+    bool metKeyed = isMatKeyed(mat_id, false, false, false, true, false, false, false, false);
+    if (SceneUI::DrawSmartFloat("met", "Metal", &metallic, 0.0f, 1.0f, "%.3f", metKeyed, 
+        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, true, false, false, false, false); }, 16)) {
+        pbsdf->metallicProperty.intensity = metallic;
+        changed = true;
+    }
+
+    float roughness = (float)pbsdf->roughnessProperty.color.x;
+    bool rghKeyed = isMatKeyed(mat_id, false, false, true, false, false, false, false, false);
+    if (SceneUI::DrawSmartFloat("rgh", "Rough", &roughness, 0.0f, 1.0f, "%.3f", rghKeyed,
+        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, true, false, false, false, false, false); }, 16)) {
+        pbsdf->roughnessProperty.color = Vec3(roughness);
+        changed = true;
+    }
+
+    float ior = pbsdf->ior;
+    bool iorKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, true, false);
+    if (SceneUI::DrawSmartFloat("ior", "IOR", &ior, 1.0f, 3.0f, "%.3f", iorKeyed,
+        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, true, false); }, 16)) {
+        pbsdf->ior = ior;
+        changed = true;
+    }
+
+    float transmission = pbsdf->transmission;
+    bool trnKeyed = isMatKeyed(mat_id, false, false, false, false, false, true, false, false);
+    if (SceneUI::DrawSmartFloat("trans", "Trans", &transmission, 0.0f, 1.0f, "%.3f", trnKeyed,
+        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, true, false, false); }, 16)) {
+        pbsdf->setTransmission(transmission, pbsdf->ior);
+        changed = true;
+    }
+
+    float specular = pbsdf->specularProperty.intensity;
+    bool specKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, false, true);
+    if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
+        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, false, true); }, 16)) {
+        pbsdf->specularProperty.intensity = specular;
+        changed = true;
+    }
+
+    float opacity = pbsdf->opacityProperty.alpha;
+    bool opKeyed = isMatKeyed(mat_id, false, true, false, false, false, false, false, false);
+    if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,
+        [&](){ insertMatPropKey(pbsdf, mat_id, false, true, false, false, false, false, false, false); }, 16)) {
+        pbsdf->opacityProperty.alpha = opacity;
+        changed = true;
+    }
+
+    Vec3 emission = pbsdf->emissionProperty.color;
+    float emission_arr[3] = { (float)emission.x, (float)emission.y, (float)emission.z };
+    bool emsKeyed = isMatKeyed(mat_id, false, false, false, false, true, false, false, false);
+    if (KeyframeButton("##MEms", emsKeyed)) { insertMatPropKey(pbsdf, mat_id, false, false, false, false, true, false, false, false); }
+    ImGui::SameLine();
+    if (ImGui::ColorEdit3("Emission", emission_arr)) {
+        pbsdf->emissionProperty.color = Vec3(emission_arr[0], emission_arr[1], emission_arr[2]);
+        changed = true;
+    }
+
+    float emissionStr = pbsdf->emissionProperty.intensity;
+    if (SceneUI::DrawSmartFloat("mems", "EmStr", &emissionStr, 0.0f, 1000.0f, "%.1f", false, nullptr, 12)) {
+        pbsdf->emissionProperty.intensity = emissionStr;
+        changed = true;
+    }
+
+    ImGui::Separator();
+    if (UIWidgets::BeginSection("Subsurface Scattering", ImVec4(1.0f, 0.7f, 0.4f, 1.0f))) {
+        float sss_amount = pbsdf->subsurface;
+        if (SceneUI::DrawSmartFloat("sss", "Subsurf", &sss_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
+            pbsdf->subsurface = sss_amount;
+            changed = true;
+        }
+        UIWidgets::HelpMarker("Amount of subsurface scattering (0=off, 1=full)");
+        
+        Vec3 sss_color = pbsdf->subsurfaceColor;
+        float sss_color_arr[3] = {(float)sss_color.x, (float)sss_color.y, (float)sss_color.z};
+        if (ImGui::ColorEdit3("SSS Color", sss_color_arr)) {
+            pbsdf->subsurfaceColor = Vec3(sss_color_arr[0], sss_color_arr[1], sss_color_arr[2]);
+            changed = true;
+        }
+        
+        Vec3 sss_radius = pbsdf->subsurfaceRadius;
+        float sss_radius_arr[3] = {(float)sss_radius.x, (float)sss_radius.y, (float)sss_radius.z};
+        if (ImGui::DragFloat3("Radius (RGB)", sss_radius_arr, 0.01f, 0.001f, 10.0f, "%.3f")) {
+            pbsdf->subsurfaceRadius = Vec3(sss_radius_arr[0], sss_radius_arr[1], sss_radius_arr[2]);
+            changed = true;
+        }
+        
+        float sss_scale = pbsdf->subsurfaceScale;
+        if (SceneUI::DrawSmartFloat("sscl", "Scale", &sss_scale, 0.001f, 2.0f, "%.4f", false, nullptr, 12)) {
+            pbsdf->subsurfaceScale = sss_scale;
+            changed = true;
+        }
+        
+        float sss_aniso = pbsdf->subsurfaceAnisotropy;
+        if (SceneUI::DrawSmartFloat("ssani", "Aniso", &sss_aniso, -0.9f, 0.9f, "%.2f", false, nullptr, 12)) {
+            pbsdf->subsurfaceAnisotropy = sss_aniso;
+            changed = true;
+        }
+        
+        ImGui::Separator();
+        ImGui::Text("Presets:");
+        if (ImGui::SmallButton("Skin")) {
+            pbsdf->subsurface = 0.3f;
+            pbsdf->subsurfaceColor = Vec3(1.0f, 0.8f, 0.6f);
+            pbsdf->subsurfaceRadius = Vec3(1.0f, 0.2f, 0.1f);
+            pbsdf->subsurfaceScale = 0.05f;
+            pbsdf->subsurfaceAnisotropy = 0.0f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Wax")) {
+            pbsdf->subsurface = 0.5f;
+            pbsdf->subsurfaceColor = Vec3(1.0f, 0.9f, 0.6f);
+            pbsdf->subsurfaceRadius = Vec3(0.3f, 0.3f, 0.2f);
+            pbsdf->subsurfaceScale = 0.1f;
+            pbsdf->subsurfaceAnisotropy = 0.0f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Milk")) {
+            pbsdf->subsurface = 0.8f;
+            pbsdf->subsurfaceColor = Vec3(1.0f, 1.0f, 1.0f);
+            pbsdf->subsurfaceRadius = Vec3(0.5f, 0.5f, 0.5f);
+            pbsdf->subsurfaceScale = 0.2f;
+            pbsdf->subsurfaceAnisotropy = 0.8f;
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Jade")) {
+            pbsdf->subsurface = 0.4f;
+            pbsdf->subsurfaceColor = Vec3(0.3f, 0.8f, 0.4f);
+            pbsdf->subsurfaceRadius = Vec3(0.2f, 0.5f, 0.2f);
+            pbsdf->subsurfaceScale = 0.05f;
+            pbsdf->subsurfaceAnisotropy = 0.3f;
+            changed = true;
+        }
+        
+        UIWidgets::EndSection();
+    }
+
+    if (UIWidgets::BeginSection("Clear Coat", ImVec4(0.8f, 0.2f, 0.8f, 1.0f))) {
+        float cc_amount = pbsdf->clearcoat;
+        if (SceneUI::DrawSmartFloat("cc", "ClearCt", &cc_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
+            pbsdf->clearcoat = cc_amount;
+            changed = true;
+        }
+        
+        float cc_roughness = pbsdf->clearcoatRoughness;
+        if (SceneUI::DrawSmartFloat("ccr", "CCRough", &cc_roughness, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
+            pbsdf->clearcoatRoughness = cc_roughness;
+            changed = true;
+        }
+        
+        ImGui::Separator();
+        if (ImGui::SmallButton("Car Paint")) {
+            pbsdf->clearcoat = 1.0f;
+            pbsdf->clearcoatRoughness = 0.03f;
+            changed = true;
+        }
+        UIWidgets::EndSection();
+    }
+
+    if (UIWidgets::BeginSection("Translucent", ImVec4(0.5f, 0.9f, 0.9f, 1.0f))) {
+        float trans = pbsdf->translucent;
+        if (SceneUI::DrawSmartFloat("trns", "Transl", &trans, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
+            pbsdf->translucent = trans;
+            changed = true;
+        }
+        UIWidgets::EndSection();
+    }
+
+    if (UIWidgets::BeginSection("Texture Maps", ImVec4(0.4f, 1.0f, 0.6f, 1.0f))) {
+        static std::shared_ptr<Texture> texture_clipboard = nullptr;
+
+        auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type) {
+            ImGui::PushID(label);
+            
+            // 1. Label
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%s", label);
+            
+            // 2. Setup Right Alignment for Buttons
+            float buttonsWidth = 85.0f; 
+            float availWidth = ImGui::GetContentRegionAvail().x;
+            float rightEdge = ImGui::GetWindowContentRegionMax().x;
+
+            // 3. Texture Info / Short Name
+            ImGui::SameLine();
+            
+            // Move cursor to allow space for label but don't overlap buttons
+            // Calculate max width for name
+            float cursorX = ImGui::GetCursorPosX();
+            float nameMaxWidth = rightEdge - cursorX - buttonsWidth - 10.0f; 
+            
+            if (tex_ref && tex_ref->is_loaded()) {
+                std::string name = tex_ref->name;
+                std::string shortName = std::filesystem::path(name).filename().string();
+                
+                // Truncate if long 
+                if (shortName.length() > 20) {
+                     shortName = shortName.substr(0, 8) + "..." + shortName.substr(shortName.length()-5);
+                }
+
+                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", shortName.c_str());
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
+                
+                // 4. Buttons (Right Aligned)
+                ImGui::SameLine();
+                if (ImGui::GetCursorPosX() < (rightEdge - buttonsWidth)) {
+                    ImGui::SetCursorPosX(rightEdge - buttonsWidth);
+                }
+                
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+                
+                // X Button
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.2f, 0.2f, 1.0f));
+                if (ImGui::SmallButton("X")) {
+                    if (tex_ref) texture_graveyard.push_back(tex_ref); // Safety
+                    tex_ref = nullptr;
+                    texture_changed = true;
+                }
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove");
+
+                ImGui::SameLine(0, 4);
+                // C Button
+                if (ImGui::SmallButton("C")) texture_clipboard = tex_ref;
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy");
+            
+                ImGui::PopStyleVar();
+            }
+            else {
+                ImGui::TextDisabled("-");
+                
+                // 4. Buttons (Right Aligned even if empty)
+                ImGui::SameLine();
+                if (ImGui::GetCursorPosX() < (rightEdge - buttonsWidth)) {
+                    ImGui::SetCursorPosX(rightEdge - buttonsWidth);
+                }
+
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+                
+                // P Button
+                if (texture_clipboard) {
+                    if (ImGui::SmallButton("P")) {
+                        tex_ref = texture_clipboard;
+                        texture_changed = true;
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste");
+                    ImGui::SameLine(0, 4);
+                }
+                
+                ImGui::PopStyleVar();
+            }
+
+            // Load Button (Always at end)
+            ImGui::SameLine(0, 4);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
+            if (ImGui::SmallButton("+")) {
+                std::string initialDir = "";
+                std::string defaultFile = "";
+
+                if (tex_ref && !tex_ref->name.empty()) {
+                    std::string fullPath = tex_ref->name;
+                    size_t lastSlash = fullPath.find_last_of("/\\");
+                    if (lastSlash != std::string::npos) {
+                        initialDir = fullPath.substr(0, lastSlash);
+                        defaultFile = fullPath.substr(lastSlash + 1);
+                    }
+                }
+                else if (texture_clipboard && !texture_clipboard->name.empty()) {
+                    std::string fullPath = texture_clipboard->name;
+                    size_t lastSlash = fullPath.find_last_of("/\\");
+                    if (lastSlash != std::string::npos) initialDir = fullPath.substr(0, lastSlash);
+                }
+
+                auto new_tex = LoadTextureFromDialog(type, initialDir, defaultFile);
+                if (new_tex) {
+                    if (tex_ref) texture_graveyard.push_back(tex_ref); // Safety
+                    tex_ref = new_tex;
+                    texture_changed = true;
+                }
+            }
+            ImGui::PopStyleVar();
+            
+            ImGui::PopID();
+        };
+
+        DrawTextureSlot("Albedo", pbsdf->albedoProperty.texture, TextureType::Albedo);
+        DrawTextureSlot("Normal", pbsdf->normalProperty.texture, TextureType::Normal);
+        DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness);
+        DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic);
+        DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission);
+        DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity);
+
+        UIWidgets::EndSection();
+    }
+
+    if (changed || texture_changed) {
+        TriggerMaterialUpdate(texture_changed);
+        g_ProjectManager.markModified();
+    }
+
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(6);
 }

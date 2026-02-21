@@ -213,6 +213,9 @@
     <ClInclude Include="source\include\MaterialManager.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\MeshModifiers.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Transform.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -412,6 +415,9 @@
     <ClCompile Include="source\src\Utils\SceneSerializer.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Utils\MeshModifiers.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Utils\SceneExporter.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
@@ -500,6 +506,9 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_materials.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_modifiers.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_procamera.cpp">
@@ -623,6 +632,9 @@
       <Filter>Kaynak Dosyalar\Hair</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Hair\HairSystem.cpp">
+      <Filter>Kaynak Dosyalar\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairSystem_Skinning.cpp">
       <Filter>Kaynak Dosyalar\Hair</Filter>
     </ClCompile>
   </ItemGroup>

@@ -193,7 +193,7 @@ namespace UIWidgets {
     // High-stability geometric icons drawn via DrawList
 
     enum class IconType {
-        Scene, Render, Terrain, Water, Volumetric, Force, World, System, 
+        Scene, Render, Terrain, Water, Volumetric, Force, World, System, Sculpt,
         Wind, Gravity, Physics, Vortex, Noise, Magnet,
         Camera, Light, Mesh,
         Timeline, Console, Graph, AnimGraph,

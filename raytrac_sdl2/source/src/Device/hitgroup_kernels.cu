@@ -142,46 +142,138 @@ extern "C" __global__ void __closesthit__ch() {
 
     if (hgd->is_terrain && hgd->splat_map_tex) {
         float4 mask = tex2D<float4>(hgd->splat_map_tex, uv.x, uv.y);
-        float3 blended_albedo = make_float3(0.0f);
-        float blended_roughness = 0.0f;
-        float3 blended_ts_normal = make_float3(0.0f);
-        float total_weight = 0.0f;
+        float3 blend_alb = make_float3(0.0f);
+        float  blend_rgh = 0.0f;
+        float  blend_met = 0.0f;
+        float  blend_cc  = 0.0f; // Clearcoat
+        float  blend_ccr = 0.0f; // Clearcoat Roughness
+        float  blend_sub = 0.0f; // Subsurface
+        float3 blend_subc= make_float3(0.0f); // Subsurface Color
+        float3 blend_emis= make_float3(0.0f); // Emission
+        float  blend_tra = 0.0f; // Transmission
+        float  blend_trn = 0.0f; // Translucent
+        float  blend_ior = 0.0f; // IOR
+        float3 blend_nrm = make_float3(0.0f);
+        float  total_w   = 0.0f;
 
+        // Iterate 4 layers
         for (int i = 0; i < 4; ++i) {
-            float weight = (i==0) ? mask.x : (i==1) ? mask.y : (i==2) ? mask.z : mask.w;
-            if (weight < 0.001f) continue;
-            float2 layer_uv = uv * hgd->layer_uv_scale[i];
-            float3 col = make_float3(1.0f);
-            if (hgd->layer_albedo_tex[i]) {
-                float4 c = tex2D<float4>(hgd->layer_albedo_tex[i], layer_uv.x, layer_uv.y);
-                col = make_float3(c.x, c.y, c.z); 
+            float w = (i==0) ? mask.x : (i==1) ? mask.y : (i==2) ? mask.z : mask.w;
+            if (w < 0.001f) continue;
+            
+            // Get material ID from SBT
+            int matID = hgd->layer_material_ids[i];
+            if (matID < 0) continue; // Skip invalid materials
+
+            // Fetch material data from bindless buffer
+            const GpuMaterial& mat = optixLaunchParams.materials[matID];
+            
+            // Apply UV tiling
+            float2 l_uv = uv * hgd->layer_uv_scale[i];
+
+            // 1. Albedo
+            float3 col = mat.albedo;
+            if (mat.albedo_tex) {
+                 float4 c = tex2D<float4>(mat.albedo_tex, l_uv.x, l_uv.y);
+                 col = make_float3(c.x, c.y, c.z);
             }
-            float r = 0.5f;
-            if (hgd->layer_roughness_tex[i]) {
-                r = tex2D<float4>(hgd->layer_roughness_tex[i], layer_uv.x, layer_uv.y).x;
+
+            // 2. Roughness
+            float rgh = mat.roughness;
+            if (mat.roughness_tex) {
+                 rgh = tex2D<float4>(mat.roughness_tex, l_uv.x, l_uv.y).x; // Assume R channel or grayscale
             }
+
+            // 3. Metallic
+            float met = mat.metallic;
+            if (mat.metallic_tex) {
+                 met = tex2D<float4>(mat.metallic_tex, l_uv.x, l_uv.y).z; // Metallic usually Blue channel in ORM, or Red?
+                 // Standard convention often R=Occ, G=Rough, B=Metal. 
+                 // But standalone metallic usually R.
+                 // Let's assume standalone or B if combined. 
+                 // Wait, material_scatter uses .z (Blue) for metallic_tex. Consistency!
+            }
+
+            // 4. Normal
             float3 n_ts = make_float3(0,0,1);
-            if (hgd->layer_normal_tex[i]) {
-                float4 n = tex2D<float4>(hgd->layer_normal_tex[i], layer_uv.x, layer_uv.y);
-                n_ts = make_float3(n.x, n.y, n.z) * 2.0f - make_float3(1.0f, 1.0f, 1.0f);
+            if (mat.normal_tex) {
+                 float4 n = tex2D<float4>(mat.normal_tex, l_uv.x, l_uv.y);
+                 n_ts = make_float3(n.x, n.y, n.z) * 2.0f - make_float3(1.0f);
             }
-            blended_albedo += col * weight;
-            blended_roughness += r * weight;
-            blended_ts_normal += n_ts * weight;
-            total_weight += weight;
+
+            // 5. Height (Optional - for future height blending)
+            // float h = 0.0f;
+            // if (mat.height_tex) h = tex2D<float4>(mat.height_tex, l_uv.x, l_uv.y).x;
+
+            // 5. Extended Properties
+            float cc = mat.clearcoat;
+            float ccr = mat.clearcoat_roughness;
+            float sub = mat.subsurface;
+            float3 subc = mat.subsurface_color;
+            float ior = mat.ior;
+
+            float3 emis = mat.emission;
+            if (mat.emission_tex) {
+                 float4 e = tex2D<float4>(mat.emission_tex, l_uv.x, l_uv.y);
+                 emis = make_float3(e.x, e.y, e.z); 
+            }
+
+            float tra = mat.transmission;
+            if (mat.transmission_tex) {
+                 tra = tex2D<float4>(mat.transmission_tex, l_uv.x, l_uv.y).x; 
+            }
+            float trn = mat.translucent;
+
+            blend_alb += col * w;
+            blend_rgh += rgh * w;
+            blend_met += met * w;
+            blend_cc  += cc * w;
+            blend_ccr += ccr * w;
+            blend_sub += sub * w;
+            blend_subc+= subc * w;
+            blend_emis+= emis * w;
+            blend_tra += tra * w;
+            blend_trn += trn * w;
+            blend_ior += ior * w;
+            blend_nrm += n_ts * w;
+            total_w += w;
         }
 
-        if (total_weight > 0.0f) {
-             blended_albedo /= total_weight;
-             blended_roughness /= total_weight;
-             blended_ts_normal = normalize(blended_ts_normal);
-             final_normal = normalize(
-                 blended_ts_normal.x * world_tangent +
-                 blended_ts_normal.y * world_bitangent +
-                 blended_ts_normal.z * world_normal
-             );
-             payload->blended_albedo = blended_albedo;
-             payload->blended_roughness = blended_roughness;
+        if (total_w > 0.0f) {
+             float inv_w = 1.0f / total_w;
+             blend_alb *= inv_w;
+             blend_rgh *= inv_w;
+             blend_met *= inv_w; 
+             blend_cc  *= inv_w;
+             blend_ccr *= inv_w;
+             blend_sub *= inv_w;
+             blend_subc*= inv_w;
+             blend_emis*= inv_w;
+             blend_tra *= inv_w;
+             blend_trn *= inv_w;
+             blend_ior *= inv_w; 
+             
+             if (length(blend_nrm) > 0.001f) {
+                 blend_nrm = normalize(blend_nrm);
+                 // TBN Transform
+                 final_normal = normalize(
+                     blend_nrm.x * world_tangent +
+                     blend_nrm.y * world_bitangent +
+                     blend_nrm.z * world_normal
+                 );
+             }
+
+             payload->blended_albedo = blend_alb;
+             payload->blended_roughness = blend_rgh;
+             payload->blended_metallic = blend_met;
+             payload->blended_clearcoat = blend_cc;
+             payload->blended_clearcoat_roughness = blend_ccr;
+             payload->blended_subsurface = blend_sub;
+             payload->blended_subsurface_color = blend_subc;
+             payload->blended_emission = blend_emis;
+             payload->blended_transmission = blend_tra;
+             payload->blended_translucent = blend_trn;
+             payload->blended_ior = blend_ior;
              payload->use_blended_data = 1;
         }
     } 
@@ -350,6 +442,24 @@ extern "C" __global__ void __closesthit__shadow() {
     payload->hit = 1;
 }
 
+// Stochastic Hair Shadow (AnyHit)
+// Allows light to bleed through hair strands for a "deep shadow" effect
+extern "C" __global__ void __anyhit__hair_shadow() {
+    uint3 idx = optixGetLaunchIndex();
+    unsigned int seed = idx.x * 747796405u + idx.y * 2891336453u + optixLaunchParams.frame_number * 123456789u;
+    
+    // Quick PCG-like hash for deterministic randomness per frame
+    seed = (seed ^ (seed >> 16)) * 0x45d9f3b;
+    seed = (seed ^ (seed >> 16)) * 0x45d9f3b;
+    seed = seed ^ (seed >> 16);
+    float rnd = (seed & 0x00FFFFFF) / 16777216.0f;
+
+    // 50% transparency for hair in shadows
+    if (rnd > 0.5f) {
+        optixIgnoreIntersection();
+    }
+}
+
 // Hair Closest Hit
 extern "C" __global__ void __closesthit__hair() {
     unsigned int p0 = optixGetPayload_0();
@@ -371,7 +481,8 @@ extern "C" __global__ void __closesthit__hair() {
     tangent = normalize(tangent);
     float3 to_hit = hit_point - ray_origin;
     float3 plane_n = normalize(cross(tangent, to_hit));
-    float3 normal = normalize(cross(plane_n, tangent));
+    // [FIX] Normal must point from hair center to hit point (towards camera)
+    float3 normal = -normalize(cross(plane_n, tangent)); 
     float3 wo_perp = (wo - dot(wo, tangent) * tangent);
     float3 bitangent = cross(tangent, normalize(wo_perp));
     float h = clamp(dot(normal, bitangent), -1.0f, 1.0f);
@@ -382,6 +493,12 @@ extern "C" __global__ void __closesthit__hair() {
     float ior = h_mat.ior;
     float alpha_rad = h_mat.cuticleAngle; 
     float3 sigma_a = h_mat.sigma_a;
+
+    // Position along strand (0=root, 1=tip)
+    float vStrand = 0.5f; 
+    if (hgd->has_strand_v && hgd->strand_v != nullptr) {
+         vStrand = hgd->strand_v[prim_idx];
+    }
 
     int base_mat_id = (hair_color_mode == 3 && hgd->mesh_material_id >= 0) ? hgd->mesh_material_id : hgd->material_id;
 
@@ -410,12 +527,11 @@ extern "C" __global__ void __closesthit__hair() {
             roughness *= rough_val.x;
         }
         float3 c_clamped = make_float3(fmaxf(0.001f, fminf(0.99f, hair_color.x)), fmaxf(0.001f, fminf(0.99f, hair_color.y)), fmaxf(0.001f, fminf(0.99f, hair_color.z)));
-        sigma_a = make_float3(-logf(c_clamped.x) * 2.5f, -logf(c_clamped.y) * 2.5f, -logf(c_clamped.z) * 2.5f);
+        sigma_a = make_float3(-logf(c_clamped.x) * 0.5f, -logf(c_clamped.y) * 0.5f, -logf(c_clamped.z) * 0.5f);
     }
     if (h_mat.tint > 0.001f) {
-        sigma_a.x += -logf(fmaxf(0.001f, h_mat.tintColor.x)) * h_mat.tint;
-        sigma_a.y += -logf(fmaxf(0.001f, h_mat.tintColor.y)) * h_mat.tint;
-        sigma_a.z += -logf(fmaxf(0.001f, h_mat.tintColor.z)) * h_mat.tint;
+        // Tint is now applied inside hair_bsdf_eval as post-process color multiplication
+        // No longer modifying sigma_a here
     }
     if (hgd->strand_ids != nullptr) {
         uint32_t strandID = hgd->strand_ids[prim_idx];
@@ -438,10 +554,11 @@ extern "C" __global__ void __closesthit__hair() {
                 hsv.z = fmaxf(0.001f, fminf(1.0f, hsv.z));
                 hair_color = hsv_to_rgb(hsv);
                 float3 c_clamped = make_float3(fmaxf(0.001f, fminf(0.99f, hair_color.x)), fmaxf(0.001f, fminf(0.99f, hair_color.y)), fmaxf(0.001f, fminf(0.99f, hair_color.z)));
-                sigma_a = make_float3(-logf(c_clamped.x) * 2.5f, -logf(c_clamped.y) * 2.5f, -logf(c_clamped.z) * 2.5f);
+                sigma_a = make_float3(-logf(c_clamped.x) * 0.5f, -logf(c_clamped.y) * 0.5f, -logf(c_clamped.z) * 0.5f);
             }
         }
     }
+
     HairGPU::GpuHairMaterial hair_mat_final;
     hair_mat_final.sigma_a = sigma_a;
     hair_mat_final.roughness = fmaxf(0.01f, roughness); 
@@ -453,7 +570,20 @@ extern "C" __global__ void __closesthit__hair() {
     hair_mat_final.v_R = h_mat.v_R;
     hair_mat_final.v_TT = h_mat.v_TT;
     hair_mat_final.v_TRT = h_mat.v_TRT;
-    hair_mat_final.s = h_mat.s;
+    hair_mat_final.s_R = h_mat.s_R;
+    hair_mat_final.s_TT = h_mat.s_TT;
+    hair_mat_final.s_TRT = h_mat.s_TRT;
+    hair_mat_final.s_MS = h_mat.s_MS;
+    // NEW: Pass through coat, tint, specular tint, diffuse softness, gradient
+    hair_mat_final.coat = h_mat.coat;
+    hair_mat_final.coatTint = h_mat.coatTint;
+    hair_mat_final.tint = h_mat.tint;
+    hair_mat_final.tintColor = h_mat.tintColor;
+    hair_mat_final.specularTint = h_mat.specularTint;
+    hair_mat_final.diffuseSoftness = h_mat.diffuseSoftness;
+    hair_mat_final.enableRootTipGradient = h_mat.enableRootTipGradient;
+    hair_mat_final.tipSigma = h_mat.tipSigma;
+    hair_mat_final.rootTipBalance = h_mat.rootTipBalance;
     if (hgd->material_id >= 0 && hgd->material_id < optixLaunchParams.material_count) {
         GpuMaterial mat = optixLaunchParams.materials[hgd->material_id];
         if (mat.emission.x + mat.emission.y + mat.emission.z > 0.001f) {
@@ -464,30 +594,57 @@ extern "C" __global__ void __closesthit__hair() {
     float3 result_color = make_float3(0.0f);
     int light_count = optixLaunchParams.light_count;
     LightGPU* lights = optixLaunchParams.lights;
-    for (int li = 0; li < light_count && li < 16; ++li) {
+    
+    if (light_count > 0) {
+        // Stochastic Light Selection for Performance
+        uint3 launch_idx = optixGetLaunchIndex();
+        unsigned int light_seed = launch_idx.x * 747796405u + launch_idx.y * 2891336453u + optixLaunchParams.frame_number * 123456789u + prim_idx;
+        light_seed = (light_seed ^ (light_seed >> 16)) * 0x45d9f3b;
+        light_seed = (light_seed ^ (light_seed >> 16)) * 0x45d9f3b;
+        light_seed = light_seed ^ (light_seed >> 16);
+        float rnd_light = (light_seed & 0x00FFFFFF) / 16777216.0f;
+        
+        int li = (int)(rnd_light * light_count) % light_count;
         LightGPU light = lights[li];
+        
         float3 light_dir;
         float3 Li;
         float light_dist = 1e6f;
-        if (light.type == 0) {
+        if (light.type == 0) { // Point/Area Light
             float3 to_light = light.position - hit_point;
             light_dist = length(to_light);
-            light_dir = to_light / light_dist;
+            light_dir = to_light / (light_dist + 1e-4f);
             float atten = 1.0f / (light_dist * light_dist + 1e-4f);
             Li = light.color * light.intensity * atten;
-        } else {
-            light_dir = normalize(light.direction);
+        } else { // Directional Light
+            light_dir = normalize(light.direction); 
             Li = light.color * light.intensity;
         }
+
         OptixHitResult shadow_payload;
         shadow_payload.hit = 0;
         unsigned int sp0, sp1;
         packPayload(&shadow_payload, sp0, sp1);
+
         float3 shadow_origin = hit_point + normal * 0.001f; 
-        optixTrace(optixLaunchParams.handle, shadow_origin, light_dir, 0.001f, light_dist - 0.001f, 0.0f, OptixVisibilityMask(255), OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT, SHADOW_RAY_TYPE, RAY_TYPE_COUNT, SHADOW_RAY_TYPE, sp0, sp1);
+        optixTrace(
+            optixLaunchParams.handle,
+            shadow_origin,
+            light_dir,
+            0.001f,
+            light_dist - 0.001f,
+            0.0f,
+            OptixVisibilityMask(255),
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+            SHADOW_RAY_TYPE,
+            RAY_TYPE_COUNT,
+            SHADOW_RAY_TYPE,
+            sp0, sp1
+        );
+
         if (shadow_payload.hit == 0) {
-            float3 bsdf = HairGPU::hair_bsdf_eval(wo, light_dir, tangent, hair_mat_final, h);
-            result_color += bsdf * Li; 
+            float3 bsdf = HairGPU::hair_bsdf_eval(wo, light_dir, tangent, hair_mat_final, h, vStrand);
+            result_color += (bsdf * Li) * (float)light_count; 
         }
     }
     {

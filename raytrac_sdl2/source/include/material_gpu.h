@@ -83,6 +83,16 @@ struct alignas(16) GpuMaterial {
     float fft_wind_direction;         // 4 bytes
     float fft_amplitude;              // 4 bytes
     float fft_time_scale;             // 4 bytes
+
+    // Block 12: Standard Textures (Bindless Support)
+    cudaTextureObject_t albedo_tex = 0;
+    cudaTextureObject_t normal_tex = 0;
+    cudaTextureObject_t roughness_tex = 0;
+    cudaTextureObject_t metallic_tex = 0;
+    cudaTextureObject_t emission_tex = 0;
+    cudaTextureObject_t height_tex = 0; // Displacement
+    cudaTextureObject_t opacity_tex = 0;
+    cudaTextureObject_t transmission_tex = 0;
 };  
 
 /**
@@ -91,43 +101,63 @@ struct alignas(16) GpuMaterial {
 struct alignas(16) GpuHairMaterial {
     // Block 1: Color & Appearance (16 bytes)
     float3 sigma_a;               // Absorption coefficient (12 bytes)
-    int colorMode;              // Color mode (4 bytes)
+    int colorMode;                // Color mode (4 bytes)
 
     // Block 2: Physically Based Model (16 bytes)
     float3 color;                 // Direct color (12 bytes)
-    float roughness;            // Longitudinal roughness (4 bytes)
+    float roughness;              // Longitudinal roughness (4 bytes)
 
     // Block 3: Physical Properties (16 bytes)
-    float melanin;              // Melanin amount (4 bytes)
-    float melaninRedness;       // Melanin redness (4 bytes)
-    float ior;                  // Index of refraction (4 bytes)
-    float cuticleAngle;         // In radians (4 bytes)
+    float melanin;                // Melanin amount (4 bytes)
+    float melaninRedness;         // Melanin redness (4 bytes)
+    float ior;                    // Index of refraction (4 bytes)
+    float cuticleAngle;           // In radians (4 bytes)
 
     // Block 4: Styling & Tint (16 bytes)
     float3 tintColor;             // Tint color (12 bytes)
-    float tint;                 // Tint strength (4 bytes)
+    float tint;                   // Tint strength (4 bytes)
 
     // Block 5: Azimuthal & Random (16 bytes)
-    float radialRoughness;      // Azimuthal roughness (4 bytes)
-    float randomHue;            // Variation (4 bytes)
-    float randomValue;          // Variation (4 bytes)
-    float emissionStrength;     // (4 bytes)
+    float radialRoughness;        // Azimuthal roughness (4 bytes)
+    float randomHue;              // Variation (4 bytes)
+    float randomValue;            // Variation (4 bytes)
+    float emissionStrength;       // (4 bytes)
 
     // Block 6: Emission & Variances (16 bytes)
     float3 emission;              // (12 bytes)
-    float v_R;                  // Variance for R lobe (4 bytes)
+    float v_R;                    // Variance for R lobe (4 bytes)
 
     // Block 7: More Variances & Misc (16 bytes)
-    float v_TT;                 // Variance for TT lobe (4 bytes)
-    float v_TRT;                // Variance for TRT lobe (4 bytes)
-    float s;                    // Logistic scale (4 bytes)
-    float pad0;                 // (4 bytes)
+    float v_TT;                   // Variance for TT lobe (4 bytes)
+    float v_TRT;                  // Variance for TRT lobe (4 bytes)
+    float s_R;                    // Logistic scale for R lobe (4 bytes)
+    float s_TT;                   // Logistic scale for TT lobe (4 bytes)
 
-    // Block 8: Textures (16 bytes)
+    // Block 8: More Azimuthal & Textures (16 bytes)
+    float s_TRT;                  // Logistic scale for TRT lobe (4 bytes)
+    float s_MS;                   // Logistic scale for MS lobe (4 bytes)
     cudaTextureObject_t albedo_tex;    // 8 bytes
+    
+    // Block 9: Remaining Textures (16 bytes)
     cudaTextureObject_t roughness_tex; // 8 bytes
+    float coat;                   // Coat strength for fur (4 bytes)
+    float specularTint;           // Tint primary highlight by hair color (4 bytes)
+
+    // Block 10: Coat & Gradient (16 bytes)
+    float3 coatTint;              // Coat reflection tint (12 bytes)
+    float diffuseSoftness;        // MS weight: 0=hard specular, 1=soft diffuse (4 bytes)
+
+    // Block 11: Root-Tip Gradient (16 bytes)
+    float3 tipSigma;              // Absorption at tip (12 bytes)
+    float rootTipBalance;         // 0=root color, 1=tip color at tip (4 bytes)
+
+    // Block 12: Flags & Padding (16 bytes)
+    int enableRootTipGradient;    // 0 or 1 (4 bytes)
+    float pad1;                   // (4 bytes)
+    float pad2;                   // (4 bytes)
+    float pad3;                   // (4 bytes)
 };
-// Total: 176 bytes - well aligned (11 x 16-byte blocks)
+// Total: 192 bytes - well aligned (12 x 16-byte blocks)
 
 inline bool float3_equal(float3 a, float3 b, float epsilon = FLOAT_COMPARE_EPSILON) {  
     return fabsf(a.x - b.x) < epsilon && 
@@ -173,56 +203,56 @@ namespace std {
         size_t operator()(const GpuMaterial& m) const {  
             size_t h = 0;
 
-            auto hash_combine = [&](size_t& seed, const auto& v) {  
-                seed ^= std::hash<std::decay_t<decltype(v)>>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);  
+            auto hash_combine_f = [&](size_t& seed, float v) {  
+                seed ^= std::hash<float>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);  
             };  
 
             // Albedo block
-            hash_combine(h, m.albedo.x);  
-            hash_combine(h, m.albedo.y);  
-            hash_combine(h, m.albedo.z);  
-            hash_combine(h, m.opacity);  
+            hash_combine_f(h, m.albedo.x);  
+            hash_combine_f(h, m.albedo.y);  
+            hash_combine_f(h, m.albedo.z);  
+            hash_combine_f(h, m.opacity);  
 
             // PBR block
-            hash_combine(h, m.roughness);  
-            hash_combine(h, m.metallic);  
-            hash_combine(h, m.clearcoat);  
-            hash_combine(h, m.transmission);  
+            hash_combine_f(h, m.roughness);  
+            hash_combine_f(h, m.metallic);  
+            hash_combine_f(h, m.clearcoat);  
+            hash_combine_f(h, m.transmission);  
 
             // Emission block
-            hash_combine(h, m.emission.x);  
-            hash_combine(h, m.emission.y);  
-            hash_combine(h, m.emission.z);  
-            hash_combine(h, m.ior);  
+            hash_combine_f(h, m.emission.x);  
+            hash_combine_f(h, m.emission.y);  
+            hash_combine_f(h, m.emission.z);  
+            hash_combine_f(h, m.ior);  
 
             // SSS block
-            hash_combine(h, m.subsurface_color.x);
-            hash_combine(h, m.subsurface_color.y);
-            hash_combine(h, m.subsurface_color.z);
-            hash_combine(h, m.subsurface);
-            hash_combine(h, m.subsurface_radius.x);
-            hash_combine(h, m.subsurface_radius.y);
-            hash_combine(h, m.subsurface_radius.z);
-            hash_combine(h, m.subsurface_scale);
-            hash_combine(h, m.subsurface_anisotropy);
+            hash_combine_f(h, m.subsurface_color.x);
+            hash_combine_f(h, m.subsurface_color.y);
+            hash_combine_f(h, m.subsurface_color.z);
+            hash_combine_f(h, m.subsurface);
+            hash_combine_f(h, m.subsurface_radius.x);
+            hash_combine_f(h, m.subsurface_radius.y);
+            hash_combine_f(h, m.subsurface_radius.z);
+            hash_combine_f(h, m.subsurface_scale);
+            hash_combine_f(h, m.subsurface_anisotropy);
 
             // Clear Coat & Translucent
-            hash_combine(h, m.clearcoat_roughness);
-            hash_combine(h, m.translucent);
+            hash_combine_f(h, m.clearcoat_roughness);
+            hash_combine_f(h, m.translucent);
 
             // Water Details
-            hash_combine(h, m.micro_detail_strength);
-            hash_combine(h, m.micro_detail_scale);
-            hash_combine(h, m.foam_noise_scale);
-            hash_combine(h, m.foam_threshold);
+            hash_combine_f(h, m.micro_detail_strength);
+            hash_combine_f(h, m.micro_detail_scale);
+            hash_combine_f(h, m.foam_noise_scale);
+            hash_combine_f(h, m.foam_threshold);
 
             // FFT Settings
-            hash_combine(h, m.fft_ocean_size);
-            hash_combine(h, m.fft_choppiness);
-            hash_combine(h, m.fft_wind_speed);
-            hash_combine(h, m.fft_wind_direction);
-            hash_combine(h, m.fft_amplitude);
-            hash_combine(h, m.fft_time_scale);
+            hash_combine_f(h, m.fft_ocean_size);
+            hash_combine_f(h, m.fft_choppiness);
+            hash_combine_f(h, m.fft_wind_speed);
+            hash_combine_f(h, m.fft_wind_direction);
+            hash_combine_f(h, m.fft_amplitude);
+            hash_combine_f(h, m.fft_time_scale);
 
             return h;  
         }  
@@ -264,17 +294,17 @@ namespace std {
         size_t operator()(const GpuMaterialWithTextures& x) const {  
             size_t h = std::hash<GpuMaterial>{}(x.material);  
 
-            auto hash_combine = [&](size_t& seed, const auto& v) {  
-                seed ^= std::hash<std::decay_t<decltype(v)>>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);  
+            auto hash_combine_s = [&](size_t& seed, size_t v) {  
+                seed ^= std::hash<size_t>{}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);  
             };  
 
-            hash_combine(h, x.albedoTexID);  
-            hash_combine(h, x.normalTexID);  
-            hash_combine(h, x.roughnessTexID);  
-            hash_combine(h, x.metallicTexID);  
-            hash_combine(h, x.opacityTexID);  
-            hash_combine(h, x.emissionTexID);  
-            hash_combine(h, x.materialNameHash);
+            hash_combine_s(h, x.albedoTexID);  
+            hash_combine_s(h, x.normalTexID);  
+            hash_combine_s(h, x.roughnessTexID);  
+            hash_combine_s(h, x.metallicTexID);  
+            hash_combine_s(h, x.opacityTexID);  
+            hash_combine_s(h, x.emissionTexID);  
+            hash_combine_s(h, x.materialNameHash);
 
             return h;  
         }  

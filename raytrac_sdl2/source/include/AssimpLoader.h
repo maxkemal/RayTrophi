@@ -285,7 +285,6 @@ struct BoneData {
         return boneNameToIndex.size();
     }
     
-    // Clear all bone data (Tüm kemik verilerini temizle)
     void clear() {
         boneNameToIndex.clear();
         boneNameToNode.clear();
@@ -296,6 +295,9 @@ struct BoneData {
         boneIndexToName.clear();
         globalInverseTransform = Matrix4x4::identity();
     }
+    
+    // Original root transform before any intelligent scaling corrections
+    Matrix4x4 originalRootTransform = Matrix4x4::identity();
 };
 
 
@@ -324,6 +326,7 @@ inline Matrix4x4 convert(const aiMatrix4x4& m) {
 class AssimpLoader {
 public:
     std::string currentImportName; // Unique material naming to prevent collisions (Çakışma önleyici isim)
+    std::string currentModelStem;  // Filename without extension (Uzantısız dosya adı)
     // NOTE: Uses global ::baseDirectory from globals.h
     
     std::set<std::string> lightNodeNames;
@@ -444,8 +447,10 @@ public:
         if (import_prefix.empty()) {
             std::filesystem::path p(filename);
             this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
+            this->currentModelStem = p.stem().string();
         } else {
             this->currentImportName = import_prefix;
+            this->currentModelStem = std::filesystem::path(filename).stem().string();
         }
 
         SCENE_LOG_INFO("Starting model loading: " + filename + " (Prefix: " + currentImportName + ")");
@@ -466,16 +471,17 @@ public:
         SCENE_LOG_INFO("Importing file with Assimp...");
         
         unsigned int importFlags = 
-            aiProcess_GenSmoothNormals |    // Generate smooth normals (Yumuşak normaller)
-            aiProcess_JoinIdenticalVertices | // Optimization: Join same vertices (Optimizasyon: Vertex birleştir)
-            aiProcess_Triangulate |         // Triangulate all faces (Tüm yüzeyleri üçgenle)
-            aiProcess_CalcTangentSpace;     // Calculate tangent space (Tanjant uzayı hesapla)
+            aiProcess_GenSmoothNormals |    // Generate smooth normals
+            aiProcess_JoinIdenticalVertices | // Optimization: Join same vertices
+            aiProcess_Triangulate |         // Triangulate all faces
+            aiProcess_CalcTangentSpace |     // Calculate tangent space
+            aiProcess_FindInvalidData |      // Detect invalid data (NaN etc)
+            aiProcess_ImproveCacheLocality | // Optimization for rendering
+            aiProcess_ValidateDataStructure; // Ensure scene hierarchy is valid
         
-        // Add global scale for FBX
-        // FBX için global ölçekleme
-        if (isFBX) {
-            importFlags |= aiProcess_GlobalScale;
-        }
+        // Add global scale for FBX and other formats
+        // FBX ve diğer formatlar için global ölçekleme
+        importFlags |= aiProcess_GlobalScale;
         
         this->scene = importer.ReadFile(filename, importFlags);
 
@@ -485,6 +491,87 @@ public:
         }
 
         SCENE_LOG_INFO("Assimp file loaded successfully. Processing scene data...");
+
+        // Log Metadata for Units (Birimler için Metadata kaydet)
+        if (scene->mMetaData) {
+            float unitFactor = 1.0f;
+            if (scene->mMetaData->Get("UnitScaleFactor", unitFactor)) {
+                SCENE_LOG_INFO("Model Metadata: UnitScaleFactor = " + std::to_string(unitFactor));
+            }
+        }
+        
+        // Save the original root transform (without correction)
+        boneData.originalRootTransform = convert(scene->mRootNode->mTransformation);
+
+        // =========================================================================
+        // INTELLIGENT SCALE & POSITION DETECTION (Akıllı Ölçek ve Konum Algılama)
+        // =========================================================================
+        // Check if the model is too big (units mismatch) or too far from origin.
+        // Modelin çok büyük (ölçek uyuşmazlığı) veya orijinden çok uzak olup olmadığını kontrol et.
+        {
+            aiVector3D sceneMin(1e10f, 1e10f, 1e10f);
+            aiVector3D sceneMax(-1e10f, -1e10f, -1e10f);
+            bool hasGeometry = false;
+
+            for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
+                aiMesh* mesh = scene->mMeshes[m];
+                if (mesh->mNumVertices > 0) hasGeometry = true;
+                for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+                    aiVector3D p = mesh->mVertices[v];
+                    sceneMin.x = std::min(sceneMin.x, p.x);
+                    sceneMin.y = std::min(sceneMin.y, p.y);
+                    sceneMin.z = std::min(sceneMin.z, p.z);
+                    sceneMax.x = std::max(sceneMax.x, p.x);
+                    sceneMax.y = std::max(sceneMax.y, p.y);
+                    sceneMax.z = std::max(sceneMax.z, p.z);
+                }
+            }
+
+            if (hasGeometry) {
+                aiVector3D size = sceneMax - sceneMin;
+                aiVector3D center = (sceneMax + sceneMin) * 0.5f;
+                float maxDim = std::max({size.x, size.y, size.z});
+                
+                SCENE_LOG_INFO("Model Raw Dimensions: " + std::to_string(size.x) + "x" + std::to_string(size.y) + "x" + std::to_string(size.z));
+                SCENE_LOG_INFO("Model Raw Center: " + std::to_string(center.x) + ", " + std::to_string(center.y) + ", " + std::to_string(center.z));
+
+                float scaleFactor = 1.0f;
+                
+                // Intelligent Unit Detection (Akıllı Birim Algılama)
+                // If model is huge (e.g. > 100m for a non-terrain object), it might be in CM or MM
+                // Eğer model çok büyükse (örn. 100m'den büyük), CM veya MM olabilir.
+                if (maxDim > 500.0f) {
+                    scaleFactor = 0.01f; // CM -> Meters
+                    if (maxDim > 5000.0f) scaleFactor = 0.001f; // MM -> Meters
+                    
+                    SCENE_LOG_WARN("Model seems extremely large (" + std::to_string(maxDim) + " units). Auto-scaling by " + std::to_string(scaleFactor) + " to normalize to Meters.");
+                }
+                
+                // Detect if model is way off-center (Orijinden çok uzak mı?)
+                bool needsCentering = center.Length() > 1000.0f;
+                if (needsCentering) {
+                    SCENE_LOG_WARN("Model is VERY far from origin (" + std::to_string(center.Length()) + " units). Auto-centering suggested.");
+                }
+
+                if (scaleFactor != 1.0f || needsCentering) {
+                    aiMatrix4x4 correction;
+                    if (needsCentering) {
+                        // Pre-multiply by centering translation
+                        aiMatrix4x4::Translation(-center, correction);
+                    }
+                    if (scaleFactor != 1.0f) {
+                        // Pre-multiply by scale
+                        aiMatrix4x4 scaleMat;
+                        aiMatrix4x4::Scaling(aiVector3D(scaleFactor, scaleFactor, scaleFactor), scaleMat);
+                        correction = scaleMat * correction;
+                    }
+                    
+                    // Bake this into the root node transformation
+                    scene->mRootNode->mTransformation = correction * scene->mRootNode->mTransformation;
+                    SCENE_LOG_INFO("Applied intelligent correction to Root Node.");
+                }
+            }
+        }
 
         SCENE_LOG_INFO("Clearing existing cameras, lights, and transform cache...");
         cameras.clear();
@@ -773,70 +860,91 @@ public:
                 gpuMat.ior = 1.0f;
                 gpuMat.transmission = 0.0f;
                 gpuMat.opacity = 1.0f;
-            } else if (mat->gpuMaterial) {
-                gpuMat = *mat->gpuMaterial;
-            } else if (mat->type() == MaterialType::PrincipledBSDF) {
-                PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
-                Vec3 alb = pbsdf->albedoProperty.color;
-                gpuMat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-                gpuMat.roughness = (float)pbsdf->roughnessProperty.color.x;
-                gpuMat.metallic = (float)pbsdf->metallicProperty.intensity;
-                Vec3 em = pbsdf->emissionProperty.color;
-                float emStr = pbsdf->emissionProperty.intensity;
-                gpuMat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-                gpuMat.ior = pbsdf->ior;
-                gpuMat.transmission = pbsdf->transmission;
-                gpuMat.opacity = pbsdf->opacityProperty.alpha;
-                gpuMat.subsurface = pbsdf->subsurface;
-                Vec3 sssColor = pbsdf->subsurfaceColor;
-                gpuMat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-                Vec3 sssRadius = pbsdf->subsurfaceRadius;
-                gpuMat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-                gpuMat.subsurface_scale = pbsdf->subsurfaceScale;
-                gpuMat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
-                gpuMat.subsurface_ior = pbsdf->subsurfaceIOR;
-                gpuMat.clearcoat = pbsdf->clearcoat;
-                gpuMat.clearcoat_roughness = pbsdf->clearcoatRoughness;
-                gpuMat.translucent = pbsdf->translucent;
-                gpuMat.anisotropic = pbsdf->anisotropic;
             } else {
-                gpuMat.albedo = make_float3(0.8f, 0.8f, 0.8f);
-                gpuMat.roughness = 0.5f;
-                gpuMat.metallic = 0.0f;
-                gpuMat.emission = make_float3(0.0f, 0.f, 0.f);
-                gpuMat.ior = 1.5f;
-                gpuMat.transmission = 0.0f;
-                gpuMat.opacity = 1.0f;
+                // Helper to get CUDA texture object (uploads if needed)
+                auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
+                    extern bool g_hasOptix; 
+                    if (tex && tex->is_loaded()) {
+                         if (!tex->is_gpu_uploaded && g_hasOptix) {
+                             tex->upload_to_gpu();
+                         }
+                         return tex->get_cuda_texture();
+                    }
+                    return 0;
+                };
+
+                // Calculate GpuMaterial properties from PrincipledBSDF
+                if (mat->type() == MaterialType::PrincipledBSDF) {
+                    PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+                    Vec3 alb = pbsdf->albedoProperty.color;
+                    gpuMat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+                    gpuMat.roughness = (float)pbsdf->roughnessProperty.color.x;
+                    gpuMat.metallic = (float)pbsdf->metallicProperty.intensity;
+                    Vec3 em = pbsdf->emissionProperty.color;
+                    float emStr = pbsdf->emissionProperty.intensity;
+                    gpuMat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+                    gpuMat.ior = pbsdf->ior;
+                    gpuMat.transmission = pbsdf->transmission;
+                    gpuMat.opacity = pbsdf->opacityProperty.alpha;
+                    
+                    // SSS
+                    gpuMat.subsurface = pbsdf->subsurface;
+                    Vec3 sssColor = pbsdf->subsurfaceColor;
+                    gpuMat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+                    Vec3 sssRadius = pbsdf->subsurfaceRadius;
+                    gpuMat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+                    gpuMat.subsurface_scale = pbsdf->subsurfaceScale;
+                    gpuMat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
+                    gpuMat.subsurface_ior = pbsdf->subsurfaceIOR;
+                    
+                    // Clearcoat & Translucent
+                    gpuMat.clearcoat = pbsdf->clearcoat;
+                    gpuMat.clearcoat_roughness = pbsdf->clearcoatRoughness;
+                    gpuMat.translucent = pbsdf->translucent;
+                    gpuMat.anisotropic = pbsdf->anisotropic;
+
+                    // Bindless Textures Population
+                    gpuMat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
+                    gpuMat.normal_tex      = getCudaTex(pbsdf->normalProperty.texture);
+                    gpuMat.roughness_tex   = getCudaTex(pbsdf->roughnessProperty.texture);
+                    gpuMat.metallic_tex    = getCudaTex(pbsdf->metallicProperty.texture);
+                    gpuMat.emission_tex    = getCudaTex(pbsdf->emissionProperty.texture);
+                    gpuMat.opacity_tex     = getCudaTex(pbsdf->opacityProperty.texture);
+                    gpuMat.transmission_tex= getCudaTex(pbsdf->transmissionProperty.texture);
+                    gpuMat.height_tex      = getCudaTex(pbsdf->heightProperty.texture); // Displacement
+                } else if (mat->gpuMaterial) {
+                    gpuMat = *mat->gpuMaterial;
+                } else {
+                    gpuMat.albedo = make_float3(0.8f, 0.8f, 0.8f);
+                    gpuMat.roughness = 0.5f;
+                    gpuMat.metallic = 0.0f;
+                    gpuMat.emission = make_float3(0.0f, 0.f, 0.f);
+                    gpuMat.ior = 1.5f;
+                    gpuMat.transmission = 0.0f;
+                    gpuMat.opacity = 1.0f;
+                }
             }
             data.materials[i] = gpuMat;
 
-            // Texture Bundle
+            // Texture Bundle (Legacy / SBT access)
             OptixGeometryData::TextureBundle texBundle = {};
-            auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
-                if (tex && tex->is_loaded()) {
-                     if (!tex->is_gpu_uploaded && g_hasOptix) {
-                         tex->upload_to_gpu();
-                     }
-                     return tex->get_cuda_texture();
-                }
-                return 0;
-            };
+            
             if (mat->type() == MaterialType::PrincipledBSDF) {
                 PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
-                if (pbsdf->albedoProperty.texture) { texBundle.albedo_tex = getCudaTex(pbsdf->albedoProperty.texture); texBundle.has_albedo_tex = (texBundle.albedo_tex != 0); }
-                if (pbsdf->roughnessProperty.texture) { texBundle.roughness_tex = getCudaTex(pbsdf->roughnessProperty.texture); texBundle.has_roughness_tex = (texBundle.roughness_tex != 0); }
-                if (pbsdf->normalProperty.texture) { texBundle.normal_tex = getCudaTex(pbsdf->normalProperty.texture); texBundle.has_normal_tex = (texBundle.normal_tex != 0); }
-                if (pbsdf->metallicProperty.texture) { texBundle.metallic_tex = getCudaTex(pbsdf->metallicProperty.texture); texBundle.has_metallic_tex = (texBundle.metallic_tex != 0); }
-                if (pbsdf->emissionProperty.texture) { texBundle.emission_tex = getCudaTex(pbsdf->emissionProperty.texture); texBundle.has_emission_tex = (texBundle.emission_tex != 0); }
-                if (pbsdf->opacityProperty.texture) { 
-                    texBundle.opacity_tex = getCudaTex(pbsdf->opacityProperty.texture); 
-                    texBundle.has_opacity_tex = (texBundle.opacity_tex != 0); 
+                // Use same texture handles populated above
+                if (gpuMat.albedo_tex) { texBundle.albedo_tex = gpuMat.albedo_tex; texBundle.has_albedo_tex = true; }
+                if (gpuMat.roughness_tex) { texBundle.roughness_tex = gpuMat.roughness_tex; texBundle.has_roughness_tex = true; }
+                if (gpuMat.normal_tex) { texBundle.normal_tex = gpuMat.normal_tex; texBundle.has_normal_tex = true; }
+                if (gpuMat.metallic_tex) { texBundle.metallic_tex = gpuMat.metallic_tex; texBundle.has_metallic_tex = true; }
+                if (gpuMat.emission_tex) { texBundle.emission_tex = gpuMat.emission_tex; texBundle.has_emission_tex = true; }
+                if (gpuMat.opacity_tex) { 
+                    texBundle.opacity_tex = gpuMat.opacity_tex;
+                    texBundle.has_opacity_tex = true;
                     texBundle.opacity_has_alpha = pbsdf->opacityProperty.texture->has_alpha ? 1 : 0;
                 }
-                if (pbsdf->transmissionProperty.texture) { texBundle.transmission_tex = getCudaTex(pbsdf->transmissionProperty.texture); texBundle.has_transmission_tex = (texBundle.transmission_tex != 0); }
+                if (gpuMat.transmission_tex) { texBundle.transmission_tex = gpuMat.transmission_tex; texBundle.has_transmission_tex = true; }
                 
-                // DEBUG: Trace albedo texture assignment
-                // if (texBundle.has_albedo_tex) SCENE_LOG_INFO("AssimpLoader: Albedo texture assigned for material " + std::to_string(i));
+                // Height texture not in logic bundle yet, but available in GpuMaterial
             }
             data.textures[i] = texBundle;
 
@@ -919,21 +1027,34 @@ public:
                                 data.uvs[base_v_idx + k] = make_float2(uvs[k].u, uvs[k].v);
                                 data.colors[base_v_idx + k] = make_float3(cols[k].x, cols[k].y, cols[k].z);
 
-                                // Extract skinning data
-                                if (tri->hasSkinData()) {
-                                    const auto& weights = tri->getSkinBoneWeights(k);
-                                    int4 bi = make_int4(-1, -1, -1, -1);
-                                    float4 bw = make_float4(0, 0, 0, 0);
+                                    // Extract skinning data
+                                    if (tri->hasSkinData()) {
+                                        const auto& weights = tri->getSkinBoneWeights(k);
+                                        int4 bi = make_int4(-1, -1, -1, -1);
+                                        float4 bw = make_float4(0, 0, 0, 0);
 
-                                    for (size_t w = 0; w < std::min(weights.size(), (size_t)4); ++w) {
-                                        if (w == 0) { bi.x = weights[w].first; bw.x = weights[w].second; }
-                                        else if (w == 1) { bi.y = weights[w].first; bw.y = weights[w].second; }
-                                        else if (w == 2) { bi.z = weights[w].first; bw.z = weights[w].second; }
-                                        else if (w == 3) { bi.w = weights[w].first; bw.w = weights[w].second; }
+                                        // 1. Calculate sum of first 4 weights
+                                        float sum = 0.0f;
+                                        size_t numInfluences = std::min(weights.size(), (size_t)4);
+                                        for (size_t w = 0; w < numInfluences; ++w) {
+                                            sum += weights[w].second;
+                                        }
+
+                                        // 2. Assign and normalize
+                                        if (sum > 1e-6f) {
+                                            float invSum = 1.0f / sum;
+                                            for (size_t w = 0; w < numInfluences; ++w) {
+                                                float normalizedWeight = weights[w].second * invSum;
+                                                if (w == 0) { bi.x = weights[w].first; bw.x = normalizedWeight; }
+                                                else if (w == 1) { bi.y = weights[w].first; bw.y = normalizedWeight; }
+                                                else if (w == 2) { bi.z = weights[w].first; bw.z = normalizedWeight; }
+                                                else if (w == 3) { bi.w = weights[w].first; bw.w = normalizedWeight; }
+                                            }
+                                        }
+
+                                        data.boneIndices[base_v_idx + k] = bi;
+                                        data.boneWeights[base_v_idx + k] = bw;
                                     }
-                                    data.boneIndices[base_v_idx + k] = bi;
-                                    data.boneWeights[base_v_idx + k] = bw;
-                                }
                             }
                             data.indices[i] = tri_idx_struct;
 
@@ -1104,7 +1225,7 @@ private:
         boneData.boneNameToNode.clear();
         boneData.boneOffsetMatrices.clear();
 
-        boneData.globalInverseTransform = convert(scene->mRootNode->mTransformation).inverse();
+        boneData.globalInverseTransform = boneData.originalRootTransform.inverse();
         
         // Store per-model inverse for AnimationController
         if (!currentImportName.empty()) {
@@ -1181,7 +1302,7 @@ private:
         boneData.boneParents.clear();
         boneData.boneDefaultTransforms.clear();
         
-        boneData.globalInverseTransform = convert(scene->mRootNode->mTransformation).inverse();
+        boneData.globalInverseTransform = boneData.originalRootTransform.inverse();
         
         // Store this model's specific inverse
         boneData.perModelInverses[this->currentImportName] = boneData.globalInverseTransform;
@@ -2267,35 +2388,105 @@ private:
 
         return textureName;
     }
+private:
+    // =========================================================================
+    // SMART TEXTURE PATH RESOLVER (Akıllı Doku Yolu Çözücü)
+    // =========================================================================
+    // Resolves broken or absolute paths by searching in multiple potential locations.
+    // Kırık veya mutlak yolları birden fazla potansiyel konumda arayarak çözer.
+    // =========================================================================
+    std::string resolveTexturePath(const std::string& originalPath) {
+        namespace fs = std::filesystem;
+        
+        try {
+            fs::path p(originalPath);
+            fs::path modelDir(baseDirectory);
+
+            // 1. Try directly (as is)
+            if (fs::exists(p)) return p.string();
+
+            // 2. Try relative to model directory (standard case)
+            fs::path relPath = modelDir / p;
+            if (fs::exists(relPath)) return relPath.string();
+
+            // 3. Try just the filename in model directory
+            fs::path filenameOnly = modelDir / p.filename();
+            if (fs::exists(filenameOnly)) return filenameOnly.string();
+
+            // 4. Try in "textures" or "Textures" subfolder
+            fs::path texSub = modelDir / "textures" / p.filename();
+            if (fs::exists(texSub)) return texSub.string();
+
+            fs::path texSubUpper = modelDir / "Textures" / p.filename();
+            if (fs::exists(texSubUpper)) return texSubUpper.string();
+
+            // 4b. Try in folder named after the model (e.g. "ModelName/texture.png")
+            if (!currentModelStem.empty()) {
+                fs::path modelFolderSub = modelDir / currentModelStem / p.filename();
+                if (fs::exists(modelFolderSub)) return modelFolderSub.string();
+            }
+
+            // 4c. Try in parent directory's "textures" (common in some asset packs)
+            fs::path parentTex = modelDir.parent_path() / "textures" / p.filename();
+            if (fs::exists(parentTex)) return parentTex.string();
+
+            // 5. Recursive reconstruction from absolute path
+            // e.g. "C:/Project/Assets/Textures/skin.png" -> check "Textures/skin.png" then "Assets/Textures/skin.png" etc.
+            if (p.is_absolute()) {
+                fs::path suffix = p.filename();
+                fs::path parent = p.parent_path();
+                
+                // Try up to 3 levels of parent folders
+                for (int i = 0; i < 3; ++i) {
+                    if (!parent.has_relative_path() || parent == parent.root_path()) break;
+                    
+                    suffix = parent.filename() / suffix;
+                    fs::path candidate = modelDir / suffix;
+                    if (fs::exists(candidate)) return candidate.string();
+                    
+                    parent = parent.parent_path();
+                }
+            }
+
+            // 6. Final attempt: Scan the model directory recursively for the filename (expensive but effective)
+            // SADECE küçük dosyalarda veya opsiyonel olarak yapılabilir. Şimdilik kapalı tutalım.
+            
+        } catch (const std::exception& e) {
+            SCENE_LOG_WARN("Path resolution error: " + std::string(e.what()));
+        }
+
+        return ""; // Not found
+    }
+
+public:
     std::shared_ptr<Texture> loadTextureWithCache(const std::string& name, TextureType type)
     {
-        // Calculate Full Path FIRST to ensure uniqueness in cache across different imports
-        std::filesystem::path texPath(name);
-        if (!texPath.is_absolute())
-            texPath = std::filesystem::path(baseDirectory) / texPath;
-        texPath = texPath.lexically_normal();
-        
-        // Use Full Path in Cache Key
-        // This fixes the issue where 'wood.jpg' in Model1 uses the texture from Model2 by mistake
-        std::string cacheKey = texPath.string() + "_" + std::to_string(static_cast<int>(type));
+        // Use Smart Resolver to find the real file path
+        // Gerçek dosya yolunu bulmak için Akıllı Çözücü kullan
+        std::string resolvedPath = resolveTexturePath(name);
+
+        if (resolvedPath.empty()) {
+            SCENE_LOG_WARN("Could not resolve texture path: " + name + " (Check if file exists in model folder or 'textures/' subfolder)");
+            return nullptr;
+        }
+
+        // Use lexically normal full path for consistent cache keys
+        std::string finalPath = std::filesystem::path(resolvedPath).lexically_normal().string();
+        std::string cacheKey = finalPath + "_" + std::to_string(static_cast<int>(type));
 
         auto it = textureCache.find(cacheKey);
         if (it != textureCache.end())
             return it->second;
 
-        // SCENE_LOG_INFO("Final texture path: " + texPath.string()); 
-        // SCENE_LOG_INFO("Path exists: " + std::to_string(std::filesystem::exists(texPath)));  
+        auto tex = std::make_shared<Texture>(finalPath, type);
 
-        auto tex = std::make_shared<Texture>(texPath.string(), type);
-
-        if (!tex->is_loaded()) {  // ← Bu kontrolü ekle!
-           // SCENE_LOG_ERROR("Texture is_loaded() = false after constructor: " + texPath.string());
+        if (!tex->is_loaded()) {
             return nullptr;
         }
 
         if (g_hasOptix) {
             if (!tex->upload_to_gpu()) {
-               // SCENE_LOG_ERROR("Disk texture GPU upload failed: " + texPath.string());
+                // SCENE_LOG_ERROR("Disk texture GPU upload failed: " + finalPath);
                 return nullptr;
             }
         }

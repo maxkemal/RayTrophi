@@ -121,6 +121,8 @@ public:
     
     // Updates d_material_indices buffer - for material slot reassignment (different material assigned)
     void updateSBTMaterialBindings(const std::vector<int>& material_indices);
+    // [NEW] Update specific mesh material binding (uses AccelManager fast path)
+    void updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id);
     
     // Updates SBT hitgroup records with new volumetric parameters - for volumetric material changes
     // Updates SBT hitgroup records with new volumetric parameters - for volumetric material changes
@@ -188,6 +190,7 @@ public:
         const uint32_t* strand_ids,
         const float3* tangents,
         const float2* root_uvs,
+        const float* strand_v,
         size_t vertex_count,
         size_t segment_count,
         const GpuHairMaterial& material,

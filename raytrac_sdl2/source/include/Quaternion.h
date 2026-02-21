@@ -147,6 +147,46 @@ public:
         return mat;
     }
 
+    // Matristen Quaternion oluşturma (Decomposition)
+    static Quaternion fromMatrix(const Matrix4x4& m) {
+        float trace = m.m[0][0] + m.m[1][1] + m.m[2][2];
+        float S = 0;
+
+        if (trace > 0) {
+            S = sqrtf(trace + 1.0f) * 2;
+            return Quaternion(
+                0.25f * S,
+                (m.m[2][1] - m.m[1][2]) / S,
+                (m.m[0][2] - m.m[2][0]) / S,
+                (m.m[1][0] - m.m[0][1]) / S
+            );
+        } else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2]) {
+            S = sqrtf(1.0f + m.m[0][0] - m.m[1][1] - m.m[2][2]) * 2;
+            return Quaternion(
+                (m.m[2][1] - m.m[1][2]) / S,
+                0.25f * S,
+                (m.m[0][1] + m.m[1][0]) / S,
+                (m.m[0][2] + m.m[2][0]) / S
+            );
+        } else if (m.m[1][1] > m.m[2][2]) {
+            S = sqrtf(1.0f + m.m[1][1] - m.m[0][0] - m.m[2][2]) * 2;
+            return Quaternion(
+                (m.m[0][2] - m.m[2][0]) / S,
+                (m.m[0][1] + m.m[1][0]) / S,
+                0.25f * S,
+                (m.m[1][2] + m.m[2][1]) / S
+            );
+        } else {
+            S = sqrtf(1.0f + m.m[2][2] - m.m[0][0] - m.m[1][1]) * 2;
+            return Quaternion(
+                (m.m[1][0] - m.m[0][1]) / S,
+                (m.m[0][2] + m.m[2][0]) / S,
+                (m.m[1][2] + m.m[2][1]) / S,
+                0.25f * S
+            );
+        }
+    }
+
     // Quaternion'dan euler aÃ§Ã½larÃ½ oluÃ¾turma
     Vec3 toEuler() const {
         Vec3 euler;

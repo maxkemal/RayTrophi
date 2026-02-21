@@ -433,6 +433,7 @@ void MaterialManager::syncAllGpuMaterials_internal() {
             
             mat->gpuMaterial->ior = pbsdf->ior;
             mat->gpuMaterial->transmission = pbsdf->transmission;
+            // IMPORTANT: Opacity property alpha is what we use for transparency
             mat->gpuMaterial->opacity = pbsdf->opacityProperty.alpha;
             
             // SSS

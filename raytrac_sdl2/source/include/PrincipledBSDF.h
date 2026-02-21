@@ -48,6 +48,7 @@ public:
         const std::shared_ptr<Texture>& roughnessTexture = nullptr,
         const std::shared_ptr<Texture>& metallicTexture = nullptr,
         const std::shared_ptr<Texture>& normalTexture = nullptr,
+        const std::shared_ptr<Texture>& heightTexture = nullptr,
         const std::shared_ptr<Texture>& opacityTexture = nullptr,
         const TextureTransform& transform = TextureTransform(),
         const Vec3& emission = Vec3(0.0f, 0.0f, 0.0f),
@@ -72,6 +73,7 @@ public:
         roughnessProperty = MaterialProperty(Vec3(roughness), 1.0f, roughnessTexture);
         metallicProperty = MaterialProperty(Vec3(metallic), metallic, metallicTexture);
         normalProperty = MaterialProperty(Vec3(0.5f, 0.5f, 1.0f), 1.0f, normalTexture);
+        heightProperty = MaterialProperty(Vec3(0.5f), 1.0f, heightTexture); // 0.5 = mid-gray
         opacityProperty = MaterialProperty(Vec3(1.0f), 1.0f, opacityTexture, 1.0f);
         emissionProperty = MaterialProperty(emission, 0.0f);
         
