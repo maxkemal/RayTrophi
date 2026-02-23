@@ -10,6 +10,9 @@
 
 **A high-performance, production-ready ray tracing renderer with hybrid CPU/GPU rendering**
 
+[![RayTrophi V0.05 Showcase](https://img.youtube.com/vi/Y03YvX5EHEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y03YvX5EHEM)
+**[▶️ Watch Showcase on YouTube](https://www.youtube.com/watch?v=Y03YvX5EHEM)**
+
 [Features](#-features) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Performance](#-performance) • [Gallery](#-gallery)
 
 </div>

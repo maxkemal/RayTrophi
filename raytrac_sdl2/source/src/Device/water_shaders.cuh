@@ -213,24 +213,29 @@ __device__ inline float calculateShoreFoam(
     float shore_distance,
     float shore_intensity,
     float3 position,
-    float time
+    float time,
+    float foam_scale = 1.0f
 ) {
-    if (depth > shore_distance) return 0.0f;
+    if (depth > shore_distance || shore_distance < 0.001f) return 0.0f;
     
     // Base shore factor
     float shore_t = 1.0f - (depth / shore_distance);
     shore_t = shore_t * shore_t;  // Quadratic falloff
     
+    // Smooth the threshold so it doesn't abruptly clip
+    shore_t = smoothstep(0.0f, 1.0f, shore_t);
+    
     // Add animated noise for natural look
-    float2 noisePos = make_float2(position.x * 2.0f + time * 0.5f, position.z * 2.0f);
+    float noise_val = foam_scale > 0.001f ? foam_scale : 1.0f;
+    float2 noisePos = make_float2(position.x * noise_val + time * 0.5f, position.z * noise_val - time * 0.3f);
     float foam_noise = (fbm(noisePos) + 1.0f) * 0.5f;
     
-    // Combine with edge detection pattern
-    float edge_pattern = sinf(depth * 20.0f - time * 3.0f) * 0.5f + 0.5f;
+    // Combine with edge detection pattern 
+    float edge_pattern = sinf(depth * (10.0f / shore_distance) - time * 3.0f) * 0.5f + 0.5f;
     
-    float shore_foam = shore_t * shore_intensity * foam_noise * (0.5f + edge_pattern * 0.5f);
+    float shore_foam = shore_t * shore_intensity * ((foam_noise * 0.7f) + (edge_pattern * 0.3f));
     
-    return fminf(shore_foam, 1.0f);
+    return fminf(shore_foam * 1.5f, 1.0f); // Boost slightly for clearer visibility
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -394,6 +399,9 @@ __device__ inline WaterResult sampleFFTOcean(
     float ny = sqrtf(fmaxf(0.0f, 1.0f - nxz.x * nxz.x - nxz.y * nxz.y));
     float3 normal = normalize(make_float3(nxz.x, ny, nxz.y));
     
+    // variables for micro slope
+    float micro_slope = 0.0f;
+    
     // === MICRO DETAIL (CAPILLARY WAVES) ===
     // Multi-layer animated noise for realistic ripples
     // Uses STATIONARY animation pattern - no drift, only in-place morphing
@@ -470,6 +478,11 @@ __device__ inline WaterResult sampleFFTOcean(
         float dsdx = (h_x - h_c) / d;
         float dsdz = (h_z - h_c) / d;
         
+        // Extract a stable "peak" value for foam rather than the chaotic spatial derivative
+        // h_c ranges approximately -1.0 to 1.0. We remap it to 0.0 - 1.0 for foam crest thresholding.
+        // This completely eliminates the "accumulating noise" issue from sub-pixel jitter!
+        micro_slope = (h_c * 0.5f + 0.5f);
+        
         // Perturb normal
         float3 noise_n = normalize(make_float3(-dsdx * micro_detail_strength, 1.0f, -dsdz * micro_detail_strength));
         
@@ -482,12 +495,24 @@ __device__ inline WaterResult sampleFFTOcean(
     }
 
     // === FOAM ===
-    // Simple foam from steep slopes (Jacobian approximation) but improved with noise
-    float slope = sqrtf(nxz.x * nxz.x + nxz.y * nxz.y);
+    // Completely switch from Macro steepness to Micro peak height for foam!
+    // This allows foam to beautifully trace the small turbulent ripples instead of big waves,
+    // and correctly anti-aliases without accumulating firefly pixel noise over passes.
+    float slope;
+    if (micro_detail_strength > 0.001f) {
+        slope = micro_slope;
+    } else {
+        // Fallback to macro waves if no micro details exist
+        slope = sqrtf(nxz.x * nxz.x + nxz.y * nxz.y);
+    }
+    
+    // Scale slope by threshold and intensity
     float base_foam = fmaxf(0.0f, (slope - foam_threshold) * foam_level * 5.0f);
     
-    // Break up foam with noise
-    float foam_noise = fbm(make_float2(position.x, position.z) * foam_noise_scale);
+    // Break up foam with animated noise based on time
+    float2 f_pos = make_float2(position.x, position.z) * foam_noise_scale;
+    float foam_noise = fbm(f_pos + make_float2(time * 0.1f, time * 0.15f));
+    
     float foam = base_foam * (0.5f + 0.5f * foam_noise);
     
     foam = fminf(1.0f, foam);
@@ -513,8 +538,9 @@ __device__ inline WaterResult evaluateWater(
     float time,
     const WaterParams& params
 ) {
+    WaterResult res;
     if (params.use_fft_ocean && params.fft_height_tex != 0) {
-        return sampleFFTOcean(
+        res = sampleFFTOcean(
             position,
             params.fft_ocean_size,
             params.fft_choppiness,
@@ -532,11 +558,16 @@ __device__ inline WaterResult evaluateWater(
             params.time
         );
     } else {
-        return evaluateGerstnerWave(
+        res = evaluateGerstnerWave(
             position, baseNormal, time,
             params.wave_speed,
             params.wave_strength,
             params.wave_frequency
         );
     }
+
+    res.water_color = params.shallow_color;
+    res.absorption = calculateWaterAbsorption(0.0f, params.absorption_color, params.absorption_density);
+
+    return res;
 }

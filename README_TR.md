@@ -10,6 +10,9 @@
 
 **Hibrit CPU/GPU rendering ile yüksek performanslı, üretime hazır ray tracing renderleyici**
 
+[![RayTrophi V0.05 Showcase](https://img.youtube.com/vi/Y03YvX5EHEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y03YvX5EHEM)
+**[▶️ Showcase Videosunu YouTube'da İzleyin](https://www.youtube.com/watch?v=Y03YvX5EHEM)**
+
 [Özellikler](#-özellikler) • [Hızlı Başlangıç](#-hızlı-başlangıç) • [Mimari](#-mimari) • [Performans](#-performans) • [Galeri](#-galeri)
 
 </div>

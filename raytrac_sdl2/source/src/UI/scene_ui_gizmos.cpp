@@ -901,6 +901,14 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
         objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
     }
+    else if (sel.selected.type == SelectableType::ForceField && sel.selected.force_field) {
+        Matrix4x4 mat = Matrix4x4::fromTRS(sel.selected.force_field->position, sel.selected.force_field->rotation, sel.selected.force_field->scale);
+
+        objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
+        objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
+        objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
+        objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
+    }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Keyboard Shortcuts for Transform Mode
@@ -1538,13 +1546,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
             sel.selected.rotation = r;
             sel.selected.scale = s;
             
-            // Update direction if it's a directional force
-            if (sel.selected.force_field->type == Physics::ForceFieldType::Wind || 
-                sel.selected.force_field->type == Physics::ForceFieldType::Gravity) {
-                // Extract local -Z as direction
-                Vec3 zAxis(objectMatrix[8], objectMatrix[9], objectMatrix[10]);
-                sel.selected.force_field->direction = (-zAxis).normalize();
-            }
+            // Removed direction override here, because ForceField direction is a LOCAL property
+            // and should only be explicitly set in the UI, not implicitly by gizmo rotation
+            // (The Gizmo rotation already rotates the final world force).
 
             if (ctx.optix_gpu_ptr) {
                 ctx.optix_gpu_ptr->resetAccumulation();
@@ -2005,6 +2009,7 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
             case Physics::ForceFieldType::Wind:      symbol = "W"; has_direction = true; break;
             case Physics::ForceFieldType::Vortex:    symbol = "@"; break;
             case Physics::ForceFieldType::Gravity:   symbol = "G"; has_direction = true; break;
+            case Physics::ForceFieldType::Magnetic:  symbol = "M"; has_direction = true; break;
             case Physics::ForceFieldType::Turbulence: symbol = "~"; break;
             case Physics::ForceFieldType::Attractor:  symbol = "+"; break;
             case Physics::ForceFieldType::Repeller:   symbol = "-"; break;
@@ -2016,17 +2021,23 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
 
         // Draw Direction Arrow
         if (has_direction) {
-            Vec3 dir = ff->direction;
-            // Also account for rotation in the direction if not explicitly setting direction
             Matrix4x4 rot = Matrix4x4::rotationX(ff->rotation.x * 0.0174533f) * 
                             Matrix4x4::rotationY(ff->rotation.y * 0.0174533f) * 
                             Matrix4x4::rotationZ(ff->rotation.z * 0.0174533f);
-            Vec3 world_dir = rot.transform_vector(Vec3(0, 0, -1)); // Default forward is -Z
             
-            // If direction is set manually, use it
-            if (dir.length() > 0.1f) world_dir = dir;
-
-            Vec3 arrow_end = ff->position + world_dir * 1.5f;
+            Vec3 local_dir = ff->direction;
+            if (local_dir.length() < 0.001f) {
+                // If it's a directional force but direction is 0,0,0, assume -Y (down) default
+                local_dir = Vec3(0, -1, 0);
+            }
+            
+            Vec3 world_dir = rot.transform_vector(local_dir).normalize();
+            
+            // Scale arrow length based on strength to visually indicate force magnitude
+            float arrow_len = 1.5f + std::abs(ff->strength) * 0.1f;
+            if (arrow_len > 15.0f) arrow_len = 15.0f; // Cap max length
+            
+            Vec3 arrow_end = ff->position + world_dir * arrow_len;
             ImVec2 screen_end = Project(arrow_end);
             if (screen_end.x > -5000) {
                 draw_list->AddLine(screen_pos, screen_end, color, 2.0f);
@@ -2041,9 +2052,12 @@ void SceneUI::drawForceFieldGizmos(UIContext& ctx, bool& gizmo_hit) {
             }
         }
 
+        // Show name and strength for ALL force fields in the viewport
+        char label[256];
+        snprintf(label, sizeof(label), "%s (Str: %.1f)", ff->name.c_str(), ff->strength);
+        draw_list->AddText(ImVec2(screen_pos.x + size + 5, screen_pos.y - 8), color, label);
+
         if (is_selected) {
-            draw_list->AddText(ImVec2(screen_pos.x + size + 5, screen_pos.y - 8), color, ff->name.c_str());
-            
             // Draw Radius for non-infinite
             if (ff->shape != Physics::ForceFieldShape::Infinite) {
                 float r = ff->falloff_radius;

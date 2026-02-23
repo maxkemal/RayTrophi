@@ -726,14 +726,9 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
     float tan_half_fov = tanf(fov_rad * 0.5f);
     float aspect = io.DisplaySize.x / io.DisplaySize.y;
     
-        // Calculate Viewport offsets and sizes
-        float left_off = showSidePanel ? side_panel_width : 0.0f;
-        float top_off = 19.0f; // Menu bar height estimate
-        bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph);
-        float bottom_off = show_bottom ? (bottom_panel_height + 24.0f) : 24.0f;
-
-        float v_width = io.DisplaySize.x - left_off;
-        float v_height = io.DisplaySize.y - top_off - bottom_off;
+        // Calculate Full Window Sizes (since rendering spans the entire screen)
+        float v_width = (std::max)(1.0f, io.DisplaySize.x);
+        float v_height = (std::max)(1.0f, io.DisplaySize.y);
 
         auto Project = [&](const Vec3& p) -> ImVec2 {
             Vec3 dir = (p - cam.lookfrom);
@@ -752,8 +747,8 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
             float half_w = half_h * aspect;
 
             return ImVec2(
-                left_off + ((local_x / half_w) * 0.5f + 0.5f) * v_width,
-                top_off + (0.5f - (local_y / half_h) * 0.5f) * v_height
+                ((local_x / half_w) * 0.5f + 0.5f) * v_width,
+                (0.5f - (local_y / half_h) * 0.5f) * v_height
             );
         };
     
@@ -1007,18 +1002,13 @@ inline void SceneUI::drawRiverGizmos(UIContext& ctx, bool& gizmo_hit) {
             float mx = io.MousePos.x;
             float my = io.MousePos.y;
 
-            // Calculate Viewport offsets and sizes
-            float left_off = showSidePanel ? side_panel_width : 0.0f;
-            float top_off = 19.0f; // Menu bar height estimate
-            bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph);
-            float bottom_off = show_bottom ? (bottom_panel_height + 24.0f) : 24.0f;
+            // Full window size
+            float v_width = (std::max)(1.0f, io.DisplaySize.x);
+            float v_height = (std::max)(1.0f, io.DisplaySize.y);
 
-            float v_width = io.DisplaySize.x - left_off;
-            float v_height = io.DisplaySize.y - top_off - bottom_off;
-
-            // Normalize mouse position relative to viewport
-            float u = (mx - left_off) / v_width;
-            float v = 1.0f - ((my - top_off) / v_height);
+            // Normalize mouse position relative to full window viewport
+            float u = mx / v_width;
+            float v = 1.0f - (my / v_height);
 
             // Use Camera's own ray generation for perfect consistency
             Ray cameraRay = cam.get_ray(u, v);

@@ -154,11 +154,18 @@ void RiverManager::generateMesh(RiverSpline* river, SceneData& scene) {
         
         gpu->micro_detail_strength = wp.micro_detail_strength;
         gpu->micro_detail_scale = wp.micro_detail_scale;
+        gpu->micro_anim_speed = wp.micro_anim_speed;
+        gpu->micro_morph_speed = wp.micro_morph_speed;
         gpu->foam_noise_scale = wp.foam_noise_scale;
         gpu->foam_threshold = wp.foam_threshold;
         gpu->fft_ocean_size = wp.fft_ocean_size;
         gpu->fft_choppiness = wp.fft_choppiness;
         
+        // Sync pbsdf properties so Renderer doesn't override with incorrect values
+        water_mat->albedoProperty.color = Vec3(wp.deep_color.x, wp.deep_color.y, wp.deep_color.z);
+        water_mat->emissionProperty.color = Vec3(wp.shallow_color.x, wp.shallow_color.y, wp.shallow_color.z);
+        water_mat->emissionProperty.intensity = 1.0f;
+
         water_mat->gpuMaterial = gpu;
         water_mat->materialName = matName;
         

@@ -853,11 +853,24 @@ int main(int argc, char* argv[]) {
                     bool is_shift_pressed = state[SDL_SCANCODE_LSHIFT] || state[SDL_SCANCODE_RSHIFT];
 
                     if (is_shift_pressed) {
-                    // Optimized pan speed calculation: smaller base constant and dynamic distance scaling
-                    float pan_multiplier = 0.0015f + render_settings.mouse_sensitivity * 0.015f;
-                    float pan_speed = pan_multiplier * current_nav_dist;
-                    
-                    Vec3 offset = scene.camera->u * -(float)dx * pan_speed + scene.camera->v * (float)dy * pan_speed;
+                        // Very strict clamp on panning logic
+                        // Distances above 100 units get heavily log-scaled
+                        float dist_factor = current_nav_dist;
+                        if (current_nav_dist > 100.0f) {
+                            dist_factor = 100.0f + std::log10(current_nav_dist - 99.0f) * 10.0f;
+                        }
+                        
+                        // Extremely small base speeds for panning
+                        float pan_speed = (0.0005f + render_settings.mouse_sensitivity * 0.001f) * dist_factor;
+                        
+                        // Enforce a hard cap of 0.5 units per mouse pixel moved, regardless of distance
+                        pan_speed = std::min(pan_speed, 0.5f);
+                        
+                        // Additional clamp: if dx or dy are somehow massive (e.g. framerate drops), clamp their values
+                        int safe_dx = std::clamp(dx, -50, 50);
+                        int safe_dy = std::clamp(dy, -50, 50);
+                        
+                        Vec3 offset = scene.camera->u * -(float)safe_dx * pan_speed + scene.camera->v * (float)safe_dy * pan_speed;
                         scene.camera->lookfrom += offset;
                         scene.camera->lookat += offset;
                         scene.camera->update_camera_vectors();
@@ -873,8 +886,11 @@ int main(int argc, char* argv[]) {
                             scene.camera->update_camera_vectors();
                         }
                         else {
-                            yaw += dx * render_settings.mouse_sensitivity * 0.2f;
-                            pitch -= dy * render_settings.mouse_sensitivity * 0.2f;
+                            // Rotation: Pan/Zoom can be fast, but rotation speed is strictly dampened
+                            // so that high sensitivity doesn't lead to uncontrollable spinning.
+                            float rot_speed = 0.1f + (render_settings.mouse_sensitivity * 0.05f);
+                            yaw += dx * rot_speed;
+                            pitch -= dy * rot_speed;
                             pitch = std::clamp(pitch, -89.9f, 89.9f);
                             float rad_yaw = yaw * 3.14159265f / 180.0f;
                             float rad_pitch = pitch * 3.14159265f / 180.0f;
