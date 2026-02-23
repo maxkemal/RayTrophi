@@ -2,6 +2,8 @@
 
 ## v0.05 (Şubat 2026) - World Building Expansion
 
+[![RayTrophi V0.05 Showcase](https://img.youtube.com/vi/Y03YvX5EHEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y03YvX5EHEM)
+
 ---
 
 ## 🇹🇷 Türkçe (TR)

@@ -9,6 +9,7 @@
 #include "water_shaders.cuh"
 #include "hair_bsdf.cuh"
 #include "random_utils.cuh"
+#include "trace_ray.cuh"
 
 extern "C" __constant__ RayGenParams optixLaunchParams;
 
@@ -326,21 +327,78 @@ extern "C" __global__ void __closesthit__ch() {
              params.wind_direction = mat.fft_wind_direction;
              params.wind_speed = mat.fft_wind_speed;
              params.time = time;
-
+             
              WaterResult wave_res = evaluateWater(hitPoint, final_normal, time, params);
              final_normal = wave_res.normal;
              
+             // Measure actual water depth by tracing DOWN to the floor
+             float water_depth = params.depth_max > 0.1f ? params.depth_max : 100.0f;
+             float3 floor_position = hitPoint - make_float3(0.0f, water_depth, 0.0f);
+             bool found_floor = false;
+
+             if (params.shore_foam_intensity > 0.01f || params.absorption_density > 0.01f || params.caustic_intensity > 0.01f) {
+                 OptixHitResult depth_payload;
+                 depth_payload.hit = 0;
+                 Ray depth_ray;
+                 depth_ray.origin = hitPoint - make_float3(0.0f, 0.05f, 0.0f); // Offset to avoid self-hit
+                 depth_ray.direction = make_float3(0.0f, -1.0f, 0.0f);
+                 
+                 trace_ray(depth_ray, &depth_payload, 0.0f, water_depth);
+                 
+                 // Make sure we actually hit something below the water that isn't another water plane
+                 if (depth_payload.hit && !depth_payload.use_blended_data) { 
+                     // Ensure hit point is actually below us
+                     float hit_dist = hitPoint.y - depth_payload.position.y;
+                     if (hit_dist > 0.0f) {
+                         water_depth = hit_dist;
+                         floor_position = depth_payload.position;
+                         found_floor = true;
+                     }
+                 }
+             }
+
+             // Prepare blended data struct so depth color & caustics actually render everywhere!
+             payload->use_blended_data = 1; 
+             payload->blended_albedo = mat.albedo;
+             payload->blended_roughness = mat.roughness;
+             payload->blended_metallic = mat.metallic;
+             payload->blended_clearcoat = mat.clearcoat;
+             payload->blended_clearcoat_roughness = mat.clearcoat_roughness;
+             payload->blended_subsurface = mat.subsurface;
+             payload->blended_subsurface_color = mat.subsurface_color;
+             payload->blended_emission = mat.emission;
+             payload->blended_transmission = mat.transmission;
+             payload->blended_translucent = mat.translucent;
+             payload->blended_ior = mat.ior;
+
+             // Shore Foam Calculation
              float shore_foam = 0.0f;
-             if (params.shore_foam_intensity > 0.01f) {
-                 shore_foam = calculateShoreFoam(1.0f, params.shore_foam_distance, params.shore_foam_intensity, hitPoint, time);
+             if (params.shore_foam_intensity > 0.01f && found_floor) {
+                 shore_foam = calculateShoreFoam(water_depth, params.shore_foam_distance, params.shore_foam_intensity, hitPoint, time, params.foam_noise_scale);
              }
              float total_foam = fminf(wave_res.foam * params.foam_level + shore_foam, 1.0f);
-             float3 base_color = mat.albedo;
+             
+             // Base Water Color based on Depth
+             float3 base_color = calculateDepthColor(water_depth, params.depth_max, params.shallow_color, params.deep_color);
+             
+             // Caustics Calculation
+             if (params.caustic_intensity > 0.01f && found_floor) {
+                 float caustic_val = calculateWaterCaustics(floor_position, time, params.caustic_scale, params.caustic_speed);
+                 
+                 // Fade out caustics based on depth (Beer's Law approximation for caustic energy loss)
+                 float caustic_fade = expf(-water_depth * params.absorption_density * 0.5f);
+                 base_color = base_color + (params.shallow_color * caustic_val * params.caustic_intensity * caustic_fade);
+             }
+
              if (total_foam > 0.01f) {
-                 float3 foam_color = make_float3(0.92f, 0.96f, 1.0f);
+                 float3 foam_color = make_float3(0.92f, 0.96f, 1.0f); // White/Blueish foam
                  base_color = lerp(base_color, foam_color, total_foam);
                  payload->blended_roughness = lerp(mat.roughness, 0.8f, total_foam); 
-                 payload->use_blended_data = 1;
+                 
+                 // Foam is opaque and diffuse, prevent "glass" transmission which makes it completely black!
+                 payload->blended_transmission = lerp(mat.transmission, 0.0f, total_foam);
+                 payload->blended_metallic = lerp(mat.metallic, 0.0f, total_foam);
+                 payload->blended_clearcoat = lerp(mat.clearcoat, 0.0f, total_foam);
              }
              payload->blended_albedo = base_color;
          }

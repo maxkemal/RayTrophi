@@ -397,9 +397,10 @@ void updateFFTOcean(FFTOceanState* state, const FFTOceanParams* params, float ti
         p.small_wave_cutoff != state->cached_params.small_wave_cutoff) 
     {
         need_new_spectrum = true;
-        state->cached_params = p; // Update cache
     }
     
+    // Always update cached params so choppiness/time changes don't trigger constant GPU re-syncs!
+    state->cached_params = p;
     dim3 block(16, 16);
     dim3 grid((N + block.x - 1) / block.x, (N + block.y - 1) / block.y);
 

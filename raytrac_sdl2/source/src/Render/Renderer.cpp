@@ -4090,15 +4090,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                 if (is_water) {
                     extern RenderSettings render_settings;
-                    float water_time = 0.0f;
-
-                    if (render_settings.start_animation_render || render_settings.animation_is_playing) {
-                        float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
-                        water_time = static_cast<float>(render_settings.animation_current_frame) / fps;
-                    }
-                    else {
-                        water_time = SDL_GetTicks() / 1000.0f;
-                    }
+                    float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
+                    float water_time = static_cast<float>(render_settings.animation_current_frame) / fps;
 
                     // Pack parameters (Mirror GPU raygen.cu packing)
                     WaterParamsCPU params;
@@ -5366,34 +5359,43 @@ void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gp
                 // Calculate GpuMaterial properties from PrincipledBSDF
                 if (mat->type() == MaterialType::PrincipledBSDF) {
                     PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
-                    Vec3 alb = pbsdf->albedoProperty.color;
-                    gpu_mat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-                    gpu_mat.roughness = (float)pbsdf->roughnessProperty.color.x;
-                    gpu_mat.metallic = (float)pbsdf->metallicProperty.intensity;
-                    Vec3 em = pbsdf->emissionProperty.color;
-                    float emStr = pbsdf->emissionProperty.intensity;
-                    gpu_mat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-                    gpu_mat.ior = pbsdf->ior;
-                    gpu_mat.transmission = pbsdf->transmission;
-                    gpu_mat.opacity = pbsdf->opacityProperty.alpha;
+                    if (mat->gpuMaterial) {
+                        gpu_mat = *(mat->gpuMaterial);
+                    }
+                    // If this is a Water or River material, we MUST NOT overwrite the custom packed 
+                    // gpu_mat parameters with generic PrincipledBSDF default values!
+                    bool is_water = mat->materialName.find("Water") != std::string::npos || mat->materialName.find("River") != std::string::npos;
                     
-                    // SSS
-                    gpu_mat.subsurface = pbsdf->subsurface;
-                    Vec3 sssColor = pbsdf->subsurfaceColor;
-                    gpu_mat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-                    Vec3 sssRadius = pbsdf->subsurfaceRadius;
-                    gpu_mat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-                    gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
-                    gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
-                    gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
-                    
-                    // Clearcoat & Translucent
-                    gpu_mat.clearcoat = pbsdf->clearcoat;
-                    gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
-                    gpu_mat.translucent = pbsdf->translucent;
-                    gpu_mat.anisotropic = pbsdf->anisotropic;
-                    gpu_mat.sheen = pbsdf->sheen;
-                    gpu_mat.sheen_tint = pbsdf->sheen_tint;
+                    if (!is_water) {
+                        Vec3 alb = pbsdf->albedoProperty.color;
+                        gpu_mat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+                        gpu_mat.roughness = (float)pbsdf->roughnessProperty.color.x;
+                        gpu_mat.metallic = (float)pbsdf->metallicProperty.intensity;
+                        Vec3 em = pbsdf->emissionProperty.color;
+                        float emStr = pbsdf->emissionProperty.intensity;
+                        gpu_mat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+                        gpu_mat.ior = pbsdf->ior;
+                        gpu_mat.transmission = pbsdf->transmission;
+                        gpu_mat.opacity = pbsdf->opacityProperty.alpha;
+                        
+                        // SSS
+                        gpu_mat.subsurface = pbsdf->subsurface;
+                        Vec3 sssColor = pbsdf->subsurfaceColor;
+                        gpu_mat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+                        Vec3 sssRadius = pbsdf->subsurfaceRadius;
+                        gpu_mat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+                        gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
+                        gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
+                        gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
+                        
+                        // Clearcoat & Translucent
+                        gpu_mat.clearcoat = pbsdf->clearcoat;
+                        gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
+                        gpu_mat.translucent = pbsdf->translucent;
+                        gpu_mat.anisotropic = pbsdf->anisotropic;
+                        gpu_mat.sheen = pbsdf->sheen;
+                        gpu_mat.sheen_tint = pbsdf->sheen_tint;
+                    }
 
                     // Bindless Textures Population
                     gpu_mat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);

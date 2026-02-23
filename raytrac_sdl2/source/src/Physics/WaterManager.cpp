@@ -304,6 +304,8 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     // Water Details (New)
     gpu->micro_detail_strength = surf.params.micro_detail_strength;
     gpu->micro_detail_scale = surf.params.micro_detail_scale;
+    gpu->micro_anim_speed = surf.params.micro_anim_speed;
+    gpu->micro_morph_speed = surf.params.micro_morph_speed;
     gpu->foam_noise_scale = surf.params.foam_noise_scale;
     gpu->foam_threshold = surf.params.foam_threshold;
     
@@ -311,6 +313,11 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     gpu->fft_ocean_size = surf.params.fft_ocean_size;
     gpu->fft_choppiness = surf.params.fft_choppiness;
     
+    // Sync pbsdf properties so Renderer doesn't override with incorrect values
+    water_mat->albedoProperty.color = Vec3(surf.params.deep_color.x, surf.params.deep_color.y, surf.params.deep_color.z);
+    water_mat->emissionProperty.color = Vec3(surf.params.shallow_color.x, surf.params.shallow_color.y, surf.params.shallow_color.z);
+    water_mat->emissionProperty.intensity = 1.0f;
+
     water_mat->gpuMaterial = gpu;
     
     // Register material

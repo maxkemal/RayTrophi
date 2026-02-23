@@ -178,7 +178,7 @@ public:
     // Force Parameters
     // ─────────────────────────────────────────────────────────────────────────
     float strength = 1.0f;                 ///< Force magnitude
-    Vec3 direction = Vec3(0, 1, 0);        ///< Direction for Wind/Gravity types
+    Vec3 direction = Vec3(0, -1, 0);       ///< Direction for Wind/Gravity types
     
     // ─────────────────────────────────────────────────────────────────────────
     // Falloff

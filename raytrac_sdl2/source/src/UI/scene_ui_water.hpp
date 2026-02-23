@@ -60,7 +60,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
         
         if (ImGui::BeginListBox("##waterlist", ImVec2(-1, 80))) {
             for (int i = 0; i < waters.size(); i++) {
-                if (waters[i].type == WaterSurface::Type::River) continue; // Skip rivers (handled in River panel)
+                // Show all water types, including rivers (since River panel delegates material editing here)
                 
                 bool is_selected = (selected_water_idx == i);
                 if (ImGui::Selectable(waters[i].name.c_str(), is_selected)) {
@@ -741,6 +741,10 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         pbsdf->subsurfaceColor = surf.params.absorption_color;
                         pbsdf->roughness = surf.params.roughness;
                         pbsdf->ior = surf.params.ior;
+                        // Synchronize deep_color and shallow_color with PrincipledBSDF properties
+                        pbsdf->albedoProperty.color = surf.params.deep_color;
+                        pbsdf->emissionProperty.color = surf.params.shallow_color;
+                        pbsdf->emissionProperty.intensity = 1.0f;
                     }
 
                     if (mat->gpuMaterial) {

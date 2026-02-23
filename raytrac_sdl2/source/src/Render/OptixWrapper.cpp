@@ -1165,22 +1165,12 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     params.time = SDL_GetTicks() / 1000.0f;
     
     // Water time logic:
-    // - During static viewport render (accumulating): freeze time to prevent ghosting
-    // - During animation render (each frame different): use frame-based time for wave motion
-    if (render_settings.start_animation_render || render_settings.animation_is_playing) {
-        // Animation mode: calculate time from frame number
-        // This ensures waves move consistently across frames in video output
-        float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
-        float frame_time = static_cast<float>(render_settings.animation_current_frame) / fps;
-        params.water_time = frame_time;
-        frozen_water_time = frame_time;  // Keep in sync
-    } else {
-        // Viewport mode: freeze time at accumulation start to prevent ghosting
-        if (accumulated_samples == 0) {
-            frozen_water_time = params.time;  // Capture time at accumulation start
-        }
-        params.water_time = frozen_water_time;
-    }
+    // Tie water time directly to the animation timeline frame ALWAYS.
+    // This prevents the "jumping" effect when tweaking parameters while designing static images,
+    // but ensures water still flows properly when rendering or playing a timeline animation.
+    float fps = static_cast<float>(render_settings.animation_fps > 0 ? render_settings.animation_fps : 24);
+    float frame_time = static_cast<float>(render_settings.animation_current_frame) / fps;
+    params.water_time = frame_time;
 
     // Full image tiles
     params.tile_x = 0;
