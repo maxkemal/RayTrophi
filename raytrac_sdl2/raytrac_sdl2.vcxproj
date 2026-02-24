@@ -103,15 +103,15 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(ProjectDir)source\include;$(IncludePath)</IncludePath>
-    <LibraryPath>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(LibraryPath)</LibraryPath>
+    <IncludePath>$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)source\external;$(ProjectDir)source\external\imgui;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
     <IncludePath>$(SDL2_ROOT)\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)source\external;$(ProjectDir)source\external\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)source\external;$(ProjectDir)source\external\imgui;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -161,6 +161,7 @@
       <SupportJustMyCode>false</SupportJustMyCode>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -205,7 +206,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
