@@ -141,6 +141,24 @@ void from_json(const nlohmann::json& j, HairStrand& s) {
             }
         }
     }
+    
+    if (j.contains("restGroomedPositions") && j["restGroomedPositions"].is_array()) {
+        s.restGroomedPositions.clear();
+        for (const auto& pos : j["restGroomedPositions"]) {
+            if (pos.is_array() && pos.size() >= 3) {
+                s.restGroomedPositions.push_back(Vec3(pos[0].get<float>(), pos[1].get<float>(), pos[2].get<float>()));
+            }
+        }
+    }
+
+    if (j.contains("prevPositions") && j["prevPositions"].is_array()) {
+        s.prevPositions.clear();
+        for (const auto& pos : j["prevPositions"]) {
+            if (pos.is_array() && pos.size() >= 3) {
+                s.prevPositions.push_back(Vec3(pos[0].get<float>(), pos[1].get<float>(), pos[2].get<float>()));
+            }
+        }
+    }
 }
 
 
@@ -178,11 +196,19 @@ void to_json(nlohmann::json& j, const HairStrand& s) {
         {"baseLength", s.baseLength},
         {"clumpScale", s.clumpScale},
         {"meshMaterialID", s.meshMaterialID},
-        {"groomedPositions", nlohmann::json::array()}
+        {"groomedPositions", nlohmann::json::array()},
+        {"restGroomedPositions", nlohmann::json::array()},
+        {"prevPositions", nlohmann::json::array()}
     };
     
     for (const auto& pos : s.groomedPositions) {
         j["groomedPositions"].push_back({pos.x, pos.y, pos.z});
+    }
+    for (const auto& pos : s.restGroomedPositions) {
+        j["restGroomedPositions"].push_back({pos.x, pos.y, pos.z});
+    }
+    for (const auto& pos : s.prevPositions) {
+        j["prevPositions"].push_back({pos.x, pos.y, pos.z});
     }
 }
 

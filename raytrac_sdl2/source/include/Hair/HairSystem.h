@@ -62,6 +62,12 @@ struct HairGenerationParams {
     float gravity = 0.0f;               // Downward bend (0-1)
     float forceInfluence = 1.0f;        // How much external force fields affect this groom
 
+    // Physics / Dynamics
+    bool useDynamics = false;           // Enable real-time Verlet physics
+    float physicsDamping = 0.95f;       // Velocity damping (0-1)
+    float physicsStiffness = 0.1f;      // Shape retention (0-1)
+    float physicsMass = 1.0f;           // Particle mass
+
     
     // Rendering
     uint16_t defaultMaterialID = 0;     // Hair material

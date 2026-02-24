@@ -469,6 +469,9 @@ namespace AnimationGraph {
         result.boneNames.resize(count);
         result.blendWeight = 1.0f;
         
+        // Forward normalized time from the dominant pose
+        result.normalizedTime = (t > 0.5f) ? b.normalizedTime : a.normalizedTime;
+        
         // Blend Root Motion
         if (a.rootMotion.hasPosition && b.rootMotion.hasPosition) {
             result.rootMotion.positionDelta = Vec3::lerp(a.rootMotion.positionDelta, b.rootMotion.positionDelta, t);
@@ -583,19 +586,7 @@ namespace AnimationGraph {
             result.rootMotion.hasPosition = true;
         }
         
-        for (const auto& [nodeName, trsAdd] : additive.extraTransforms) {
-            // Get bone name for offset lookup
-            std::string boneName = (i < result.boneNames.size()) ? result.boneNames[i] : "";
-            
-            Matrix4x4 localMat = result.trsTransforms[i].toMatrix();
-            auto offsetIt = ctx.boneData->boneOffsetMatrices.find(boneName);
-            if (offsetIt != ctx.boneData->boneOffsetMatrices.end()) {
-                result.boneTransforms[i] = localMat * offsetIt->second;
-            } else {
-                result.boneTransforms[i] = localMat;
-            }
-        }
-        
+
         for (const auto& [nodeName, trsAdditive] : additive.extraTransforms) {
             auto baseIt = base.extraTransforms.find(nodeName);
             if (baseIt != base.extraTransforms.end()) {
@@ -826,34 +817,44 @@ namespace AnimationGraph {
         
         // 3. Update transition progress
         if (isTransitioning) {
-            updateTransition(ctx.deltaTime);
             PoseData targetPose = getStatePose(targetStateName);
             
+            float blendTime = 0.3f;
+            for (const auto& trans : transitions) {
+                if (trans.fromState == currentStateName && trans.toState == targetStateName) {
+                    blendTime = trans.blendTime;
+                    break;
+                }
+            }
+            
+            transitionProgress += ctx.deltaTime / std::max(0.001f, blendTime);
             float t = std::clamp(transitionProgress, 0.0f, 1.0f);
-            return BlendNode::blendPoses(currentPose, targetPose, t, ctx);
+            PoseData blendedPose = BlendNode::blendPoses(currentPose, targetPose, t, ctx);
+            
+            // Forward the target's normalized time during transition
+            if (targetPose.isValid()) {
+                blendedPose.normalizedTime = targetPose.normalizedTime;
+            }
+            
+            if (transitionProgress >= 1.0f) {
+                currentStateName = targetStateName;
+                targetStateName.clear();
+                transitionProgress = 0.0f;
+                isTransitioning = false;
+                for (const auto& state : states) {
+                    if (state.name == currentStateName && state.onEnter) state.onEnter();
+                }
+            }
+            
+            return blendedPose;
         }
         
         return currentPose;
     }
     
     void StateMachineNode::updateTransition(float deltaTime) {
-        float blendTime = 0.3f;
-        for (const auto& trans : transitions) {
-            if (trans.fromState == currentStateName && trans.toState == targetStateName) {
-                blendTime = trans.blendTime;
-                break;
-            }
-        }
-        transitionProgress += deltaTime / std::max(0.001f, blendTime);
-        if (transitionProgress >= 1.0f) {
-            currentStateName = targetStateName;
-            targetStateName.clear();
-            transitionProgress = 0.0f;
-            isTransitioning = false;
-            for (const auto& state : states) {
-                if (state.name == currentStateName && state.onEnter) state.onEnter();
-            }
-        }
+        // Obsolete: Transition logic is now handled inline in computePose
+        // to prevent 1-frame snapping glitches.
     }
     
     void StateMachineNode::addState(const std::string& name, uint32_t poseNodeId, bool isDefault) {
@@ -911,6 +912,19 @@ namespace AnimationGraph {
     }
     
     NodeSystem::PinValue AnimParameterNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        // Warning: This expects the NodeSystem Context to hold an AnimationEvalContext in its domainContext
+        if (ctx.hasDomainContext<AnimationEvalContext>()) {
+            AnimationEvalContext* animCtx = ctx.getDomainContext<AnimationEvalContext>();
+            if (paramType == ParamType::Float) {
+                return animCtx->getFloatParam(parameterName, 0.0f);
+            } else if (paramType == ParamType::Bool) {
+                return animCtx->getBoolParam(parameterName, false);
+            } else if (paramType == ParamType::Int) {
+                return animCtx->getIntParam(parameterName, 0);
+            } else if (paramType == ParamType::Trigger) {
+                return animCtx->getBoolParam(parameterName, false); // Triggers act as bools in nodes
+            }
+        }
         return NodeSystem::PinValue{}; 
     }
     
@@ -942,10 +956,52 @@ namespace AnimationGraph {
     
     PoseData BlendSpace1DNode::computePose(AnimationEvalContext& ctx) {
         float val = ctx.getFloatParam(parameterName, 0.0f);
+        
+        // 1. Check if we have enough points
         if (blendPoints.empty()) return PoseData{};
-        return PoseData{}; // Placeholder for full logic
+        if (blendPoints.size() == 1 || !ctx.clipsPtr) {
+            // Need to return the clip pose for the single point 
+            if (blendPoints.empty()) return PoseData{};
+            // Fake an AnimClipNode evaluation
+            AnimClipNode tempClip;
+            tempClip.clipName = blendPoints[0].clipName;
+            return tempClip.computePose(ctx); 
+        }
+
+        // 2. Sort points by value (should ideally be done on edit, doing it here for safety)
+        std::vector<BlendPoint> sortedPoints = blendPoints;
+        std::sort(sortedPoints.begin(), sortedPoints.end(), [](const BlendPoint& a, const BlendPoint& b) {
+            return a.paramValue < b.paramValue;
+        });
+
+        // 3. Find segments
+        if (val <= sortedPoints.front().paramValue) {
+            AnimClipNode clip; clip.clipName = sortedPoints.front().clipName;
+            return clip.computePose(ctx);
+        }
+        if (val >= sortedPoints.back().paramValue) {
+            AnimClipNode clip; clip.clipName = sortedPoints.back().clipName;
+            return clip.computePose(ctx);
+        }
+
+        for (size_t i = 0; i < sortedPoints.size() - 1; ++i) {
+            if (val >= sortedPoints[i].paramValue && val <= sortedPoints[i+1].paramValue) {
+                float range = sortedPoints[i+1].paramValue - sortedPoints[i].paramValue;
+                float t = (range > 0.0001f) ? (val - sortedPoints[i].paramValue) / range : 0.0f;
+                
+                AnimClipNode clipA; clipA.clipName = sortedPoints[i].clipName;
+                PoseData poseA = clipA.computePose(ctx);
+                
+                AnimClipNode clipB; clipB.clipName = sortedPoints[i+1].clipName;
+                PoseData poseB = clipB.computePose(ctx);
+                
+                return BlendNode::blendPoses(poseA, poseB, t, ctx);
+            }
+        }
+        
+        return PoseData{};
     }
-    
+
     void BlendSpace1DNode::drawContent() {
         InputTextString("Parameter", parameterName);
         if (ImGui::Button("Add Point")) {
@@ -987,7 +1043,22 @@ namespace AnimationGraph {
     }
     
     NodeSystem::PinValue ConditionNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
-        return NodeSystem::PinValue{};
+        if (!ctx.hasDomainContext<AnimationEvalContext>()) return NodeSystem::PinValue{};
+        
+        AnimationEvalContext* animCtx = ctx.getDomainContext<AnimationEvalContext>();
+        float paramVal = animCtx->getFloatParam(parameterName, 0.0f);
+        
+        bool result = false;
+        switch (compareType) {
+            case CompareType::Greater: result = paramVal > compareValue; break;
+            case CompareType::Less: result = paramVal < compareValue; break;
+            case CompareType::Equal: result = std::abs(paramVal - compareValue) < 0.0001f; break;
+            case CompareType::NotEqual: result = std::abs(paramVal - compareValue) >= 0.0001f; break;
+            case CompareType::GreaterEqual: result = paramVal >= compareValue; break;
+            case CompareType::LessEqual: result = paramVal <= compareValue; break;
+        }
+        
+        return result;
     }
 
     void ConditionNode::drawContent() {
@@ -1061,6 +1132,11 @@ namespace AnimationGraph {
     }
 
     NodeSystem::PinValue TimeNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
+        if (ctx.hasDomainContext<AnimationEvalContext>()) {
+            AnimationEvalContext* animCtx = ctx.getDomainContext<AnimationEvalContext>();
+            if (outputIndex == 0) return animCtx->deltaTime;
+            if (outputIndex == 1) return animCtx->globalTime;
+        }
         return NodeSystem::PinValue{};
     }
 

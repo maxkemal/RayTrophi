@@ -214,9 +214,23 @@
 | GTX 10xx | Pascal | Compute | 🔶 Moderate |
 | GTX 9xx | Maxwell | Compute | 🔶 Slower |
 
-### 📦 Dependencies
+### 📦 Dependencies & Environment Variables
 
-All dependencies are managed automatically:
+The project uses absolute paths via system environment variables. Before building, you **must set the following Environment Variables** in your Windows system to point to your local installation paths:
+
+| Environment Variable | Description | Example Path |
+|----------------------|-------------|--------------|
+| `SDL2_ROOT`          | SDL2 Root Directory | `C:\Libraries\SDL2-2.30.4` |
+| `SDL2_IMAGE_ROOT`    | SDL2 Image Root Directory | `C:\Libraries\SDL2-2.30.4\SDL2_image-2.8.2` |
+| `OPTIX_ROOT`         | OptiX SDK Directory | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
+| `EMBREE_ROOT`        | Embree Root Directory | `C:\Libraries\embree-4.4.0.x64.windows` |
+| `OIDN_ROOT`          | Intel Open Image Denoise Root | `C:\Libraries\oidn-2.3.0.x64.windows` |
+| `ASSIMP_ROOT`        | Assimp Root Directory | `C:\Libraries\Assimp` |
+| `CUDA_PATH`          | CUDA Toolkit Directory | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` |
+
+*(Note: `CUDA_PATH` is usually set automatically when you install the CUDA Toolkit.)*
+
+All dependencies are managed automatically once these variables are correctly configured:
 - SDL2 (graphics output)
 - Embree 4.x (CPU BVH)
 - AssImp 5.x (model loading)
@@ -249,21 +263,29 @@ cd RayTrophi/raytrac_sdl2
 
 **Note**: All dependencies (DLLs, resources) are automatically copied to the output directory by the build system.
 
-#### **Method 2: CMake (Known Issues - See below)**
+#### **Method 2: CMake**
 
 ```bash
-mkdir build && cd build
+mkdir build
+cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
+cmake --build . --config Release -j 12
 ```
 
-⚠️ **CMake Known Issue**: CPU rendering with SDL has a screen update bug. Use VS2022 .vcxproj build for stable CPU rendering.
+*(Note: CMake build is fully supported and equivalent to the VS2022 project.)*
 
 ### ▶️ Running
 
+If built with Visual Studio:
 ```bash
 cd x64/Release
 raytracing_render_code.exe
+```
+
+If built with CMake:
+```bash
+cd build/Release
+RayTrophi.exe
 ```
 
 The UI will appear. Use File > Load Scene to import models (GLTF recommended).

@@ -19,6 +19,7 @@
 #include <deque>
 #include <cmath>
 #include "Renderer.h"
+#include <execution>
 
 // Forward declarations
 class Triangle;
@@ -424,6 +425,23 @@ inline void HairUI::initializePresets() {
         preset.matParams.roughness = 0.28f;
         m_presets.push_back(preset);
     }
+    {
+        HairPreset preset;
+        preset.name = "Wet Dark Hair";
+        preset.genParams = m_editParams;
+        preset.genParams.length = 0.15f;
+        preset.genParams.clumpiness = 0.95f;   // Wet hair clumps heavily at the tips
+        preset.genParams.frizz = 0.0f;         // No frizz in wet hair
+        preset.genParams.gravity = 1.5f;       // Added weight from water
+        preset.genParams.childRadius = 0.015f; // Tighter strands
+        preset.matParams.colorMode = HairMaterialParams::ColorMode::MELANIN;
+        preset.matParams.melanin = 0.85f;      // Appears darker when wet due to water absorbing/scattering light
+        preset.matParams.melaninRedness = 0.1f;
+        // The most important material change for "wet" hair:
+        preset.matParams.roughness = 0.1f;         // Very sharp primary highlight
+        preset.matParams.radialRoughness = 0.1f;   // Very sharp secondary highlight
+        m_presets.push_back(preset);
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // ARCHITECTURAL / NATURE PRESETS
@@ -749,7 +767,24 @@ inline void HairUI::drawGenerationPanel(
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Small scale high-frequency jitter");
     }
 
-    if (ImGui::CollapsingHeader("Force Field Physics")) {
+    if (ImGui::CollapsingHeader("Dynamics & Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Checkbox("Enable Hair Dynamics (PBD)", &m_editParams.useDynamics)) stylingChanged = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Real-time Position Based Dynamics for hair simulation using Verlet integration.");
+
+        if (m_editParams.useDynamics) {
+            ImGui::Indent();
+            if (ImGui::SliderFloat("Damping", &m_editParams.physicsDamping, 0.5f, 1.0f, "%.3f")) stylingChanged = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Velocity retention. 1.0 = no friction, 0.5 = heavy drag.");
+
+            if (ImGui::SliderFloat("Stiffness", &m_editParams.physicsStiffness, 0.0f, 1.0f, "%.3f")) stylingChanged = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("How strongly the hair tries to return to its original groomed shape.");
+
+            if (ImGui::SliderFloat("Mass", &m_editParams.physicsMass, 0.1f, 5.0f, "%.2f")) stylingChanged = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Heavier hair reacts slower to wind forces.");
+            ImGui::Unindent();
+        }
+
+        ImGui::Separator();
         if (ImGui::SliderFloat("Force Influence", &m_editParams.forceInfluence, 0.0f, 2.0f, "%.2f")) stylingChanged = true;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much external force fields (Wind, Turbulence, etc.) affect this groom.\n0 = Ignore forces, 1 = Normal, 2 = Double effect");
     }
@@ -1757,11 +1792,11 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 float brushRadiusSq = brushRadius * brushRadius;
                 Matrix4x4 localToWorld = groom->transform;
 
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     // OPTIMIZATION: Quick root-distance early exit
                     Vec3 strandRootWorld = localToWorld.transform_point(strand.baseRootPos);
                     float distToRoot = (strandRootWorld - worldPos).length();
-                    if (distToRoot > (brushRadius + strand.baseLength * 1.2f)) continue;
+                    if (distToRoot > (brushRadius + strand.baseLength * 1.2f)) return;
 
                     // Modern Volume Hit: Check distance to any point on the strand
                     float minDistSq = 1e30f;
@@ -1800,7 +1835,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             else strand.groomedPositions[i] = strand.groomedPositions[i-1] + strand.rootNormal * segmentLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -1855,12 +1890,12 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 }
                 if (toothRowLen > 1e-5f) toothRowAxis = toothRowAxis / toothRowLen;
 
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     // OPTIMIZATION: Quick root-distance early exit
                     Vec3 strandRootWorld = localToWorld.transform_point(strand.baseRootPos);
-                    if ((strandRootWorld - worldPos).length() > (brushRadius + strand.baseLength * 1.5f)) continue;
+                    if ((strandRootWorld - worldPos).length() > (brushRadius + strand.baseLength * 1.5f)) return;
 
-                    if (strand.groomedPositions.size() <= 1) continue;
+                    if (strand.groomedPositions.size() <= 1) return;
                     
                     // Volume hit check: any point within brush?
                     float minDistSq = 1e30f;
@@ -1871,7 +1906,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         if (d2 < minDistSq) { minDistSq = d2; closestIdx = (int)pi; }
                     }
                     
-                    if (minDistSq >= brushRadiusSq) continue;
+                    if (minDistSq >= brushRadiusSq) return;
 
                     // --- COMB TOOTH CATCH TEST ---
                     // Project strand midpoint onto tooth row axis to determine
@@ -1885,7 +1920,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                     float distToToothCenter = std::abs(slotPos - toothSpacing * 0.5f);
                     
                     // Strand is "caught" if it's within the tooth catch radius
-                    if (distToToothCenter > toothCatchHalf) continue;
+                    if (distToToothCenter > toothCatchHalf) return;
                     
                     // Tooth catch strength (closer to tooth center = stronger catch)
                     float toothCatchFactor = 1.0f - (distToToothCenter / toothCatchHalf);
@@ -1954,7 +1989,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 // [FIX] Bake manual edits to rest pose immediately to persist against skinning updates
                 hairSystem.bakeGroomToRest(m_selectedGroomName);
@@ -1968,7 +2003,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
             if (HairGroom* groom = hairSystem.getGroom(m_selectedGroomName)) {
                 float brushRadiusSq = brushRadius * brushRadius;
                 Matrix4x4 localToWorld = groom->transform;
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -1991,7 +2026,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             strand.groomedPositions[i] = root + (strand.groomedPositions[i] - root) * scaleFactor;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2003,7 +2038,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
             if (HairGroom* groom = hairSystem.getGroom(m_selectedGroomName)) {
                 float brushRadiusSq = brushRadius * brushRadius;
                 Matrix4x4 localToWorld = groom->transform;
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2016,18 +2051,24 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         float falloff = 1.0f - dist / brushRadius;
                         Vec3 rootNormal = strand.rootNormal;
 
+                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
                         for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
                             Vec3 worldPoint = localToWorld.transform_point(strand.groomedPositions[i]);
                             float pDist = (worldPoint - worldPos).length();
                             float pFalloff = 1.0f - std::clamp(pDist / brushRadius, 0.0f, 1.0f);
                             
                             // Refined Puff: Move points along normal but with per-point falloff 
-                            // and a much smaller multiplier to avoid "explosive" growth.
-                            float displacement = effectStrength * pFalloff * effectiveDelta * 2.0f;
+                            float displacement = effectStrength * pFalloff * effectiveDelta * 5.0f;
                             strand.groomedPositions[i] = strand.groomedPositions[i] + rootNormal * displacement;
+                            
+                            // Length constraint
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = strand.groomedPositions[i] - prev;
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2039,7 +2080,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
             if (HairGroom* groom = hairSystem.getGroom(m_selectedGroomName)) {
                 float brushRadiusSq = brushRadius * brushRadius;
                 Matrix4x4 localToWorld = groom->transform;
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2053,7 +2094,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         // Scale clump change by time
                         strand.clumpScale = std::max(0.0f, strand.clumpScale + effectStrength * falloff * effectiveDelta * 100.0f);
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2068,7 +2109,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 Matrix4x4 worldToLocal = localToWorld.inverse();
                 Vec3 localPos = worldToLocal.transform_point(worldPos);
 
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2083,14 +2124,21 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         Vec3 bitangent = (std::abs(normal.y) < 0.9f) ? Vec3::cross(normal, Vec3(0,1,0)) : Vec3::cross(normal, Vec3(1,0,0));
                         bitangent.normalize();
 
+                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
                         for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
                             float t = (float)i / (strand.groomedPositions.size() - 1);
                             float wave = std::sin(t * m_brushSettings.frequency * 6.283f + strand.randomSeed * 6.283f);
                             float displacement = m_brushSettings.amplitude * wave * falloff * effectStrength * effectiveDelta * 5.0f * t;
                             strand.groomedPositions[i] = strand.groomedPositions[i] + bitangent * displacement;
+                            
+                            // Length constraint
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = strand.groomedPositions[i] - prev;
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2102,7 +2150,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
             if (HairGroom* groom = hairSystem.getGroom(m_selectedGroomName)) {
                 float brushRadiusSq = brushRadius * brushRadius;
                 Matrix4x4 localToWorld = groom->transform;
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2114,6 +2162,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         float dist = std::sqrt(minDistSq);
                         float falloff = 1.0f - dist / brushRadius;
                         
+                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
                         for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
                             float t = (float)i / (strand.groomedPositions.size() - 1);
                             // Simple stable pseudo-random jitter
@@ -2125,9 +2174,15 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             Vec3 jitter(rx, ry, rz);
                             float displacement = m_brushSettings.amplitude * falloff * effectStrength * effectiveDelta * 2.0f * t;
                             strand.groomedPositions[i] = strand.groomedPositions[i] + jitter * displacement;
+                            
+                            // Length constraint
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = strand.groomedPositions[i] - prev;
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2139,7 +2194,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
             if (HairGroom* groom = hairSystem.getGroom(m_selectedGroomName)) {
                 float brushRadiusSq = brushRadius * brushRadius;
                 Matrix4x4 localToWorld = groom->transform;
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2159,8 +2214,17 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             nextPos[i] = Vec3::mix(strand.groomedPositions[i], avg, std::min(1.0f, smoothAmount));
                         }
                         strand.groomedPositions = nextPos;
+                        
+                        // Length constraint
+                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
+                        for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = strand.groomedPositions[i] - prev;
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
+                        }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2175,7 +2239,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 Matrix4x4 worldToLocal = localToWorld.inverse();
                 Vec3 localBrushPos = worldToLocal.transform_point(worldPos);
 
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2188,12 +2252,19 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         float falloff = 1.0f - dist / brushRadius;
                         float pinchAmt = effectStrength * falloff * effectiveDelta * 5.0f;
 
+                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
                         for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
                             Vec3 toBrush = localBrushPos - strand.groomedPositions[i];
                             strand.groomedPositions[i] = strand.groomedPositions[i] + toBrush * std::min(1.0f, pinchAmt);
+                            
+                            // Length constraint
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = strand.groomedPositions[i] - prev;
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2208,7 +2279,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 Matrix4x4 worldToLocal = localToWorld.inverse();
                 Vec3 localBrushPos = worldToLocal.transform_point(worldPos);
 
-                for (auto& strand : groom->guides) {
+                std::for_each(std::execution::par_unseq, groom->guides.begin(), groom->guides.end(), [&](auto& strand) {
                     float minDistSq = 1e30f;
                     for (const auto& p : strand.groomedPositions) {
                         Vec3 worldP = localToWorld.transform_point(p);
@@ -2221,15 +2292,22 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         float falloff = 1.0f - dist / brushRadius;
                         float spreadAmt = effectStrength * falloff * effectiveDelta * 5.0f;
 
+                        float segmentTargetLen = strand.baseLength / (strand.groomedPositions.size() - 1);
                         for (size_t i = 1; i < strand.groomedPositions.size(); ++i) {
                             Vec3 awayFromBrush = strand.groomedPositions[i] - localBrushPos;
-                            float l = awayFromBrush.length();
-                            if (l > 0.001f) {
-                                strand.groomedPositions[i] = strand.groomedPositions[i] + (awayFromBrush / l) * spreadAmt * 0.01f;
+                            float l_dist = awayFromBrush.length();
+                            if (l_dist > 0.001f) {
+                                strand.groomedPositions[i] = strand.groomedPositions[i] + (awayFromBrush / l_dist) * spreadAmt * 0.01f;
                             }
+                            
+                            // Length constraint
+                            Vec3 prev = strand.groomedPositions[i-1];
+                            Vec3 segDir = strand.groomedPositions[i] - prev;
+                            float l = segDir.length();
+                            if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 groom->isDirty = true;
                 hairSystem.restyleGroom(m_selectedGroomName);
             }
@@ -2305,13 +2383,16 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                 };
                 std::vector<StrandInfo> caughtStrands;
                 
-                for (size_t si = 0; si < groom->guides.size(); ++si) {
+                std::mutex braidMtx;
+                std::vector<int> strandIndices(groom->guides.size());
+                std::iota(strandIndices.begin(), strandIndices.end(), 0);
+                std::for_each(std::execution::par_unseq, strandIndices.begin(), strandIndices.end(), [&](int si) {
                     auto& strand = groom->guides[si];
-                    if (strand.groomedPositions.size() <= 1) continue;
+                    if (strand.groomedPositions.size() <= 1) return;
                     
                     // Quick root distance check
                     Vec3 rootWorld = localToWorld.transform_point(strand.baseRootPos);
-                    if ((rootWorld - worldPos).length() > (brushRadius + strand.baseLength * 1.5f)) continue;
+                    if ((rootWorld - worldPos).length() > (brushRadius + strand.baseLength * 1.5f)) return;
                     
                     // Volume hit check
                     float minDistSq = 1e30f;
@@ -2329,9 +2410,10 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         float angleOnOU = toStrand.dot(overUnderAxis);
                         float angle = std::atan2(angleOnOU, angleOnCross);
                         
-                        caughtStrands.push_back({si, angle, std::sqrt(minDistSq)});
+                        std::lock_guard<std::mutex> lock(braidMtx);
+                        caughtStrands.push_back({(size_t)si, angle, std::sqrt(minDistSq)});
                     }
-                }
+                });
                 
                 if (caughtStrands.empty()) break;
                 
@@ -2340,7 +2422,9 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                           [](const StrandInfo& a, const StrandInfo& b) { return a.angle < b.angle; });
                 
                 // Assign groups: divide angular range evenly
-                for (size_t ci = 0; ci < caughtStrands.size(); ++ci) {
+                std::vector<int> caughtIndices(caughtStrands.size());
+                std::iota(caughtIndices.begin(), caughtIndices.end(), 0);
+                std::for_each(std::execution::par_unseq, caughtIndices.begin(), caughtIndices.end(), [&](int ci) {
                     auto& info = caughtStrands[ci];
                     auto& strand = groom->guides[info.strandIdx];
                     
@@ -2437,7 +2521,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                             if (l > 1e-6f) strand.groomedPositions[i] = prev + (segDir / l) * segmentTargetLen;
                         }
                     }
-                }
+                });
                 
                 groom->isDirty = true;
                 hairSystem.bakeGroomToRest(m_selectedGroomName);
