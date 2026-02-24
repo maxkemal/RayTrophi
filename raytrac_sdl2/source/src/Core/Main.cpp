@@ -590,14 +590,12 @@ int main(int argc, char* argv[]) {
      renderer =
         SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 
-     surface = SDL_GetWindowSurface(window);
+     surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
+     original_surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
 
      raytrace_texture =
-        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
             SDL_TEXTUREACCESS_STREAMING, image_width, image_height);
-
-     original_surface =
-        SDL_ConvertSurface(surface, surface->format, 0);
 
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
     
@@ -704,6 +702,15 @@ int main(int argc, char* argv[]) {
     } else {
         ui.addViewportMessage("CPU Rendering Mode (No compatible GPU found)", 6.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
     }
+
+    // ===========================================================================
+    // FORCE INITIAL RESOLUTION APPLY
+    // Ensures rendering bounds, surfaces, and CPU buffers perfectly align 
+    // down to the exact pixel, bypassing Windows DPI/Window-Frame issues.
+    // ===========================================================================
+    pending_width = image_width;
+    pending_height = image_height;
+    pending_resolution_change = true;
 
     SDL_Event e;
     while (!quit) {

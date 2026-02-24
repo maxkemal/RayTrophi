@@ -1,3 +1,0 @@
-E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/RayTrophi.dir
-E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/ALL_BUILD.dir
-E:/RayTrophi_projesi/raytracing_Proje_Moduler/raytrac_sdl2/build/CMakeFiles/ZERO_CHECK.dir

@@ -1,6 +1,10 @@
 ﻿// Suppress C4146 warning globally for this file (OpenVDB/NanoVDB compatibility)
 #pragma warning(disable: 4146)
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 // Fix for linker errors: Ensure Imath/OpenEXR are treated as DLLs
 #define IMATH_DLL
 #define OPENEXR_DLL
@@ -14,6 +18,14 @@
 #include <openvdb/openvdb.h>
 #include <openvdb/io/File.h>
 #include <openvdb/tools/Interpolation.h>
+
+// Undefine min and max macros that might have been brought in by Windows headers
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
 
 #include <nanovdb/NanoVDB.h>
 // Enable OpenVDB support in NanoVDB tools

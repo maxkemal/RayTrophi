@@ -36,20 +36,27 @@ if(WIN32)
         set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} /O2 /Zi /DNDEBUG")
         set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /DEBUG /SUBSYSTEM:CONSOLE")
         
-        add_compile_options(/MP)
+        # Match VS build flags required for optimal CPU performance and proper OpenMP enablement
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /Zc:__cplusplus /openmp /arch:AVX2 /fp:fast")
     endif()
 endif()
 
 # --- USER DEFINED PATHS ---
-set(SDL2_ROOT "E:/SDL2-2.30.4" CACHE PATH "Path to SDL2 root directory")
-set(SDL2_IMAGE_ROOT "E:/SDL2-2.30.4/SDL2_image-2.8.2" CACHE PATH "Path to SDL2 Image root directory")
-set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0" CACHE PATH "Path to OptiX SDK")
-set(EMBREE_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/embree-4.4.0.x64.windows" CACHE PATH "Path to Embree root")
-set(OIDN_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/oidn-2.3.0.x64.windows" CACHE PATH "Path to OIDN root")
-set(ASSIMP_ROOT "E:/RayTrophi_projesi/dis_bagimliliklar/Assimp" CACHE PATH "Path to Assimp root")
+# Read paths from environment variables. These can be overridden via CMake cache variables (-D).
+set(SDL2_ROOT "$ENV{SDL2_ROOT}" CACHE PATH "Path to SDL2 root directory")
+set(SDL2_IMAGE_ROOT "$ENV{SDL2_IMAGE_ROOT}" CACHE PATH "Path to SDL2 Image root directory")
+set(OPTIX_ROOT "$ENV{OPTIX_ROOT}" CACHE PATH "Path to OptiX SDK")
+if(NOT OPTIX_ROOT AND EXISTS "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0")
+    # Fallback to standard NVIDIA OptiX installation path if environment variable is not set
+    set(OPTIX_ROOT "C:/ProgramData/NVIDIA Corporation/OptiX SDK 8.0.0" CACHE PATH "Path to OptiX SDK" FORCE)
+endif()
+set(EMBREE_ROOT "$ENV{EMBREE_ROOT}" CACHE PATH "Path to Embree root")
+set(OIDN_ROOT "$ENV{OIDN_ROOT}" CACHE PATH "Path to OIDN root")
+set(ASSIMP_ROOT "$ENV{ASSIMP_ROOT}" CACHE PATH "Path to Assimp root")
 
 # --- SOURCE FILES (Refactored Structure) ---
 # Automatically collect source files from new subdirectories to avoid manual maintenance
+file(GLOB SOURCES_CPP_ROOT "source/src/*.cpp")
 file(GLOB_RECURSE SOURCES_CPP 
     "source/src/Core/*.cpp"
     "source/src/Render/*.cpp"
@@ -61,6 +68,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Animation/*.cpp"
     "source/src/Hair/*.cpp"
 )
+list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 
 file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
 file(GLOB_RECURSE HEADERS "source/include/*.h" "source/external/imgui/*.h") # Recursive header search
@@ -70,8 +78,17 @@ set(MINIZ_SOURCES
     "source/external/miniz.c"
 )
 
+# Host-callable CUDA files (compiled to .obj)
+set(CUDA_SOURCES_OBJ
+    "source/src/Device/fft_ocean.cu"
+    "source/src/Device/foliage_deform.cu"
+    "source/src/Device/skinning_kernels.cu"
+    "source/src/Device/gas_kernels.cu"
+    "source/src/Device/gas_fft_solver.cu"
+)
+
 # Gather all sources
-set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${HEADERS})
+set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${CUDA_SOURCES_OBJ} ${HEADERS})
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
@@ -116,6 +133,7 @@ add_custom_command(
     -o "${PTX_OUTPUT}"
     -I"${OPTIX_ROOT}/include"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/include"
+    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/libs"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     --use_fast_math
@@ -149,6 +167,8 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/external/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/libs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/include"
     "${OPTIX_ROOT}/include"
     "${SDL2_ROOT}/include"
     "${SDL2_IMAGE_ROOT}/include"
@@ -174,6 +194,12 @@ set(LIB_OIDN_CORE "${OIDN_ROOT}/lib/OpenImageDenoise_core.lib")
 # Assimp
 set(LIB_ASSIMP "${ASSIMP_ROOT}/lib/x64/assimp-vc143-mt.lib")
 
+# VCPKG Libraries
+file(GLOB VCPKG_LIBS "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib/*.lib")
+set(ADDITIONAL_LIBS
+    openvdb.lib Imath-3_1.lib Iex-3_3.lib IlmThread-3_3.lib OpenEXR-3_3.lib OpenEXRCore-3_3.lib blosc.lib zlib.lib lz4.lib zstd.lib
+)
+
 # Link Libraries
 target_link_libraries(${PROJECT_NAME} PRIVATE
     ${LIB_SDL2}
@@ -189,6 +215,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     CUDA::cufft           # cuFFT for FFT-based pressure solver
     kernel32 user32 gdi32 winspool comdlg32 advapi32 shell32 ole32 oleaut32 uuid
 )
+
+target_link_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib")
+target_link_libraries(${PROJECT_NAME} PRIVATE ${ADDITIONAL_LIBS})
 
 # --- POST BUILD COPY ---
 # Copy .ptx to executable directory

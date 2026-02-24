@@ -19,8 +19,8 @@
 #include <cmath>
 #include <unordered_set>
 #include <Quaternion.h>
-
-
+#include <execution>
+#include <numeric>
 
 namespace Hair {
 
@@ -1425,21 +1425,30 @@ void HairSystem::addStrandsAtPosition(const std::string& groomName, const Vec3& 
     }
     Vec3 forward = Vec3::cross(right, up).normalize();
     
-    for (int i = 0; i < count; ++i) {
+        std::vector<HairStrand> newStrands(count);
+    std::vector<int> indices(count);
+    std::iota(indices.begin(), indices.end(), 0);
+    uint32_t currentGuideCount = static_cast<uint32_t>(groom.guides.size());
+
+    std::for_each(std::execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+        // Thread-local random generator for thread safety
+        thread_local std::mt19937 tl_gen(42 + i + currentGuideCount);
+        std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+        
         // Random position within radius
-        float angle = dist01(gen) * 6.283f;
-        float r = dist01(gen) * radius;
+        float angle = dist01(tl_gen) * 6.283f;
+        float r = dist01(tl_gen) * radius;
         Vec3 offset = right * (std::cos(angle) * r) + forward * (std::sin(angle) * r);
         Vec3 rootPos = localPosition + offset;
         
         // Create strand
         HairStrand strand;
         strand.rootNormal = localNormal;
-        strand.strandID = static_cast<uint32_t>(groom.guides.size() + i);
+        strand.strandID = currentGuideCount + i;
         strand.type = StrandType::GUIDE;
-        strand.randomSeed = dist01(gen);
+        strand.randomSeed = dist01(tl_gen);
         
-        float length = groom.params.length * (1.0f - groom.params.lengthVariation * dist01(gen));
+        float length = groom.params.length * (1.0f - groom.params.lengthVariation * dist01(tl_gen));
         
         strand.baseRootPos = rootPos;
         strand.baseLength = length;
@@ -1474,8 +1483,10 @@ void HairSystem::addStrandsAtPosition(const std::string& groomName, const Vec3& 
             }
         }
         
-        groom.guides.push_back(std::move(strand));
-    }
+        newStrands[i] = std::move(strand);
+    });
+
+    groom.guides.insert(groom.guides.end(), std::make_move_iterator(newStrands.begin()), std::make_move_iterator(newStrands.end()));
 
     
     restyleGroom(groomName);
@@ -1502,7 +1513,7 @@ void HairSystem::removeStrandsAtPosition(const std::string& groomName, const Vec
     // Remove guides within radius (comparing in local space)
     auto removeFunc = [&](std::vector<HairStrand>& strands) {
         strands.erase(
-            std::remove_if(strands.begin(), strands.end(), 
+            std::remove_if(std::execution::par_unseq, strands.begin(), strands.end(), 
                 [&](const HairStrand& s) {
                     Vec3 diff = s.rootPosition() - localPosition;
                     return (diff.x * diff.x + diff.y * diff.y + diff.z * diff.z) < radiusSq;
@@ -1553,14 +1564,20 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
             }
         }
         
+        bool initPhysics = false;
+        if (params.useDynamics && strand.prevPositions.size() != params.pointsPerStrand) {
+            strand.prevPositions.resize(params.pointsPerStrand);
+            initPhysics = true;
+        }
+
         float div = (params.pointsPerStrand > 1) ? (float)(params.pointsPerStrand - 1) : 1.0f;
         for (uint32_t p = 0; p < params.pointsPerStrand; ++p) {
             float t = static_cast<float>(p) / div;
             HairPoint& point = strand.points[p];
             point.v_coord = t;
             
-            // Re-apply the same logic as generateOnMesh
-            point.position = strand.groomedPositions[p];
+            // Re-apply the same logic as generateOnMesh to find the "Goal/Rest" position
+            Vec3 goalPos = strand.groomedPositions[p];
 
             // Extract implied normal and length from groomed positions for styling
             Vec3 impliedDiff = strand.groomedPositions.back() - strand.groomedPositions.front();
@@ -1572,7 +1589,7 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
                 float wave = sinf(t * params.waveFrequency * TWO_PI + strand.randomSeed * TWO_PI);
                 Vec3 bitangent = (std::abs(normal.y) < 0.9f) ? Vec3::cross(normal, Vec3(0,1,0)) : Vec3::cross(normal, Vec3(1,0,0));
                 bitangent.normalize();
-                point.position = point.position + bitangent * (wave * params.waveAmplitude * t);
+                goalPos = goalPos + bitangent * (wave * params.waveAmplitude * t);
             }
 
             if (params.curlRadius > 0.0f && params.curlFrequency > 0.0f) {
@@ -1580,7 +1597,7 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
                 Vec3 bitangent = (std::abs(normal.y) < 0.9f) ? Vec3::cross(normal, Vec3(0,1,0)) : Vec3::cross(normal, Vec3(1,0,0));
                 bitangent.normalize();
                 Vec3 binormal = Vec3::cross(normal, bitangent).normalize();
-                point.position = point.position + (bitangent * cosf(angle) + binormal * sinf(angle)) * (params.curlRadius * t);
+                goalPos = goalPos + (bitangent * cosf(angle) + binormal * sinf(angle)) * (params.curlRadius * t);
             }
 
             if (params.roughness > 0.0f) {
@@ -1589,37 +1606,101 @@ void HairSystem::restyleGroom(const std::string& name, const Physics::ForceField
                     sinf(t * 4.2f + 1.5f + strand.randomSeed * 11.0f),
                     sinf(t * 2.7f + 0.8f + strand.randomSeed * 9.0f)
                 );
-                point.position = point.position + noise * (params.roughness * t * strandLength * 0.2f);
+                goalPos = goalPos + noise * (params.roughness * t * strandLength * 0.2f);
             }
 
             if (params.frizz > 0.0f) {
                 ThreadSafeRNG rng(strand.strandID + 12345);
                 Vec3 jitter((rng.random()-0.5f)*2,(rng.random()-0.5f)*2,(rng.random()-0.5f)*2);
-                point.position = point.position + jitter * (params.frizz * t * strandLength * 0.05f);
+                goalPos = goalPos + jitter * (params.frizz * t * strandLength * 0.05f);
             }
 
-            if (params.gravity > 0.0f) {
-                point.position.y -= t * t * params.gravity * strandLength;
+            if (!params.useDynamics) {
+                // Static procedural logic
+                if (params.gravity > 0.0f) {
+                    goalPos.y -= t * t * params.gravity * strandLength;
+                }
+
+                if (forceManager && params.forceInfluence > 0.0f) {
+                    Vec3 currentWorldPos = groom.transform.transform_point(goalPos);
+                    Vec3 force = forceManager->evaluateAtFiltered(currentWorldPos, time, Vec3(0,0,0), false, true, true, false);
+                    goalPos = goalPos + force * (params.forceInfluence * t * t * 0.1f);
+                }
+                point.position = goalPos;
+            } else {
+                // Physics Dynamics logic (Verlet Integration)
+                if (initPhysics || p == 0) {
+                    point.position = goalPos;
+                    strand.prevPositions[p] = goalPos;
+                } else {
+                    Vec3 current = point.position;
+                    Vec3 prev = strand.prevPositions[p];
+                    float dt = 1.0f / 60.0f; // Fixed timestep for stability
+                    float dtSq = dt * dt;
+
+                    Vec3 totalForce(0, 0, 0);
+
+                    // Gravity
+                    if (params.gravity > 0.0f) {
+                        totalForce.y -= params.gravity * 9.81f; // Real gravity scale
+                    }
+
+                    // External Forces
+                    if (forceManager && params.forceInfluence > 0.0f) {
+                        Vec3 currentWorldPos = groom.transform.transform_point(current);
+                        Vec3 vel = (current - prev) / dt;
+                        Vec3 force = forceManager->evaluateAtFiltered(currentWorldPos, time, vel, false, true, true, false);
+                        totalForce = totalForce + force * (params.forceInfluence * 5.0f); // Scaled for dynamics
+                    }
+
+                    // Verlet step
+                    Vec3 nextPos = current + (current - prev) * params.physicsDamping + totalForce * (1.0f / params.physicsMass) * dtSq;
+                    
+                    // --- Shape Matching (Position Based Stiffness) ---
+                    // This is unconditionally stable regardless of mass or timestep
+                    nextPos = nextPos + (goalPos - nextPos) * params.physicsStiffness;
+
+                    // --- Surface Collision (Scalp) ---
+                    Vec3 toPoint = nextPos - strand.points[0].position; // root is points[0]
+                    float dotN = Vec3::dot(toPoint, strand.rootNormal);
+                    float offset = 0.002f; // 2mm offset from skin
+                    if (dotN < offset) {
+                         Vec3 correction = strand.rootNormal * (offset - dotN);
+                         nextPos = nextPos + correction;
+                         // Prevent bounce by adjusting the previous position so velocity into scalp is zero
+                         strand.prevPositions[p] = current + correction; 
+                    } else {
+                         strand.prevPositions[p] = current;
+                    }
+
+                    point.position = nextPos;
+                }
             }
 
-            // --- Force Field Interaction ---
-            if (forceManager && params.forceInfluence > 0.0f) {
-                // Evaluate force in world space
-                Vec3 currentWorldPos = groom.transform.transform_point(point.position);
-                // System filter: is_gas=false, is_particle=true, is_cloth=true, is_rigidbody=false
-                Vec3 force = forceManager->evaluateAtFiltered(currentWorldPos, time, Vec3(0,0,0), false, true, true, false);
-                
-                // Bend the strand based on force (quadratic influence from root to tip)
-                // We use local space offset
-                point.position = point.position + force * (params.forceInfluence * t * t * 0.1f);
-            }
-
-            
             point.radius = params.rootRadius * (1.0f - t) + params.tipRadius * t;
         }
-    }
 
-    
+        // --- Length Constraint Pass ---
+        // Also applies to physics to ensure hair doesn't stretch infinitely
+        if (params.pointsPerStrand > 1) {
+            // Multiple constraint iterations for better physics resolution
+            int iterations = params.useDynamics ? 3 : 1; 
+            for (int iter = 0; iter < iterations; ++iter) {
+                for (uint32_t p = 1; p < params.pointsPerStrand; ++p) {
+                    float targetSegLen = (strand.groomedPositions[p] - strand.groomedPositions[p-1]).length();
+                    Vec3 prev = strand.points[p-1].position;
+                    Vec3 segDir = strand.points[p].position - prev;
+                    float l = segDir.length();
+                    
+                    if (l > 1e-6f) {
+                        strand.points[p].position = prev + (segDir / l) * targetSegLen;
+                    } else {
+                        strand.points[p].position = prev + strand.rootNormal * targetSegLen;
+                    }
+                }
+            }
+        }
+    }
 
     // [FIX] Skinned grooms have their positions updated to current World Space directly.
     // So we must ensure their transform is Identity to prevent double transformation.
@@ -1758,7 +1839,12 @@ void to_json(nlohmann::json& j, const HairGenerationParams& p) {
         {"useTangentShading", p.useTangentShading},
         {"useBSpline", p.useBSpline},
         {"subdivisions", p.subdivisions},
-        {"forceInfluence", p.forceInfluence}
+        {"forceInfluence", p.forceInfluence},
+        
+        {"useDynamics", p.useDynamics},
+        {"physicsDamping", p.physicsDamping},
+        {"physicsStiffness", p.physicsStiffness},
+        {"physicsMass", p.physicsMass}
     };
 }
 
@@ -1785,10 +1871,12 @@ void from_json(const nlohmann::json& j, HairGenerationParams& p) {
     p.useBSpline = j.value("useBSpline", true);
     p.subdivisions = j.value("subdivisions", 2u);
     p.forceInfluence = j.value("forceInfluence", 1.0f);
-
+    
+    p.useDynamics = j.value("useDynamics", false);
+    p.physicsDamping = j.value("physicsDamping", 0.95f);
+    p.physicsStiffness = j.value("physicsStiffness", 0.1f);
+    p.physicsMass = j.value("physicsMass", 1.0f);
 }
-
-
 static nlohmann::json mat4ToJson(const Matrix4x4& m) {
     nlohmann::json j = nlohmann::json::array();
     for (int i = 0; i < 4; ++i)

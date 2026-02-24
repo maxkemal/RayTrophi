@@ -4703,9 +4703,18 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     extern std::atomic<bool> rendering_stopped_cpu;
     extern std::atomic<bool> g_scene_loading_in_progress;
 
-    if (rendering_stopped_cpu.load()) return;
-    if (g_scene_loading_in_progress.load()) return;
-    if (!scene.camera) return;
+    if (rendering_stopped_cpu.load()) {
+        // SCENE_LOG_WARN("CPU Render aborted: rendering_stopped_cpu is true");
+        return;
+    }
+    if (g_scene_loading_in_progress.load()) {
+        SCENE_LOG_WARN("CPU Render aborted: scene loading in progress");
+        return;
+    }
+    if (!scene.camera) {
+        SCENE_LOG_WARN("CPU Render aborted: no camera");
+        return;
+    }
 
     extern RenderSettings render_settings;
 
@@ -4714,8 +4723,8 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     const size_t pixel_count = image_width * image_height;
     if (cpu_accumulation_buffer.size() != pixel_count) {
         cpu_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
-        cpu_accumulation_valid = true;
     }
+    cpu_accumulation_valid = true;
 
     // Ensure variance buffer is allocated for adaptive sampling
     if (cpu_variance_buffer.size() != pixel_count) {
@@ -4760,6 +4769,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         target_max_samples = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
     }
     if (cpu_accumulated_samples >= target_max_samples) {
+        // SCENE_LOG_INFO("CPU Render returned early: cpu_accumulated_samples(" + std::to_string(cpu_accumulated_samples) + ") >= target_max_samples(" + std::to_string(target_max_samples) + ")");
         return; // Already done
     }
 
@@ -4828,6 +4838,10 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             }
 
             int idx = next_pixel_index.fetch_add(1, std::memory_order_relaxed);
+            if (idx == 0) {
+                 // Print first pixel trace to confirm thread starts
+                 // SCENE_LOG_INFO("Worker thread started processing pixels.");
+            }
             if (idx >= static_cast<int>(pixels_to_render)) break;
 
             int i = pixel_list[idx].first;
@@ -5056,6 +5070,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     }
 
     cpu_accumulated_samples += samples_this_pass;
+        // SCENE_LOG_INFO("CPU Render Pass Completed. Total samples: " + std::to_string(cpu_accumulated_samples));
 
     // Update window title with progress
     if (window) {

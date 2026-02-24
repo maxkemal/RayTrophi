@@ -103,21 +103,21 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\include;E:\SDL2-2.30.4\include;C:\oidn-2.3.0.x64.windows\include;D:\assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\visual studio proje c++\raytracing_Proje_Moduler\raytrac_sdl2\source\include;$(IncludePath)</IncludePath>
-    <LibraryPath>E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\debug\lib;C:\oidn-2.3.0.x64.windows\lib;E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;D:\assimp\out\build\x64-Release\lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;$(LibraryPath)</LibraryPath>
+    <IncludePath>$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(ProjectDir)source\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
-    <IncludePath>E:\SDL2-2.30.4\include;$(IncludePath)</IncludePath>
-    <LibraryPath>E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;$(LibraryPath)</LibraryPath>
+    <IncludePath>$(SDL2_ROOT)\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\include;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\include;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\include;C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0\include;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\include;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\include;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\external;E:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\external\imgui;$(IncludePath)</IncludePath>
-    <LibraryPath>E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\lib;E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows\lib;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\Assimp\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows\lib;$(LibraryPath)</LibraryPath>
+    <IncludePath>$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)source\external;$(ProjectDir)source\external\imgui;$(IncludePath)</IncludePath>
+    <LibraryPath>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
-    <IncludePath>E:\SDL2-2.30.4\include;$(IncludePath)</IncludePath>
-    <LibraryPath>E:\SDL2-2.30.4\lib\x64;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64;$(LibraryPath)</LibraryPath>
+    <IncludePath>$(SDL2_ROOT)\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
@@ -165,8 +165,8 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
@@ -180,8 +180,8 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -213,8 +213,8 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;cufft.lib;embree4.lib;tbb12.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>E:\RayTrophi_projesi\raytracing_Proje_Moduler\vcpkg\installed\x64-windows\lib;E:\SDL2-2.30.4\lib\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;cuda.lib;cudart.lib;cufft.lib;embree4.lib;tbb12.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
     </Link>
   </ItemDefinitionGroup>
@@ -233,8 +233,8 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>E:\SDL2-2.30.4\lib\x64\SDL2.lib;E:\SDL2-2.30.4\lib\x64\SDL2main.lib;E:\SDL2-2.30.4\lib\x64\SDL2test.lib;E:\SDL2-2.30.4\SDL2_image-2.8.2\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>E:\SDL2-2.30.4\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

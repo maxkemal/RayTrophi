@@ -74,6 +74,7 @@ struct HairStrand {
     float baseLength;               // Original strand length
     std::vector<Vec3> groomedPositions; // Current groomed positions (World Space - Animated)
     std::vector<Vec3> restGroomedPositions; // Bind Pose groomed positions (Relative to Bind Triangle)
+    std::vector<Vec3> prevPositions;    // Previous positions for Verlet integration (Physics)
     float clumpScale = 1.0f;        // Per-strand clumpiness multiplier
 
     // Skinning / Binding Data
