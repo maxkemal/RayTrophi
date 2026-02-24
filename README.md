@@ -220,12 +220,11 @@ The project uses absolute paths via system environment variables. Before buildin
 
 | Environment Variable | Description | Example Path |
 |----------------------|-------------|--------------|
-| `SDL2_ROOT`          | SDL2 Root Directory | `C:\Libraries\SDL2-2.30.4` |
-| `SDL2_IMAGE_ROOT`    | SDL2 Image Root Directory | `C:\Libraries\SDL2-2.30.4\SDL2_image-2.8.2` |
+| `SDL2_ROOT`          | SDL2 Root Directory | `E:\RayTrophi_projesi\dis_bagimliliklar\SDL2-2.30.4` |
 | `OPTIX_ROOT`         | OptiX SDK Directory | `C:\ProgramData\NVIDIA Corporation\OptiX SDK 8.0.0` |
-| `EMBREE_ROOT`        | Embree Root Directory | `C:\Libraries\embree-4.4.0.x64.windows` |
-| `OIDN_ROOT`          | Intel Open Image Denoise Root | `C:\Libraries\oidn-2.3.0.x64.windows` |
-| `ASSIMP_ROOT`        | Assimp Root Directory | `C:\Libraries\Assimp` |
+| `EMBREE_ROOT`        | Embree Root Directory | `E:\RayTrophi_projesi\dis_bagimliliklar\embree-4.4.0.x64.windows` |
+| `OIDN_ROOT`          | Intel Open Image Denoise Root | `E:\RayTrophi_projesi\dis_bagimliliklar\oidn-2.3.0.x64.windows` |
+| `ASSIMP_ROOT`        | Assimp Root Directory | `E:\RayTrophi_projesi\dis_bagimliliklar\Assimp` |
 | `CUDA_PATH`          | CUDA Toolkit Directory | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` |
 
 *(Note: `CUDA_PATH` is usually set automatically when you install the CUDA Toolkit.)*
