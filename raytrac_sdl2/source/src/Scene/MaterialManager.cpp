@@ -1,4 +1,4 @@
-#include "MaterialManager.h"
+﻿#include "MaterialManager.h"
 #include "PrincipledBSDF.h"
 #include "material_gpu.h"
 #include "globals.h"
@@ -99,7 +99,7 @@ uint16_t MaterialManager::addMaterial(const std::string& name, std::shared_ptr<M
 
     // Check capacity
     if (materials.size() >= MAX_MATERIALS) {
-        std::cerr << "[MaterialManager] Maximum material count reached!" << std::endl;
+       // std::cerr << "[MaterialManager] Maximum material count reached!" << std::endl;
         return INVALID_MATERIAL_ID;
     }
 
@@ -180,7 +180,7 @@ uint16_t MaterialManager::getOrCreateMaterialID(const std::string& name, std::sh
                     }
                     
                     if (updated) {
-                        SCENE_LOG_INFO("[MaterialManager] Updated texture refs for existing material: " + name);
+                       // SCENE_LOG_INFO("[MaterialManager] Updated texture refs for existing material: " + name);
                     }
                 }
             }
@@ -190,7 +190,7 @@ uint16_t MaterialManager::getOrCreateMaterialID(const std::string& name, std::sh
     }
 
     if (materials.size() >= MAX_MATERIALS) {
-        std::cerr << "[MaterialManager] Maximum material count reached!" << std::endl;
+       // std::cerr << "[MaterialManager] Maximum material count reached!" << std::endl;
         return INVALID_MATERIAL_ID;
     }
 
@@ -206,7 +206,7 @@ uint16_t MaterialManager::getOrCreateMaterialID(const std::string& name, std::sh
             texInfo = "HAS ALBEDO TEX: " + pbsdf->albedoProperty.texture->name;
         }
     }
-    SCENE_LOG_INFO("[MaterialManager] getOrCreateMaterialID NEW: " + name + " -> ID=" + std::to_string(id) + " | " + texInfo);
+   // SCENE_LOG_INFO("[MaterialManager] getOrCreateMaterialID NEW: " + name + " -> ID=" + std::to_string(id) + " | " + texInfo);
 
     return id;
 }
@@ -302,7 +302,7 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
     
     root["materials"] = materialsArray;
     
-    SCENE_LOG_INFO("[MaterialManager] Serialized " + std::to_string(materials.size()) + " materials");
+   // SCENE_LOG_INFO("[MaterialManager] Serialized " + std::to_string(materials.size()) + " materials");
     return root;
 }
 

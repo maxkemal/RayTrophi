@@ -17,6 +17,7 @@
 #include "ProjectManager.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
+#include "Backend/IBackend.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -34,8 +35,8 @@ void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
     if (!g_hasOptix) {
         return; // Silent skip - CPU-only mode
     }
-    if (ctx.optix_gpu_ptr) {
-        VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.optix_gpu_ptr);
+    if (ctx.backend_ptr) {
+        VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.backend_ptr);
     }
 }
 
@@ -107,10 +108,10 @@ void SceneUI::importVDBVolume(UIContext& ctx) {
     ctx.renderer.resetCPUAccumulation();
     
     // GPU sync only if OptiX is available
-    if (g_hasOptix && ctx.optix_gpu_ptr) {
+    if (g_hasOptix && ctx.backend_ptr) {
         // Upload VDB volumes to GPU for OptiX ray marching
         syncVDBVolumesToGPU(ctx);
-        ctx.optix_gpu_ptr->resetAccumulation();
+        ctx.backend_ptr->resetAccumulation();
     }
     
     g_ProjectManager.markModified();
@@ -242,9 +243,9 @@ void SceneUI::importVDBSequence(UIContext& ctx) {
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
     
-    if (ctx.optix_gpu_ptr) {
+    if (ctx.backend_ptr) {
         syncVDBVolumesToGPU(ctx);
-        ctx.optix_gpu_ptr->resetAccumulation();
+        ctx.backend_ptr->resetAccumulation();
     }
     
     g_ProjectManager.markModified();
@@ -321,7 +322,7 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
                 if (ImGui::MenuItem("Delete")) {
                     scene.removeGasVolume(gas);
                     selection.clearSelection();
-                    ctx.renderer.updateOptiXGasVolumes(scene, ctx.optix_gpu_ptr);
+                    ctx.renderer.updateBackendGasVolumes(scene);
                     SceneUI::syncVDBVolumesToGPU(ctx);
                 }
                 ImGui::EndPopup();
@@ -519,9 +520,9 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     // Apply changes
     if (changed) {
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
+        if (ctx.backend_ptr) {
             syncVDBVolumesToGPU(ctx);  // Sync shader changes to GPU
-            ctx.optix_gpu_ptr->resetAccumulation();
+            ctx.backend_ptr->resetAccumulation();
         }
         g_ProjectManager.markModified();
     }

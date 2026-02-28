@@ -1,4 +1,4 @@
-﻿#include "TimelineWidget.h"
+#include "TimelineWidget.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -178,7 +178,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                             ctx.renderer.resetCPUAccumulation();
                             g_bvh_rebuild_pending = true;
                             g_optix_rebuild_pending = true;
-                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                             break;
                         }
                     }
@@ -220,7 +220,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                         ctx.renderer.resetCPUAccumulation();
                         g_bvh_rebuild_pending = true;
                         g_optix_rebuild_pending = true;
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                     }
                 }
             }
@@ -232,7 +232,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                 // Water mesh changed - need geometry update
                 g_bvh_rebuild_pending = true;
                 g_optix_rebuild_pending = true;
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
             }
             
             last_water_update_frame = current_frame;
@@ -308,9 +308,9 @@ void TimelineWidget::draw(UIContext& ctx) {
                         
                         // PERFORMANCE CRITICAL: Directly update OptiX instances for this object!
                         // This is O(1) lookup + O(small) instance updates, NOT O(2M) object scan!
-                        if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                        if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
                             // Get instance IDs for this object
-                            auto instance_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(track_name);
+                            auto instance_ids = ctx.backend_ptr->getInstancesByNodeName(track_name);
                             
                             if (!instance_ids.empty()) {
                                 // Convert Matrix4x4 to float[12] for OptiX
@@ -330,14 +330,14 @@ void TimelineWidget::draw(UIContext& ctx) {
                                 
                                 // Update each instance directly (typically 1-3 instances per object)
                                 for (int inst_id : instance_ids) {
-                                    ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, transform_array);
+                                    ctx.backend_ptr->updateInstanceTransform(inst_id, transform_array);
                                 }
                             }
                         }
                         
                         // GPU mode: Skip CPU vertex update - TLAS handles transforms
                         // CPU mode: Need to update world-space vertices for raytracing
-                        bool using_gpu = ctx.render_settings.use_optix && ctx.optix_gpu_ptr;
+                        bool using_gpu = ctx.render_settings.use_optix && ctx.backend_ptr;
                         if (!using_gpu) {
                             // CPU rendering - update world-space vertices for ALL triangles with same nodeName
                             // A mesh with 2M triangles shares the same nodeName, so we must update all of them
@@ -470,7 +470,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                 }
                 
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
             }
             
             // Apply material keyframes
@@ -479,8 +479,8 @@ void TimelineWidget::draw(UIContext& ctx) {
                 if (mat && mat->gpuMaterial) {
                     evaluated.material.applyTo(*mat->gpuMaterial);
                     ctx.renderer.resetCPUAccumulation();
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->resetAccumulation();
                     }
                 }
             }
@@ -494,13 +494,13 @@ void TimelineWidget::draw(UIContext& ctx) {
             // which iterates ALL 2M objects again - causing 3+ second delays!
             
             // Check if we're actually using GPU rendering (both pointer exists AND use_optix is true)
-            bool using_gpu_render = ctx.optix_gpu_ptr && 
-                                    ctx.optix_gpu_ptr->isUsingTLAS() && 
+            bool using_gpu_render = ctx.backend_ptr && 
+                                    ctx.backend_ptr->isUsingTLAS() && 
                                     ctx.render_settings.use_optix;
             
             if (using_gpu_render) {
                 // GPU rendering mode - use fast TLAS update
-                ctx.optix_gpu_ptr->rebuildTLAS();
+                ctx.backend_ptr->rebuildAccelerationStructure();
                 // SKIP CPU BVH rebuild in GPU mode during animation!
                 // CPU BVH is only needed for picking, which is disabled during playback.
             } else {
@@ -510,18 +510,18 @@ void TimelineWidget::draw(UIContext& ctx) {
             }
             
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
         }
         
-        if (needs_light_update && ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (needs_light_update && ctx.backend_ptr) {
+            ctx.backend_ptr->setLights(ctx.scene.lights);
+            ctx.backend_ptr->resetAccumulation();
             ctx.renderer.resetCPUAccumulation();
         }
         
-        if (needs_camera_update && ctx.optix_gpu_ptr && ctx.scene.camera) {
-            ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (needs_camera_update && ctx.backend_ptr && ctx.scene.camera) {
+            ctx.backend_ptr->syncCamera(*ctx.scene.camera);
+            ctx.backend_ptr->resetAccumulation();
             ctx.renderer.resetCPUAccumulation();
         }
         

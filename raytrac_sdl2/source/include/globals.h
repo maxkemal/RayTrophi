@@ -79,6 +79,8 @@ struct RenderSettings {
 
     // Backend
     bool use_optix = false;
+    bool use_vulkan = false;
+    bool backend_changed = false;
     bool UI_use_embree = true;
   
     // Animation
@@ -245,6 +247,7 @@ extern bool is_normal_map;
 extern  int hitcount;
 extern bool use_embree;
 extern bool g_hasOptix ;
+extern bool g_hasVulkan;
 extern bool g_hasCUDA; // General CUDA availability (independent of OptiX)
 extern float last_render_time_ms;
 extern bool pending_resolution_change;
@@ -283,6 +286,11 @@ extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
 extern std::atomic<bool> g_scene_loading_in_progress;  // Prevents concurrent load operations
 extern bool g_needs_geometry_rebuild;   // Set by loader thread, main loop does actual rebuild
 extern bool g_needs_optix_sync;         // Set by loader thread, main loop syncs OptiX buffers
+
+// ===========================================================================
+// UI INTERACTION FLAGS
+// ===========================================================================
+extern bool g_viewport_hovered;         // True when mouse is over the main RenderView
 
 #endif // GLOBALS_H
 

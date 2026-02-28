@@ -87,7 +87,7 @@ public:
    // void launch(uchar4* output_buffer, int width, int height);
     bool trace(const Ray& ray, HitRecord& rec) const;
     void cleanup();
-    void setCameraParams(const Camera& camera);
+    void setCameraParams(const Camera& camera, float exposure_override = -1.0f);
     // void setLightParams(const std::shared_ptr<Light>& light);
     void setWorld(const WorldData& world);
 
@@ -146,6 +146,14 @@ public:
         return (it != node_to_instance.end()) ? it->second : std::vector<int>{};
     }
     void updateInstanceTransform(int instance_id, const float transform[12]);
+    
+    // Buffer accessors for IBackend
+    uchar4* getFramebufferDevicePtr() const { return d_framebuffer; }
+    float4* getAccumulationDevicePtr() const { return d_accumulation_float4; }
+    void* getParamsDevicePtr() const { return (void*)d_params; }
+    int getImageWidth() const { return Image_width; }
+    int getImageHeight() const { return Image_height; }
+
     
     // Set visibility by node name (uses OptiX visibility masks)
     void setVisibilityByNodeName(const std::string& nodeName, bool visible);
@@ -247,6 +255,10 @@ public:
      */
     void clearHairGeometry();
     void updateHairMaterialsOnly(const Hair::HairSystem& hairSystem);
+    
+    // Download image from GPU to host memory
+    void downloadFramebuffer(uchar4* host_ptr, int width, int height);
+
 private:
     // Hair rendering members
     OptixTraversableHandle m_hairHandle = 0;

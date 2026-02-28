@@ -52,6 +52,9 @@
     <Filter Include="Kaynak Dosyalar\Hair">
       <UniqueIdentifier>{1b01040e-5f06-425a-8ca5-8ad61b6294d4}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Kaynak Dosyalar\shader">
+      <UniqueIdentifier>{dfa80880-344e-4bcf-8552-0872c52a8403}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -300,6 +303,15 @@
     <ClInclude Include="source\src\UI\scene_ui_river.hpp">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Backend\IBackend.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\OptixBackend.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\VulkanBackend.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -345,6 +357,21 @@
     </None>
     <None Include="source\src\Device\hair_bsdf.cuh">
       <Filter>Kaynak Dosyalar\Device</Filter>
+    </None>
+    <None Include="source\shaders\closesthit.rchit">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\miss.rmiss">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\raygen.rgen">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\shadow_anyhit.rchit">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
+    <None Include="source\shaders\shadow_miss.rmiss">
+      <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -636,6 +663,15 @@
     </ClCompile>
     <ClCompile Include="source\src\Hair\HairSystem_Skinning.cpp">
       <Filter>Kaynak Dosyalar\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\simdjson.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\OptixBackend.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

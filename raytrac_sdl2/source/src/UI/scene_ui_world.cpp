@@ -618,6 +618,14 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                             params.sun_azimuth = azimuth;
                             changed = true;
                         }
+
+                        // Also sync light color and intensity into world params
+                        // Use top-level world color as sun tint (used by Vulkan miss shader)
+                        Vec3 lightColor = light->color;
+                        world.setColor(lightColor);
+                        // Sun intensity stored in Nishita params
+                        params.sun_intensity = light->intensity;
+                        world.setSunIntensity(light->intensity);
                         
                         foundDirLight = true;
                         ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Synced with Directional Light");
@@ -994,6 +1002,9 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
                             -params.sun_direction.y,
                             -params.sun_direction.z
                         );
+                        
+                        // Keep light intensity in sync with the Nishita params when user edits the sun
+                        light->intensity = params.sun_intensity;
                         
                         // CRITICAL: Mark lights dirty so GPU gets updated light direction
                         extern bool g_lights_dirty;
@@ -1407,15 +1418,16 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         world_params_changed_this_frame = true;
         ctx.renderer.resetCPUAccumulation();
         
-        // OPTIMIZATION: Only update OptiX when OptiX rendering is enabled
-        if (ctx.render_settings.use_optix && ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setWorld(world.getGPUData());
-            ctx.optix_gpu_ptr->resetAccumulation();
-        }
-        
-        // Mark world buffer dirty for main loop (in case direct update is skipped)
+        // DEFERRED: Don't call setWorld()/resetAccumulation() here!
+        // Let Main loop handle it once per frame after flushLUT() to avoid
+        // double GPU transfer and ensure LUT is fresh before upload.
         extern bool g_world_dirty;
         g_world_dirty = true;
+        
+        // Reset GPU accumulation so change is visible on next render pass
+        if (ctx.backend_ptr) {
+            ctx.backend_ptr->resetAccumulation();
+        }
     }
     
     // Pop the global item width set at function start

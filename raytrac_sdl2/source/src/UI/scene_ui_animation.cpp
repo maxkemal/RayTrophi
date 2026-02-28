@@ -1,4 +1,4 @@
-﻿#include "scene_ui.h"
+#include "scene_ui.h"
 #include "scene_data.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
@@ -88,9 +88,9 @@ void SceneUI::processAnimations(UIContext& ctx) {
                              anything_changed = true;
                              
                              // TLAS Update Logic (using OptixWrapper)
-                             if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                             if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
                                  tlas_dirty = true;
-                                 std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(name);
+                                 std::vector<int> inst_ids = ctx.backend_ptr->getInstancesByNodeName(name);
                                  
                                  if (!inst_ids.empty()) {
                                      float t[12];
@@ -100,7 +100,7 @@ void SceneUI::processAnimations(UIContext& ctx) {
                                      t[8] = newMat.m[2][0]; t[9] = newMat.m[2][1]; t[10] = newMat.m[2][2]; t[11] = newMat.m[2][3];
                                     
                                     for (int inst_id : inst_ids) {
-                                         ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
+                                         ctx.backend_ptr->updateInstanceTransform(inst_id, t);
                                     }
                                  }
                              }
@@ -205,7 +205,7 @@ void SceneUI::processAnimations(UIContext& ctx) {
     if (anything_changed) {
         // Reset Accumulation
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
         
         // Rebuild BVH (CPU)
         // If objects moved, we must rebuild CPU BVH for picking/CPU render
@@ -215,18 +215,18 @@ void SceneUI::processAnimations(UIContext& ctx) {
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
         
         // GPU Updates
-        if (ctx.optix_gpu_ptr) {
+        if (ctx.backend_ptr) {
              // If TLAS was marked dirty (Object Transforms)
              if (tlas_dirty) {
-                 ctx.optix_gpu_ptr->rebuildTLAS();
+                 ctx.backend_ptr->rebuildAccelerationStructure();
              }
              
              // Update Lights if needed (we don't track specifically, just safe update)
-             ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+             ctx.backend_ptr->setLights(ctx.scene.lights);
              
              // Update Camera
              if (ctx.scene.camera) {
-                 ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
+                 ctx.backend_ptr->syncCamera(*ctx.scene.camera);
              }
         }
     }

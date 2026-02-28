@@ -1,0 +1,41 @@
+/*
+ * RayTrophi Studio - Vulkan Backend Test Shader
+ * 
+ * Bu shader Vulkan compute pipeline'ının çalıştığını doğrulamak için
+ * basit bir gradient çizer. Her pixel'in rengi UV koordinatlarına göre değişir.
+ *
+ * Workgroup boyutu 16x16 = 256 thread (çoğu GPU için optimal)
+ */
+#version 460
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Output image - compute shader bunu doğrudan yazabilir
+layout(rgba8, set = 0, binding = 0) uniform writeonly image2D outputImage;
+
+// Push constants - küçük veriler için en hızlı yol (uniform buffer'dan hızlı)
+layout(push_constant) uniform PushConstants {
+    int width;
+    int height;
+    float time;
+} pc;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    
+    // Sınır kontrolü - shader dispatch her zaman 16'nın katı olur,
+    // ama image boyutu olmayabilir
+    if (pos.x >= pc.width || pos.y >= pc.height) return;
+    
+    // UV koordinatları [0, 1] aralığında
+    vec2 uv = vec2(pos) / vec2(pc.width, pc.height);
+    
+    // Gradient renk: kırmızı=X, yeşil=Y, mavi=zamanla değişir
+    vec3 color = vec3(
+        uv.x,                               // Soldan sağa kırmızı artar
+        uv.y,                               // Yukarıdan aşağı yeşil artar
+        0.5 + 0.5 * sin(pc.time * 2.0)      // Mavi zamanla titreşir
+    );
+    
+    imageStore(outputImage, pos, vec4(color, 1.0));
+}

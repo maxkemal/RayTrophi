@@ -16,6 +16,7 @@
 class Renderer;
 struct SceneData;
 class OptixWrapper;
+namespace Backend { class IBackend; }
 class ColorProcessor;
 class SceneSelection;
 struct RenderSettings;
@@ -42,7 +43,9 @@ class GasVolume;
 #include <vector>
 #include <unordered_map>
 #include "Vec3.h" // For bbox_cache
-#include "instancegroup.h" 
+#include "instancegroup.h"
+#include "Backend/IBackend.h"
+#include "Backend/OptixBackend.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HEADER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -64,6 +67,7 @@ struct UIContext {
     SceneData& scene;
     Renderer& renderer;
     OptixWrapper* optix_gpu_ptr;
+    Backend::IBackend* backend_ptr;
     ColorProcessor& color_processor;
     RenderSettings& render_settings;
     SceneSelection& selection;  // Scene selection manager

@@ -246,9 +246,29 @@ void OptixWrapper::launch(int w, int h) {
     // OPTIMIZATION: Only upload if params changed (dirty flag)
     // Logic layer (World, Animation, Loaders) is now responsible for ensuring
     // GPU params are dirty/updated when they change.
+    
+    // Lazy-allocate d_params on first use (matches d_params_persistent pattern)
+    if (!d_params) {
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&d_params), sizeof(RayGenParams)));
+        params_dirty = true; // Force upload after allocation
+    }
+    
     if (params_dirty) {
         CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice));
         params_dirty = false;
+    }
+    // Safety: Don't launch without valid pipeline, geometry, and SBT
+    if (!pipeline) {
+        SCENE_LOG_WARN("[OptiX] launch() skipped - no pipeline");
+        return;
+    }
+
+    bool has_geometry = (traversable_handle != 0);
+    bool has_sbt = (sbt.raygenRecord && sbt.missRecordBase && sbt.hitgroupRecordBase);
+    
+    if (!has_geometry || !has_sbt) {
+        // No geometry loaded yet or SBT not configured - skip silently
+        return;
     }
 
     OPTIX_CHECK(optixLaunch(pipeline, stream, d_params, sizeof(RayGenParams), &sbt, w, h, 1));
@@ -257,6 +277,11 @@ void OptixWrapper::launch(int w, int h) {
 // Original signature for compatibility
 void OptixWrapper::launch(SDL_Surface* surface, SDL_Window* window, int w, int h) {
     launch(w, h);
+}
+
+void OptixWrapper::downloadFramebuffer(uchar4* host_ptr, int width, int height) {
+    if (!d_framebuffer || !host_ptr) return;
+    CUDA_CHECK(cudaMemcpy(host_ptr, d_framebuffer, width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
 }
 
 void OptixWrapper::cleanup() {
@@ -369,6 +394,9 @@ void OptixWrapper::setWindParams(const Vec3& direction, float strength, float sp
             
         // Trigger Geometry Deformation (Vertex Bending + BLAS Refit)
         accel_manager->applyWindDeformation(-1, direction, strength, speed, time);
+        
+        // Reset accumulation to show deformation immediately
+        resetAccumulation();
     }
 }
 
@@ -1226,6 +1254,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     bool has_geometry = (traversable_handle != 0);
     bool has_sbt = (sbt.raygenRecord && sbt.missRecordBase && sbt.hitgroupRecordBase);
     
+
     if (has_geometry && has_sbt) {
         OPTIX_CHECK(optixLaunch(
             pipeline, stream,
@@ -1328,13 +1357,30 @@ static inline float3 optix_to_float3(const Vec3& v) {
     return make_float3(v.x, v.y, v.z);
 }
 
-void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
+void OptixWrapper::setCameraParams(const Camera& cpuCamera, float exposure_override) {
+    // 1. Safe access to presets (pre-validate to avoid crashes below)
+    float iso_mult = 1.0f;
+    if (cpuCamera.iso_preset_index >= 0 && cpuCamera.iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) {
+        iso_mult = CameraPresets::ISO_PRESETS[cpuCamera.iso_preset_index].exposure_multiplier;
+    }
+    
+    float shutter_time = 0.004f; // Default 1/250s
+    if (cpuCamera.shutter_preset_index >= 0 && cpuCamera.shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
+        shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
+    }
+    
+    float f_number = 16.0f;
+    if (cpuCamera.fstop_preset_index > 0 && cpuCamera.fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
+        f_number = CameraPresets::FSTOP_PRESETS[cpuCamera.fstop_preset_index].f_number;
+    } else if (cpuCamera.aperture > 0.001f) {
+        f_number = 0.8f / cpuCamera.aperture;
+    }
+
+    // 2. Map Basic Params
     params.camera.origin = optix_to_float3(cpuCamera.origin);
     params.camera.horizontal = optix_to_float3(cpuCamera.horizontal);
     params.camera.vertical = optix_to_float3(cpuCamera.vertical);
     params.camera.lower_left_corner = optix_to_float3(cpuCamera.lower_left_corner);
-
-    // DOF için yeni parametreler:
     params.camera.u = optix_to_float3(cpuCamera.u);
     params.camera.v = optix_to_float3(cpuCamera.v);
     params.camera.w = optix_to_float3(cpuCamera.w);
@@ -1345,40 +1391,27 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.blade_count = cpuCamera.blade_count;
     params.camera.distortion = cpuCamera.distortion;
     
-    // Calculate Exposure Factor for GPU
+    // 3. Exposure Calculation (Must match VulkanBackend logic for GPU parity)
     float exposure_factor = 1.0f;
-    if (cpuCamera.auto_exposure) {
-        exposure_factor = std::pow(2.0f, cpuCamera.ev_compensation);
-    } else {
-        float iso_mult = CameraPresets::ISO_PRESETS[cpuCamera.iso_preset_index].exposure_multiplier;
-        float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
-        
-        // Use F-Stop Number (e.g., 16.0)
-        float f_number = 16.0f;
-        if (cpuCamera.fstop_preset_index > 0) {
-            f_number = CameraPresets::FSTOP_PRESETS[cpuCamera.fstop_preset_index].f_number;
-        } else {
-             // Custom Mode fallback
-             if (cpuCamera.aperture > 0.001f)
-                 f_number = 0.8f / cpuCamera.aperture;
-             else 
-                 f_number = 16.0f;
-        }
-        float aperture_sq = f_number * f_number; // e.g., 16*16 = 256
-        
+    if (exposure_override > 0.0f) {
+        exposure_factor = exposure_override;
+    } else if (cpuCamera.auto_exposure) {
         float ev_comp = std::pow(2.0f, cpuCamera.ev_compensation);
-        
-        float current_val = (iso_mult * shutter_time) / (aperture_sq + 0.0001f);
-        
-        // Baseline: Sunny 16 Rule (ISO 100, f/16, 1/125s) with Radiance=1.0 assumption?
-        // Val = (1.0 * 0.008) / 256 = 0.00003125
-        // If scene radiance is ~1.0, this small value makes image dark.
-        // We want factor=1.0 at baseline.
+        exposure_factor = ev_comp; 
+    } else if (cpuCamera.use_physical_exposure) {
+        // Physical exposure mode: calculate from ISO/Shutter/F-stop (matches Vulkan)
+        float aperture_sq = f_number * f_number;
+        float ev_comp = std::pow(2.0f, cpuCamera.ev_compensation);
+        float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
         float baseline_val = 0.00003125f; 
-        
-        exposure_factor = (current_val / baseline_val) * ev_comp;
+        exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f; 
+    } else {
+        // Manual mode: use EV compensation only
+        exposure_factor = std::pow(2.0f, cpuCamera.ev_compensation);
     }
-    // MOTION BLUR VELOCITY CALCULATION
+    params.camera.exposure_factor = exposure_factor;
+
+    // 4. Motion Blur Velocity Calculation
     if (first_frame_camera) {
         params.camera.vel_origin = make_float3(0.0f);
         params.camera.vel_corner = make_float3(0.0f);
@@ -1386,23 +1419,13 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
         params.camera.vel_vertical = make_float3(0.0f);
         first_frame_camera = false;
     } else {
-        // Assume 24 FPS baseline (0.0416s per frame)
-        // If shutter speed is 1/50s (0.02s), blur should cover ~50% of frame movement
         float frame_dt = 1.0f / 24.0f; 
-        float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
-        
-        // Scale factor: How much of the inter-frame movement occurs during shutter open time?
-        // Movement = (Current - Prev) is assumed to happen over 'frame_dt'.
-        // Blur Motion = Movement * (shutter_time / frame_dt).
         float scale = shutter_time / frame_dt;
-        
-        // Clamp scale for stability (max 2 frames blur?)
         if (scale > 2.0f) scale = 2.0f;
 
         float3 curr_origin = optix_to_float3(cpuCamera.origin);
         float3 prev_origin = optix_to_float3(prev_camera.origin);
         
-        // Teleport check (if moved too far, disable blur for this frame)
         if (optix_length(curr_origin - prev_origin) > 100.0f) {
             scale = 0.0f;
         }
@@ -1414,11 +1437,14 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     }
     prev_camera = cpuCamera;
     
-    params.camera.shutter_open_time = CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds;
+    params.camera.shutter_open_time = (cpuCamera.shutter_preset_index >= 0 && cpuCamera.shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) ? 
+                                       CameraPresets::SHUTTER_SPEED_PRESETS[cpuCamera.shutter_preset_index].speed_seconds : 0.004f;
     params.camera.motion_blur_enabled = cpuCamera.enable_motion_blur ? 1 : 0;
     
-    params.camera.exposure_factor = exposure_factor;
     params_dirty = true; // Trigger GPU upload
+    
+    // Reset accumulation when camera parameters change (OptiX consistency with Vulkan)
+    resetAccumulation();
     
     // ═══════════════════════════════════════════════════════════════════════════
     // CINEMA MODE - Physical Lens Imperfections
@@ -1426,14 +1452,14 @@ void OptixWrapper::setCameraParams(const Camera& cpuCamera) {
     params.camera.camera_mode = static_cast<int>(cpuCamera.camera_mode);
     
     // Chromatic Aberration
-    bool ca_active = (cpuCamera.camera_mode == CameraMode::Cinema) && cpuCamera.enable_chromatic_aberration;
+    bool ca_active = cpuCamera.enable_chromatic_aberration;
     params.camera.chromatic_aberration_enabled = ca_active ? 1 : 0;
     params.camera.chromatic_aberration = cpuCamera.chromatic_aberration;
     params.camera.chromatic_aberration_r = cpuCamera.chromatic_aberration_r;
     params.camera.chromatic_aberration_b = cpuCamera.chromatic_aberration_b;
     
     // Vignetting
-    bool vignette_active = (cpuCamera.camera_mode == CameraMode::Cinema) && cpuCamera.enable_vignetting;
+    bool vignette_active = cpuCamera.enable_vignetting;
     params.camera.vignetting_enabled = vignette_active ? 1 : 0;
      params.camera.vignetting_amount = cpuCamera.vignetting_amount;
     params.camera.vignetting_falloff = cpuCamera.vignetting_falloff;
@@ -1509,6 +1535,9 @@ void OptixWrapper::setWorld(const WorldData& world) {
     
     // Mark params dirty for upload to GPU
     params_dirty = true;
+    
+    // Reset accumulation to show change immediately
+    resetAccumulation();
 }
 void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lights) {
     std::vector<LightGPU> gpuLights;
@@ -1997,6 +2026,9 @@ void OptixWrapper::updateMaterialBuffer(const std::vector<GpuMaterial>& material
     }
     
     m_material_count = static_cast<int>(new_count);
+    
+    // Reset accumulation to show material buffer change immediately
+    resetAccumulation();
 }
 
 void OptixWrapper::syncSBTMaterialData(const std::vector<GpuMaterial>& materials, bool sync_terrain) {
@@ -2039,6 +2071,7 @@ void OptixWrapper::updateSBTMaterialBindings(const std::vector<int>& material_in
 void OptixWrapper::updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id) {
     if (accel_manager) {
         accel_manager->updateMeshMaterialBinding(node_name, old_mat_id, new_mat_id);
+        resetAccumulation(); // Binding change needs fresh render
     }
 }
 

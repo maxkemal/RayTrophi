@@ -1,0 +1,444 @@
+/*
+ * RayTrophi Studio — Vulkan Ray Generation Shader
+ * Iterative Path Tracer — Multi-bounce, Temporally Accumulating
+ *
+ * v3 — Derleme hataları giderildi:
+ *   - Duplicate imageStore kaldırıldı
+ *   - (void)display GLSL'de geçersiz — kaldırıldı
+ *   - Kullanılmayan sampleUnitDisk kaldırıldı
+ *   - acesTonemap / linearToSRGB kaldırıldı (tonemap CPU'ya taşındı, CpuTonemap.h)
+ *   - accumImage artık sadece ham HDR yazar
+ *   - pad[3] array → pad0/pad1/pad2 ayrı field (array push constant'ta sorun çıkarabilir)
+ */
+
+#version 460
+#extension GL_EXT_ray_tracing                          : require
+#extension GL_EXT_buffer_reference                     : require
+#extension GL_EXT_scalar_block_layout                  : require
+#extension GL_EXT_nonuniform_qualifier                 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// ============================================================
+// Sabitler
+// ============================================================
+const float PI          = 3.14159265358979323846;
+const float TWO_PI      = 6.28318530717958647692;
+const int   MAX_BOUNCES = 12;
+const float T_MIN       = 1e-3;
+const float T_MAX       = 1e6;
+
+// ============================================================
+// Descriptor Bindings
+// ============================================================
+layout(set = 0, binding = 0, rgba32f) uniform image2D accumImage;
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+
+struct Material {
+    // Block 1: Albedo + opacity
+    float albedo_r, albedo_g, albedo_b, opacity;
+    // Block 2: Emission + strength
+    float emission_r, emission_g, emission_b, emission_strength;
+    // Block 3: PBR properties
+    float roughness, metallic, ior, transmission;
+    // Block 4: Subsurface color + amount
+    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
+    // Block 5: Subsurface radius + scale
+    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
+    // Block 6: Coatings & Translucency
+    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
+    // Block 7: Additional properties
+    float anisotropic, sheen, sheen_tint;
+    uint flags;
+    // Block 8: Water/Extra params
+    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
+    // Block 9: Extra water params
+    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
+    // Block 10: Standard Textures (first 4)
+    uint albedo_tex;
+    uint normal_tex;
+    uint roughness_tex;
+    uint metallic_tex;
+    // Block 11: Standard Textures (second 4)
+    uint emission_tex;
+    uint height_tex;
+    uint opacity_tex;
+    uint transmission_tex;
+    // Block 12: Reserved
+    uint _reserved_0, _reserved_1, _reserved_2, _reserved_3;
+};
+
+struct LightData {
+    vec4 position;
+    vec4 color;
+    vec4 params;
+    vec4 direction;
+};
+
+struct VkGeometryData {
+    uint64_t vertexAddr;
+    uint64_t normalAddr;
+    uint64_t uvAddr;
+    uint64_t indexAddr;
+    uint64_t materialAddr;
+};
+
+struct VkInstanceData {
+    uint materialIndex;
+    uint blasIndex;
+};
+
+// ════════════════════════════════════════════════════════════════════════════════
+// EXTENDED WORLD DATA — Full Nishita Sky Model + Atmosphere LUT
+// ════════════════════════════════════════════════════════════════════════════════
+struct VkWorldDataExtended {
+    // ════════════════════════════ CORE MODE & SUN TINT (32 bytes)
+    vec3  sunDir;
+    int   mode;
+    vec3  sunColor;
+    float sunIntensity;
+    
+    // ════════════════════════════ NISHITA SUN PARAMETERS (32 bytes)
+    float sunSize;
+    float mieAnisotropy;
+    float rayleighDensity;
+    float mieDensity;
+    float humidity;
+    float temperature;
+    float ozoneAbsorptionScale;
+    float _pad0;
+    
+    // ════════════════════════════ ATMOSPHERE DENSITY (32 bytes)
+    float airDensity;
+    float dustDensity;
+    float ozoneDensity;
+    float altitude;
+    float planetRadius;
+    float atmosphereHeight;
+    float _pad1;
+    float _pad2;
+    
+    // ════════════════════════════ CLOUD LAYER 1 PARAMETERS (64 bytes)
+    int   cloudsEnabled;
+    float cloudCoverage;
+    float cloudDensity;
+    float cloudScale;
+    float cloudHeightMin;
+    float cloudHeightMax;
+    float cloudOffsetX;
+    float cloudOffsetZ;
+    float cloudQuality;
+    float cloudDetail;
+    int   cloudBaseSteps;
+    int   cloudLightSteps;
+    float cloudShadowStrength;
+    float cloudAmbientStrength;
+    float cloudSilverIntensity;
+    float cloudAbsorption;
+    
+    // ════════════════════════════ ADVANCED CLOUD SCATTERING (32 bytes)
+    float cloudAnisotropy;
+    float cloudAnisotropyBack;
+    float cloudLobeMix;
+    float cloudEmissiveIntensity;
+    vec3  cloudEmissiveColor;
+    float _pad3;
+    
+    // ════════════════════════════ FOG PARAMETERS (32 bytes)
+    int   fogEnabled;
+    float fogDensity;
+    float fogHeight;
+    float fogFalloff;
+    float fogDistance;
+    float fogSunScatter;
+    vec3  fogColor;
+    
+    // ════════════════════════════ GOD RAYS (16 bytes)
+    int   godRaysEnabled;
+    float godRaysIntensity;
+    float godRaysDensity;
+    int   godRaysSamples;
+    
+    // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
+    int   envTexSlot;
+    float envIntensity;
+    float envRotation;
+    int   _pad5;
+    uvec2 transmittanceLUT;      // 64-bit handle as uvec2
+    uvec2 skyviewLUT;            // 64-bit handle as uvec2
+    uvec2 multiScatterLUT;       // 64-bit handle as uvec2
+    uvec2 aerialPerspectiveLUT;  // 64-bit handle as uvec2
+};
+
+layout(set = 0, binding = 2, scalar) readonly buffer MaterialBuffer  { Material     m[]; } materials;
+layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer     { LightData    l[]; } lights;
+layout(set = 0, binding = 4, scalar) readonly buffer GeometryBuffer  { VkGeometryData g[]; } geometries;
+layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanceData  i[]; } instances;
+layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer     { VkWorldDataExtended w; } worldData;
+// Atmosphere LUT samplers: [0]=transmittance, [1]=skyview, [2]=multi_scatter, [3]=aerial_perspective
+layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
+
+// ============================================================
+// Push Constants
+// ============================================================
+layout(push_constant) uniform CameraPC {
+    vec4  origin;
+    vec4  lowerLeft;
+    vec4  horizontal;
+    vec4  vertical;
+    uint  frameCount;
+    uint  minSamples;
+    uint  lightCount;
+    float varianceThreshold;
+    uint  maxSamples;
+    float exposure_factor;
+
+    // Extended Pro Features
+    float aperture;
+    float focusDistance;
+    float distortion;
+    uint  bladeCount;
+
+    uint  caEnabled;
+    float caAmount;
+    float caRScale;
+    float caBScale;
+
+    uint  vignetteEnabled;
+    float vignetteAmount;
+    float vignetteFalloff;
+    float pad0;
+
+    uint  shakeEnabled;
+    float shakeOffsetX;
+    float shakeOffsetY;
+    float shakeOffsetZ;
+
+    float shakeRotX;
+    float shakeRotY;
+    float shakeRotZ;
+    float pad1;
+} cam;
+
+// ============================================================
+// Payload — closesthit v2 + miss v2 ile tam eşleşme
+// ============================================================
+struct RayPayload {
+    vec3  radiance;
+    vec3  attenuation;
+    vec3  scatterOrigin;
+    vec3  scatterDir;
+    uint  seed;
+    bool  scattered;
+    bool  hitEmissive;
+    uint  occluded;
+};
+
+layout(location = 0) rayPayloadEXT RayPayload payload;
+
+// Location 1: Shadow payload
+layout(location = 1) rayPayloadEXT bool shadowOccluded;
+
+// ============================================================
+// PCG RNG
+// ============================================================
+uint pcgNext(inout uint state) {
+    state = state * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float rnd(inout uint seed) {
+    return float(pcgNext(seed)) * (1.0 / 4294967296.0);
+}
+
+uint initSeed(uvec2 pixel, uvec2 size, uint frame) {
+    uint px = pixel.x + pixel.y * size.x;
+    uint h  = px ^ (frame * 2654435761u);
+    h = h * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    return (h >> 22u) ^ h;
+}
+
+// ============================================================
+// Luminance Helper
+// ============================================================
+float luminance(vec3 c) {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// ============================================================
+// Main
+// ============================================================
+void main() {
+    uvec2 pixel      = gl_LaunchIDEXT.xy;
+    uvec2 screenSize = gl_LaunchSizeEXT.xy;
+
+    // Adaptive Sampling Check
+    if (cam.frameCount >= cam.minSamples && cam.varianceThreshold > 0.0) {
+        vec4 data = imageLoad(accumImage, ivec2(pixel));
+        float mean = dot(data.rgb, vec3(0.2126, 0.7152, 0.0722));
+        float mean2 = data.a;
+        float variance = max(0.0, mean2 - mean * mean);
+        float stdDev = sqrt(variance);
+
+        float denom = max(mean, 1e-3);
+        if ((stdDev / denom) < cam.varianceThreshold) {
+            return;
+        }
+    }
+
+    uint seed = initSeed(pixel, screenSize, cam.frameCount);
+
+    // Jittered AA sample
+    float jitterU = (float(pixel.x) + rnd(seed)) / float(screenSize.x);
+    float jitterV = 1.0 - (float(pixel.y) + rnd(seed)) / float(screenSize.y);
+
+    // Primary ray with effects
+    float u = jitterU;
+    float v = jitterV;
+
+    // 1. Lens Distortion
+    if (abs(cam.distortion) > 0.001) {
+        float aspect = float(screenSize.x) / float(screenSize.y);
+        float uc = (u - 0.5) * aspect;
+        float vc = (v - 0.5);
+        float r2 = uc * uc + vc * vc;
+        float factor = 1.0 + cam.distortion * r2;
+        u = (uc * factor) / aspect + 0.5;
+        v = vc * factor + 0.5;
+    }
+
+    // 2. Stochastic Chromatic Aberration
+    float caFactor = 1.0;
+    if (cam.caEnabled != 0 && cam.caAmount > 0.0001) {
+        float r2 = (u - 0.5) * (u - 0.5) + (v - 0.5) * (v - 0.5);
+        // Randomly choose a channel to sample for this pass
+        uint channel = pcgNext(seed) % 3;
+        if (channel == 0) caFactor = 1.0 + cam.caAmount * r2 * (cam.caRScale - 1.0);
+        else if (channel == 2) caFactor = 1.0 + cam.caAmount * r2 * (cam.caBScale - 1.0);
+        
+        u = (u - 0.5) * caFactor + 0.5;
+        v = (v - 0.5) * caFactor + 0.5;
+    }
+
+    vec3 rayOrigin = cam.origin.xyz;
+    if (cam.shakeEnabled != 0) {
+        rayOrigin += vec3(cam.shakeOffsetX, cam.shakeOffsetY, cam.shakeOffsetZ);
+    }
+
+    // Camera ray direction calculation with DOF
+    vec3 rayTarget = cam.lowerLeft.xyz + u * cam.horizontal.xyz + v * cam.vertical.xyz;
+    vec3 rayDir;
+
+    if (cam.aperture > 0.001) {
+        // Sample lens for DOF
+        vec2 rd = vec2(0.0);
+        float lensRadius = cam.aperture * 0.5;
+
+        if (cam.bladeCount < 3) {
+            // Unit disk sampling (Circular Bokeh)
+            float r = sqrt(rnd(seed));
+            float theta = 2.0 * PI * rnd(seed);
+            rd = lensRadius * vec2(r * cos(theta), r * sin(theta));
+        } else {
+            // Polygonal Bokeh
+            float theta_wedge = 2.0 * PI / float(cam.bladeCount);
+            int wedge = int(pcgNext(seed) % cam.bladeCount);
+            float a1 = float(wedge) * theta_wedge;
+            float a2 = a1 + theta_wedge;
+            
+            float t_lerp = rnd(seed);
+            vec2 p_edge = vec2(cos(a1), sin(a1)) * (1.0 - t_lerp) + vec2(cos(a2), sin(a2)) * t_lerp;
+            float r_scale = sqrt(rnd(seed));
+            rd = lensRadius * p_edge * r_scale;
+        }
+
+        // Camera basis vectors (extracted from horizontal/vertical)
+        vec3 camU = normalize(cam.horizontal.xyz);
+        vec3 camV = normalize(cam.vertical.xyz);
+        vec3 lensOffset = camU * rd.x + camV * rd.y;
+
+        rayOrigin += lensOffset;
+        rayDir = normalize(rayTarget - rayOrigin);
+    } else {
+        rayDir = normalize(rayTarget - rayOrigin);
+    }
+
+    // Path tracing
+    vec3 radiance   = vec3(0.0);
+    vec3 throughput = vec3(1.0);
+
+    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+
+        payload.radiance      = vec3(0.0);
+        payload.attenuation   = vec3(1.0);
+        payload.scatterOrigin = vec3(0.0);
+        payload.scatterDir    = vec3(0.0);
+        payload.seed          = seed;
+        payload.scattered     = false;
+        payload.hitEmissive   = false;
+
+        traceRayEXT(
+            topLevelAS,
+            gl_RayFlagsOpaqueEXT,
+            0xFF,
+            0, 0, 0,
+            rayOrigin,
+            T_MIN,
+            rayDir,
+            T_MAX,
+            0
+        );
+
+        seed = payload.seed;
+
+        radiance += throughput * payload.radiance;
+
+        if (!payload.scattered) break;
+
+        throughput *= payload.attenuation;
+
+        // Erken çıkış
+        if (max(throughput.r, max(throughput.g, throughput.b)) < 0.001) break;
+
+        // Russian Roulette (bounce >= 3)
+        if (bounce >= 3) {
+            float maxComp     = max(throughput.r, max(throughput.g, throughput.b));
+            float surviveProb = clamp(maxComp, 0.05, 0.95);
+            if (rnd(seed) > surviveProb) break;
+            throughput /= surviveProb;
+        }
+
+        rayOrigin = payload.scatterOrigin;
+        rayDir    = payload.scatterDir;
+    }
+
+    // Apply exposure factor
+    vec3 exposedRadiance = radiance * cam.exposure_factor;
+    
+    // Vignetting
+    if (cam.vignetteEnabled != 0) {
+        float vx = (u * 2.0 - 1.0);
+        float vy = (v * 2.0 - 1.0);
+        float dist = sqrt(vx*vx + vy*vy) / 1.414;
+        float vignette = 1.0 - cam.vignetteAmount * pow(dist, cam.vignetteFalloff);
+        exposedRadiance *= max(0.0, vignette);
+    }
+
+    // Welford running average
+    vec4 oldAcc = vec4(0.0);
+    if (cam.frameCount > 0u) {
+        oldAcc = imageLoad(accumImage, ivec2(pixel));
+    }
+
+    float N      = float(cam.frameCount) + 1.0;
+    vec3  newAcc = oldAcc.rgb + (exposedRadiance - oldAcc.rgb) / N;
+    
+    // Variance accumulation (E[L^2])
+    float L = dot(exposedRadiance, vec3(0.2126, 0.7152, 0.0722));
+    float L2 = L * L;
+    float newL2 = oldAcc.a + (L2 - oldAcc.a) / N;
+
+    // Exposed HDR accumulation
+    imageStore(accumImage, ivec2(pixel), vec4(newAcc, newL2));
+}

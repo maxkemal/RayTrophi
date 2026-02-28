@@ -336,6 +336,8 @@ public:
     std::vector<TextureInfo> textureInfos;
     std::vector<std::shared_ptr<Camera>> cameras; // Camera list (Kamera listesi)
     bool isFBX = false; // Track if current file is FBX (FBX formatı kontrolü)
+    bool isGLTF = false; // Track if current file is GLTF/GLB (GLTF/GLB formatı kontrolü)
+
     
     // Transform Cache: Ensures all meshes with the same nodeName share the same Transform.
     // Critical for Gizmo to move all object parts together.
@@ -457,126 +459,53 @@ public:
 
         BoneData boneData;
         
-        // Check if file is FBX format
-        // FBX formatı kontrolü
-        std::string lowerFilename = filename;
-        std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(), ::tolower);
-        this->isFBX = (lowerFilename.find(".fbx") != std::string::npos);
-        
-        if (isFBX) {
-            SCENE_LOG_INFO("FBX format detected");
-            // Note: Assimp reads unit scale from FBX metadata automatically
+        // Detect format from filename (Format algılama)
+        std::string fileNameStr = filename;
+        std::string ext = "";
+        size_t lastDot = fileNameStr.find_last_of('.');
+        if (lastDot != std::string::npos) {
+            ext = fileNameStr.substr(lastDot);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         }
+        
+        this->isFBX = (ext == ".fbx");
+        this->isGLTF = (ext == ".gltf" || ext == ".glb");
+        
+        if (this->isFBX) SCENE_LOG_INFO("FBX format detected");
+        if (this->isGLTF) SCENE_LOG_INFO("GLTF/GLB format detected");
 
-        SCENE_LOG_INFO("Importing file with Assimp...");
+        SCENE_LOG_INFO("Importing file with Assimp: " + filename);
         
+        // Optimized flags for large scenes (Büyük sahneler için optimize edilmiş bayraklar)
         unsigned int importFlags = 
-            aiProcess_GenSmoothNormals |    // Generate smooth normals
-            aiProcess_JoinIdenticalVertices | // Optimization: Join same vertices
-            aiProcess_Triangulate |         // Triangulate all faces
-            aiProcess_CalcTangentSpace |     // Calculate tangent space
-            aiProcess_FindInvalidData |      // Detect invalid data (NaN etc)
-            aiProcess_ImproveCacheLocality | // Optimization for rendering
-            aiProcess_ValidateDataStructure; // Ensure scene hierarchy is valid
+            aiProcess_GenSmoothNormals |    
+            aiProcess_JoinIdenticalVertices| 
+            aiProcess_Triangulate |         
+            aiProcess_CalcTangentSpace |    
+            aiProcess_ImproveCacheLocality; 
         
-        // Add global scale for FBX and other formats
-        // FBX ve diğer formatlar için global ölçekleme
-        importFlags |= aiProcess_GlobalScale;
+        // For FBX, global scale helps normalize units
+        if (this->isFBX) {
+            importFlags |= aiProcess_GlobalScale;
+        }
         
-        this->scene = importer.ReadFile(filename, importFlags);
+        this->scene = importer.ReadFile(fileNameStr, importFlags);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
             SCENE_LOG_ERROR("Assimp import failed: " + std::string(importer.GetErrorString()));
             return {};
         }
 
-        SCENE_LOG_INFO("Assimp file loaded successfully. Processing scene data...");
+        SCENE_LOG_INFO("Assimp file loaded successfully. Extracting geometry data...");
 
-        // Log Metadata for Units (Birimler için Metadata kaydet)
-        if (scene->mMetaData) {
-            float unitFactor = 1.0f;
-            if (scene->mMetaData->Get("UnitScaleFactor", unitFactor)) {
-                SCENE_LOG_INFO("Model Metadata: UnitScaleFactor = " + std::to_string(unitFactor));
-            }
-        }
-        
-        // Save the original root transform (without correction)
+        // Save the original root transform
         boneData.originalRootTransform = convert(scene->mRootNode->mTransformation);
-
-        // =========================================================================
-        // INTELLIGENT SCALE & POSITION DETECTION (Akıllı Ölçek ve Konum Algılama)
-        // =========================================================================
-        // Check if the model is too big (units mismatch) or too far from origin.
-        // Modelin çok büyük (ölçek uyuşmazlığı) veya orijinden çok uzak olup olmadığını kontrol et.
-        {
-            aiVector3D sceneMin(1e10f, 1e10f, 1e10f);
-            aiVector3D sceneMax(-1e10f, -1e10f, -1e10f);
-            bool hasGeometry = false;
-
-            for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
-                aiMesh* mesh = scene->mMeshes[m];
-                if (mesh->mNumVertices > 0) hasGeometry = true;
-                for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
-                    aiVector3D p = mesh->mVertices[v];
-                    sceneMin.x = std::min(sceneMin.x, p.x);
-                    sceneMin.y = std::min(sceneMin.y, p.y);
-                    sceneMin.z = std::min(sceneMin.z, p.z);
-                    sceneMax.x = std::max(sceneMax.x, p.x);
-                    sceneMax.y = std::max(sceneMax.y, p.y);
-                    sceneMax.z = std::max(sceneMax.z, p.z);
-                }
-            }
-
-            if (hasGeometry) {
-                aiVector3D size = sceneMax - sceneMin;
-                aiVector3D center = (sceneMax + sceneMin) * 0.5f;
-                float maxDim = std::max({size.x, size.y, size.z});
-                
-                SCENE_LOG_INFO("Model Raw Dimensions: " + std::to_string(size.x) + "x" + std::to_string(size.y) + "x" + std::to_string(size.z));
-                SCENE_LOG_INFO("Model Raw Center: " + std::to_string(center.x) + ", " + std::to_string(center.y) + ", " + std::to_string(center.z));
-
-                float scaleFactor = 1.0f;
-                
-                // Intelligent Unit Detection (Akıllı Birim Algılama)
-                // If model is huge (e.g. > 100m for a non-terrain object), it might be in CM or MM
-                // Eğer model çok büyükse (örn. 100m'den büyük), CM veya MM olabilir.
-                if (maxDim > 500.0f) {
-                    scaleFactor = 0.01f; // CM -> Meters
-                    if (maxDim > 5000.0f) scaleFactor = 0.001f; // MM -> Meters
-                    
-                    SCENE_LOG_WARN("Model seems extremely large (" + std::to_string(maxDim) + " units). Auto-scaling by " + std::to_string(scaleFactor) + " to normalize to Meters.");
-                }
-                
-                // Detect if model is way off-center (Orijinden çok uzak mı?)
-                bool needsCentering = center.Length() > 1000.0f;
-                if (needsCentering) {
-                    SCENE_LOG_WARN("Model is VERY far from origin (" + std::to_string(center.Length()) + " units). Auto-centering suggested.");
-                }
-
-                if (scaleFactor != 1.0f || needsCentering) {
-                    aiMatrix4x4 correction;
-                    if (needsCentering) {
-                        // Pre-multiply by centering translation
-                        aiMatrix4x4::Translation(-center, correction);
-                    }
-                    if (scaleFactor != 1.0f) {
-                        // Pre-multiply by scale
-                        aiMatrix4x4 scaleMat;
-                        aiMatrix4x4::Scaling(aiVector3D(scaleFactor, scaleFactor, scaleFactor), scaleMat);
-                        correction = scaleMat * correction;
-                    }
-                    
-                    // Bake this into the root node transformation
-                    scene->mRootNode->mTransformation = correction * scene->mRootNode->mTransformation;
-                    SCENE_LOG_INFO("Applied intelligent correction to Root Node.");
-                }
-            }
-        }
 
         SCENE_LOG_INFO("Clearing existing cameras, lights, and transform cache...");
         cameras.clear();
         lights.clear();
-        clearTransformCache();  // Clear transform cache (Transform önbelleğini temizle)
+        clearTransformCache(); 
+
 
         SCENE_LOG_INFO("Building node map from scene hierarchy...");
         std::function<void(aiNode*)> recurse = [&](aiNode* node) {

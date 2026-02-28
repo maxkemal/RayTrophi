@@ -24,6 +24,9 @@
 #include "ProjectManager.h"
 #include "scene_ui_animgraph.hpp"
 
+extern bool g_hasOptix;
+extern bool g_hasCUDA;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE HIERARCHY PANEL (Outliner)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -68,7 +71,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
         if (ImGui::Button(ctx.render_settings.show_background ? "(o)" : "( )")) {
             ctx.render_settings.show_background = !ctx.render_settings.show_background;
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
         }
         ImGui::PopStyleColor();
         ImGui::SameLine();
@@ -125,7 +128,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         if (member) member->visible = mctx.visible;
                     }
                     ctx.renderer.resetCPUAccumulation();
-                    if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                 }
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
@@ -217,9 +220,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (ImGui::BeginPopupContextItem()) {
                     if (ImGui::MenuItem("Set As Active", nullptr, is_active)) {
                         ctx.scene.setActiveCamera(i);
-                        if (ctx.optix_gpu_ptr && ctx.scene.camera) {
-                            ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr && ctx.scene.camera) {
+                            ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                     }
@@ -242,9 +245,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // Double-click to set as active
                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
                     ctx.scene.setActiveCamera(i);
-                    if (ctx.optix_gpu_ptr && ctx.scene.camera) {
-                        ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr && ctx.scene.camera) {
+                        ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                     SCENE_LOG_INFO("Set Camera #" + std::to_string(i) + " as active");
@@ -289,9 +292,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 if (ImGui::Button(light->visible ? "(o)" : "( )")) {
                     light->visible = !light->visible;
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->setLights(ctx.scene.lights);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                     ProjectManager::getInstance().markModified();
@@ -363,7 +366,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::Separator();
                     if (ImGui::MenuItem("Toggle Visibility", nullptr, light->visible)) {
                         light->visible = !light->visible;
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                        if (ctx.backend_ptr) ctx.backend_ptr->setLights(ctx.scene.lights);
                         ctx.renderer.resetCPUAccumulation();
                     }
                     ImGui::EndPopup();
@@ -394,9 +397,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
             if (ImGui::Button(vdb->visible ? "(o)" : "( )")) {
                 vdb->visible = !vdb->visible;
-                if (ctx.optix_gpu_ptr) {
+                if (ctx.backend_ptr) {
                     syncVDBVolumesToGPU(ctx);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                    ctx.backend_ptr->resetAccumulation();
                 }
                 ctx.renderer.resetCPUAccumulation();
                 ProjectManager::getInstance().markModified();
@@ -455,9 +458,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::Separator();
                 if (ImGui::MenuItem("Toggle Visibility", nullptr, vdb->visible)) {
                     vdb->visible = !vdb->visible;
-                    if (ctx.optix_gpu_ptr) {
+                    if (ctx.backend_ptr) {
                         syncVDBVolumesToGPU(ctx);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -486,9 +489,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
             if (ImGui::Button(gas->visible ? "(o)" : "( )")) {
                 gas->visible = !gas->visible;
-                if (ctx.optix_gpu_ptr) {
-                    ctx.renderer.updateOptiXGasVolumes(ctx.scene, ctx.optix_gpu_ptr);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
                 }
                 ctx.renderer.resetCPUAccumulation();
                 ProjectManager::getInstance().markModified();
@@ -528,9 +531,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::Separator();
                 if (ImGui::MenuItem("Toggle Visibility", nullptr, gas->visible)) {
                     gas->visible = !gas->visible;
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.updateOptiXGasVolumes(ctx.scene, ctx.optix_gpu_ptr);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -858,8 +861,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     bool new_visible = !all_visible;
                     for (auto& pair : kv.second) pair.second->visible = new_visible;
                     
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setVisibilityByNodeName(name, new_visible);
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->setVisibilityByNodeName(name, new_visible);
                     }
                     
                     extern bool g_bvh_rebuild_pending;
@@ -956,7 +959,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ImGui::MenuItem("Toggle Visibility", nullptr, all_visible)) {
                         bool new_visible = !all_visible;
                         for (auto& pair : kv.second) pair.second->visible = new_visible;
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->setVisibilityByNodeName(name, new_visible);
+                        if (ctx.backend_ptr) ctx.backend_ptr->setVisibilityByNodeName(name, new_visible);
                         ctx.renderer.resetCPUAccumulation();
                     }
                     ImGui::EndPopup();
@@ -1053,9 +1056,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                                 // Sync Updates
                                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                                 ctx.renderer.resetCPUAccumulation();
-                                if (ctx.optix_gpu_ptr) {
-                                    ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                if (ctx.backend_ptr) {
+                                    ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
+                                    ctx.backend_ptr->resetAccumulation();
                                 }
                                 sel.selected.has_cached_aabb = false;
                                 ProjectManager::getInstance().markModified();
@@ -1068,9 +1071,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             ImGui::PushItemWidth(100);
                             if (ImGui::InputInt("Mat ID", &matID)) {
                                 for (auto& pair : kv.second) pair.second->setMaterialID(matID);
-                                if (ctx.optix_gpu_ptr) {
-                                    ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                if (ctx.backend_ptr) {
+                                    ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
+                                    ctx.backend_ptr->resetAccumulation();
                                 }
                                 ctx.renderer.resetCPUAccumulation();
                             }
@@ -1182,11 +1185,11 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         invalidateCache();
                         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                         ctx.renderer.resetCPUAccumulation();
-                        if (ctx.optix_gpu_ptr) {
-                            ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                            if (ctx.scene.camera) ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.rebuildBackendGeometry(ctx.scene);
+                            ctx.backend_ptr->setLights(ctx.scene.lights);
+                            if (ctx.scene.camera) ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         is_bvh_dirty = false;
                         ProjectManager::getInstance().markModified();
@@ -1299,18 +1302,18 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         if (sel.selected.type == SelectableType::Object) {
                             g_bvh_rebuild_pending = true;
                             sel.selected.has_cached_aabb = false;
-                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
+                            if (ctx.backend_ptr) ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
                         } else if (sel.selected.type == SelectableType::Light) {
-                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
+                            if (ctx.backend_ptr) ctx.backend_ptr->setLights(ctx.scene.lights);
                         } else if (sel.selected.type == SelectableType::Camera || sel.selected.type == SelectableType::CameraTarget) {
-                            if (ctx.optix_gpu_ptr && sel.selected.camera) ctx.optix_gpu_ptr->setCameraParams(*sel.selected.camera);
+                            if (ctx.backend_ptr && sel.selected.camera) ctx.renderer.syncCameraToBackend(*sel.selected.camera);
                         } else if (sel.selected.type == SelectableType::VDBVolume) {
                             SceneUI::syncVDBVolumesToGPU(ctx);
                         } else if (sel.selected.type == SelectableType::GasVolume) {
-                            ctx.renderer.updateOptiXGasVolumes(ctx.scene, ctx.optix_gpu_ptr);
+                            ctx.renderer.updateBackendGasVolumes(ctx.scene);
                         }
 
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                         ctx.renderer.resetCPUAccumulation();
                         ProjectManager::getInstance().markModified();
                     }
@@ -1463,9 +1466,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     cam.lookat = cam.lookat + delta;
                     cam.update_camera_vectors();
                     sel.selected.position = pos;
-                    if (ctx.optix_gpu_ptr && g_hasOptix) {
-                        ctx.optix_gpu_ptr->setCameraParams(cam);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(cam);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                 }
 
@@ -1513,9 +1516,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         cam.enable_chromatic_aberration = false;
                         cam.enable_vignetting = false;
                         cam.enable_camera_shake = false;
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                         ProjectManager::getInstance().markModified();
@@ -1524,9 +1527,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ModeButton("Pro", 1, ImVec4(0.3f, 0.5f, 0.8f, 1.0f))) {
                         cam.camera_mode = CameraMode::Pro;
                         cam.auto_exposure = false;
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                         ProjectManager::getInstance().markModified();
@@ -1537,9 +1540,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         cam.auto_exposure = false;
                         cam.enable_vignetting = true;
                         cam.vignetting_amount = 0.3f;
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                         ProjectManager::getInstance().markModified();
@@ -1714,11 +1717,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 // ═══════════════════════════════════════════════════════════════════════════
                 // F-STOP PRESETS - Photographer-friendly aperture selection
                 // ═══════════════════════════════════════════════════════════════════════════
-                // ═══════════════════════════════════════════════════════════════════════════
-                // F-STOP SELECTION (Dynamic based on Lens Body)
-                // ═══════════════════════════════════════════════════════════════════════════
+                bool fstop_changed = false;
 
-                // 1. Determine Limits from selected lens
+                // FSTOP SELECTION (Dynamic based on Lens Body)
                 float limit_min_f = 0.5f;    // Widest (Smallest number) - Custom default
                 float limit_max_f = 128.0f;  // Tightest (Largest number) - Custom default
 
@@ -1727,10 +1728,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     limit_max_f = CameraPresets::LENS_PRESETS[cam.lens_preset_index].min_aperture;
                 }
 
-                // Auto-fix if current aperture is out of bounds (optional, or just clamp display)
-                // ...
-
-                // 2. Combo Box (Presets Filtering)
+                // Combo Box (Presets Filtering)
                 if (ImGui::BeginCombo("F-Stop Preset", CameraPresets::FSTOP_PRESETS[cam.fstop_preset_index].name)) {
                     for (size_t i = 0; i < CameraPresets::FSTOP_PRESET_COUNT; ++i) {
                         float f_val = CameraPresets::FSTOP_PRESETS[i].f_number;
@@ -1746,16 +1744,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                             // Apply Preset
                             if (cam.fstop_preset_index > 0) {
-                                // Calculate aperture diameter: D = f / N
-                                // Ensure focal length is updated
                                 float f_mm = (cam.focal_length_mm > 1.0f) ? cam.focal_length_mm : 50.0f;
-                                // Revert to using the preset's calibrated aperture_value
                                 cam.aperture = CameraPresets::FSTOP_PRESETS[i].aperture_value;
                                 cam.lens_radius = cam.aperture * 0.5f;
                             }
                             cam.update_camera_vectors();
-                            
                             cam.markDirty();
+                            fstop_changed = true;
                         }
                         if (is_selected) ImGui::SetItemDefaultFocus();
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s (f/%.1f)", CameraPresets::FSTOP_PRESETS[i].description, f_val);
@@ -1763,27 +1758,33 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::EndCombo();
                 }
 
-                // 3. Manual F-Stop Slider
+                // Manual F-Stop Slider
                 bool apKeyed = isCamKeyed(false, false, false, false, true);
                 if (KeyframeButton("##CAp", apKeyed)) { insertCamKey("Aperture", false, false, false, false, true); }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(apKeyed ? "REMOVE Aperture key" : "ADD Aperture key");
                 ImGui::SameLine();
                 
-                // Calculate current f-stop from physical aperture
                 float calc_f_mm = (cam.focal_length_mm > 1.0f) ? cam.focal_length_mm : 50.0f;
                 float current_f = (cam.aperture > 0.001f) ? (calc_f_mm / cam.aperture) : limit_max_f;
-                
-                // Clamp for display safely
                 current_f = std::max(limit_min_f, std::min(current_f, limit_max_f));
 
                 if (SceneUI::DrawSmartFloat("fstop", "F-Stop", &current_f, limit_min_f, limit_max_f, "f/%.2f", apKeyed,
                     [&](){ insertCamKey("Aperture", false, false, false, false, true); }, 16)) {
                     cam.fstop_preset_index = 0; // Reset to Custom
-                    // Scale calculated aperture to match preset units (approx 0.01 scale factor)
                     cam.aperture = (calc_f_mm / current_f) * 0.01f; 
                     cam.lens_radius = cam.aperture * 0.5f;
-
                     cam.markDirty();
+                    fstop_changed = true;
+                }
+                
+                // Sync F-Stop change to exposure mode
+                if (fstop_changed) {
+                    cam.use_physical_exposure = true;
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(cam);
+                        ctx.backend_ptr->resetAccumulation();
+                    }
+                    ctx.renderer.resetCPUAccumulation();
                 }
 
                 // Lens & Aperture Shape Settings
@@ -1845,6 +1846,11 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                     if (mb_changed) {
                         cam.markDirty();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
+                        }
+                        ctx.renderer.resetCPUAccumulation();
                     }
 
                     // Logic to update FOV from Lens settings
@@ -1911,7 +1917,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         iso_max = CameraPresets::CAMERA_BODIES[cam.body_preset_index].max_iso;
                     }
 
-                    ImGui::PushItemWidth(120);
+                    ImGui::PushItemWidth(180);
                     // Find current preset name or show "Custom" if index is invalid/-1
                     const char* iso_preview = (cam.iso_preset_index >= 0 && cam.iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) 
                          ? CameraPresets::ISO_PRESETS[cam.iso_preset_index].name 
@@ -1937,27 +1943,6 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             }
                         }
                         ImGui::EndCombo();
-                    }
-                    ImGui::SameLine();
-                    
-                    // Manual ISO Drag
-                    // Clamp visual range but allow manual input
-                    int iso_val = cam.iso;
-                    if (ImGui::DragInt("##ISOVal", &iso_val, 10.0f, iso_min, iso_max, "ISO %d")) {
-                         // Clamp result
-                         if (iso_val < iso_min) iso_val = iso_min;
-                         if (iso_val > iso_max) iso_val = iso_max;
-                         cam.iso = iso_val;
-                         
-                         exposure_changed = true;
-                         // Try to match preset, else set to custom (-1)
-                         cam.iso_preset_index = -1; 
-                         for (size_t i=0; i<CameraPresets::ISO_PRESET_COUNT; ++i) {
-                             if (CameraPresets::ISO_PRESETS[i].iso_value == cam.iso) {
-                                 cam.iso_preset_index = (int)i;
-                                 break;
-                             }
-                         }
                     }
                     ImGui::PopItemWidth();
 
@@ -1992,9 +1977,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
 
                     // Trigger Update if changed
                     if (exposure_changed) {
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        // Enable physical exposure mode when ISO/Shutter/F-stop are modified
+                        cam.use_physical_exposure = true;
+                        
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                     }
@@ -2029,18 +2017,18 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         cam.vfov = fov;
                         cam.fov = fov;
                         cam.update_camera_vectors();
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Wider = More visible area\nNarrower = Zoom in effect");
                     
                     // Simple Focus Distance
                     if (ImGui::SliderFloat("Focus Distance", &cam.focus_dist, 0.5f, 50.0f, "%.1f m")) {
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Distance to the focused object");
@@ -2050,9 +2038,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ImGui::SliderFloat("Background Blur", &dof_strength, 0.0f, 1.0f, "%.2f")) {
                         cam.aperture = (1.0f - dof_strength) * 0.05f;
                         cam.lens_radius = cam.aperture * 0.5f;
-                        if (ctx.optix_gpu_ptr && g_hasOptix) {
-                            ctx.optix_gpu_ptr->setCameraParams(cam);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(cam);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("0 = Sharp everywhere\n1 = Blurry background (Portrait mode)");
@@ -2173,9 +2161,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         }
                         
                         if (cinema_changed) {
-                            if (ctx.optix_gpu_ptr && g_hasOptix) {
-                                ctx.optix_gpu_ptr->setCameraParams(cam);
-                                ctx.optix_gpu_ptr->resetAccumulation();
+                            if (ctx.backend_ptr) {
+                                ctx.renderer.syncCameraToBackend(cam);
+                                ctx.backend_ptr->resetAccumulation();
                             }
                             ctx.renderer.resetCPUAccumulation();
                             ProjectManager::getInstance().markModified();
@@ -2228,9 +2216,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         for (size_t i = 0; i < ctx.scene.cameras.size(); ++i) {
                             if (ctx.scene.cameras[i].get() == &cam) {
                                 ctx.scene.setActiveCamera(i);
-                                if (ctx.optix_gpu_ptr) {
-                                    ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                                    ctx.optix_gpu_ptr->resetAccumulation();
+                                if (ctx.backend_ptr) {
+                                    ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                                    ctx.backend_ptr->resetAccumulation();
                                 }
                                 ctx.renderer.resetCPUAccumulation();
                                 break;
@@ -2248,9 +2236,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (ImGui::Button("Reset Camera")) {
                     cam.reset();
                     sel.selected.position = cam.lookfrom;
-                    if (ctx.optix_gpu_ptr && g_hasOptix) {
-                        ctx.optix_gpu_ptr->setCameraParams(cam);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(cam);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                     ctx.start_render = true;
@@ -2456,9 +2444,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                 }
 
-                if (light_changed && ctx.optix_gpu_ptr && g_hasOptix) {
-                    ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                if (light_changed && ctx.backend_ptr && g_hasOptix) {
+                    ctx.backend_ptr->setLights(ctx.scene.lights);
+                    ctx.backend_ptr->resetAccumulation();
                 }
             }
 

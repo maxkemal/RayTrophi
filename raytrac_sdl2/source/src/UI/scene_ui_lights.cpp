@@ -1,8 +1,8 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+﻿// ===============================================================================
 // SCENE UI - LIGHTS PANEL
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // This file handles the Lights properties panel.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 #include "scene_ui.h"
 #include "renderer.h"
@@ -16,9 +16,10 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "ProjectManager.h"
+#include <Backend/VulkanBackend.h>
 
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 void SceneUI::drawLightsContent(UIContext& ctx)
 {
     ImGui::TextColored(ImVec4(0.6f, 0.9f, 1.0f, 1), "Scene Lights");
@@ -132,7 +133,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                     SCENE_LOG_INFO("Light " + prop_name + " keyframe @ frame " + std::to_string(current_frame));
                 };
 
-            // Position with ◇ key button
+            // Position with ? key button
             if (ImGui::DragFloat3("Position", &light->position.x, 0.1f)) changed = true;
             ImGui::SameLine();
             if (ImGui::SmallButton(("##KPos" + std::to_string(i)).c_str())) {
@@ -140,7 +141,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Key Position");
 
-            // Direction with ◇ key button (only for Directional/Spot)
+            // Direction with ? key button (only for Directional/Spot)
             if (light->type() == LightType::Directional || light->type() == LightType::Spot) {
                 if (ImGui::DragFloat3("Direction", &light->direction.x, 0.1f)) changed = true;
                 ImGui::SameLine();
@@ -150,7 +151,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Key Direction");
             }
 
-            // Color with ◇ key button
+            // Color with ? key button
             if (ImGui::ColorEdit3("Color", &light->color.x)) changed = true;
             ImGui::SameLine();
             if (ImGui::SmallButton(("##KCol" + std::to_string(i)).c_str())) {
@@ -158,7 +159,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Key Color");
 
-            // Intensity with ◇ key button
+            // Intensity with ? key button
             if (ImGui::DragFloat("Intensity", &light->intensity, 0.1f, 0, 1000.0f)) changed = true;
             ImGui::SameLine();
             if (ImGui::SmallButton(("##KInt" + std::to_string(i)).c_str())) {
@@ -194,9 +195,9 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                 }
             }
 
-            // ─────────────────────────────────────────────────────────────────
+            // �����������������������������������������������������������������
             // LIGHT KEYFRAME BUTTON
-            // ─────────────────────────────────────────────────────────────────
+            // �����������������������������������������������������������������
             ImGui::Separator();
             if (ImGui::SmallButton("Key Light")) {
                 // Get current frame
@@ -258,9 +259,31 @@ void SceneUI::drawLightsContent(UIContext& ctx)
 
     if (changed) {
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.backend_ptr->setLights(ctx.scene.lights);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        // If a directional light was changed in the UI, sync the World sun parameters
+        // so miss/sky shaders reflect color/intensity updates immediately.
+        for (const auto& l : ctx.scene.lights) {
+            if (!l) continue;
+            if (l->type() == LightType::Directional) {
+                // World expects Nishita sun direction = -direction (scene convention)
+                ctx.renderer.world.setSunDirection(-l->direction);
+                ctx.renderer.world.setSunIntensity(l->intensity);
+                if (ctx.backend_ptr) {
+                    auto worldGPU = ctx.renderer.world.getGPUData();
+                    ctx.backend_ptr->setWorldData(&worldGPU);
+                    // Upload LUTs for Vulkan backend if available
+                    auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
+                    if (vulkanBackend) {
+                        auto* al = ctx.renderer.world.getLUT();
+                        if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                    }
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                break; // Sync to first directional light only
+            }
         }
         ProjectManager::getInstance().markModified();
     }
@@ -278,11 +301,48 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
     lights.erase(it);
 
     // GPU + CPU reset
-    if (ctx.optix_gpu_ptr) {
-        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-        ctx.optix_gpu_ptr->resetAccumulation();
-    }
+            if (ctx.backend_ptr) {
+                ctx.backend_ptr->setLights(ctx.scene.lights);
+                // Ensure LUT upload after world sync
+                auto worldGPU = ctx.renderer.world.getGPUData();
+                ctx.backend_ptr->setWorldData(&worldGPU);
+                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
+                if (vulkanBackend) {
+                    auto* al = ctx.renderer.world.getLUT();
+                    if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                }
+                ctx.backend_ptr->resetAccumulation();
+            }
     ctx.renderer.resetCPUAccumulation();
+
+    // If deleted light was directional, sync World sun (clear or update to next directional)
+    bool foundDir = false;
+    for (const auto& l : ctx.scene.lights) {
+        if (l && l->type() == LightType::Directional) { foundDir = true;
+            ctx.renderer.world.setSunDirection(-l->direction);
+            ctx.renderer.world.setSunIntensity(l->intensity);
+            if (ctx.backend_ptr) {
+                auto worldGPU = ctx.renderer.world.getGPUData();
+                ctx.backend_ptr->setWorldData(&worldGPU);
+                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
+                if (vulkanBackend) {
+                    auto* al = ctx.renderer.world.getLUT();
+                    if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                }
+                ctx.backend_ptr->resetAccumulation();
+            }
+            break;
+        }
+    }
+    if (!foundDir) {
+        // No directional light remains — clear sun intensity so sky disk disappears
+        ctx.renderer.world.setSunIntensity(0.0f);
+        if (ctx.backend_ptr) {
+            auto worldGPU = ctx.renderer.world.getGPUData();
+            ctx.backend_ptr->setWorldData(&worldGPU);
+            ctx.backend_ptr->resetAccumulation();
+        }
+    }
 
     SCENE_LOG_INFO("Deleted Light");
     ProjectManager::getInstance().markModified();

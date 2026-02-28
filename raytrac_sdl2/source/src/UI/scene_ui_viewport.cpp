@@ -279,9 +279,9 @@ void SceneUI::drawFocusIndicator(UIContext& ctx) {
             ProjectManager::getInstance().markModified();
 
             // Update GPU
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
         }
@@ -541,9 +541,9 @@ void SceneUI::drawZoomRing(UIContext& ctx) {
             cam.update_camera_vectors();
 
             // Update GPU
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
@@ -700,9 +700,9 @@ void SceneUI::drawDollyArc(UIContext& ctx) {
             cam.update_camera_vectors();
 
             // Update GPU
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(cam);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(cam);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
@@ -885,12 +885,21 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
         if (dragging == 1) {
             int old_idx = iso_idx;
             iso_idx = std::max(0, std::min(new_idx, (int)CameraPresets::ISO_PRESET_COUNT - 1));
-            value_changed = (iso_idx != old_idx);
+            if (iso_idx != old_idx) {
+                cam.iso_preset_index = iso_idx;
+                int iso_val = CameraPresets::ISO_PRESETS[iso_idx].iso_value;
+                cam.iso = iso_val;
+                value_changed = true;
+            }
         }
         else if (dragging == 2) {
             int old_idx = shutter_idx;
             shutter_idx = std::max(0, std::min(new_idx, (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT - 1));
-            value_changed = (shutter_idx != old_idx);
+            if (shutter_idx != old_idx) {
+                cam.shutter_preset_index = shutter_idx;
+                cam.shutter_speed = 1.0f / CameraPresets::SHUTTER_SPEED_PRESETS[shutter_idx].speed_seconds;
+                value_changed = true;
+            }
         }
         else if (dragging == 3) {
             int old_idx = fstop_idx;
@@ -905,14 +914,15 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
             }
         }
 
-        // When manually changing exposure, disable auto and update render
+        // When manually changing exposure, disable auto and enable physical exposure
         if (value_changed) {
             cam.auto_exposure = false;  // Disable auto exposure
+            cam.use_physical_exposure = true;  // Enable physical calculation (GPU parity)
 
             // Update GPU and reset render
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(cam);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(cam);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
@@ -943,9 +953,9 @@ void SceneUI::drawExposureInfo(UIContext& ctx) {
         cam.auto_exposure = !cam.auto_exposure;
         hud_captured_mouse = true; // Prevent viewport selection
 
-        if (ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setCameraParams(cam);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.syncCameraToBackend(cam);
+            ctx.backend_ptr->resetAccumulation();
         }
         ctx.renderer.resetCPUAccumulation();
         ProjectManager::getInstance().markModified();
@@ -1145,7 +1155,9 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
             bool is_paused = ctx.render_settings.is_render_paused;
             
             std::string status_text;
-            std::string mode_tag = use_optix ? "[GPU]" : "[CPU]";
+            std::string mode_tag = "[CPU]";
+            if (ctx.render_settings.use_optix) mode_tag = "[OptiX]";
+            else if (ctx.render_settings.use_vulkan) mode_tag = "[Vulkan]";
             
             if (current >= target && target > 0) {
                  status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Done)";
@@ -1261,7 +1273,7 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     float margin_left = 10.0f;
     float margin_top = 45.0f;  // Below menu bar
     float box_width = 200.0f;
-    float box_height = 85.0f;
+    float box_height = 105.0f; // Increased for Backend badge
     
     ImVec2 box_pos(margin_left, margin_top);
     
@@ -1323,8 +1335,10 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     snprintf(line3, sizeof(line3), "f/%.1f  Focus: %.2fm", f_stop, (float)cam.focus_dist);
     draw_list->AddText(ImVec2(x, y), col_label, line3);
     
-    // Camera Mode badge
+    // Line 4: Badges (Mode and Backend)
     y += 18.0f;
+    
+    // Camera Mode badge
     const char* mode_label = "AUTO";
     ImU32 mode_color = IM_COL32(100, 200, 100, 255);
     
@@ -1338,6 +1352,22 @@ void SceneUI::drawLensInfoHUD(UIContext& ctx) {
     
     draw_list->AddRectFilled(ImVec2(x, y), ImVec2(x + 50, y + 14), mode_color, 3.0f);
     draw_list->AddText(ImVec2(x + 4, y), IM_COL32(0, 0, 0, 255), mode_label);
+    
+    // Backend Badge
+    const char* backend_label = "CPU";
+    ImU32 backend_color = IM_COL32(150, 150, 150, 255);
+    
+    if (render_settings.use_optix) {
+        backend_label = "OptiX";
+        backend_color = IM_COL32(118, 185, 0, 255); // NVIDIA Green
+    } else if (render_settings.use_vulkan) {
+        backend_label = "Vulkan";
+        backend_color = IM_COL32(230, 25, 35, 255); // Vulkan Red
+    }
+    
+    float bx = x + 55.0f;
+    draw_list->AddRectFilled(ImVec2(bx, y), ImVec2(bx + 45, y + 14), backend_color, 3.0f);
+    draw_list->AddText(ImVec2(bx + 4, y), IM_COL32(255, 255, 255, 255), backend_label);
     
     // Shake indicator (if active)
     if (cam.enable_camera_shake) {

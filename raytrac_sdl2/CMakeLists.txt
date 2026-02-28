@@ -53,6 +53,7 @@ endif()
 set(EMBREE_ROOT "$ENV{EMBREE_ROOT}" CACHE PATH "Path to Embree root")
 set(OIDN_ROOT "$ENV{OIDN_ROOT}" CACHE PATH "Path to OIDN root")
 set(ASSIMP_ROOT "$ENV{ASSIMP_ROOT}" CACHE PATH "Path to Assimp root")
+set(VULKAN_SDK "$ENV{VULKAN_SDK}" CACHE PATH "Path to Vulkan SDK")
 
 # --- SOURCE FILES (Refactored Structure) ---
 # Automatically collect source files from new subdirectories to avoid manual maintenance
@@ -67,6 +68,7 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Utils/*.cpp"
     "source/src/Animation/*.cpp"
     "source/src/Hair/*.cpp"
+    "source/src/Backend/*.cpp"
 )
 list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 
@@ -92,6 +94,9 @@ set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${CUDA_SOURCES_
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
+
+# --- VULKAN ---
+find_package(Vulkan REQUIRED)
 
 # Updated Path for Device Code
 set(CUDA_SOURCE "source/src/Device/raygen.cu")
@@ -175,6 +180,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${EMBREE_ROOT}/include"
     "${OIDN_ROOT}/include"
     "${ASSIMP_ROOT}/include"
+    "${VULKAN_SDK}/Include"
 )
 
 # --- LIBRARIES (FULL PATHS) ---
@@ -213,6 +219,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     CUDA::cudart
     CUDA::cuda_driver
     CUDA::cufft           # cuFFT for FFT-based pressure solver
+    Vulkan::Vulkan
     kernel32 user32 gdi32 winspool comdlg32 advapi32 shell32 ole32 oleaut32 uuid
 )
 
@@ -226,6 +233,14 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     "${PTX_OUTPUT}"
     "$<TARGET_FILE_DIR:${PROJECT_NAME}>/raygen.ptx"
     COMMENT "Copying raygen.ptx to output directory"
+)
+
+# Copy Vulkan shaders to executable directory/shaders
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
+    COMMENT "Copying Vulkan shaders to output directory/shaders"
 )
 
 message(STATUS "Build setup complete for RayTrophi (Refactored)")

@@ -8,8 +8,11 @@
 #include <imgui_impl_sdlrenderer2.h>
 #include <scene_ui.h>
 #include "OptixWrapper.h"
+#include "Backend/IBackend.h"
+#include "Backend/OptixBackend.h"
 #include <future>
 #include <thread>
+#include <functional>
 #include <vector_types.h>  // CUDA float4, float3 types for hair GPU upload
 #include "Hair/HairBSDF.h"
 
@@ -55,6 +58,7 @@
 #include "VolumetricRenderer.h"
 #include "AtmosphereLUT.h"       // Required for CPU transmittance sampling
 #include "Hair/HairBSDF.h"       // Hair BSDF for shading
+#include <Backend/VulkanBackend.h>
 bool Renderer::isCudaAvailable() {
     try {
         oidn::DeviceRef testDevice = oidn::newDevice(oidn::DeviceType::CUDA);
@@ -95,178 +99,135 @@ void Renderer::initOIDN() {
 
 void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
     if (!surface) return;
-
     std::lock_guard<std::mutex> lock(oidnMutex);
 
-    // Initialize device if not ready
     if (!oidnInitialized) {
         initOIDN();
-        if (!oidnInitialized) return; // Failed to init
+        if (!oidnInitialized) return;
     }
 
-    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
     int width = surface->w;
     int height = surface->h;
-    size_t pixelCount = static_cast<size_t>(width) * height;
-    size_t bufferSize = pixelCount * 3;
+    size_t pixelCount = (size_t)width * height;
+    size_t bufferSize = pixelCount * 3;  // Float3
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PERFORMANCE CONSTANTS
-    // ═══════════════════════════════════════════════════════════════════════════
-    constexpr float inv255 = 1.0f / 255.0f;  // Precomputed for multiplication
-    const float blend_inv = 1.0f - blend;    // Precomputed inverse blend
-
-    // Detect pixel format for direct access (bypass SDL_GetRGB)
-    // Most common formats: ARGB8888, RGBA8888, BGRA8888
-    const SDL_PixelFormat* fmt = surface->format;
-    const bool is_direct_format = (fmt->BytesPerPixel == 4);
-    const Uint32 r_mask = fmt->Rmask;
-    const Uint32 g_mask = fmt->Gmask;
-    const Uint32 b_mask = fmt->Bmask;
-    const Uint8 r_shift = fmt->Rshift;
-    const Uint8 g_shift = fmt->Gshift;
-    const Uint8 b_shift = fmt->Bshift;
-
-    // ===== BUFFER CACHE OPTIMIZATION =====
-    // Boyut değiştiyse buffer'ları yeniden oluştur
     bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
-
     if (sizeChanged) {
-        // CPU buffer'ları resize et
         oidnColorData.resize(bufferSize);
-        oidnOriginalData.resize(bufferSize);  // Original için cache
+        oidnOriginalData.resize(bufferSize);
 
-        // OIDN buffer'larını yeniden oluştur
         try {
+            // Buffer'ları device'a göre oluştur
+            // CUDA device'da newBuffer → GPU memory
+            // CPU device'da newBuffer  → CPU memory
             oidnColorBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
             oidnOutputBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
 
-            // Filter'ı yeniden oluştur ve commit et (boyut değiştiği için)
             oidnFilter = oidnDevice.newFilter("RT");
-            oidnFilter.setImage("color", oidnColorBuffer, oidn::Format::Float3, width, height);
-            oidnFilter.setImage("output", oidnOutputBuffer, oidn::Format::Float3, width, height);
-            oidnFilter.set("hdr", false);
-            oidnFilter.set("srgb", true);
+            oidnFilter.setImage("color", oidnColorBuffer,
+                oidn::Format::Float3, width, height);
+            oidnFilter.setImage("output", oidnOutputBuffer,
+                oidn::Format::Float3, width, height);
+
+            // HDR: Vulkan'dan gelen veri linear float — hdr:true olmalı
+            // srgb: false — tonemap/gamma SDL'e yazarken biz yapıyoruz
+            oidnFilter.set("hdr", true);
+            oidnFilter.set("srgb", false);
             oidnFilter.commit();
 
             oidnCachedWidth = width;
             oidnCachedHeight = height;
-
-            SCENE_LOG_INFO("OIDN buffers recreated for new resolution: " +
-                std::to_string(width) + "x" + std::to_string(height));
         }
         catch (const std::exception& e) {
-            SCENE_LOG_ERROR(std::string("OIDN buffer creation failed: ") + e.what());
+            SCENE_LOG_ERROR(std::string("[OIDN] Buffer creation failed: ") + e.what());
             return;
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // OPTIMIZED PIXEL READ - Direct access, no SDL_GetRGB calls
-    // Also caches original values for blend (eliminates second read loop)
-    // ═══════════════════════════════════════════════════════════════════════════
-    if (is_direct_format) {
-        // Fast path: Direct bit manipulation (no function calls)
-        for (size_t i = 0; i < pixelCount; ++i) {
-            Uint32 pixel = pixels[i];
-            float r = ((pixel & r_mask) >> r_shift) * inv255;
-            float g = ((pixel & g_mask) >> g_shift) * inv255;
-            float b = ((pixel & b_mask) >> b_shift) * inv255;
+    // ===========================================================================
+    // SDL surface → OIDN input
+    // Eğer Vulkan buffer'ı direkt expose edilebilirse bu kısım tamamen kalkar
+    // Şimdilik: CPU'da float dönüşümü → buffer write
+    // ===========================================================================
+    const SDL_PixelFormat* fmt = surface->format;
+    Uint32* pixels = static_cast<Uint32*>(surface->pixels);
+    const float inv255 = 1.0f / 255.0f;
+    const float blend_inv = 1.0f - blend;
 
-            size_t idx = i * 3;
-            oidnColorData[idx] = r;
-            oidnColorData[idx + 1] = g;
-            oidnColorData[idx + 2] = b;
+    // Pixel okuma + linear'e çevir
+    // sRGB → linear: OIDN HDR mode linear input bekliyor
+    // Eğer SDL surface zaten gamma corrected (8bit sRGB) ise düzeltmemiz lazım
+    for (size_t i = 0; i < pixelCount; ++i) {
+        Uint32 pixel = pixels[i];
+        float r = ((pixel & fmt->Rmask) >> fmt->Rshift) * inv255;
+        float g = ((pixel & fmt->Gmask) >> fmt->Gshift) * inv255;
+        float b = ((pixel & fmt->Bmask) >> fmt->Bshift) * inv255;
 
-            // Cache original for blend (avoid second read)
-            oidnOriginalData[idx] = r;
-            oidnOriginalData[idx + 1] = g;
-            oidnOriginalData[idx + 2] = b;
-        }
-    }
-    else {
-        // Fallback: Use SDL_GetRGB for non-standard formats
-        for (size_t i = 0; i < pixelCount; ++i) {
-            Uint8 r, g, b;
-            SDL_GetRGB(pixels[i], surface->format, &r, &g, &b);
+        // sRGB → linear (OIDN HDR mode için gerekli)
+        // Yaklaşık: pow(x, 2.2) yerine hızlı versiyon
+        r = r * r;
+        g = g * g;
+        b = b * b;
 
-            size_t idx = i * 3;
-            float rf = r * inv255;
-            float gf = g * inv255;
-            float bf = b * inv255;
-
-            oidnColorData[idx] = rf;
-            oidnColorData[idx + 1] = gf;
-            oidnColorData[idx + 2] = bf;
-
-            oidnOriginalData[idx] = rf;
-            oidnOriginalData[idx + 1] = gf;
-            oidnOriginalData[idx + 2] = bf;
-        }
+        size_t idx = i * 3;
+        oidnColorData[idx] = r;
+        oidnColorData[idx + 1] = g;
+        oidnColorData[idx + 2] = b;
+        oidnOriginalData[idx] = r;
+        oidnOriginalData[idx + 1] = g;
+        oidnOriginalData[idx + 2] = b;
     }
 
     try {
-        // Cache'lenmiş buffer'a yaz
         oidnColorBuffer.write(0, bufferSize * sizeof(float), oidnColorData.data());
-
-        // Denoise çalıştır (filter zaten commit edilmiş durumda)
         oidnFilter.execute();
 
-        const char* errorMessage;
-        if (oidnDevice.getError(errorMessage) != oidn::Error::None) {
-            SCENE_LOG_ERROR(std::string("OIDN error: ") + errorMessage);
+        const char* errMsg;
+        if (oidnDevice.getError(errMsg) != oidn::Error::None) {
+            SCENE_LOG_ERROR(std::string("[OIDN] ") + errMsg);
+            return;
         }
 
-        // Sonucu oku
         oidnOutputBuffer.read(0, bufferSize * sizeof(float), oidnColorData.data());
     }
     catch (const std::exception& e) {
-        SCENE_LOG_ERROR(std::string("OIDN execution failed: ") + e.what());
+        SCENE_LOG_ERROR(std::string("[OIDN] Execution failed: ") + e.what());
         return;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
-    // OPTIMIZED BLEND & WRITE - Single pass, no second pixel read
-    // Uses cached original values, direct pixel write
-    // ═══════════════════════════════════════════════════════════════════════════
-    if (is_direct_format) {
-        // Fast path: Direct bit manipulation
-        for (size_t i = 0; i < pixelCount; ++i) {
-            size_t idx = i * 3;
+    // ===========================================================================
+    // Blend + write back — linear → sRGB + tonemap
+    // ===========================================================================
+    for (size_t i = 0; i < pixelCount; ++i) {
+        size_t idx = i * 3;
 
-            // Blend: denoised * blend + original * (1 - blend)
-            float r_final = oidnColorData[idx] * blend + oidnOriginalData[idx] * blend_inv;
-            float g_final = oidnColorData[idx + 1] * blend + oidnOriginalData[idx + 1] * blend_inv;
-            float b_final = oidnColorData[idx + 2] * blend + oidnOriginalData[idx + 2] * blend_inv;
+        float r = oidnColorData[idx];
+        float g = oidnColorData[idx + 1];
+        float b = oidnColorData[idx + 2];
 
-            // Clamp and convert to 8-bit
-            Uint8 r = static_cast<Uint8>(std::clamp(r_final, 0.0f, 1.0f) * 255.0f + 0.5f);
-            Uint8 g = static_cast<Uint8>(std::clamp(g_final, 0.0f, 1.0f) * 255.0f + 0.5f);
-            Uint8 b = static_cast<Uint8>(std::clamp(b_final, 0.0f, 1.0f) * 255.0f + 0.5f);
-
-            // Direct pixel write (preserve alpha if present)
-            Uint32 alpha = pixels[i] & fmt->Amask;
-            pixels[i] = alpha | (r << r_shift) | (g << g_shift) | (b << b_shift);
+        // Blend (düşük sample'larda denoised ile original karıştır)
+        if (blend < 0.999f) {
+            r = r * blend + oidnOriginalData[idx] * blend_inv;
+            g = g * blend + oidnOriginalData[idx + 1] * blend_inv;
+            b = b * blend + oidnOriginalData[idx + 2] * blend_inv;
         }
-    }
-    else {
-        // Fallback: Use SDL_MapRGB
-        for (size_t i = 0; i < pixelCount; ++i) {
-            size_t idx = i * 3;
 
-            float r_final = oidnColorData[idx] * blend + oidnOriginalData[idx] * blend_inv;
-            float g_final = oidnColorData[idx + 1] * blend + oidnOriginalData[idx + 1] * blend_inv;
-            float b_final = oidnColorData[idx + 2] * blend + oidnOriginalData[idx + 2] * blend_inv;
+        // Linear → sRGB (sqrt yaklaşımı, pow(x, 1/2.2) yerine)
+        r = sqrtf(std::max(r, 0.0f));
+        g = sqrtf(std::max(g, 0.0f));
+        b = sqrtf(std::max(b, 0.0f));
 
-            Uint8 r = static_cast<Uint8>(std::clamp(r_final, 0.0f, 1.0f) * 255.0f + 0.5f);
-            Uint8 g = static_cast<Uint8>(std::clamp(g_final, 0.0f, 1.0f) * 255.0f + 0.5f);
-            Uint8 b = static_cast<Uint8>(std::clamp(b_final, 0.0f, 1.0f) * 255.0f + 0.5f);
+        Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
+        Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
+        Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
 
-            pixels[i] = SDL_MapRGB(surface->format, r, g, b);
-        }
+        Uint32 alpha = pixels[i] & fmt->Amask;
+        pixels[i] = alpha
+            | ((Uint32)ri << fmt->Rshift)
+            | ((Uint32)gi << fmt->Gshift)
+            | ((Uint32)bi << fmt->Bshift);
     }
 }
-
 Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int max_depth)
     : image_width(image_width), image_height(image_height), aspect_ratio(static_cast<double>(image_width) / image_height), halton_cache(new float[MAX_DIMENSIONS * MAX_SAMPLES_HALTON]), color_processor(image_width, image_height)
 {
@@ -274,9 +235,9 @@ Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int
 
     frame_buffer.resize(image_width * image_height);
     sample_counts.resize(image_width * image_height, 0);
-    max_halton_index = MAX_SAMPLES_HALTON - 1; // Halton dizisi için maksimum indeks
+    max_halton_index = MAX_SAMPLES_HALTON - 1; // Halton dizisi i�in maksimum indeks
 
-    // Adaptive sampling için bufferlar
+    // Adaptive sampling i�in bufferlar
     variance_buffer.resize(image_width * image_height, 0.0f);
 
     rendering_complete = false;
@@ -301,7 +262,7 @@ void Renderer::resetResolution(int w, int h) {
     // Optional: zero the actual frame buffer content
     std::fill(frame_buffer.begin(), frame_buffer.end(), Vec3(0.0f));
 
-    // OIDN cache invalidate - buffer'lar bir sonraki denoise'da yeniden oluşturulacak
+    // OIDN cache invalidate - buffer'lar bir sonraki denoise'da yeniden olu�turulacak
     oidnCachedWidth = 0;
     oidnCachedHeight = 0;
 
@@ -321,12 +282,12 @@ Renderer::~Renderer()
 bool Renderer::SaveSurface(SDL_Surface* surface, const char* file_path)
 {
 
-    // Aynı isimde dosya varsa silmeye çalış (zorla yazma)
+    // Ayn� isimde dosya varsa silmeye �al�� (zorla yazma)
     if (std::filesystem::exists(file_path)) {
         std::error_code ec;
         std::filesystem::remove(file_path, ec);
         if (ec) {
-            SDL_Log("Dosya silinemiyor. Başka bir işlem tarafından kullanılıyor olabilir.");
+            SDL_Log("Dosya silinemiyor. Ba�ka bir i�lem taraf�ndan kullan�l�yor olabilir.");
             return false;
         }
     }
@@ -358,7 +319,7 @@ Vec3 Renderer::getColorFromSurface(SDL_Surface* surface, int i, int j) {
     Uint8 r, g, b;
     SDL_GetRGB(pixel, surface->format, &r, &g, &b);
 
-    // sRGB to linear dönüşümü istersen buraya koy
+    // sRGB to linear d�n���m� istersen buraya koy
     return Vec3(r / 255.0f, g / 255.0f, b / 255.0f);
 }
 
@@ -468,14 +429,14 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 }
                 modelBoneMatrices = pose.boneTransforms;
 
-                // ═══════════════════════════════════════════════════════════════════════════
+                // ===========================================================================
                 // CRITICAL FIX: Direct bone-to-index merging for AnimGraph
                 // Graph pose.boneTransforms order matches the order in boneData.boneIndexToName
                 // but we must ONLY update the indices that belong to THIS model.
                 // CRITICAL FIX: Always copy the matrix.
                 // If it's identity, it means the bone IS at origin/bind pose.
                 // Skipping identity used to cause "stuck" bones from previous poses.
-                // ═══════════════════════════════════════════════════════════════════════════
+                // ===========================================================================
                 for (size_t localIdx = 0; localIdx < modelBoneMatrices.size(); ++localIdx) {
                     const std::string& boneName = scene.boneData.getBoneNameByIndex(localIdx);
                     
@@ -510,10 +471,10 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             // Get this model's bone matrices (current state)
             modelBoneMatrices = ctx.animator->getFinalBoneMatrices();
 
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             // CRITICAL FIX: Map Animator Local Indices to Global Indices
             // The animator's matrices are per-model. We must map them to global slots.
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             const auto& allClips = ctx.animator->getAllClips();
             if (!allClips.empty()) {
                 // We can use the bone mapping from the first clip as a reference for node names
@@ -619,9 +580,9 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
 
 
 bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool apply_cpu_skinning, bool force_bind_pose) {
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // GEOMETRY CHANGE TRACKING (Animation Performance Optimization)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // Track if actual geometry (vertex positions) changed.
     // Return false for camera-only or material-only animations to avoid unnecessary BVH rebuilds.
     bool geometry_changed = false;
@@ -745,7 +706,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         // This part is only reached if useAnimationController is false.
 
 
-    // --- 1. Adım: Animasyonlu Node Hiyerarşisini Güncelle ---
+    // --- 1. Ad�m: Animasyonlu Node Hiyerar�isini G�ncelle ---
     std::unordered_map<std::string, Matrix4x4> animatedGlobalNodeTransforms;
 
     // Ensure bone matrices buffer is large enough for all bones in the scene
@@ -759,9 +720,9 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     for (const auto& modelCtx : scene.importedModelContexts) {
         if (!modelCtx.loader || !modelCtx.loader->getScene() || !modelCtx.loader->getScene()->mRootNode) continue;
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // CRITICAL FIX: Skip models without animation data
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         if (!modelCtx.hasAnimation) {
             continue; // Skip non-animated models - preserve their transforms
         }
@@ -818,7 +779,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         finalBoneMatrices.resize(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
     }
 
-    // --- 0. Adım: Performans Önbelleği Hazırlığı ---
+    // --- 0. Ad�m: Performans �nbelle�i Haz�rl��� ---
     if (animation_groups_dirty || animation_groups.empty()) {
         animation_groups.clear();
         std::unordered_map<void*, size_t> transformToGroup;
@@ -842,7 +803,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         SCENE_LOG_INFO("Animation groups rebuilt: " + std::to_string(animation_groups.size()) + " groups.");
     }
 
-    // --- 2. Adım: Grupları Animasyon Türüne Göre Güncelle ---
+    // --- 2. Ad�m: Gruplar� Animasyon T�r�ne G�re G�ncelle ---
     for (auto& group : animation_groups) {
         if (group.triangles.empty()) continue;
 
@@ -923,7 +884,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         }
     }
 
-    // --- 3. Adım: Işık ve Kamera Animasyonları (from files AND manual keyframes) ---
+    // --- 3. Ad�m: I��k ve Kamera Animasyonlar� (from files AND manual keyframes) ---
 
     // FILE-BASED Light Animation (existing code)
     for (auto& light : scene.lights) {
@@ -1005,7 +966,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     if (scene.camera && cameraHasAnimation && animatedGlobalNodeTransforms.count(scene.camera->nodeName) > 0) {
         // Apply global inverse REMOVED. Static camera works without it.
-        // We suspect globalInverse was introducing the "tilt" (sola yatık).
+        // We suspect globalInverse was introducing the "tilt" (sola yat�k).
         // We KEEP the manual UP vector flip because user confirmed it fixed "tepetaklak". (Upside down)
 
         Matrix4x4 animTransform = animatedGlobalNodeTransforms[scene.camera->nodeName];
@@ -1014,7 +975,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         // Blender cameras usually point down -Z.
         Vec3 forward = animTransform.transform_vector(Vec3(0, 0, -1)).normalize();
 
-        // FIX: Force Global Up (0, 1, 0) to prevent unwanted Roll/Tilt (sola yatık).
+        // FIX: Force Global Up (0, 1, 0) to prevent unwanted Roll/Tilt (sola yat�k).
         // This mimics "Track To" constraint behavior where the camera stays level.
         // If the camera needs to roll (bank), this line should be reverted to use transformed up.
         // Note on position precision: Small errors (e.g. -0.003 instad of 0) are due to Linear vs Bezier interpolation differences.
@@ -1206,7 +1167,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 
     } // End of Legacy Else
     
-    // --- 4. Adım: BVH Güncelle (only if geometry changed) ---
+    // --- 4. Ad�m: BVH G�ncelle (only if geometry changed) ---
     // OPTIMIZATION: Skip CPU BVH rebuild for camera-only or material-only animations
     if (geometry_changed) {
         auto embree_ptr = std::dynamic_pointer_cast<EmbreeBVH>(scene.bvh);
@@ -1215,9 +1176,9 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
         }
     }
     
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // HAIR SYSTEM UPDATE (Rigid & Skeletal Synchronization)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // This MUST run after ALL bone/rigid transformations are final.
     if (hairSystem.getTotalStrandCount() > 0) {
         // We pass the final calculated bone matrices.
@@ -1236,7 +1197,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
     const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
     const std::string& output_folder, bool use_denoiser, float denoiser_blend,
-    OptixWrapper* optix_gpu, bool use_optix, UIContext* ui_ctx) {
+    Backend::IBackend* backend, bool use_optix, UIContext* ui_ctx) {
 
     render_finished = false;
     rendering_complete = false;
@@ -1248,7 +1209,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     extern std::atomic<bool> rendering_paused;
     rendering_paused = false;
 
-    // LOCK VIEWPORT/CAMERA INPUT during animation render
+    // Backend is already synced to this->m_backend in Main.cpp or passed via parameter
+    if (!m_backend && backend) m_backend = backend;
+      // LOCK VIEWPORT/CAMERA INPUT during animation render
     if (ui_ctx) {
         ui_ctx->render_settings.animation_render_locked = true;
     }
@@ -1298,13 +1261,13 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     }
 
     // Check if OptiX is valid
-    bool run_optix = use_optix && optix_gpu && g_hasOptix;
+    bool run_optix = use_optix && m_backend && g_hasOptix;
 
     // IMPORTANT: Sync local optix pointer for updateWind updates to work
-    // render_Animation receives optix_gpu as argument, but updateWind uses member this->optix_gpu_ptr
-    if (run_optix) {
-        this->optix_gpu_ptr = optix_gpu;
-    }
+    // This is no longer needed as m_backend is used directly
+    // if (run_optix) {
+    //     this->m_backend = backend;
+    // }
 
     if (use_optix && !run_optix) {
         SCENE_LOG_WARN("OptiX requested but not available/valid. Falling back to CPU.");
@@ -1351,13 +1314,13 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // --- WIND ANIMATION ---
         // Apply wind simulation for this frame
         // FIX: Use same pattern as Play Mode (Main.cpp line 691-697) for consistent behavior
-        if (run_optix && optix_gpu) {
+        if (run_optix && m_backend) {
             // Calculate wind transforms on CPU (same as Play Mode)
             InstanceManager::getInstance().updateWind(current_time, scene);
 
             // Efficiently update instance transforms on GPU (no full rebuild)
             // This is the critical step that was missing - ensures GPU TLAS has updated matrices
-            optix_gpu->updateTLASMatricesOnly(scene.world.objects);
+            m_backend->updateInstanceTransforms(scene.world.objects);
 
             // Wind updates don't require geometry_changed = true
             // Only instance transforms changed, not vertex data
@@ -1463,36 +1426,35 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // IMPORTANT: Terrain erosion can change triangle count, not just positions.
             // Full rebuildOptiXGeometry is required to handle topology changes.
             if (geometry_changed) {
-                if (optix_gpu->isUsingTLAS()) {
-                    // FAST PATH: GPU Skinning & Transform Update (Refit)
-                    // Pass computed bone matrices to the GPU kernel
-                    optix_gpu->updateTLASGeometry(scene.world.objects, this->finalBoneMatrices);
-                }
-                else {
-                    // Fallback: Full Rebuild (Slow)
-                    this->rebuildOptiXGeometry(scene, optix_gpu);
-                }
+                // Determine if we can do a fast update or need a full rebuild
+                // For now, let the backend or renderer-level rebuild handle it
+                this->rebuildBackendGeometry(scene);
             }
-
-            // 1.5. Update GPU Materials (CRITICAL for material keyframe animations!)
+              // 1.5. Update GPU Materials (CRITICAL for material keyframe animations!)
             // This uploads the materials updated by updateAnimationState to OptiX
-            this->updateOptiXMaterialsOnly(scene, optix_gpu);
-
+            this->updateBackendMaterials(scene);
             // 2. Set Scene Params
-            if (scene.camera) optix_gpu->setCameraParams(*scene.camera);
-            optix_gpu->setLightParams(scene.lights);
-            // optix_gpu->setBackgroundColor(scene.background_color);
-            optix_gpu->setWorld(this->world.getGPUData());
-
-            // 3. Reset Cycles-style Accumulation for new frame
-            optix_gpu->resetAccumulation();
-
-            // 4. Render Loop (Accumulate Samples until target reached)
+            this->syncCameraToBackend(*scene.camera);
+            if (m_backend) {
+                m_backend->setLights(scene.lights);
+                WorldData wd = this->world.getGPUData();
+                m_backend->setWorldData(&wd);
+                // If Vulkan backend, upload AtmosphereLUT host arrays so shaders can sample LUTs
+                if (m_backend) {
+                    auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(m_backend);
+                    if (vulkanBackend) {
+                        auto* al = this->world.getLUT();
+                        if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                    }
+                }
+                m_backend->resetAccumulation();
+            }
+              // 4. Render Loop (Accumulate Samples until target reached)
             // 4. Render Loop (Accumulate Samples until target reached)
             std::vector<uchar4> temp_framebuffer(target_surface->w * target_surface->h);
 
             // Render until max samples reached
-            while (!optix_gpu->isAccumulationComplete() && !rendering_stopped_gpu) {
+            while (m_backend && !m_backend->isAccumulationComplete() && !rendering_stopped_gpu) {
                 // PAUSE WAIT - Block here while paused, check stop flag periodically
                 while (rendering_paused.load() && !rendering_stopped_gpu.load()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1501,7 +1463,12 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                 
                 // Launch progressive render
                 // Pass 'nullptr' for window to disable title updates (headless like)
-                optix_gpu->launch_random_pixel_mode_progressive(target_surface, nullptr, renderer, target_surface->w, target_surface->h, temp_framebuffer, raytrace_texture);
+                 if (m_backend) {
+                     void* framebuffer_ptr = (void*)&temp_framebuffer;
+                     m_backend->renderProgressive(target_surface, nullptr, renderer, 
+                                                 target_surface->w, target_surface->h, 
+                                                 framebuffer_ptr, raytrace_texture);
+                 }
             }
             
             // IMMEDIATE EXIT CHECK after GPU render loop
@@ -1686,7 +1653,7 @@ void Renderer::updateBVH(SceneData& scene, bool use_embree) {
     rebuildBVH(scene, use_embree);
 }
 
-void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
+void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const std::string& model_path,
     std::function<void(int progress, const std::string& stage)> progress_callback,
     bool append, const std::string& import_prefix) {
 
@@ -1704,7 +1671,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         SCENE_LOG_INFO("SCENE CLEANUP: Starting comprehensive cleanup...");
         SCENE_LOG_INFO("========================================");
 
-        // ---- 1. Sahne verilerini sıfırla ----
+        // ---- 1. Sahne verilerini s�f�rla ----
         scene.world.clear();
         scene.lights.clear();
         scene.animationDataList.clear();
@@ -1732,7 +1699,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
 
         update_progress(5, "Clearing materials...");
 
-        // ---- 2. MaterialManager'ı temizle ----
+        // ---- 2. MaterialManager'� temizle ----
         size_t material_count_before = MaterialManager::getInstance().getMaterialCount();
         MaterialManager::getInstance().clear();
         SCENE_LOG_INFO("[MATERIAL CLEANUP] MaterialManager cleared: " + std::to_string(material_count_before) + " materials removed.");
@@ -1740,10 +1707,12 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         // ---- 3. CPU Texture Cache'leri temizle ----
         assimpLoader.clearTextureCache();
 
-        // ---- 4. GPU OptiX Texture'larını temizle ----
-        if (g_hasOptix && optix_gpu_ptr) {
+        // ---- 4. GPU OptiX Texture'lar�n� temizle ----
+        if (g_hasOptix && backend) {
             try {
-                optix_gpu_ptr->destroyTextureObjects();
+                Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(backend);
+                OptixWrapper* optix_gpu = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
+                if (optix_gpu) optix_gpu->destroyTextureObjects();
                 SCENE_LOG_INFO("[GPU CLEANUP] OptiX texture objects destroyed.");
             }
             catch (std::exception& e) {
@@ -1767,7 +1736,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     baseDirectory = path.parent_path().string() + "/";
     SCENE_LOG_INFO("Base directory set to: " + baseDirectory);
 
-    // ---- 1. Geometri ve animasyon yükle ----
+    // ---- 1. Geometri ve animasyon y�kle ----
     update_progress(15, "Loading geometry & animations...");
     SCENE_LOG_INFO("Loading model geometry and animations...");
 
@@ -1873,7 +1842,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
         updateAnimationWithGraph(scene, 0.0f, true);
     }
 
-    // ---- 2. Kamera ve ışık verisi ----
+    // ---- 2. Kamera ve ���k verisi ----
     update_progress(55, "Loading camera & lights...");
     SCENE_LOG_INFO("Loading camera and lighting data...");
 
@@ -1998,7 +1967,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
     // which properly builds from ALL triangles in the scene.
     // If we build here with only loaded_triangles, we destroy the existing 
     // materials' texture handles, causing the second object to use first object's textures!
-    if (g_hasOptix && optix_gpu_ptr && !append)
+    if (g_hasOptix && backend && !append)
     {
         try
         {
@@ -2008,32 +1977,43 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
             OptixGeometryData optix_data = newLoader->convertTrianglesToOptixData(loaded_triangles);
             SCENE_LOG_INFO("Converting " + std::to_string(loaded_triangles.size()) + " triangles to OptiX format.");
 
+            Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(backend);
+            OptixWrapper* optix_gpu = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
+
             update_progress(82, "Validating materials...");
-            optix_gpu_ptr->validateMaterialIndices(optix_data);
+            if (optix_gpu) optix_gpu->validateMaterialIndices(optix_data);
             SCENE_LOG_INFO("Material indices validated.");
 
             update_progress(85, "Building OptiX acceleration...");
-            optix_gpu_ptr->buildFromData(optix_data);
+            if (optix_gpu) optix_gpu->buildFromData(optix_data);
             SCENE_LOG_INFO("OptiX BVH and acceleration structures built.");
 
             update_progress(90, "Configuring OptiX camera...");
             if (scene.camera) {
                 SCENE_LOG_INFO("Setting up OptiX camera parameters...");
-                optix_gpu_ptr->setCameraParams(*scene.camera);
+                Backend::CameraParams cp;
+                cp.origin = scene.camera->lookfrom;
+                cp.lookAt = scene.camera->lookat;
+                cp.up = scene.camera->vup;
+                cp.fov = scene.camera->vfov;
+                cp.aperture = scene.camera->aperture;
+                cp.focusDistance = scene.camera->focus_dist;
+                cp.aspectRatio = scene.camera->aspect;
+                backend->setCamera(cp);
                 SCENE_LOG_INFO("OptiX camera configured successfully.");
             }
 
             update_progress(93, "Setting up OptiX lights...");
             if (!scene.lights.empty()) {
                 SCENE_LOG_INFO("Configuring " + std::to_string(scene.lights.size()) + " lights for OptiX...");
-                optix_gpu_ptr->setLightParams(scene.lights);
+                backend->setLights(scene.lights);
                 SCENE_LOG_INFO("OptiX light parameters set successfully.");
             }
 
             // Consistently sync all volumes using unified logic
-            VolumetricRenderer::syncVolumetricData(scene, optix_gpu_ptr);
+            VolumetricRenderer::syncVolumetricData(scene, m_backend);
             update_progress(96, "Finalizing world environment...");
-            // optix_gpu_ptr->setBackgroundColor(scene.background_color);
+            // backend->setBackgroundColor(scene.background_color);
             // Do not force COLOR mode - preserve existing mode set by createDefaultScene or UI
             // this->world.setMode(WORLD_MODE_COLOR); 
 
@@ -2043,7 +2023,7 @@ void Renderer::create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const
             if (this->world.getMode() == WORLD_MODE_COLOR) {
                 this->world.setColor(scene.background_color);
             }
-            optix_gpu_ptr->setWorld(this->world.getGPUData());
+            if (optix_gpu) optix_gpu->setWorld(this->world.getGPUData());
 
             SCENE_LOG_INFO("World environment set for OptiX rendering.");
         }
@@ -2118,24 +2098,24 @@ void Renderer::apply_normal_map(HitRecord& rec) {
 void Renderer::create_coordinate_system(const Vec3& N, Vec3& T, Vec3& B) {
     Vec3 N_norm = N.normalize();
 
-    // Eğer normal z eksenine paralelse, çok küçük düz yüzeyler için özel durum
+    // E�er normal z eksenine paralelse, �ok k���k d�z y�zeyler i�in �zel durum
     if (N_norm.z < -0.999999f) {
-        T = Vec3(0, -1, 0);  // Ters yönlendirilmiş bir tangent
+        T = Vec3(0, -1, 0);  // Ters y�nlendirilmi� bir tangent
         B = Vec3(-1, 0, 0);
     }
     else {
-        // Normalden tangent ve bitangent hesaplaması
+        // Normalden tangent ve bitangent hesaplamas�
         float a = 1.0f / (1.0f + N_norm.z);
         float b = -N_norm.x * N_norm.y * a;
 
-        // Daha hassas bir hesaplama, düz yüzeylerdeki ters dönme sorunu engellenebilir
+        // Daha hassas bir hesaplama, d�z y�zeylerdeki ters d�nme sorunu engellenebilir
         T = Vec3(1.0f - N_norm.x * N_norm.x * a, b, -N_norm.x);
         B = Vec3(b, 1.0f - N_norm.y * N_norm.y * a, -N_norm.y);
 
-        // Düz yüzeylerde yönleri doğru tutmak için küçük düzeltme
+        // D�z y�zeylerde y�nleri do�ru tutmak i�in k���k d�zeltme
         if (std::abs(N_norm.z) > 0.9999f) {
-            T = Vec3(1.0f, 0.0f, 0.0f);  // x yönüyle tangent düzeltmesi
-            B = Vec3(0.0f, 1.0f, 0.0f);  // y yönüyle bitangent düzeltmesi
+            T = Vec3(1.0f, 0.0f, 0.0f);  // x y�n�yle tangent d�zeltmesi
+            B = Vec3(0.0f, 1.0f, 0.0f);  // y y�n�yle bitangent d�zeltmesi
         }
     }
 }
@@ -2176,18 +2156,18 @@ float Renderer::halton(int index, int base) {
 }
 
 Vec2 Renderer::stratified_halton(int x, int y, int sample_index, int samples_per_pixel) {
-    // Daha iyi dağılım için permütasyon ekliyoruz
+    // Daha iyi da��l�m i�in perm�tasyon ekliyoruz
     const uint32_t pixel_hash = (x * 73856093) ^ (y * 19349663); // Basit bir hash fonksiyonu
     const uint32_t sample_hash = sample_index * 83492791;
 
-    // Halton dizisinde farklı offsetler kullanıyoruz
+    // Halton dizisinde farkl� offsetler kullan�yoruz
     const int base_index = (pixel_hash + sample_hash) % MAX_SAMPLES_HALTON;
 
-    // Farklı asal sayı tabanları kullanarak daha iyi dağılım
+    // Farkl� asal say� tabanlar� kullanarak daha iyi da��l�m
     const float u = halton_cache[base_index];                     // Taban 2
     const float v = halton_cache[(base_index + MAX_SAMPLES_HALTON / 2) % MAX_SAMPLES_HALTON]; // Taban 3
 
-    // Stratifikasyon eklemek için jitter
+    // Stratifikasyon eklemek i�in jitter
     const float jitter_u = (rand() / (float)RAND_MAX) * 0.8f / samples_per_pixel;
     const float jitter_v = (rand() / (float)RAND_MAX) * 0.8f / samples_per_pixel;
 
@@ -2203,12 +2183,12 @@ float Renderer::luminance(const Vec3& color) {
     return 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
 }
 
-// --- Akıllı ışık seçimi ---
+// --- Ak�ll� ���k se�imi ---
 int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights, const Vec3& hit_position) {
     int light_count = (int)lights.size();
     if (light_count == 0) return -1;
 
-    // --- 1. Directional light varsa %33 ihtimalle seç ---
+    // --- 1. Directional light varsa %33 ihtimalle se� ---
     for (int i = 0; i < light_count; i++) {
         if (!lights[i]->visible) continue; // Skip invisible lights
         if (lights[i]->type() == LightType::Directional) {
@@ -2219,7 +2199,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
         }
     }
 
-    // --- 2. Tüm ışık türlerinden ağırlıklı seçim (GPU ile uyumlu) ---
+    // --- 2. T�m ���k t�rlerinden a��rl�kl� se�im (GPU ile uyumlu) ---
     std::vector<float> weights(light_count, 0.0f);
     float total_weight = 0.0f;
 
@@ -2254,12 +2234,12 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
         total_weight += weights[i];
     }
 
-    // --- Eğer ağırlık yoksa fallback rastgele seçim ---
+    // --- E�er a��rl�k yoksa fallback rastgele se�im ---
     if (total_weight < 1e-6f) {
         return std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
     }
 
-    // --- Weighted seçim ---
+    // --- Weighted se�im ---
     float r = Vec3::random_float() * total_weight;
     float accum = 0.0f;
     for (int i = 0; i < light_count; i++) {
@@ -2269,7 +2249,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
         }
     }
 
-    // --- Güvenlik fallback ---
+    // --- G�venlik fallback ---
     return std::clamp(int(Vec3::random_float() * light_count), 0, light_count - 1);
 }
 
@@ -2285,8 +2265,8 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     Vec3 hit_point = rec.point;
     Vec2 uv = Vec2(rec.u, rec.v);
 
-    // Malzeme özellikleri
-    // Malzeme özellikleri (Blending Support)
+    // Malzeme �zellikleri
+    // Malzeme �zellikleri (Blending Support)
     Vec3 albedo;
     float metallic;
     float roughness;
@@ -2338,11 +2318,11 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         light_distance = to_light.length();
         L = to_light / light_distance;
 
-        // DÜZELTME: PointLight sınıfı getIntensity içinde zaten falloff (1/d^2) uyguluyor.
-        // Burada tekrar uygularsak ışık çok zayıflıyor (1/d^4).
+        // D�ZELTME: PointLight s�n�f� getIntensity i�inde zaten falloff (1/d^2) uyguluyor.
+        // Burada tekrar uygularsak ���k �ok zay�fl�yor (1/d^4).
         attenuation = 1.0f;
 
-        // Point Light Specific Boost: Global çarpan kaldırıldı, sadece Point Light 10 kat güçlendirildi.
+        // Point Light Specific Boost: Global �arpan kald�r�ld�, sadece Point Light 10 kat g��lendirildi.
         Li = point->getIntensity(hit_point, light_sample) * attenuation;
 
         float area = 4.0f * M_PI * point->getRadius() * point->getRadius();
@@ -2665,7 +2645,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     float NdotL = std::fmax(Vec3::dot(N, L), 0.0001f);
 
 
-    // --- BRDF Hesabı (Specular + Diffuse) ---
+    // --- BRDF Hesab� (Specular + Diffuse) ---
     Vec3 H = (L + V).normalize();
     float NdotV = std::fmax(Vec3::dot(N, V), 0.0001f);
     float NdotH = std::fmax(Vec3::dot(N, H), 0.0001f);
@@ -2673,16 +2653,16 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     float alpha = max(roughness * roughness, 0.01f);
     PrincipledBSDF psdf;
-    // Specular bileşeni
+    // Specular bile�eni
     float D = psdf.DistributionGGX(N, H, roughness);
     float G = psdf.GeometrySmith(N, V, L, roughness);
     Vec3 F = psdf.fresnelSchlickRoughness(VdotH, F0, roughness);
 
     Vec3 specular = psdf.evalSpecular(N, V, L, F0, roughness);
 
-    // Diffuse bileşeni - GPU ile uyumlu
+    // Diffuse bile�eni - GPU ile uyumlu
     Vec3 F_avg = F0 + (Vec3(1.0f) - F0) / 21.0f;
-    // GPU formülü: k_d = (1 - F_avg) * (1 - metallic)
+    // GPU form�l�: k_d = (1 - F_avg) * (1 - metallic)
     Vec3 k_d = (Vec3(1.0f) - F_avg) * (1.0f - metallic);
     Vec3 diffuse = k_d * albedo / M_PI;
 
@@ -2707,8 +2687,8 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
 
-    // Işık katkısı
-    // GPU formülü: (f * Li * NdotL) * mis_weight
+    // I��k katk�s�
+    // GPU form�l�: (f * Li * NdotL) * mis_weight
     Vec3 direct = brdf * Li * NdotL * mis_weight;
 
     return direct;
@@ -3427,24 +3407,24 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 Vec3f volume_albedo = toVec3f(albedo_raw);
                 float scattering_intensity = shader ? shader->scattering.coefficient : 1.0f;
 
-                // ═══════════════════════════════════════════════════════════════
+                // ===============================================================
                 // Absorption parameters (sigma_a)
-                // ═══════════════════════════════════════════════════════════════
+                // ===============================================================
                 Vec3 absorption_color_raw = shader ? shader->absorption.color : Vec3(0.0f);
                 Vec3f absorption_color = toVec3f(absorption_color_raw);
                 float absorption_coeff = shader ? shader->absorption.coefficient : 0.0f;
 
-                // ═══════════════════════════════════════════════════════════════
+                // ===============================================================
                 // Emission parameters
-                // ═══════════════════════════════════════════════════════════════
+                // ===============================================================
                 VolumeEmissionMode emission_mode = shader ? shader->emission.mode : VolumeEmissionMode::None;
                 Vec3 emission_color_raw = shader ? shader->emission.color : Vec3(1.0f, 0.5f, 0.1f);
                 Vec3f emission_color = toVec3f(emission_color_raw);
                 float emission_intensity = shader ? shader->emission.intensity : 0.0f;
 
-                // ════════════════════════════──────────────────────────────────────────
+                // ============================������������������������������������������
                 // Density and Remapping Properties
-                // ════════════════════════════──────────────────────────────────────────
+                // ============================������������������������������������������
                 float remap_low = shader ? shader->density.remap_low : 0.0f;
                 float remap_high = shader ? shader->density.remap_high : 1.0f;
                 float remap_range = std::max(1e-5f, remap_high - remap_low);
@@ -4488,15 +4468,18 @@ void Renderer::resetCPUAccumulation() {
 
 
 void Renderer::uploadHairToGPU() {
-    if (!optix_gpu_ptr || !g_hasCUDA) return;
+    if (!m_backend || !g_hasCUDA) return;
+
+    Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
+    OptixWrapper* optix_gpu = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
 
     if (hairSystem.getTotalStrandCount() == 0) {
-        optix_gpu_ptr->clearHairGeometry();
+        if (optix_gpu) optix_gpu->clearHairGeometry();
         return;
     }
     
     // Clear previous hair states in OptiX
-    optix_gpu_ptr->clearHairGeometry();
+    if (optix_gpu) optix_gpu->clearHairGeometry();
     
     auto groomNames = hairSystem.getGroomNames();
     bool first = true;
@@ -4552,7 +4535,7 @@ void Renderer::uploadHairToGPU() {
             GpuHairMaterial hairMat = Hair::HairBSDF::convertToGpu(matParams);
 
             // Add this groom to OptiX
-            optix_gpu_ptr->buildHairGeometry(
+            if (optix_gpu) optix_gpu->buildHairGeometry(
                 vertices4.data(),
                 hairIndices.data(),
                 hairStrandIDs.data(),
@@ -4575,7 +4558,7 @@ void Renderer::uploadHairToGPU() {
 }
 
 void Renderer::updateHairGeometryOnGPU(bool forceRebuild) {
-    if (!optix_gpu_ptr || !g_hasCUDA) return;
+    if (!m_backend || !g_hasCUDA) return;
     
     // Without HairGPUManager, we always perform a full upload if anything changed.
     // In the future, we can implement a CPU-based vertex refit here.
@@ -4585,102 +4568,72 @@ void Renderer::updateHairGeometryOnGPU(bool forceRebuild) {
 void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
     this->hairMaterial = mat;
 
-    if (optix_gpu_ptr && g_hasCUDA) {
-        // 1. Base material parameters
-        optix_gpu_ptr->setHairMaterial(
-            make_float3(mat.color.x, mat.color.y, mat.color.z),
-            make_float3(mat.absorptionCoefficient.x, mat.absorptionCoefficient.y, mat.absorptionCoefficient.z),
-            mat.melanin,
-            mat.melaninRedness,   // [NEW]
-            mat.roughness,
-            mat.radialRoughness,  // [NEW]
-            mat.ior,
-            mat.coat,
-            mat.cuticleAngle * 3.14159f / 180.0f,
-            mat.randomHue,
-            mat.randomValue
-        );
-        
-        // 2. Color mode (0=Direct, 1=Melanin, 2=Absorption, 3=Root UV Map)
-        optix_gpu_ptr->setHairColorMode(static_cast<int>(mat.colorMode));
-        
-        // 3. Custom textures (if assigned in Hair Material Panel)
-        cudaTextureObject_t albedoTex = 0;
-        bool hasAlbedo = false;
-        cudaTextureObject_t roughnessTex = 0;
-        bool hasRoughness = false;
-        
+    if (m_backend && g_hasCUDA) {
+        Backend::IBackend::HairMaterialData hmd;
+        hmd.color = mat.color;
+        hmd.absorption = mat.absorptionCoefficient;
+        hmd.melanin = mat.melanin;
+        hmd.melaninRedness = mat.melaninRedness;
+        hmd.roughness = mat.roughness;
+        hmd.radialRoughness = mat.radialRoughness;
+        hmd.ior = mat.ior;
+        hmd.coat = mat.coat;
+        hmd.cuticleAngle = mat.cuticleAngle * 3.14159f / 180.0f;
+        hmd.randomHue = mat.randomHue;
+        hmd.randomValue = mat.randomValue;
+        hmd.colorMode = static_cast<int>(mat.colorMode);
+
+        // 1. Albedo Texture
         if (mat.customAlbedoTexture && mat.customAlbedoTexture->is_loaded()) {
-            if (!mat.customAlbedoTexture->isUploaded()) {
-                mat.customAlbedoTexture->upload_to_gpu();
-            }
+            if (!mat.customAlbedoTexture->isUploaded()) mat.customAlbedoTexture->upload_to_gpu();
             if (mat.customAlbedoTexture->isUploaded()) {
-                albedoTex = mat.customAlbedoTexture->getTextureObject();
-                hasAlbedo = true;
+                hmd.albedoTexture = (int64_t)mat.customAlbedoTexture->getTextureObject();
             }
         }
-        
+
+        // 2. Roughness Texture
         if (mat.customRoughnessTexture && mat.customRoughnessTexture->is_loaded()) {
-            if (!mat.customRoughnessTexture->isUploaded()) {
-                mat.customRoughnessTexture->upload_to_gpu();
-            }
+            if (!mat.customRoughnessTexture->isUploaded()) mat.customRoughnessTexture->upload_to_gpu();
             if (mat.customRoughnessTexture->isUploaded()) {
-                roughnessTex = mat.customRoughnessTexture->getTextureObject();
-                hasRoughness = true;
+                hmd.roughnessTexture = (int64_t)mat.customRoughnessTexture->getTextureObject();
             }
         }
-        
-        // 4. Scalp mesh texture (for ROOT_UV_MAP mode without custom textures)
-        cudaTextureObject_t scalpAlbedoTex = 0;
-        bool hasScalpAlbedo = false;
-        float3 scalpBaseColor = make_float3(0.5f, 0.5f, 0.5f); // Default fallback
-        
-        if (mat.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && !hasAlbedo) {
-            // Try to find the scalp mesh material from the first groom
+
+        // 3. Scalp Mesh Texture (Automatic detection for ROOT_UV_MAP mode)
+        if (mat.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && hmd.albedoTexture == -1) {
             auto groomNames = hairSystem.getGroomNames();
             if (!groomNames.empty()) {
                 auto* groom = hairSystem.getGroom(groomNames[0]);
                 if (groom) {
-                    // Look up scalp material in MaterialManager
                     auto& matMgr = MaterialManager::getInstance();
                     const auto& all_mats = matMgr.getAllMaterials();
                     int scalpMatID = groom->params.defaultMaterialID;
-                    
+
                     if (scalpMatID >= 0 && (size_t)scalpMatID < all_mats.size()) {
                         const auto& scalpMat = all_mats[scalpMatID];
                         if (scalpMat) {
-                            if (scalpMat->albedoProperty.texture) {
-                                auto& tex = scalpMat->albedoProperty.texture;
-                                if (tex->is_loaded()) {
-                                    if (!tex->isUploaded()) {
-                                        tex->upload_to_gpu();
-                                    }
-                                    if (tex->isUploaded()) {
-                                        scalpAlbedoTex = tex->getTextureObject();
-                                        hasScalpAlbedo = true;
-                                    }
+                            if (scalpMat->albedoProperty.texture && scalpMat->albedoProperty.texture->is_loaded()) {
+                                if (!scalpMat->albedoProperty.texture->isUploaded()) scalpMat->albedoProperty.texture->upload_to_gpu();
+                                if (scalpMat->albedoProperty.texture->isUploaded()) {
+                                    hmd.scalpAlbedoTexture = (int64_t)scalpMat->albedoProperty.texture->getTextureObject();
                                 }
                             }
-                            scalpBaseColor = make_float3(
-                                scalpMat->albedoProperty.color.x,
-                                scalpMat->albedoProperty.color.y,
-                                scalpMat->albedoProperty.color.z
-                            );
+                            hmd.scalpBaseColor = scalpMat->albedoProperty.color;
                         }
                     }
                 }
             }
         }
-        
-        optix_gpu_ptr->setHairTextures(
-            albedoTex, hasAlbedo,
-            roughnessTex, hasRoughness,
-            scalpAlbedoTex, hasScalpAlbedo,
-            scalpBaseColor
-        );
 
-        // 5. Update Per-Groom Materials in SBT
-        optix_gpu_ptr->updateHairMaterialsOnly(hairSystem);
+        std::vector<Backend::IBackend::HairMaterialData> materials = { hmd };
+        m_backend->uploadHairMaterials(materials);
+        
+        // For OptiX, we also need to trigger per-groom updates if they are managed separately
+        // Although the combined upload should handle the global params.
+        Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
+        if (optixBackend && optixBackend->getOptixWrapper()) {
+            optixBackend->getOptixWrapper()->updateHairMaterialsOnly(hairSystem);
+        }
     }
     resetCPUAccumulation();
 }
@@ -4787,10 +4740,10 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
     std::vector<std::thread> threads;
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // OPTIMIZATION: Cache pixel list - only rebuild + shuffle when necessary
     // This avoids O(n) allocation + O(n) shuffle on EVERY pass
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (!cpu_pixel_list_valid || cpu_cached_pixel_list.size() != pixel_count) {
         // Rebuild pixel list (resolution changed or first time)
         cpu_cached_pixel_list.clear();
@@ -4848,13 +4801,13 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             int j = pixel_list[idx].second;
             int pixel_index = j * image_width + i;
 
-            // ═══════════════════════════════════════════════════════════════════
+            // ===================================================================
             // ADAPTIVE SAMPLING - Early exit for converged pixels
             // Same logic as GPU: skip if variance is below threshold AND we have enough samples
-            // ═══════════════════════════════════════════════════════════════════
-            // ADAPTIVE SAMPLING - Coefficient of Variation (CV = σ/μ) based convergence
+            // ===================================================================
+            // ADAPTIVE SAMPLING - Coefficient of Variation (CV = ?/�) based convergence
             // Industry standard: relative error is consistent across all brightness levels
-            // ═══════════════════════════════════════════════════════════════════
+            // ===================================================================
             if (render_settings.use_adaptive_sampling) {
                 Vec4& accum_check = cpu_accumulation_buffer[pixel_index];
                 float prev_samples_check = accum_check.w;
@@ -4863,7 +4816,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 // Compute mean luminance for CV calculation
                 float mean_lum_check = 0.2126f * accum_check.x + 0.7152f * accum_check.y + 0.0722f * accum_check.z;
 
-                // Coefficient of Variation: CV = σ / μ (relative standard deviation)
+                // Coefficient of Variation: CV = ? / � (relative standard deviation)
                 // This gives consistent convergence across dark and bright regions
                 float cv = (mean_lum_check > 0.00001f) ? std::sqrt(current_variance) / mean_lum_check : 1.0f;
 
@@ -4946,13 +4899,13 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 accum.w = float(samples_this_pass);
             }
 
-            // ═══════════════════════════════════════════════════════════════════
+            // ===================================================================
             // ADAPTIVE SAMPLING - Variance calculation for next pass decision
-            // ═══════════════════════════════════════════════════════════════════
+            // ===================================================================
             // ADAPTIVE SAMPLING - Welford's Online Variance Algorithm
             // More numerically stable than naive variance calculation
-            // Stores variance (σ²), CV is computed at check time as σ/μ
-            // ═══════════════════════════════════════════════════════════════════
+            // Stores variance (?�), CV is computed at check time as ?/�
+            // ===================================================================
             if (render_settings.use_adaptive_sampling) {
                 // Compute luminance (Rec.709 weights)
                 auto compute_luminance = [](const Vec3& c) {
@@ -4964,11 +4917,11 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 float mean_lum = compute_luminance(blended_color);
 
                 // Welford's online algorithm for running variance
-                // More stable than naive E[X²] - E[X]² approach
+                // More stable than naive E[X] - E[X] approach
                 float diff = new_lum - mean_lum;
                 float prev_variance = cpu_variance_buffer[pixel_index];
 
-                // Incremental variance update: Var_n = Var_{n-1} + (x - μ)² / n - Var_{n-1} / n
+                // Incremental variance update: Var_n = Var_{n-1} + (x - mean) / n - Var_{n-1} / n
                 // Simplified: exponential moving average with decreasing alpha
                 float alpha = 1.0f / std::max(new_total_samples, 2.0f);
                 float updated_variance = prev_variance * (1.0f - alpha) + (diff * diff) * alpha;
@@ -4988,38 +4941,41 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                     return 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
                 };
 
-            // Calculate Exposure Factor
+            // Calculate Exposure Factor (MUST match GPU path - OptixWrapper for consistency)
             float exposure_factor = 1.0f;
             if (scene.camera) {
                 if (scene.camera->auto_exposure) {
+                    // Auto Exposure: use EV compensation only
                     exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
                 }
-                else {
-                    // Manual Exposure calculation
-                    float iso_mult = CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier;
-                    float shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds;
+                else if (scene.camera->use_physical_exposure) {
+                    // Physical Manual Mode: calculate from ISO/Shutter/F-stop (matches GPU)
+                    float iso_mult = (scene.camera->iso_preset_index >= 0 && scene.camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) ?
+                                     CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier : 1.0f;
+                    float shutter_time = (scene.camera->shutter_preset_index >= 0 && scene.camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) ?
+                                         CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds : 0.004f;
 
                     // Use F-Stop Number
                     float f_number = 16.0f;
-                    if (scene.camera->fstop_preset_index > 0) {
+                    if (scene.camera->fstop_preset_index > 0 && scene.camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
                         f_number = CameraPresets::FSTOP_PRESETS[scene.camera->fstop_preset_index].f_number;
                     }
                     else {
                         // Custom Mode: Estimate f-number from aperture (diameter/radius)
-                        // Using aperture=0.05 -> f/16 as reference (K=0.8)
                         if (scene.camera->aperture > 0.001f)
                             f_number = 0.8f / scene.camera->aperture;
                         else
                             f_number = 16.0f;
                     }
-                    float aperture_sq = f_number * f_number;
-
+                    float aperture_sq = f_number * f_number + 1e-6f;
                     float ev_comp = std::pow(2.0f, scene.camera->ev_compensation);
-
                     float current_val = (iso_mult * shutter_time) / (aperture_sq + 0.001f);
                     float baseline_val = 0.00003125f; // Sunny 16 baseline
-
                     exposure_factor = (current_val / baseline_val) * ev_comp;
+                }
+                else {
+                    // Manual Mode (non-physical): use EV compensation only
+                    exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
                 }
 
             }
@@ -5099,18 +5055,26 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
 
 // Rebuild OptiX geometry after scene modifications (deletion/addition)
-void Renderer::rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
+void Renderer::rebuildBackendGeometry(SceneData& scene) {
     // Rebuild geometry TLAS
-    rebuildOptiXGeometryWithList(scene.world.objects, optix_gpu_ptr);
+    rebuildBackendGeometryWithList(scene.world.objects);
     // Sync all volumes (VDB/Gas)
-    VolumetricRenderer::syncVolumetricData(scene, optix_gpu_ptr);
+    VolumetricRenderer::syncVolumetricData(scene, m_backend);
 }
 
-void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hittable>>& objects, OptixWrapper* optix_gpu_ptr) {
-    if (!optix_gpu_ptr || !g_hasCUDA) {
-        if (!optix_gpu_ptr) SCENE_LOG_WARN("[OptiX] Cannot rebuild - no OptiX pointer");
+
+void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    if (!m_backend) {
+        SCENE_LOG_WARN("[Backend] Cannot rebuild - no backend pointer");
         return;
     }
+    if (render_settings.use_vulkan) {
+        m_backend->updateGeometry(objects);
+        return;
+    }
+    if (!g_hasCUDA) return;
+      Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
+    OptixWrapper* optix_gpu_ptr = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
 
     // Handle empty list
     size_t hairCount = hairSystem.getTotalStrandCount();
@@ -5119,10 +5083,11 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
 
     if (objects.empty() && hairCount == 0) {
         SCENE_LOG_INFO("[OptiX] Scene empty (No objects, no hair), clearing GPU scene");
-        optix_gpu_ptr->clearScene();
-        optix_gpu_ptr->resetAccumulation();
+        if (optix_gpu_ptr) optix_gpu_ptr->clearScene();
+        m_backend->resetAccumulation();
         return;
     }
+
 
     // Global flag to block concurrent updates
     extern bool g_optix_rebuild_in_progress;
@@ -5168,13 +5133,24 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
             }
         }
         else {
-            for (const auto& obj : objects) {
+            std::function<void(const std::shared_ptr<Hittable>&)> collect;
+            collect = [&](const std::shared_ptr<Hittable>& obj) {
+                if (!obj) return;
                 if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                    if (tri->visible) {
-                        triangles.push_back(tri);
+                    if (tri->visible) triangles.push_back(tri);
+                } else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
+                    for (auto& child : list->objects) collect(child);
+                } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                    // Collect from source if it exists
+                    if (inst->source_triangles) {
+                        for (auto& tri : *inst->source_triangles) triangles.push_back(tri);
                     }
+                } else if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
+                    if (bvh->left) collect(bvh->left);
+                    if (bvh->right) collect(bvh->right);
                 }
-            }
+            };
+            for (const auto& obj : objects) collect(obj);
         }
 
         OptixGeometryData optix_data;
@@ -5182,9 +5158,9 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
             optix_data = assimpLoader.convertTrianglesToOptixData(triangles);
         }
 
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // HAIR GEOMETRY DATA (OptiX Curve Primitives)
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // TODO: Fix OptiX 8 compatibility (Error 7001). Disabled for stability.
         // Hair Geometry Generation (OptiX Curves)
         if (hairSystem.getTotalStrandCount() > 0) {
@@ -5263,10 +5239,13 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
             }
         }
 
-        optix_gpu_ptr->validateMaterialIndices(optix_data);
-        optix_gpu_ptr->buildFromDataTLAS(optix_data, objects);
+        if (optix_gpu_ptr) {
+            optix_gpu_ptr->validateMaterialIndices(optix_data);
+            optix_gpu_ptr->buildFromDataTLAS(optix_data, objects);
+        }
         
-        optix_gpu_ptr->resetAccumulation();
+        m_backend->resetAccumulation();
+
 
         if (triangles.size() > 1000) {
            // SCENE_LOG_INFO("[OptiX] Geometry rebuilt (Snapshot) - " + std::to_string(triangles.size()) + " triangles");
@@ -5284,195 +5263,219 @@ void Renderer::rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hi
 //
 // Performance: ~1-5ms vs ~200-500ms for rebuildOptiXGeometry
 // ============================================================================
-void Renderer::updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
-    if (!optix_gpu_ptr || !g_hasCUDA) {
+void Renderer::updateBackendMaterials(SceneData& scene) {
+    if (!m_backend) return;
+
+    // Prefer OptiX/CUDA path if available
+    Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
+    OptixWrapper* optix_gpu_ptr = (optixBackend && g_hasCUDA) ? optixBackend->getOptixWrapper() : nullptr;
+
+    if (optix_gpu_ptr) {
+        try {
+            // Existing OptiX-specific material sync (unchanged)
+            auto& mgr = MaterialManager::getInstance();
+            const auto& all_materials = mgr.getAllMaterials();
+            if (all_materials.empty()) return;
+
+            std::vector<GpuMaterial> gpu_materials;
+            std::vector<OptixGeometryData::VolumetricInfo> volumetric_info;
+            gpu_materials.reserve(all_materials.size());
+            volumetric_info.reserve(all_materials.size());
+
+            for (size_t i = 0; i < all_materials.size(); ++i) {
+                const auto& mat = all_materials[i];
+                if (!mat) continue;
+
+                GpuMaterial gpu_mat = {};
+                OptixGeometryData::VolumetricInfo vol_info = {};
+
+                if (mat->type() == MaterialType::Volumetric) {
+                    Volumetric* vol_mat = static_cast<Volumetric*>(mat.get());
+                    if (vol_mat) {
+                        vol_info.is_volumetric = 1;
+                        Vec3 albedo = vol_mat->getAlbedo();
+                        Vec3 emission = vol_mat->getEmissionColor();
+                        vol_info.density = static_cast<float>(vol_mat->getDensity());
+                        vol_info.absorption = static_cast<float>(vol_mat->getAbsorption());
+                        vol_info.scattering = static_cast<float>(vol_mat->getScattering());
+                        vol_info.albedo = make_float3(albedo.x, albedo.y, albedo.z);
+                        vol_info.emission = make_float3(emission.x, emission.y, emission.z);
+                        vol_info.g = static_cast<float>(vol_mat->getG());
+                        vol_info.step_size = vol_mat->getStepSize();
+                        vol_info.max_steps = vol_mat->getMaxSteps();
+                        vol_info.noise_scale = vol_mat->getNoiseScale();
+
+                        vol_info.multi_scatter = vol_mat->getMultiScatter();
+                        vol_info.g_back = vol_mat->getGBack();
+                        vol_info.lobe_mix = vol_mat->getLobeMix();
+                        vol_info.light_steps = vol_mat->getLightSteps();
+                        vol_info.shadow_strength = vol_mat->getShadowStrength();
+
+                        vol_info.aabb_min = make_float3(0, 0, 0);
+                        vol_info.aabb_max = make_float3(1, 1, 1);
+
+                        gpu_mat.albedo = make_float3(1.0f, 1.0f, 1.0f);
+                        gpu_mat.roughness = 1.0f;
+                        gpu_mat.metallic = 0.0f;
+                        gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
+                        gpu_mat.ior = 1.0f;
+                        gpu_mat.transmission = 0.0f;
+                        gpu_mat.opacity = 1.0f;
+
+                        if (vol_mat->hasVDBVolume()) {
+                            void* grid_ptr = VDBVolumeManager::getInstance().getGPUGrid(vol_mat->getVDBVolumeID());
+                            vol_info.nanovdb_grid = grid_ptr;
+                            vol_info.has_nanovdb = (grid_ptr != nullptr) ? 1 : 0;
+                        }
+                    }
+                } else {
+                    auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
+                        extern bool g_hasOptix;
+                        if (tex && tex->is_loaded()) {
+                            if (!tex->is_gpu_uploaded && g_hasOptix) tex->upload_to_gpu();
+                            return tex->get_cuda_texture();
+                        }
+                        return 0;
+                    };
+
+                    if (mat->type() == MaterialType::PrincipledBSDF) {
+                        PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+                        if (mat->gpuMaterial) gpu_mat = *(mat->gpuMaterial);
+                        bool is_water = mat->materialName.find("Water") != std::string::npos || mat->materialName.find("River") != std::string::npos;
+                        if (!is_water) {
+                            Vec3 alb = pbsdf->albedoProperty.color;
+                            gpu_mat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
+                            gpu_mat.roughness = (float)pbsdf->roughnessProperty.color.x;
+                            gpu_mat.metallic = (float)pbsdf->metallicProperty.intensity;
+                            Vec3 em = pbsdf->emissionProperty.color;
+                            float emStr = pbsdf->emissionProperty.intensity;
+                            gpu_mat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
+                            gpu_mat.ior = pbsdf->ior;
+                            gpu_mat.transmission = pbsdf->transmission;
+                            gpu_mat.opacity = pbsdf->opacityProperty.alpha;
+                            gpu_mat.subsurface = pbsdf->subsurface;
+                            Vec3 sssColor = pbsdf->subsurfaceColor;
+                            gpu_mat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
+                            Vec3 sssRadius = pbsdf->subsurfaceRadius;
+                            gpu_mat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
+                            gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
+                            gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
+                            gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
+                            gpu_mat.clearcoat = pbsdf->clearcoat;
+                            gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
+                            gpu_mat.translucent = pbsdf->translucent;
+                            gpu_mat.anisotropic = pbsdf->anisotropic;
+                            gpu_mat.sheen = pbsdf->sheen;
+                            gpu_mat.sheen_tint = pbsdf->sheen_tint;
+                        }
+
+                        gpu_mat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
+                        gpu_mat.normal_tex      = getCudaTex(pbsdf->normalProperty.texture);
+                        gpu_mat.roughness_tex   = getCudaTex(pbsdf->roughnessProperty.texture);
+                        gpu_mat.metallic_tex    = getCudaTex(pbsdf->metallicProperty.texture);
+                        gpu_mat.emission_tex    = getCudaTex(pbsdf->emissionProperty.texture);
+                        gpu_mat.opacity_tex     = getCudaTex(pbsdf->opacityProperty.texture);
+                        gpu_mat.transmission_tex= getCudaTex(pbsdf->transmissionProperty.texture);
+                        gpu_mat.height_tex      = getCudaTex(pbsdf->heightProperty.texture);
+                    } else if (mat->gpuMaterial) {
+                        gpu_mat = *mat->gpuMaterial;
+                        vol_info.is_volumetric = 0;
+                    } else {
+                        gpu_mat.albedo = make_float3(0.8f, 0.8f, 0.8f);
+                        gpu_mat.roughness = 0.5f;
+                        gpu_mat.metallic = 0.0f;
+                        gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
+                        gpu_mat.ior = 1.5f;
+                        gpu_mat.transmission = 0.0f;
+                        gpu_mat.opacity = 1.0f;
+                        vol_info.is_volumetric = 0;
+                    }
+                }
+
+                gpu_materials.push_back(gpu_mat);
+                volumetric_info.push_back(vol_info);
+            }
+
+            if (!gpu_materials.empty()) {
+                optix_gpu_ptr->updateMaterialBuffer(gpu_materials);
+                if (!volumetric_info.empty()) optix_gpu_ptr->updateSBTVolumetricData(volumetric_info);
+                optix_gpu_ptr->syncSBTMaterialData(gpu_materials, true);
+            }
+
+            optix_gpu_ptr->updateHairMaterialsOnly(hairSystem);
+            setHairMaterial(hairMaterial);
+            VolumetricRenderer::syncVolumetricData(scene, m_backend);
+            optix_gpu_ptr->resetAccumulation();
+        }
+        catch (std::exception& e) {
+            SCENE_LOG_ERROR("[OptiX] updateOptiXMaterialsOnly failed: " + std::string(e.what()));
+        }
+
         return;
     }
 
+    // Generic backend path (Vulkan, CPU backends etc.)
     try {
-        // Get all materials directly from MaterialManager - NO triangle iteration!
         auto& mgr = MaterialManager::getInstance();
         const auto& all_materials = mgr.getAllMaterials();
+        if (all_materials.empty()) return;
 
-        if (all_materials.empty()) {
-            return;
-        }
+        std::vector<Backend::IBackend::MaterialData> backendMaterials;
+        backendMaterials.reserve(all_materials.size());
 
-        // Build GpuMaterial array directly from MaterialManager
-        std::vector<GpuMaterial> gpu_materials;
-        std::vector<OptixGeometryData::VolumetricInfo> volumetric_info;
+        for (const auto& mat : all_materials) {
+            Backend::IBackend::MaterialData data = {};
+            if (!mat) { backendMaterials.push_back(data); continue; }
 
-        gpu_materials.reserve(all_materials.size());
-        volumetric_info.reserve(all_materials.size());
+            data.albedo = mat->albedo;
+            data.ior = mat->ior;
+            data.opacity = 1.0f;
 
-        for (size_t i = 0; i < all_materials.size(); ++i) {
-            const auto& mat = all_materials[i];
-            if (!mat) continue;
+            if (mat->type() == MaterialType::PrincipledBSDF) {
+                PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
+                data.albedo = pbsdf->albedoProperty.color;
+                data.opacity = pbsdf->opacityProperty.alpha;
+                data.roughness = (float)pbsdf->roughnessProperty.color.x;
+                data.metallic = (float)pbsdf->metallicProperty.intensity;
+                data.clearcoat = pbsdf->clearcoat;
+                data.transmission = pbsdf->transmission;
+                data.emission = pbsdf->emissionProperty.color;
+                data.emissionStrength = pbsdf->emissionProperty.intensity;
+                data.ior = pbsdf->ior;
 
-            GpuMaterial gpu_mat = {};
-            OptixGeometryData::VolumetricInfo vol_info = {};
+                data.subsurface = pbsdf->subsurface;
+                data.subsurfaceColor = pbsdf->subsurfaceColor;
+                data.subsurfaceRadius = pbsdf->subsurfaceRadius;
+                data.subsurfaceScale = pbsdf->subsurfaceScale;
+                data.subsurfaceAnisotropy = pbsdf->subsurfaceAnisotropy;
+                data.subsurfaceIOR = pbsdf->subsurfaceIOR;
 
-            // Check if it's a PrincipledBSDF or Volumetric material
-            if (mat->type() == MaterialType::Volumetric) {
-                // Volumetric material
-                Volumetric* vol_mat = static_cast<Volumetric*>(mat.get());
-                if (vol_mat) {
-                    vol_info.is_volumetric = 1;
-                    Vec3 albedo = vol_mat->getAlbedo();
-                    Vec3 emission = vol_mat->getEmissionColor();
-                    vol_info.density = static_cast<float>(vol_mat->getDensity());
-                    vol_info.absorption = static_cast<float>(vol_mat->getAbsorption());
-                    vol_info.scattering = static_cast<float>(vol_mat->getScattering());
-                    vol_info.albedo = make_float3(albedo.x, albedo.y, albedo.z);
-                    vol_info.emission = make_float3(emission.x, emission.y, emission.z);
-                    vol_info.g = static_cast<float>(vol_mat->getG());
-                    vol_info.step_size = vol_mat->getStepSize();
-                    vol_info.max_steps = vol_mat->getMaxSteps();
-                    vol_info.noise_scale = vol_mat->getNoiseScale();
+                data.clearcoatRoughness = pbsdf->clearcoatRoughness;
+                data.translucent = pbsdf->translucent;
+                data.anisotropic = pbsdf->anisotropic;
+                data.sheen = pbsdf->sheen;
+                data.sheenTint = pbsdf->sheen_tint;
 
-                    // Multi-Scattering Parameters
-                    vol_info.multi_scatter = vol_mat->getMultiScatter();
-                    vol_info.g_back = vol_mat->getGBack();
-                    vol_info.lobe_mix = vol_mat->getLobeMix();
-                    vol_info.light_steps = vol_mat->getLightSteps();
-                    vol_info.shadow_strength = vol_mat->getShadowStrength();
-
-                    // Default AABB (will be correct from initial build)
-                    vol_info.aabb_min = make_float3(0, 0, 0);
-                    vol_info.aabb_max = make_float3(1, 1, 1);
-
-                    // Default GpuMaterial for volumetric
-                    gpu_mat.albedo = make_float3(1.0f, 1.0f, 1.0f);
-                    gpu_mat.roughness = 1.0f;
-                    gpu_mat.metallic = 0.0f;
-                    gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
-                    gpu_mat.ior = 1.0f;
-                    gpu_mat.transmission = 0.0f;
-                    gpu_mat.opacity = 1.0f;
-
-                    // Fetch NanoVDB Grid Pointer if available
-                    if (vol_mat->hasVDBVolume()) {
-                        void* grid_ptr = VDBVolumeManager::getInstance().getGPUGrid(vol_mat->getVDBVolumeID());
-                        vol_info.nanovdb_grid = grid_ptr;
-                        vol_info.has_nanovdb = (grid_ptr != nullptr) ? 1 : 0;
-                    }
-                }
-            }
-            else {
-                 // Helper to get CUDA texture object (uploads if needed)
-                auto getCudaTex = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
-                    extern bool g_hasOptix; // Access global
-                    if (tex && tex->is_loaded()) {
-                         if (!tex->is_gpu_uploaded && g_hasOptix) {
-                             tex->upload_to_gpu();
-                         }
-                         return tex->get_cuda_texture();
-                    }
-                    return 0;
-                };
-
-                // Calculate GpuMaterial properties from PrincipledBSDF
-                if (mat->type() == MaterialType::PrincipledBSDF) {
-                    PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat.get());
-                    if (mat->gpuMaterial) {
-                        gpu_mat = *(mat->gpuMaterial);
-                    }
-                    // If this is a Water or River material, we MUST NOT overwrite the custom packed 
-                    // gpu_mat parameters with generic PrincipledBSDF default values!
-                    bool is_water = mat->materialName.find("Water") != std::string::npos || mat->materialName.find("River") != std::string::npos;
-                    
-                    if (!is_water) {
-                        Vec3 alb = pbsdf->albedoProperty.color;
-                        gpu_mat.albedo = make_float3((float)alb.x, (float)alb.y, (float)alb.z);
-                        gpu_mat.roughness = (float)pbsdf->roughnessProperty.color.x;
-                        gpu_mat.metallic = (float)pbsdf->metallicProperty.intensity;
-                        Vec3 em = pbsdf->emissionProperty.color;
-                        float emStr = pbsdf->emissionProperty.intensity;
-                        gpu_mat.emission = make_float3((float)em.x * emStr, (float)em.y * emStr, (float)em.z * emStr);
-                        gpu_mat.ior = pbsdf->ior;
-                        gpu_mat.transmission = pbsdf->transmission;
-                        gpu_mat.opacity = pbsdf->opacityProperty.alpha;
-                        
-                        // SSS
-                        gpu_mat.subsurface = pbsdf->subsurface;
-                        Vec3 sssColor = pbsdf->subsurfaceColor;
-                        gpu_mat.subsurface_color = make_float3((float)sssColor.x, (float)sssColor.y, (float)sssColor.z);
-                        Vec3 sssRadius = pbsdf->subsurfaceRadius;
-                        gpu_mat.subsurface_radius = make_float3((float)sssRadius.x, (float)sssRadius.y, (float)sssRadius.z);
-                        gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
-                        gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
-                        gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
-                        
-                        // Clearcoat & Translucent
-                        gpu_mat.clearcoat = pbsdf->clearcoat;
-                        gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
-                        gpu_mat.translucent = pbsdf->translucent;
-                        gpu_mat.anisotropic = pbsdf->anisotropic;
-                        gpu_mat.sheen = pbsdf->sheen;
-                        gpu_mat.sheen_tint = pbsdf->sheen_tint;
-                    }
-
-                    // Bindless Textures Population
-                    gpu_mat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
-                    gpu_mat.normal_tex      = getCudaTex(pbsdf->normalProperty.texture);
-                    gpu_mat.roughness_tex   = getCudaTex(pbsdf->roughnessProperty.texture);
-                    gpu_mat.metallic_tex    = getCudaTex(pbsdf->metallicProperty.texture);
-                    gpu_mat.emission_tex    = getCudaTex(pbsdf->emissionProperty.texture);
-                    gpu_mat.opacity_tex     = getCudaTex(pbsdf->opacityProperty.texture);
-                    gpu_mat.transmission_tex= getCudaTex(pbsdf->transmissionProperty.texture);
-                    gpu_mat.height_tex      = getCudaTex(pbsdf->heightProperty.texture); // Displacement
-                }
-                else if (mat->gpuMaterial) {
-                    // PrincipledBSDF with gpuMaterial (Fallback if manually set)
-                    gpu_mat = *mat->gpuMaterial;
-                    vol_info.is_volumetric = 0;
-                }
-                else {
-                    // Fallback default material
-                    gpu_mat.albedo = make_float3(0.8f, 0.8f, 0.8f);
-                    gpu_mat.roughness = 0.5f;
-                    gpu_mat.metallic = 0.0f;
-                    gpu_mat.emission = make_float3(0.0f, 0.0f, 0.0f);
-                    gpu_mat.ior = 1.5f;
-                    gpu_mat.transmission = 0.0f;
-                    gpu_mat.opacity = 1.0f;
-                    vol_info.is_volumetric = 0;
-                }
+                auto getH = [](const std::shared_ptr<Texture>& tex) -> int64_t { return tex ? reinterpret_cast<int64_t>(tex.get()) : 0; };
+                data.albedoTexture = getH(pbsdf->albedoProperty.texture);
+                data.normalTexture = getH(pbsdf->normalProperty.texture);
+                data.roughnessTexture = getH(pbsdf->roughnessProperty.texture);
+                data.metallicTexture = getH(pbsdf->metallicProperty.texture);
+                data.emissionTexture = getH(pbsdf->emissionProperty.texture);
+                data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
+                data.opacityTexture = getH(pbsdf->opacityProperty.texture);
+                data.heightTexture = getH(pbsdf->heightProperty.texture);
             }
 
-            gpu_materials.push_back(gpu_mat);
-            volumetric_info.push_back(vol_info);
+            backendMaterials.push_back(data);
         }
 
-        // Update GPU buffers - FAST! Just memory copies
-        if (!gpu_materials.empty()) {
-            optix_gpu_ptr->updateMaterialBuffer(gpu_materials);
-            
-            // Also update volumetric data (cloud density, etc.)
-            if (!volumetric_info.empty()) {
-                optix_gpu_ptr->updateSBTVolumetricData(volumetric_info);
-            }
-
-            // CRASH FIX: Also sync SBT material data (Emission + Terrain textures)
-            // This is FAST and avoids full OptiX rebuild when only textures change.
-            optix_gpu_ptr->syncSBTMaterialData(gpu_materials, true);
-        }
-
-        // 4. Update Hair Materials (Per-Groom)
-        optix_gpu_ptr->updateHairMaterialsOnly(hairSystem);
-
-
-        // --- NEW: Sync Hair Material Parameters (includes color mode & textures) ---
-        setHairMaterial(hairMaterial);
-
-        // Update independent volumes as well (GpuVDBVolume)
-        VolumetricRenderer::syncVolumetricData(scene, optix_gpu_ptr);
-
-        // Reset accumulation to show changes immediately
-        optix_gpu_ptr->resetAccumulation();
+        m_backend->uploadMaterials(backendMaterials);
+        VolumetricRenderer::syncVolumetricData(scene, m_backend);
+        m_backend->resetAccumulation();
     }
     catch (std::exception& e) {
-        SCENE_LOG_ERROR("[OptiX] updateOptiXMaterialsOnly failed: " + std::string(e.what()));
+        SCENE_LOG_ERROR(std::string("[Renderer] updateBackendMaterials failed: ") + e.what());
     }
 }
 
@@ -5511,9 +5514,9 @@ void Renderer::updateWind(SceneData& scene, float time) {
         float wave = group->wind_settings.wave_size > 0.1f ? group->wind_settings.wave_size : 50.0f;
         Vec3 dir = group->wind_settings.direction.normalize();
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // ENHANCED WIND PARAMETERS
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
 
         // Constant lean: How much the tree bends TOWARDS wind direction (in degrees)
         // This creates the "permanently bent by strong wind" look
@@ -5532,10 +5535,10 @@ void Renderer::updateWind(SceneData& scene, float time) {
             const auto& init = group->initial_instances[i];
             auto& curr = group->instances[i];
 
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             // MULTI-FREQUENCY OSCILLATION
             // Creates natural, organic movement by combining multiple wave frequencies
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
 
             // Phase based on world position (creates wave propagation effect)
             float pos_phase = (init.position.x * dir.x + init.position.z * dir.z) / wave;
@@ -5554,13 +5557,13 @@ void Renderer::updateWind(SceneData& scene, float time) {
             float oscillation = wave_primary + wave_secondary + wave_tertiary;
             oscillation = oscillation / 1.5f;  // Normalize back to ~[-1, 1]
 
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             // DIRECTIONAL BENDING
             // Tree leans TOWARDS wind direction + oscillates around that lean
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
 
             // Constant lean towards wind direction
-            // Rüzgar +X yönünde esiyorsa, ağaç +X yönüne doğru eğilir
+            // R�zgar +X y�n�nde esiyorsa, a�a� +X y�n�ne do�ru e�ilir
             float lean_x = dir.z * lean_amount;   // Lean around X-axis based on wind Z component
             float lean_z = -dir.x * lean_amount;  // Lean around Z-axis based on wind X component
 
@@ -5572,9 +5575,9 @@ void Renderer::updateWind(SceneData& scene, float time) {
             float final_rot_x = init.rotation.x + lean_x + osc_x;
             float final_rot_z = init.rotation.z + lean_z + osc_z;
 
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             // ANGLE CLAMPING (Prevent unnatural over-bending)
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             float total_bend = sqrtf((final_rot_x - init.rotation.x) * (final_rot_x - init.rotation.x) +
                 (final_rot_z - init.rotation.z) * (final_rot_z - init.rotation.z));
 
@@ -5596,7 +5599,7 @@ void Renderer::updateWind(SceneData& scene, float time) {
                         hi->setTransform(new_mat);
 
                         // OPTIMIZATION: Direct GPU Update
-                        if (this->optix_gpu_ptr && g_hasCUDA && !hi->optix_instance_ids.empty()) {
+                        if (this->m_backend && g_hasCUDA && !hi->optix_instance_ids.empty()) {
                             float t[12];
                             const Matrix4x4& m = new_mat;
                             t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
@@ -5604,7 +5607,7 @@ void Renderer::updateWind(SceneData& scene, float time) {
                             t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
 
                             for (int id : hi->optix_instance_ids) {
-                                this->optix_gpu_ptr->updateInstanceTransform(id, t);
+                                this->m_backend->updateInstanceTransform(id, t);
                             }
                         }
                     }
@@ -5615,14 +5618,14 @@ void Renderer::updateWind(SceneData& scene, float time) {
         group->gpu_dirty = true;
         any_update = true;
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // GPU SHADER WIND PARAMETERS
         // Upload wind direction, strength, speed, time for shader-based displacement
-        // ═══════════════════════════════════════════════════════════════════════════
-            if (this->optix_gpu_ptr && g_hasCUDA) {
+        // ===========================================================================
+            if (this->m_backend && g_hasCUDA) {
             // Normalize strength to 0-1 range for shader (divide by max angle)
             float normalized_strength = strength / 25.0f;  // max_bend_angle = 25 degrees
-            this->optix_gpu_ptr->setWindParams(
+            this->m_backend->setWindParams(
                 group->wind_settings.direction,
                 normalized_strength,
                 speed,
@@ -5630,26 +5633,75 @@ void Renderer::updateWind(SceneData& scene, float time) {
             );
         }
         // Commit changes to TLAS if any updates occurred
-        if (any_update && this->optix_gpu_ptr && g_hasCUDA) {
-            this->optix_gpu_ptr->rebuildTLAS(); // Fast refit/update
+        if (any_update && this->m_backend && g_hasCUDA) {
+            this->m_backend->rebuildAccelerationStructure(); // Fast refit/update
         }
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // GAS VOLUME OPTIX SYNC
-// ═══════════════════════════════════════════════════════════════════════════════
-// ─────────────────────────────────────────────────────────────────────────────
+// ===============================================================================
+// �����������������������������������������������������������������������������
 // Volumetric Sync - Unified logic for Gas and VDB
-// ─────────────────────────────────────────────────────────────────────────────
-void Renderer::updateOptiXGasVolumes(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
-    VolumetricRenderer::syncVolumetricData(scene, optix_gpu_ptr);
+// �����������������������������������������������������������������������������
+void Renderer::updateBackendGasVolumes(SceneData& scene) {
+    VolumetricRenderer::syncVolumetricData(scene, m_backend);
 }
 
 void Renderer::updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id) {
-    if (optix_gpu_ptr) {
-        optix_gpu_ptr->updateMeshMaterialBinding(node_name, old_mat_id, new_mat_id);
-        optix_gpu_ptr->resetAccumulation();
+    if (m_backend) {
+        m_backend->updateInstanceMaterialBinding(node_name, old_mat_id, new_mat_id);
     }
     resetCPUAccumulation(); // Ensure CPU path also resets
+}
+
+void Renderer::syncCameraToBackend(const Camera& cam) {
+    if (!m_backend) return;
+    Backend::CameraParams cp;
+    cp.origin = cam.lookfrom;
+    cp.lookAt = cam.lookat;
+    cp.up = cam.vup;
+    cp.fov = cam.vfov;
+    cp.aperture = cam.aperture;
+    cp.focusDistance = cam.focus_dist;
+    cp.aspectRatio = cam.aspect_ratio;
+    cp.exposureFactor = cam.getPhysicalExposureMultiplier();
+    cp.ev_compensation = cam.ev_compensation;
+    cp.isoPresetIndex = cam.iso_preset_index;
+    cp.shutterPresetIndex = cam.shutter_preset_index;
+    cp.fstopPresetIndex = cam.fstop_preset_index;
+    cp.autoAE = cam.auto_exposure;
+    cp.usePhysicalExposure = cam.use_physical_exposure;
+    cp.motionBlurEnabled = cam.enable_motion_blur;
+    cp.vignettingEnabled = cam.enable_vignetting;
+    cp.chromaticAberrationEnabled = cam.enable_chromatic_aberration;
+    
+    // Pro Features
+    cp.distortion = cam.distortion;
+    cp.lens_quality = cam.lens_quality;
+    cp.vignetting_amount = cam.vignetting_amount;
+    cp.vignetting_falloff = cam.vignetting_falloff;
+    cp.chromatic_aberration = cam.chromatic_aberration;
+    cp.chromatic_aberration_r = cam.chromatic_aberration_r;
+    cp.chromatic_aberration_b = cam.chromatic_aberration_b;
+    cp.camera_mode = (int)cam.camera_mode;
+    cp.blade_count = cam.blade_count;
+    
+    // Shake / Handheld
+    cp.shake_enabled = cam.enable_camera_shake;
+    cp.shake_intensity = cam.shake_intensity;
+    cp.shake_frequency = cam.shake_frequency;
+    cp.handheld_sway_amplitude = cam.handheld_sway_amplitude;
+    cp.handheld_sway_frequency = cam.handheld_sway_frequency;
+    cp.breathing_amplitude = cam.breathing_amplitude;
+    cp.breathing_frequency = cam.breathing_frequency;
+    cp.enable_focus_drift = cam.enable_focus_drift;
+    cp.focus_drift_amount = cam.focus_drift_amount;
+    cp.operator_skill = (int)cam.operator_skill;
+    cp.ibis_enabled = cam.ibis_enabled;
+    cp.ibis_effectiveness = cam.ibis_effectiveness;
+    cp.rig_mode = (int)cam.rig_mode;
+
+    m_backend->setCamera(cp);
 }

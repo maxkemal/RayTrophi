@@ -238,6 +238,10 @@ public:
 
     AtmosphereLUT* getLUT() const { return atmosphere_lut; }
 
+    // Deferred LUT mechanism: avoids recomputing 50K-pixel LUT on every slider tick
+    bool needsLUTUpdate() const { return lut_dirty; }
+    void flushLUT();  // Call once per frame from main loop to apply pending LUT update
+
     // CPU Evaluation (for background missing)
     Vec3 evaluate(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));
     WorldData data;
@@ -248,6 +252,7 @@ private:
    Texture* hdri_texture = nullptr;
    Texture* env_overlay_texture = nullptr;
    AtmosphereLUT* atmosphere_lut = nullptr;
+   bool lut_dirty = false;  // Deferred LUT recomputation flag
    
    // Internal helper for Nishita
    Vec3 calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));

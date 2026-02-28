@@ -25,7 +25,7 @@
 
 ### 🎯 Temel Özellikler
 
-- **Hibrit Rendering**: CPU (Embree/Özel BVH) ve GPU (OptiX) hızlandırması arasında sorunsuz geçiş
+- **Hibrit Rendering**: CPU (Embree/Özel BVH) ve GPU (OptiX & Vulkan) hızlandırması arasında sorunsuz geçiş
 
 - **Üretime Hazır**: Principled BSDF, gelişmiş materyaller, volumetric, subsurface scattering
 - **Yüksek Performans**: Optimize BVH yapısı (<1s 3.3M üçgen için), %75 bellek tasarruflu üçgen yapısı
@@ -68,6 +68,7 @@
   - ✅ Hareket Bulanıklığı (Motion Blur)
   - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
   - ✅ Ton haritalama & post-processing
+  - ✅ **Deneysel Vulkan Backend**: Akıllı donanım algılamaya sahip platform bağımsız ray tracing mimarisi. Vulkan bağımlılıkları (`vulkan-1.dll`) veya desteklenmeyen GPU'larda sistemin çökmesini engelleyerek otomatik olarak OptiX veya CPU moduna geçiş (Graceful Fallback).
   - ✅ **Gelişmiş Animasyon**: Kemik (bone) animasyonu, quaternion interpolasyonu ve timeline kontrolü
   - ✅ **Gelişmiş Bulut Aydınlatma Kontrolleri**:
     - Işık Adımları (Light Steps): Volumetrik bulut kalitesi için
@@ -88,6 +89,7 @@
   - Embree BVH (Intel, üretim seviyesi)
   - Özel ParallelBVH (SAH tabanlı, OpenMP paralelleştirilmiş)
   - OptiX GPU hızlandırma yapısı
+  - Vulkan izleme ve ivmelendirme (TLAS/BLAS) yapısı (Deneysel)
 
 - **Optimizasyonlar**
 - **Optimizasyonlar**
@@ -174,6 +176,7 @@
 - NVIDIA GPU (SM 5.0+): GTX 9xx, 10xx, 16xx veya RTX serisi
 - CUDA Toolkit 12.0+
 - OptiX 7.x SDK
+- Vulkan SDK 1.3+ (Vulkan rendering desteği için)
 
 **GPU Uyumluluğu:**
 | GPU Serisi | Mimari | Mod | Performans |
@@ -196,7 +199,17 @@ Tüm bağımlılıklar otomatik yönetilir:
 - stb_image (HDR/texture yükleme)
 - **TinyEXR** (EXR format desteği)
 - Intel OIDN (denoising)
-- CUDA/OptiX (GPU rendering - opsiyonel)
+- CUDA/OptiX/Vulkan (GPU rendering - opsiyonel)
+
+| Ortam Değişkeni (Env Var) | Açıklama |
+|----------------------|-------------|
+| `SDL2_ROOT`          | SDL2 Kök Dizini | 
+| `OPTIX_ROOT`         | OptiX SDK Dizini | 
+| `EMBREE_ROOT`        | Embree Kök Dizini | 
+| `OIDN_ROOT`          | Intel Open Image Denoise Dizini |
+| `ASSIMP_ROOT`        | Assimp Kök Dizini | 
+| `CUDA_PATH`          | CUDA Toolkit Dizini | 
+| `VULKAN_SDK`         | Vulkan SDK Dizini | 
 
 ### 🔨 Derleme Talimatları
 
@@ -280,7 +293,8 @@ RayTrophi/
 2. **BVH Sistemleri**
    - **EmbreeBVH** (`src/Render/EmbreeBVH.cpp`): Endüstri standardı, hız için optimize
    - **ParallelBVHNode** (`src/Render/ParallelBVHNode.cpp`): Özel SAH tabanlı, OpenMP paralel build
-   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): GPU hızlandırmalı yapı
+   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): NVIDIA GPU hızlandırmalı yapı
+   - **Vulkan RT** (`src/Backend/VulkanBackend.cpp`): Vulkan donanım tabanlı ray tracing yapısı
 
 3. **Materyal Sistemi** (`src/Scene/PrincipledBSDF.cpp`)
    - Modüler özellik tabanlı materyaller
@@ -372,6 +386,7 @@ Visual Studio projesi bağımlılıkları vcpkg veya manuel yollar ile yönetir.
 |--------------------------|-----------------|---------------|
 | CPU Rendering (SDL)      | ✅ Çalışıyor    | ⚠️ Hatalı     |
 | GPU Rendering (OptiX)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
+| Vulkan Rendering (RT)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
 | Bağımlılık Yönetimi      | ✅ Mükemmel     | ⚠️ Manuel     |
 | Derleme Hızı             | Hızlı           | Daha yavaş    |
 | **Öneri**                | **BUNU KULLAN** | Deneysel      |
@@ -453,7 +468,7 @@ mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metalik
 - [ ] Index tabanlı BVH (vektör kopyalamayı kaldır)
 - [ ] SBVH (Spatial BVH splits)
 - [ ] Linux/macOS desteği
-- [ ] Vulkan backend (OptiX alternatifi)
+- [x] Vulkan backend (OptiX alternatifi)
 - [ ] Ağ rendering (dağıtık ray tracing)
 - [ ] USD format desteği
 - [ ] Işık yolu görselleştirme/debugging

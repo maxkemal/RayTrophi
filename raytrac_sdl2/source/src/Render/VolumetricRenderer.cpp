@@ -6,6 +6,7 @@
 * =========================================================================
 */
 #include "VolumetricRenderer.h"
+#include "Backend/IBackend.h"
 #include "VDBVolume.h"
 #include "VDBVolumeManager.h"
 #include "GasVolume.h"
@@ -218,8 +219,8 @@ float VolumetricRenderer::determineSunTransmittance(const Vec3& origin, const Ve
 // ============================================================================
 // GPU SYNC
 // ============================================================================
-void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* optix_gpu_ptr) {
-    if (!optix_gpu_ptr || !g_hasCUDA) return;
+void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend* backend) {
+    if (!backend || !g_hasCUDA) return;
 
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;
@@ -382,7 +383,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* opti
         }
         gpu_vdb_volumes.push_back(gv);
     }
-    optix_gpu_ptr->updateVDBVolumeBuffer(gpu_vdb_volumes);
+    backend->updateVDBVolumes(gpu_vdb_volumes);
 
     // 2. Prepare Texture-based Gas Volumes (Legacy Path)
     std::vector<GpuGasVolume> gpu_gas_volumes;
@@ -445,7 +446,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, OptixWrapper* opti
         }
         gpu_gas_volumes.push_back(gv);
     }
-    optix_gpu_ptr->updateGasVolumeBuffer(gpu_gas_volumes);
+    backend->updateGasVolumes(gpu_gas_volumes);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
