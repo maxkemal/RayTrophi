@@ -11,7 +11,7 @@
 #include "Vec3.h"
 #include "Ray.h"
 #include "scene_data.h"
-#include "OptixWrapper.h"
+namespace Backend { class IBackend; }
 #include "World.h" // Needed for WorldData
 
 // Forward declarations
@@ -40,7 +40,7 @@ public:
     /**
      * @brief Sync all volumetric data (VDB & Gas) to Optix GPU buffers
      */
-    static void syncVolumetricData(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+    static void syncVolumetricData(SceneData& scene, Backend::IBackend* backend);
     
     /**
      * @brief Apply atmospheric aerial perspective and height fog to a color based on distance

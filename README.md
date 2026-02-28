@@ -25,7 +25,7 @@
 
 ### 🎯 Key Highlights
 
-- **Hybrid Rendering**: Seamlessly switch between CPU (Embree/Custom BVH) and GPU (OptiX) acceleration
+- **Hybrid Rendering**: Seamlessly switch between CPU (Embree/Custom BVH) and GPU (OptiX & Vulkan) acceleration
 
 - **Production-Ready**: Principled BSDF, advanced materials, volumetrics, subsurface scattering
 - **High Performance**: Optimized BVH construction (<1s for 3.3M triangles), 75% memory-optimized triangle structure
@@ -74,6 +74,7 @@
   - ✅ Motion Blur
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
+  - ✅ **Experimental Vulkan Backend**: Cross-platform path tracing pipeline with smart hardware detection. Gracefully falls back to OptiX or CPU if Vulkan dependencies (`vulkan-1.dll`) or compatible GPUs are absent.
   - ✅ **Advanced Animation**: 
     - Bone animation with quaternion interpolation
     - Multi-track timeline with keyframe editing (Location/Rotation/Scale/Material)
@@ -109,6 +110,7 @@
   - Embree BVH (Intel, production-grade)
   - Custom ParallelBVH (SAH-based, OpenMP parallelized)
   - OptiX GPU acceleration structure
+  - Vulkan ray tracing TLAS/BLAS architecture (Experimental)
 
 - **Optimizations**
   - SIMD vector operations
@@ -203,6 +205,7 @@
 - NVIDIA GPU (SM 5.0+): GTX 9xx, 10xx, 16xx, or RTX series
 - CUDA Toolkit 12.0+
 - OptiX 7.x SDK
+- Vulkan SDK 1.3+ (For Vulkan rendering path)
 
 **GPU Compatibility:**
 | GPU Series | Architecture | Mode | Performance |
@@ -226,6 +229,7 @@ The project uses absolute paths via system environment variables. Before buildin
 | `OIDN_ROOT`          | Intel Open Image Denoise Root | `E:\RayTrophi_projesi\external_dependencies\oidn-2.3.0.x64.windows` |
 | `ASSIMP_ROOT`        | Assimp Root Directory | `E:\RayTrophi_projesi\external_dependencies\Assimp` |
 | `CUDA_PATH`          | CUDA Toolkit Directory | `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.x` |
+| `VULKAN_SDK`         | Vulkan SDK Directory | `C:\VulkanSDK\1.3.xxx.0` |
 
 *(Note: `CUDA_PATH` is usually set automatically when you install the CUDA Toolkit.)*
 
@@ -330,7 +334,8 @@ RayTrophi/
 2. **BVH Systems**
    - **EmbreeBVH** (`src/Render/EmbreeBVH.cpp`): Industry-standard, optimized for speed
    - **ParallelBVHNode** (`src/Render/ParallelBVHNode.cpp`): Custom SAH-based, OpenMP parallel build
-   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): GPU-accelerated structure
+   - **OptiX BVH** (`src/Render/OptixWrapper.cpp`): NVIDIA GPU structure
+   - **Vulkan RT** (`src/Backend/VulkanBackend.cpp`): Vulkan hardware ray tracing backend
 
 3. **Material System** (`src/Scene/PrincipledBSDF.cpp`)
    - Modular property-based materials
@@ -422,6 +427,7 @@ The Visual Studio project manages dependencies via vcpkg or manual paths.
 |--------------------------|-----------------|---------------|
 | CPU Rendering (SDL)      | ✅ Working      | ⚠️ Has bugs   |
 | GPU Rendering (OptiX)    | ✅ Working      | ✅ Working     |
+| Vulkan Rendering (RT)    | ✅ Working      | ✅ Working     |
 | Dependency Management    | ✅ Excellent    | ⚠️ Manual     |
 | Build Speed              | Fast            | Slower        |
 | **Recommendation**       | **USE THIS**    | Experimental  |
@@ -503,7 +509,7 @@ mat->metallicProperty.constant_value = Vec3(1.0, 1.0, 1.0); // Metallic
 - [ ] Index-based BVH (remove vector copying)
 - [ ] SBVH (Spatial BVH splits)
 - [ ] Linux/macOS support
-- [ ] Vulkan backend (alternative to OptiX)
+- [x] Vulkan backend (alternative to OptiX)
 - [ ] Network rendering (distributed ray tracing)
 - [ ] USD format support
 - [ ] Light path visualization/debugging

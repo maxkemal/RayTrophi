@@ -1,12 +1,12 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SCENE UI - PRO CAMERA HUD
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // Professional camera overlay features:
 //   - Histogram         : RGB/Luma brightness distribution graph (draggable)
 //   - Focus Peaking     : Sharp edge highlighting for manual focus
 //   - Zebra Stripes     : Overexposure warning pattern
 //   - Multi-Point AF    : Autofocus point grid with light metering
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 #include "scene_ui.h"
 #include "renderer.h"
@@ -21,9 +21,9 @@
 #include <algorithm>
 #include <array>
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // HISTOGRAM OVERLAY (Draggable, real camera viewfinder style)
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 void SceneUI::drawHistogramOverlay(UIContext& ctx) {
     if (!viewport_settings.show_histogram) return;
     if (!viewport_settings.show_camera_hud) return;
@@ -173,9 +173,9 @@ void SceneUI::drawHistogramOverlay(UIContext& ctx) {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // FOCUS PEAKING OVERLAY - Actual edge detection on rendered image
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 void SceneUI::drawFocusPeakingOverlay(UIContext& ctx) {
     if (!viewport_settings.show_focus_peaking) return;
     if (!viewport_settings.show_camera_hud) return;
@@ -255,12 +255,12 @@ void SceneUI::drawFocusPeakingOverlay(UIContext& ctx) {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // ZEBRA STRIPES OVERLAY
-// ═════════════════════════════════════════════════════════════════════════════
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
+// =============================================================================
 // ZEBRA STRIPES OVERLAY - Fixed to detect HDR overexposure
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 void SceneUI::drawZebraOverlay(UIContext& ctx) {
     if (!viewport_settings.show_zebra) return;
     if (!viewport_settings.show_camera_hud) return;
@@ -315,10 +315,10 @@ void SceneUI::drawZebraOverlay(UIContext& ctx) {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // MULTI-POINT AF OVERLAY - Real Focus Detection!
 // When focus ring is adjusted, points that are IN FOCUS light up GREEN
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
     if (!viewport_settings.show_af_points) return;
     if (!viewport_settings.show_camera_hud) return;
@@ -394,9 +394,9 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
                          if (std::abs(cam.focus_dist - hit_distance) > 0.02f) { 
                              cam.focus_dist = hit_distance;
                              ctx.renderer.resetCPUAccumulation();
-                             if (ctx.optix_gpu_ptr) {
-                                 ctx.optix_gpu_ptr->setCameraParams(cam);
-                                 ctx.optix_gpu_ptr->resetAccumulation();
+                             if (ctx.backend_ptr) {
+                                 ctx.backend_ptr->syncCamera(cam);
+                                 ctx.backend_ptr->resetAccumulation();
                              }
                          }
                     }
@@ -464,9 +464,9 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
                     cam.update_camera_vectors();
                     
                     // Update GPU
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setCameraParams(cam);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->syncCamera(cam);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -555,9 +555,9 @@ void SceneUI::drawAFPointsOverlay(UIContext& ctx) {
     }
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 // PRO CAMERA SETTINGS PANEL (Stub - settings via PRO button popup)
-// ═════════════════════════════════════════════════════════════════════════════
+// =============================================================================
 void SceneUI::drawProCameraPanel(UIContext& ctx) {
     (void)ctx;  // Settings accessed via viewport controls PRO button popup
 }
@@ -589,9 +589,9 @@ void SceneUI::updateAutofocus(UIContext& ctx) {
         if (std::abs(cam.focus_dist - rec.t) > 0.05f) { 
             cam.focus_dist = rec.t;
             
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(cam);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.backend_ptr->syncCamera(cam);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
         }

@@ -29,7 +29,7 @@
 
 
 // Helper function to create a default Blender-like startup scene
-inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrapper* optix_gpu) {
+inline void createDefaultScene(SceneData& scene, Renderer& renderer, Backend::IBackend* backend) {
     if (scene.initialized && (!scene.world.objects.empty() || !scene.lights.empty())) {
          return; // Scene already has content
     }
@@ -55,7 +55,7 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, OptixWrappe
     if (found) {
         SCENE_LOG_INFO("Loading Default Scene Asset: " + defaultAssetPath);
         // Load the GLB/GLTF file
-        renderer.create_scene(scene, optix_gpu, defaultAssetPath, nullptr);
+        renderer.create_scene(scene, backend, defaultAssetPath, nullptr);
         
         // ONLY create default camera if NO cameras were loaded from file
         // The cameras list is the source of truth - if it has cameras, don't create another

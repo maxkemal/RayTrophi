@@ -130,7 +130,7 @@ void SceneUI::drawModifiersPanel(UIContext& ctx) {
             rebuildMeshCache(ctx.scene.world.objects);
             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+            if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
 
             addViewportMessage("Modifiers Updated");
             g_ProjectManager.markModified();

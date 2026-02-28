@@ -1,8 +1,8 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SCENE UI - SELECTION & INTERACTION
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // This file handles Mouse picking, Marquee selection, and Delete operations.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 #include "scene_ui.h"
 #include "renderer.h"
@@ -259,18 +259,18 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             }
         }
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // SELECTION CACHE SYNC (Now centralized in update(), but kept here as safety)
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         if (!mesh_cache_valid) {
             rebuildMeshCache(ctx.scene.world.objects);
         }
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // GPU MODE VERTEX SYNC: In GPU TLAS mode, CPU vertices are NOT updated during
         // gizmo drag (only GPU transform is updated). We must sync before picking.
         // This is a one-time cost per click - acceptable for accurate selection.
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         extern bool g_bvh_rebuild_pending;
         if (g_bvh_rebuild_pending && ctx.render_settings.use_optix) {
             // BVH is stale - transforms changed. Sync ALL objects with TransformHandle.
@@ -296,10 +296,10 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         ensureCPUSyncForPicking(ctx);
 
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // SKINNED MESH FIX: When using GPU rendering with animations,
         // CPU vertices may be out of sync. Force a sync for picking accuracy.
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         if (ctx.render_settings.use_optix && !ctx.scene.animationDataList.empty()) {
             // We have GPU rendering + animations: sync CPU vertices for skinned meshes
             // This is a one-time cost per click, acceptable for accurate selection
@@ -420,11 +420,11 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             // SMART SELECTION: GPU picking (O(1)) with CPU fallback
             // GPU mode: Try pick buffer first, fall back to CPU linear scan
             // CPU mode: Linear scan through mesh_cache with updated vertices
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
 
             HitRecord rec;
             bool hit = false;
@@ -438,16 +438,16 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             std::string gpu_picked_name;
             
             bool use_gpu = ctx.render_settings.use_optix;
-            bool has_ptr = (ctx.optix_gpu_ptr != nullptr);
+            bool has_ptr = (ctx.backend_ptr != nullptr);
             bool rebuild_pending = g_optix_rebuild_pending;
             
             if (use_gpu && has_ptr && !rebuild_pending) {
                 // Pass viewport dimensions for coordinate scaling
                 int vp_w = static_cast<int>(win_w);
                 int vp_h = static_cast<int>(win_h);
-                int object_id = ctx.optix_gpu_ptr->getPickedObjectId(x, y, vp_w, vp_h);
+                int object_id = ctx.backend_ptr->getPickedObjectId(x, y, vp_w, vp_h);
                 if (object_id >= 0) {
-                    gpu_picked_name = ctx.optix_gpu_ptr->getPickedObjectName(x, y, vp_w, vp_h);
+                    gpu_picked_name = ctx.backend_ptr->getPickedObjectName(x, y, vp_w, vp_h);
                     // Only mark as success if name found AND exists in mesh_cache
                     if (!gpu_picked_name.empty() && mesh_cache.find(gpu_picked_name) != mesh_cache.end()) {
                         // [FIX] Ignore ForceField visualization meshes
@@ -460,9 +460,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
-            // ═══════════════════════════════════════════════════════════════════════
+            // =======================================================================
             // CPU BVH PICKING: Faster fallback for large scenes (e.g. 1.2M triangles)
-            // ═══════════════════════════════════════════════════════════════════════
+            // =======================================================================
             if (!gpu_pick_success) {
                 // First try the world BVH (if not being rebuilt)
                 extern bool g_bvh_rebuild_pending;
@@ -511,9 +511,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
             }
 
-            // ═══════════════════════════════════════════════════════════
+            // ===========================================================
             // APPLY PICK FOCUS (Using Found Hits)
-            // ═══════════════════════════════════════════════════════════
+            // ===========================================================
             if (is_picking_focus) {
                 float min_dist = 1e9f;
                 bool found_hit = false;
@@ -542,9 +542,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 if (found_hit) {
                     ctx.scene.camera->focus_dist = min_dist;
                     ctx.scene.camera->update_camera_vectors();
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->syncCamera(*ctx.scene.camera);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                    // SCENE_LOG_INFO(std::string("Pick Focus set to: ") + std::to_string(min_dist) + "m");
@@ -589,9 +589,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 return; // Camera selected, done
             }
 
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             // GPU PICK SUCCESS PATH: Direct mesh selection from pick buffer result
-            // ═══════════════════════════════════════════════════════════════════════════
+            // ===========================================================================
             if (gpu_pick_success && !gpu_picked_name.empty()) {
                 // Find the object in mesh_cache using GPU-provided name
                 auto cache_it = mesh_cache.find(gpu_picked_name);
@@ -818,7 +818,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 // ============================================================================
 // Delete Operation (Shared by Menu and Key Shortcut)
 // ============================================================================
-// OPTIMIZED VERSION - O(n) instead of O(n²)
+// OPTIMIZED VERSION - O(n) instead of O(n�)
 void SceneUI::triggerDelete(UIContext& ctx) {
     if (!ctx.selection.hasSelection()) return;
 
@@ -831,9 +831,9 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     std::vector<std::string> deleted_names;
     std::vector<std::pair<std::string, std::vector<std::shared_ptr<Triangle>>>> undo_data;
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // VDB VOLUME DELETION
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     bool vdb_deleted = false;
     for (const auto& item : items_to_delete) {
         if (item.type == SelectableType::VDBVolume && item.vdb_volume) {
@@ -856,17 +856,17 @@ void SceneUI::triggerDelete(UIContext& ctx) {
 
     if (vdb_deleted) {
         // Sync empty/reduced list to GPU immediately to prevent invalid memory access
-        if (ctx.optix_gpu_ptr) {
+        if (ctx.backend_ptr) {
             syncVDBVolumesToGPU(ctx);
             // Also reset accumulation as scene changed
-            ctx.optix_gpu_ptr->resetAccumulation();
+            ctx.backend_ptr->resetAccumulation();
         }
         ctx.renderer.resetCPUAccumulation();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // GAS VOLUME DELETION
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     bool gas_deleted = false;
     for (const auto& item : items_to_delete) {
         if (item.type == SelectableType::GasVolume && item.gas_volume) {
@@ -885,16 +885,16 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     }
 
     if (gas_deleted) {
-        if (ctx.optix_gpu_ptr) {
-            ctx.renderer.updateOptiXGasVolumes(ctx.scene, ctx.optix_gpu_ptr);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendGasVolumes(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
         }
         ctx.renderer.resetCPUAccumulation();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // FORCE FIELD DELETION
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     int ff_deleted_count = 0;
     for (const auto& item : items_to_delete) {
         if (item.type == SelectableType::ForceField && item.force_field) {
@@ -908,7 +908,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
     if (ff_deleted_count > 0) {
         // Reset accumulation if needed (force fields might affect visual simulation)
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
     }
 
     // Build mesh cache once if needed
@@ -935,7 +935,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         }
     }
 
-    // OPTIMIZATION: Single remove_if pass for ALL objects - O(n) instead of O(n²)
+    // OPTIMIZATION: Single remove_if pass for ALL objects - O(n) instead of O(n�)
     // CRITICAL: Using raw pointer .get() instead of dynamic_pointer_cast for massive speedup
     // dynamic_pointer_cast does RTTI check on every call = very slow on 4M objects
     // We already know exact pointers from mesh_cache, so just compare raw pointers
@@ -1018,9 +1018,9 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // Handle camera deletions
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     int deleted_cameras = 0;
     for (const auto& item : items_to_delete) {
         if (item.type == SelectableType::Camera && item.camera) {
@@ -1057,16 +1057,16 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         invalidateCache();
 
         if (deleted_objects > 0) {
-            // ═══════════════════════════════════════════════════════════════════════
+            // =======================================================================
             // INCREMENTAL GPU UPDATE (TLAS mode) - Instant!
-            // ═══════════════════════════════════════════════════════════════════════
-            if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+            // =======================================================================
+            if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
                 // Fast path: Just hide instances by setting visibility_mask = 0
                 for (const auto& name : deleted_names) {
-                    ctx.optix_gpu_ptr->hideInstancesByNodeName(name);
+                    ctx.backend_ptr->hideInstancesByNodeName(name);
                 }
                 // Single TLAS update after ALL hides complete (batched for efficiency)
-                ctx.optix_gpu_ptr->rebuildTLAS();
+                ctx.backend_ptr->rebuildAccelerationStructure();
             }
             else {
                 // GAS mode fallback: Full rebuild required
@@ -1078,20 +1078,20 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         }
 
         // Update lights if any were deleted
-        if (deleted_lights > 0 && ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (deleted_lights > 0 && ctx.backend_ptr) {
+            ctx.backend_ptr->setLights(ctx.scene.lights);
+            ctx.backend_ptr->resetAccumulation();
         }
 
         // Update GPU camera if cameras changed
-        if (deleted_cameras > 0 && ctx.optix_gpu_ptr && ctx.scene.camera) {
-            ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (deleted_cameras > 0 && ctx.backend_ptr && ctx.scene.camera) {
+            ctx.backend_ptr->syncCamera(*ctx.scene.camera);
+            ctx.backend_ptr->resetAccumulation();
         }
 
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // AUTO-CLEANUP TIMELINE TRACKS FOR DELETED ENTITIES
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // Remove timeline tracks for deleted objects/lights/cameras
         // This prevents orphan keyframes from cluttering the timeline
         for (const auto& deleted_name : deleted_names) {
@@ -1323,9 +1323,9 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
         g_bvh_rebuild_pending = true;
         
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.backend_ptr->setLights(ctx.scene.lights);
+            ctx.backend_ptr->resetAccumulation();
         }
         
         ProjectManager::getInstance().markModified();

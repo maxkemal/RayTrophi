@@ -8,10 +8,14 @@
 #include <future>
 #include <SDL_image.h>
 #include "Renderer.h"
+#include "Backend/IBackend.h"
+#include "Backend/OptixBackend.h"
+#include "Backend/VulkanBackend.h"
 #include "CPUInfo.h"
+
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
-#include "imgui_impl_sdlrenderer2.h"  // Değiştirildi: sdlrenderer2
+#include "imgui_impl_sdlrenderer2.h"  // De�i�tirildi: sdlrenderer2
 #include <scene_ui.h>
 
 #include "EmbreeBVH.h"
@@ -152,6 +156,7 @@ bool g_optix_rebuild_in_progress = false; // True while TLAS rebuild is happenin
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
+bool g_viewport_hovered = false;         // True when mouse is over the main RenderView
 
 // Helper to ensure original_surface matches main surface dimensions
 // This prevents tonemap accumulation issues by giving us a clean "Raw" buffer
@@ -189,18 +194,20 @@ SDL_Texture* raytrace_texture = nullptr;
 int saved_viewport_width = -1;
 int saved_viewport_height = -1;
 bool saved_window_maximized = false;
-std::mutex surface_mutex;  // Surface erişimi için mutex
+std::mutex surface_mutex;  // Surface eri�imi i�in mutex
 SceneUI ui;
 SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
-OptixWrapper optix_gpu;
+std::unique_ptr<Backend::IBackend> g_backend;
 ColorProcessor color_processor(image_width, image_height);
+
 std::string active_model_path;
 SceneSelection scene_selection;  // Scene selection manager
 UIContext ui_ctx{
    scene,
    ray_renderer,
-   &optix_gpu,
+    nullptr, // optix_gpu_ptr will be set later during initialization
+   nullptr, // backend_ptr (assigned later)
    color_processor,
    render_settings,
    scene_selection,  // Add selection reference
@@ -286,22 +293,22 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
 void reset_render_resolution(int w, int h)
 {
     // ------------------------------------------------------------------
-    // 1. SDL Pencere Boyutunu Güncelle
+    // 1. SDL Pencere Boyutunu G�ncelle
     // ------------------------------------------------------------------
     // ------------------------------------------------------------------
-    // 1. SDL Pencere Boyutunu Güncelle - IPTAL (Kullanıcı pencere boyutu değişsin istemiyor)
+    // 1. SDL Pencere Boyutunu G�ncelle - IPTAL (Kullan�c� pencere boyutu de�i�sin istemiyor)
     // ------------------------------------------------------------------
     // SDL_SetWindowSize(window, w, h);
     
     // ------------------------------------------------------------------
-    // 2. SDL kaynaklarını sıfırla (DESTROY)
+    // 2. SDL kaynaklar�n� s�f�rla (DESTROY)
     // ------------------------------------------------------------------
     if (raytrace_texture) SDL_DestroyTexture(raytrace_texture);
     if (surface) SDL_FreeSurface(surface);
     if (original_surface) SDL_FreeSurface(original_surface);
 
     // ------------------------------------------------------------------
-    // 3. Yeni kaynakları oluştur (CREATE)
+    // 3. Yeni kaynaklar� olu�tur (CREATE)
     // ------------------------------------------------------------------
     surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
     original_surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
@@ -313,37 +320,45 @@ void reset_render_resolution(int w, int h)
         return;
     }
 
-    // Siyah ekranla başla
+    // Siyah ekranla ba�la
     SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
     SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
     g_original_surface_needs_sync = true;
     
-    // Texture'ı güncelle
+    // Texture'� g�ncelle
     SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
     
-    // Ekranı güncelle
+    // Ekran� g�ncelle
     SDL_RenderClear(renderer);
     SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
 
     // ------------------------------------------------------------------
-    // 4. Aspect ratio ve global değişkenleri güncelle
+    // 4. Aspect ratio ve global de�i�kenleri g�ncelle
     // ------------------------------------------------------------------
     aspect_ratio = (float)w / h;
     
     // ------------------------------------------------------------------
-    // 5. Diğer Bileşenleri Güncelle
+    // 5. Di�er Bile�enleri G�ncelle
     // ------------------------------------------------------------------
     ray_renderer.resetResolution(w, h);
     // Always resize OptiX buffers if available
-    if (g_hasOptix) { optix_gpu.resetBuffers(w, h); }
+    if (g_backend) {
+        Backend::RenderParams rp = {};
+        rp.imageWidth = w;
+        rp.imageHeight = h;
+        rp.samplesPerPixel = render_settings.samples_per_pixel;
+        g_backend->setRenderParams(rp);
+    }
     color_processor.resize(w, h);
 
     // CRITICAL: Ensure Camera aspect ratio matches new resolution for correct ray generation (AF, Picking)
     if (scene.camera) {
         scene.camera->aspect_ratio = aspect_ratio;
         scene.camera->update_camera_vectors();
-        if (g_hasOptix) { optix_gpu.setCameraParams(*scene.camera); }
+        if (g_backend) {
+            ray_renderer.syncCameraToBackend(*scene.camera);
+        }
     }
 
     SCENE_LOG_INFO("Render resolution updated: " + std::to_string(w) + "x" + std::to_string(h));
@@ -351,9 +366,9 @@ void reset_render_resolution(int w, int h)
 // Check if GPU has RT Cores (hardware ray tracing)
 static bool hasRTCores(int major, int minor)
 {
-    // RTX donanımı SM 7.5 ile başladı.
-    if (major > 7) return true;            // SM 8.x, 9.x, 10.x › yeni RTX mimarileri
-    if (major == 7 && minor >= 5) return true; // SM 7.5 › Turing
+    // RTX donan�m� SM 7.5 ile ba�lad�.
+    if (major > 7) return true;            // SM 8.x, 9.x, 10.x � yeni RTX mimarileri
+    if (major == 7 && minor >= 5) return true; // SM 7.5 � Turing
     return false;
 }
 
@@ -431,11 +446,20 @@ std::string WStringToString(const std::wstring& wstr) {
     WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), strTo.data(), size_needed, nullptr, nullptr);
     return strTo;
 }
-bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
+bool initializeOptixIfAvailable() {
     if (!g_hasOptix) return false;
 
     try {
-        optix_gpu.initialize();
+        // Create an OWNING backend (it will create its own OptixWrapper internally)
+        auto backend = std::make_unique<Backend::OptixBackend>();
+        g_backend = std::move(backend);
+        
+        // Initialize the backend
+        g_backend->initialize();
+        
+        // Set backend to renderer and UI
+        ray_renderer.setBackend(g_backend.get());
+        ui_ctx.backend_ptr = g_backend.get();
 
         auto load_ptx = [](const std::wstring& filename) -> std::string {
             std::filesystem::path ptx_path = filename;
@@ -446,16 +470,16 @@ bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
             return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         };
 
-        OptixWrapper::PtxData ptx_data;
+        Backend::ShaderProgramData shader_data;
         std::string raygen_ptx = load_ptx(L"raygen.ptx");
         std::string miss_ptx = load_ptx(L"miss_kernels.ptx");
         std::string hitgroup_ptx = load_ptx(L"hitgroup_kernels.ptx");
 
-        ptx_data.raygen_ptx = raygen_ptx.c_str();
-        ptx_data.miss_ptx = miss_ptx.c_str();
-        ptx_data.hitgroup_ptx = hitgroup_ptx.c_str();
+        shader_data.raygen = raygen_ptx;
+        shader_data.miss = miss_ptx;
+        shader_data.hitgroup = hitgroup_ptx;
 
-        optix_gpu.setupPipeline(ptx_data);
+        g_backend->loadShaders(shader_data);
     }
     catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("OptiX initialization failed: ") + e.what());
@@ -466,6 +490,25 @@ bool initializeOptixIfAvailable(OptixWrapper& optix_gpu) {
     return true;
 }
 
+bool initializeVulkanIfAvailable() {
+    try {
+        auto backend = std::make_unique<Backend::VulkanBackendAdapter>();
+        if (!backend->initialize()) {
+            SCENE_LOG_ERROR("Vulkan backend initialization returned false.");
+            return false;
+        }
+        
+        g_backend = std::move(backend);
+        ray_renderer.setBackend(g_backend.get());
+        ui_ctx.backend_ptr = g_backend.get();
+        return true;
+    }
+    catch (const std::exception& e) {
+        SCENE_LOG_ERROR(std::string("Vulkan initialization failed: ") + e.what());
+        return false;
+    }
+}
+
 
 
 void init_RayTrophi_Pro_Dark_Thema()
@@ -473,7 +516,7 @@ void init_RayTrophi_Pro_Dark_Thema()
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* c = style.Colors;
 
-    // Modern yumuşaklık
+    // Modern yumu�akl�k
     style.FrameRounding = 6.0f;
     style.WindowRounding = 5.0f;
     style.ScrollbarRounding = 6.0f;
@@ -481,7 +524,7 @@ void init_RayTrophi_Pro_Dark_Thema()
     style.TabRounding = 5.0f;
     style.PopupRounding = 4.0f;
 
-    // Daha düz ve net border
+    // Daha d�z ve net border
     style.WindowBorderSize = 1.0f;
     style.FrameBorderSize = 1.0f;
     style.PopupBorderSize = 1.0f;
@@ -494,11 +537,11 @@ void init_RayTrophi_Pro_Dark_Thema()
     c[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.10f, 0.11f, 0.95f);
     c[ImGuiCol_PopupBg] = ImVec4(0.11f, 0.11f, 0.13f, 1.0f);
 
-    // Yazılar
+    // Yaz�lar
     c[ImGuiCol_Text] = ImVec4(0.95f, 0.97f, 0.99f, 1.0f);
     c[ImGuiCol_TextDisabled] = ImVec4(0.45f, 0.45f, 0.48f, 1.0f);
 
-    // Çerçeveler
+    // �er�eveler
     c[ImGuiCol_FrameBg] = ImVec4(0.17f, 0.17f, 0.19f, 1);
     c[ImGuiCol_FrameBgHovered] = ImVec4(0.23f, 0.23f, 0.26f, 1);
     c[ImGuiCol_FrameBgActive] = accent;
@@ -508,7 +551,7 @@ void init_RayTrophi_Pro_Dark_Thema()
     c[ImGuiCol_ButtonHovered] = accent;
     c[ImGuiCol_ButtonActive] = ImVec4(0.03f, 0.63f, 0.55f, 1.0f);
 
-    // Header / seçili elemanlar
+    // Header / se�ili elemanlar
     c[ImGuiCol_Header] = ImVec4(0.19f, 0.19f, 0.21f, 1);
     c[ImGuiCol_HeaderHovered] = accent;
     c[ImGuiCol_HeaderActive] = ImVec4(0.03f, 0.63f, 0.55f, 1);
@@ -521,16 +564,16 @@ void init_RayTrophi_Pro_Dark_Thema()
     c[ImGuiCol_Border] = ImVec4(0.0f, 0.0f, 0.0f, 0.60f);
     c[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
 
-    // Separator'lar (daha belirgin, modern çizgi)
+    // Separator'lar (daha belirgin, modern �izgi)
     style.SeparatorTextPadding = ImVec2(10.0f, 8.0f);
-    style.SeparatorTextAlign = ImVec2(0.0f, 0.5f); // sola hizalı başlıklar çok daha modern
+    style.SeparatorTextAlign = ImVec2(0.0f, 0.5f); // sola hizal� ba�l�klar �ok daha modern
     style.SeparatorTextBorderSize = 2.0f;  // default 1.0f
 	// Accent renkli separator
     c[ImGuiCol_Separator] = ImVec4(0.25f, 0.75f, 0.70f, 0.60f); // accent soft
     c[ImGuiCol_SeparatorHovered] = ImVec4(0.25f, 0.80f, 0.75f, 1.00f);
     c[ImGuiCol_SeparatorActive] = ImVec4(0.20f, 0.90f, 0.85f, 1.00f);
    
-    style.ItemSpacing = ImVec2(8, 6);   // aralıklar açılır
+    style.ItemSpacing = ImVec2(8, 6);   // aral�klar a��l�r
     style.ItemInnerSpacing = ImVec2(6, 6);
 }
 
@@ -557,7 +600,7 @@ int main(int argc, char* argv[]) {
 #endif
 
    // SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
- // Önce SDL açılacak
+ // �nce SDL a��lacak
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         SCENE_LOG_ERROR(std::string("SDL_Init Error: ") + SDL_GetError());
         return 1;
@@ -623,31 +666,58 @@ int main(int argc, char* argv[]) {
         splash.render(); 
     }
     
-    if (initializeOptixIfAvailable(optix_gpu)) {
+    if (initializeOptixIfAvailable()) {
         SCENE_LOG_INFO("OptiX is ready!");
         
-        // Link OptixAccelManager logs to HUD
-        optix_gpu.setAccelManagerStatusCallback([&](const std::string& msg, int type) {
+    if (g_backend) {
+        g_backend->setStatusCallback([&](const std::string& msg, int type) {
+            // ui.addNotification(msg, type); // Integrated into addViewportMessage
             ImVec4 color = ImVec4(1, 1, 1, 1); // Info = White
             if (type == 1) color = ImVec4(1, 1, 0, 1); // Warn = Yellow
             if (type == 2) color = ImVec4(1, 0.2f, 0.2f, 1); // Error = Red
             ui.addViewportMessage(msg, 4.0f, color); // Slightly longer duration for backend msgs
         });
+    }
         
         render_settings.use_optix = true;
         ui_ctx.render_settings.use_optix = true;
 
         // Ensure Renderer has access to OptiX for Hair/Geometry updates
-        ray_renderer.setOptixWrapper(&optix_gpu);
+        ray_renderer.setBackend(g_backend.get());
+
+        // CRITICAL: Set optix_gpu_ptr on UIContext!
+        // After IBackend migration, this was left as nullptr causing ALL gizmo/transform
+        // code to fall through to the slow CPU path (no TLAS updates, no GPU refit,
+        // no lazy sync, no material GPU updates from gizmos, etc.)
+        auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(g_backend.get());
+        if (optixBackend) {
+            ui_ctx.optix_gpu_ptr = optixBackend->getOptixWrapper();
+            SCENE_LOG_INFO("UIContext.optix_gpu_ptr set from OptixBackend");
+        }
     }
     else {
         SCENE_LOG_WARN("Falling back to CPU rendering.");
     }
 
+    // ===========================================================================
+    // VULKAN BACKEND TEST & CAPABILITY CHECK
+    // ===========================================================================
+    if (splashOk) { splash.setStatus("Checking Vulkan capabilities..."); splash.render(); }
+    
+    auto vulkanTest = std::make_unique<Backend::VulkanBackendAdapter>();
+    if (vulkanTest->initialize()) {
+        g_hasVulkan = true; // ✔️ Vulkan destekleniyor!
+        SCENE_LOG_INFO("Vulkan capabilities checked and supported!");
+
+        vulkanTest->shutdown();
+    } else {
+        g_hasVulkan = false; // 
+    }
+
     // Load Project or Create Default Scene
     if (!project_to_load.empty() && std::filesystem::exists(project_to_load)) {
         if (splashOk) { splash.setStatus("Loading Project..."); splash.render(); }
-        ProjectManager::getInstance().openProject(project_to_load, scene, render_settings, ray_renderer, g_hasOptix ? &optix_gpu : nullptr,
+        ProjectManager::getInstance().openProject(project_to_load, scene, render_settings, ray_renderer, g_backend.get(),
             [&](int progress, const std::string& msg) {
                 if (splashOk) {
                     splash.setStatus(msg);
@@ -656,7 +726,7 @@ int main(int argc, char* argv[]) {
             });
     } else {
         if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
-        createDefaultScene(scene, ray_renderer, g_hasOptix ? &optix_gpu : nullptr);
+        createDefaultScene(scene, ray_renderer, g_backend.get());
     }
     ui.invalidateCache(); // Ensure procedural objects are listed/selectable
     
@@ -664,12 +734,33 @@ int main(int argc, char* argv[]) {
     if (splashOk) { splash.setStatus("Building BVH structures..."); splash.render(); }
     ray_renderer.world.initializeLUT(); // Essential for Nishita Sky performance
     ray_renderer.rebuildBVH(scene, UI_use_embree);
-    if (g_hasOptix && optix_gpu.isCudaAvailable()) { // Ensure initialized
-        ray_renderer.rebuildOptiXGeometry(scene, &optix_gpu);
+    if (g_backend) {
+        ray_renderer.rebuildBackendGeometry(scene);
         // CRITICAL: Immediately sync GPU buffers so sun direction is correct at startup
-        optix_gpu.setWorld(ray_renderer.world.getGPUData());
-        optix_gpu.setLightParams(scene.lights);
-        if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
+        WorldData wd = ray_renderer.world.getGPUData();
+        g_backend->setWorldData(&wd);
+        // If using Vulkan backend, upload Atmosphere LUT host arrays into Vulkan images
+        if (g_backend) {
+            auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+            if (vulkanBackend) {
+                auto* al = ray_renderer.world.getLUT();
+                if (al && al->is_initialized()) {
+                    vulkanBackend->uploadAtmosphereLUT(al);
+                }
+            }
+        }
+        g_backend->setLights(scene.lights);
+        if (scene.camera) {
+            Backend::CameraParams cp;
+            cp.origin = scene.camera->lookfrom;
+            cp.lookAt = scene.camera->lookat;
+            cp.up = scene.camera->vup;
+            cp.fov = scene.camera->vfov;
+            cp.aperture = scene.camera->aperture;
+            cp.focusDistance = scene.camera->focus_dist;
+            cp.aspectRatio = scene.camera->aspect;
+            g_backend->setCamera(cp);
+        }
     }
     // Update initial camera vectors
     if (scene.camera) scene.camera->update_camera_vectors();
@@ -714,6 +805,72 @@ int main(int argc, char* argv[]) {
 
     SDL_Event e;
     while (!quit) {
+        if (render_settings.backend_changed) {
+            bool success = true;
+
+            // Detach renderer from current backend first to avoid renderer using a destroyed backend
+            ray_renderer.setBackend(nullptr);
+            ui_ctx.backend_ptr = nullptr;
+
+            // Wait for any in-progress render to finish (short timeout)
+            int wait_count = 0;
+            while (rendering_in_progress.load() && wait_count < 50) { // ~500ms
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                ++wait_count;
+            }
+
+            // Now safe to destroy existing backend
+            g_backend.reset();
+
+            if (render_settings.use_vulkan) {
+                success = initializeVulkanIfAvailable();
+                if (!success) {
+                    SCENE_LOG_ERROR("Fallback to CPU. Vulkan failed.");
+                    render_settings.use_vulkan = false;
+                }
+            } else if (render_settings.use_optix) {
+                success = initializeOptixIfAvailable();
+                if (!success) {
+                    SCENE_LOG_ERROR("Fallback to CPU. OptiX failed.");
+                    render_settings.use_optix = false;
+                }
+            }
+
+            if (!success && (!render_settings.use_optix && !render_settings.use_vulkan)) {
+                // Now falling back to CPU
+                extern bool g_cpu_sync_pending;
+                g_cpu_sync_pending = true;
+            }
+
+            if (g_backend) {
+                // Reattach renderer to the new backend
+                ray_renderer.setBackend(g_backend.get());
+                ui_ctx.backend_ptr = g_backend.get();
+
+                // IMPORTANT: Full scene sync on backend change
+                ray_renderer.rebuildBackendGeometry(scene);
+                ray_renderer.updateBackendMaterials(scene);
+                ray_renderer.updateBackendGasVolumes(scene);
+
+                // Final world/lights push
+                ray_renderer.syncCameraToBackend(*scene.camera);
+                g_backend->setLights(scene.lights);
+                auto wd = ray_renderer.world.getGPUData();
+                g_backend->setWorldData(&wd);
+                if (g_backend) {
+                    auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                    if (vulkanBackend) {
+                        auto* al = ray_renderer.world.getLUT();
+                        if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                    }
+                }
+
+                g_backend->resetAccumulation();
+            }
+
+            render_settings.backend_changed = false;
+        }
+
         bool did_render_this_frame = false; 
         bool post_processing_happened = false;
         // =========================================================================
@@ -742,9 +899,9 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_QUIT) ui.tryExit();
 
             if (e.type == SDL_KEYDOWN) {
-                // ═══════════════════════════════════════════════════════════════════
+                // ===================================================================
                 // ANIMATION RENDER SHORTCUTS - Always active, even during render!
-                // ═══════════════════════════════════════════════════════════════════
+                // ===================================================================
                 if (rendering_in_progress && ui_ctx.is_animation_mode) {
                     if (e.key.keysym.sym == SDLK_ESCAPE) {
                         rendering_stopped_cpu = true;
@@ -781,8 +938,10 @@ int main(int argc, char* argv[]) {
                         for (auto& vdb : scene.vdb_volumes) vdb->visible = true;
                         for (auto& gas : scene.gas_volumes) gas->visible = true;
                         if (g_hasOptix) {
-                            optix_gpu.showAllInstances();
-                            optix_gpu.setLightParams(scene.lights);
+                        if (g_backend) {
+                            g_backend->showAllInstances();
+                            g_backend->setLights(scene.lights);
+                        }
                         }
                         g_bvh_rebuild_pending = true;
                         ray_renderer.resetCPUAccumulation();
@@ -1024,9 +1183,9 @@ int main(int argc, char* argv[]) {
         
         bool timeline_playing = ui.timeline.isPlaying();
         
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // VOLUMETRIC TIMELINE UPDATE (Gas & VDB)
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         static int last_volume_frame = -1;
         int current_volume_frame = ui.timeline.getCurrentFrame();
         
@@ -1036,7 +1195,7 @@ int main(int argc, char* argv[]) {
             // Update Gas Volumes
             for (auto& gas : scene.gas_volumes) {
                 if (gas->isLinkedToTimeline()) {
-                    void* stream = g_hasOptix ? optix_gpu.getStream() : nullptr;
+                    void* stream = (g_hasOptix && g_backend) ? g_backend->getNativeCommandQueue() : nullptr;
                     gas->updateFromTimeline(current_volume_frame, stream);
                     volume_changed = true;
                 }
@@ -1045,7 +1204,7 @@ int main(int argc, char* argv[]) {
             // Update VDB Volumes
             for (auto& vdb : scene.vdb_volumes) {
                 if (vdb->isAnimated() && vdb->isLinkedToTimeline()) {
-                    void* stream = g_hasOptix ? optix_gpu.getStream() : nullptr;
+                    void* stream = (g_hasOptix && g_backend) ? g_backend->getNativeCommandQueue() : nullptr;
                     vdb->updateFromTimeline(current_volume_frame, stream);
                     volume_changed = true;
                 }
@@ -1054,11 +1213,11 @@ int main(int argc, char* argv[]) {
             if (volume_changed) {
                 // Sync to GPU
                 ui.syncVDBVolumesToGPU(ui_ctx);
-                ui_ctx.renderer.updateOptiXGasVolumes(scene, &optix_gpu);
+                ui_ctx.renderer.updateBackendGasVolumes(scene);
                 
                 // Break accumulation for new frame
                 if (use_optix) {
-                    optix_gpu.resetAccumulation();
+                    if (g_backend) g_backend->resetAccumulation();
                 }
                 ray_renderer.resetCPUAccumulation();
                 start_render = true;
@@ -1074,7 +1233,7 @@ int main(int argc, char* argv[]) {
                      // Note: updateFromTimeline already handles catching up if linked.
                      // But if NOT linked, it only steps if isPlaying().
                      if (!gas->linked_to_timeline && gas->isPlaying()) {
-                        void* stream = g_hasOptix ? optix_gpu.getStream() : nullptr;
+                        void* stream = (g_hasOptix && g_backend) ? g_backend->getNativeCommandQueue() : nullptr;
                         gas->stepFrame(dt, stream);
                         gas_stepped = true;
                      }
@@ -1085,9 +1244,9 @@ int main(int argc, char* argv[]) {
         if (gas_stepped) {
             // CRITICAL: Sync both render paths (Legacy and Unified VDB)
             ui.syncVDBVolumesToGPU(ui_ctx); // Logic for Unified VDB path
-            ui_ctx.renderer.updateOptiXGasVolumes(scene, &optix_gpu); // Logic for Legacy path
+            ui_ctx.renderer.updateBackendGasVolumes(scene); // Logic for Legacy path
             
-            if (use_optix) optix_gpu.resetAccumulation();
+            if (use_optix && g_backend) g_backend->resetAccumulation();
             ray_renderer.resetCPUAccumulation();
             start_render = true;
         }
@@ -1103,10 +1262,10 @@ int main(int argc, char* argv[]) {
              InstanceManager::getInstance().updateWind(time_seconds, scene);
 
              // Update OptiX Time
-             optix_gpu.setTime(time_seconds, time_seconds);
+             if (g_backend) g_backend->setTime(time_seconds, time_seconds);
              
              // Efficiently update instance transforms on GPU (no full rebuild)
-             optix_gpu.updateTLASMatricesOnly(scene.world.objects);
+             if (g_backend) g_backend->updateInstanceTransforms(scene.world.objects);
              
              // Force redraw (break accumulation)
              start_render = true;
@@ -1189,13 +1348,13 @@ int main(int argc, char* argv[]) {
             
             ui_ctx.renderer.resetCPUAccumulation();
             
-            if (ui_ctx.optix_gpu_ptr && g_needs_optix_sync) {
-                ui_ctx.renderer.rebuildOptiXGeometry(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
-                ui_ctx.renderer.updateOptiXMaterialsOnly(ui_ctx.scene, ui_ctx.optix_gpu_ptr);
+            if (ui_ctx.backend_ptr && g_needs_optix_sync) {
+                ui_ctx.renderer.rebuildBackendGeometry(ui_ctx.scene);
+                ui_ctx.renderer.updateBackendMaterials(ui_ctx.scene);
                 
-                ui_ctx.optix_gpu_ptr->setLightParams(ui_ctx.scene.lights);
-                if (ui_ctx.scene.camera) ui_ctx.optix_gpu_ptr->setCameraParams(*ui_ctx.scene.camera);
-                ui_ctx.optix_gpu_ptr->resetAccumulation();
+                ui_ctx.backend_ptr->setLights(ui_ctx.scene.lights);
+                if (ui_ctx.scene.camera) ui_ctx.renderer.syncCameraToBackend(*ui_ctx.scene.camera);
+                ui_ctx.backend_ptr->resetAccumulation();
                 g_needs_optix_sync = false;
             }
             
@@ -1232,10 +1391,10 @@ int main(int argc, char* argv[]) {
                  // Ensure vectors are up to date
                  scene.camera->update_camera_vectors();
                  
-                 if (g_hasOptix) {
-                    optix_gpu.setCameraParams(*scene.camera);
-                    optix_gpu.resetAccumulation();
-                 }
+                    if (ui_ctx.backend_ptr) {
+                        ui_ctx.renderer.syncCameraToBackend(*scene.camera);
+                        ui_ctx.backend_ptr->resetAccumulation();
+                    }
                  ray_renderer.resetCPUAccumulation();
                  
                  start_render = true;
@@ -1285,7 +1444,7 @@ int main(int argc, char* argv[]) {
             // Reset accumulation buffers BEFORE resolution change
             ray_renderer.resetCPUAccumulation();
             if (g_hasOptix) {
-                optix_gpu.resetAccumulation();
+                if (g_backend) g_backend->resetAccumulation();
             }
             
             // Reset render state
@@ -1373,7 +1532,7 @@ int main(int argc, char* argv[]) {
                 start_render = true;
                 g_camera_dirty = true;  // Mark camera buffer for GPU update
             }
-            // hareket durmuşsa foveation seviyesi büyüt
+            // hareket durmu�sa foveation seviyesi b�y�t
             if (camera_moved_recently &&
                 std::chrono::steady_clock::now() - last_camera_move_time > std::chrono::milliseconds(50)) {
                 camera_moved_recently = false;
@@ -1475,9 +1634,10 @@ int main(int argc, char* argv[]) {
                             output_folder,
                             anim_use_denoiser,
                             anim_denoiser_blend,
-                            &optix_gpu,
+                            g_backend.get(),
                             anim_use_optix,
                             &ui_ctx);
+
                             
                          SCENE_LOG_INFO("Animation render completed.");
                     });
@@ -1507,8 +1667,16 @@ int main(int argc, char* argv[]) {
                     int current_f = ui_ctx.render_settings.animation_playback_frame;
                     float time = (current_f - start_f) / fps;
 
-                    if (ui_ctx.render_settings.use_optix && g_hasOptix) {
-                        // ============ SYNCHRONOUS OPTIX RENDER (No Thread) ============
+                    static bool last_vulkan_state = false;
+                    if (ui_ctx.render_settings.use_vulkan != last_vulkan_state) {
+                        SCENE_LOG_INFO(std::string("[DEBUG] Backend Viewport: use_vulkan=") + (ui_ctx.render_settings.use_vulkan ? "TRUE" : "FALSE") + 
+                                       " use_optix=" + (ui_ctx.render_settings.use_optix ? "TRUE" : "FALSE") + 
+                                       " hasOptix=" + (g_hasOptix ? "TRUE" : "FALSE"));
+                        last_vulkan_state = ui_ctx.render_settings.use_vulkan;
+                    }
+
+                    if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                        // ============ SYNCHRONOUS GPU RENDER (No Thread) ============
                         // Each pass is ~10-50ms for 1 sample, fast enough for UI
                         
                         // OPTIMIZATION: Call every frame to allow AnimGraph autonomous playback
@@ -1547,7 +1715,10 @@ int main(int argc, char* argv[]) {
                             // For skinning, we need updateTLASGeometry() which rebuilds BLAS with new vertex data.
                             
                             // Pass Calculated Bone Matrices for GPU Skinning
-                            optix_gpu.updateTLASGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                            if (g_backend) {
+                                g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                            }
+
                             
                             // Geometry change implies all buffers need refresh
                             g_camera_dirty = true;
@@ -1556,8 +1727,15 @@ int main(int argc, char* argv[]) {
                         }
                         
                         // OPTIMIZATION: Only update GPU buffers when data has changed
-                        if (g_camera_dirty && scene.camera) {
-                            optix_gpu.setCameraParams(*scene.camera);
+                        // [CAMERA SYNC FIX] Force sync every frame if camera shake is enabled to allow real-time animation
+                        bool needs_camera_sync = g_camera_dirty || (scene.camera && (scene.camera->enable_camera_shake));
+                        if (needs_camera_sync && scene.camera) {
+                            if (g_backend) {
+                                ray_renderer.syncCameraToBackend(*scene.camera);
+                                // Vulkan already resets in setCamera(), but OptiX needs explicit reset
+                                // This ensures GPU accumulation buffer is cleared when camera/exposure changes
+                                g_backend->resetAccumulation();
+                            }
                             Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                             yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
                             pitch = asinf(dir.y) * 180.0f / 3.14159265f;
@@ -1566,10 +1744,17 @@ int main(int argc, char* argv[]) {
                             ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
                             g_camera_dirty = false;
                         }
-                        if (g_lights_dirty && !scene.lights.empty()) {
-                            optix_gpu.setLightParams(scene.lights);
+                        // Always call setLights when lights are dirty, even if the list
+                        // is empty. This allows backends to clear GPU-side light state
+                        // (e.g., the Nishita sun stored in WorldData) when the user
+                        // deletes the last directional light.
+                        if (g_lights_dirty) {
+                            if (g_backend) {
+                                g_backend->setLights(scene.lights);
+                            }
                             g_lights_dirty = false;
                         }
+
                         // Update Cloud FFT map binding dynamically
                         // 1. Update Cloud Manager (independent FFT) if needed
                         float dt_cloud = ImGui::GetIO().DeltaTime;
@@ -1603,9 +1788,17 @@ int main(int argc, char* argv[]) {
                         }
 
                         if (g_world_dirty) {
-                            optix_gpu.setWorld(ray_renderer.world.getGPUData());
+                            // DEFERRED LUT: Recompute atmosphere LUT at most once per frame
+                            // (Not on every slider tick � prevents 50K-pixel blocking)
+                            ray_renderer.world.flushLUT();
+                            
+                            if (g_backend) {
+                                auto worldGPU = ray_renderer.world.getGPUData();
+                                g_backend->setWorldData(&worldGPU);
+                            }
                             g_world_dirty = false;
                         }
+
 
                         static std::vector<uchar4> framebuffer;
                         if (framebuffer.size() != image_width * image_height) {
@@ -1614,50 +1807,105 @@ int main(int argc, char* argv[]) {
                         
                         // Single pass render (1 sample) - fast, no UI blocking
                         auto sample_start = std::chrono::high_resolution_clock::now();
-                       if (g_hasOptix && render_settings.use_optix) {
-                     // Check if we are playing animation
-                     int loop_count = 1;
-                     // Ensure we have a valid Raw Buffer (original_surface) for OptiX output
-                     EnsureOriginalSurface(surface);
-                     
-                     // Mark frame as rendered so display update logic works
-                     did_render_this_frame = true;
+                        if (g_backend) {
+                            static Backend::IBackend* last_backend = nullptr;
+                            static int last_w = -1, last_h = -1, last_max = -1;
+                            static bool last_adaptive = false;
+                            static float last_threshold = -1.0f;
+                            int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
 
-                     if (timeline_playing) {
-                         loop_count = std::max(1, render_settings.animation_samples_per_frame);
-                     }
-                     
-                     for (int i = 0; i < loop_count; ++i) {
-                         // Render to original_surface (Raw LDR) instead of surface (Display/TM)
-                         optix_gpu.launch_random_pixel_mode_progressive(
-                             original_surface, window, renderer, 
-                             image_width, image_height, 
-                             framebuffer, raytrace_texture
-                         );
-                     }
-                     // Debug Log (Temporary)
-                     // if (timeline_playing) SCENE_LOG_INFO("Preview Loop: " + std::to_string(loop_count));
-                } else {
-                        // Render to original_surface (Raw LDR)
-                        optix_gpu.launch_random_pixel_mode_progressive(
-                            original_surface, window, renderer, 
-                            image_width, image_height, 
-                            framebuffer, raytrace_texture
-                        );
-                }
+                            if (g_backend.get() != last_backend ||
+                                image_width != last_w || image_height != last_h || 
+                                current_max != last_max || 
+                                render_settings.use_adaptive_sampling != last_adaptive ||
+                                std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) 
+                            {
+                                Backend::RenderParams rp = {};
+                                rp.imageWidth = image_width;
+                                rp.imageHeight = image_height;
+                                rp.samplesPerPixel = current_max;
+                                rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
+                                rp.adaptiveThreshold = render_settings.variance_threshold;
+                                g_backend->setRenderParams(rp);
+
+                                last_backend = g_backend.get();
+                                last_w = image_width;
+                                last_h = image_height;
+                                last_max = current_max;
+                                last_adaptive = render_settings.use_adaptive_sampling;
+                                last_threshold = render_settings.variance_threshold;
+                            }
+                        }
+                        if ((g_hasOptix && render_settings.use_optix) || render_settings.use_vulkan) {
+                             static bool logged_gpu = false;
+                             if (!logged_gpu) { SCENE_LOG_INFO("[DEBUG] Entering GPU Render block"); logged_gpu = true; }
+                            // Check if we are playing animation
+                            int loop_count = 1;
+                            // Ensure we have a valid Raw Buffer (original_surface) for Backend output
+                            EnsureOriginalSurface(surface);
+                            
+                            // Mark frame as rendered so display update logic works
+                            did_render_this_frame = true;
+      
+                            if (timeline_playing) {
+                                loop_count = std::max(1, render_settings.animation_samples_per_frame);
+                            }
+                            
+                            for (int i = 0; i < loop_count; ++i) {
+                                 // [CRITICAL FIX] Check if camera changed during render and reset accumulation
+                                 // This prevents bright-while-moving artifacts by ensuring GPU accumulation
+                                 // is cleared when camera parameters change mid-render
+                                 if (g_camera_dirty && scene.camera && g_backend) {
+                                     ray_renderer.syncCameraToBackend(*scene.camera);
+                                     g_backend->resetAccumulation();
+                                     g_camera_dirty = false;
+                                 }
+                                 
+                                 // Render using the backend's generic progressive interface
+                                 if (g_backend) {
+                                     if (g_backend->isAccumulationComplete()) break;
+                                     g_backend->renderProgressive(
+                                         original_surface, nullptr, renderer,
+                                         image_width, image_height, &framebuffer, raytrace_texture);
+                                 }
+                            }
+                        } else {
+                            // CPU Rendering (Fallback)
+                            // Check if camera changed during render
+                            if (g_camera_dirty && scene.camera) {
+                                ray_renderer.syncCameraToBackend(*scene.camera);
+                                if (g_backend) g_backend->resetAccumulation();
+                                ray_renderer.resetCPUAccumulation();
+                                g_camera_dirty = false;
+                            }
+                            
+                            if (g_backend) {
+                                if (g_backend->isAccumulationComplete()) {
+                                    // Done
+                                } else {
+                                    g_backend->renderProgressive(
+                                        original_surface, nullptr, renderer,
+                                        image_width, image_height, &framebuffer, raytrace_texture);
+                                }
+                            } else {
+                                // Default legacy CPU Path
+                                ray_renderer.render_progressive_pass(original_surface, window, scene, 1);
+                                did_render_this_frame = true;
+                            }
+                        }
                         
                         auto sample_end = std::chrono::high_resolution_clock::now();
                         float sample_time_ms = std::chrono::duration<float, std::milli>(sample_end - sample_start).count();
                         
                         // Update progress for UI
                         int prev_samples = render_settings.render_current_samples;
-                        render_settings.render_current_samples = optix_gpu.getAccumulatedSamples();
+                        if (g_backend) render_settings.render_current_samples = g_backend->getCurrentSampleCount();
                         
                         int effective_max_samples = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
                         render_settings.render_target_samples = effective_max_samples > 0 ? effective_max_samples : 100;
                         
                         render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
-                        render_settings.is_rendering_active = !optix_gpu.isAccumulationComplete();
+                        if (g_backend) render_settings.is_rendering_active = !g_backend->isAccumulationComplete();
                         
                         // Update time estimation
                         if (render_settings.render_current_samples > prev_samples) {
@@ -1667,6 +1915,39 @@ int main(int argc, char* argv[]) {
                             
                             int remaining_samples = render_settings.render_target_samples - render_settings.render_current_samples;
                             render_settings.render_estimated_remaining = (remaining_samples * render_settings.avg_sample_time_ms) / 1000.0f;
+                        }
+                        
+                        // Update progress for UI from GPU Backend
+                        if (g_backend) {
+                            render_settings.render_current_samples = g_backend->getCurrentSampleCount();
+                            if (render_settings.render_target_samples > 0) {
+                                render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
+                            }
+                            render_settings.is_rendering_active = !g_backend->isAccumulationComplete();
+                        }
+
+                        // ===== WINDOW TITLE STATISTICS (GPU) =====
+                        if (window && ((g_hasOptix && render_settings.use_optix) || render_settings.use_vulkan)) {
+                            std::string projectName = active_model_path;
+                            if (projectName.empty() || projectName == "Untitled") {
+                                projectName = "Untitled Project";
+                            } else {
+                                size_t lastSlash = projectName.find_last_of("\\/");
+                                if (lastSlash != std::string::npos) projectName = projectName.substr(lastSlash + 1);
+                            }
+
+                            // Remove extension if present
+                            size_t dot = projectName.find_last_of(".");
+                            if (dot != std::string::npos) projectName = projectName.substr(0, dot);
+
+                            float progress_pct = render_settings.render_progress * 100.0f;
+                            std::string backend_name = (render_settings.use_vulkan) ? "Vulkan" : "OptiX";
+                            std::string title = "RayTrophi Studio [" + projectName + "] - " + backend_name + " - Sample " + 
+                                std::to_string(render_settings.render_current_samples) + "/" + 
+                                std::to_string(render_settings.render_target_samples) +
+                                " (" + std::to_string(int(progress_pct)) + "%) - " +
+                                std::to_string(int(sample_time_ms)) + "ms/sample";
+                            SDL_SetWindowTitle(window, title.c_str());
                         }
                         
                         // ===== DENOISE LOGIC =====
@@ -1680,13 +1961,15 @@ int main(int argc, char* argv[]) {
                             effective_denoiser = render_settings.use_denoiser;
                         }
                         
-                        if (effective_denoiser && optix_gpu.getAccumulatedSamples() > 0) {
+                        if (effective_denoiser && g_backend && g_backend->getCurrentSampleCount() > 0) {
                                 // Must denoise the Raw Buffer (original_surface) so Tonemapper gets clean input
                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
                             }
                         }
                     else {
                         // ============ SYNCHRONOUS CPU RENDER (Like OptiX) ============
+                        static bool logged_cpu = false;
+                        if (!logged_cpu) { SCENE_LOG_INFO("[DEBUG] Entering CPU Render block"); logged_cpu = true; }
                         // Each pass is 1 sample per pixel, accumulates progressively
                         
                         // ===============================================================
@@ -1839,7 +2122,7 @@ int main(int argc, char* argv[]) {
                 // Pass renderer to use float buffer if available (prevents quantization artifacts)
                 // Pass nullptr if using OptiX (OptiX handles its own buffer or falls back to surface)
                 applyToneMappingToSurface(surface, original_surface, color_processor, 
-                    ui_ctx.render_settings.use_optix ? nullptr : &ray_renderer);
+                    (ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan) ? nullptr : &ray_renderer);
             }
             if (apply_tonemap) {
                 apply_tonemap = false;
@@ -1857,7 +2140,7 @@ int main(int argc, char* argv[]) {
         if (ui_ctx.render_settings.save_image_requested && original_surface) {
             ui_ctx.render_settings.save_image_requested = false;
 
-            std::string path = saveFileDialogW(L"PNG Dosyaları\0*.png\0Tüm Dosyalar\0*.*\0");
+            std::string path = saveFileDialogW(L"PNG Dosyalar�\0*.png\0T�m Dosyalar\0*.*\0");
             if (!path.empty()) {
                 if (SaveSurface(surface, path.c_str())) {
                     SCENE_LOG_INFO("Image saved to: " + path);
@@ -1912,8 +2195,8 @@ int main(int argc, char* argv[]) {
                 // SKIP EVERYTHING if no animations exist at all
                 if (!has_file_animations && !has_manual_keyframes) {
                     // No animation data - just reset accumulation and skip geometry updates
-                    if (ui_ctx.render_settings.use_optix && g_hasOptix) {
-                        optix_gpu.resetAccumulation();
+                    if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                        if (g_backend) g_backend->resetAccumulation();
                     } else {
                         ray_renderer.resetCPUAccumulation();
                     }
@@ -1926,10 +2209,11 @@ int main(int argc, char* argv[]) {
                     
                     if (has_file_animations) {
                         // File-based animations present - need full update (Assimp skinning, node hierarchy)
-                        bool geometry_modified = ray_renderer.updateAnimationState(scene, time, !ui_ctx.render_settings.use_optix);
+                        bool geometry_modified = ray_renderer.updateAnimationState(scene, time, 
+                           !(ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan));
                         
                         // CRITICAL: Update CPU BVH so viewport 'sees' the new pose (Fixes BBox/Selection)
-                        if (geometry_modified && !ui_ctx.render_settings.use_optix) {
+                        if (geometry_modified && !(ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan)) {
                             ray_renderer.updateBVH(scene, ui_ctx.render_settings.UI_use_embree);
                         }
                     }
@@ -1940,14 +2224,16 @@ int main(int argc, char* argv[]) {
                     g_lights_dirty = true;
                     g_world_dirty = true;
                     
-                    // Update OptiX if needed
-                    if (ui_ctx.render_settings.use_optix && g_hasOptix) {
+                    // Update Backend if needed
+                    if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
                         // PERFORMANCE: Only update geometry if file-based animations modified it
                         if (has_file_animations) {
-                            optix_gpu.updateGeometry(scene.world.objects);
+                            if (g_backend) g_backend->updateGeometry(scene.world.objects);
                         } else if (wind_active) {
-                            // FAST PATH: Wind only updates matrices, not vertex geometry.
-                            optix_gpu.updateTLASMatricesOnly(scene.world.objects);
+                            if (g_backend) {
+                                g_backend->updateGeometry(scene.world.objects);
+                            }
+                            if (g_backend) g_backend->updateInstanceTransforms(scene.world.objects);
                         } else if (has_manual_keyframes) {
                             // PERFORMANCE CRITICAL: 
                             // updateTLASMatricesOnly calls syncInstanceTransforms which iterates ALL 2M objects!
@@ -1971,14 +2257,14 @@ int main(int argc, char* argv[]) {
                         }
                         // If !has_file_animations && !has_manual_keyframes, we don't reach here
                         
-                        if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
-                        optix_gpu.setLightParams(scene.lights);
+                        if (scene.camera) ray_renderer.syncCameraToBackend(*scene.camera);
+                        ray_renderer.updateBackendMaterials(scene);
                         
                         // Update GPU materials for material keyframe animation
-                        ray_renderer.updateOptiXMaterialsOnly(scene, &optix_gpu);
+                        ray_renderer.updateBackendMaterials(scene);
                         
                         // Reset accumulation for new frame
-                        optix_gpu.resetAccumulation();
+                        g_backend->resetAccumulation();
                         
                         // Clear dirty flags since we just updated manually
                         g_camera_dirty = false;
@@ -2011,8 +2297,8 @@ int main(int argc, char* argv[]) {
             
             bool accumulation_complete = false;
             
-            if (ui_ctx.render_settings.use_optix && g_hasOptix) {
-                accumulation_complete = optix_gpu.isAccumulationComplete();
+            if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
             } else {
                 accumulation_complete = ray_renderer.isCPUAccumulationComplete();
             }
@@ -2028,8 +2314,8 @@ int main(int argc, char* argv[]) {
         // Only update texture when there's actual rendering happening
         // ===========================================================================
         bool accumulation_done_for_display = false;
-        if (ui_ctx.render_settings.use_optix && g_hasOptix) {
-            accumulation_done_for_display = optix_gpu.isAccumulationComplete();
+        if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+            accumulation_done_for_display = g_backend ? g_backend->isAccumulationComplete() : false;
         } else {
             accumulation_done_for_display = ray_renderer.isCPUAccumulationComplete();
         }
@@ -2043,6 +2329,9 @@ int main(int argc, char* argv[]) {
                                      ImGui::GetIO().WantCaptureMouse || did_render_this_frame || post_processing_happened;
         
         if (needs_texture_update) {
+            // OPTIMIZATION: If Vulkan or OptiX already updated the texture inside renderProgressive, 
+            // we don't strictly need to do it again here from 'surface', unless post-processing happened.
+            // However, surface->pixels is what blit logic uses, so we keep it for now.
             SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
             last_texture_updated = !accumulation_done_for_display;
         }
@@ -2079,14 +2368,23 @@ int main(int argc, char* argv[]) {
         // ===========================================================================
         if (g_gpu_refit_pending) {
             // ui.addViewportMessage("Updating GPU...", 2.0f); // Removed to prevent spam
-            if (g_hasOptix) {
+            if (g_hasOptix && g_backend) {
                 // LIGHTWEIGHT UPDATE: Transforms only (fast)
                 // If actual geometry (vertices) changed, use g_optix_rebuild_pending instead.
-                optix_gpu.updateTLASMatricesOnly(scene.world.objects);
-                
-                optix_gpu.setLightParams(scene.lights);
-                if (scene.camera) optix_gpu.setCameraParams(*scene.camera);
-                optix_gpu.resetAccumulation();
+                g_backend->updateInstanceTransforms(scene.world.objects);
+                g_backend->setLights(scene.lights);
+                if (scene.camera) {
+                    Backend::CameraParams cp;
+                    cp.origin = scene.camera->lookfrom;
+                    cp.lookAt = scene.camera->lookat;
+                    cp.up = scene.camera->vup;
+                    cp.fov = scene.camera->vfov;
+                    cp.aspectRatio = scene.camera->aspect_ratio;
+                    cp.aperture = scene.camera->aperture;
+                    cp.focusDistance = scene.camera->focus_dist;
+                    g_backend->setCamera(cp);
+                }
+                g_backend->resetAccumulation();
             }
             g_gpu_refit_pending = false;
         }
@@ -2111,7 +2409,7 @@ int main(int argc, char* argv[]) {
             // - Copying 4M shared_ptr for async rebuild takes ~3 seconds due to atomic ref count increments
             // NOTE: Only skip if actually using GPU AND not switching to CPU mode
             // g_cpu_sync_pending means user switched from GPU to CPU - must rebuild!
-            if (g_hasOptix && ui_ctx.render_settings.use_optix && !g_cpu_sync_pending) {
+            if ((g_hasOptix && ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan) && !g_cpu_sync_pending) {
                 // GPU mode active: Skip expensive CPU BVH rebuild
                 g_bvh_rebuild_pending = false;
             }
@@ -2189,9 +2487,8 @@ int main(int argc, char* argv[]) {
                 // CRITICAL FIX: Ensure GPU is completely idle before freeing/modifying geometry
                 if (g_hasCUDA) cudaDeviceSynchronize();
 
-                // Capture references for lambda
-                auto& scene_ref = scene;
-                auto optix_ptr = &optix_gpu;
+                // Capture backend pointer for lambda
+                Backend::IBackend* backend_ptr = g_backend.get();
                 auto& renderer_ref = ray_renderer;
                 
                 // CRITICAL FIX: Set global flag to pause rendering in OptixWrapper
@@ -2201,12 +2498,15 @@ int main(int argc, char* argv[]) {
                 // such as syncInstancesToScene or object deletion.
                 std::vector<std::shared_ptr<Hittable>> objects_snapshot = scene.world.objects;
 
-                g_optix_future = std::async(std::launch::async, [objects_snapshot, optix_ptr, &renderer_ref]() {
+                g_optix_future = std::async(std::launch::async, [objects_snapshot, backend_ptr, &renderer_ref]() {
                     // Use the snapshot instead of direct reference to scene.world.objects
-                    renderer_ref.rebuildOptiXGeometryWithList(objects_snapshot, optix_ptr);
+                    renderer_ref.rebuildBackendGeometryWithList(objects_snapshot);
                     
                     // REAPPLY FOLIAGE persistence (since rebuild wipes instances)
-                    TerrainManager::getInstance().reapplyAllFoliage(optix_ptr);
+                    // (Transition: dynamic_cast to get internal wrapper for now until TerrainManager is refactored)
+                    if (auto optix_backend = dynamic_cast<Backend::OptixBackend*>(backend_ptr)) {
+                        TerrainManager::getInstance().reapplyAllFoliage(optix_backend->getOptixWrapper());
+                    }
                 });
                 
                 g_optix_rebuilding = true;
@@ -2220,9 +2520,16 @@ int main(int argc, char* argv[]) {
             if (g_optix_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 try {
                     g_optix_future.get();
-                    optix_gpu.resetAccumulation();
+                    if (g_backend) g_backend->resetAccumulation();
                     ui.clearViewportMessages();
                     ui.addViewportMessage("OptiX Rebuild Complete", 2.0f);
+                    
+                    // CRITICAL FIX: Mark all scene data dirty after rebuild to force re-sync
+                    g_camera_dirty = true;
+                    g_lights_dirty = true;
+                    g_world_dirty = true;
+                    g_needs_optix_sync = true;
+                    
                     start_render = true;
                 } catch (const std::exception& e) {
                     SCENE_LOG_WARN(std::string("OptiX Rebuild Failed: ") + e.what());

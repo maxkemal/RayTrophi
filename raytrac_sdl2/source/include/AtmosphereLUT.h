@@ -32,6 +32,11 @@ public:
     float3 sampleTransmittance(float cosTheta, float altitude, float atmosphereHeight) const;
     float3 sampleSkyView(float3 rayDir, float3 sunDir, float Rg, float Rt) const;
 
+    // Host-side accessors for Vulkan uploads
+    const std::vector<float4>& getHostTransmittance() const { return host_transmittance; }
+    const std::vector<float4>& getHostSkyView() const { return host_skyview; }
+    const std::vector<float4>& getHostMultiScatter() const { return host_multi_scatter; }
+
 private:
     void cleanup();
     

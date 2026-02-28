@@ -2,6 +2,7 @@
 #include "globals.h"
 #include "Renderer.h"
 #include "OptixWrapper.h"
+#include "Backend/IBackend.h"
 #include "AssimpLoader.h"
 #include "Triangle.h"
 #include "OptixAccelManager.h"
@@ -297,8 +298,8 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     // If we only call uploadHairToGPU, old meshes from previous projects may linger
     // in the AccelManager's internal instance list, causing slowness even if
     // they aren't visible.
-    if (render_settings.use_optix) {
-        renderer.rebuildOptiXGeometry(scene, renderer.optix_gpu_ptr);
+    if (render_settings.use_optix && renderer.m_backend) {
+        renderer.rebuildBackendGeometry(scene);
     }
 
 
@@ -703,7 +704,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
 
 bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                                   RenderSettings& settings, Renderer& renderer, 
-                                  OptixWrapper* optix_gpu,
+                                  Backend::IBackend* backend,
                                   std::function<void(int, const std::string&)> progress_callback) {
     
     if (progress_callback) progress_callback(0, "Opening project file with turbo parser...");
@@ -726,12 +727,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // Clear current project and scene
     if (progress_callback) progress_callback(5, "Clearing scene...");
     
-    if (optix_gpu) {
-        cudaError_t err = cudaDeviceSynchronize();
-        if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("cudaDeviceSynchronize failed: " + std::string(cudaGetErrorString(err)));
-        }
-        cudaGetLastError();
+    if (backend) {
+        backend->waitForCompletion();
     }
     
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -747,7 +744,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     scene.addCamera(temp_camera);
     
     renderer.resetCPUAccumulation();
-    if (optix_gpu) optix_gpu->resetAccumulation();
+    if (backend) backend->resetAccumulation();
     
     try {
 
@@ -1132,17 +1129,17 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         renderer.updateAnimationWithGraph(scene, 0.0f, true);
     }
 
-    if (optix_gpu) {
+    if (backend) {
         if (progress_callback) progress_callback(95, "Uploading to GPU...");
-        renderer.rebuildOptiXGeometry(scene, optix_gpu);
-        if (!renderer.finalBoneMatrices.empty() && optix_gpu && optix_gpu->isUsingTLAS()) {
-             optix_gpu->updateTLASGeometry(scene.world.objects, renderer.finalBoneMatrices);
+        renderer.rebuildBackendGeometry(scene);
+        if (!renderer.finalBoneMatrices.empty()) {
+            backend->updateSceneGeometry(scene.world.objects, renderer.finalBoneMatrices);
         }
-        optix_gpu->setLightParams(scene.lights);
+        backend->setLights(scene.lights);
         if (scene.camera) {
-            optix_gpu->setCameraParams(*scene.camera);
+            renderer.syncCameraToBackend(*scene.camera);
         }
-        optix_gpu->resetAccumulation();
+        backend->resetAccumulation();
     }
     
     g_needs_geometry_rebuild = true;
@@ -1150,10 +1147,10 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
-
+    
     if (scene.camera) {
         scene.camera->update_camera_vectors();
-        if (optix_gpu) optix_gpu->setCameraParams(*scene.camera);
+        if (backend) renderer.syncCameraToBackend(*scene.camera);
     }
     
     if (progress_callback) progress_callback(100, "Done.");
@@ -1166,7 +1163,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 // ============================================================================
 
 bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
-                                  Renderer& renderer, OptixWrapper* optix_gpu,
+                                  Renderer& renderer, Backend::IBackend* backend,
                                   std::function<void(int, const std::string&)> progress_callback,
                                   bool rebuild) {
     if (!fs::exists(filepath)) {
@@ -1199,7 +1196,7 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
 
     // Load with Assimp - append mode (don't clear existing scene)
     // AssimpLoader usually just takes time, ideally we'd pass progress callback into it too
-    renderer.create_scene(scene, optix_gpu, filepath, progress_callback, true, import_prefix);  // append = true, import_prefix = unique id
+    renderer.create_scene(scene, backend, filepath, progress_callback, true, import_prefix);  // append = true, import_prefix = unique id
     
     if (progress_callback) progress_callback(80, "Processing objects...");
 
@@ -1246,14 +1243,14 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
         renderer.rebuildBVH(scene, render_settings.UI_use_embree);
         renderer.resetCPUAccumulation();
         
-        if (optix_gpu) {
+        if (backend) {
             if (progress_callback) progress_callback(95, "Uploading to GPU...");
-            renderer.rebuildOptiXGeometry(scene, optix_gpu);
-            optix_gpu->setLightParams(scene.lights);
+            renderer.rebuildBackendGeometry(scene);
+            backend->setLights(scene.lights);
             if (scene.camera) {
-                optix_gpu->setCameraParams(*scene.camera);
+                renderer.syncCameraToBackend(*scene.camera);
             }
-            optix_gpu->resetAccumulation();
+            backend->resetAccumulation();
         }
     }
     
@@ -1303,7 +1300,7 @@ bool ProjectManager::importTexture(const std::string& filepath) {
 
 uint32_t ProjectManager::addProceduralObject(ProceduralMeshType type, const std::string& name,
                                               const Matrix4x4& transform, SceneData& scene,
-                                              Renderer& renderer, OptixWrapper* optix_gpu) {
+                                              Renderer& renderer, Backend::IBackend* backend) {
     uint32_t id = g_project.generateObjectId();
     
     ProceduralObjectData proc;

@@ -857,7 +857,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         if (gas->render_path == GasVolume::VolumeRenderPath::VDBUnified) {
             SceneUI::syncVDBVolumesToGPU(ui_ctx); // Unified path sync
         } else {
-            ui_ctx.renderer.updateOptiXGasVolumes(scene, ui_ctx.optix_gpu_ptr); // Legacy path sync
+            ui_ctx.renderer.updateBackendGasVolumes(scene); // Legacy path sync
         }
         if (ui_ctx.optix_gpu_ptr) ui_ctx.optix_gpu_ptr->resetAccumulation();
         ui_ctx.renderer.resetCPUAccumulation();

@@ -1,8 +1,8 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SCENE UI - CAMERA PANEL
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // This file handles the Camera settings panel content.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 #include "scene_ui.h"
 #include "renderer.h"
@@ -14,9 +14,9 @@
 #include "scene_data.h"
 #include "ProjectManager.h"
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 // CAMERA SETTINGS PANEL CONTENT NOT USING. MOVE THE PRO CAMERA FEATURES 
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 
 /*void SceneUI::drawCameraContent(UIContext& ctx)
 {
@@ -30,9 +30,9 @@
                 std::string label = "Camera #" + std::to_string(i);
                 if (ImGui::Selectable(label.c_str(), is_selected)) {
                     ctx.scene.setActiveCamera(i);
-                    if (ctx.optix_gpu_ptr && ctx.scene.camera) {
-                        ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr && ctx.scene.camera) {
+                        ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                     SCENE_LOG_INFO("Switched to Camera #" + std::to_string(i));
@@ -102,9 +102,9 @@
             SCENE_LOG_INFO("Camera " + prop_name + " keyframe @ frame " + std::to_string(current_frame));
         };
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SECTION 1: TRANSFORM (Position & Target)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     static bool targetLock = true;
     if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
@@ -173,9 +173,9 @@
         ImGui::Spacing();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SECTION 2: PHYSICAL CAMERA (Body + Lens)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (ImGui::CollapsingHeader("Physical Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
@@ -184,9 +184,9 @@
         static int selected_lens = 4;  // Default: 50mm Normal
         static float current_crop = 1.0f;
 
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         // CAMERA BODY (Sensor + Crop Factor)
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         ImGui::TextColored(ImVec4(0.7f, 0.9f, 1.0f, 1.0f), "Camera Body");
 
         ImGui::AlignTextToFramePadding();
@@ -221,9 +221,9 @@
                         ctx.scene.camera->fov = fov;
                         ctx.scene.camera->update_camera_vectors();
 
-                        if (ctx.optix_gpu_ptr) {
-                            ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                     }
@@ -258,9 +258,9 @@
                     ctx.scene.camera->fov = fov;
                     ctx.scene.camera->update_camera_vectors();
 
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -279,9 +279,9 @@
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         // LENS SELECTION
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.5f, 1.0f), "Lens");
 
         ImGui::AlignTextToFramePadding();
@@ -310,7 +310,7 @@
                 if (i > 0 && CameraPresets::LENS_PRESETS[i].category != current_cat) {
                     current_cat = CameraPresets::LENS_PRESETS[i].category;
                     ImGui::Separator();
-                    ImGui::TextDisabled("── %s ──", CameraPresets::getLensCategoryName(current_cat));
+                    ImGui::TextDisabled("�� %s ��", CameraPresets::getLensCategoryName(current_cat));
                 }
 
                 bool is_selected = (selected_lens == (int)i);
@@ -342,9 +342,9 @@
 
                         ctx.scene.camera->update_camera_vectors();
 
-                        if (ctx.optix_gpu_ptr) {
-                            ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                            ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                            ctx.backend_ptr->resetAccumulation();
                         }
                         ctx.renderer.resetCPUAccumulation();
                     }
@@ -377,14 +377,14 @@
         ImGui::Separator();
         ImGui::Spacing();
 
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         // FOV (Manual override or display)
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("FOV");
         ImGui::SameLine(80);
         ImGui::PushItemWidth(-40);
-        bool fov_changed = ImGui::SliderFloat("##CamFOV", &fov, 10.0f, 120.0f, "%.1f°");
+        bool fov_changed = ImGui::SliderFloat("##CamFOV", &fov, 10.0f, 120.0f, "%.1f�");
         ImGui::PopItemWidth();
         ImGui::SameLine();
         if (ImGui::SmallButton("K##KCamFOV")) {
@@ -398,18 +398,18 @@
             ctx.scene.camera->update_camera_vectors();
             selected_lens = 0; // Switch to Custom when manually adjusted
 
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                ctx.backend_ptr->resetAccumulation();
             }
             }
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
         }
 
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         // LENS DISTORTION
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Distortion");
         ImGui::SameLine(80);
@@ -417,9 +417,9 @@
         float dist = ctx.scene.camera->distortion;
         if (ImGui::SliderFloat("##CamDist", &dist, -0.5f, 0.5f, "%.3f")) {
              ctx.scene.camera->distortion = dist;
-             if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                ctx.optix_gpu_ptr->resetAccumulation();
+             if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
@@ -430,9 +430,9 @@
         ImGui::Unindent(8.0f);
         ImGui::Spacing();
    
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SECTION 2.5: CAMERA MODE (Auto / Pro / Cinema)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (ImGui::CollapsingHeader("Camera Mode", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
         
@@ -470,9 +470,9 @@
                 ctx.scene.camera->vignetting_amount = 0.3f;
             }
             
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                ctx.backend_ptr->resetAccumulation();
             }
             ctx.renderer.resetCPUAccumulation();
             ProjectManager::getInstance().markModified();
@@ -487,10 +487,11 @@
         };
         ImGui::TextDisabled("%s", mode_desc[current_mode]);
         
-        // ─────────────────────────────────────────────────────────────────────
+        // ���������������������������������������������������������������������
         // CINEMA MODE EFFECTS (Only visible in Cinema mode)
-        // ─────────────────────────────────────────────────────────────────────
-        if (ctx.scene.camera->camera_mode == CameraMode::Cinema) {
+        // ���������������������������������������������������������������������
+        // === PRO & CINEMA MODE EFFECTS ===
+        if (ctx.scene.camera->camera_mode == CameraMode::Pro || ctx.scene.camera->camera_mode == CameraMode::Cinema) {
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::Spacing();
@@ -499,7 +500,7 @@
             
             // Chromatic Aberration
             bool ca_changed = false;
-            ImGui::Checkbox("Chromatic Aberration##CAEnable", &ctx.scene.camera->enable_chromatic_aberration);
+            ca_changed |= ImGui::Checkbox("Chromatic Aberration##CAEnable", &ctx.scene.camera->enable_chromatic_aberration);
             if (ctx.scene.camera->enable_chromatic_aberration) {
                 ImGui::Indent(16.0f);
                 ImGui::AlignTextToFramePadding();
@@ -514,7 +515,7 @@
             
             // Vignetting
             bool vig_changed = false;
-            ImGui::Checkbox("Vignetting##VigEnable", &ctx.scene.camera->enable_vignetting);
+            vig_changed |= ImGui::Checkbox("Vignetting##VigEnable", &ctx.scene.camera->enable_vignetting);
             if (ctx.scene.camera->enable_vignetting) {
                 ImGui::Indent(16.0f);
                 
@@ -544,7 +545,7 @@
             
             // Camera Shake
             bool shake_changed = false;
-            ImGui::Checkbox("Camera Shake (Handheld)##ShakeEnable", &ctx.scene.camera->enable_camera_shake);
+            shake_changed |= ImGui::Checkbox("Camera Shake (Handheld)##ShakeEnable", &ctx.scene.camera->enable_camera_shake);
             if (ctx.scene.camera->enable_camera_shake) {
                 ImGui::Indent(16.0f);
                 
@@ -576,7 +577,7 @@
                 ImGui::PopItemWidth();
                 
                 // IBIS
-                ImGui::Checkbox("IBIS (Stabilization)", &ctx.scene.camera->ibis_enabled);
+                shake_changed |= ImGui::Checkbox("IBIS (Stabilization)", &ctx.scene.camera->ibis_enabled);
                 if (ctx.scene.camera->ibis_enabled) {
                     ImGui::SameLine();
                     ImGui::PushItemWidth(60);
@@ -588,10 +589,10 @@
             }
             
             // Update GPU if any cinema parameter changed
-            if (ca_changed || vig_changed || shake_changed) {
-                if (ctx.optix_gpu_ptr) {
-                    ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+            if (ca_changed || vig_changed || shake_changed) { ctx.scene.camera->markDirty();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                    ctx.backend_ptr->resetAccumulation();
                 }
                 ctx.renderer.resetCPUAccumulation();
                 ProjectManager::getInstance().markModified();
@@ -602,9 +603,9 @@
         ImGui::Spacing();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SECTION 3: DEPTH OF FIELD
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (ImGui::CollapsingHeader("Depth of Field", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
@@ -671,9 +672,9 @@
                     ctx.scene.camera->update_camera_vectors();
 
                     // Refresh viewport
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -721,9 +722,9 @@
                     ctx.scene.camera->update_camera_vectors();
                     SCENE_LOG_INFO("Focus distance set to: " + std::to_string(distance));
 
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     ctx.renderer.resetCPUAccumulation();
                 }
@@ -738,9 +739,9 @@
                 ctx.scene.camera->update_camera_vectors();
 
                 // Update GPU and reset accumulation for viewport refresh
-                if (ctx.optix_gpu_ptr) {
-                    ctx.optix_gpu_ptr->setCameraParams(*ctx.scene.camera);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                    ctx.backend_ptr->resetAccumulation();
                 }
                 }
                 ctx.renderer.resetCPUAccumulation();
@@ -754,7 +755,14 @@
                 ImGui::TextUnformatted("Blades");
                 ImGui::SameLine(80);
                 ImGui::PushItemWidth(-1);
-                ImGui::SliderInt("##BladeCount", &ctx.scene.camera->blade_count, 3, 12);
+                if (ImGui::SliderInt("##BladeCount", &ctx.scene.camera->blade_count, 3, 12)) {
+                    if (ctx.scene.camera) {
+                        ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+                        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                    }
+                    ctx.renderer.resetCPUAccumulation();
+                    ProjectManager::getInstance().markModified();
+                }
                 ImGui::PopItemWidth();
                 ImGui::TextDisabled("More blades = rounder bokeh");
                 ImGui::TreePop();
@@ -774,9 +782,9 @@
         ImGui::Spacing();
     
     
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SECTION 4: CONTROLS & ACTIONS
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (ImGui::CollapsingHeader("Controls", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8.0f);
 
@@ -854,9 +862,9 @@
         ImGui::Unindent(8.0f);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     // SECTION 5: CAMERA HUD (Viewport Overlay Controls)
-    // ═══════════════════════════════════════════════════════════════════════════
+    // ===========================================================================
     if (ImGui::CollapsingHeader("Camera HUD")) {
         ImGui::Indent(8.0f);
 

@@ -354,10 +354,18 @@ void World::setNishitaParams(const NishitaSkyParams& params) {
         data.advanced.env_overlay_tex = savedTex;
     }
 
-    // Trigger LUT precomputation
+    // DEFERRED: Mark LUT as needing update instead of computing immediately.
+    // This prevents 50K-pixel ray march from running on every UI slider tick.
+    // Main loop calls flushLUT() once per frame.
     if (atmosphere_lut) {
-        atmosphere_lut->precompute(data.nishita);
+        lut_dirty = true;
     }
+}
+
+void World::flushLUT() {
+    if (!lut_dirty || !atmosphere_lut) return;
+    atmosphere_lut->precompute(data.nishita);
+    lut_dirty = false;
 }
 
 void World::setColor(const Vec3& color) {
@@ -489,9 +497,9 @@ void World::setSunDirection(const Vec3& direction) {
     
     data.nishita.sun_azimuth = azimDeg;
     
-    // CRITICAL: Trigger LUT update so change is visible immediately
+    // DEFERRED: Mark LUT dirty instead of immediate precompute
     if (atmosphere_lut) {
-        atmosphere_lut->precompute(data.nishita);
+        lut_dirty = true;
     }
 }
 

@@ -18,7 +18,7 @@
 // Forward define
 struct RenderSettings;
 class Renderer;
-class OptixWrapper;
+namespace Backend { class IBackend; }
 
 class SceneSerializer {
 public:
@@ -27,6 +27,6 @@ public:
 
     // .rts dosyasÄ±ndan sahneyi yÃ¼kler
     // Ã–nce modeli yÃ¼kler (eÄŸer varsa), sonra ayarlarÄ± uygular
-    static bool Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, OptixWrapper* optix_gpu, const std::string& filepath);
+    static bool Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, Backend::IBackend* backend, const std::string& filepath);
 };
 

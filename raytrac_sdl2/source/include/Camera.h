@@ -263,43 +263,13 @@ public:
     // Get physical exposure multiplier
     // This multiplies the render result (signal + variance together!)
     float getPhysicalExposureMultiplier() const {
-        if (!use_physical_exposure) return 1.0f;
-        
-        // Get f-stop from aperture or preset
-        float f_number = 2.8f; // default
-        if (fstop_preset_index > 0) {
-            // Will use CameraPresets later
-            switch(fstop_preset_index) {
-                case 1: f_number = 1.2f; break;
-                case 2: f_number = 1.4f; break;
-                case 3: f_number = 1.8f; break;
-                case 4: f_number = 2.0f; break;
-                case 5: f_number = 2.8f; break;
-                case 6: f_number = 4.0f; break;
-                case 7: f_number = 5.6f; break;
-                case 8: f_number = 8.0f; break;
-                case 9: f_number = 11.0f; break;
-                case 10: f_number = 16.0f; break;
-                case 11: f_number = 22.0f; break;
-            }
+        if (!use_physical_exposure) {
+            return std::pow(2.0f, ev_compensation);
         }
         
-        // Shutter time in seconds
-        float shutter_seconds = 1.0f / shutter_speed;
-        
-        // ISO amplification factor (relative to native ISO)
-        // THIS IS THE KEY: ISO amplifies signal AND variance together!
-        float iso_gain = static_cast<float>(iso) / static_cast<float>(native_iso);
-        
-        // Aperture factor: Light ∝ 1/N²
-        float aperture_factor = 1.0f / (f_number * f_number);
-        
-        // Shutter factor: Light ∝ time (normalized to 1/250s)
-        float shutter_factor = shutter_seconds / (1.0f / 250.0f);
-        
-        // Total exposure = Light gathered × Amplification
-        const float reference_scale = 2.5f; // Scene brightness calibration
-        return aperture_factor * shutter_factor * iso_gain * reference_scale;
+        // Return 0.0 to signal the backend to use its own physical presets
+        // Or return a baseline if you want a fallback
+        return 0.0f; 
     }
     
     // Get recommended sample count based on ISO

@@ -353,10 +353,26 @@ __device__ float3 hair_bsdf_eval(
         bsdf = bsdf * (1.0f - mat.tint) + tinted * mat.tint;
     }
     
-    // --- Apply Coat Layer (fur gloss) ---
+    // --- Apply Coat Layer (wet look / fur gloss) ---
+    // Coat = additional specular lobe from water/gel film on hair surface
     if (mat.coat > 0.0f) {
-        float coatF = fresnel_dielectric(cosThetaO, 1.35f) * mat.coat;
-        bsdf = bsdf * (1.0f - coatF) + mat.coatTint * (coatF * 0.5f);
+        float coatIOR = 1.33f; // Water film IOR
+        float coatFresnel = fresnel_dielectric(cosThetaO, coatIOR) * mat.coat;
+        
+        // Coat specular: narrow Gaussian lobe (smooth water surface)
+        float coatRoughness = fmaxf(mat.roughness * 0.3f, 0.02f);
+        float coatVariance = coatRoughness * coatRoughness;
+        float sinThetaSum_coat = sinThetaI + sinThetaO; // No cuticle shift for coat
+        float M_coat = gaussian(sinThetaSum_coat, coatVariance);
+        
+        float phi_coat = -2.0f * gammaO; // Same as R lobe reflection angle
+        float s_coat = fmaxf(coatRoughness * 0.8f * 0.5f, 0.01f);
+        float N_coat = eval_N(phi, s_coat, phi_coat);
+        
+        float3 coatSpec = mat.coatTint * (coatFresnel * M_coat * N_coat);
+        
+        // Energy conservation: dim base BSDF by coat reflection
+        bsdf = bsdf * (1.0f - coatFresnel) + coatSpec;
     }
     
     // Add emission if present

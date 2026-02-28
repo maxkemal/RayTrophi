@@ -287,10 +287,21 @@ namespace Hair {
             bsdf = bsdf * (1.0f - params.tint) + tinted * params.tint;
         }
 
-        // Apply coat layer (fur gloss)
+        // Apply coat layer (wet look / fur gloss)
+        // Coat = additional specular R-like lobe from water/gel film on hair surface
         if (params.coat > 0.0f) {
-            float coatF = fresnel(cosThetaO, 1.35f) * params.coat;
-            bsdf = bsdf * (1.0f - coatF) + params.coatTint * coatF * 0.5f;
+            float coatIOR = 1.33f; // Water film IOR
+            float coatFresnel = fresnel(cosThetaO, coatIOR) * params.coat;
+            
+            // Coat specular: narrow Gaussian lobe (smooth water surface)
+            float coatRoughness = std::max(params.roughness * 0.3f, 0.02f); // Much smoother than hair
+            float M_coat = evalM(coatRoughness, sinThetaI, sinThetaO, cosThetaD);
+            float N_coat = evalN(coatRoughness * 0.8f, phi, phi_R(gammaO, gammaT));
+            
+            Vec3 coatSpec = params.coatTint * (coatFresnel * M_coat * N_coat);
+            
+            // Energy conservation: dim base BSDF by coat reflection
+            bsdf = bsdf * (1.0f - coatFresnel) + coatSpec;
         }
 
         // Add emission

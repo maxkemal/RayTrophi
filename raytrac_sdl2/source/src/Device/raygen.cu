@@ -51,7 +51,8 @@ extern "C" __global__ void __raygen__rg() {
             current_variance > 0.0f && 
             cv < effective_threshold) {
             float3 prev_color = make_float3(prev.x, prev.y, prev.z);
-            optixLaunchParams.framebuffer[pixel_index] = make_color(prev_color);
+            // Apply exposure to converged pixels too
+            optixLaunchParams.framebuffer[pixel_index] = make_color(prev_color * optixLaunchParams.camera.exposure_factor);
             if (optixLaunchParams.converged_count != nullptr) {
                 atomicAdd(optixLaunchParams.converged_count, 1);
             }
@@ -94,20 +95,6 @@ extern "C" __global__ void __raygen__rg() {
     }
 
     float3 new_color = color_sum / float(samples_this_pass);
-    new_color *= optixLaunchParams.camera.exposure_factor;
-    
-    if (optixLaunchParams.camera.vignetting_enabled) {
-        float norm_x = (float(i) / float(optixLaunchParams.image_width)) * 2.0f - 1.0f;
-        float norm_y = (float(j) / float(optixLaunchParams.image_height)) * 2.0f - 1.0f;
-        float dist_sq = norm_x * norm_x + norm_y * norm_y;
-        float vignette_radius = 1.414f;
-        float normalized_dist = sqrtf(dist_sq) / vignette_radius;
-        float falloff = optixLaunchParams.camera.vignetting_falloff;
-        float vignette_factor = 1.0f - optixLaunchParams.camera.vignetting_amount * powf(normalized_dist, falloff);
-        vignette_factor = fmaxf(vignette_factor, 0.0f);
-        new_color *= vignette_factor;
-    }
-
     float3 blended_color = new_color;
     float new_total_samples = float(samples_this_pass);
     
@@ -134,5 +121,20 @@ extern "C" __global__ void __raygen__rg() {
         variance_buffer[pixel_index] = fminf(fmaxf(updated_variance, 0.0f), 100.0f);
     }
     
-    optixLaunchParams.framebuffer[pixel_index] = make_color(blended_color);
+    // Apply exposure only for display
+    float3 exposed_color = blended_color * optixLaunchParams.camera.exposure_factor;
+
+    if (optixLaunchParams.camera.vignetting_enabled) {
+        float norm_x = (float(i) / float(optixLaunchParams.image_width)) * 2.0f - 1.0f;
+        float norm_y = (float(j) / float(optixLaunchParams.image_height)) * 2.0f - 1.0f;
+        float dist_sq = norm_x * norm_x + norm_y * norm_y;
+        float vignette_radius = 1.414f;
+        float normalized_dist = sqrtf(dist_sq) / vignette_radius;
+        float falloff = optixLaunchParams.camera.vignetting_falloff;
+        float vignette_factor = 1.0f - optixLaunchParams.camera.vignetting_amount * powf(normalized_dist, falloff);
+        vignette_factor = fmaxf(vignette_factor, 0.0f);
+        exposed_color *= vignette_factor;
+    }
+
+    optixLaunchParams.framebuffer[pixel_index] = make_color(exposed_color);
 }

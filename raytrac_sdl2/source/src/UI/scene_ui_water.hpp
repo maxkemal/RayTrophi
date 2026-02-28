@@ -39,8 +39,8 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
         // Rebuild BVH after adding geometry
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-            ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+        if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+            ctx.renderer.rebuildBackendGeometry(ctx.scene);
         }
         SCENE_LOG_INFO("[Water] Created new water plane");
     }
@@ -711,8 +711,8 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         // Rebuild BVH after mesh change
                         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                         ctx.renderer.resetCPUAccumulation();
-                        if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                            ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                        if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                            ctx.renderer.rebuildBackendGeometry(ctx.scene);
                         }
                     }
                 } else {
@@ -812,8 +812,8 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                     
                     // Rebuild BVH for correct raytracing
                     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                    if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                        ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                    if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                        ctx.renderer.rebuildBackendGeometry(ctx.scene);
                     }
                 }
                 
@@ -823,7 +823,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 // Reset accumulation and sync GPU materials for real-time preview
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.optix_gpu_ptr) {
-                    ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
                     ctx.optix_gpu_ptr->resetAccumulation();
                 }
             }
@@ -838,7 +838,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                 ctx.renderer.resetCPUAccumulation();
                 if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                    ctx.renderer.rebuildBackendGeometry(ctx.scene);
                 }
                 selected_water_idx = -1;
             }

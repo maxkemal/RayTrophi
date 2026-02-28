@@ -197,8 +197,8 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 
                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                     ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                     ctx.renderer.rebuildBackendGeometry(ctx.scene);
                 }
             }
         }
@@ -314,8 +314,8 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
                 // Rebuild BVH and OptiX
                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                    ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                    ctx.renderer.rebuildBackendGeometry(ctx.scene);
                 }
                 SCENE_LOG_INFO("[Scatter] Applied Y-Offset of " + std::to_string(global_y_offset) + " to " + std::to_string(active_group->instances.size()) + " instances.");
             }
@@ -339,8 +339,8 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
             // Rebuild BVH and OptiX
             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+            if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                ctx.renderer.rebuildBackendGeometry(ctx.scene);
             }
         }
 
@@ -355,8 +355,8 @@ void SceneUI::drawScatterBrushPanel(UIContext& ctx) {
             // Rebuild BVH and OptiX
             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+            if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                ctx.renderer.rebuildBackendGeometry(ctx.scene);
             }
         }
 
@@ -680,8 +680,8 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
              // Rebuild BVH and OptiX (Once per stroke)
              ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
              ctx.renderer.resetCPUAccumulation();
-             if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                 ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+             if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                 ctx.renderer.rebuildBackendGeometry(ctx.scene);
              }
              SCENE_LOG_INFO("[Foliage] Committed stroke.");
         }
@@ -803,9 +803,9 @@ void SceneUI::handleTerrainFoliageBrush(UIContext& ctx) {
              ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
              ctx.renderer.resetCPUAccumulation();
              
-             if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
+             if (ctx.backend_ptr && ctx.render_settings.use_optix) {
                  // Fast instance update
-                 ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+                 ctx.renderer.rebuildBackendGeometry(ctx.scene);
              }
         }
         
@@ -893,8 +893,8 @@ void SceneUI::handleScatterBrush(UIContext& ctx) {
             // Rebuild BVH & OptiX (Only once per stroke!)
             ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
-                ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+            if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                ctx.renderer.rebuildBackendGeometry(ctx.scene);
             }
             
             SCENE_LOG_INFO("[Scatter] Committed stroke: " + std::to_string(added_count) + " instances.");

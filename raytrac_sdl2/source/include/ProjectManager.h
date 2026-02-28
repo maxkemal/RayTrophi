@@ -27,6 +27,7 @@ enum class TextureType;
 // Forward declarations
 class Renderer;
 class OptixWrapper;
+namespace Backend { class IBackend; }
 
 // ============================================================================
 // RayTrophi Project Manager
@@ -63,7 +64,7 @@ public:
     // Load project from .rtp file
     // Clears current scene and loads everything from package
     bool openProject(const std::string& filepath, SceneData& scene, 
-                     RenderSettings& settings, Renderer& renderer, OptixWrapper* optix_gpu,
+                     RenderSettings& settings, Renderer& renderer, Backend::IBackend* backend,
                      std::function<void(int, const std::string&)> progress_callback = nullptr);
     
     // ========================================================================
@@ -73,7 +74,7 @@ public:
     // Import a 3D model file into the project
     // Copies file to package, loads geometry, adds to scene
     bool importModel(const std::string& filepath, SceneData& scene,
-                     Renderer& renderer, OptixWrapper* optix_gpu,
+                     Renderer& renderer, Backend::IBackend* backend,
                      std::function<void(int, const std::string&)> progress_callback = nullptr,
                      bool rebuild = true);
     
@@ -87,7 +88,7 @@ public:
     // Add a procedural object (Cube, Plane, etc.)
     uint32_t addProceduralObject(ProceduralMeshType type, const std::string& name,
                                  const Matrix4x4& transform, SceneData& scene,
-                                 Renderer& renderer, OptixWrapper* optix_gpu);
+                                 Renderer& renderer, Backend::IBackend* backend);
     
     // Remove procedural object by ID
     bool removeProceduralObject(uint32_t id, SceneData& scene);

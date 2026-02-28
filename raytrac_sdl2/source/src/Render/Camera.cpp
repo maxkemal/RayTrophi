@@ -15,8 +15,11 @@ Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, f
 }
 
 Camera::Camera()
-    : aperture(0.0), aspect(0.0), aspect_ratio(0.0), blade_count(0), far_dist(0.0),
-    focus_dist(0.0), fov(0.0), lens_radius(0.0), near_dist(0.0), vfov(0.0) {
+    : aperture(0.0), aspect(1.77f), aspect_ratio(1.77f), blade_count(6), far_dist(1000.0f),
+    focus_dist(10.0f), fov(45.0f), lens_radius(0.0), near_dist(0.1f), vfov(45.0f),
+    iso_preset_index(1), shutter_preset_index(5), fstop_preset_index(4),
+    auto_exposure(true), use_physical_exposure(false), enable_motion_blur(false),
+    enable_vignetting(false), enable_chromatic_aberration(false) {
 }
 Ray Camera::get_ray(float s, float t) const {
     float use_s = s;
@@ -53,6 +56,7 @@ int Camera::random_int(int min, int max) const {
     return dis(gen);
 }
 void Camera::update_camera_vectors() {
+    lens_radius = aperture * 0.5f; // [DOF FIX] Ensure lens_radius is in sync with aperture
     Vec3 view = lookat - lookfrom;
     if (view.length_squared() < 1e-8)
         view = Vec3(0, 0, -1);
@@ -78,20 +82,22 @@ void Camera::update_camera_vectors() {
     // We use a fixed sensor height reference (24mm) to map "Wide Angle" feel consistently.
     // This allows the distortion to feel "physically correct" relative to standard FOV.
     
-    // Note: theta is already calculated above as (vfov * PI / 180)
-    float est_f = (24.0f / 2.0f) / tan(theta / 2.0f);
-    
-    if (est_f < 50.0f) {
-         // Barrel Distortion for Wide Angle (< 50mm)
-         // Quadratic curve: stronger effect as f decreases (e.g. 16mm is visible)
-         float ratio = (50.0f - est_f) / 50.0f;
-         distortion = -0.25f * (ratio * ratio); 
-    } else {
-         // Pincushion Distortion for Telephoto (> 50mm)
-         // Linear, mild effect
-         float ratio = (est_f - 50.0f) / 200.0f;
-         distortion = 0.05f * ratio;
-         if (distortion > 0.05f) distortion = 0.05f; // Cap at max
+    if (auto_lens_characteristics) {
+        // Note: theta is already calculated above as (vfov * PI / 180)
+        float est_f = (24.0f / 2.0f) / tan(theta / 2.0f);
+        
+        if (est_f < 50.0f) {
+             // Barrel Distortion for Wide Angle (< 50mm)
+             // Quadratic curve: stronger effect as f decreases (e.g. 16mm is visible)
+             float ratio = (50.0f - est_f) / 50.0f;
+             distortion = -0.25f * (ratio * ratio); 
+        } else {
+             // Pincushion Distortion for Telephoto (> 50mm)
+             // Linear, mild effect
+             float ratio = (est_f - 50.0f) / 200.0f;
+             distortion = 0.05f * ratio;
+             if (distortion > 0.05f) distortion = 0.05f; // Cap at max
+        }
     }
     // -------------------------------------------------------------------------
 

@@ -21,7 +21,8 @@
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
-
+#include "Backend/IBackend.h"
+#include "Backend/OptixBackend.h"
 using json = nlohmann::json;
 
 // Helper to convert Vec3 to JSON array
@@ -222,7 +223,7 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     }
 }
 
-bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, OptixWrapper* optix_gpu, const std::string& filepath) {
+bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, Backend::IBackend* backend, const std::string& filepath) {
     simdjson::dom::parser parser;
     simdjson::dom::element root;
     
@@ -244,7 +245,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     // Clear current scene
     scene.clear();
     renderer.resetCPUAccumulation();
-    if (optix_gpu) optix_gpu->resetAccumulation();
+    if (backend) backend->resetAccumulation();
 
     // 2. Apply Camera
     simdjson::dom::element cam;
@@ -483,10 +484,12 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     // 10. Rebuild All
     renderer.rebuildBVH(scene, settings.UI_use_embree);
     
-    if (optix_gpu) {
-        renderer.rebuildOptiXGeometry(scene, optix_gpu);
-        optix_gpu->setLightParams(scene.lights);
-        if (scene.camera) optix_gpu->setCameraParams(*scene.camera);
+    if (backend) {
+        renderer.rebuildBackendGeometry(scene);
+        backend->setLights(scene.lights);
+        if (scene.camera) {
+            renderer.syncCameraToBackend(*scene.camera);
+        }
     }
 
     SCENE_LOG_INFO("Scene loaded with turbo parser from: " + filepath);

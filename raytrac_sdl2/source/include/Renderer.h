@@ -84,7 +84,9 @@ enum class BVHType {
 };
 
 class OptixWrapper;
+namespace Backend { class IBackend; }
 struct UIContext;
+
 
 class Renderer {
 public:
@@ -113,7 +115,8 @@ public:
     void render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer, 
         const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
         const std::string& output_folder = "", bool use_denoiser = false, float denoiser_blend = 0.9f,
-        OptixWrapper* optix_gpu = nullptr, bool use_optix = false, UIContext* ui_ctx = nullptr);
+        Backend::IBackend* backend = nullptr, bool use_optix = false, UIContext* ui_ctx = nullptr);
+
     bool updateAnimationState(SceneData& scene, float time, bool apply_cpu_skinning = true, bool force_bind_pose = false);
     std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame
     
@@ -131,33 +134,36 @@ public:
     bool useNewAnimationSystem = false;
     // void create_scene(SceneData& scene,OptixWrapper* optix_gpu_ptr = nullptr);
 
-    void setOptixWrapper(OptixWrapper* ptr) { optix_gpu_ptr = ptr; }
+    void setBackend(Backend::IBackend* backend) { m_backend = backend; }
+
 
     void rebuildBVH(SceneData& scene, bool use_embree);
     void updateBVH(SceneData& scene, bool use_embree);
    
-    void create_scene(SceneData& scene, OptixWrapper* optix_gpu_ptr, const std::string& model_path,
+    void create_scene(SceneData& scene, Backend::IBackend* backend, const std::string& model_path,
         std::function<void(int progress, const std::string& stage)> progress_callback = nullptr,
         bool append = false, const std::string& import_prefix = "");  // If true, don't clear scene before loading
 
-    // Rebuild OptiX geometry after scene modifications (deletion/addition)
-    void rebuildOptiXGeometry(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+    // Rebuild backend geometry after scene modifications (deletion/addition)
+    void rebuildBackendGeometry(SceneData& scene);
     
-    // VARIANT: Rebuild OptiX geometry with a specific object list (to avoid race conditions)
-    void rebuildOptiXGeometryWithList(const std::vector<std::shared_ptr<Hittable>>& objects, OptixWrapper* optix_gpu_ptr);
+    // VARIANT: Rebuild backend geometry with a specific object list (to avoid race conditions)
+    void rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<Hittable>>& objects);
 
-    // Sync all volumetric data (VDB, Gas) to GPU - Moved to VolumetricRenderer
-
-    // Update OptiX materials only (fast path - no geometry rebuild)
+    // Update backend materials only (fast path - no geometry rebuild)
     // Use when only material properties change (color, roughness, volumetric params, etc.)
-    void updateOptiXMaterialsOnly(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+    void updateBackendMaterials(SceneData& scene);
 
-    // Update OptiX Gas Volumes (fast path - no geometry rebuild)
+    // Update Gas Volumes on backend (fast path - no geometry rebuild)
     // Updates texture handles, transforms, and shader parameters for gas volumes
-    void updateOptiXGasVolumes(SceneData& scene, OptixWrapper* optix_gpu_ptr);
+    void updateBackendGasVolumes(SceneData& scene);
 
     // Fast update for mesh material binding (avoids full rebuild)
     void updateMeshMaterialBinding(const std::string& node_name, int old_mat_id, int new_mat_id);
+    
+    // Helper to sync camera state to backend
+    void syncCameraToBackend(const Camera& cam);
+
    
     void initializeBuffers(int image_width, int image_height);
     World world;
@@ -184,7 +190,8 @@ public:
 
     bool hideInterpolatedHair = false; // [NEW] Toggle to hide child hairs (interpolated) for performance during grooming
 
-    OptixWrapper* optix_gpu_ptr = nullptr; // Set externally via set_optix()   
+    Backend::IBackend* m_backend = nullptr; 
+
 private:
     std::vector<float> variance_buffer;
     static constexpr size_t CACHE_SIZE = 8;

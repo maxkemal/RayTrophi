@@ -24,6 +24,7 @@
 #include "SceneSerializer.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
+#include "Backend/IBackend.h"
 #include "ColorProcessingParams.h"
 #include "SceneSelection.h"
 #include "scene_data.h"    // Added explicit include
@@ -929,20 +930,37 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Render Engine", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
                         extern bool g_hasOptix;
-                        if (!g_hasOptix) {
-                            ImGui::BeginDisabled();
-                            ctx.render_settings.use_optix = false; // Force false if not supported
-                        }
-                        if (ImGui::Checkbox("Use OptiX (GPU Acceleration)", &ctx.render_settings.use_optix)) {
-                            if (!ctx.render_settings.use_optix) { extern bool g_cpu_sync_pending; g_cpu_sync_pending = true; }
+                        
+                        int engine_type = 0;
+                        if (ctx.render_settings.use_optix) engine_type = 1;
+                        if (ctx.render_settings.use_vulkan) engine_type = 2;
+                        
+                        const char* engines[] = { "CPU (Embree)", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
+                        
+                        if (ImGui::Combo("Engine", &engine_type, engines, IM_ARRAYSIZE(engines))) {
+                            extern bool g_hasVulkan;
+                            if (engine_type == 2 && !g_hasVulkan) {
+                                engine_type = g_hasOptix ? 1 : 0;
+                            }
+                            ctx.render_settings.use_optix = (engine_type == 1);
+                            ctx.render_settings.use_vulkan = (engine_type == 2);
+                            extern bool g_cpu_sync_pending; 
+                            g_cpu_sync_pending = true;
+                            
+                            ctx.render_settings.backend_changed = true;
                             ctx.start_render = true;
                         }
-                        if (!g_hasOptix) {
-                            ImGui::EndDisabled();
-                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  [No Compatible GPU found]");
+                        
+                        if (!g_hasOptix && engine_type == 1) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU found]");
                         }
                         
-                        if (!ctx.render_settings.use_optix) {
+                        extern bool g_hasVulkan;
+                        if (!g_hasVulkan && engine_type == 2) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[Vulkan Not Supported]");
+                        }
+                        
+                        if (!ctx.render_settings.use_optix && !ctx.render_settings.use_vulkan) {
                             const char* bvh_items[] = { "Custom RayTrophi BVH", "Intel Embree (Recommended)" };
                             int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
                             if (ImGui::Combo("CPU BVH Type", &current_bvh, bvh_items, 2)) {
@@ -950,7 +968,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                                 ctx.start_render = true;
                             }
-                          
                         }
                         UIWidgets::EndSection();
                     }
@@ -1288,8 +1305,10 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     ctx.renderer.resetCPUAccumulation();
                     
                     // Sync to GPU immediately for live feedback
-                    ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                    ctx.start_render = true; // [NEW] Trigger render pass immediately
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.updateBackendMaterials(ctx.scene);
+                        ctx.start_render = true; // [NEW] Trigger render pass immediately
+                    }
                 }
             } break;
         }
@@ -1527,11 +1546,13 @@ void SceneUI::draw(UIContext& ctx)
     handleSceneInteraction(ctx, gizmo_hit);
     processDeferredSceneUpdates(ctx);
     
-    // Update Water Animation
-    if (WaterManager::getInstance().update(ImGui::GetIO().DeltaTime)) {
-         if (ctx.optix_gpu_ptr) {
-             ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-             ctx.optix_gpu_ptr->resetAccumulation();
+     if (WaterManager::getInstance().update(ImGui::GetIO().DeltaTime)) {
+         if (ctx.backend_ptr) {
+             ctx.renderer.updateBackendMaterials(ctx.scene);
+             // Logic for resetAccumulation should ideally be in backend or handled via renderer
+             // For now, if we still need to talk to optix wrapper specifically, we go through backend
+             // if (auto optix = dynamic_cast<Backend::OptixBackend*>(ctx.backend_ptr)) optix->getOptixWrapper()->resetAccumulation();
+             ctx.backend_ptr->resetAccumulation();
          }
          // Also reset CPU accumulation if needed, though water FFT is mostly for GPU?
          // If CPU supports it (sampleOceanHeight), maybe reset CPU too.
@@ -2125,9 +2146,9 @@ void SceneUI::processDeferredSceneUpdates(UIContext& ctx)
         ctx.renderer.resetCPUAccumulation();
         
         // OPTIMIZATION: Only update OptiX geometry when OptiX rendering is enabled
-        if (ctx.render_settings.use_optix && ctx.optix_gpu_ptr) {
-            ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.render_settings.use_optix && ctx.backend_ptr) {
+            ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
+            ctx.backend_ptr->resetAccumulation();
         }
         is_bvh_dirty = false;
     }
@@ -2508,7 +2529,7 @@ void SceneUI::drawRenderWindow(UIContext& ctx) {
         } else {
             if (UIWidgets::PrimaryButton("Render", ImVec2(60, 0))) {
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                 ctx.render_settings.is_final_render_mode = true;
                 ctx.start_render = true; 
             }
@@ -2820,18 +2841,18 @@ void SceneUI::performNewProject(UIContext& ctx) {
      // 4. Reset Rendering State
      ctx.sample_count = 0;
      ctx.renderer.resetCPUAccumulation();
-     if (ctx.optix_gpu_ptr) {
-         ctx.optix_gpu_ptr->resetAccumulation();
+     if (ctx.backend_ptr) {
+         ctx.backend_ptr->resetAccumulation();
          // Explicitly clear GPU VDB buffer
          syncVDBVolumesToGPU(ctx); // Sends empty list since scene.vdb_volumes is cleared
      }
      
      // 5. Create Default Scene (Camera, Ground Plane, default light)
-     createDefaultScene(ctx.scene, ctx.renderer, ctx.optix_gpu_ptr);
+     createDefaultScene(ctx.scene, ctx.renderer, ctx.backend_ptr);
      
      ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-     if (ctx.optix_gpu_ptr) {
-         ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+     if (ctx.backend_ptr) {
+         ctx.renderer.rebuildBackendGeometry(ctx.scene);
      }
      if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
      
@@ -2909,7 +2930,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             
             if (ext == ".rtp") {
-                g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr,
+                g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.backend_ptr,
                     [this](int p, const std::string& s) {
                         scene_loading_progress = p;
                         scene_loading_stage = s;
@@ -2983,13 +3004,15 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                     }
                 }
             } else {
-                SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.optix_gpu_ptr, filepath);
+                SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.backend_ptr, filepath);
             }
             
             invalidateCache();
             active_model_path = g_ProjectManager.getProjectName();
             
-            if (ctx.optix_gpu_ptr && g_hasCUDA) cudaDeviceSynchronize();
+            if (ctx.backend_ptr && g_hasCUDA) {
+                 ctx.backend_ptr->waitForCompletion();
+            }
             
             // Register animation clips with AnimationController
             // This ensures bone animations work immediately after project load
@@ -3258,9 +3281,9 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
 
     if (changed) {
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
+        if (ctx.backend_ptr) {
             syncVDBVolumesToGPU(ctx); 
-            ctx.optix_gpu_ptr->resetAccumulation();
+            ctx.backend_ptr->resetAccumulation();
         }
     }
 

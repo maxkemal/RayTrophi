@@ -1,8 +1,8 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SCENE UI - MATERIAL EDITOR
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // This file handles the Material properties panel.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 #include "scene_ui.h"
 #include "renderer.h"
@@ -27,12 +27,12 @@ void SceneUI::resetMaterialUI() {
     showMatNodeEditor = false;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // MATERIAL & TEXTURE EDITOR PANEL
-// ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
+// ===============================================================================
 // IMPLEMENTATION: manageTextureGraveyard
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 extern bool g_optix_rebuild_pending; // Ensure this is available
 
 void SceneUI::manageTextureGraveyard() {
@@ -69,9 +69,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         return;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // 1. GET MATERIAL SLOTS FROM CACHE (O(1) lookup, not O(N) triangle scan!)
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Use cached material slots instead of scanning all triangles every frame
     auto slots_it = material_slots_cache.find(obj_name);
     if (slots_it == material_slots_cache.end()) {
@@ -86,9 +86,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         return;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // 2. SLOT SELECTION UI
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     static int active_slot_index = 0;
 
     // Safety: Reset slot index if out of bounds (e.g. material removed or selection changed)
@@ -137,9 +137,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     Material* active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
     std::string current_mat_name = active_mat_ptr ? active_mat_ptr->materialName : "None";
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // 3. ASSIGN MATERIAL TO ACTIVE SLOT
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     ImGui::Separator();
 
     // --- MATERIAL KEYFRAME BUTTON ---
@@ -371,9 +371,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                     // Update bindings on GPU (Fast Path) - CRITICAL FIX
                     ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, (uint16_t)i);
 
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.updateBackendMaterials(ctx.scene);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                     g_ProjectManager.markModified();
                 }
@@ -384,9 +384,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     }
     ImGui::PopItemWidth();
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // SHORTCUTS (New Surface / Volume) - affecting Active Slot
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     ImGui::SameLine();
     if (ImGui::Button("+S", ImVec2(40, 0))) {
         ImGui::OpenPopup("NewSurfPopup");
@@ -437,9 +437,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             // Update bindings on GPU (Fast Path)
             ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, new_id);
 
-            if (ctx.optix_gpu_ptr) {
-                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
         }
@@ -492,18 +492,18 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             // Update bindings on GPU (Fast Path)
             ctx.renderer.updateMeshMaterialBinding(obj_name, active_mat_id, new_id);
 
-            if (ctx.optix_gpu_ptr) {
-                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
         }
         ImGui::EndPopup();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // MATERIAL EDITOR (Context-Aware for Active Slot)
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Re-fetch active material in case it changed
     active_mat_id = used_material_ids[active_slot_index];
     // NOTE: If we just replaced the material, the used_material_ids list is somewhat stale 
@@ -592,10 +592,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                          ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                          ctx.renderer.resetCPUAccumulation();
                          
-                         if (ctx.optix_gpu_ptr) {
+                         if (ctx.backend_ptr) {
                              // Rebuild Geometry (GAS) because vertices changed
-                             ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
-                             ctx.optix_gpu_ptr->resetAccumulation();
+                             ctx.renderer.rebuildBackendGeometry(ctx.scene);
+                             ctx.backend_ptr->resetAccumulation();
                          }
                          addViewportMessage("Mesh fitted to VDB bounds", 3.0f, ImVec4(0.5f, 1.0f, 0.5f, 1.0f));
                      } else {
@@ -632,7 +632,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
         bool changed = false;
 
-        // ── DISTINCT INPUT FIELD STYLING FOR VOLUMETRIC PANEL (For Colors only) ────────────────
+        // �� DISTINCT INPUT FIELD STYLING FOR VOLUMETRIC PANEL (For Colors only) ����������������
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
@@ -725,9 +725,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
              changed = true;
         }
 
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // MULTI-SCATTERING CONTROLS
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Multi-Scattering");
 
@@ -765,9 +765,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             // OPTIMIZED: Material property change - No geometry rebuild needed!
             // Only reset accumulation and update GPU material buffers
             ctx.renderer.resetCPUAccumulation();
-            if (ctx.optix_gpu_ptr) {
-                ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
             }
         }
 
@@ -781,9 +781,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // REUSABLE MATERIAL EDITOR WIDGET
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, UIContext& ctx) {
     if (!pbsdf) return;
     
@@ -871,9 +871,9 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         }
 
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.optix_gpu_ptr) {
-            ctx.renderer.updateOptiXMaterialsOnly(ctx.scene, ctx.optix_gpu_ptr);
-            ctx.optix_gpu_ptr->resetAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
         }
     };
 

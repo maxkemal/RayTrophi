@@ -1,8 +1,8 @@
-﻿// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // This file handles 3D Gizmos (Move/Rotate/Scale), Bounding Boxes, and overlays.
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 
 #include "scene_ui.h"
 #include "renderer.h"
@@ -17,10 +17,10 @@
 #include "GasVolume.h"  // For gas simulation gizmos
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
-// ═════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
+// =============================================================================
+// ===============================================================================
 // SELECTION BOUNDING BOX DRAWING (Multi-selection support)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     Camera& cam = *ctx.scene.camera;
@@ -143,9 +143,9 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         DrawSegmentedLine(corners[3], corners[7]);
     };
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // DRAW VDB GHOST BOUNDS (Always visible)
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     for (const auto& vdb : ctx.scene.vdb_volumes) {
         // Skip if this VDB is currently selected (will be drawn with highlight)
         if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume == vdb) continue;
@@ -155,9 +155,9 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         DrawBoundingBox(bounds.min, bounds.max, IM_COL32(180, 180, 180, 100), 1.0f);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // DRAW GAS VOLUME BOUNDS (Smoke/Fire Simulation) - With Picking Support
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     for (const auto& gas : ctx.scene.gas_volumes) {
         if (!gas || !gas->visible) continue;
         
@@ -269,9 +269,9 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // DRAW SELECTION HIGHLIGHTS
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     if (sel.hasSelection()) {
         // Draw bounding box for each selected item (multi-selection support)
         for (size_t idx = 0; idx < sel.multi_selection.size(); ++idx) {
@@ -344,7 +344,7 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
             }
             else if (item.type == SelectableType::Light && item.light) {
                 Vec3 lightPos = item.light->position;
-                float boxSize = 0.15f; // Küçültüldü: 0.5 -> 0.15
+                float boxSize = 0.15f; // K���lt�ld�: 0.5 -> 0.15
                 bb_min = Vec3(lightPos.x - boxSize, lightPos.y - boxSize, lightPos.z - boxSize);
                 bb_max = Vec3(lightPos.x + boxSize, lightPos.y + boxSize, lightPos.z + boxSize);
                 has_bounds = true;
@@ -555,17 +555,17 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
             auto al = std::dynamic_pointer_cast<AreaLight>(light);
             if (!al) continue;
 
-            // Normalleştirilmiş u ve v vektörleri
+            // Normalle�tirilmi� u ve v vekt�rleri
             Vec3 u = al->getU();
             Vec3 v = al->getV();
             float halfW = al->getWidth() * 0.5f;
             float halfH = al->getHeight() * 0.5f;
 
-            // pos merkez noktası, köşeleri merkezden hesapla
+            // pos merkez noktas�, k��eleri merkezden hesapla
             Vec3 corner1 = pos - u * halfW - v * halfH;  // Sol-Alt
-            Vec3 corner2 = pos + u * halfW - v * halfH;  // Sağ-Alt  
-            Vec3 corner3 = pos + u * halfW + v * halfH;  // Sağ-Üst
-            Vec3 corner4 = pos - u * halfW + v * halfH;  // Sol-Üst
+            Vec3 corner2 = pos + u * halfW - v * halfH;  // Sa�-Alt  
+            Vec3 corner3 = pos + u * halfW + v * halfH;  // Sa�-�st
+            Vec3 corner4 = pos - u * halfW + v * halfH;  // Sol-�st
 
             ImVec2 c1 = Project(corner1);
             ImVec2 c2 = Project(corner2);
@@ -576,7 +576,7 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
             draw_list->AddLine(c2, c3, col);
             draw_list->AddLine(c3, c4, col);
             draw_list->AddLine(c4, c1, col);
-            // X çizgisi: merkez artık gerçek merkez
+            // X �izgisi: merkez art�k ger�ek merkez
             draw_list->AddLine(c1, c3, col, 1.0f);
             draw_list->AddLine(c2, c4, col, 1.0f);
         }
@@ -615,9 +615,9 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
 }
 
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // IMGUIZMO TRANSFORM GIZMO
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 void SceneUI::drawTransformGizmo(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
     if (!sel.hasSelection() || !sel.show_gizmo || !ctx.scene.camera) return;
@@ -639,9 +639,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     ImGuizmo::SetOrthographic(false);
     ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Build View Matrix (LookAt)
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     Vec3 eye = cam.lookfrom;
     Vec3 target = cam.lookat;
     Vec3 up = cam.vup;
@@ -657,9 +657,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         -r.dot(eye), -u.dot(eye), f.dot(eye), 1.0f
     };
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Build Projection Matrix (Perspective)
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float near_plane = 0.1f;
     float far_plane = 10000.0f;
@@ -685,9 +685,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         return ImVec2(((cx / cw) * 0.5f + 0.5f) * io.DisplaySize.x, (1.0f - ((cy / cw) * 0.5f + 0.5f)) * io.DisplaySize.y);
         };
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Get Object Matrix
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     float objectMatrix[16];
     Vec3 pos = sel.selected.position;
 
@@ -910,9 +910,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Keyboard Shortcuts for Transform Mode
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Only process when viewport has focus (not UI panels)
     if (sel.hasSelection() && !ImGui::GetIO().WantCaptureKeyboard) {
         if (ImGui::IsKeyPressed(ImGuiKey_G)) {
@@ -1018,9 +1018,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     auto command = std::make_unique<DuplicateObjectCommand>(targetName, newName, new_tri_vec);
                     history.record(std::move(command));
 
-                    // ═══════════════════════════════════════════════════════════
+                    // ===========================================================
                     // DEFERRED FULL REBUILD (Reliable - async in Main.cpp)
-                    // ═══════════════════════════════════════════════════════════
+                    // ===========================================================
                     extern bool g_optix_rebuild_pending;
                     g_optix_rebuild_pending = true;
                     
@@ -1035,9 +1035,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Determine Gizmo Operation
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     ImGuizmo::OPERATION operation = ImGuizmo::TRANSLATE;
     switch (sel.transform_mode) {
     case TransformMode::Translate: operation = ImGuizmo::TRANSLATE; break;
@@ -1051,9 +1051,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     ImGuizmo::MODE mode = (sel.transform_space == TransformSpace::Local) ?
         ImGuizmo::LOCAL : ImGuizmo::WORLD;
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Shift + Drag Duplication Logic + IDLE PREVIEW
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     static bool was_using_gizmo = false;
     static LightState drag_start_light_state;
     static std::shared_ptr<Light> drag_light = nullptr;
@@ -1080,17 +1080,17 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
             // If idle for threshold and not yet updated, do preview update
             if (idle_time >= IDLE_THRESHOLD && !preview_updated) {
                 // SCENE_LOG_INFO("[GIZMO] Idle preview - updating geometry");
-                if (ctx.optix_gpu_ptr) {
-                    if (ctx.optix_gpu_ptr->isUsingTLAS()) {
+                if (ctx.backend_ptr) {
+                    if (ctx.backend_ptr->isUsingTLAS()) {
                         // TLAS MODE: Transforms are ALREADY updated via instance matrices!
                         // Just reset accumulation to show the updated render, NO heavy rebuild.
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                        ctx.backend_ptr->resetAccumulation();
                         // Skip rebuildBVH too - picking uses linear search, not BVH.
                     } else {
                         // GAS MODE: Use fast vertex update (legacy)
-                        ctx.optix_gpu_ptr->updateGeometry(ctx.scene.world.objects);
-                        ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                        ctx.optix_gpu_ptr->resetAccumulation();
+                        ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
+                        ctx.backend_ptr->setLights(ctx.scene.lights);
+                        ctx.backend_ptr->resetAccumulation();
                         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                     }
                 } else {
@@ -1117,9 +1117,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     }
 
     if (is_using && !was_using_gizmo) {
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         // MANIPULATION START
-        // ═══════════════════════════════════════════════════════════════════════════
+        // ===========================================================================
         if (io.KeyShift && sel.hasSelection()) {
             triggerDuplicate(ctx);
         }
@@ -1178,9 +1178,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
     // NOTE: was_using_gizmo update moved to END of function (after is_bvh_dirty is set)
 
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Render and Manipulate Gizmo
-    // ─────────────────────────────────────────────────────────────────────────
+    // �������������������������������������������������������������������������
     // Save old position BEFORE manipulation for delta calculation (multi-selection)
     // Save old position & MATRIX BEFORE manipulation for delta calculation
     Vec3 oldGizmoPos(objectMatrix[12], objectMatrix[13], objectMatrix[14]);
@@ -1398,9 +1398,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                 }
                                 
                                 // TLAS MODE: Update GPU instance transform (fast path)
-                                bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                                bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
                                 if (using_gpu_tlas) {
-                                    std::vector<int> inst_ids = ctx.optix_gpu_ptr->getInstancesByNodeName(targetName);
+                                    std::vector<int> inst_ids = ctx.backend_ptr->getInstancesByNodeName(targetName);
                                     if (!inst_ids.empty()) {
                                         float t[12];
                                         Matrix4x4& m = th->base;
@@ -1409,7 +1409,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                         t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
                                         
                                         for (int inst_id : inst_ids) {
-                                            ctx.optix_gpu_ptr->updateInstanceTransform(inst_id, t);
+                                            ctx.backend_ptr->updateInstanceTransform(inst_id, t);
                                         }
                                     }
                                     // NOTE: TLAS mode - NO CPU vertex update during drag! (saves millions of calls)
@@ -1461,16 +1461,16 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 } // End of multi_selection loop
 
                 // Trigger TLAS Update after processing all objects
-                if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
                     // Use fast matrix-only update instead of full rebuild
-                    ctx.optix_gpu_ptr->updateTLASMatricesOnly(ctx.scene.world.objects);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                    ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
+                    ctx.backend_ptr->resetAccumulation();
                 }
 
                 sel.selected.has_cached_aabb = false;
 
                 // DEFERRED UPDATE: Only mark dirty during drag (for CPU mode)
-                bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
                 if (!using_gpu_tlas) {
                     is_bvh_dirty = true;
                 }
@@ -1506,24 +1506,24 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 Vec3 right(objectMatrix[0], objectMatrix[1], objectMatrix[2]);
                 Vec3 forward(objectMatrix[8], objectMatrix[9], objectMatrix[10]);
 
-                // Scale bilgisini vektörlerden çıkar
+                // Scale bilgisini vekt�rlerden ��kar
                 float sx = right.length();
                 float sz = forward.length();
 
-                // Width ve Height güncelle
+                // Width ve Height g�ncelle
                 if (sx > 0.001f) al->width = sx;
                 if (sz > 0.001f) al->height = sz;
 
-                // u ve v HER ZAMAN normalize tutulmalı!
+                // u ve v HER ZAMAN normalize tutulmal�!
                 if (sx > 0.001f) al->u = right / sx;
                 if (sz > 0.001f) al->v = forward / sz;
 
-                // Position doğrudan gizmo merkezinden alınmalı (artık position = merkez)
+                // Position do�rudan gizmo merkezinden al�nmal� (art�k position = merkez)
                 al->position = newPos;
             }
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->setLightParams(ctx.scene.lights);
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.backend_ptr->setLights(ctx.scene.lights);
+                ctx.backend_ptr->resetAccumulation();
             }
         }
         else if (sel.selected.type == SelectableType::ForceField && sel.selected.force_field) {
@@ -1550,8 +1550,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
             // and should only be explicitly set in the UI, not implicitly by gizmo rotation
             // (The Gizmo rotation already rotates the final world force).
 
-            if (ctx.optix_gpu_ptr) {
-                ctx.optix_gpu_ptr->resetAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.backend_ptr->resetAccumulation();
             }
         }
         else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
@@ -1587,9 +1587,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
              
              ctx.renderer.resetCPUAccumulation();
              
-             if (ctx.optix_gpu_ptr) {
+             if (ctx.backend_ptr) {
                  SceneUI::syncVDBVolumesToGPU(ctx);
-                 ctx.optix_gpu_ptr->resetAccumulation();
+                 ctx.backend_ptr->resetAccumulation();
              }
         }
         else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
@@ -1612,13 +1612,13 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
              
              ctx.renderer.resetCPUAccumulation();
              
-             if (ctx.optix_gpu_ptr) {
+             if (ctx.backend_ptr) {
                  if (sel.selected.gas_volume->render_path == GasVolume::VolumeRenderPath::VDBUnified) {
                      SceneUI::syncVDBVolumesToGPU(ctx);
                  } else {
-                     ctx.renderer.updateOptiXGasVolumes(ctx.scene, ctx.optix_gpu_ptr);
+                     ctx.renderer.updateBackendGasVolumes(ctx.scene);
                  }
-                 ctx.optix_gpu_ptr->resetAccumulation();
+                 ctx.backend_ptr->resetAccumulation();
              }
         }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
@@ -1659,11 +1659,11 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                         t_handle->setBase(newMat);
 
                         // TLAS INSTANCING UPDATE (Fast GPU Path)
-                        // Only use GPU path if both: OptiX enabled AND using TLAS mode
-                        bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                        // Use the GPU path when the active backend supports TLAS
+                        bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
                         if (using_gpu_tlas) {
                              // Use unified update method
-                             ctx.optix_gpu_ptr->updateObjectTransform(targetName, newMat);
+                             ctx.backend_ptr->updateObjectTransform(targetName, newMat);
                         }
                         else {
                             // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
@@ -1714,9 +1714,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                 processed_transforms.insert(th.get());
 
                                 // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
-                                if (ctx.optix_gpu_ptr && ctx.optix_gpu_ptr->isUsingTLAS()) {
+                                if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
                                     // Use unified update method
-                                    ctx.optix_gpu_ptr->updateObjectTransform(targetName, th->base);
+                                    ctx.backend_ptr->updateObjectTransform(targetName, th->base);
                                 } else {
                                     // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
                                     tri->updateTransformedVertices();
@@ -1729,8 +1729,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 sel.selected.has_cached_aabb = false;
 
                 // DEFERRED UPDATE: Mark dirty when NOT using GPU rendering
-                // Check use_optix setting (from render_settings) not just isUsingTLAS
-                bool using_gpu_render = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+                // Consider GPU rendering active when backend supports TLAS
+                bool using_gpu_render = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
                 if (!using_gpu_render) {
                     is_bvh_dirty = true;
                     extern bool g_cpu_bvh_refit_pending;
@@ -1745,13 +1745,13 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     if (!is_using && was_using_gizmo && is_bvh_dirty) {
         // SCENE_LOG_INFO("[GIZMO] Released - Triggering deferred geometry update");
         // Check actual render mode, not just pointer existence
-        bool using_gpu = ctx.optix_gpu_ptr && ctx.render_settings.use_optix;
+        bool using_gpu = ctx.backend_ptr && ctx.render_settings.use_optix;
         
-        if (using_gpu && ctx.optix_gpu_ptr->isUsingTLAS()) {
+        if (using_gpu && ctx.backend_ptr->isUsingTLAS()) {
             // TLAS MODE: Commits all pending transform changes
             // During drag, updateInstanceTransform() queues changes but doesn't rebuild TLAS.
             // On release, we must rebuild TLAS to apply those transforms to GPU.
-            ctx.optix_gpu_ptr->rebuildTLAS();
+            ctx.backend_ptr->rebuildAccelerationStructure();
         } else if (using_gpu) {
             // GAS MODE: Defer update to Main loop to avoid UI freeze
             extern bool g_gpu_refit_pending;
@@ -1772,7 +1772,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // LAZY CPU SYNC: Mark objects for later sync instead of updating now
     // This makes gizmo release INSTANT - sync happens when user tries to pick something
     if (!is_using && was_using_gizmo) {
-        bool using_gpu_tlas = ctx.optix_gpu_ptr && ctx.render_settings.use_optix && ctx.optix_gpu_ptr->isUsingTLAS();
+        bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
         
         if (sel.multi_selection.size() > 0) {
             for (auto& item : sel.multi_selection) {
@@ -1824,9 +1824,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     was_using_gizmo = is_using;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 // CAMERA GIZMOS - Draw camera icons in viewport
-// ═══════════════════════════════════════════════════════════════════════════════
+// ===============================================================================
 void SceneUI::drawCameraGizmos(UIContext& ctx) {
     if (!ctx.scene.camera || ctx.scene.cameras.size() <= 1) return;
 

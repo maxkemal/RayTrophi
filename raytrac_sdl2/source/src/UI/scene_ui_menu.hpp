@@ -28,6 +28,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #endif
+#include <scene_ui_gas.hpp>
 // extern bool show_controls_window; // Assume defined elsewhere
 
 
@@ -290,7 +291,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          }
                          
                          // Import WITHOUT clearing scene
-                         bool success = ProjectManager::getInstance().importModel(file, ctx.scene, ctx.renderer, ctx.optix_gpu_ptr,
+                         bool success = ProjectManager::getInstance().importModel(file, ctx.scene, ctx.renderer, ctx.backend_ptr,
                              [this](int p, const std::string& s) {
                                  scene_loading_progress = p; 
                                  scene_loading_stage = s;
@@ -678,7 +679,7 @@ void SceneUI::addProceduralPlane(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
     
     SCENE_LOG_INFO("Added Plane: " + name);
     addViewportMessage("Added Plane: " + name);
@@ -744,7 +745,7 @@ void SceneUI::addProceduralCube(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
     
     SCENE_LOG_INFO("Added Cube: " + name);
     addViewportMessage("Added Cube: " + name);
@@ -833,7 +834,7 @@ void SceneUI::addProceduralSphere(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
     
     SCENE_LOG_INFO("Added Sphere: " + name);
     addViewportMessage("Added Sphere: " + name);
@@ -954,7 +955,7 @@ void SceneUI::addProceduralCylinder(UIContext& ctx) {
     rebuildMeshCache(ctx.scene.world.objects);
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
-    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildOptiXGeometry(ctx.scene, ctx.optix_gpu_ptr);
+    if (ctx.optix_gpu_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
     
     SCENE_LOG_INFO("Added Cylinder: " + name);
     addViewportMessage("Added Cylinder: " + name);
