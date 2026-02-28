@@ -2157,7 +2157,7 @@ void SceneUI::drawAuxWindows(UIContext& ctx)
 {
     if (show_controls_window) {
         ImGui::SetNextWindowSize(ImVec2(500, 600), ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Controls & Help", &show_controls_window)) {
+        if (ImGui::Begin("Quick Guide & Shortcuts", &show_controls_window)) {
             drawControlsContent();
         }
         ImGui::End();
@@ -2166,7 +2166,7 @@ void SceneUI::drawAuxWindows(UIContext& ctx)
 
 void SceneUI::drawControlsContent()
 {
-     UIWidgets::ColoredHeader("Camera Controls", ImVec4(1.0f, 0.9f, 0.4f, 1.0f));
+     UIWidgets::ColoredHeader("Viewport & Camera Navigation", ImVec4(1.0f, 0.9f, 0.4f, 1.0f));
      UIWidgets::Divider();
      
      ImGui::BulletText("Rotate: Middle Mouse Drag");
@@ -2177,34 +2177,36 @@ void SceneUI::drawControlsContent()
      ImGui::BulletText("Move Up/Down: PageUp / PageDown");
      
      ImGui::Spacing();
-     UIWidgets::ColoredHeader("Shortcuts", ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
+     UIWidgets::ColoredHeader("General Shortcuts & Undo System", ImVec4(0.6f, 0.8f, 1.0f, 1.0f));
      UIWidgets::Divider();
-     ImGui::BulletText("Toggle Properties Panel: N");
+     ImGui::BulletText("Toggle Properties/Panels: N");
      ImGui::BulletText("Toggle Render Window: F12");
-     ImGui::BulletText("Toggle Help Window: F1");
-     ImGui::BulletText("Save Image: Ctrl + S"); 
-     ImGui::BulletText("Undo: Ctrl + Z");
-     ImGui::BulletText("Redo: Ctrl + Y or Ctrl + Shift + Z");
-     ImGui::BulletText("Delete Object: Delete or X");
-     ImGui::BulletText("Duplicate Object: Shift + D");
+     ImGui::BulletText("Toggle Help Window (This): F1");
+     ImGui::BulletText("Save Project: Ctrl + S"); 
+     ImGui::BulletText("Undo (Object/Light transform & delete): Ctrl + Z");
+     ImGui::BulletText("Redo: Ctrl + Y (or Ctrl + Shift + Z)");
+     ImGui::BulletText("Delete Selected (O(1) perf): Delete or X");
+     ImGui::BulletText("Duplicate Selected: Shift + D");
      
      ImGui::Spacing();
-     UIWidgets::ColoredHeader("Gizmo Controls", ImVec4(1.0f, 0.6f, 0.4f, 1.0f));
+     UIWidgets::ColoredHeader("Advanced Selection", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
+     UIWidgets::Divider();
+     ImGui::BulletText("Select Object / Light: Left Click in viewport");
+     ImGui::BulletText("Multi-Select (Add/Remove): Ctrl + Left Click");
+     ImGui::BulletText("Box Selection: Right Mouse Drag (Selects multiple)");
+     ImGui::TextDisabled("  * You can select both lights and physical objects simultaneously.");
+
+     ImGui::Spacing();
+     UIWidgets::ColoredHeader("Transform Gizmo & Idle Preview", ImVec4(1.0f, 0.6f, 0.4f, 1.0f));
      UIWidgets::Divider();
      ImGui::BulletText("Move Mode: G (Translate)");
      ImGui::BulletText("Rotate Mode: R");
      ImGui::BulletText("Scale Mode: S");
      ImGui::BulletText("Switch Mode: W (Cycle through modes)");
-     ImGui::TextDisabled("  * Click and drag gizmo handles to transform");
-     ImGui::TextDisabled("  * Changes apply immediately to selected object");
-     
-     ImGui::Spacing();
-     UIWidgets::ColoredHeader("Selection Controls", ImVec4(0.8f, 0.4f, 1.0f, 1.0f));
-     UIWidgets::Divider();
-     ImGui::BulletText("Select Object: Left Click");
-     ImGui::BulletText("Multi-Select: Shift + Left Click");
-     ImGui::BulletText("Box Selection: Right Mouse Drag");
-     ImGui::BulletText("Duplicate Selection: Shift + D");
+     ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Idle Preview Feature:");
+     ImGui::TextDisabled("  * While dragging a gizmo handle, pause your mouse for 0.3s");
+     ImGui::TextDisabled("  * The engine will render a quick preview of your new position.");
+     ImGui::TextDisabled("  * Release the mouse to finalize and update the BVH.");
 
      ImGui::Spacing();
      UIWidgets::ColoredHeader("Interface Guide", ImVec4(0.4f, 1.0f, 0.6f, 1.0f));

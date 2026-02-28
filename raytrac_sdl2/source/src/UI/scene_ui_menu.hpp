@@ -606,7 +606,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
 #endif
             }
             ImGui::Separator();
-            ImGui::MenuItem("Legacy Controls", nullptr, &show_controls_window);
+            ImGui::MenuItem("Quick Guide & Shortcuts", nullptr, &show_controls_window);
             ImGui::EndMenu();
         }
 
