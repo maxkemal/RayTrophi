@@ -101,6 +101,10 @@ public:
     void freeAllGPU();
     void* getGPUGrid(int volume_id) const;
     void* getGPUTemperatureGrid(int volume_id) const;
+    void* getHostGrid(int volume_id) const;
+    size_t getHostGridSize(int volume_id) const;
+    void* getHostTemperatureGrid(int volume_id) const;
+    size_t getHostTemperatureGridSize(int volume_id) const;
     
     // CPU Sampling (for CPU renderer)
     float sampleDensityCPU(int volume_id, float x, float y, float z) const;

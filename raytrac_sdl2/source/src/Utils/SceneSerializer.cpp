@@ -21,9 +21,70 @@
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include <cctype>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#endif
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 using json = nlohmann::json;
+namespace fs = std::filesystem;
+
+namespace {
+static fs::path pathFromUtf8(const std::string& utf8_path) {
+#ifdef _WIN32
+    auto toWide = [](const std::string& src, UINT codepage, DWORD flags) -> std::wstring {
+        const int size = MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
+        if (size <= 0) return {};
+        std::wstring out(static_cast<size_t>(size - 1), L'\0');
+        if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(), size) <= 0) return {};
+        return out;
+    };
+
+    std::wstring wide = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (wide.empty()) {
+        wide = toWide(utf8_path, CP_ACP, 0);
+    }
+    if (!wide.empty()) {
+        return fs::path(wide);
+    }
+#endif
+    return fs::path(utf8_path);
+}
+
+static simdjson::error_code loadJsonRootFromFile(simdjson::dom::parser& parser,
+                                                 const std::string& filepath,
+                                                 simdjson::dom::element& root,
+                                                 std::string* read_error = nullptr) {
+    std::ifstream in_json(pathFromUtf8(filepath), std::ios::binary);
+    if (!in_json.is_open()) {
+        if (read_error) {
+            *read_error = "Failed to open file";
+        }
+        return simdjson::IO_ERROR;
+    }
+
+    std::string json_text((std::istreambuf_iterator<char>(in_json)), std::istreambuf_iterator<char>());
+    if (!in_json.good() && !in_json.eof()) {
+        if (read_error) {
+            *read_error = "Failed while reading file stream";
+        }
+        return simdjson::IO_ERROR;
+    }
+
+    simdjson::padded_string padded_json(json_text);
+    return parser.parse(padded_json).get(root);
+}
+}
 
 // Helper to convert Vec3 to JSON array
 json vec3ToJson(const Vec3& v) {
@@ -178,6 +239,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
     root["settings"]["use_adaptive"] = settings.use_adaptive_sampling;
     root["settings"]["use_denoiser"] = settings.use_denoiser;
     root["settings"]["use_optix"] = settings.use_optix;
+    root["settings"]["use_vulkan"] = settings.use_vulkan;
+    root["settings"]["backend"] = settings.use_vulkan ? "vulkan" : (settings.use_optix ? "optix" : "cpu");
     root["settings"]["persistent_tonemap"] = settings.persistent_tonemap;
 
     // 6. PostFX
@@ -226,10 +289,13 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
 bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Renderer& renderer, Backend::IBackend* backend, const std::string& filepath) {
     simdjson::dom::parser parser;
     simdjson::dom::element root;
-    
-    auto error = parser.load(filepath).get(root);
+
+    std::string read_error;
+    auto error = loadJsonRootFromFile(parser, filepath, root, &read_error);
     if (error) {
-        SCENE_LOG_ERROR("Failed to parse JSON scene file with simdjson: " + std::string(simdjson::error_message(error)));
+        SCENE_LOG_ERROR("Failed to parse JSON scene file with simdjson: " + std::string(simdjson::error_message(error)) +
+                        " | path=" + filepath +
+                        (read_error.empty() ? "" : " | read_error=" + read_error));
         return false;
     }
 
@@ -358,7 +424,9 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     simdjson::dom::element s;
     if (!root["settings"].get(s)) {
         int64_t q = 0, spp = 1, bounces = 10;
-        bool adaptive = true, denoiser = false, optix = true, tonemap = false;
+        bool adaptive = true, denoiser = false, optix = true, vulkan = false, tonemap = false;
+        std::string backend_name;
+        std::string_view backend_name_sv;
         
         s["quality_preset"].get(q);
         s["samples_per_pixel"].get(spp);
@@ -366,7 +434,28 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         s["use_adaptive"].get(adaptive);
         s["use_denoiser"].get(denoiser);
         s["use_optix"].get(optix);
+        s["use_vulkan"].get(vulkan);
+        if (!s["backend"].get(backend_name_sv)) {
+            backend_name = std::string(backend_name_sv);
+        }
         s["persistent_tonemap"].get(tonemap);
+
+        if (!backend_name.empty()) {
+            std::transform(backend_name.begin(), backend_name.end(), backend_name.begin(),
+                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (backend_name == "vulkan") {
+                vulkan = true;
+                optix = false;
+            } else if (backend_name == "optix") {
+                optix = true;
+                vulkan = false;
+            } else if (backend_name == "cpu") {
+                optix = false;
+                vulkan = false;
+            }
+        }
+
+        if (vulkan) optix = false;
 
         settings.quality_preset = (QualityPreset)q;
         settings.samples_per_pixel = (int)spp;
@@ -374,6 +463,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.use_adaptive_sampling = adaptive;
         settings.use_denoiser = denoiser;
         settings.use_optix = optix;
+        settings.use_vulkan = vulkan;
         settings.persistent_tonemap = tonemap;
     }
 

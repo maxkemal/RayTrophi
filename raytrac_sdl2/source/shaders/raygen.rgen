@@ -17,13 +17,14 @@
 #extension GL_EXT_scalar_block_layout                  : require
 #extension GL_EXT_nonuniform_qualifier                 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_ray_flags_primitive_culling          : require
 
 // ============================================================
 // Sabitler
 // ============================================================
 const float PI          = 3.14159265358979323846;
 const float TWO_PI      = 6.28318530717958647692;
-const int   MAX_BOUNCES = 12;
+const int   MAX_BOUNCES = 12; // fallback — cam.maxBounces ile override edilir
 const float T_MIN       = 1e-3;
 const float T_MAX       = 1e6;
 
@@ -64,7 +65,8 @@ struct Material {
     uint opacity_tex;
     uint transmission_tex;
     // Block 12: Reserved
-    uint _reserved_0, _reserved_1, _reserved_2, _reserved_3;
+    float subsurface_ior;
+    uint _reserved_1, _reserved_2, _reserved_3;
 };
 
 struct LightData {
@@ -143,7 +145,7 @@ struct VkWorldDataExtended {
     vec3  cloudEmissiveColor;
     float _pad3;
     
-    // ════════════════════════════ FOG PARAMETERS (32 bytes)
+    // ════════════════════════════ FOG PARAMETERS (40 bytes)
     int   fogEnabled;
     float fogDensity;
     float fogHeight;
@@ -151,12 +153,19 @@ struct VkWorldDataExtended {
     float fogDistance;
     float fogSunScatter;
     vec3  fogColor;
+    float _pad4;   // padding — aligns fogColor to 16 bytes, matches C++ struct
     
     // ════════════════════════════ GOD RAYS (16 bytes)
     int   godRaysEnabled;
     float godRaysIntensity;
     float godRaysDensity;
     int   godRaysSamples;
+    
+    // ════════════════════════════ AERIAL PERSPECTIVE (16 bytes) — matches OptiX AtmosphereAdvanced
+    int   aerialEnabled;        // 1 = apply aerial perspective
+    float aerialMinDistance;    // No haze below this (meters)
+    float aerialMaxDistance;    // Full haze at this (meters)
+    float _pad5_aerial;
     
     // ════════════════════════════ ENVIRONMENT & LUT REFS (32 bytes)
     int   envTexSlot;
@@ -176,6 +185,41 @@ layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanc
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer     { VkWorldDataExtended w; } worldData;
 // Atmosphere LUT samplers: [0]=transmittance, [1]=skyview, [2]=multi_scatter, [3]=aerial_perspective
 layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Binding 9: Volume Instances SSBO (OptiX-compatible volumetric data)
+// ════════════════════════════════════════════════════════════════════════════════
+struct VkVolumeInstance {
+    float transform[12];
+    vec3  aabb_min;
+    vec3  aabb_max;
+    float density_multiplier;
+    float density_remap_low;
+    float density_remap_high;
+    float noise_scale;
+    vec3  scatter_color;
+    float scatter_coefficient;
+    float scatter_anisotropy;
+    float scatter_anisotropy_back;
+    float scatter_lobe_mix;
+    float scatter_multi;
+    vec3  absorption_color;
+    float absorption_coefficient;
+    vec3  emission_color;
+    float emission_intensity;
+    float step_size;
+    int   max_steps;
+    int   shadow_steps;
+    float shadow_strength;
+    int   volume_type;
+    int   is_active;
+    float voxel_size;
+    int   _pad0;
+    float inv_transform[12];
+    float _reserved[6];
+};
+
+layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 
 // ============================================================
 // Push Constants
@@ -216,11 +260,10 @@ layout(push_constant) uniform CameraPC {
     float shakeRotX;
     float shakeRotY;
     float shakeRotZ;
-    float pad1;
+    float waterTime;   // Wall-clock seconds for water animation
+    uint  maxBounces;  // UI'dan gelen toplam bounce limiti
 } cam;
 
-// ============================================================
-// Payload — closesthit v2 + miss v2 ile tam eşleşme
 // ============================================================
 struct RayPayload {
     vec3  radiance;
@@ -231,6 +274,7 @@ struct RayPayload {
     bool  scattered;
     bool  hitEmissive;
     uint  occluded;
+    bool  skipAABBs;    // set by volume_closesthit when a solid surface is found inside
 };
 
 layout(location = 0) rayPayloadEXT RayPayload payload;
@@ -264,6 +308,27 @@ uint initSeed(uvec2 pixel, uvec2 size, uint frame) {
 // ============================================================
 float luminance(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float sanitizeComponent(float v) {
+    if (isnan(v)) return 0.0;
+    if (isinf(v)) return (v > 0.0) ? 1e6 : 0.0;
+    return clamp(v, 0.0, 1e6);
+}
+
+vec3 sanitizeRadiance(vec3 c) {
+    return vec3(
+        sanitizeComponent(c.x),
+        sanitizeComponent(c.y),
+        sanitizeComponent(c.z)
+    );
+}
+
+vec3 softClipFireflies(vec3 c, float maxLuma) {
+    float l = luminance(c);
+    if (l <= maxLuma) return c;
+    float scale = maxLuma / max(l, 1e-6);
+    return c * scale;
 }
 
 // ============================================================
@@ -368,7 +433,16 @@ void main() {
     vec3 radiance   = vec3(0.0);
     vec3 throughput = vec3(1.0);
 
-    for (int bounce = 0; bounce < MAX_BOUNCES; bounce++) {
+    // PRIMARY HIT POSITION — saved at bounce 0 for aerial perspective & fog
+    // (payload.scatterOrigin is overwritten each bounce, so we capture it once)
+    vec3 firstHitPos   = vec3(0.0);
+    bool firstHitValid = false;
+
+    int effectiveBounces = int(cam.maxBounces); // her zaman UI'dan gelir, C++ tarafı min 1 garantiliyor
+    for (int bounce = 0; bounce < effectiveBounces; bounce++) {
+
+        // Consume skipAABBs flag set by previous bounce (volume solid detection)
+        bool useSkipAABBs = payload.skipAABBs;
 
         payload.radiance      = vec3(0.0);
         payload.attenuation   = vec3(1.0);
@@ -377,10 +451,17 @@ void main() {
         payload.seed          = seed;
         payload.scattered     = false;
         payload.hitEmissive   = false;
+        payload.skipAABBs     = false;
+
+        // When the previous bounce was a volume that detected a solid surface inside,
+        // skip AABB (procedural) geometry so the solid triangle is hit directly.
+        uint traceFlags = useSkipAABBs
+            ? (gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipAABBEXT)
+            :  gl_RayFlagsOpaqueEXT;
 
         traceRayEXT(
             topLevelAS,
-            gl_RayFlagsOpaqueEXT,
+            traceFlags,
             0xFF,
             0, 0, 0,
             rayOrigin,
@@ -392,11 +473,14 @@ void main() {
 
         seed = payload.seed;
 
-        radiance += throughput * payload.radiance;
+        vec3 bounceRadiance = sanitizeRadiance(throughput * payload.radiance);
+        bounceRadiance = softClipFireflies(bounceRadiance, 64.0);
+        radiance += bounceRadiance;
 
         if (!payload.scattered) break;
 
-        throughput *= payload.attenuation;
+        throughput = sanitizeRadiance(throughput * payload.attenuation);
+        throughput = softClipFireflies(throughput, 128.0);
 
         // Erken çıkış
         if (max(throughput.r, max(throughput.g, throughput.b)) < 0.001) break;
@@ -411,10 +495,105 @@ void main() {
 
         rayOrigin = payload.scatterOrigin;
         rayDir    = payload.scatterDir;
+
+        // Record first surface hit position for aerial perspective
+        if (bounce == 0 && !firstHitValid) {
+            firstHitPos   = payload.scatterOrigin;
+            firstHitValid = true;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // ATMOSPHERIC FOG — Distance-based exponential fog (uses VkWorldDataExtended)
+    // Matches OptiX fog integration in closesthit kernels
+    // ══════════════════════════════════════════════════════════════════════════
+    if (firstHitValid && worldData.w.fogEnabled != 0 && worldData.w.fogDensity > 0.0) {
+        // Estimate primary hit distance from first scatter origin
+        vec3 primaryOrigin = cam.origin.xyz;
+        if (cam.shakeEnabled != 0) {
+            primaryOrigin += vec3(cam.shakeOffsetX, cam.shakeOffsetY, cam.shakeOffsetZ);
+        }
+        // First hit distance
+        float hitDist = length(firstHitPos - primaryOrigin);
+        hitDist = min(hitDist, worldData.w.fogDistance);
+        
+        // Height-based exponential fog density
+        float fogDensity = worldData.w.fogDensity;
+        float fogFalloff = worldData.w.fogFalloff;
+        float cameraH = primaryOrigin.y;
+        float heightFactor = exp(-cameraH * fogFalloff);
+        
+        // Beer-Lambert attenuation
+        float fogAmount = 1.0 - exp(-hitDist * fogDensity * heightFactor);
+        fogAmount = clamp(fogAmount, 0.0, 1.0);
+        
+        // Sun scattering in fog (Mie-like forward scatter)
+        vec3 fogCol = worldData.w.fogColor;
+        if (worldData.w.fogSunScatter > 0.0) {
+            vec3 firstRayDir = normalize(firstHitPos - primaryOrigin);
+            float sunDot = max(dot(firstRayDir, normalize(worldData.w.sunDir)), 0.0);
+            float sunScatter = pow(sunDot, 8.0) * worldData.w.fogSunScatter;
+            fogCol += worldData.w.sunColor * worldData.w.sunIntensity * sunScatter * 0.1;
+        }
+        
+        radiance = mix(radiance, fogCol, fogAmount);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // AERIAL PERSPECTIVE — matches OptiX gpu_get_aerial_perspective() exactly
+    // Nishita-based distance haze: uses Transmittance + SkyView LUTs
+    // ══════════════════════════════════════════════════════════════════════
+    if (firstHitValid && worldData.w.mode == 2 && worldData.w.aerialEnabled != 0 && worldData.w._pad5 != 0) {
+        vec3 primaryOrigin = cam.origin.xyz;
+        if (cam.shakeEnabled != 0) {
+            primaryOrigin += vec3(cam.shakeOffsetX, cam.shakeOffsetY, cam.shakeOffsetZ);
+        }
+        float hitDist = length(firstHitPos - primaryOrigin);
+        
+        if (hitDist > 0.1 && hitDist < 1e6) {
+            vec3  rayDir      = normalize(firstHitPos - primaryOrigin);
+            float Rg          = worldData.w.planetRadius;
+            vec3  p           = primaryOrigin + vec3(0.0, Rg, 0.0);
+            float altitude    = length(p) - Rg;
+            vec3  up          = p / (Rg + altitude);
+
+            // Transmittance LUT sample — same UV mapping as OptiX
+            float cosTheta    = max(0.01, dot(up, rayDir));
+            float uT          = (cosTheta + 0.2) / 1.2;
+            float vT          = clamp(altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
+            vec3  transmittance = texture(atmosphereLUTs[0], vec2(uT, vT)).rgb;
+
+            // Distance ramp (matches OptiX ramp * ramp)
+            float minD   = worldData.w.aerialMinDistance;
+            float maxD   = worldData.w.aerialMaxDistance;
+            float ramp   = (hitDist < minD) ? 0.0 : clamp((hitDist - minD) / max(1.0, maxD - minD), 0.0, 1.0);
+            
+            // INCREASED FOG IMPACT matches OptiX (300x, then /10000)
+            float densityFactor = 1.0 + worldData.w.fogDensity * 300.0;
+            float effectiveDist = hitDist * densityFactor;
+            float distFactor    = clamp(effectiveDist / 10000.0, 0.0, 1.0) * (ramp * ramp);
+
+            vec3 finalTrans = pow(transmittance, vec3(distFactor));
+
+            // Sky radiance at view direction (clamped above horizon, same as OptiX)
+            vec3 lookupDir = rayDir;
+            if (lookupDir.y < 0.0) lookupDir = normalize(vec3(lookupDir.x, 0.0, lookupDir.z));
+            float az       = atan(lookupDir.z, lookupDir.x);
+            if (az < 0.0) az += 6.2831853;
+            float uS       = az / 6.2831853;
+            float vS       = (1.0 - lookupDir.y) * 0.5;
+            vec3  skyRad   = texture(atmosphereLUTs[1], vec2(uS, vS)).rgb;
+
+            // Blend scene with atmospheric haze (same formula as OptiX)
+            radiance = radiance * finalTrans + skyRad * (vec3(1.0) - finalTrans);
+        }
     }
 
     // Apply exposure factor
-    vec3 exposedRadiance = radiance * cam.exposure_factor;
+    vec3 exposedRadiance = sanitizeRadiance(radiance * cam.exposure_factor);
+    // Firefly clamp (luminance-preserving): stabilizes extreme bright outliers
+    // that otherwise appear as burned white/black pixels during accumulation.
+    exposedRadiance = softClipFireflies(exposedRadiance, 32.0);
     
     // Vignetting
     if (cam.vignetteEnabled != 0) {

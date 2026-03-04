@@ -617,6 +617,17 @@ extern "C" __global__ void __closesthit__hair() {
         }
     }
 
+    // [FIX] Derive hair_color from sigma_a for melanin and absorption modes
+    // hair_color is used for ambient terms, payload albedo output, and fallback.
+    // Without this, melanin mode incorrectly uses the old DIRECT_COLORING color.
+    if (hair_color_mode == 1 || hair_color_mode == 2) {
+        hair_color = make_float3(
+            expf(-sigma_a.x * 0.5f),
+            expf(-sigma_a.y * 0.5f),
+            expf(-sigma_a.z * 0.5f)
+        );
+    }
+
     HairGPU::GpuHairMaterial hair_mat_final;
     hair_mat_final.sigma_a = sigma_a;
     hair_mat_final.roughness = fmaxf(0.01f, roughness); 

@@ -1,0 +1,182 @@
+/*
+ * RayTrophi Studio — Vulkan Hair Intersection Shader
+ * Cubic B-Spline Round Tube Ray Intersection
+ *
+ * Her AABB primitive bir kübik B-spline segmentine karşılık gelir.
+ * Kontrol noktaları ve yarıçaplar SSBO'dan gl_PrimitiveID ile okunur.
+ *
+ * Algoritma:
+ *   1. Ray yönüyle hizalanmış orthonormal çerçeve oluştur (X,Y=yanal, Z=ray)
+ *   2. B-spline kontrol noktalarını bu çerçeveye projekte et
+ *   3. Projekte eğrinin ray eksenine (XY=0) uzaklığını Newton iterasyonu ile minimize et
+ *   4. Minimum uzaklık ≤ interpolate edilmiş yarıçap ise:
+ *      - tHit hesapla (ray eksenindeki kiriş kesim noktası)
+ *      - hitAttributeEXT ile tangent (xyz) ve eğri parametresi (w) raporla
+ *
+ * SBT offset = m_hasVolumeShaders ? 2 : 1
+ * Bu shader VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR ile çalışır.
+ */
+
+#version 460
+#extension GL_EXT_ray_tracing         : require
+#extension GL_EXT_scalar_block_layout : require
+
+// ─── Hit Attribute ────────────────────────────────────────────────────────────
+// hair_closesthit.rchit ile AYNI tipte olmalı
+// xyz = world-space eğri teğeti (normalize edilmiş)
+// w   = B-spline parametresi u ∈ [0,1]
+hitAttributeEXT vec4 hairAttrib;
+
+// ─── Hair Segment SSBO (Binding 10) ──────────────────────────────────────────
+// C++ tarafı: VulkanRT::HairSegmentGPU (80 bytes per segment)
+struct HairSegmentGPU {
+    vec4 cp0;         // xyz = dünya-uzayı konum, w = yarıçap
+    vec4 cp1;
+    vec4 cp2;
+    vec4 cp3;
+    uint strandID;
+    uint groomID;
+    uint materialID;
+    uint padding;
+};
+
+layout(set = 0, binding = 10, scalar) readonly buffer HairSegmentSSBO {
+    HairSegmentGPU hairSegs[];
+};
+
+// ─── Kübik B-Spline Baz Fonksiyonları ────────────────────────────────────────
+// Uniform kübik B-spline, t ∈ [0,1]
+void bsplineBasis(float t,
+                  out float b0, out float b1,
+                  out float b2, out float b3)
+{
+    float t2 = t * t;
+    float t3 = t2 * t;
+    // B0 = (1-t)^3 / 6 şeklinde değil — uniform kübik B-spline bazı:
+    b0 = (1.0 - 3.0*t + 3.0*t2 - t3) / 6.0;
+    b1 = (4.0   - 6.0*t2   + 3.0*t3) / 6.0;
+    b2 = (1.0 + 3.0*t + 3.0*t2 - 3.0*t3) / 6.0;
+    b3 =  t3 / 6.0;
+}
+
+// Türev baz fonksiyonları
+void bsplineBasisDeriv(float t,
+                       out float db0, out float db1,
+                       out float db2, out float db3)
+{
+    float t2 = t * t;
+    db0 = (-3.0 + 6.0*t  - 3.0*t2) / 6.0;
+    db1 = (-12.0*t        + 9.0*t2) / 6.0;
+    db2 = ( 3.0 + 6.0*t  - 9.0*t2) / 6.0;
+    db3 =                   3.0*t2  / 6.0;
+}
+
+void main()
+{
+    uint segIdx = uint(gl_PrimitiveID);
+    HairSegmentGPU seg = hairSegs[segIdx];
+
+    // Kontrol noktaları ve yarıçaplar (dünya uzayı)
+    vec3 P[4];
+    float R[4];
+    P[0] = seg.cp0.xyz;  R[0] = seg.cp0.w;
+    P[1] = seg.cp1.xyz;  R[1] = seg.cp1.w;
+    P[2] = seg.cp2.xyz;  R[2] = seg.cp2.w;
+    P[3] = seg.cp3.xyz;  R[3] = seg.cp3.w;
+
+    // ─── Ray çerçevesi ────────────────────────────────────────────────────────
+    // Z ekseni = normalize(ray yönü), X/Y = yanal düzlem
+    vec3 O  = gl_WorldRayOriginEXT;
+    vec3 D  = gl_WorldRayDirectionEXT;
+    float DLen    = length(D);
+    float invDLen = 1.0 / DLen;
+    vec3 Z = D * invDLen;   // normalize edilmiş ray yönü
+
+    // Gram-Schmidt orthogonalizasyonu
+    vec3 tmpUp = (abs(Z.x) > 0.9) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 Y = normalize(cross(Z, tmpUp));
+    vec3 X = cross(Y, Z);
+
+    // Kontrol noktalarını ray çerçevesine projekte et (ray origin'e göre)
+    vec3 lP[4];
+    for (int i = 0; i < 4; i++) {
+        vec3 v = P[i] - O;
+        lP[i] = vec3(dot(v, X), dot(v, Y), dot(v, Z));
+    }
+
+    // ─── Faz 1: Kaba örnekleme ────────────────────────────────────────────────
+    // Eğri boyunca N+1 noktada 2D (XY) uzaklığı hesapla, en yakın u'yu bul
+    const int N_COARSE = 8;
+    float minDist2 = 1.0e30;
+    float bestU    = 0.0;
+
+    for (int s = 0; s <= N_COARSE; s++) {
+        float u = float(s) / float(N_COARSE);
+        float b0, b1, b2, b3;
+        bsplineBasis(u, b0, b1, b2, b3);
+        vec3 p = b0*lP[0] + b1*lP[1] + b2*lP[2] + b3*lP[3];
+        float d2 = p.x*p.x + p.y*p.y;
+        if (d2 < minDist2) {
+            minDist2 = d2;
+            bestU    = u;
+        }
+    }
+
+    // ─── Faz 2: Newton iterasyonu ─────────────────────────────────────────────
+    // D(u) = px(u)^2 + py(u)^2  →  minimize et
+    // D'(u)  = 2*(px*dpx + py*dpy)
+    // D''(u) ≈ 2*(dpx^2 + dpy^2)   [2. derece terimleri ihmal]
+    float u = bestU;
+    for (int iter = 0; iter < 6; iter++) {
+        float b0, b1, b2, b3;
+        float db0, db1, db2, db3;
+        bsplineBasis(u, b0, b1, b2, b3);
+        bsplineBasisDeriv(u, db0, db1, db2, db3);
+
+        vec3 p  = b0*lP[0]  + b1*lP[1]  + b2*lP[2]  + b3*lP[3];
+        vec3 dp = db0*lP[0] + db1*lP[1] + db2*lP[2] + db3*lP[3];
+
+        float D_prime  = 2.0 * (p.x*dp.x + p.y*dp.y);
+        float D_prime2 = 2.0 * (dp.x*dp.x + dp.y*dp.y) + 1e-12;
+
+        u -= D_prime / D_prime2;
+        u  = clamp(u, 0.0, 1.0);
+    }
+
+    // ─── Son değerlendirme ────────────────────────────────────────────────────
+    {
+        float b0, b1, b2, b3;
+        float db0, db1, db2, db3;
+        bsplineBasis(u, b0, b1, b2, b3);
+        bsplineBasisDeriv(u, db0, db1, db2, db3);
+
+        vec3 pLocal = b0*lP[0] + b1*lP[1] + b2*lP[2] + b3*lP[3];
+
+        // Eğri parametresi u'daki interpolate edilmiş yarıçap
+        float rU = b0*R[0] + b1*R[1] + b2*R[2] + b3*R[3];
+
+        float dist2XY = pLocal.x*pLocal.x + pLocal.y*pLocal.y;
+
+        if (dist2XY <= rU * rU) {
+            // Ray tüp yüzeyine çarptığı gerçek t (ön yüz):
+            //   pLocal.z = tHit * |D|  →  tHit = pLocal.z * invDLen
+            // Yüzey kesimi için derinlik düzeltmesi (ince tüpte ihmal edilebilir ama doğru):
+            //   hit_z = pLocal.z - sqrt(rU^2 - dist2XY)
+            float sqrtTerm = sqrt(max(rU * rU - dist2XY, 0.0));
+            float tHit = (pLocal.z - sqrtTerm) * invDLen;
+
+            if (tHit >= gl_RayTminEXT && tHit <= gl_RayTmaxEXT) {
+                // Dünya uzayında teğet yönü: türev vektörünü ray çerçevesinden
+                // dünya çerçevesine dönüştür
+                vec3 dpLocal = db0*lP[0] + db1*lP[1] + db2*lP[2] + db3*lP[3];
+                vec3 tangentWorld = normalize(dpLocal.x*X + dpLocal.y*Y + dpLocal.z*Z);
+
+                // Hit attribute: tangent (xyz) + eğri parametresi (w)
+                hairAttrib = vec4(tangentWorld, u);
+
+                // Kesişimi raporla — hitKind=0 (düz kıl)
+                reportIntersectionEXT(tHit, 0u);
+            }
+        }
+    }
+}

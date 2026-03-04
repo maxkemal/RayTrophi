@@ -818,7 +818,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
 // ============================================================================
 // Delete Operation (Shared by Menu and Key Shortcut)
 // ============================================================================
-// OPTIMIZED VERSION - O(n) instead of O(n²)
+// OPTIMIZED VERSION - O(n) instead of O(nï¿½)
 void SceneUI::triggerDelete(UIContext& ctx) {
     if (!ctx.selection.hasSelection()) return;
 
@@ -935,7 +935,7 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         }
     }
 
-    // OPTIMIZATION: Single remove_if pass for ALL objects - O(n) instead of O(n²)
+    // OPTIMIZATION: Single remove_if pass for ALL objects - O(n) instead of O(nï¿½)
     // CRITICAL: Using raw pointer .get() instead of dynamic_pointer_cast for massive speedup
     // dynamic_pointer_cast does RTTI check on every call = very slow on 4M objects
     // We already know exact pointers from mesh_cache, so just compare raw pointers
@@ -1061,12 +1061,28 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             // INCREMENTAL GPU UPDATE (TLAS mode) - Instant!
             // =======================================================================
             if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                // Fast path: Just hide instances by setting visibility_mask = 0
-                for (const auto& name : deleted_names) {
-                    ctx.backend_ptr->hideInstancesByNodeName(name);
+                if (ctx.render_settings.use_vulkan) {
+                    // [CRASH FIX] Vulkan: do NOT call hideInstancesByNodeName +
+                    // rebuildAccelerationStructure() inline here.
+                    // After erasing from world.objects the BLAS pointers those
+                    // instances reference may already be freed; calling
+                    // rebuildAccelerationStructure() while a traceRays dispatch
+                    // is still in flight (or descriptor sets are still bound) causes
+                    // an access violation / device lost.
+                    // Deferring to g_vulkan_rebuild_pending lets the frame-end block
+                    // in Main.cpp run the full safe sequence:
+                    //   rebuildAccelerationStructure() -> updateGeometry()
+                    //   -> uploadHairToGPU() -> updateBackendMaterials()
+                    // with no render in flight.
+                    g_vulkan_rebuild_pending = true;
+                } else {
+                    // OptiX fast path: hide instances then rebuild TLAS (safe)
+                    for (const auto& name : deleted_names) {
+                        ctx.backend_ptr->hideInstancesByNodeName(name);
+                    }
+                    // Single TLAS update after ALL hides complete (batched for efficiency)
+                    ctx.backend_ptr->rebuildAccelerationStructure();
                 }
-                // Single TLAS update after ALL hides complete (batched for efficiency)
-                ctx.backend_ptr->rebuildAccelerationStructure();
             }
             else {
                 // GAS mode fallback: Full rebuild required

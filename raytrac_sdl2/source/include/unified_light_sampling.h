@@ -332,43 +332,40 @@ UNIFIED_FUNC int pick_smart_light_unified(
     // Create a mutable random value we can consume
     float rng_val = random_val;
     
-    // --- Step 1: Directional Light Shortcut (Matches GPU) ---
-    // GPU iterates all lights and gives each Directional light a 33% chance.
-    // If multiple directional lights exist, they are checked sequentially.
+    // --- Step 1: Directional Light Selection (Vulkan parity) ---
+    // Vulkan uses dir_count/light_count proportional probability instead of hardcoded 0.33.
+    // This ensures adding more lights doesn't disproportionately reduce directional contrib.
+    
+    int dir_count = 0;
+    for (int i = 0; i < light_count; i++) {
+        if (lights[i].type == 1) dir_count++;
+    }
     
     float prob_to_reach_weighted = 1.0f;
     
-    for (int i = 0; i < light_count; i++) {
-        if (lights[i].type == 1) {  // Directional
-            // Check if we pick this light using the 33% shortcut
-            // To simulate "fresh" random usage like GPU would with random_float(rng),
-            // we slice the current random value. 
-            // However, since we only have single 'random_val', we map it.
-            // Simplified: If random_val is in [0, 0.33] of the CURRENT range.
-            
-            // For true parity with GPU which calls random_float() inside the loop:
-            // We can't strictly emulate multiple Independent calls from one float without hashing.
-            // But assuming 1 Directional Light (common case), we just need to check 0.33.
-            
-            // Let's use a hashed approach to simulate a new random number for the check if we have multiple
-            // For single directional light (standard), this collapses to simple check.
-            
-            // Standard approach: Use the passed random_val for the DECISION.
-            // If we have 1 Dir light, range [0, 0.33) picks it.
-            // Range [0.33, 1.0) proceeds to weighted.
-            
-            if (rng_val < 0.33f) {
-                if (pdf_out) *pdf_out = 0.33f * prob_to_reach_weighted; // GPU: 0.33 probability at this step
-                return i;
+    if (dir_count > 0) {
+        float dir_prob = float(dir_count) / float(light_count);
+        
+        if (rng_val < dir_prob) {
+            // Pick among directional lights
+            float step = dir_prob / float(dir_count);
+            int sel = static_cast<int>(rng_val / step);
+            sel = (sel >= dir_count) ? dir_count - 1 : sel; // safety clamp
+            int found = 0;
+            for (int i = 0; i < light_count; i++) {
+                if (lights[i].type == 1) {
+                    if (found == sel) {
+                        if (pdf_out) *pdf_out = dir_prob / float(dir_count);
+                        return i;
+                    }
+                    found++;
+                }
             }
-            
-            // If not picked, we proceed.
-            // Renormalize rng_val for next steps?
-            // GPU generates NEW random number. 
-            // We map [0.33, 1.0] -> [0.0, 1.0]
-            rng_val = (rng_val - 0.33f) / 0.67f;
-            prob_to_reach_weighted *= 0.67f;
         }
+        
+        // Not picked, proceed to weighted selection
+        rng_val = (rng_val - dir_prob) / fmaxf(1.0f - dir_prob, 1e-6f);
+        prob_to_reach_weighted = 1.0f - dir_prob;
     }
     
     // --- Step 2: Weighted Selection (Matches GPU) ---
@@ -393,7 +390,9 @@ UNIFIED_FUNC int pick_smart_light_unified(
             
             if (light.type == 0) { // Point
                  float falloff = 1.0f / (dist * dist);
-                 weight = falloff * intensity;
+                 // Vulkan parity: include spherical area so selection pdf and per-light pdf are consistent
+                 float area = 4.0f * UnifiedConstants::PI * light.radius * light.radius;
+                 weight = falloff * intensity * area;
             }
             else if (light.type == 2) { // Area
                  float falloff = 1.0f / (dist * dist);

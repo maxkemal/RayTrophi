@@ -218,7 +218,7 @@ struct GpuVDBVolume {
     float pivot_offset[3];
     int motion_blur_enabled;
     float velocity_scale;
-    int pad1;
+    int vdb_id;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════

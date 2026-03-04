@@ -591,7 +591,13 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     if (force_bind_pose) {
         if (!was_in_bind_pose) {
             was_in_bind_pose = true;
-            geometry_changed = true;
+            // [HAIR PANEL FIX] Do NOT mark geometry_changed=true for the GPU path
+            // (apply_cpu_skinning=false).  Hair is re-uploaded to GPU inside
+            // uploadHairToGPU() below; triggering updateGeometry afterwards would
+            // overwrite m_meshBlasCount (including the newly-uploaded hair BLAS) and
+            // cause stale/orphaned BLASes to accumulate on every Hair-tab switch.
+            // CPU-only / skinning paths still need geometry_changed = apply_cpu_skinning.
+            geometry_changed = apply_cpu_skinning;
             
             if (!scene.boneData.boneNameToIndex.empty()) {
                 this->finalBoneMatrices.assign(scene.boneData.boneNameToIndex.size(), Matrix4x4::identity());
@@ -4019,7 +4025,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                 b_metal += static_cast<float>(layer->getPropertyValue(layer->metallicProperty, luv).z) * weights[i];
                                 
                                 if (layer->has_normal_map()) {
-                                    blended_n += (layer->get_normal_from_map(luv.u, luv.v) * 2.0f - Vec3(1.0f)) * weights[i];
+                                    Vec3 ns = layer->get_normal_from_map(luv.u, luv.v) * 2.0f - Vec3(1.0f);
+                                    ns.x = -ns.x; // [FIX] Flip X for basis consistency (matching OptiX)
+                                    ns.y = -ns.y; // [FIX] Flip Y for terrain normal map orientation
+                                    blended_n += ns * weights[i];
                                     has_n = true;
                                 }
                             }
@@ -4227,13 +4236,32 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             }
         }
 
+        // --- Emissive Contribution (Vulkan parity: computed BEFORE scatter) ---
+        // Vulkan closesthit: payload.radiance = emColor * emStrength (before scatter decision)
+        // Vulkan raygen: radiance += throughput * payload.radiance (before scatter check)
+        // This ensures emissive-only surfaces still contribute even if scatter fails.
+        Vec3 emitted = rec.material ? rec.material->getEmission(rec.uv, rec.point) : Vec3(0.0f);
+        emission = toVec3f(emitted);
+
         // --- Scatter ray (GPU Parity: Happens before contribution accumulation) ---
         Vec3 attenuation(1.0f);
         Ray scattered;
         bool is_specular = false;
         bool can_scatter = rec.material && rec.material->scatter(current_ray, rec, attenuation, scattered, is_specular);
 
-        if (!can_scatter) break;
+        if (!can_scatter) {
+            // Vulkan parity: emissive-only surfaces still emit light.
+            // raygen.rgen accumulates payload.radiance THEN checks payload.scattered.
+            color += throughput * emission;
+            break;
+        }
+
+        // Vulkan/OptiX parity: Emission ve direct lighting zaten evaluate_brdf() içeriyor.
+        // Scatter attenuation'ı throughput'a SONRA uygulamak gerekir,
+        // yoksa BRDF iki kez çarpılır (double-BRDF bug).
+        // OptiX: throughput_for_nee = throughput (pre-scatter)
+        // Vulkan: payload.radiance att=1.0 ile toplanır, throughput scatter sonrası güncellenir
+        Vec3f throughput_for_nee = throughput;
 
         Vec3f atten_f = toVec3f(attenuation);
         throughput *= atten_f;
@@ -4264,10 +4292,6 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 current_medium_absorb = Vec3f(0.0f);
             }
         }
-        
-        // --- Emissive Contribution ---
-        Vec3 emitted = rec.material ? rec.material->getEmission(rec.uv, rec.point) : Vec3(0.0f);
-        emission = toVec3f(emitted/2);
 
         // --- Direct lighting ---
         Vec3f direct_light(0.0f);
@@ -4352,15 +4376,23 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                             // MIS Weight (Currently 1.0 for analytic lights to match GPU, can be enabled for Area lights)
                             float mis_weight = 1.0f;
-                            // GPU Parity: GPU calculates MIS using only geometry PDF, ignoring selection PDF
-                            if (light.type == (int)UnifiedLightType::Area) {
-                                float pdf_geo = compute_light_pdf(light, distance, 1.0f); // Pass 1.0 for selection PDF
-                                mis_weight = power_heuristic(pdf_geo, std::clamp(pdf_brdf, 0.01f, 5000.0f));
+                            // Vulkan parity: Delta ışıklar (point/directional) için MIS uygulanmaz
+                            bool isDelta = (light.type == (int)UnifiedLightType::Point || 
+                                          light.type == (int)UnifiedLightType::Directional);
+                            if (!isDelta && light.type == (int)UnifiedLightType::Area) {
+                                // Vulkan parity: Combined PDF = pdf_geometry * pdf_select
+                                // MIS weight ve estimator ikisi de combined PDF kullanmalı
+                                float pdf_geo = compute_light_pdf(light, distance, 1.0f);
+                                float pdf_combined = pdf_geo * pdf_select;
+                                mis_weight = power_heuristic(pdf_combined, std::clamp(pdf_brdf, 0.01f, 5000.0f));
+                                // Area light: tam MIS estimator = f * Li * NdotL * w / pdf_combined
+                                direct_light = (f * Li * std::max(0.0f, dot(N, wi)) * mis_weight) 
+                                             / std::max(pdf_combined, 1e-4f);
+                            } else {
+                                // Delta ışıklar: mis_weight = 1.0, sadece pdf_select ile böl
+                                direct_light = (f * Li * std::max(0.0f, dot(N, wi)) * mis_weight) 
+                                             / std::max(pdf_select, 1e-4f);
                             }
-
-                            // Contribution: (f * Li * cos * mis_weight)
-                            // GPU Parity: Do NOT divide by pdf_select. GPU performs biased accumulation based on selection frequency.
-                            direct_light = (f * Li * std::max(0.0f, dot(N, wi)) * mis_weight);
 
                             direct_light = clamp_contribution(direct_light, UnifiedConstants::MAX_CONTRIBUTION);
                         }
@@ -4379,7 +4411,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             total_contribution *= (UnifiedConstants::MAX_CONTRIBUTION * 2.0f / total_lum);
         }
 
-        color += throughput * total_contribution;
+        // Vulkan/OptiX parity: PRE-scatter throughput kullan.
+        // Direct lighting ve emission zaten kendi BRDF değerlendirmesini içerir.
+        // Post-scatter throughput kullanmak BRDF'i iki kez uygular (çift-BRDF hatası).
+        color += throughput_for_nee * total_contribution;
 
         current_ray = scattered;
     }
@@ -4468,7 +4503,114 @@ void Renderer::resetCPUAccumulation() {
 
 
 void Renderer::uploadHairToGPU() {
-    if (!m_backend || !g_hasCUDA) return;
+    if (!m_backend) return;
+
+    // ── Vulkan path ──────────────────────────────────────────────────────────
+    auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(m_backend);
+    if (vulkanBackend) {
+        vulkanBackend->clearHairGeometry();
+        if (hairSystem.getTotalStrandCount() == 0) {
+            vulkanBackend->resetAccumulation();
+            return;
+        }
+
+        auto groomNames = hairSystem.getGroomNames();
+
+        // [FIX] Combine ALL visible grooms into ONE strand list so that only a
+        // single AABB BLAS and a single segment SSBO are created.  The old
+        // per-groom uploadHairStrands calls overwrote the segment SSBO on every
+        // iteration, leaving only the last groom's segments in the buffer while
+        // the earlier grooms' BLASes still referenced wrong segment indices.
+        // Combining avoids the overwrite and eliminates extra BLAS objects.
+        //
+        // materialID is set to the groom index so each strand looks up the
+        // correct entry in the per-groom hair material buffer.
+        std::vector<Backend::HairStrandData> combinedStrands;
+        std::vector<Backend::IBackend::HairMaterialData> allMaterials;
+
+        uint32_t groomMaterialIndex = 0;
+        for (const auto& name : groomNames) {
+            const Hair::HairGroom* groom = hairSystem.getGroom(name);
+            if (!groom || !groom->isVisible) continue;
+
+            // Collect strands (prefer interpolated; fall back to guides)
+            const auto& srcStrands = (!groom->interpolated.empty() && !hideInterpolatedHair)
+                ? groom->interpolated : groom->guides;
+            if (srcStrands.empty()) continue;
+            // Calculate scale and extract parameters
+            const Matrix4x4& transform = groom->transform;
+            float sx = Vec3(transform.m[0][0], transform.m[1][0], transform.m[2][0]).length();
+            float sy = Vec3(transform.m[0][1], transform.m[1][1], transform.m[2][1]).length();
+            float sz = Vec3(transform.m[0][2], transform.m[1][2], transform.m[2][2]).length();
+            float avgScale = (sx + sy + sz) / 3.0f;
+            bool useBSpline = groom->params.useBSpline;
+
+            for (const auto& s : srcStrands) {
+                if (s.points.size() < 4) continue;
+                Backend::HairStrandData sd;
+                // Override materialID to be the groom's index into allMaterials
+                // so the hair intersection shader fetches the correct material.
+                sd.materialID = groomMaterialIndex;
+                sd.rootUV     = s.rootUV;
+                
+                size_t estimatedPoints = s.points.size() + (useBSpline ? 4 : 0);
+                sd.points.reserve(estimatedPoints);
+                sd.radii.reserve(estimatedPoints);
+
+                auto addPoint = [&](const Hair::HairPoint& hp) {
+                    Vec3 p = transform.transform_point(hp.position);
+                    float r = std::max((hp.radius > 0.f ? hp.radius : 0.002f) * avgScale, 1e-5f);
+                    sd.points.push_back(p);
+                    sd.radii.push_back(r);
+                };
+
+                if (useBSpline) {
+                    addPoint(s.points.front());
+                    addPoint(s.points.front());
+                }
+
+                for (const auto& hp : s.points) {
+                    addPoint(hp);
+                }
+
+                if (useBSpline) {
+                    addPoint(s.points.back());
+                    addPoint(s.points.back());
+                }
+                
+                combinedStrands.push_back(std::move(sd));
+            }
+
+            // Collect material for this groom
+            const auto& mp = groom->material;
+            Backend::IBackend::HairMaterialData mat;
+            mat.color           = mp.color;
+            mat.melanin         = mp.melanin;
+            mat.melaninRedness  = mp.melaninRedness;
+            mat.roughness       = mp.roughness;
+            mat.radialRoughness = mp.radialRoughness;
+            mat.ior             = mp.ior;
+            mat.cuticleAngle    = mp.cuticleAngle;
+            mat.colorMode       = (int)mp.colorMode;
+            allMaterials.push_back(mat);
+            ++groomMaterialIndex;
+        }
+
+        if (!combinedStrands.empty()) {
+            // Single upload call → single BLAS, single segment SSBO
+            vulkanBackend->uploadHairStrands(combinedStrands, "combined_hair");
+        }
+        if (!allMaterials.empty()) {
+            vulkanBackend->uploadHairMaterials(allMaterials);
+        }
+        SCENE_LOG_INFO("[Hair GPU/Vulkan] Uploaded " + std::to_string(groomMaterialIndex)
+            + " grooms, " + std::to_string(combinedStrands.size()) + " strands (combined)");
+        vulkanBackend->resetAccumulation();
+        return;
+    }
+
+    // ── OptiX / CUDA path ────────────────────────────────────────────────────
+    if (!g_hasCUDA) return;
 
     Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
     OptixWrapper* optix_gpu = optixBackend ? optixBackend->getOptixWrapper() : nullptr;
@@ -4555,6 +4697,7 @@ void Renderer::uploadHairToGPU() {
     }
     
     SCENE_LOG_INFO("[Hair GPU] Integrated " + std::to_string(groomNames.size()) + " hair grooms into TLAS");
+    m_backend->resetAccumulation();
 }
 
 void Renderer::updateHairGeometryOnGPU(bool forceRebuild) {
@@ -4582,6 +4725,19 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
         hmd.randomHue = mat.randomHue;
         hmd.randomValue = mat.randomValue;
         hmd.colorMode = static_cast<int>(mat.colorMode);
+        // Artistic controls
+        hmd.tint = mat.tint;
+        hmd.tintColor = mat.tintColor;
+        hmd.specularTint = mat.specularTint;
+        hmd.diffuseSoftness = mat.diffuseSoftness;
+        hmd.coatTint = mat.coatTint;
+        // Emission
+        hmd.emission = mat.emission;
+        hmd.emissionStrength = mat.emissionStrength;
+        // Root-tip gradient
+        hmd.enableRootTipGradient = mat.enableRootTipGradient;
+        hmd.tipColor = mat.tipColor;
+        hmd.rootTipBalance = mat.rootTipBalance;
 
         // 1. Albedo Texture
         if (mat.customAlbedoTexture && mat.customAlbedoTexture->is_loaded()) {
@@ -4634,6 +4790,8 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
         if (optixBackend && optixBackend->getOptixWrapper()) {
             optixBackend->getOptixWrapper()->updateHairMaterialsOnly(hairSystem);
         }
+        
+        m_backend->resetAccumulation();
     }
     resetCPUAccumulation();
 }
@@ -5059,7 +5217,26 @@ void Renderer::rebuildBackendGeometry(SceneData& scene) {
     // Rebuild geometry TLAS
     rebuildBackendGeometryWithList(scene.world.objects);
     // Sync all volumes (VDB/Gas)
-    VolumetricRenderer::syncVolumetricData(scene, m_backend);
+    // [VULKAN FIX] For Vulkan, rebuildBackendGeometryWithList() sets g_vulkan_rebuild_pending=true
+    // and returns immediately — m_orderedVDBInstances is still stale/empty at this point.
+    // Calling syncVolumetricData here would upload an SSBO with incorrect slot ordering or
+    // all-inactive entries (if old VDB IDs don't match the freshly loaded scene VDB IDs).
+    // The correct sync happens in the pending-block (Main.cpp): after updateGeometry() rebuilds
+    // m_orderedVDBInstances, syncVDBVolumesToGPU() + updateBackendMaterials() ensure the SSBO
+    // is in the right order. Skip the premature call here for Vulkan.
+    if (!render_settings.use_vulkan) {
+        VolumetricRenderer::syncVolumetricData(scene, m_backend);
+    }
+    // Restore hair after rebuild.
+    // For Vulkan the actual BLAS/TLAS rebuild is deferred: rebuildBackendGeometryWithList()
+    // sets g_vulkan_rebuild_pending and returns immediately — no BLASes exist yet.
+    // uploadHairToGPU() would create hair BLASes against the pre-rebuild TLAS and then the
+    // pending-block in Main.cpp would immediately destroy them (rebuildAccelerationStructure).
+    // The pending-block already calls uploadHairToGPU() after updateGeometry() completes, so
+    // skip the call here to avoid the wasted work and the double-clearHairGeometry/waitIdle.
+    if (!render_settings.use_vulkan) {
+        uploadHairToGPU();
+    }
 }
 
 
@@ -5069,7 +5246,9 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
         return;
     }
     if (render_settings.use_vulkan) {
-        m_backend->updateGeometry(objects);
+        extern bool g_vulkan_rebuild_pending;
+        g_vulkan_rebuild_pending = true;
+        SCENE_LOG_INFO("[Vulkan] Geometry update requested - signaling heavy rebuild flag.");
         return;
     }
     if (!g_hasCUDA) return;
@@ -5084,7 +5263,7 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
     if (objects.empty() && hairCount == 0) {
         SCENE_LOG_INFO("[OptiX] Scene empty (No objects, no hair), clearing GPU scene");
         if (optix_gpu_ptr) optix_gpu_ptr->clearScene();
-        m_backend->resetAccumulation();
+        if (m_backend) m_backend->resetAccumulation();
         return;
     }
 
@@ -5244,7 +5423,7 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
             optix_gpu_ptr->buildFromDataTLAS(optix_data, objects);
         }
         
-        m_backend->resetAccumulation();
+        if (m_backend) m_backend->resetAccumulation();
 
 
         if (triangles.size() > 1000) {
@@ -5420,10 +5599,41 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
         const auto& all_materials = mgr.getAllMaterials();
         if (all_materials.empty()) return;
 
+        // === Build terrain layer data for Vulkan splat-blending ===
+        // Map: material_id -> terrain layer buffer index (used to set FLAG_TERRAIN in material flags)
+        std::unordered_map<uint16_t, uint32_t> terrainMatToLayerIdx;
+        std::vector<Backend::IBackend::TerrainLayerData> terrainLayers;
+
+        const auto& terrainObjects = TerrainManager::getInstance().getTerrains();
+        for (const auto& t : terrainObjects) {
+            if (t.layers.empty() || !t.splatMap || !t.splatMap->is_loaded()) continue;
+
+            Backend::IBackend::TerrainLayerData ld{};
+            uint32_t activeCount = 0;
+            for (int k = 0; k < 4 && k < (int)t.layers.size(); ++k) {
+                if (t.layers[k]) {
+                    uint16_t mid = mgr.getMaterialID(t.layers[k]->materialName);
+                    ld.layer_mat_id[k] = mid;
+                    ld.layer_uv_scale[k] = (k < (int)t.layer_uv_scales.size()) ? t.layer_uv_scales[k] : 1.0f;
+                    ++activeCount;
+                } else {
+                    ld.layer_mat_id[k] = 0;
+                    ld.layer_uv_scale[k] = 1.0f;
+                }
+            }
+            ld.splatMapTexture = reinterpret_cast<int64_t>(t.splatMap.get());
+            ld.layer_count = activeCount;
+
+            uint32_t layerIdx = (uint32_t)terrainLayers.size();
+            terrainLayers.push_back(ld);
+            terrainMatToLayerIdx[t.material_id] = layerIdx;
+        }
+
         std::vector<Backend::IBackend::MaterialData> backendMaterials;
         backendMaterials.reserve(all_materials.size());
 
-        for (const auto& mat : all_materials) {
+        for (size_t i = 0; i < all_materials.size(); ++i) {
+            const auto& mat = all_materials[i];
             Backend::IBackend::MaterialData data = {};
             if (!mat) { backendMaterials.push_back(data); continue; }
 
@@ -5467,12 +5677,36 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                 data.heightTexture = getH(pbsdf->heightProperty.texture);
             }
 
+            // Copy water-specific GPU params (live in GpuMaterial, not duplicated in PrincipledBSDF)
+            if (mat->gpuMaterial) {
+                const auto& gm = *mat->gpuMaterial;
+                data.micro_detail_strength = gm.micro_detail_strength;
+                data.micro_detail_scale    = gm.micro_detail_scale;
+                data.foam_threshold        = gm.foam_threshold;
+                data.fft_ocean_size        = gm.fft_ocean_size;
+                data.fft_choppiness        = gm.fft_choppiness;
+                data.fft_wind_speed        = gm.fft_wind_speed;
+                data.fft_amplitude         = gm.fft_amplitude;
+                data.fft_time_scale        = gm.fft_time_scale;
+            }
+
+            // Mark terrain base materials so the Vulkan shader knows to use splat blending
+            auto tit = terrainMatToLayerIdx.find((uint16_t)i);
+            if (tit != terrainMatToLayerIdx.end()) {
+                data.flags |= Backend::IBackend::MAT_FLAG_TERRAIN;
+                data.terrainLayerIdx = tit->second;
+            }
+
             backendMaterials.push_back(data);
         }
 
-        m_backend->uploadMaterials(backendMaterials);
-        VolumetricRenderer::syncVolumetricData(scene, m_backend);
-        m_backend->resetAccumulation();
+        if (m_backend) {
+            m_backend->uploadMaterials(backendMaterials);
+            if (!terrainLayers.empty())
+                m_backend->uploadTerrainLayerMaterials(terrainLayers);
+            VolumetricRenderer::syncVolumetricData(scene, m_backend);
+            m_backend->resetAccumulation();
+        }
     }
     catch (std::exception& e) {
         SCENE_LOG_ERROR(std::string("[Renderer] updateBackendMaterials failed: ") + e.what());

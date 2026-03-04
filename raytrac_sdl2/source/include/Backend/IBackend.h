@@ -114,6 +114,15 @@ struct TriangleData {
     Vec3 n0, n1, n2;        // Normals
     Vec2 uv0, uv1, uv2;     // Texture coords
     uint16_t materialID;
+    
+    // Optional skinning data
+    bool hasSkinData = false;
+    int32_t boneIndices_v0[4] = {-1, -1, -1, -1};
+    int32_t boneIndices_v1[4] = {-1, -1, -1, -1};
+    int32_t boneIndices_v2[4] = {-1, -1, -1, -1};
+    float boneWeights_v0[4] = {0, 0, 0, 0};
+    float boneWeights_v1[4] = {0, 0, 0, 0};
+    float boneWeights_v2[4] = {0, 0, 0, 0};
 };
 
 // Hair strand data for upload
@@ -299,11 +308,42 @@ public:
 
         // Padding/flags for future use
         uint32_t flags = 0;
+        uint32_t terrainLayerIdx = 0; // Index into terrain layer buffer (valid when MAT_FLAG_TERRAIN set)
+
+        // Water-specific parameters (maps to VkGpuMaterial Block 8 & Block 9)
+        float micro_detail_strength = 0.0f;
+        float micro_detail_scale    = 0.0f;
+        float foam_threshold        = 0.0f;
+        float fft_ocean_size        = 0.0f;
+        float fft_choppiness        = 0.0f;
+        float fft_wind_speed        = 0.0f;
+        float fft_amplitude         = 0.0f;
+        float fft_time_scale        = 0.0f;
     };
-    
+
+    // Flag bits for MaterialData::flags
+    static constexpr uint32_t MAT_FLAG_TERRAIN = (1u << 16); // Splat-blended terrain material
+
+    /**
+     * @brief Per-terrain layer descriptor for splat-map based blending.
+     *        Used by the Vulkan backend (binding 12).
+     */
+    struct TerrainLayerData {
+        uint32_t layer_mat_id[4]   = {0, 0, 0, 0};  // Material indices for layers 0-3
+        float    layer_uv_scale[4] = {1, 1, 1, 1};  // UV tiling for layers 0-3
+        int64_t  splatMapTexture   = 0;              // Texture pointer/handle for RGBA splat map
+        uint32_t layer_count       = 0;              // Active layer count (0 = no terrain)
+    };
+
     virtual void uploadMaterials(const std::vector<MaterialData>& materials) = 0;
+
+    /**
+     * @brief Upload terrain layer descriptors for splat-map blending (Vulkan path).
+     *        Default no-op for backends that handle terrain differently (e.g. OptiX).
+     */
+    virtual void uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& /*layers*/) {}
     
-    // Hair-specific material
+    // Hair-specific material (synced with all rendering backends)
     struct HairMaterialData {
         Vec3 color;
         Vec3 absorption;
@@ -317,6 +357,19 @@ public:
         float randomHue;
         float randomValue;
         int colorMode;
+        // Artistic controls
+        float tint = 0.0f;
+        Vec3 tintColor = Vec3(1, 1, 1);
+        float specularTint = 0.0f;
+        float diffuseSoftness = 0.5f;
+        Vec3 coatTint = Vec3(1, 1, 1);
+        // Emission
+        Vec3 emission = Vec3(0, 0, 0);
+        float emissionStrength = 0.0f;
+        // Root-tip gradient
+        bool enableRootTipGradient = false;
+        Vec3 tipColor = Vec3(0.6f, 0.4f, 0.25f);
+        float rootTipBalance = 0.5f;
         // Textures
         int64_t albedoTexture = -1;
         int64_t roughnessTexture = -1;
@@ -338,7 +391,30 @@ public:
         bool sRGB,
         bool isFloat = false
     ) = 0;
-    
+
+    /**
+     * @brief Upload 3D texture (e.g. NanoVDB grid as VkImage or SSBO for volume rendering)
+     * @param data    Raw voxel data (float or uint8)
+     * @param width/height/depth  Grid resolution
+     * @param channels  1=density, 4=RGBA
+     * @param isFloat   true → float32 per channel
+     * @return Opaque texture handle (backend-specific)
+     *
+     * Default no-op for backends that don't support 3D textures (OptiX uses NanoVDB SSBO path).
+     * Vulkan backend overrides this for VkImage3D allocation.
+     */
+    virtual int64_t uploadTexture3D(
+        const void* data,
+        uint32_t width,
+        uint32_t height,
+        uint32_t depth,
+        uint32_t channels,
+        bool isFloat = false
+    ) {
+        (void)data; (void)width; (void)height; (void)depth; (void)channels; (void)isFloat;
+        return 0;
+    }
+
     virtual void destroyTexture(int64_t textureHandle) = 0;
     
     // ========================================================================

@@ -31,10 +31,9 @@ extern bool g_hasOptix;
 // HELPER: Sync VDB volumes to GPU (OptiX) - with GPU availability check
 // ─────────────────────────────────────────────────────────────────────────────
 void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
-    // SAFETY: Only sync to GPU if OptiX is actually available
-    if (!g_hasOptix) {
-        return; // Silent skip - CPU-only mode
-    }
+    // Sync to GPU for both OptiX and Vulkan backends.
+    // Previously guarded by !g_hasOptix which caused animated VDB frames
+    // to never be re-uploaded in Vulkan mode.
     if (ctx.backend_ptr) {
         VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.backend_ptr);
     }
@@ -107,9 +106,16 @@ void SceneUI::importVDBVolume(UIContext& ctx) {
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
     
-    // GPU sync only if OptiX is available
-    if (g_hasOptix && ctx.backend_ptr) {
-        // Upload VDB volumes to GPU for OptiX ray marching
+    if (ctx.render_settings.use_vulkan) {
+        // Vulkan: must rebuild TLAS to add the new AABB instance.
+        // [FIX] Check use_vulkan FIRST — even when g_hasOptix=true, Vulkan mode requires
+        // a TLAS rebuild to add the VDB AABB. The old g_hasOptix-first check caused
+        // g_vulkan_rebuild_pending to never be set on OptiX hardware, leaving the TLAS
+        // without the VDB AABB instance → volume shader never invoked → VDB invisible.
+        // syncVDBVolumesToGPU will be called from the rebuild block after updateGeometry.
+        g_vulkan_rebuild_pending = true;
+    } else if (g_hasOptix && ctx.backend_ptr) {
+        // OptiX: sync SSBO + reset (no TLAS AABB needed for OptiX)
         syncVDBVolumesToGPU(ctx);
         ctx.backend_ptr->resetAccumulation();
     }
@@ -244,7 +250,12 @@ void SceneUI::importVDBSequence(UIContext& ctx) {
     ctx.renderer.resetCPUAccumulation();
     
     if (ctx.backend_ptr) {
-        syncVDBVolumesToGPU(ctx);
+        if (ctx.render_settings.use_vulkan) {
+            // Vulkan: rebuild TLAS to include new VDB AABB (syncVDBVolumesToGPU called from rebuild block)
+            g_vulkan_rebuild_pending = true;
+        } else {
+            syncVDBVolumesToGPU(ctx);
+        }
         ctx.backend_ptr->resetAccumulation();
     }
     
@@ -353,7 +364,13 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
                         auto it_obj = std::find(scene.world.objects.begin(), scene.world.objects.end(), vdb);
                         if (it_obj != scene.world.objects.end()) scene.world.objects.erase(it_obj);
                         selection.clearSelection();
-                        syncVDBVolumesToGPU(ctx);
+                        // Vulkan: rebuild TLAS to remove the stale AABB instance.
+                        // OptiX: sync SSBO to remove volume.
+                        if (ctx.render_settings.use_vulkan) {
+                            g_vulkan_rebuild_pending = true;
+                        } else {
+                            syncVDBVolumesToGPU(ctx);
+                        }
                     }
                 }
                 ImGui::EndPopup();
@@ -524,6 +541,12 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
             syncVDBVolumesToGPU(ctx);  // Sync shader changes to GPU
             ctx.backend_ptr->resetAccumulation();
         }
+        // [VULKAN FIX] Explicitly kick off a fresh render pass so property changes
+        // are visible immediately even when accumulation was already complete.
+        // The auto-progressive loop also handles this via isAccumulationComplete(),
+        // but setting start_render=true here guarantees the very next main-loop
+        // frame dispatches a new GPU sample with the updated SSBO.
+        ctx.start_render = true;
         g_ProjectManager.markModified();
     }
     

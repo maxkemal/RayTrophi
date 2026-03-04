@@ -354,14 +354,17 @@ void GasSimulator::initialize(const GasSimulationSettings& s) {
     // BACKEND SELECTION - Respect settings while prioritizing CUDA if possible
     // ═══════════════════════════════════════════════════════════════════════════════
     bool cuda_available = false;
-    int device_count = 0;
-    if (cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0) {
-        cudaDeviceProp prop;
-        if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess && prop.major >= 5) {
-            cuda_available = true;
+    // Respect central detection flag to avoid calling CUDA symbols when driver missing
+    if (g_hasCUDA) {
+        int device_count = 0;
+        if (cudaGetDeviceCount(&device_count) == cudaSuccess && device_count > 0) {
+            cudaDeviceProp prop;
+            if (cudaGetDeviceProperties(&prop, 0) == cudaSuccess && prop.major >= 5) {
+                cuda_available = true;
+            }
+        } else {
+            cudaGetLastError(); // Clear any error flag
         }
-    } else {
-        cudaGetLastError(); // Clear any error flag
     }
     
     // Choose which backend to actually use
@@ -1758,6 +1761,12 @@ void GasSimulator::initCUDA() {
 }
 void GasSimulator::freeCUDA() {
     if (!cuda_initialized) return;
+    if (!g_hasCUDA) {
+        SCENE_LOG_WARN("[GasSimulator::freeCUDA] CUDA not present, skipping GPU free");
+        cuda_initialized = false;
+        gpu_data_valid = false;
+        return;
+    }
     
     SCENE_LOG_INFO("[GasSimulator::freeCUDA] START - Syncing device before free...");
     

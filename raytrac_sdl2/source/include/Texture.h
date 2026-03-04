@@ -846,6 +846,8 @@ public:
 
     // Efficiently update GPU data from current CPU pixels
     void updateGPU() {
+        // Mark Vulkan sampler cache as stale so the backend re-uploads on next material sync.
+        vulkan_dirty = true;
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return;
 
         cudaError_t err = cudaSuccess;
@@ -884,6 +886,8 @@ public:
 
     // Upload a specific region to GPU (useful for partial splatmap updates)
     bool upload_region_to_gpu(int x, int y, int w, int h) {
+        // Vulkan cache must be invalidated even on partial updates (brush painting).
+        vulkan_dirty = true;
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return false;
 
         // Clamp to texture bounds
@@ -1027,6 +1031,11 @@ public:
     bool is_gray_scale = true;
     bool m_is_loaded = false;
     bool is_gpu_uploaded = false;
+    // [FIX] Set to true by updateGPU() so that Vulkan backend knows to re-upload
+    // the texture to its sampler array even though the pointer hasn't changed.
+    // The Vulkan getTexID cache is keyed by pointer; in-place content changes
+    // (autoMask, paintSplatMap, importSplatMap) would otherwise stay stale.
+    bool vulkan_dirty = false;
     int width = 0, height = 0;
     std::vector<CompactVec4> pixels;
     std::vector<float4> float_pixels; // For HDR

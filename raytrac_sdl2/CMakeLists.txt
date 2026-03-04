@@ -152,6 +152,7 @@ add_custom_command(
 # --- EXECUTABLE ---
 # Add only raygen.ptx to executable (others are likely loaded dynamically or need separate rules)
 add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUT})
+set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "RayTrophi Studio")
 
 # --- INCLUDE DIRECTORIES ---
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -226,6 +227,13 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 target_link_directories(${PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/lib")
 target_link_libraries(${PROJECT_NAME} PRIVATE ${ADDITIONAL_LIBS})
 
+# Use delay loading for Driver API so the application can gracefully fall back to Vulkan/CPU when NVIDIA driver is missing.
+if(MSVC)
+    target_link_options(${PROJECT_NAME} PRIVATE "/DELAYLOAD:nvcuda.dll" "/DELAYLOAD:vulkan-1.dll" "/DELAYLOAD:cudart64_12.dll" "/DELAYLOAD:cudart64_11.dll" "/DELAYLOAD:cufft64_11.dll")
+    # Also need delayimp.lib to hook the delay loading
+    target_link_libraries(${PROJECT_NAME} PRIVATE delayimp)
+endif()
+
 # --- POST BUILD COPY ---
 # Copy .ptx to executable directory
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -236,9 +244,10 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 )
 
 # Copy Vulkan shaders to executable directory/shaders
+# Compiled .spv files live under source/shaders/ (produced by compile_shaders.bat)
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/shaders"
     "$<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders"
     COMMENT "Copying Vulkan shaders to output directory/shaders"
 )

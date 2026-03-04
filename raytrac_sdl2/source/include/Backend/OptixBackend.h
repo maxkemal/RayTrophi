@@ -42,6 +42,7 @@ public:
     void uploadHairMaterials(const std::vector<HairMaterialData>& materials) override;
     
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;
+    int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override { return 0; }
     void destroyTexture(int64_t textureHandle) override;
 
     void setRenderParams(const RenderParams& params) override;

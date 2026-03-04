@@ -272,7 +272,14 @@ void GasVolume::freeGPUResources() {
         gpu_res_x = gpu_res_y = gpu_res_z = 0;
         return;
     }
-    
+    // If CUDA isn't available, reset tracking and return
+    if (!g_hasCUDA) {
+        density_texture = temperature_texture = velocity_texture = 0;
+        density_array = temperature_array = velocity_array = nullptr;
+        gpu_res_x = gpu_res_y = gpu_res_z = 0;
+        return;
+    }
+
     // Clear any sticky errors first
     cudaGetLastError();
     

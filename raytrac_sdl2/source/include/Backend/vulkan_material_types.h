@@ -64,9 +64,30 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     VkGpuTextureHandle opacity_tex;
     VkGpuTextureHandle transmission_tex;
 
-    // Block 12: Reserved for future use (16 bytes)
-    uint32_t _reserved[4];
+    // Block 12: Terrain layer index + subsurface IOR (16 bytes)
+    // When FLAG_TERRAIN (bit 16) is set in flags, _terrain_layer_idx is the index
+    // into the TerrainLayerBuffer (binding 12) for splat-based layer blending.
+    float subsurface_ior;
+    uint32_t _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
+    uint32_t _reserved[2];
 };
+
+// Flag bits for VkGpuMaterial::flags
+static constexpr uint32_t VK_MAT_FLAG_TERRAIN = (1u << 16); // Splat-blended terrain material
+
+/**
+ * @brief Per-terrain splat-layer descriptor uploaded to binding 12.
+ *        Contains up to 4 material layer indices, per-layer UV scales,
+ *        and the splat map texture handle used for blending weights.
+ */
+struct VK_GPU_ALIGN(16) VkTerrainLayerData {
+    uint32_t layer_mat_id[4];   // Material buffer indices for layers 0-3
+    float    layer_uv_scale[4]; // UV tiling scales for layers 0-3
+    uint32_t splat_map_tex;     // Combined-image-sampler slot for the RGBA splat map
+    uint32_t layer_count;       // Number of active layers (1-4)
+    uint32_t _pad[2];           // Padding to 48 bytes
+};
+static_assert(sizeof(VkTerrainLayerData) == 48, "VkTerrainLayerData size mismatch");
 
 /**
  * @brief Vulkan-Specific GPU Light struct.

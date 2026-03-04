@@ -192,7 +192,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ctx.renderer.resetCPUAccumulation();
                     g_bvh_rebuild_pending = true;
                     g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                 }
                 ImGui::SameLine(); UIWidgets::HelpMarker("Fast: Simple 4-neighbor average\nSobel: Smooth 8-neighbor filter (recommended)\nHigh Quality: Enhanced edge detection");
                 
@@ -204,7 +204,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     ctx.renderer.resetCPUAccumulation();
                     g_bvh_rebuild_pending = true;
                     g_optix_rebuild_pending = true;
-                    if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                    if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                 }
                 ImGui::PopItemWidth();
                 ImGui::SameLine(); UIWidgets::HelpMarker("Intensity of surface detail lighting (bumpiness).");
@@ -226,10 +226,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 if (UIWidgets::PrimaryButton("Initialize Layers", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
                     TerrainManager::getInstance().initLayers(t);
                     SCENE_LOG_INFO("Terrain layers initialized for: " + t->name);
-                    if (ctx.optix_gpu_ptr) {
-                        ctx.renderer.updateBackendMaterials(ctx.scene);
-                        ctx.optix_gpu_ptr->resetAccumulation();
-                        ctx.renderer.resetCPUAccumulation();
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+                        ctx.backend_ptr->resetAccumulation();
                     }
                 }
             }
@@ -266,10 +266,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             bool is_selected = (t->layers[i] == mat);
                             if (ImGui::Selectable(mat->materialName.c_str(), is_selected)) {
                                 t->layers[i] = mat;
-                                if (ctx.optix_gpu_ptr) {
+                                ctx.renderer.resetCPUAccumulation();
+                                if (ctx.backend_ptr) {
                                     ctx.renderer.updateBackendMaterials(ctx.scene);
-                                    ctx.optix_gpu_ptr->resetAccumulation();
-                                    ctx.renderer.resetCPUAccumulation();
+                                    ctx.backend_ptr->resetAccumulation();
                                 }
                             }
                             if (is_selected) ImGui::SetItemDefaultFocus();
@@ -286,10 +286,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             newMat->materialName = matName;
                             MaterialManager::getInstance().addMaterial(matName, newMat);
                             t->layers[i] = newMat;
-                            if (ctx.optix_gpu_ptr) {
+                            ctx.renderer.resetCPUAccumulation();
+                            if (ctx.backend_ptr) {
                                 ctx.renderer.updateBackendMaterials(ctx.scene);
-                                ctx.optix_gpu_ptr->resetAccumulation();
-                                ctx.renderer.resetCPUAccumulation();
+                                ctx.backend_ptr->resetAccumulation();
                             }
                             SCENE_LOG_INFO("Created terrain layer material: " + matName);
                         }
@@ -298,10 +298,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     // UV Scale
                         ImGui::PushItemWidth(160.0f);
                         if (SceneUI::DrawSmartFloat("uvs", "UV Tile Scale", &t->layer_uv_scales[i], 0.1f, 1000.0f, "%.1f", false, nullptr, 12)) {
-                            if (ctx.optix_gpu_ptr) {
+                            ctx.renderer.resetCPUAccumulation();
+                            if (ctx.backend_ptr) {
                                 ctx.renderer.updateBackendMaterials(ctx.scene);
-                                ctx.optix_gpu_ptr->resetAccumulation();
-                                ctx.renderer.resetCPUAccumulation();
+                                ctx.backend_ptr->resetAccumulation();
                             }
                         }
                         ImGui::PopItemWidth();
@@ -320,8 +320,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             t->splatMap->updateGPU(); // Helper needed? or manually?
                             // Texture::updateGPU() exists in Texture.h (I saw it).
                             t->splatMap->updateGPU();
-                            if (ctx.optix_gpu_ptr) ctx.renderer.updateBackendMaterials(ctx.scene);
-                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            if (ctx.backend_ptr) {
+                                ctx.renderer.updateBackendMaterials(ctx.scene);
+                                ctx.backend_ptr->resetAccumulation();
+                            }
                             SCENE_LOG_INFO("Filled mask for Layer " + std::to_string(i));
                         }
                      }
@@ -953,7 +955,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             
                             // Force Update
                             ctx.renderer.resetCPUAccumulation();
-                            if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                             g_optix_rebuild_pending = true; // Must ensure this is handled in Main loop!
                         }
                         
@@ -975,7 +977,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             if (changed) {
                                 // Real-time preview requires reset
                                 ctx.renderer.resetCPUAccumulation();
-                                if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                                 
                                 // Since logic is time-based, just setting dirty might not be enough if time is paused.
                                 // But Renderer::updateWind reads these values every frame.
@@ -1028,8 +1030,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                 if (UIWidgets::PrimaryButton("Generate Mask", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
                     TerrainManager::getInstance().autoMask(t, 0.0f, 0.0f, t->am_height_min, t->am_height_max, t->am_slope);
                     ctx.renderer.resetCPUAccumulation();
-                    if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                    if (ctx.optix_gpu_ptr) ctx.renderer.updateBackendMaterials(ctx.scene);
+                    if (ctx.backend_ptr) { ctx.renderer.updateBackendMaterials(ctx.scene); ctx.backend_ptr->resetAccumulation(); }
                     SCENE_LOG_INFO("Auto-mask generated for: " + t->name);
                 }
 
@@ -1038,8 +1039,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                     if (!path.empty()) {
                         TerrainManager::getInstance().importSplatMap(t, path);
                         ctx.renderer.resetCPUAccumulation();
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
-                        if (ctx.optix_gpu_ptr) ctx.renderer.updateBackendMaterials(ctx.scene);
+                        if (ctx.backend_ptr) { ctx.renderer.updateBackendMaterials(ctx.scene); ctx.backend_ptr->resetAccumulation(); }
                     }
                 }
 
@@ -1075,7 +1075,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                         }
                         t->splatMap->updateGPU();
                         ctx.renderer.resetCPUAccumulation();
-                        if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                        if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                         SCENE_LOG_INFO("Flow baked to Splat Alpha using engine-side FlowMap.");
                     } else {
                         SCENE_LOG_WARN("Please run Erosion first to generate a Flow Map.");
@@ -1360,7 +1360,7 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                          terrain, hitPoint, terrain_brush.paint_channel, terrain_brush.radius, terrain_brush.strength, dt
                      );
                      // Paint updates CPU texture, updateSplatMapTexture() already syncs to GPU
-                     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                     if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                      ctx.renderer.resetCPUAccumulation();
                      // NOTE: No g_optix_rebuild_pending needed - texture is already updated via updateGPU()
                  } 
@@ -1372,7 +1372,7 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      );
                      // Hardness map is CPU-only, no GPU rebuild needed
                      // Just reset accumulation for visual feedback (brush preview update)
-                     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                     if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                      ctx.renderer.resetCPUAccumulation();
                  }
                  else {
@@ -1389,7 +1389,7 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                          terrain_brush.stamp_rotation
                      );
                      
-                     if (ctx.optix_gpu_ptr) ctx.optix_gpu_ptr->resetAccumulation();
+                     if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                      ctx.renderer.resetCPUAccumulation();
                      
                      if (ctx.optix_gpu_ptr && g_hasOptix && ctx.render_settings.use_optix) {

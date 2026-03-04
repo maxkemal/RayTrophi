@@ -930,33 +930,59 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Render Engine", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
                         extern bool g_hasOptix;
+                        extern bool g_hasVulkan;
                         
+                        // Hardware support validation (essential when loading a project saved with a GPU backend)
+                        if (ctx.render_settings.use_optix && !g_hasOptix) {
+                            ctx.render_settings.use_optix = false;
+                        }
+                        if (ctx.render_settings.use_vulkan && !g_hasVulkan) {
+                            ctx.render_settings.use_vulkan = false;
+                        }
+
                         int engine_type = 0;
                         if (ctx.render_settings.use_optix) engine_type = 1;
                         if (ctx.render_settings.use_vulkan) engine_type = 2;
                         
                         const char* engines[] = { "CPU (Embree)", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
                         
-                        if (ImGui::Combo("Engine", &engine_type, engines, IM_ARRAYSIZE(engines))) {
-                            extern bool g_hasVulkan;
-                            if (engine_type == 2 && !g_hasVulkan) {
-                                engine_type = g_hasOptix ? 1 : 0;
+                        if (ImGui::BeginCombo("Engine", engines[engine_type])) {
+                            for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {
+                                bool is_disabled = false;
+                                if (i == 1 && !g_hasOptix) is_disabled = true;
+                                if (i == 2 && !g_hasVulkan) is_disabled = true;
+
+                                bool is_selected = (engine_type == i);
+                                ImGuiSelectableFlags flags = is_disabled ? ImGuiSelectableFlags_Disabled : 0;
+                                
+                                std::string label = engines[i];
+                                if (is_disabled) {
+                                    label += " [Not Supported]";
+                                }
+                                
+                                if (ImGui::Selectable(label.c_str(), is_selected, flags)) {
+                                    engine_type = i;
+                                    ctx.render_settings.use_optix = (engine_type == 1);
+                                    ctx.render_settings.use_vulkan = (engine_type == 2);
+                                    extern bool g_cpu_sync_pending; 
+                                    g_cpu_sync_pending = true;
+                                    
+                                    ctx.render_settings.backend_changed = true;
+                                    ctx.start_render = true;
+                                }
+                                
+                                if (is_selected) {
+                                    ImGui::SetItemDefaultFocus();
+                                }
                             }
-                            ctx.render_settings.use_optix = (engine_type == 1);
-                            ctx.render_settings.use_vulkan = (engine_type == 2);
-                            extern bool g_cpu_sync_pending; 
-                            g_cpu_sync_pending = true;
-                            
-                            ctx.render_settings.backend_changed = true;
-                            ctx.start_render = true;
+                            ImGui::EndCombo();
                         }
                         
-                        if (!g_hasOptix && engine_type == 1) {
+                        if (!g_hasOptix && !g_hasVulkan) {
+                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU Available]");
+                        } else if (!g_hasOptix && engine_type == 1) { // Fallback print if somehow matched
                             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU found]");
-                        }
-                        
-                        extern bool g_hasVulkan;
-                        if (!g_hasVulkan && engine_type == 2) {
+                        } else if (!g_hasVulkan && engine_type == 2) {
                             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[Vulkan Not Supported]");
                         }
                         
@@ -2855,8 +2881,26 @@ void SceneUI::performNewProject(UIContext& ctx) {
      ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
      if (ctx.backend_ptr) {
          ctx.renderer.rebuildBackendGeometry(ctx.scene);
+         ctx.renderer.updateBackendMaterials(ctx.scene);
+         ctx.renderer.updateBackendGasVolumes(ctx.scene);
+         ctx.backend_ptr->setLights(ctx.scene.lights);
+         auto wd = ctx.renderer.world.getGPUData();
+         ctx.backend_ptr->setWorldData(&wd);
+         if (ctx.scene.camera) {
+             ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+         }
+         ctx.backend_ptr->resetAccumulation();
      }
      if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
+
+     extern bool g_camera_dirty;
+     extern bool g_lights_dirty;
+     extern bool g_world_dirty;
+     extern bool g_needs_optix_sync;
+     g_camera_dirty = true;
+     g_lights_dirty = true;
+     g_world_dirty = true;
+     g_needs_optix_sync = true;
      
      active_model_path = "Untitled";
      ctx.active_model_path = "Untitled";
