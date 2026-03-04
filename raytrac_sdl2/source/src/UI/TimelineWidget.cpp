@@ -135,11 +135,23 @@ void TimelineWidget::draw(UIContext& ctx) {
         static auto last_time = now;
         float elapsed = std::chrono::duration<float>(now - last_time).count();
         float frame_duration = 1.0f / ctx.render_settings.animation_fps;
-        
+
         if (elapsed >= frame_duration) {
-            current_frame++;
-            if (current_frame > end_frame) current_frame = start_frame;
-            last_time = now;
+            // Advance as many frames as have actually elapsed (fixes slow-motion
+            // when render time > frame_duration, e.g. Vulkan 50ms vs 33ms@30fps)
+            int frames_to_advance = static_cast<int>(elapsed / frame_duration);
+            // Cap to ~2s worth to avoid a huge jump after a stall
+            if (frames_to_advance > static_cast<int>(2.0f * ctx.render_settings.animation_fps))
+                frames_to_advance = static_cast<int>(2.0f * ctx.render_settings.animation_fps);
+
+            current_frame += frames_to_advance;
+            int range = end_frame - start_frame + 1;
+            if (range > 0 && current_frame > end_frame)
+                current_frame = start_frame + (current_frame - start_frame) % range;
+
+            // Carry over the fractional remainder so timing stays accurate
+            last_time += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<float>(frames_to_advance * frame_duration));
         }
     }
     

@@ -130,12 +130,13 @@ public:
         return 0.01f;
     }
     Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
-        // GPU uses emission color directly (no intensity multiplication)
-        // For GPU parity, return color directly. For texture, sample and return.
+        // Vulkan: payload.radiance = emColor * emStrength
+        // OptiX:  gpuMat.emission = color * intensity (pre-multiplied at upload)
+        // CPU must match: return color * intensity
         if (emissionProperty.texture) {
-            return emissionProperty.texture->get_color(uv.u, uv.v);
+            return emissionProperty.texture->get_color(uv.u, uv.v) * emissionProperty.intensity;
         }
-        return emissionProperty.color;
+        return emissionProperty.color * emissionProperty.intensity;
     }
     MaterialProperty specularProperty;
     TextureTransform textureTransform;

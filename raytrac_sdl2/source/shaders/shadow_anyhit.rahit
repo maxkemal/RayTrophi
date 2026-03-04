@@ -1,0 +1,145 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Push Constants (match other shaders exactly)
+layout(push_constant) uniform CameraPC {
+    vec4 origin;
+    vec4 lowerLeft;
+    vec4 horizontal;
+    vec4 vertical;
+    uint frameCount;
+    uint minSamples;
+    uint lightCount;
+    float varianceThreshold;
+    uint maxSamples;
+    float exposure_factor;
+} cam;
+
+// Material struct (must match GPU layout exactly)
+struct Material {
+    float albedo_r, albedo_g, albedo_b, opacity;
+    float emission_r, emission_g, emission_b, emission_strength;
+    float roughness, metallic, ior, transmission;
+    float subsurface_r, subsurface_g, subsurface_b, subsurface_amount;
+    float subsurface_radius_r, subsurface_radius_g, subsurface_radius_b, subsurface_scale;
+    float clearcoat, clearcoat_roughness, translucent, subsurface_anisotropy;
+    float anisotropic, sheen, sheen_tint;
+    uint flags;
+    float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
+    float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
+    uint albedo_tex;
+    uint normal_tex;
+    uint roughness_tex;
+    uint metallic_tex;
+    uint emission_tex;
+    uint height_tex;
+    uint opacity_tex;
+    uint transmission_tex;
+    float subsurface_ior;
+    uint _reserved_1, _reserved_2, _reserved_3;
+};
+
+struct VkInstanceData {
+    uint materialIndex;
+    uint blasIndex;
+};
+
+// Geometry buffer reference types for UV lookup
+struct VkGeometryData {
+    uint64_t vertexAddr;
+    uint64_t normalAddr;
+    uint64_t uvAddr;
+    uint64_t indexAddr;
+    uint64_t materialAddr;
+};
+
+layout(buffer_reference, scalar) readonly buffer UVBuffer2    { vec2 u[]; };
+layout(buffer_reference, scalar) readonly buffer IndexBuffer2 { uint i[]; };
+
+// Descriptor bindings — MUST match closesthit.rchit set/binding layout exactly
+layout(set = 0, binding = 1) uniform accelerationStructureEXT topLevelAS;
+layout(set = 0, binding = 2, scalar) readonly buffer MaterialBuffer  { Material      m[]; } materials;
+layout(set = 0, binding = 4, scalar) readonly buffer GeometryBuffer  { VkGeometryData g[]; } geometries;
+layout(set = 0, binding = 5, scalar) readonly buffer InstanceBuffer  { VkInstanceData  i[]; } instances;
+layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
+
+// Shadow payload (location=1, same as closesthit declaration)
+layout(location = 1) rayPayloadInEXT bool shadowOccluded;
+
+// Barycentrics from triangle intersection
+hitAttributeEXT vec2 baryCoord;
+
+void main() {
+    VkInstanceData inst = instances.i[gl_InstanceID];
+    Material mat = materials.m[inst.materialIndex];
+
+    // --- Determine opacity value (0=fully transparent, 1=fully opaque) ---
+    float maskValue = mat.opacity; // default: uniform material opacity
+
+    // Compute interpolated UV (needed for any texture lookup below)
+    vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
+    vec2 hitUV = vec2(0.5, 0.5);
+    VkGeometryData geo = geometries.g[inst.blasIndex];
+    if (geo.uvAddr != 0) {
+        UVBuffer2 uvBuf = UVBuffer2(geo.uvAddr);
+        uint ui0, ui1, ui2;
+        if (geo.indexAddr != 0) {
+            IndexBuffer2 iBuf = IndexBuffer2(geo.indexAddr);
+            ui0 = iBuf.i[gl_PrimitiveID * 3 + 0];
+            ui1 = iBuf.i[gl_PrimitiveID * 3 + 1];
+            ui2 = iBuf.i[gl_PrimitiveID * 3 + 2];
+        } else {
+            ui0 = uint(gl_PrimitiveID) * 3 + 0;
+            ui1 = uint(gl_PrimitiveID) * 3 + 1;
+            ui2 = uint(gl_PrimitiveID) * 3 + 2;
+        }
+        hitUV = uvBuf.u[ui0] * bary.x + uvBuf.u[ui1] * bary.y + uvBuf.u[ui2] * bary.z;
+        hitUV.y = 1.0 - hitUV.y;
+    }
+
+    int opacityTexID = int(mat.opacity_tex);
+    if (opacityTexID > 0) {
+        // Use LOD 0 explicitly — ray tracing has no implicit derivatives.
+        // Without this, thin features (eyelashes, foliage) blur to grey at higher LODs
+        // and produce incorrect partial shadows where the area should be fully transparent.
+        float texOpacity = ((mat.flags & 256u) != 0u)
+            ? textureLod(materialTextures[nonuniformEXT(opacityTexID)], hitUV, 0.0).a
+            : textureLod(materialTextures[nonuniformEXT(opacityTexID)], hitUV, 0.0).r;
+        // Texture modulates the uniform material opacity
+        maskValue = texOpacity * mat.opacity;
+    }
+
+    // --- Fast paths for fully transparent / fully opaque ---
+    if (maskValue < 0.001) {
+        ignoreIntersectionEXT;
+        return;
+    }
+    if (maskValue >= 0.999) {
+        shadowOccluded = true;
+        terminateRayEXT;
+        return;
+    }
+
+    // --- Stochastic shadow: P(shadow) = maskValue ---
+    // Seed includes frameCount so each accumulation sample produces a different
+    // pattern — without this, results are deterministic per-pixel and never converge,
+    // producing visible fixed banding on large surfaces like leaves.
+    uint seed = uint(gl_LaunchIDEXT.x) * 1973u + uint(gl_LaunchIDEXT.y) * 9277u;
+    seed ^= cam.frameCount * 83492791u;
+    seed ^= uint(gl_PrimitiveID) * 26699u;
+    seed ^= floatBitsToUint(gl_HitTEXT) * 2531011u;
+    seed = seed * 747796405u + 2891336453u;
+    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
+    float rnd = float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+
+    if (rnd < maskValue) {
+        shadowOccluded = true;
+        terminateRayEXT;
+    } else {
+        ignoreIntersectionEXT;
+    }
+}

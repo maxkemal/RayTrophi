@@ -12,6 +12,18 @@
 #define GPU_MIN_ALPHA 0.0001f
 #define GPU_MIN_DOT 0.0001f
 
+__device__ __forceinline__ bool finite3(const float3& v) {
+    return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
+}
+
+__device__ __forceinline__ float3 clamp3f(const float3& v, float lo, float hi) {
+    return make_float3(
+        fminf(fmaxf(v.x, lo), hi),
+        fminf(fmaxf(v.y, lo), hi),
+        fminf(fmaxf(v.z, lo), hi)
+    );
+}
+
 __device__ float G_SchlickGGX(float NdotV, float roughness) {
     // IBL/Path Tracing variant: k = alpha / 2 = (roughness^2) / 2
     float alpha = roughness * roughness;
@@ -24,11 +36,14 @@ __device__ float G_Smith(float NdotV, float NdotL, float roughness) {
 }
 
 __device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N) {
-    float3 H = normalize(wo + wi);
+    float3 sum = wo + wi;
+    float sum_len2 = dot(sum, sum);
+    if (sum_len2 < 1e-12f) return 1e-6f;
+    float3 H = normalize(sum);
     float NdotH = max(dot(N, H), GPU_MIN_DOT);
     float VdotH = max(dot(wo, H), GPU_MIN_DOT);
 
-    float roughness = mat.roughness;
+    float roughness = fminf(fmaxf(mat.roughness, 0.02f), 1.0f);
     float alpha = max(roughness * roughness, GPU_MIN_ALPHA);
     float alpha2 = alpha * alpha;
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
@@ -80,7 +95,10 @@ __device__ float3 evaluate_brdf(
     float NdotV = max(dot(N, wo), GPU_MIN_DOT);
     if (NdotL < GPU_MIN_DOT || NdotV < GPU_MIN_DOT) return make_float3(0.0f, 0.0f, 0.0f);
 
-    float3 H = normalize(wi + wo);
+    float3 sum = wi + wo;
+    float sum_len2 = dot(sum, sum);
+    if (sum_len2 < 1e-12f) return make_float3(0.0f, 0.0f, 0.0f);
+    float3 H = normalize(sum);
     float NdotH = max(dot(N, H), GPU_MIN_DOT);
     float VdotH = max(dot(wo, H), GPU_MIN_DOT);
     if (NdotH < GPU_MIN_DOT || VdotH < GPU_MIN_DOT) return make_float3(0.0f, 0.0f, 0.0f);
@@ -123,6 +141,8 @@ __device__ float3 evaluate_brdf(
         return make_float3(0.0f, 0.0f, 0.0f);;
 
     }*/
+    roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+
     float metallic = material.metallic;
     if (payload.use_blended_data) {
         metallic = payload.blended_metallic;
@@ -162,17 +182,12 @@ __device__ float3 evaluate_brdf(
     }
     // Bindless texture support for transmission can be added here if needed
 
-    if (transmission >= 0.01f)
-    {
-        curandState rng;
-        if (random_float(&rng) > transmission)
-        {
-            return diffuse;
-        }
-        return spec;
-    }
-
-    return (diffuse + spec);
+    // Deterministic BRDF evaluation (no random branch here):
+    // high transmission reduces diffuse lobe while keeping specular response.
+    float surfaceWeight = 1.0f - fminf(fmaxf(transmission, 0.0f), 1.0f);
+    float3 brdf = diffuse * surfaceWeight + spec;
+    if (!finite3(brdf)) return make_float3(0.0f, 0.0f, 0.0f);
+    return clamp3f(brdf, 0.0f, 1e4f);
 }
 __device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float roughness)
 {
@@ -181,7 +196,8 @@ __device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float rou
 }
 
 __device__ float3 importance_sample_ggx(float u1, float u2, float roughness, const float3& N) {
-    float alpha = (roughness * roughness);
+    float safeRoughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+    float alpha = (safeRoughness * safeRoughness);
     float phi = 2.0f * M_PIf * u1;
     float cosTheta = sqrtf((1.0f - u2) / (1.0f + (alpha * alpha - 1.0f) * u2));
     float sinTheta = sqrtf(max(1.0f - cosTheta * cosTheta, 0.0f));
@@ -606,11 +622,21 @@ __device__ bool scatter_material(
     if (payload.has_transmission_tex)
         transmission = tex2D<float4>(payload.transmission_tex, uv.x, uv.y).x;
 
+    roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
+    metallic = fminf(fmaxf(metallic, 0.0f), 1.0f);
+    transmission = fminf(fmaxf(transmission, 0.0f), 1.0f);
+
    
    
     //  Fresnel-Schlick + GGX ile metalik / difüz karışımı
     float3 H = importance_sample_ggx(random_float(rng), random_float(rng), roughness, N);
     float3 L = normalize(reflect(-V, H));
+    if (dot(N, L) <= 0.0f) {
+        L = normalize(reflect(-V, N));
+        if (dot(N, L) <= 0.0f) {
+            L = N;
+        }
+    }
 
     float cos_theta = fmaxf(dot(V, H), 1e-4f);
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);   
@@ -659,20 +685,56 @@ __device__ bool scatter_material(
     }
     
     // 5. STANDARD DIFFUSE + SPECULAR (Base layer)
-    float NdotL = max(dot(N, L), 0.01f);
+    // Stochastic lobe selection — mirrors GLSL closesthit.rchit dielectric branch.
+    // fresnelWeight modulated by (1 - roughness^2) so that roughness=1 → ~0% specular,
+    // roughness=0 → purely Fresnel-driven specular chance. metallic paths use full F luma.
     float3 wo = -normalize(ray_in.direction);
-    float3 wi = L;
- 
+    float cosTheta_N = fmaxf(dot(V, N), 0.0f);
+
     float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
-    float3 diffuse = k_d * albedo/M_PIf;
-    float3 specular = F;
-    *pdf = pdf_brdf(material, wo, wi, payload.normal);   
-    *scattered = Ray(payload.position + L * 0.001f, L);
-    *attenuation = (diffuse + specular);
-    *is_specular = (roughness < 0.05f && metallic > 0.5f);  // Mirror-like surfaces
+    // Schlick Fresnel at surface normal angle (not half-vector) for lobe probability,
+    // then dampen by roughness^2 to suppress specular at high roughness (dielectric only).
+    float fresnelAtN = F0.x + (1.0f - F0.x) * powf(1.0f - cosTheta_N, 5.0f);
+    float roughnessDampen = 1.0f - roughness * roughness;   // 0 when roughness=1, 1 when roughness=0
+    // For metals: keep full specular probability regardless of roughness (metallic=1 → metal GGX)
+    float p_spec = fresnelAtN * roughnessDampen * (1.0f - metallic) + metallic;
+    p_spec = fminf(fmaxf(p_spec, 0.001f), 0.999f);
 
+    if (random_float(rng) < p_spec) {
+        // --- Specular / Metal lob ---
+        // L already sampled from GGX distribution above.
+        if (dot(N, L) <= 0.0f) {
+            // Degenerate: fallback to perfect mirror
+            L = reflect(-V, N);
+        }
+        *scattered = Ray(payload.position + N * 0.001f, L);
+        // For metals: tint by albedo; for dielectrics: white specular
+        float3 spec_tint = lerp(make_float3(1.0f, 1.0f, 1.0f), albedo, metallic);
+        *attenuation = clamp3f(F * spec_tint / p_spec, 0.0f, 1e4f);
+        *pdf = pdf_brdf(material, wo, L, N) * p_spec;
+        *is_specular = true;
+    } else {
+        // --- Diffuse lob ---
+        float3 diff_dir = random_cosine_direction(rng);
+        float3 up = fabsf(N.z) < 0.999f ? make_float3(0.0f, 0.0f, 1.0f) : make_float3(1.0f, 0.0f, 0.0f);
+        float3 tangentX = normalize(cross(up, N));
+        float3 tangentY = cross(N, tangentX);
+        float3 world_diff = normalize(tangentX * diff_dir.x + tangentY * diff_dir.y + N * diff_dir.z);
+
+        float NdotD = fmaxf(dot(N, world_diff), GPU_MIN_DOT);
+        float3 diffuse = k_d * albedo;  // path-tracing: albedo (not /PI — PDF cancels PI factor)
+
+        *scattered = Ray(payload.position + N * 0.001f, world_diff);
+        *attenuation = clamp3f(diffuse / (1.0f - p_spec), 0.0f, 1e4f);
+        *pdf = NdotD / M_PIf * (1.0f - p_spec);
+        *is_specular = false;
+    }
+
+    if (!finite3(*attenuation)) {
+        *attenuation = make_float3(1.0f, 1.0f, 1.0f);
+    }
     return true;
 }
 

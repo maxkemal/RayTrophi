@@ -26,6 +26,7 @@
 // For linking with CUDA Driver API (nvcuda.dll is loaded by driver usually, but we need cuda.lib for symbols)
 #pragma comment(lib, "cuda.lib")
 #pragma comment(lib, "cudart.lib")
+#pragma comment(lib, "delayimp.lib") // Required for delay load in MSVC
 
 // Helper function for autoMask
 inline float smoothstep(float edge0, float edge1, float x) {
@@ -710,6 +711,14 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
     
     // Clear dirty regions after full update
     terrain->dirty_region.clear();
+
+    // [CPU/GPU REBUILD FIX] Ensure changes are uploaded to backend
+    extern bool g_bvh_rebuild_pending;
+    extern bool g_optix_rebuild_pending;
+    extern bool g_vulkan_rebuild_pending;
+    g_bvh_rebuild_pending = true;
+    g_optix_rebuild_pending = true;
+    g_vulkan_rebuild_pending = true;
 }
 
 void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain) {
@@ -748,8 +757,10 @@ void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain
     // 5. Flag for rebuild
     extern bool g_bvh_rebuild_pending;
     extern bool g_optix_rebuild_pending;
+    extern bool g_vulkan_rebuild_pending;
     g_bvh_rebuild_pending = true;
     g_optix_rebuild_pending = true;
+    g_vulkan_rebuild_pending = true;
 }
 
 // ===========================================================================
@@ -3350,6 +3361,11 @@ void TerrainManager::deserialize(const json& data, const std::string& terrainDir
 
 void TerrainManager::initCuda() {
     if (cudaInitialized) return;
+
+    if (!g_hasCUDA) {
+        SCENE_LOG_WARN("[GPU Erosion] CUDA not available, skipping GPU erosion init");
+        return;
+    }
 
     SCENE_LOG_INFO("[GPU Erosion] Initializing CUDA...");
 

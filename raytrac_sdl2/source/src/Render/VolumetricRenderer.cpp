@@ -83,10 +83,11 @@ static Vec3 get_sun_color(float sun_elevation) {
 static Vec3 to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
 
 // ============================================================================
-// GOD RAYS (CPU) - MATCHED TO GPU logic
+// GOD RAYS (CPU) — OptiX GPU calculate_volumetric_god_rays ile birebir eşleşme
 // ============================================================================
 Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldData& world_data, const Ray& ray, float maxDistance, const Hittable* bvh, class AtmosphereLUT* lut) {
-    if (world_data.mode != WORLD_MODE_NISHITA || !world_data.nishita.godrays_enabled || world_data.nishita.godrays_intensity <= 0.0f) {
+    if (world_data.mode != WORLD_MODE_NISHITA || !world_data.nishita.godrays_enabled
+        || world_data.nishita.godrays_intensity <= 0.001f || world_data.nishita.godrays_density <= 0.0f) {
         return Vec3(0.0f);
     }
 
@@ -94,95 +95,92 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
     Vec3 sunDir = to_vec3(nishita.sun_direction).normalize();
     float sunDot = Vec3::dot(ray.direction, sunDir);
 
-    // Threshold (Relaxed from 0.3 to 0.1 to see more rays at sunset)
-    if (sunDot < 0.1f) {
-        return Vec3(0.0f);
+    // === MATCH GPU: anisotropy-based early exit ===
+    float g = nishita.mie_anisotropy;
+    float anisotropyFade = std::pow(std::max(0.0f, sunDot), 1.0f + (1.0f - g) * 10.0f);
+    if (anisotropyFade < 0.001f) return Vec3(0.0f);
+
+    // === MATCH GPU: sun below horizon early exit ===
+    if (sunDir.y < -0.05f) return Vec3(0.0f);
+
+    // === MATCH GPU: march distance cap (5000m) ===
+    float marchDistance = std::min({ maxDistance, nishita.fog_distance, 5000.0f });
+
+    // === MATCH GPU: adaptive step count (8-24) ===
+    int numSteps = (sunDot > 0.98f) ? nishita.godrays_samples : (nishita.godrays_samples / 2);
+    numSteps = std::max(8, std::min(numSteps, 24));
+
+    float stepSize = marchDistance / (float)numSteps;
+
+    // === MATCH GPU: Mie phase ===
+    float g2 = g * g;
+    float phase = (1.0f - g2) / (4.0f * 3.14159265f * std::pow(std::max(1.0f + g2 - 2.0f * g * sunDot, 0.0001f), 1.5f));
+    phase = std::min(phase, 6.0f);        // GPU: toned down peak
+
+    // === MATCH GPU: mediaDensity scale 0.002 ===
+    float mediaDensity = nishita.godrays_density * 0.002f;
+
+    // === MATCH GPU: sunRadianceBase = {1, 0.98, 0.95} * sun_intensity * 0.15 ===
+    Vec3 sunRadianceBase(1.0f, 0.98f, 0.95f);
+    sunRadianceBase = sunRadianceBase * nishita.sun_intensity * 0.15f;
+    // Physical sun color from transmittance LUT
+    if (lut) {
+        float3 st = lut->sampleTransmittance(std::max(0.01f, sunDir.y), nishita.altitude, nishita.atmosphere_height);
+        sunRadianceBase = sunRadianceBase * Vec3(st.x, st.y, st.z);
     }
 
-    // Limits (Matching GPU march distance)
-    float marchDistance = std::min(maxDistance, nishita.fog_distance * 0.5f);
-    int num_steps = nishita.godrays_samples;
-    num_steps = std::max(4, std::min(num_steps, 32)); // Clamped to 32 for CPU performance
-    if (num_steps <= 0) return Vec3(0.0f);
-
-    float step_size = marchDistance / (float)num_steps;
-    Vec3 total_light(0.0f);
+    Vec3  godRayColor(0.0f);
     float transmittance = 1.0f;
 
-    // Jitter start
-    float jitter = ((float)rand() / RAND_MAX) * step_size;
+    // === MATCH GPU: jitter starting position ===
+    float jitter = ((float)rand() / (float)RAND_MAX);
+    float t = jitter * stepSize;
 
-    // Elevation factor (Boosted for low angles)
-    float sunElevation = sunDir.y;
-    float elevationFactor = 1.0f - std::min(0.9f, std::max(0.0f, sunElevation * 2.5f));
-
-    // Media density (Matching GPU)
-    float mediaDensity = nishita.godrays_density * 0.01f;
-
-    // --- OPTIMIZATION: HOIST IN VARIANTS OUT OF LOOP ---
-    // Phase function is constant for the ray
-    float mu = sunDot;
-    float g = nishita.mie_anisotropy;
-    float g2 = g * g;
-    float denom = 1.0f + g2 - 2.0f * g * mu;
-    if (denom < 0.0001f) denom = 0.0001f;
-    float phase = (1.0f - g2) / (4.0f * 3.14159265f * pow(denom, 1.5f));
-
-    // Sun Color from LUT (Physical Parity)
-    Vec3 sun_color(1.0f);
-    if (lut) {
-        float3 sunTrans = lut->sampleTransmittance(std::max(0.01f, sunDir.y), nishita.altitude, nishita.atmosphere_height);
-        sun_color = Vec3(sunTrans.x, sunTrans.y, sunTrans.z);
-    } else {
-        sun_color = get_sun_color(sunElevation);
-    }
-
-    for (int i = 0; i < num_steps; ++i) {
-        float t = jitter + step_size * (float)i + step_size * 0.5f;
+    for (int i = 0; i < numSteps; ++i) {
         if (t > marchDistance) break;
 
-        Vec3 p = ray.at(t);
-        
-        // FIX: Distance-based attenuation to prevent near-camera halo (matches GPU)
-        float distanceFromCamera = t;
-        // VERY AGGRESSIVE FADE: 0.05 = full effect at ~20m (was 0.01 = 100m, still too slow)
-        float distanceFade = 1.0f - std::exp(-distanceFromCamera * 0.05f);
-        distanceFade = std::max(0.01f, distanceFade); // Minimum 1% to nearly eliminate near-camera
-        
-        float height = p.y;
-        float heightFactor = exp(-std::max(0.0f, height) * 0.0005f); // Matching GPU height falloff
+        // === MATCH GPU: nearFade (avoid near-camera halo, same formula) ===
+        float nearFade = std::min(1.0f, std::max(0.0f, (t - 0.2f) * 4.0f));
+        if (nearFade > 0.001f) {
+            Vec3 samplePos = ray.at(t);
 
-        float density = mediaDensity * heightFactor * distanceFade;
+            // === MATCH GPU: height attenuation (0.0002 falloff, +altitude offset) ===
+            float h = std::max(0.0f, samplePos.y + nishita.altitude);
+            float heightFactor = std::exp(-h * 0.0002f);
 
-        if (density > 0.0001f) {
-            float sunTrans = determineSunTransmittance(p, sunDir, 10000.0f, bvh, scene, world_data);
+            float sigma_s = mediaDensity * heightFactor;
+            float sigma_t = sigma_s;
+            float stepTrans = std::exp(-sigma_t * stepSize);
 
-            // Add Cloud Occlusion Check
-            if (sunTrans > 0.001f) {
-                float cloudTrans = determine_cloud_transmittance(world_data, p, sunDir, 10000.0f);
-                sunTrans *= cloudTrans;
-            }
+            if (sigma_t > 1e-6f) {
+                // Solid shadow test
+                float occlusion = determineSunTransmittance(samplePos, sunDir, 100000.0f, bvh, scene, world_data);
 
-            if (sunTrans > 0.001f) {
-                // Decay is distance dependent
-              
+                // Cloud occlusion
+                if (occlusion > 0.001f) {
+                    occlusion *= determine_cloud_transmittance(world_data, samplePos, sunDir, 10000.0f);
+                }
 
-                // Match GPU Intensity and attenuation
-                float global_scale = 0.0002f; // Increased from 0.00005f to better match GPU
-                Vec3 contribution = sun_color * (density * phase * nishita.godrays_intensity) * transmittance  * step_size * elevationFactor * sunTrans * nishita.sun_intensity * global_scale;
-
-                if (std::isfinite(contribution.x)) {
-                    total_light = total_light + contribution;
+                if (occlusion > 0.001f) {
+                    // === MATCH GPU inscatter formula exactly ===
+                    Vec3 inscatter = sunRadianceBase * phase * occlusion * (sigma_s / sigma_t) * nearFade;
+                    godRayColor = godRayColor + inscatter * transmittance * (1.0f - stepTrans);
                 }
             }
+
+            transmittance *= stepTrans;
         }
 
-        // Absorption through medium (Matching GPU)
-        transmittance *= exp(-density * step_size * 0.5f);
         if (transmittance < 0.01f) break;
+        t += stepSize;
     }
 
-    return total_light;
+    // === MATCH GPU: multiply by godrays_intensity at end ===
+    godRayColor = godRayColor * nishita.godrays_intensity;
+
+    if (!std::isfinite(godRayColor.x) || !std::isfinite(godRayColor.y) || !std::isfinite(godRayColor.z))
+        return Vec3(0.0f);
+    return godRayColor;
 }
 
 // ============================================================================
@@ -220,7 +218,9 @@ float VolumetricRenderer::determineSunTransmittance(const Vec3& origin, const Ve
 // GPU SYNC
 // ============================================================================
 void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend* backend) {
-    if (!backend || !g_hasCUDA) return;
+    // Allow sync for both OptiX (CUDA) and Vulkan backends.
+    // Legacy CUDA texture gas volumes are still guarded by g_hasCUDA below.
+    if (!backend) return;
 
     // 1. Prepare VDB Volumes (Unified for VDB and Unified-Path Gas)
     std::vector<GpuVDBVolume> gpu_vdb_volumes;
@@ -231,10 +231,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         if (!vdb || !vdb->visible) continue;
 
         GpuVDBVolume gv = {};
-        gv.density_grid = mgr.getGPUGrid(vdb->getVDBVolumeID());
-        gv.temperature_grid = mgr.getGPUTemperatureGrid(vdb->getVDBVolumeID());
+        gv.vdb_id = vdb->getVDBVolumeID();
+        gv.density_grid = mgr.getGPUGrid(gv.vdb_id);
+        gv.temperature_grid = mgr.getGPUTemperatureGrid(gv.vdb_id);
 
-        if (!gv.density_grid) continue;
+        // Allow Vulkan path: density_grid is null (no CUDA), but host grid exists for Vulkan upload
+        if (!gv.density_grid && !mgr.getHostGrid(gv.vdb_id)) continue;
 
         Matrix4x4 m = vdb->getTransform();
         Matrix4x4 inv = vdb->getInverseTransform();
@@ -312,10 +314,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         if (gas->live_vdb_id < 0) continue;
 
         GpuVDBVolume gv = {};
-        gv.density_grid = mgr.getGPUGrid(gas->live_vdb_id);
-        gv.temperature_grid = mgr.getGPUTemperatureGrid(gas->live_vdb_id);
+        gv.vdb_id = gas->live_vdb_id;
+        gv.density_grid = mgr.getGPUGrid(gv.vdb_id);
+        gv.temperature_grid = mgr.getGPUTemperatureGrid(gv.vdb_id);
 
-        if (!gv.density_grid) continue;
+        // Allow Vulkan path: density_grid is null (no CUDA), but host grid exists for Vulkan upload
+        if (!gv.density_grid && !mgr.getHostGrid(gv.vdb_id)) continue;
 
         auto trans = gas->getTransformHandle();
         Matrix4x4 m = trans ? trans->getFinal() : Matrix4x4::identity();
@@ -385,7 +389,8 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
     }
     backend->updateVDBVolumes(gpu_vdb_volumes);
 
-    // 2. Prepare Texture-based Gas Volumes (Legacy Path)
+    // 2. Prepare Texture-based Gas Volumes (Legacy Path - CUDA/OptiX only)
+    if (!g_hasCUDA) return; // Legacy gas volumes use CUDA textures; skip for Vulkan
     std::vector<GpuGasVolume> gpu_gas_volumes;
     for (const auto& gas : scene.gas_volumes) {
         if (!gas || !gas->visible || gas->render_path != GasVolume::VolumeRenderPath::Legacy) continue;

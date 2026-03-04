@@ -1743,7 +1743,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
     if (deltaTime <= 1e-6f || effectStrength <= 0.0f) return;
 
     // Avoid accumulation spikes (e.g. first frame or lag)
-    float effectiveDelta = std::min(deltaTime, 0.1f);
+    float effectiveDelta = (std::min)(deltaTime, 0.1f);
 
 
 
@@ -2491,7 +2491,7 @@ inline void HairUI::applyBrushInternal(HairSystem& hairSystem, const Vec3& world
                         // Apply tightness pull (toward braid center line)
                         Vec3 projOnAxis = localBrushPos + localBraidDir * (strand.groomedPositions[i] - localBrushPos).dot(localBraidDir);
                         Vec3 toAxis = projOnAxis - strand.groomedPositions[i];
-                        strand.groomedPositions[i] = strand.groomedPositions[i] + toAxis * std::min(1.0f, tightenPull);
+                        strand.groomedPositions[i] = strand.groomedPositions[i] + toAxis * (std::min)(1.0f, tightenPull);
                         
                         // Surface collision
                         Vec3 rel = strand.groomedPositions[i] - strand.groomedPositions[0];
@@ -2630,8 +2630,8 @@ inline void HairUI::endStroke(HairSystem& hairSystem) {
     
     // Check positions (sample a few strands for performance)
     if (!changed && !groom->guides.empty() && !m_strokeSnapshot.guides.empty()) {
-        size_t checkCount = std::min(groom->guides.size(), (size_t)20);
-        size_t step = std::max((size_t)1, groom->guides.size() / checkCount);
+        size_t checkCount = (std::min)(groom->guides.size(), (size_t)20);
+        size_t step = (std::max)((size_t)1, groom->guides.size() / checkCount);
         
         for (size_t s = 0; s < groom->guides.size() && !changed; s += step) {
             if (s >= m_strokeSnapshot.guides.size()) { changed = true; break; }

@@ -13,6 +13,7 @@
 // CUDA Library Linking
 #pragma comment(lib, "cufft.lib")
 #pragma comment(lib, "cudart.lib")
+#pragma comment(lib, "delayimp.lib") // Required for delay load in MSVC
 
 // #include "GeometryUtils.h" // Removed: Not needed for manual mesh generation
 
@@ -313,10 +314,26 @@ WaterSurface* WaterManager::createWaterPlane(SceneData& scene, const Vec3& pos, 
     gpu->fft_ocean_size = surf.params.fft_ocean_size;
     gpu->fft_choppiness = surf.params.fft_choppiness;
     
-    // Sync pbsdf properties so Renderer doesn't override with incorrect values
+    // Sync pbsdf properties so Renderer/Vulkan path reads correct values
     water_mat->albedoProperty.color = Vec3(surf.params.deep_color.x, surf.params.deep_color.y, surf.params.deep_color.z);
     water_mat->emissionProperty.color = Vec3(surf.params.shallow_color.x, surf.params.shallow_color.y, surf.params.shallow_color.z);
     water_mat->emissionProperty.intensity = 1.0f;
+
+    // === Sync water-packed fields to PrincipledBSDF so Renderer/Vulkan path reads them ===
+    water_mat->ior           = surf.params.ior;
+    water_mat->transmission  = 1.0f;
+    water_mat->roughnessProperty.color = Vec3(surf.params.roughness);
+    water_mat->sheen         = fmaxf(0.001f, surf.params.wave_strength); // IS_WATER flag
+    water_mat->anisotropic   = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
+    water_mat->sheen_tint    = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
+    water_mat->clearcoat     = surf.params.shore_foam_intensity;
+    water_mat->clearcoatRoughness   = surf.params.caustic_intensity;
+    water_mat->subsurface           = surf.params.depth_max / 100.0f;
+    water_mat->subsurfaceScale      = surf.params.absorption_density;
+    water_mat->subsurfaceColor      = Vec3(surf.params.absorption_color.x, surf.params.absorption_color.y, surf.params.absorption_color.z);
+    water_mat->subsurfaceRadius     = Vec3(surf.params.shore_foam_distance, surf.params.caustic_scale, surf.params.sss_intensity);
+    water_mat->translucent          = surf.params.foam_level;
+    water_mat->subsurfaceAnisotropy = surf.params.caustic_speed;
 
     water_mat->gpuMaterial = gpu;
     
@@ -1642,6 +1659,28 @@ void WaterManager::deserialize(const nlohmann::json& j, SceneData& scene) {
                 // FFT
                 gpu->fft_ocean_size = surf.params.fft_ocean_size;
                 gpu->fft_choppiness = surf.params.fft_choppiness;
+
+                // === Also sync PrincipledBSDF fields so Renderer/Vulkan path reads them ===
+                if (mat->type() == MaterialType::PrincipledBSDF) {
+                    PrincipledBSDF* pbsdf = static_cast<PrincipledBSDF*>(mat);
+                    pbsdf->albedoProperty.color         = Vec3(surf.params.deep_color.x, surf.params.deep_color.y, surf.params.deep_color.z);
+                    pbsdf->emissionProperty.color       = Vec3(surf.params.shallow_color.x, surf.params.shallow_color.y, surf.params.shallow_color.z);
+                    pbsdf->emissionProperty.intensity   = 1.0f;
+                    pbsdf->ior                          = surf.params.ior;
+                    pbsdf->transmission                 = 1.0f;
+                    pbsdf->roughnessProperty.color      = Vec3(surf.params.roughness);
+                    pbsdf->sheen                        = std::fmax(0.001f, surf.params.wave_strength);
+                    pbsdf->anisotropic                  = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
+                    pbsdf->sheen_tint                   = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
+                    pbsdf->clearcoat                    = surf.params.shore_foam_intensity;
+                    pbsdf->clearcoatRoughness           = surf.params.caustic_intensity;
+                    pbsdf->subsurface                   = surf.params.depth_max / 100.0f;
+                    pbsdf->subsurfaceScale              = surf.params.absorption_density;
+                    pbsdf->subsurfaceColor              = Vec3(surf.params.absorption_color.x, surf.params.absorption_color.y, surf.params.absorption_color.z);
+                    pbsdf->subsurfaceRadius             = Vec3(surf.params.shore_foam_distance, surf.params.caustic_scale, surf.params.sss_intensity);
+                    pbsdf->translucent                  = surf.params.foam_level;
+                    pbsdf->subsurfaceAnisotropy         = surf.params.caustic_speed;
+                }
             }
         }
         

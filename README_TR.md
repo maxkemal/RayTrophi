@@ -68,7 +68,37 @@
   - ✅ Hareket Bulanıklığı (Motion Blur)
   - ✅ Intel Open Image Denoise (OIDN) entegrasyonu
   - ✅ Ton haritalama & post-processing
-  - ✅ **Deneysel Vulkan Backend**: Akıllı donanım algılamaya sahip platform bağımsız ray tracing mimarisi. Vulkan bağımlılıkları (`vulkan-1.dll`) veya desteklenmeyen GPU'larda sistemin çökmesini engelleyerek otomatik olarak OptiX veya CPU moduna geçiş (Graceful Fallback).
+  - 🧪 **[DENEYSEL] Vulkan RT Backend** *(Aktif Geliştirme)*: `VK_KHR_ray_tracing_pipeline` üzerine inşa edilmiş donanım tabanlı ray tracing mimarisi. Compute shader ile GPU hızlandırmalı iskelet animasyonu (skinning), dinamik geometri için TLAS/BLAS refit, kalıcı descriptor set yönetimi ve tek komut tamponu ile trace+readback mimarisi. Vulkan bağımlılıkları (`vulkan-1.dll`) veya desteklenmeyen GPU'larda otomatik olarak OptiX veya CPU moduna geçiş yapar.
+
+  <details>
+  <summary>🧪 <b>Vulkan Backend — Özellik Uyumluluk Tablosu</b> (genişlet)</summary>
+
+  | Özellik | OptiX | Vulkan RT | Not |
+  |---------|:-----:|:---------:|-----|
+  | Principled BSDF | ✅ | ✅ | Tam uyumlu |
+  | Lambertian / Metal / Dielektrik | ✅ | ✅ | Tam uyumlu |
+  | Subsurface Scattering (SSS) | ✅ | ✅ | Küçük renk tonu farkı |
+  | Clearcoat & Anizotropik | ✅ | ✅ | Tam uyumlu |
+  | Volumetrik Render | ✅ | 🧪 | Yoğunluk hesabında ufak farklar |
+  | **Saç Sistemi (Hair)** | ✅ | 🧪 | Shader hesaplama farkları |
+  | HDR / EXR Environment | ✅ | ✅ | Tam uyumlu |
+  | Nishita Gökyüzü & Gece/Gündüz | ✅ | ✅ | Tam uyumlu |
+  | Volumetrik Bulutlar | ✅ | 🧪 | Saçılım hesabında küçük farklar |
+  | **Su / Okyanus (FFT)** | ✅ | 🧪 | Dalga refleksiyon farkları |
+  | Kemik Animasyon (GPU Skinning) | ✅ | ✅ | Vulkan compute shader |
+  | Derinlik Alanı (DOF) | ✅ | ✅ | Tam uyumlu |
+  | Hareket Bulanıklığı (Motion Blur) | ✅ | ✅ | Tam uyumlu |
+  | Yumuşak Gölgeler (MIS) | ✅ | ✅ | Tam uyumlu |
+  | Alan Işıkları | ✅ | ✅ | Tam uyumlu |
+  | Ton Haritalama & Post-FX | ✅ | ✅ | Tam uyumlu |
+  | OIDN Denoising | ✅ | ✅ | Tam uyumlu |
+  | Adaptif Örnekleme | ✅ | ✅ | Tam uyumlu |
+  | Birikimli (Progressive) Render | ✅ | ✅ | Tam uyumlu |
+
+  > **Lejant:** ✅ Tam destek &nbsp;|&nbsp; 🧪 Destekleniyor, küçük çıktı farkları olabilir
+
+  </details>
+
   - ✅ **Gelişmiş Animasyon**: Kemik (bone) animasyonu, quaternion interpolasyonu ve timeline kontrolü
   - ✅ **Gelişmiş Bulut Aydınlatma Kontrolleri**:
     - Işık Adımları (Light Steps): Volumetrik bulut kalitesi için
@@ -89,7 +119,7 @@
   - Embree BVH (Intel, üretim seviyesi)
   - Özel ParallelBVH (SAH tabanlı, OpenMP paralelleştirilmiş)
   - OptiX GPU hızlandırma yapısı
-  - Vulkan izleme ve ivmelendirme (TLAS/BLAS) yapısı (Deneysel)
+  - 🧪 Vulkan RT TLAS/BLAS mimarisi — dinamik refit, compute skinning, tek-gönderim pipeline *(Deneysel)*
 
 - **Optimizasyonlar**
 - **Optimizasyonlar**
@@ -384,7 +414,7 @@ Visual Studio projesi bağımlılıkları vcpkg veya manuel yollar ile yönetir.
 
 | Özellik                  | VS2022 .vcxproj | CMake         |
 |--------------------------|-----------------|---------------|
-| CPU Rendering (SDL)      | ✅ Çalışıyor    | ⚠️ Hatalı     |
+| CPU Rendering (SDL)      | ✅ Çalışıyor    | ✅ Çalışıyor     |
 | GPU Rendering (OptiX)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
 | Vulkan Rendering (RT)    | ✅ Çalışıyor    | ✅ Çalışıyor  |
 | Bağımlılık Yönetimi      | ✅ Mükemmel     | ⚠️ Manuel     |

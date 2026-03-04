@@ -333,6 +333,16 @@ WorldData World::getGPUData() const {
 
 void World::setMode(WorldMode mode) {
     data.mode = mode;
+
+    // Lazy-load HDRI only when HDRI mode is actually activated.
+    // This avoids trying to open stale/missing paths during project load
+    // when the current world mode is not HDRI.
+    if (mode == WORLD_MODE_HDRI && !hdri_path.empty()) {
+        const bool hdriReady = (hdri_texture && hdri_texture->is_loaded());
+        if (!hdriReady) {
+            setHDRI(hdri_path);
+        }
+    }
 }
 
 WorldMode World::getMode() const {
@@ -505,6 +515,10 @@ void World::setSunDirection(const Vec3& direction) {
 
 void World::setSunIntensity(float intensity) {
     data.nishita.sun_intensity = intensity;
+    // Intensity change invalidates the baked LUT (sun_intensity is baked into LUT values)
+    if (atmosphere_lut) {
+        lut_dirty = true;
+    }
 }
 
 void World::setPlanetRadius(float radius) {
@@ -806,9 +820,17 @@ void World::serialize(nlohmann::json& j) const {
     j["color_intensity"] = data.color_intensity;
     
     // HDRI
-    j["hdri_path"] = hdri_path;
-    j["env_rotation"] = getHDRIRotation();
-    j["env_intensity"] = data.env_intensity;
+    // Persist HDRI path only when HDRI mode is active to avoid hidden stale paths
+    // being carried in projects where HDRI is not currently used.
+    if (data.mode == WORLD_MODE_HDRI) {
+        j["hdri_path"] = hdri_path;
+        j["env_rotation"] = getHDRIRotation();
+        j["env_intensity"] = data.env_intensity;
+    } else {
+        j["hdri_path"] = "";
+        j["env_rotation"] = 0.0f;
+        j["env_intensity"] = 1.0f;
+    }
     
     // Nishita
     nlohmann::json n;
@@ -912,7 +934,10 @@ void World::deserialize(const nlohmann::json& j) {
     
     if (j.contains("hdri_path")) {
         std::string path = j["hdri_path"];
-        if (!path.empty()) setHDRI(path);
+        hdri_path = path;
+        if (!path.empty() && data.mode == WORLD_MODE_HDRI) {
+            setHDRI(path);
+        }
     }
     if (j.contains("env_rotation")) setHDRIRotation(j["env_rotation"]);
     if (j.contains("env_intensity")) data.env_intensity = j["env_intensity"];

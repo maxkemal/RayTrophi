@@ -186,8 +186,9 @@ bool PrincipledBSDF::scatter(
         transmissionValue = getTransmission(uv);
     }
     
-    Vec3 emission = getPropertyValue(emissionProperty, uv);
-    
+    // Emission is computed separately in the render loop (Renderer.cpp / ray_color.cuh),
+    // NOT in scatter. Vulkan closesthit sets payload.radiance = emColor * emStrength
+    // independently from scatter decision. Emissive surfaces still scatter normally.
 
     float translucentValue = translucent; 
     float sssValue = subsurface; 
@@ -203,11 +204,6 @@ bool PrincipledBSDF::scatter(
 
     Vec3 N = rec.normal;                  // Oriented normal (points against ray)
     Vec3 V = -r_in.direction.normalize(); // View vector
-    if(emission.length_squared() > 0.0001f) {
-        attenuation = emission;
-        is_specular = false; // Transmission is specular
-        return true;
-    }
     // 1. CLEAR COAT (Top layer - ONLY on front face)
     if (rec.front_face && clearcoatValue > 0.01f) {
         // Fresnel for clear coat decides reflection probability

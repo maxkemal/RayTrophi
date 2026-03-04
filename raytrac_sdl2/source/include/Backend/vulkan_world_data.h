@@ -96,7 +96,7 @@ struct VkWorldDataExtended {
     float _pad3;                 // Padding
     
     // ═══════════════════════════════════════════════════════════════════════════════
-    // FOG PARAMETERS (32 bytes) - Cache Line 7
+    // FOG PARAMETERS (40 bytes) - Cache Line 7
     // ═══════════════════════════════════════════════════════════════════════════════
     int   fogEnabled;       // 1 = enable fog
     float fogDensity;       // Base density (0.0-0.1)
@@ -106,6 +106,7 @@ struct VkWorldDataExtended {
     float fogDistance;      // Max fog distance (meters)
     float fogSunScatter;    // Sun scattering in fog
     float fogColor[3];      // Fog tint color (RGB)
+    float _pad4;            // Padding (fogColor[3] + pad4 = 16 bytes)
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // VOLUMETRIC GOD RAYS (16 bytes)
@@ -116,12 +117,20 @@ struct VkWorldDataExtended {
     int   godRaysSamples;   // Quality steps (8-32)
     
     // ═══════════════════════════════════════════════════════════════════════════════
+    // AERIAL PERSPECTIVE (matches OptiX world.advanced) (16 bytes)
+    // ═══════════════════════════════════════════════════════════════════════════════
+    int   aerialEnabled;        // 1 = enable aerial perspective (matches AtmosphereAdvanced::aerial_perspective)
+    float aerialMinDistance;    // No haze below this (meters, matches aerial_min_distance)
+    float aerialMaxDistance;    // Full haze at this (meters, matches aerial_max_distance)
+    float _pad5_aerial;         // Padding
+    
+    // ═══════════════════════════════════════════════════════════════════════════════
     // ENVIRONMENT & LUT REFERENCES (32 bytes) - Cache Line 8
     // ═══════════════════════════════════════════════════════════════════════════════
     int   envTexSlot;       // Environment texture descriptor slot
     float envIntensity;     // Environment map intensity
     float envRotation;      // Rotation in radians
-    int   _pad5;            // Padding
+    int   _pad5;            // repurposed: nishitaLutReady (1 = atmosphereLUTs[4] valid)
     
     // LUT availability flags (0 or 1 for each, or actual descriptor handles in real impl)
     // Note: Using uint64_t for GPU texture object handles (matches CUDA)

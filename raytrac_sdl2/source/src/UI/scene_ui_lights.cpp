@@ -271,6 +271,7 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                 // World expects Nishita sun direction = -direction (scene convention)
                 ctx.renderer.world.setSunDirection(-l->direction);
                 ctx.renderer.world.setSunIntensity(l->intensity);
+                ctx.renderer.world.flushLUT(); // Recompute LUT with new intensity BEFORE uploading to GPU
                 if (ctx.backend_ptr) {
                     auto worldGPU = ctx.renderer.world.getGPUData();
                     ctx.backend_ptr->setWorldData(&worldGPU);
@@ -321,6 +322,7 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
         if (l && l->type() == LightType::Directional) { foundDir = true;
             ctx.renderer.world.setSunDirection(-l->direction);
             ctx.renderer.world.setSunIntensity(l->intensity);
+            ctx.renderer.world.flushLUT(); // Recompute LUT with new intensity BEFORE uploading to GPU
             if (ctx.backend_ptr) {
                 auto worldGPU = ctx.renderer.world.getGPUData();
                 ctx.backend_ptr->setWorldData(&worldGPU);
@@ -337,9 +339,16 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
     if (!foundDir) {
         // No directional light remains — clear sun intensity so sky disk disappears
         ctx.renderer.world.setSunIntensity(0.0f);
+        ctx.renderer.world.flushLUT(); // Recompute LUT (will be all-zero at intensity=0)
         if (ctx.backend_ptr) {
             auto worldGPU = ctx.renderer.world.getGPUData();
             ctx.backend_ptr->setWorldData(&worldGPU);
+            // Upload zeroed LUT texture to GPU so Vulkan sky goes dark
+            auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
+            if (vulkanBackend) {
+                auto* al = ctx.renderer.world.getLUT();
+                if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+            }
             ctx.backend_ptr->resetAccumulation();
         }
     }

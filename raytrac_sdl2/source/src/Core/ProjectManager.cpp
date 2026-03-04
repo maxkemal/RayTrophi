@@ -23,8 +23,22 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <algorithm>
+#include <cctype>
+#include <limits>
 #include <thread>
 #include <chrono>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+#endif
 
 #include <chrono>
 #include "TerrainManager.h"
@@ -43,6 +57,187 @@ namespace {
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+
+namespace {
+enum class ProjectBackendMode {
+    CPU,
+    OPTIX,
+    VULKAN
+};
+
+static ProjectBackendMode modeFromSettings(const RenderSettings& settings) {
+    if (settings.use_vulkan) return ProjectBackendMode::VULKAN;
+    if (settings.use_optix) return ProjectBackendMode::OPTIX;
+    return ProjectBackendMode::CPU;
+}
+
+static ProjectBackendMode modeFromBackendPtr(Backend::IBackend* backend) {
+    if (!backend) return ProjectBackendMode::CPU;
+
+    Backend::BackendType type = Backend::BackendType::CPU_EMBREE;
+    try {
+        type = backend->getInfo().type;
+    } catch (...) {
+        return ProjectBackendMode::CPU;
+    }
+
+    if (type == Backend::BackendType::VULKAN_RT || type == Backend::BackendType::VULKAN_COMPUTE) {
+        return ProjectBackendMode::VULKAN;
+    }
+    if (type == Backend::BackendType::OPTIX) {
+        return ProjectBackendMode::OPTIX;
+    }
+    return ProjectBackendMode::CPU;
+}
+
+static const char* modeToString(ProjectBackendMode mode) {
+    switch (mode) {
+        case ProjectBackendMode::VULKAN: return "Vulkan";
+        case ProjectBackendMode::OPTIX: return "OptiX";
+        default: return "CPU";
+    }
+}
+
+static fs::path pathFromUtf8(const std::string& utf8_path) {
+#ifdef _WIN32
+    auto toWide = [](const std::string& src, UINT codepage, DWORD flags) -> std::wstring {
+        const int size = MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
+        if (size <= 0) return {};
+        std::wstring out(static_cast<size_t>(size - 1), L'\0');
+        if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(), size) <= 0) return {};
+        return out;
+    };
+
+    std::wstring wide = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (wide.empty()) {
+        wide = toWide(utf8_path, CP_ACP, 0);
+    }
+    if (!wide.empty()) {
+        return fs::path(wide);
+    }
+#endif
+    return fs::path(utf8_path);
+}
+
+static simdjson::error_code loadJsonRootFromFile(simdjson::dom::parser& parser,
+                                                 const std::string& filepath,
+                                                 simdjson::dom::element& root,
+                                                 std::string* read_error = nullptr) {
+    auto readFileToString = [](const fs::path& path, std::string& out_text, std::string& out_err) -> bool {
+        std::ifstream in_json(path, std::ios::binary);
+        if (!in_json.is_open()) {
+            out_err = "open failed";
+            return false;
+        }
+
+        out_text.assign(std::istreambuf_iterator<char>(in_json), std::istreambuf_iterator<char>());
+        if (!in_json.good() && !in_json.eof()) {
+            out_err = "stream read failed";
+            return false;
+        }
+
+        return true;
+    };
+
+    std::string json_text;
+    std::string last_error;
+
+#ifdef _WIN32
+    auto readFileToStringWin32 = [](const std::string& utf8_path, std::string& out_text, std::string& out_err) -> bool {
+        auto toWide = [](const std::string& src, UINT codepage, DWORD flags) -> std::wstring {
+            int size = MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
+            if (size <= 0) return {};
+            std::wstring out(static_cast<size_t>(size), L'\0');
+            if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(), size) <= 0) return {};
+            out.resize(static_cast<size_t>(size - 1));
+            return out;
+        };
+
+        std::wstring path_w = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
+        if (path_w.empty()) {
+            path_w = toWide(utf8_path, CP_ACP, 0);
+        }
+        if (path_w.empty()) {
+            out_err = "utf8/acp to wide conversion failed";
+            return false;
+        }
+
+        HANDLE file = CreateFileW(path_w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            out_err = "CreateFileW failed (err=" + std::to_string(GetLastError()) + ")";
+            return false;
+        }
+
+        LARGE_INTEGER file_size{};
+        if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0) {
+            out_err = "GetFileSizeEx failed (err=" + std::to_string(GetLastError()) + ")";
+            CloseHandle(file);
+            return false;
+        }
+
+        if (file_size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<size_t>::max())) {
+            out_err = "file too large";
+            CloseHandle(file);
+            return false;
+        }
+
+        out_text.resize(static_cast<size_t>(file_size.QuadPart));
+        DWORD read_total = 0;
+        while (read_total < static_cast<DWORD>(out_text.size())) {
+            DWORD chunk_read = 0;
+            const DWORD remaining = static_cast<DWORD>(out_text.size()) - read_total;
+            if (!ReadFile(file, out_text.data() + read_total, remaining, &chunk_read, nullptr)) {
+                out_err = "ReadFile failed (err=" + std::to_string(GetLastError()) + ")";
+                CloseHandle(file);
+                return false;
+            }
+            if (chunk_read == 0) break;
+            read_total += chunk_read;
+        }
+        out_text.resize(read_total);
+        CloseHandle(file);
+        return true;
+    };
+#endif
+
+    const fs::path utf8_path = pathFromUtf8(filepath);
+
+    if (!readFileToString(utf8_path, json_text, last_error)) {
+        fs::path native_path(filepath);
+        std::string native_error;
+        if (!readFileToString(native_path, json_text, native_error)) {
+#ifdef _WIN32
+            std::string winapi_error;
+            if (readFileToStringWin32(filepath, json_text, winapi_error)) {
+                last_error = "u8path=" + last_error + " | native=" + native_error + " | winapi=ok";
+            } else {
+#endif
+            std::error_code ec_u8_exists;
+            std::error_code ec_native_exists;
+            const bool u8_exists = fs::exists(utf8_path, ec_u8_exists);
+            const bool native_exists = fs::exists(native_path, ec_native_exists);
+            if (read_error) {
+                *read_error = "u8path=" + last_error +
+                              " (exists=" + std::string(u8_exists ? "true" : "false") + ")" +
+                              " | native=" + native_error +
+                              " (exists=" + std::string(native_exists ? "true" : "false") + ")" +
+#ifdef _WIN32
+                              " | winapi=" + winapi_error +
+#endif
+                              " | cwd=" + fs::current_path().string();
+            }
+            return simdjson::IO_ERROR;
+#ifdef _WIN32
+            }
+#endif
+        }
+    }
+
+    simdjson::padded_string padded_json(json_text);
+    return parser.parse(padded_json).get(root);
+}
+}
 
 // Global project data instance
 ProjectData g_project;
@@ -273,12 +468,14 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     
     // 2. Reset Globals
     bool was_optix = render_settings.use_optix;
+    bool was_vulkan = render_settings.use_vulkan;
     bool was_denoiser = render_settings.use_denoiser;
     
     render_settings = RenderSettings(); // Default constructor resets to defaults
     
     // Restore Device Preference
     render_settings.use_optix = was_optix;
+    render_settings.use_vulkan = was_vulkan;
     render_settings.use_denoiser = was_denoiser;
 
     renderer.world.reset();             // Reset Atmosphere/Godrays
@@ -706,21 +903,28 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                                   RenderSettings& settings, Renderer& renderer, 
                                   Backend::IBackend* backend,
                                   std::function<void(int, const std::string&)> progress_callback) {
+    const bool prev_use_optix = settings.use_optix;
+    const bool prev_use_vulkan = settings.use_vulkan;
+    const ProjectBackendMode prev_backend_mode = modeFromBackendPtr(backend);
     
     if (progress_callback) progress_callback(0, "Opening project file with turbo parser...");
     
     // 1. Read JSON Metadata with simdjson
     simdjson::dom::parser parser;
     simdjson::dom::element root;
-    
-    auto error = parser.load(filepath).get(root);
+
+    std::string read_error;
+    auto error = loadJsonRootFromFile(parser, filepath, root, &read_error);
     if (error) {
-        SCENE_LOG_ERROR("Failed to parse project file with simdjson: " + std::string(simdjson::error_message(error)));
+        SCENE_LOG_ERROR("Failed to parse project file with simdjson: " + std::string(simdjson::error_message(error)) +
+                        " | path=" + filepath +
+                        (read_error.empty() ? "" : " | read_error=" + read_error));
         return false;
     }
 
     // 2. Prepare Binary Stream
-    std::string bin_path = filepath + ".bin";
+    fs::path bin_path = pathFromUtf8(filepath);
+    bin_path += ".bin";
     std::ifstream in_bin(bin_path, std::ios::binary);
     bool has_binary = in_bin.is_open();
     
@@ -1103,6 +1307,17 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     }
     
     if (in_bin.is_open()) in_bin.close();
+
+    const ProjectBackendMode requested_backend_mode = modeFromSettings(settings);
+    const bool backend_mode_changed =
+        (settings.use_optix != prev_use_optix) ||
+        (settings.use_vulkan != prev_use_vulkan) ||
+        (requested_backend_mode != prev_backend_mode);
+    if (backend_mode_changed) {
+        settings.backend_changed = true;
+        SCENE_LOG_INFO(std::string("[ProjectLoad] Backend switch scheduled: ") +
+            modeToString(prev_backend_mode) + " -> " + modeToString(requested_backend_mode));
+    }
     
     g_project.current_file_path = filepath;
     g_project.is_modified = false;
@@ -1129,21 +1344,14 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         renderer.updateAnimationWithGraph(scene, 0.0f, true);
     }
 
-    if (backend) {
-        if (progress_callback) progress_callback(95, "Uploading to GPU...");
-        renderer.rebuildBackendGeometry(scene);
-        if (!renderer.finalBoneMatrices.empty()) {
-            backend->updateSceneGeometry(scene.world.objects, renderer.finalBoneMatrices);
-        }
-        backend->setLights(scene.lights);
-        if (scene.camera) {
-            renderer.syncCameraToBackend(*scene.camera);
-        }
-        backend->resetAccumulation();
-    }
+    // IMPORTANT: Do not push GPU data from this loader thread.
+    // Backend can be switched/destroyed concurrently (e.g. project requests different engine),
+    // causing null/dangling backend access. Main thread performs deferred full GPU sync.
     
     g_needs_geometry_rebuild = true;
-    g_needs_optix_sync = false;
+    // IMPORTANT: Must be true so main-thread scene-load finalization performs full backend sync.
+    // Otherwise GPU backend may keep stale scene state until a manual backend toggle occurs.
+    g_needs_optix_sync = true;
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
@@ -1870,6 +2078,8 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["final_render_width"] = settings.final_render_width;
     j["final_render_height"] = settings.final_render_height;
     j["use_gpu"] = settings.use_optix;
+    j["use_vulkan"] = settings.use_vulkan;
+    j["backend"] = settings.use_vulkan ? "vulkan" : (settings.use_optix ? "optix" : "cpu");
     j["use_embree"] = settings.UI_use_embree;
     j["use_denoiser"] = settings.use_denoiser;
     j["render_use_denoiser"] = settings.render_use_denoiser;
@@ -1888,7 +2098,30 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.max_bounces = j.value("max_bounces", 10);
     settings.final_render_width = j.value("final_render_width", 1280);
     settings.final_render_height = j.value("final_render_height", 720);
-    settings.use_optix = j.value("use_gpu", false);
+    bool loaded_optix = j.value("use_gpu", false);
+    bool loaded_vulkan = j.value("use_vulkan", false);
+    std::string backend_name = j.value("backend", "");
+
+    if (!backend_name.empty()) {
+        std::transform(backend_name.begin(), backend_name.end(), backend_name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (backend_name == "vulkan") {
+            loaded_vulkan = true;
+            loaded_optix = false;
+        } else if (backend_name == "optix") {
+            loaded_optix = true;
+            loaded_vulkan = false;
+        } else if (backend_name == "cpu") {
+            loaded_optix = false;
+            loaded_vulkan = false;
+        }
+    }
+
+    // Keep backend selection strictly exclusive.
+    if (loaded_vulkan) loaded_optix = false;
+
+    settings.use_optix = loaded_optix;
+    settings.use_vulkan = loaded_vulkan;
     settings.UI_use_embree = j.value("use_embree", true);
     settings.use_denoiser = j.value("use_denoiser", false);
     settings.render_use_denoiser = j.value("render_use_denoiser", true);
@@ -2145,6 +2378,7 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
     // We must ensure they are added to both!
     
     for (const auto& j : j_arr) {
+      try {
         std::string filepath = j.value("filepath", "");
         if (filepath.empty()) continue;
         
@@ -2205,6 +2439,11 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
         
         scene.addVDBVolume(vdb);
         scene.world.objects.push_back(vdb);
+      } catch (const std::exception& e) {
+          SCENE_LOG_ERROR("[ProjectManager] Skipping VDB volume — deserialize failed: " + std::string(e.what()));
+      } catch (...) {
+          SCENE_LOG_ERROR("[ProjectManager] Skipping VDB volume — unknown error during deserialize");
+      }
     }
 }
 
@@ -2222,14 +2461,19 @@ json ProjectManager::serializeGasVolumes(const std::vector<std::shared_ptr<GasVo
 
 void ProjectManager::deserializeGasVolumes(const json& j_arr, SceneData& scene) {
     for (const auto& j : j_arr) {
-        auto gas = std::make_shared<GasVolume>();
-        gas->fromJson(j);
-        scene.addGasVolume(gas);
-        scene.world.objects.push_back(gas);
-        
-        // Auto-initialize if it was previously initialized
-        if (gas->isInitialized()) {
-             gas->initialize();
+        try {
+            auto gas = std::make_shared<GasVolume>();
+            // NOTE: fromJson() calls initialize() internally.
+            // Do NOT call initialize() again afterwards — that causes a double CUDA
+            // alloc / driver deadlock, and is especially dangerous when the original
+            // baked / live VDB data is missing on the current machine.
+            gas->fromJson(j);
+            scene.addGasVolume(gas);
+            scene.world.objects.push_back(gas);
+        } catch (const std::exception& e) {
+            SCENE_LOG_ERROR("[ProjectManager] Skipping GAS volume — deserialize failed: " + std::string(e.what()));
+        } catch (...) {
+            SCENE_LOG_ERROR("[ProjectManager] Skipping GAS volume — unknown error during deserialize");
         }
     }
 }

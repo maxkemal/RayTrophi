@@ -5,6 +5,19 @@
 #include "globals.h"  // For SCENE_LOG_INFO
 #include <algorithm>
 
+namespace {
+bool isVulkanBackend(Backend::IBackend* backend) {
+    if (!backend) return false;
+    Backend::BackendType type = Backend::BackendType::CPU_EMBREE;
+    try {
+        type = backend->getInfo().type;
+    } catch (...) {
+        return false;
+    }
+    return type == Backend::BackendType::VULKAN_RT || type == Backend::BackendType::VULKAN_COMPUTE;
+}
+}
+
 // ============================================================================
 // DELETE COMMAND IMPLEMENTATION
 // ============================================================================
@@ -62,8 +75,17 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
         
         // Incremental GPU update for TLAS mode
         if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-            ctx.backend_ptr->hideInstancesByNodeName(object_name_);
-            ctx.backend_ptr->rebuildAccelerationStructure();
+            if (isVulkanBackend(ctx.backend_ptr)) {
+                // [CRASH FIX] Defer to the safe frame-end rebuild block:
+                //   rebuildAccelerationStructure() -> updateGeometry() -> uploadHairToGPU() -> updateBackendMaterials()
+                // Calling updateGeometry() directly here (while traceRays may be dispatching)
+                // can leave stale descriptor bindings pointing at freed BLAS memory -> crash.
+                g_vulkan_rebuild_pending = true;
+                ctx.backend_ptr->resetAccumulation();
+            } else {
+                ctx.backend_ptr->hideInstancesByNodeName(object_name_);
+                ctx.backend_ptr->rebuildAccelerationStructure();
+            }
         } else if (ctx.backend_ptr) {
             extern bool g_optix_rebuild_pending;
             g_optix_rebuild_pending = true;
@@ -100,8 +122,16 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
     
     // Incremental GPU update for TLAS mode
     // Note: For undo of delete, we need FULL rebuild since we're adding triangles back
-    // The cloneInstancesByNodeName won't work here because BLAS is gone
-    if (ctx.backend_ptr) {
+    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
+        if (isVulkanBackend(ctx.backend_ptr)) {
+            // [CRASH FIX] Use deferred safe-rebuild instead of direct updateGeometry().
+            g_vulkan_rebuild_pending = true;
+            ctx.backend_ptr->resetAccumulation();
+        } else {
+            extern bool g_optix_rebuild_pending;
+            g_optix_rebuild_pending = true;
+        }
+    } else if (ctx.backend_ptr) {
         extern bool g_optix_rebuild_pending;
         g_optix_rebuild_pending = true;
     }
@@ -141,8 +171,16 @@ void DuplicateObjectCommand::execute(UIContext& ctx) {
          // Defer full rebuild to Main.cpp async handler
          extern bool g_bvh_rebuild_pending;
          g_bvh_rebuild_pending = true;
-         extern bool g_optix_rebuild_pending;
-         g_optix_rebuild_pending = true;
+
+         if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS() && isVulkanBackend(ctx.backend_ptr)) {
+             // [CRASH FIX] Use deferred safe-rebuild instead of direct updateGeometry().
+             g_vulkan_rebuild_pending = true;
+             ctx.backend_ptr->resetAccumulation();
+         } else {
+             extern bool g_optix_rebuild_pending;
+             g_optix_rebuild_pending = true;
+         }
+
          ctx.renderer.resetCPUAccumulation();
          ctx.start_render = true;
          SCENE_LOG_INFO("Redo: Duplicated " + source_name_ + " -> " + new_name_);
@@ -166,8 +204,16 @@ void DuplicateObjectCommand::undo(UIContext& ctx) {
     // Defer full rebuild to Main.cpp async handler
     extern bool g_bvh_rebuild_pending;
     g_bvh_rebuild_pending = true;
-    extern bool g_optix_rebuild_pending;
-    g_optix_rebuild_pending = true;
+
+    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS() && isVulkanBackend(ctx.backend_ptr)) {
+        // [CRASH FIX] Use deferred safe-rebuild instead of direct updateGeometry().
+        g_vulkan_rebuild_pending = true;
+        ctx.backend_ptr->resetAccumulation();
+    } else {
+        extern bool g_optix_rebuild_pending;
+        g_optix_rebuild_pending = true;
+    }
+
     ctx.renderer.resetCPUAccumulation();
     
     SCENE_LOG_INFO("Undo: Removed duplicate " + new_name_);

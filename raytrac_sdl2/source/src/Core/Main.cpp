@@ -6,6 +6,11 @@
 #include <atomic>
 #include <thread>
 #include <future>
+#include <exception>
+#include <csignal>
+#include <sstream>
+#include <unordered_set>
+#include <string_view>
 #include <SDL_image.h>
 #include "Renderer.h"
 #include "Backend/IBackend.h"
@@ -51,6 +56,263 @@
 #define TINYEXR_IMPLEMENTATION
 #include "tinyexr.h"
 #include <InstanceManager.h>
+#include "DllLoadPolicy.h"
+
+namespace {
+bool g_startupDiagVerbose = false;
+constexpr const char* kStartupDiagVersion = "startup_diag_v3_2026_03_01";
+
+constexpr DWORD kMsCppException = 0xE06D7363;
+constexpr DWORD kDbgPrintExceptionC = 0x40010006;
+constexpr DWORD kDbgPrintExceptionWideC = 0x4001000A;
+
+bool isBenignStatusException(DWORD code) {
+    return code == kDbgPrintExceptionC ||
+           code == kDbgPrintExceptionWideC ||
+           code == EXCEPTION_BREAKPOINT ||
+           code == EXCEPTION_SINGLE_STEP;
+}
+
+bool isFatalExceptionCode(DWORD code) {
+    return code == EXCEPTION_ACCESS_VIOLATION ||
+           code == EXCEPTION_STACK_OVERFLOW ||
+           code == EXCEPTION_ILLEGAL_INSTRUCTION ||
+           code == EXCEPTION_IN_PAGE_ERROR ||
+           code == EXCEPTION_ARRAY_BOUNDS_EXCEEDED ||
+           code == EXCEPTION_DATATYPE_MISALIGNMENT ||
+           code == EXCEPTION_INT_DIVIDE_BY_ZERO ||
+           code == EXCEPTION_PRIV_INSTRUCTION ||
+           code == 0xC0000374; // STATUS_HEAP_CORRUPTION
+}
+
+const char* exceptionSeverityTag(DWORD code) {
+    if (isFatalExceptionCode(code)) return "FATAL";
+    if (code == kMsCppException) return "WARN";  // often first-chance, may be handled safely
+    return "WARN";
+}
+
+bool shouldLogExceptionOnce(DWORD code, const void* address) {
+    static std::mutex seenLock;
+    static std::unordered_set<std::string> seen;
+
+    std::ostringstream key;
+    key << std::hex << code << "@" << address;
+    const std::string keyStr = key.str();
+
+    std::lock_guard<std::mutex> guard(seenLock);
+    auto [it, inserted] = seen.insert(keyStr);
+    return inserted;
+}
+
+bool hasArg(int argc, char* argv[], std::string_view arg) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && std::string_view(argv[i]) == arg) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#ifdef _WIN32
+bool canLoadRuntimeDll(const char* dllName) {
+    if (!dllName || !dllName[0]) return false;
+
+    HMODULE h = LoadLibraryExA(dllName, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!h) {
+        h = LoadLibraryExA(dllName, nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    }
+    if (!h) {
+        h = LoadLibraryA(dllName);
+    }
+    if (!h) {
+        return false;
+    }
+
+    FreeLibrary(h);
+    return true;
+}
+
+bool g_vcRuntimeMissing = false;
+std::string g_vcRuntimeMissingList;
+
+void checkVcRuntimeRedistributable() {
+    static const char* kRequiredDlls[] = {
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "msvcp140.dll"
+    };
+
+    std::vector<std::string> missing;
+    for (const char* dll : kRequiredDlls) {
+        if (!canLoadRuntimeDll(dll)) {
+            missing.emplace_back(dll);
+        }
+    }
+
+    if (!missing.empty()) {
+        g_vcRuntimeMissing = true;
+        g_vcRuntimeMissingList.clear();
+        for (size_t i = 0; i < missing.size(); ++i) {
+            if (i > 0) g_vcRuntimeMissingList += ", ";
+            g_vcRuntimeMissingList += missing[i];
+        }
+    }
+}
+
+void notifyIfVcRuntimeMissing() {
+    if (!g_vcRuntimeMissing) return;
+
+    const std::string warn =
+        "Visual C++ Redistributable may be missing or corrupted. Missing DLL(s): " +
+        g_vcRuntimeMissingList +
+        ". Please install Microsoft Visual C++ 2015-2022 Redistributable (x64).";
+
+    SCENE_LOG_WARN(warn);
+
+    std::string msg =
+        "Visual C++ Redistributable may be missing or corrupted.\n\n"
+        "Missing DLL(s): " + g_vcRuntimeMissingList +
+        "\n\nInstall Microsoft Visual C++ 2015-2022 Redistributable (x64).";
+
+    MessageBoxA(nullptr, msg.c_str(), "RayTrophi - Dependency Warning", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+}
+#endif
+
+std::string startupCrashLogPath() {
+    char exePath[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        try {
+            std::filesystem::path p(exePath);
+            return (p.parent_path() / "StartupCrash.log").string();
+        } catch (...) {
+        }
+    }
+    return "StartupCrash.log";
+}
+
+void emergencyStartupLog(const std::string& message) {
+    try {
+        std::ofstream file(startupCrashLogPath(), std::ios::out | std::ios::app);
+        if (file.is_open()) {
+            SYSTEMTIME st{};
+            GetLocalTime(&st);
+            file << "["
+                 << st.wYear << "-"
+                 << st.wMonth << "-"
+                 << st.wDay << " "
+                 << st.wHour << ":"
+                 << st.wMinute << ":"
+                 << st.wSecond
+                 << "] " << message << std::endl;
+            file.flush();
+        }
+    } catch (...) {
+    }
+}
+
+void startupDiagLog(const std::string& message) {
+    if (g_startupDiagVerbose) {
+        emergencyStartupLog(message);
+    }
+}
+
+LONG WINAPI topLevelExceptionHandler(EXCEPTION_POINTERS* exceptionInfo) {
+    DWORD code = exceptionInfo && exceptionInfo->ExceptionRecord
+        ? exceptionInfo->ExceptionRecord->ExceptionCode
+        : 0;
+    const void* address = (exceptionInfo && exceptionInfo->ExceptionRecord)
+        ? exceptionInfo->ExceptionRecord->ExceptionAddress
+        : nullptr;
+
+    std::ostringstream ss;
+    ss << "[" << exceptionSeverityTag(code) << "] Unhandled SEH exception at startup. code=0x"
+       << std::hex << code << " address=0x" << address;
+    emergencyStartupLog(ss.str());
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+LONG CALLBACK vectoredExceptionHandler(PEXCEPTION_POINTERS exceptionInfo) {
+    if (!exceptionInfo || !exceptionInfo->ExceptionRecord) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    const auto* rec = exceptionInfo->ExceptionRecord;
+
+    // Ignore common non-fatal debug/status exceptions.
+    if (isBenignStatusException(rec->ExceptionCode)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Most C++ exceptions are first-chance and eventually handled; only log them in verbose mode.
+    if (rec->ExceptionCode == kMsCppException && !g_startupDiagVerbose) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    // Re-entrancy guard: if logging itself triggers another exception, do not recurse.
+    static thread_local bool handlingException = false;
+    if (handlingException) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    handlingException = true;
+
+    if (!shouldLogExceptionOnce(rec->ExceptionCode, rec->ExceptionAddress)) {
+        handlingException = false;
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    std::ostringstream ss;
+    ss << "[" << exceptionSeverityTag(rec->ExceptionCode) << "] Vectored exception. code=0x"
+       << std::hex << rec->ExceptionCode
+       << " address=0x" << rec->ExceptionAddress;
+
+    if (rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2) {
+        const auto accessType = static_cast<unsigned long long>(rec->ExceptionInformation[0]);
+        const auto faultAddr = static_cast<unsigned long long>(rec->ExceptionInformation[1]);
+        ss << " av_type=" << std::dec << accessType << " fault_addr=0x" << std::hex << faultAddr;
+    }
+
+    emergencyStartupLog(ss.str());
+    handlingException = false;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+[[noreturn]] void terminateHandler() {
+    try {
+        auto current = std::current_exception();
+        if (current) {
+            try {
+                std::rethrow_exception(current);
+            } catch (const std::exception& e) {
+                emergencyStartupLog(std::string("[FATAL] std::terminate: ") + e.what());
+            } catch (...) {
+                emergencyStartupLog("[FATAL] std::terminate: unknown exception");
+            }
+        } else {
+            emergencyStartupLog("[FATAL] std::terminate called without active exception");
+        }
+    } catch (...) {
+        emergencyStartupLog("[FATAL] std::terminate logging failed");
+    }
+    std::_Exit(EXIT_FAILURE);
+}
+
+void signalHandler(int sig) {
+    emergencyStartupLog("[FATAL] Signal received: " + std::to_string(sig));
+    std::_Exit(EXIT_FAILURE);
+}
+
+void installEarlyCrashHandlers() {
+    AddVectoredExceptionHandler(1, vectoredExceptionHandler);
+    SetUnhandledExceptionFilter(topLevelExceptionHandler);
+    std::set_terminate(terminateHandler);
+    std::signal(SIGABRT, signalHandler);
+    std::signal(SIGSEGV, signalHandler);
+    std::signal(SIGFPE, signalHandler);
+    std::signal(SIGILL, signalHandler);
+    std::signal(SIGTERM, signalHandler);
+}
+}
 
 bool SaveSurface(SDL_Surface* surface, const char* file_path) {
     SDL_Surface* surface_to_save = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGB24, 0);
@@ -151,6 +413,7 @@ bool g_original_surface_needs_sync = true;
 // ===========================================================================
 bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
+bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_optix_rebuild_pending = false;
 bool g_optix_rebuild_in_progress = false; // True while TLAS rebuild is happening    // GPU OptiX geometry needs rebuild
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
@@ -348,6 +611,9 @@ void reset_render_resolution(int w, int h)
         rp.imageWidth = w;
         rp.imageHeight = h;
         rp.samplesPerPixel = render_settings.samples_per_pixel;
+        rp.maxBounces = std::max(1, render_settings.max_bounces); // min 1: sıfır = primary ray only
+        rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
+        rp.adaptiveThreshold = render_settings.variance_threshold;
         g_backend->setRenderParams(rp);
     }
     color_processor.resize(w, h);
@@ -387,57 +653,105 @@ bool g_has_rt_cores = false;
 
 void detectOptixHardware()
 {
-    int deviceCount = 0;
-    cudaError_t err = cudaGetDeviceCount(&deviceCount);
-
     SCENE_LOG_INFO("--- Hardware Detection ---");
-
-    if (err != cudaSuccess || deviceCount == 0) {
+#ifdef _WIN32
+    // Prefer using the CUDA Driver API dynamically via nvcuda.dll so we never
+    // rely on delay-load imports. This avoids SEH crashes when the driver is
+    // missing. We'll query device count and compute capability from the driver.
+    HMODULE hDriver = Platform::Dll::loadModuleWithPolicy("nvcuda.dll", Platform::Dll::DllCategory::Driver, false);
+    if (!hDriver) {
         g_hasOptix = false;
         g_hasCUDA = false;
         g_gpu_name = "CPU Only";
-        std::string errStr = (err != cudaSuccess) ? cudaGetErrorString(err) : "No devices found";
-        SCENE_LOG_WARN("CUDA Detection Failed: " + errStr + ". Falling back to CPU mode.");
+        SCENE_LOG_WARN("NVIDIA Driver (nvcuda.dll) not found. GPU Rendering disabled.");
         return;
     }
 
-    g_hasCUDA = true; // Found at least one CUDA device
+    using PFN_cuInit = int(*)(unsigned int);
+    using PFN_cuDeviceGetCount = int(*)(int*);
+    using PFN_cuDeviceGet = int(*)(int*, int);
+    using PFN_cuDeviceGetName = int(*)(char*, int, int);
+    using PFN_cuDeviceComputeCapability = int(*)(int*, int*, int);
+
+    PFN_cuInit pcuInit = (PFN_cuInit)GetProcAddress(hDriver, "cuInit");
+    PFN_cuDeviceGetCount pcuDeviceGetCount = (PFN_cuDeviceGetCount)GetProcAddress(hDriver, "cuDeviceGetCount");
+    PFN_cuDeviceGet pcuDeviceGet = (PFN_cuDeviceGet)GetProcAddress(hDriver, "cuDeviceGet");
+    PFN_cuDeviceGetName pcuDeviceGetName = (PFN_cuDeviceGetName)GetProcAddress(hDriver, "cuDeviceGetName");
+    PFN_cuDeviceComputeCapability pcuDevComputeCap = (PFN_cuDeviceComputeCapability)GetProcAddress(hDriver, "cuDeviceComputeCapability");
+
+    if (!pcuInit || !pcuDeviceGetCount) {
+        // Driver lacks expected symbols
+        g_hasOptix = false;
+        g_hasCUDA = false;
+        g_gpu_name = "CPU Only";
+        SCENE_LOG_WARN("CUDA Driver API symbols not found in nvcuda.dll. GPU Rendering disabled.");
+        return;
+    }
+
+    int cuRes = pcuInit(0);
+    if (cuRes != 0) {
+        g_hasOptix = false;
+        g_hasCUDA = false;
+        g_gpu_name = "CPU Only";
+        SCENE_LOG_WARN("cuInit failed. GPU Rendering disabled.");
+        return;
+    }
+
+    int deviceCount = 0;
+    cuRes = pcuDeviceGetCount(&deviceCount);
+    if (cuRes != 0 || deviceCount == 0) {
+        g_hasOptix = false;
+        g_hasCUDA = false;
+        g_gpu_name = "CPU Only";
+        SCENE_LOG_WARN("CUDA Detection Failed: no driver devices found. Falling back to CPU mode.");
+        return;
+    }
+
+    g_hasCUDA = true;
     SCENE_LOG_INFO("Found " + std::to_string(deviceCount) + " CUDA device(s).");
 
     bool foundOptix = false;
-    for (int i = 0; i < deviceCount; ++i)
-    {
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, i);
+    for (int i = 0; i < deviceCount; ++i) {
+        int dev = 0;
+        if (pcuDeviceGet) pcuDeviceGet(&dev, i);
 
-        int major = prop.major;
-        int minor = prop.minor;
+        int major = 0, minor = 0;
+        if (pcuDevComputeCap) pcuDevComputeCap(&major, &minor, dev);
+
+        char nameBuf[128] = "";
+        if (pcuDeviceGetName) pcuDeviceGetName(nameBuf, sizeof(nameBuf), dev);
+
         bool capable = isOptixCapable(major, minor);
+        std::string devName = nameBuf[0] ? std::string(nameBuf) : ("CUDA Device " + std::to_string(i));
 
-        SCENE_LOG_INFO("Device [" + std::to_string(i) + "]: " + std::string(prop.name) + 
-                       " (SM " + std::to_string(major) + "." + std::to_string(minor) + ") - " + 
+        SCENE_LOG_INFO("Device [" + std::to_string(i) + "]: " + devName +
+                       " (SM " + std::to_string(major) + "." + std::to_string(minor) + ") - " +
                        (capable ? "OptiX Capable" : "OptiX NOT Capable"));
 
         if (capable && !foundOptix) {
-            g_gpu_name = prop.name;
+            g_gpu_name = devName;
             foundOptix = true;
             g_has_rt_cores = hasRTCores(major, minor);
-            
             if (g_has_rt_cores) {
-                SCENE_LOG_INFO("Selected: " + std::string(prop.name) + " (Hardware RT enabled)");
+                SCENE_LOG_INFO("Selected: " + devName + " (Hardware RT enabled)");
             } else {
-                SCENE_LOG_INFO("Selected: " + std::string(prop.name) + " (OptiX Compute mode)");
+                SCENE_LOG_INFO("Selected: " + devName + " (OptiX Compute mode)");
             }
         }
     }
 
     g_hasOptix = foundOptix;
-    
     if (!g_hasOptix) {
         SCENE_LOG_WARN("No OptiX-compatible GPU (Maxwell SM 5.0+) found. GPU Rendering will be disabled.");
     }
 
     SCENE_LOG_INFO("--------------------------");
+#else
+    // Non-Windows platforms rely on standard CUDA runtime checks elsewhere
+    g_hasCUDA = false;
+    g_hasOptix = false;
+    g_gpu_name = "CPU Only";
+#endif
 }
 std::string WStringToString(const std::wstring& wstr) {
     if (wstr.empty()) return {};
@@ -491,6 +805,13 @@ bool initializeOptixIfAvailable() {
 }
 
 bool initializeVulkanIfAvailable() {
+#ifdef _WIN32
+    HMODULE vulkanDll = Platform::Dll::loadModuleWithPolicy("vulkan-1.dll", Platform::Dll::DllCategory::Driver, false);
+    if (!vulkanDll) {
+        SCENE_LOG_WARN("Vulkan Driver (vulkan-1.dll) not found. Vulkan Backend disabled.");
+        return false;
+    }
+#endif
     try {
         auto backend = std::make_unique<Backend::VulkanBackendAdapter>();
         if (!backend->initialize()) {
@@ -505,6 +826,10 @@ bool initializeVulkanIfAvailable() {
     }
     catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("Vulkan initialization failed: ") + e.what());
+        return false;
+    }
+    catch (...) {
+        SCENE_LOG_ERROR("Vulkan initialization failed with unknown exception.");
         return false;
     }
 }
@@ -566,37 +891,67 @@ void init_RayTrophi_Pro_Dark_Thema()
 
     // Separator'lar (daha belirgin, modern �izgi)
     style.SeparatorTextPadding = ImVec2(10.0f, 8.0f);
-    style.SeparatorTextAlign = ImVec2(0.0f, 0.5f); // sola hizal� ba�l�klar �ok daha modern
+    style.SeparatorTextAlign = ImVec2(0.0f, 0.5f); // 
     style.SeparatorTextBorderSize = 2.0f;  // default 1.0f
 	// Accent renkli separator
     c[ImGuiCol_Separator] = ImVec4(0.25f, 0.75f, 0.70f, 0.60f); // accent soft
     c[ImGuiCol_SeparatorHovered] = ImVec4(0.25f, 0.80f, 0.75f, 1.00f);
     c[ImGuiCol_SeparatorActive] = ImVec4(0.20f, 0.90f, 0.85f, 1.00f);
    
-    style.ItemSpacing = ImVec2(8, 6);   // aral�klar a��l�r
+    style.ItemSpacing = ImVec2(8, 6);   // 
     style.ItemInnerSpacing = ImVec2(6, 6);
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) try {
+    installEarlyCrashHandlers();
+
+    // Optional diagnostics:
+    //   --startup-diagnostics : verbose startup breadcrumb logs
+    //   --no-startup-diagnostics : suppress breadcrumb logs (default behavior)
+    g_startupDiagVerbose = hasArg(argc, argv, "--startup-diagnostics") &&
+                           !hasArg(argc, argv, "--no-startup-diagnostics");
+
+    emergencyStartupLog(std::string("[Startup] main() entered ver=") +
+                        kStartupDiagVersion +
+                        " pid=" + std::to_string(GetCurrentProcessId()) +
+                        " verbose=" + (g_startupDiagVerbose ? "1" : "0"));
+
+#ifdef _WIN32
+    checkVcRuntimeRedistributable();
+#endif
+
     setlocale(LC_ALL, "Turkish");
+    startupDiagLog("[Startup] locale set");
     
     // Save project path passed via command line
     std::string project_to_load = "";
     if (argc > 1) {
         project_to_load = std::filesystem::absolute(argv[1]).string();
     }
+    startupDiagLog("[Startup] argv parsed");
     
 #ifdef _WIN32
     // Konsolu tamamen kapat
     FreeConsole();
+    startupDiagLog("[Startup] FreeConsole done");
     
     char exePath[MAX_PATH];
     GetModuleFileNameA(NULL, exePath, MAX_PATH);
     std::filesystem::current_path(std::filesystem::path(exePath).parent_path());
+    startupDiagLog("[Startup] current_path set (win32)");
 #else
     if (argc > 0) {
         std::filesystem::current_path(std::filesystem::path(argv[0]).parent_path());
     }
+    startupDiagLog("[Startup] current_path set (non-win32)");
+#endif
+
+    // Ensure logger is firmly bound to the application directory (prevent wandering logs)
+    g_sceneLog.initLogLocation();
+    startupDiagLog("[Startup] g_sceneLog.initLogLocation done");
+
+#ifdef _WIN32
+    notifyIfVcRuntimeMissing();
 #endif
 
    // SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
@@ -605,55 +960,72 @@ int main(int argc, char* argv[]) {
         SCENE_LOG_ERROR(std::string("SDL_Init Error: ") + SDL_GetError());
         return 1;
     }
+    startupDiagLog("[Startup] SDL_Init done");
     SDL_EnableScreenSaver();
+    startupDiagLog("[Startup] SDL_EnableScreenSaver done");
     // ===========================================================================
     // SPLASH SCREEN - Frameless startup screen with loading status
     // ===========================================================================
     SplashScreen splash;
+    startupDiagLog("[Startup] SplashScreen constructed");
     bool splashOk = splash.init("RayTrophi_image.png", 900, 700);
+    startupDiagLog(std::string("[Startup] splash.init done, ok=") + (splashOk ? "1" : "0"));
     if (splashOk) {
         splash.setStatus("Initializing...");
         splash.render();
+        startupDiagLog("[Startup] splash first render done");
     }
     
     // Detect GPU Hardware
     if (splashOk) { splash.setStatus("Detecting CUDA/OptiX hardware..."); splash.render(); }
+        startupDiagLog("[Startup] before g_sceneLog.clear");
     g_sceneLog.clear();
+        startupDiagLog("[Startup] g_sceneLog.clear done");
     detectOptixHardware();
+        startupDiagLog("[Startup] detectOptixHardware done");
 
      // Create main window
     if (splashOk) { splash.setStatus("Creating main window..."); splash.render(); }
+    startupDiagLog("[Startup] before SDL_CreateWindow");
      window = SDL_CreateWindow("RayTrophi Studio",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         image_width,
         image_height,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+      startupDiagLog(std::string("[Startup] SDL_CreateWindow done, ptr=") + (window ? "valid" : "null"));
 
      renderer =
         SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+      startupDiagLog(std::string("[Startup] SDL_CreateRenderer done, ptr=") + (renderer ? "valid" : "null"));
 
      surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
      original_surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
+    startupDiagLog("[Startup] SDL_CreateRGBSurfaceWithFormat done");
 
      raytrace_texture =
         SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
             SDL_TEXTUREACCESS_STREAMING, image_width, image_height);
+     startupDiagLog(std::string("[Startup] SDL_CreateTexture done, ptr=") + (raytrace_texture ? "valid" : "null"));
 
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
+     startupDiagLog("[Startup] SDL_SetTextureBlendMode done");
     
     // Initialize ImGui
     if (splashOk) { splash.setStatus("Initializing ImGui..."); splash.render(); }
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    startupDiagLog("[Startup] ImGui::CreateContext done");
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
+    startupDiagLog("[Startup] ImGui SDL init done");
 
     // Initialize Theme using ThemeManager (prevents style overriding issues)
     ThemeManager::instance().setTheme("RayTrophi Pro Dark");
     ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
+    startupDiagLog("[Startup] ThemeManager init done");
 	
     // Initialize OptiX
     bool ptx_exists = std::filesystem::exists("raygen.ptx");
@@ -704,15 +1076,33 @@ int main(int argc, char* argv[]) {
     // ===========================================================================
     if (splashOk) { splash.setStatus("Checking Vulkan capabilities..."); splash.render(); }
     
+    g_hasVulkan = false;
+#ifdef _WIN32
+    HMODULE testVulkan = Platform::Dll::loadModuleWithPolicy("vulkan-1.dll", Platform::Dll::DllCategory::Driver, false);
+    if (testVulkan) {
+        try {
+            auto vulkanTest = std::make_unique<Backend::VulkanBackendAdapter>();
+            if (vulkanTest->initialize()) {
+                g_hasVulkan = true; // 
+                SCENE_LOG_INFO("Vulkan capabilities checked and supported!");
+                vulkanTest->shutdown();
+            }
+        } catch (...) {
+            SCENE_LOG_WARN("Vulkan test threw an exception, disabled.");
+        }
+    } else {
+        SCENE_LOG_WARN("vulkan-1.dll not found. Vulkan capabilities disabled.");
+    }
+#else
     auto vulkanTest = std::make_unique<Backend::VulkanBackendAdapter>();
     if (vulkanTest->initialize()) {
-        g_hasVulkan = true; // ✔️ Vulkan destekleniyor!
+        g_hasVulkan = true; // 
         SCENE_LOG_INFO("Vulkan capabilities checked and supported!");
-
         vulkanTest->shutdown();
     } else {
         g_hasVulkan = false; // 
     }
+#endif
 
     // Load Project or Create Default Scene
     if (!project_to_load.empty() && std::filesystem::exists(project_to_load)) {
@@ -728,6 +1118,9 @@ int main(int argc, char* argv[]) {
         if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
         createDefaultScene(scene, ray_renderer, g_backend.get());
     }
+    ui_ctx.render_settings.use_optix = render_settings.use_optix;
+    ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
+    ui_ctx.render_settings.backend_changed = render_settings.backend_changed;
     ui.invalidateCache(); // Ensure procedural objects are listed/selectable
     
     // Build initial BVH and OptiX structures
@@ -806,6 +1199,11 @@ int main(int argc, char* argv[]) {
     SDL_Event e;
     while (!quit) {
         if (render_settings.backend_changed) {
+            // Avoid backend destruction/recreation while a scene load thread is active.
+            // The switch will be processed immediately after loading completes.
+            if (ui.scene_loading.load() || g_scene_loading_in_progress.load()) {
+                SDL_Delay(1);
+            } else {
             bool success = true;
 
             // Detach renderer from current backend first to avoid renderer using a destroyed backend
@@ -819,6 +1217,14 @@ int main(int argc, char* argv[]) {
                 ++wait_count;
             }
 
+            // [CRASH GUARD] Wait for GPU to drain any in-flight commands before destroying the backend.
+            // The CPU-side rendering_in_progress flag may clear before the GPU finishes its last submit.
+            // Calling waitForCompletion() (wraps vkDeviceWaitIdle / cuStreamSynchronize) ensures no GPU
+            // work is active when the Vulkan/OptiX device is destroyed below.
+            if (g_backend) {
+                g_backend->waitForCompletion();
+            }
+
             // Now safe to destroy existing backend
             g_backend.reset();
 
@@ -827,12 +1233,16 @@ int main(int argc, char* argv[]) {
                 if (!success) {
                     SCENE_LOG_ERROR("Fallback to CPU. Vulkan failed.");
                     render_settings.use_vulkan = false;
+                    ui_ctx.render_settings.use_vulkan = false;
+                    // Keep capability flag intact so user can retry Vulkan later
+                    // without restarting the application.
                 }
             } else if (render_settings.use_optix) {
                 success = initializeOptixIfAvailable();
                 if (!success) {
                     SCENE_LOG_ERROR("Fallback to CPU. OptiX failed.");
                     render_settings.use_optix = false;
+                    ui_ctx.render_settings.use_optix = false;
                 }
             }
 
@@ -840,6 +1250,8 @@ int main(int argc, char* argv[]) {
                 // Now falling back to CPU
                 extern bool g_cpu_sync_pending;
                 g_cpu_sync_pending = true;
+                ui_ctx.render_settings.use_optix = false;
+                ui_ctx.render_settings.use_vulkan = false;
             }
 
             if (g_backend) {
@@ -868,7 +1280,11 @@ int main(int argc, char* argv[]) {
                 g_backend->resetAccumulation();
             }
 
+            ui_ctx.render_settings.use_optix = render_settings.use_optix;
+            ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
             render_settings.backend_changed = false;
+            ui_ctx.render_settings.backend_changed = false;
+            }
         }
 
         bool did_render_this_frame = false; 
@@ -1215,10 +1631,8 @@ int main(int argc, char* argv[]) {
                 ui.syncVDBVolumesToGPU(ui_ctx);
                 ui_ctx.renderer.updateBackendGasVolumes(scene);
                 
-                // Break accumulation for new frame
-                if (use_optix) {
-                    if (g_backend) g_backend->resetAccumulation();
-                }
+                // Break accumulation for new frame (OptiX or Vulkan)
+                if (g_backend) g_backend->resetAccumulation();
                 ray_renderer.resetCPUAccumulation();
                 start_render = true;
             }
@@ -1246,7 +1660,7 @@ int main(int argc, char* argv[]) {
             ui.syncVDBVolumesToGPU(ui_ctx); // Logic for Unified VDB path
             ui_ctx.renderer.updateBackendGasVolumes(scene); // Logic for Legacy path
             
-            if (use_optix && g_backend) g_backend->resetAccumulation();
+            if (g_backend) g_backend->resetAccumulation(); // OptiX or Vulkan
             ray_renderer.resetCPUAccumulation();
             start_render = true;
         }
@@ -1348,9 +1762,18 @@ int main(int argc, char* argv[]) {
             
             ui_ctx.renderer.resetCPUAccumulation();
             
-            if (ui_ctx.backend_ptr && g_needs_optix_sync) {
+            if (ui_ctx.backend_ptr && g_needs_optix_sync && !ui_ctx.render_settings.backend_changed) {
                 ui_ctx.renderer.rebuildBackendGeometry(ui_ctx.scene);
                 ui_ctx.renderer.updateBackendMaterials(ui_ctx.scene);
+                ui_ctx.renderer.updateBackendGasVolumes(ui_ctx.scene);
+                auto wd = ui_ctx.renderer.world.getGPUData();
+                ui_ctx.backend_ptr->setWorldData(&wd);
+                if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ui_ctx.backend_ptr)) {
+                    auto* al = ui_ctx.renderer.world.getLUT();
+                    if (al && al->is_initialized()) {
+                        vulkanBackend->uploadAtmosphereLUT(al);
+                    }
+                }
                 
                 ui_ctx.backend_ptr->setLights(ui_ctx.scene.lights);
                 if (ui_ctx.scene.camera) ui_ctx.renderer.syncCameraToBackend(*ui_ctx.scene.camera);
@@ -1789,12 +2212,19 @@ int main(int argc, char* argv[]) {
 
                         if (g_world_dirty) {
                             // DEFERRED LUT: Recompute atmosphere LUT at most once per frame
-                            // (Not on every slider tick � prevents 50K-pixel blocking)
+                            // (Not on every slider tick — prevents 50K-pixel blocking)
                             ray_renderer.world.flushLUT();
                             
                             if (g_backend) {
                                 auto worldGPU = ray_renderer.world.getGPUData();
                                 g_backend->setWorldData(&worldGPU);
+                                // Re-upload Vulkan LUT textures after any nishita param change
+                                // (including sun_intensity=0 — ensures GPU texture goes dark)
+                                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                                if (vulkanBackend) {
+                                    auto* al = ray_renderer.world.getLUT();
+                                    if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
+                                }
                             }
                             g_world_dirty = false;
                         }
@@ -1809,7 +2239,7 @@ int main(int argc, char* argv[]) {
                         auto sample_start = std::chrono::high_resolution_clock::now();
                         if (g_backend) {
                             static Backend::IBackend* last_backend = nullptr;
-                            static int last_w = -1, last_h = -1, last_max = -1;
+                            static int last_w = -1, last_h = -1, last_max = -1, last_bounces = -1;
                             static bool last_adaptive = false;
                             static float last_threshold = -1.0f;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
@@ -1817,6 +2247,7 @@ int main(int argc, char* argv[]) {
                             if (g_backend.get() != last_backend ||
                                 image_width != last_w || image_height != last_h || 
                                 current_max != last_max || 
+                                render_settings.max_bounces != last_bounces ||
                                 render_settings.use_adaptive_sampling != last_adaptive ||
                                 std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) 
                             {
@@ -1824,6 +2255,7 @@ int main(int argc, char* argv[]) {
                                 rp.imageWidth = image_width;
                                 rp.imageHeight = image_height;
                                 rp.samplesPerPixel = current_max;
+                                rp.maxBounces = std::max(1, render_settings.max_bounces);
                                 rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                                 rp.adaptiveThreshold = render_settings.variance_threshold;
                                 g_backend->setRenderParams(rp);
@@ -1832,6 +2264,7 @@ int main(int argc, char* argv[]) {
                                 last_w = image_width;
                                 last_h = image_height;
                                 last_max = current_max;
+                                last_bounces = render_settings.max_bounces;
                                 last_adaptive = render_settings.use_adaptive_sampling;
                                 last_threshold = render_settings.variance_threshold;
                             }
@@ -2487,8 +2920,6 @@ int main(int argc, char* argv[]) {
                 // CRITICAL FIX: Ensure GPU is completely idle before freeing/modifying geometry
                 if (g_hasCUDA) cudaDeviceSynchronize();
 
-                // Capture backend pointer for lambda
-                Backend::IBackend* backend_ptr = g_backend.get();
                 auto& renderer_ref = ray_renderer;
                 
                 // CRITICAL FIX: Set global flag to pause rendering in OptixWrapper
@@ -2498,15 +2929,9 @@ int main(int argc, char* argv[]) {
                 // such as syncInstancesToScene or object deletion.
                 std::vector<std::shared_ptr<Hittable>> objects_snapshot = scene.world.objects;
 
-                g_optix_future = std::async(std::launch::async, [objects_snapshot, backend_ptr, &renderer_ref]() {
+                g_optix_future = std::async(std::launch::async, [objects_snapshot, &renderer_ref]() {
                     // Use the snapshot instead of direct reference to scene.world.objects
                     renderer_ref.rebuildBackendGeometryWithList(objects_snapshot);
-                    
-                    // REAPPLY FOLIAGE persistence (since rebuild wipes instances)
-                    // (Transition: dynamic_cast to get internal wrapper for now until TerrainManager is refactored)
-                    if (auto optix_backend = dynamic_cast<Backend::OptixBackend*>(backend_ptr)) {
-                        TerrainManager::getInstance().reapplyAllFoliage(optix_backend->getOptixWrapper());
-                    }
                 });
                 
                 g_optix_rebuilding = true;
@@ -2520,6 +2945,12 @@ int main(int argc, char* argv[]) {
             if (g_optix_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 try {
                     g_optix_future.get();
+
+                    // REAPPLY FOLIAGE persistence on main thread with current, valid backend pointer.
+                    if (auto optix_backend = dynamic_cast<Backend::OptixBackend*>(g_backend.get())) {
+                        TerrainManager::getInstance().reapplyAllFoliage(optix_backend->getOptixWrapper());
+                    }
+
                     if (g_backend) g_backend->resetAccumulation();
                     ui.clearViewportMessages();
                     ui.addViewportMessage("OptiX Rebuild Complete", 2.0f);
@@ -2540,6 +2971,46 @@ int main(int argc, char* argv[]) {
             }
         }
         
+        
+        // -----------------------------------------------------------------
+        // VULKAN REBUILD (Synchronous for now)
+        // -----------------------------------------------------------------
+        if (g_optix_rebuild_pending && ui_ctx.render_settings.use_vulkan) {
+            g_vulkan_rebuild_pending = true;
+            g_optix_rebuild_pending = false; // Redirected
+        }
+
+        if (g_vulkan_rebuild_pending && ui_ctx.render_settings.use_vulkan && g_hasVulkan) {
+            if (g_backend) {
+                ui.addViewportMessage("Rebuilding Vulkan Geometry...", 2.0f);
+                
+                // [VULKAN FIX] Clear mesh registry to ensure dynamic meshes (terrain) are re-uploaded
+                g_backend->rebuildAccelerationStructure(); 
+                
+                g_backend->updateGeometry(scene.world.objects);
+                // Re-sync VDB SSBO after TLAS rebuild so SSBO order matches TLAS customIndex.
+                // This handles both VDB import and VDB deletion from Vulkan mode.
+                ui.syncVDBVolumesToGPU(ui_ctx);
+                // Re-upload hair after full BLAS rebuild — rebuildAccelerationStructure()
+                // clears ALL BLAS including hair, so hair must be re-added before the
+                // TLAS is finalized. Without this, hair is invisible until something
+                // else (e.g. the hidden checkbox) triggers uploadHairToGPU manually.
+                ray_renderer.uploadHairToGPU();
+                // [FIX] Upload material SSBO after geometry rebuild so newly created objects
+                // (terrain, imported meshes, etc.) get their material data on the GPU.
+                // Without this call the SSBO is empty/stale and objects render invisible.
+                ray_renderer.updateBackendMaterials(scene);
+                g_backend->resetAccumulation();
+                g_vulkan_rebuild_pending = false;
+                start_render = true;
+                
+                // CRITICAL FIX: Mark all scene data dirty after rebuild to force re-sync
+                g_camera_dirty = true;
+                g_lights_dirty = true;
+                g_world_dirty = true;
+            }
+        }
+
         SDL_Delay(16); // ~60 FPS cap
 
     }
@@ -2555,6 +3026,15 @@ int main(int argc, char* argv[]) {
     SDL_Quit();
     g_sceneLog.closeLogFile();
     return 0;
+}
+
+catch (const std::exception& e) {
+    emergencyStartupLog(std::string("[FATAL] Unhandled std::exception in main: ") + e.what());
+    return 1;
+}
+catch (...) {
+    emergencyStartupLog("[FATAL] Unhandled unknown exception in main");
+    return 1;
 }
 
 

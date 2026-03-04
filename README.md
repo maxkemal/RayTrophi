@@ -74,7 +74,37 @@
   - ✅ Motion Blur
   - ✅ Intel Open Image Denoise (OIDN) integration
   - ✅ Tone mapping & post-processing
-  - ✅ **Experimental Vulkan Backend**: Cross-platform path tracing pipeline with smart hardware detection. Gracefully falls back to OptiX or CPU if Vulkan dependencies (`vulkan-1.dll`) or compatible GPUs are absent.
+  - 🧪 **[EXPERIMENTAL] Vulkan RT Backend** *(Active Development)*: Hardware ray tracing pipeline built on Vulkan Ray Tracing (`VK_KHR_ray_tracing_pipeline`). Features GPU-accelerated skeletal animation via compute skinning shaders, TLAS/BLAS refit for dynamic geometry, persistent descriptor sets, and a single-submit trace+readback command buffer. Gracefully falls back to OptiX or CPU if Vulkan dependencies (`vulkan-1.dll`) or a compatible GPU are absent.
+
+  <details>
+  <summary>🧪 <b>Vulkan Backend — Feature Compatibility</b> (expand)</summary>
+
+  | Feature | OptiX | Vulkan RT | Notes |
+  |---------|:-----:|:---------:|-------|
+  | Principled BSDF | ✅ | ✅ | Full parity |
+  | Lambertian / Metal / Dielectric | ✅ | ✅ | Full parity |
+  | Subsurface Scattering (SSS) | ✅ | ✅ | Minor colour tint difference |
+  | Clearcoat & Anisotropic | ✅ | ✅ | Full parity |
+  | Volumetric Rendering | ✅ | 🧪 | Minor density differences |
+  | **Hair System** | ✅ | 🧪 | Shader computation differences |
+  | HDR / EXR Environment | ✅ | ✅ | Full parity |
+  | Nishita Sky & Day/Night Cycle | ✅ | ✅ | Full parity |
+  | Volumetric Clouds | ✅ | 🧪 | Minor scattering differences |
+  | **Water / Ocean (FFT)** | ✅ | 🧪 | Wave reflection differences |
+  | Skeletal Animation (GPU Skinning) | ✅ | ✅ | Vulkan compute shader |
+  | Depth of Field (DOF) | ✅ | ✅ | Full parity |
+  | Motion Blur | ✅ | ✅ | Full parity |
+  | Soft Shadows (MIS) | ✅ | ✅ | Full parity |
+  | Area Lights | ✅ | ✅ | Full parity |
+  | Tone Mapping & Post-FX | ✅ | ✅ | Full parity |
+  | OIDN Denoising | ✅ | ✅ | Full parity |
+  | Adaptive Sampling | ✅ | ✅ | Full parity |
+  | Progressive / Accumulative Render | ✅ | ✅ | Full parity |
+
+  > **Legend:** ✅ Full support &nbsp;|&nbsp; 🧪 Supported, minor output differences possible
+
+  </details>
+
   - ✅ **Advanced Animation**: 
     - Bone animation with quaternion interpolation
     - Multi-track timeline with keyframe editing (Location/Rotation/Scale/Material)
@@ -110,7 +140,7 @@
   - Embree BVH (Intel, production-grade)
   - Custom ParallelBVH (SAH-based, OpenMP parallelized)
   - OptiX GPU acceleration structure
-  - Vulkan ray tracing TLAS/BLAS architecture (Experimental)
+  - 🧪 Vulkan RT TLAS/BLAS architecture — dynamic refit, compute skinning, single-submit pipeline *(Experimental)*
 
 - **Optimizations**
   - SIMD vector operations
@@ -425,7 +455,7 @@ The Visual Studio project manages dependencies via vcpkg or manual paths.
 
 | Feature                  | VS2022 .vcxproj | CMake         |
 |--------------------------|-----------------|---------------|
-| CPU Rendering (SDL)      | ✅ Working      | ⚠️ Has bugs   |
+| CPU Rendering (SDL)      | ✅ Working      | ✅ Working     |
 | GPU Rendering (OptiX)    | ✅ Working      | ✅ Working     |
 | Vulkan Rendering (RT)    | ✅ Working      | ✅ Working     |
 | Dependency Management    | ✅ Excellent    | ⚠️ Manual     |

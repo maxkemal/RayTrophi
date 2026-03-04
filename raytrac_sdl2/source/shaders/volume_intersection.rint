@@ -1,0 +1,53 @@
+/*
+ * RayTrophi Studio — Vulkan Volume Intersection Shader
+ * AABB Ray-Box Intersection for Procedural Volumetric Geometry
+ *
+ * This shader handles ray-AABB intersection testing for volume objects.
+ * Works with VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR.
+ *
+ * OptiX uyumluluk:
+ *   - OptiX AABB tabanlı volume intersection mantığına eşdeğer
+ *   - HitGroupData aabb_min/aabb_max ile uyumlu
+ */
+
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+// Hit attributes — tNear and tFar passed to closest-hit for ray marching range
+hitAttributeEXT vec2 volumeHitAttrib; // .x = tNear, .y = tFar
+
+void main() {
+    // AABB is implicitly defined by the procedural geometry bounds
+    // gl_ObjectRayOriginEXT and gl_ObjectRayDirectionEXT are in object space
+    vec3 rayOrigin = gl_ObjectRayOriginEXT;
+    vec3 rayDir    = gl_ObjectRayDirectionEXT;
+    
+    // Unit AABB: [-0.5, 0.5]^3 in object space
+    // The actual world-space size is handled by the instance transform
+    vec3 boxMin = vec3(-0.5);
+    vec3 boxMax = vec3( 0.5);
+    
+    // Slab-based ray-AABB intersection (Kay-Kajiya)
+    vec3 invDir = 1.0 / rayDir;
+    
+    vec3 t0s = (boxMin - rayOrigin) * invDir;
+    vec3 t1s = (boxMax - rayOrigin) * invDir;
+    
+    vec3 tSmaller = min(t0s, t1s);
+    vec3 tLarger  = max(t0s, t1s);
+    
+    float tNear = max(max(tSmaller.x, tSmaller.y), tSmaller.z);
+    float tFar  = min(min(tLarger.x,  tLarger.y),  tLarger.z);
+    
+    // Clamp to valid ray range
+    tNear = max(tNear, gl_RayTminEXT);
+    tFar  = min(tFar,  gl_RayTmaxEXT);
+    
+    // Report hit if we have a valid intersection interval
+    if (tNear < tFar && tFar > 0.0) {
+        volumeHitAttrib = vec2(tNear, tFar);
+        // Report the near intersection point so that it participates in 
+        // closest-hit ordering with other geometry (triangles, etc.)
+        reportIntersectionEXT(tNear, 0u); // hitKind = 0 (volume type)
+    }
+}

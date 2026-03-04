@@ -858,6 +858,34 @@ void* VDBVolumeManager::getGPUTemperatureGrid(int volume_id) const {
     return vol->d_nano_temperature;
 }
 
+void* VDBVolumeManager::getHostGrid(int volume_id) const {
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_nano_handle) return nullptr;
+    auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_handle);
+    return handle->data();
+}
+
+size_t VDBVolumeManager::getHostGridSize(int volume_id) const {
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_nano_handle) return 0;
+    auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_handle);
+    return handle->bufferSize();
+}
+
+void* VDBVolumeManager::getHostTemperatureGrid(int volume_id) const {
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_nano_temperature_handle) return nullptr;
+    auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_temperature_handle);
+    return handle->data();
+}
+
+size_t VDBVolumeManager::getHostTemperatureGridSize(int volume_id) const {
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_nano_temperature_handle) return 0;
+    auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_temperature_handle);
+    return handle->bufferSize();
+}
+
 float VDBVolumeManager::sampleDensityCPU(int volume_id, float x, float y, float z) const {
     const VDBVolumeData* vol = getVolume(volume_id);
     if (!vol || !vol->internal_openvdb_grid) return 0.0f;

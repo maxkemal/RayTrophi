@@ -22,16 +22,18 @@
 
 #include <vulkan/vulkan.h>
 
-#include "Backend/IBackend.h"
 #include "vulkan_material_types.h"
+#include "vulkan_volume_types.h"
 #include "Vec3.h"
 #include "Matrix4x4.h"
 #include "World.h"
-#include <vector>
-#include <string>
 #include <memory>
-#include <functional>
+#include <string>
+#include <vector>
 #include <unordered_map>
+#include <functional>
+#include <mutex>
+#include "Backend/IBackend.h"
 #include "AtmosphereLUT.h"
 namespace VulkanRT {
 
@@ -138,6 +140,72 @@ struct BufferHandle {
 // Acceleration Structure
 // ============================================================================
 
+// ============================================================================
+// Hair Rendering GPU Data Structures
+// ============================================================================
+
+// Per-B-spline-segment GPU layout — matches GLSL HairSegmentGPU (80 bytes, scalar)
+struct HairSegmentGPU {
+    float cp0[4];        // xyz = world-space position, w = radius
+    float cp1[4];
+    float cp2[4];
+    float cp3[4];
+    uint32_t strandID;
+    uint32_t groomID;
+    uint32_t materialID;
+    uint32_t padding;
+};
+static_assert(sizeof(HairSegmentGPU) == 80, "HairSegmentGPU size mismatch");
+
+// Per-groom hair material — matches GLSL HairGpuMaterial (144 bytes, scalar)
+// Synced with OptiX GpuHairMaterial feature set (Marschner BSDF)
+struct HairGpuMaterial {
+    // Block 1: Color & Roughness (16 bytes)
+    float baseColor[3];       // offset  0  — Direct color / fallback
+    float roughness;           // offset 12  — Longitudinal roughness
+
+    // Block 2: Physical Properties (16 bytes)
+    float melanin;             // offset 16
+    float melaninRedness;      // offset 20
+    float ior;                 // offset 24  — Index of refraction
+    float cuticleAngle;        // offset 28  — In radians
+
+    // Block 3: Mode & Surface (16 bytes)
+    uint32_t colorMode;        // offset 32  — 0=Direct, 1=Melanin, 2=Absorption, 3=RootUV
+    float radialRoughness;     // offset 36  — Azimuthal roughness
+    float specularTint;        // offset 40  — 0=white highlight, 1=tinted
+    float diffuseSoftness;     // offset 44  — Multiple scattering weight
+
+    // Block 4: Artistic Tint (16 bytes)
+    float tintColor[3];        // offset 48
+    float tint;                // offset 60  — Tint strength
+
+    // Block 5: Coat / Fur (16 bytes)
+    float coatTint[3];         // offset 64
+    float coat;                // offset 76  — Coat strength
+
+    // Block 6: Emission (16 bytes)
+    float emission[3];         // offset 80
+    float emissionStrength;    // offset 92
+
+    // Block 7: Root-Tip Gradient (16 bytes)
+    float tipColor[3];         // offset 96
+    float rootTipBalance;      // offset 108
+
+    // Block 8: Absorption & Gradient Flag (16 bytes)
+    float absorption[3];       // offset 112 — Explicit sigma_a for mode 2
+    uint32_t enableGradient;   // offset 124 — 0 or 1
+
+    // Block 9: Random Variation & ID (16 bytes)
+    float randomHue;           // offset 128
+    float randomValue;         // offset 132
+    uint32_t groomID;          // offset 136
+    float pad;                 // offset 140
+};
+static_assert(sizeof(HairGpuMaterial) == 144, "HairGpuMaterial size mismatch");
+
+// ============================================================================
+
 struct BLASCreateInfo {
     // Triangle geometry
     const float* vertexData = nullptr;        // [x,y,z, x,y,z, ...]
@@ -145,6 +213,11 @@ struct BLASCreateInfo {
     const float* uvData = nullptr;            // [u,v, ...]
     uint32_t vertexCount = 0;
     uint32_t vertexStride = 12;               // Bytes between vertices (default: 3 floats)
+    
+    // Skinning / Bone animation
+    bool hasSkinning = false;
+    const int32_t* boneIndicesData = nullptr; // [b0,b1,b2,b3, ...] (16 bytes per vertex)
+    const float* boneWeightsData = nullptr;   // [w0,w1,w2,w3, ...] (16 bytes per vertex)
     
     const uint32_t* indexData = nullptr;      // Optional, null for non-indexed
     uint32_t indexCount = 0;
@@ -177,6 +250,7 @@ struct TLASInstance {
     uint32_t customIndex = 0;           // Extra user data
     uint8_t mask = 0xFF;                // Visibility mask
     bool frontFaceCCW = true;
+    uint32_t sbtRecordOffset = 0;       // SBT hit group offset (0=triangle, 1=volume procedural)
 };
 
 struct VkInstanceData {
@@ -231,6 +305,19 @@ struct AccelStructHandle {
     BufferHandle indexBuffer;
     BufferHandle materialIndexBuffer;
     VkDeviceAddress deviceAddress = 0;
+    
+    // Skinning
+    bool hasSkinning = false;
+    uint32_t vertexCount = 0;
+    BufferHandle baseVertexBuffer;
+    BufferHandle baseNormalBuffer;
+    BufferHandle boneIndexBuffer;
+    BufferHandle boneWeightBuffer;
+
+    // Persistent skinning resources — reused every frame to avoid per-frame alloc/free
+    BufferHandle persistentBoneMatsBuffer; // GPU bone matrix buffer, grown as needed
+    uint64_t    persistentBoneMatsBufSize = 0; // current allocated size in bytes
+    VkDescriptorSet skinningDescSet = VK_NULL_HANDLE; // cached desc set (updated in-place)
 };
 
 // ============================================================================
@@ -318,6 +405,44 @@ public:
      * @brief Build bottom-level acceleration structure (geometry)
      */
     uint32_t createBLAS(const BLASCreateInfo& info);
+
+    /**
+     * @brief Begin batched BLAS build mode.
+     * All subsequent createBLAS calls record into a single command buffer.
+     * Call endBatchedBLASBuild() to submit all builds at once.
+     */
+    void beginBatchedBLASBuild();
+
+    /**
+     * @brief End batched mode and submit all pending BLAS builds in one GPU submission.
+     */
+    void endBatchedBLASBuild();
+
+    /**
+     * @brief Build AABB bottom-level acceleration structure (procedural volumes)
+     * @param aabbMin World-space AABB minimum [x,y,z]
+     * @param aabbMax World-space AABB maximum [x,y,z]
+     * @return BLAS index, or UINT32_MAX on failure
+     */
+    uint32_t createAABB_BLAS(const float aabbMin[3], const float aabbMax[3]);
+
+    /**
+     * @brief Build multi-AABB BLAS for hair geometry (one AABB per segment).
+     * @param aabbs Array of per-segment bounding boxes (world space)
+     * @return BLAS index, or UINT32_MAX on failure
+     */
+    uint32_t createHairAABB_BLAS(const std::vector<VkAabbPositionsKHR>& aabbs);
+
+    /**
+     * @brief Upload hair segment and material GPU buffers.
+     * Called by uploadHairStrands / uploadHairMaterials, also updates descriptors.
+     */
+    void updateHairSegmentBuffer(const std::vector<HairSegmentGPU>& segments);
+    void updateHairMaterialBuffer(const std::vector<HairGpuMaterial>& materials);
+
+    /// Returns the SBT hit-region offset for hair instances.
+    /// 1 if no volume shaders loaded, 2 if volume shaders present.
+    uint32_t getHairSbtOffset() const { return m_hasVolumeShaders ? 2u : 1u; }
     
     /**
      * @brief Build top-level acceleration structure (instances)
@@ -350,7 +475,12 @@ public:
     bool createRTPipeline(const std::vector<uint32_t>& raygenSPV,
                           const std::vector<uint32_t>& missSPV,
                           const std::vector<uint32_t>& closestHitSPV,
-                          const std::vector<uint32_t>& anyHitSPV = std::vector<uint32_t>());
+                          const std::vector<uint32_t>& anyHitSPV               = std::vector<uint32_t>(),
+                          const std::vector<uint32_t>& volumeClosestHitSPV     = std::vector<uint32_t>(),
+                          const std::vector<uint32_t>& volumeIntersectionSPV   = std::vector<uint32_t>(),
+                          const std::vector<uint32_t>& hairClosestHitSPV       = std::vector<uint32_t>(),
+                          const std::vector<uint32_t>& hairIntersectionSPV     = std::vector<uint32_t>(),
+                          const std::vector<uint32_t>& shadowMissSPV           = std::vector<uint32_t>());
     
     /**
      * @brief Bind RT descriptors (output image + TLAS)
@@ -387,6 +517,8 @@ public:
      * @brief Trace rays (ray tracing pipeline)
      */
     void traceRays(uint32_t width, uint32_t height, uint32_t depth = 1);
+    // Trace rays + image→buffer copy in a single command buffer (1 GPU sync instead of 4)
+    void traceRaysAndReadback(uint32_t width, uint32_t height, const ImageHandle& outputImage, const BufferHandle& stagingBuffer);
     
     /**
      * @brief Set push constants
@@ -435,6 +567,8 @@ public:
     void updateMaterialBuffer(const void* data, uint64_t size, uint32_t count);
     void updateLightBuffer(const void* data, uint64_t size, uint32_t count);
     void updateWorldBuffer(const void* data, uint64_t size, uint32_t count);
+    void updateVolumeBuffer(const void* data, uint64_t size, uint32_t count);
+    void updateTerrainLayerBuffer(const void* data, uint64_t size, uint32_t count);
     void updateAtmosphereLUTs(const ImageHandle* lutImages);  // uint256_t array of 4 LUT textures
     
     // RT Resources (SSBOs)
@@ -444,6 +578,10 @@ public:
     VulkanRT::BufferHandle m_instanceDataBuffer; // SSBO containing VkInstanceData for each TLAS instance
     VulkanRT::BufferHandle m_tlasInstanceBuffer; // Buffer containing VkAccelerationStructureInstanceKHR for TLAS building
     VulkanRT::BufferHandle m_worldBuffer; // SSBO containing complete Nishita parameters
+    VulkanRT::BufferHandle m_volumeBuffer; // SSBO containing VkVolumeInstance array (binding 9)
+    VulkanRT::BufferHandle m_terrainLayerBuffer; // SSBO containing VkTerrainLayerData array (binding 12)
+    uint32_t m_volumeCount = 0;
+    uint32_t m_terrainLayerCount = 0;
     
     // Atmosphere LUT Textures (for raygen/miss shaders)
     // [0] = transmittance_lut, [1] = skyview_lut, [2] = multi_scatter_lut, [3] = aerial_perspective_lut
@@ -466,6 +604,26 @@ public:
     PFN_vkGetBufferDeviceAddressKHR fpGetBufferDeviceAddressKHR = nullptr;
     VkDevice m_device = VK_NULL_HANDLE;
     VkDescriptorSet m_rtDescriptorSet = VK_NULL_HANDLE;
+    // Acceleration structures
+    AccelStructHandle m_tlas;
+    uint32_t m_tlasInstanceCount = 0;
+    bool m_tlasSupportsUpdate = false;
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+    bool m_rtPipelineReady = false;
+    bool m_hasVolumeShaders = false; // Whether pipeline includes volume procedural hit group
+    bool m_hasHairShaders = false; // Whether pipeline includes hair procedural hit group
+    bool m_hasShadowMiss = false; // Whether a shadow miss shader is at miss index 1
+    VkPipeline m_rtPipeline = VK_NULL_HANDLE;
+    
+    // Skinning Compute Pipeline
+    bool createSkinningPipeline(const std::vector<uint32_t>& computeSPV);
+    void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices);
+    
+    VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_skinningDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_skinningDescPool = VK_NULL_HANDLE;
+    
 private:
     // Core Vulkan handles
     VkInstance m_instance = VK_NULL_HANDLE;
@@ -479,8 +637,7 @@ private:
     // Debug
     VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
     
-    // Acceleration structures
-    AccelStructHandle m_tlas;
+
     
     
     // Compute Pipelines
@@ -489,11 +646,15 @@ private:
     uint32_t m_activePipeline = UINT32_MAX;
     
     // RT Pipeline (separate from compute)
-    VkPipeline m_rtPipeline = VK_NULL_HANDLE;
+   
     VkPipelineLayout m_rtPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_rtDescriptorSetLayout = VK_NULL_HANDLE;
    
-    bool m_rtPipelineReady = false;
+   
+
+    // Hair GPU buffers (bindings 10 and 11)
+    BufferHandle m_hairSegmentBuffer;    // HairSegmentGPU[] — binding 10
+    BufferHandle m_hairMaterialBuffer;   // HairGpuMaterial[] — binding 11
     
     // Shader Binding Table
     BufferHandle m_sbtBuffer;
@@ -506,6 +667,13 @@ private:
     
     // Active command buffer (for recording)
     VkCommandBuffer m_activeCommandBuffer = VK_NULL_HANDLE;
+
+    // Batched BLAS build support — reduces N GPU submits to ~1 for large scene loads
+    VkCommandBuffer m_batchBLASCmd = VK_NULL_HANDLE;
+    bool m_inBatchedBLASBuild = false;
+    BufferHandle m_batchScratchBuffer;       // Single reusable scratch buffer for batch
+    uint32_t m_batchBLASCount = 0;           // Total BLASes in current batch (for logging)
+    uint32_t m_batchBLASInCurrentCmd = 0;    // BLASes in current cmd buffer fragment (barrier logic)
     
     // Descriptor set layouts (one per compute pipeline)
     std::vector<VkDescriptorSetLayout> m_descriptorSetLayouts;
@@ -533,7 +701,7 @@ private:
     void detectCapabilities();
     void setupDebugMessenger();
     
-    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+   
     
     GPUVendor vendorFromID(uint32_t vendorID);
     
@@ -586,6 +754,7 @@ public:
     // ========================================================================
     uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
+    void clearHairGeometry();
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;
     void showAllInstances() override;
@@ -599,7 +768,9 @@ public:
     // ========================================================================
     void uploadMaterials(const std::vector<MaterialData>& materials) override;
     void uploadHairMaterials(const std::vector<HairMaterialData>& materials) override;
+    void uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) override;
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;
+    int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override;
     void destroyTexture(int64_t textureHandle) override;
 
     // ========================================================================
@@ -667,6 +838,7 @@ private:
     CameraParams m_camera;
     bool m_useAdaptiveSampling = false;
     float m_varianceThreshold = 0.05f;
+    int m_maxBounces = 12;
     std::vector<float> m_hdrPixels;   // Float32 HDR readback buffer — her frame realloc önler
     // Output resources
     VulkanRT::ImageHandle m_outputImage;
@@ -678,6 +850,9 @@ private:
     // Mesh registry (meshName -> BLAS index)
     std::unordered_map<std::string, uint32_t> m_meshRegistry;
 
+    // Volume instance tracking for Vulkan volume rendering
+    uint32_t m_volumeBlasIndex = UINT32_MAX; // Shared AABB BLAS for all volumes
+
     // TLAS storage for updates
     std::vector<VulkanRT::TLASInstance> m_vkInstances;
     std::vector<std::shared_ptr<Hittable>> m_lastObjects;
@@ -688,18 +863,42 @@ private:
     bool m_topology_dirty = false; // set when instances/BLAS list changes
     // Uploaded textures (map from opaque handle/key -> ImageHandle)
     std::unordered_map<int64_t, VulkanRT::ImageHandle> m_uploadedImages;
-    std::unordered_map<int64_t, int64_t> m_uploadedImageIDs; // maps pointer/key -> texture ID
+    std::unordered_map<uint64_t, int64_t> m_uploadedImageIDs; // maps pointer/key + color space mode -> texture ID
     int64_t m_nextTextureID = 1;
+    
+    // NanoVDB grid device buffers mapped by vdb_id
+    std::unordered_map<int, VulkanRT::BufferHandle> m_vdbBuffers;
+    // NanoVDB temperature grid device buffers mapped by vdb_id (fire/blackbody)
+    std::unordered_map<int, VulkanRT::BufferHandle> m_vdbTempBuffers;
+    // VDB volumes in the ORDER they were added to the TLAS (customIndex 0,1,2...)
+    // Guarantees SSBO layout matches gl_InstanceCustomIndexEXT lookups in the shader.
+    std::vector<std::shared_ptr<Hittable>> m_orderedVDBInstances;
     // Cached lights when device not yet ready
     std::vector<std::shared_ptr<Light>> m_cachedLights;
     // Cached world data when device not yet ready
     WorldData m_cachedWorld;
     int64_t m_envTexID = 0;
+    // Set to true after uploadAtmosphereLUT() succeeds — used to set _pad5 (nishitaLutReady) in world buffer
+    bool m_atmosphereLutReady = false;
     uint64_t m_lastCameraHash = 0;
     Vec3 m_prevViewDir;
     bool  m_hasPrevView = false;
     // When true, clear the UI framebuffer/texture on next renderProgressive call
     bool m_forceClearOnNextPresent = false;
+
+    // ── Hair geometry ────────────────────────────────────────────────────────
+    // Hair TLAS instances (kept separate from mesh instances so they survive
+    // partial scene reloads and are merged in at TLAS build time).
+    std::vector<VulkanRT::TLASInstance> m_hairVkInstances;
+    // groomName -> BLAS index (so we can re-upload strands when they change)
+    std::unordered_map<std::string, uint32_t> m_hairGroomRegistry;
+
+    // Number of mesh BLASes stored at the start of m_device->m_blasList.
+    // Hair BLASes are always appended after this index so clearHairGeometry()
+    // can destroy and remove only the hair BLASes without touching mesh BLASes.
+    uint32_t m_meshBlasCount = 0;
+
+    mutable std::recursive_mutex m_mutex;
 };
 
 } // namespace Backend

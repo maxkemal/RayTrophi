@@ -4,6 +4,7 @@
  */
 
 #include "TerrainFFT.h"
+#include "DllLoadPolicy.h"
 #include <algorithm>
 #include <cstring>
 
@@ -77,7 +78,7 @@ bool TerrainFFTManager::initCUDA() {
     };
     
     for (int i = 0; cudartNames[i] != nullptr; i++) {
-        cudartDLL_ = LoadLibraryA(cudartNames[i]);
+        cudartDLL_ = Platform::Dll::loadModuleWithPolicy(cudartNames[i], Platform::Dll::DllCategory::Runtime, true);
         if (cudartDLL_) {
             cudaStatusMessage_ = std::string("Loaded ") + cudartNames[i];
             break;
@@ -124,7 +125,7 @@ bool TerrainFFTManager::initCUDA() {
     };
     
     for (int i = 0; cufftNames[i] != nullptr; i++) {
-        cufftDLL_ = LoadLibraryA(cufftNames[i]);
+        cufftDLL_ = Platform::Dll::loadModuleWithPolicy(cufftNames[i], Platform::Dll::DllCategory::Runtime, true);
         if (cufftDLL_) break;
     }
     

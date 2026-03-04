@@ -69,7 +69,7 @@ namespace UnifiedConstants {
     // =========================================================================
     // RENDERING CONSTANTS
     // =========================================================================
-    constexpr float MAX_CONTRIBUTION = 100.0f;      // Firefly clamp threshold
+    constexpr float MAX_CONTRIBUTION = 10000.0f;     // Firefly clamp threshold (Vulkan parity: 1e4)
     constexpr float SHADOW_BIAS = 1e-3f;           // Shadow ray offset
     
     // Russian Roulette parameters (standard path tracer values)

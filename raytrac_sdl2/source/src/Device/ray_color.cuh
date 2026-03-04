@@ -1459,7 +1459,7 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         float g_mie = world.nishita.mie_anisotropy;
         float phaseM = (1.0f - g_mie * g_mie) / (4.0f * 3.14159f * powf(1.0f + g_mie * g_mie - 2.0f * g_mie * mu, 1.5f));
         
-        // Soft halo contribution
+        // Soft halo contribution (tight excess-phase corona around disk)
         float excessPhase = fmaxf(0.0f, phaseM - 2.0f);
         if (excessPhase > 0.0f) {
             // HALO LEAK PROTECTION: Add shadow test for halo to prevent bleeding through solid objects
@@ -1470,7 +1470,22 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
                 radiance += transToSun * mieScat * excessPhase * world.nishita.sun_intensity;
             }
         }
-        
+
+        // ── Broad Mie background halo (sunset/horizon scatter glow) ──────────
+        // Vulkan miss.rmiss adds: sunColor * sunIntensity * phaseM_cap * dust*0.015
+        // This term was missing in OptiX causing the horizon to stay blue while
+        // only the disk turned orange/red at sunset.
+        // We use gpu_get_transmittance(sunDir) for physical reddening instead of a
+        // fixed sunColor — spectrum is naturally orange/red when sun is near horizon.
+        {
+            float phaseM_cap = fminf(phaseM, 2.0f);
+            float mie_scale  = fminf(world.nishita.dust_density * 0.015f, 0.15f);
+            if (mie_scale > 0.0f) {
+                float3 transToSun = gpu_get_transmittance(world, origin, sunDir);
+                radiance += transToSun * world.nishita.sun_intensity * phaseM_cap * mie_scale;
+            }
+        }
+
         // Multi-scattering (Advanced Selection)
         if (world.advanced.multi_scatter_enabled) {
             float3 scatteringAlbedo = make_float3(0.8f, 0.85f, 0.9f);
@@ -1527,24 +1542,55 @@ __device__ float luminance(const float3& c) {
     return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
 }
 
-__device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
+__device__ int pick_smart_light(const float3& hit_position, curandState* rng, float* pdf_out = nullptr) {
     int light_count = optixLaunchParams.light_count;
-    if (light_count == 0) return -1;
-
-    // --- Öncelik: Directional light --- (örnekleme olasılığı %33)
-    for (int i = 0; i < light_count; i++) {
-        if (optixLaunchParams.lights[i].type == 1) {
-            if (random_float(rng) < 0.33f)
-                return i;
-        }
+    if (light_count == 0) {
+        if (pdf_out) *pdf_out = 0.0f;
+        return -1;
     }
 
-    // --- Tüm ışık türleri için akıllı seçim ---
+    // --- Vulkan parity: Directional ışık olasılığını oransal hesapla ---
+    // Sabit 0.33 yerine dir_count/light_count kullanarak unbiased estimator sağla
+    int dir_count = 0;
+    for (int i = 0; i < light_count; i++) {
+        if (optixLaunchParams.lights[i].type == 1) dir_count++;
+    }
+
+    float prob_to_reach_weighted = 1.0f;
+    if (dir_count > 0) {
+        float dir_prob = float(dir_count) / float(light_count);
+        float rng_val = random_float(rng);
+        if (rng_val < dir_prob) {
+            // Directional ışıklar arasından seç
+            float step = dir_prob / float(dir_count);
+            int sel = int(rng_val / step);
+            int found = 0;
+            for (int i = 0; i < light_count; i++) {
+                if (optixLaunchParams.lights[i].type == 1) {
+                    if (found == sel) {
+                        if (pdf_out) *pdf_out = dir_prob / float(dir_count);
+                        return i;
+                    }
+                    found++;
+                }
+            }
+        }
+        // Directional seçilmedi, weighted selection'a geç
+        prob_to_reach_weighted = 1.0f - dir_prob;
+    }
+
+    // --- Tüm ışık türleri için akıllı seçim (directional hariç) ---
     float weights[128];
     float total_weight = 0.0f;
 
     for (int i = 0; i < light_count; i++) {
         const LightGPU& light = optixLaunchParams.lights[i];
+        
+        if (light.type == 1) { // Directional'lar weighted seçimde 0 ağırlık
+            weights[i] = 0.0f;
+            continue;
+        }
+        
         float dist = length(light.position - hit_position);
         dist = fmaxf(dist, 1.0f);
         
@@ -1552,7 +1598,8 @@ __device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
         float intensity = luminance(light.color * light.intensity);
         
         if (light.type == 0) { // Point Light
-            weights[i] = falloff * intensity;
+            float area = 4.0f * M_PIf * light.radius * light.radius;
+            weights[i] = falloff * intensity * area;
         }
         else if (light.type == 2) { // Area Light
             float area = light.area_width * light.area_height;
@@ -1569,20 +1616,26 @@ __device__ int pick_smart_light(const float3& hit_position, curandState* rng) {
     }
 
     // --- Eğer total_weight çok düşükse fallback ---
-    if (total_weight < 1e-6f)
-        return clamp(int(random_float(rng) * light_count), 0, light_count - 1);
+    if (total_weight < 1e-6f) {
+        int idx = clamp(int(random_float(rng) * light_count), 0, light_count - 1);
+        if (pdf_out) *pdf_out = prob_to_reach_weighted * (1.0f / float(light_count));
+        return idx;
+    }
 
     // --- Weighted seçim ---
     float r = random_float(rng) * total_weight;
     float accum = 0.0f;
+    int selected = light_count - 1;
     for (int i = 0; i < light_count; i++) {
         accum += weights[i];
-        if (r <= accum)
-            return i;
+        if (r <= accum) {
+            selected = i;
+            break;
+        }
     }
 
-    // --- Güvenli fallback ---
-    return clamp(int(random_float(rng) * light_count), 0, light_count - 1);
+    if (pdf_out) *pdf_out = prob_to_reach_weighted * (weights[selected] / total_weight);
+    return selected;
 }
 
 __device__ float3 sample_directional_light(const LightGPU& light, const float3& hit_pos, curandState* rng, float3& wi_out) {
@@ -1623,7 +1676,8 @@ __device__ float3 calculate_light_contribution(
     const GpuMaterial& material,
     const OptixHitResult& payload,
     const float3& wo,
-    curandState* rng
+    curandState* rng,
+    float pdf_select = 1.0f
 ) {
     float3 wi;
     float distance = 1.0f;
@@ -1689,29 +1743,31 @@ __device__ float3 calculate_light_contribution(
     float pdf_brdf_val = pdf_brdf(material, wo, wi, payload.normal);
     float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.001f, 5000.0f);
 
-    float pdf_light = 1.0f;
-    if (light.type == 0) {
-        float area = 4.0f * M_PIf * light.radius * light.radius;
-        pdf_light = 1.0f / area;
+    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance;
+
+    // Vulkan parity: Delta ışıklar (point/directional) için MIS uygulanmaz
+    bool isDelta = (light.type == 0 || light.type == 1);
+    if (isDelta) {
+        // Delta light: mis_weight = 1.0, pdf_select ile bölünecek (caller'da)
+        return f * Li * NdotL;
     }
-    else if (light.type == 1) {
-        float apparent_angle = atan2(light.radius, 1000.0f);
-        float cos_epsilon = cos(apparent_angle);
-        float solid_angle = 2.0f * M_PIf * (1.0f - cos_epsilon);
-        pdf_light = 1.0f / solid_angle;
-    }
-    else if (light.type == 2) { // Area Light
+
+    // Area/Spot ışıklar için Vulkan parity MIS: combined PDF = pdf_geo * pdf_select
+    float pdf_light_geo = 1.0f;
+    if (light.type == 2) { // Area Light
         float area = light.area_width * light.area_height;
-        pdf_light = 1.0f / fmaxf(area, 1e-4f);
+        pdf_light_geo = 1.0f / fmaxf(area, 1e-4f);
     }
     else if (light.type == 3) { // Spot Light
         float solid_angle = 2.0f * M_PIf * (1.0f - light.outer_cone_cos);
-        pdf_light = 1.0f / fmaxf(solid_angle, 1e-4f);
+        pdf_light_geo = 1.0f / fmaxf(solid_angle, 1e-4f);
     }
 
-    float mis_weight = power_heuristic(pdf_light, pdf_brdf_val_mis);
-    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance;
-    return (f * Li * NdotL) * mis_weight;
+    float pdf_combined = pdf_light_geo * fmaxf(pdf_select, 1e-6f);
+    float mis_weight = power_heuristic(pdf_combined, pdf_brdf_val_mis);
+    // Vulkan: contrib = f * Li * NdotL * mis_weight / pdf_combined
+    // Caller divides by pdf_select, so return f * Li * NdotL * mis_weight / pdf_light_geo
+    return (f * Li * NdotL) * mis_weight / fmaxf(pdf_light_geo, 1e-6f);
 }
 
 __device__ float3 calculate_direct_lighting(
@@ -2323,7 +2379,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
 
     const int max_depth = optixLaunchParams.max_depth;
     int light_count = optixLaunchParams.light_count;
-    int light_index = (light_count > 0) ? pick_smart_light(ray.origin, rng) : -1;
+    int light_index = -1;
     
     float first_hit_t = -1.0f;
     float vol_depth = -1.0f;
@@ -2331,8 +2387,8 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
     float3 first_ray_origin = ray.origin;
     float3 first_ray_dir = ray.direction;
     
-    // Firefly önleme için maksimum katkı limiti
-    const float MAX_CONTRIBUTION = 100.0f;
+    // Firefly önleme için maksimum katkı limiti (Vulkan parity: 1e4)
+    const float MAX_CONTRIBUTION = 10000.0f;
 
     for (int bounce = 0; bounce < max_depth; ++bounce) {
         OptixHitResult payload = {};
@@ -2640,10 +2696,36 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
              mat.ior = payload.blended_ior;
         }
 
-        // --- Scatter başarısızsa çık ---
-        if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular))
+        // --- Emission hesabı: scatter'dan ÖNCE (Vulkan parity) ---
+        // Vulkan closesthit: payload.radiance = emColor * emStrength (scatter kararından önce)
+        // Vulkan raygen: radiance += throughput * payload.radiance (scatter kontrolünden önce)
+        // Böylece scatter başarısız olsa bile emissive yüzeyler ışık katkısı yapar.
+        float3 emission = mat.emission;
+        if (payload.has_emission_tex) {
+            float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
+            // Emission texture is authoritative for color (matching Vulkan behavior).
+            // mat.emission is pre-multiplied (emColor * emStrength), so extract
+            // approximate strength via max component to avoid double color tint.
+            float em_strength = fmaxf(mat.emission.x, fmaxf(mat.emission.y, mat.emission.z));
+            emission = make_float3(tex.x, tex.y, tex.z) * em_strength;
+        }
+
+        // --- Scatter başarısızsa: emission'ı ekle ve çık ---
+        if (!scatter_material(mat, payload, ray, rng, &scattered, &attenuation, &pdf, &is_specular)) {
+            // Vulkan parity: emissive-only yüzeyler hala ışık yayar.
+            // raygen.rgen payload.radiance'ı payload.scattered kontrolünden ÖNCE toplar.
+            color += throughput * emission;
             break;
-       
+        }
+
+        // Save pre-attenuation throughput for NEE/emission accumulation.
+        // Emission is self-emitted light (not reflected), so it must NOT be
+        // attenuated by the surface BRDF.  Direct lighting already includes
+        // evaluate_brdf() internally, same reasoning.  This matches the
+        // Vulkan path where payload.radiance (emission + direct) is
+        // accumulated with the original throughput before scatter attenuation.
+        float3 throughput_for_nee = throughput;
+
         throughput *= attenuation;
 
         // --- Volumetric Medium Tracking (for Beer's Law) ---
@@ -2750,28 +2832,27 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
                 throughput *= (MAX_CONTRIBUTION / max_throughput);
             }
         }
-        float3 emission = mat.emission;
-        if (payload.has_emission_tex) {
-            float4 tex = tex2D<float4>(payload.emission_tex, payload.uv.x, payload.uv.y);
-            emission = make_float3(tex.x, tex.y, tex.z) * mat.emission; // Tint with material emission color
-        }
-       // emission *= 0.5f; // User optimization: add at half-rate to prevent over-emission
+        // emission zaten scatter'dan önce hesaplandı (yukarıda)
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
-        if (light_count == 0) {           
-           
-            color += throughput * emission;
+        if (light_count == 0) {
+            // Use pre-attenuation throughput: emission is self-emitted, not BRDF-filtered
+            color += throughput_for_nee * emission;
             ray = scattered;
             continue;
         }
 
-        light_index = pick_smart_light(payload.position, rng);
+        float pdf_select = 1.0f;
+        light_index = pick_smart_light(payload.position, rng, &pdf_select);
        
         // --- Direkt ışık katkısı ---
         float3 direct = make_float3(0.0f, 0.0f, 0.0f);
-        if (!is_specular && light_index >= 0) {
+        if (!is_specular && light_index >= 0 && pdf_select > 1e-6f) {
             direct = calculate_light_contribution(
-                optixLaunchParams.lights[light_index], mat, payload, wo, rng
+                optixLaunchParams.lights[light_index], mat, payload, wo, rng, pdf_select
             );
+            // Vulkan parity: pdf_select ile böl (unbiased Monte Carlo estimator)
+            // Işık daha az seçiliyorsa katkısı orantılı artırılmalı
+            direct /= fmaxf(pdf_select, 1e-4f);
             // Firefly kontrolü - aşırı parlak direkt katkıları sınırla
             float direct_lum = luminance(direct);
             if (direct_lum > MAX_CONTRIBUTION) {
@@ -2779,36 +2860,41 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             }
         }
 
-        // --- BRDF yönünde MIS katkı ---
+        // --- BRDF yönünde MIS katkı (sadece area/spot ışıklar için) ---
+        // Vulkan parity: Delta ışıklar (point/directional) için BRDF-side MIS yapılmaz
         float3 brdf_mis = make_float3(0.0f, 0.0f, 0.0f);
         if (!is_specular && light_index >= 0) {
             const LightGPU& light = optixLaunchParams.lights[light_index];
-            float3 wi = normalize(scattered.direction);
-            float pdf_brdf_val_mis = clamp(pdf, 0.1f, 5000.0f);
-            float pdf_light = 1.0f;
-            float NdotL = fmaxf(dot(payload.normal, wi), 0.0f);
+            bool isDelta = (light.type == 0 || light.type == 1);
+            
+            if (!isDelta) {
+                float3 wi = normalize(scattered.direction);
+                float pdf_brdf_val_mis = clamp(pdf, 0.1f, 5000.0f);
+                float NdotL = fmaxf(dot(payload.normal, wi), 0.0f);
 
-            if (light.type == 1) { // Directional
-                float3 L = normalize(light.direction);
-                float apparent_angle = atan2(light.radius, 1000.0f);
-                float cos_epsilon = cos(apparent_angle);
-                if (dot(wi, L) > cos_epsilon) {
-                    float solid_angle = 2.0f * M_PIf * (1.0f - cos_epsilon);
-                    pdf_light = 1.0f / solid_angle;
-                    float mis_weight = power_heuristic(pdf_brdf_val_mis, pdf_light);
+                if (light.type == 2) { // Area Light
+                    float3 delta = light.position - payload.position;
+                    float dist = length(delta);
+                    float area = light.area_width * light.area_height;
+                    float pdf_light_geo = 1.0f / fmaxf(area, 1e-4f);
+                    // Vulkan parity: BRDF-side MIS combined PDF = pdf_light_geo * pdf_select
+                    float pdf_combined = pdf_light_geo * fmaxf(pdf_select, 1e-6f);
+                    float mis_weight = power_heuristic(pdf_brdf_val_mis, pdf_combined);
                     float3 f = evaluate_brdf(mat, payload, wo, wi);
-                    brdf_mis += f * light.intensity * light.color * NdotL * mis_weight;
+                    float3 light_normal = normalize(cross(light.area_u, light.area_v));
+                    float cos_light = fmaxf(dot(-wi, light_normal), 0.0f);
+                    brdf_mis += f * (light.intensity * light.color * cos_light / fmaxf(dist * dist, 1e-4f)) * NdotL * mis_weight;
                 }
-            }
-            if (light.type == 0) { // Point
-                float3 delta = light.position - payload.position;
-                float dist = length(delta);
-                if (dist < light.radius * 1.05f) {
-                    float area = 4.0f * M_PIf * light.radius * light.radius;
-                    pdf_light = 1.0f / area;
-                    float mis_weight = power_heuristic(pdf_brdf_val_mis, pdf_light);
+                if (light.type == 3) { // Spot Light
+                    float solid_angle = 2.0f * M_PIf * (1.0f - light.outer_cone_cos);
+                    float pdf_light_geo = 1.0f / fmaxf(solid_angle, 1e-4f);
+                    float pdf_combined = pdf_light_geo * fmaxf(pdf_select, 1e-6f);
+                    float mis_weight = power_heuristic(pdf_brdf_val_mis, pdf_combined);
                     float3 f = evaluate_brdf(mat, payload, wo, wi);
-                    brdf_mis += f * (light.intensity * light.color / (dist * dist)) * NdotL * mis_weight;
+                    float3 delta = light.position - payload.position;
+                    float dist = length(delta);
+                    float falloff = spot_light_falloff(light, wi);
+                    brdf_mis += f * (light.intensity * light.color * falloff / fmaxf(dist * dist, 1e-4f)) * NdotL * mis_weight;
                 }
             }
             
@@ -2828,7 +2914,13 @@ __device__ float3 ray_color(Ray ray, curandState* rng) {
             total_contribution *= (MAX_CONTRIBUTION * 2.0f / total_lum);
         }
         
-        color += throughput * total_contribution;
+        // Use pre-attenuation throughput: emission is self-emitted light
+        // and direct/brdf_mis already contain evaluate_brdf() internally.
+        // Multiplying by post-attenuation throughput would double-apply the
+        // surface BRDF, causing oversaturated albedo-tinted emission.
+        // This matches the Vulkan raygen loop where radiance is accumulated
+        // before throughput *= payload.attenuation.
+        color += throughput_for_nee * total_contribution;
        
         ray = scattered;
     }

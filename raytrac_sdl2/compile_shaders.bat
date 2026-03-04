@@ -35,18 +35,38 @@ for %%f in (%SHADER_DIR%\*.comp) do (
 REM Compile ray tracing shaders (.rgen, .rmiss, .rchit, .rahit, .rint)
 for %%e in (rgen rmiss rchit rahit rint) do (
     for %%f in (%SHADER_DIR%\*.%%e) do (
-        echo Compiling: %%~nxf
-        "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 --target-spv=spv1.4
-        if errorlevel 1 (
-            echo FAILED: %%~nxf
-            goto :error
+        REM Skip shadow_anyhit.rchit — superseded by shadow_anyhit.rahit (correct any-hit stage)
+        if /I "%%~nxf"=="shadow_anyhit.rchit" (
+            echo   SKIPPING: %%~nxf ^(replaced by shadow_anyhit.rahit^)
+        ) else (
+            echo Compiling: %%~nxf
+            "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3 --target-spv=spv1.4
+            if errorlevel 1 (
+                echo FAILED: %%~nxf
+                goto :error
+            )
+            echo   OK: %%~nf.spv
         )
-        echo   OK: %%~nf.spv
     )
 )
 
 echo.
 echo ===== All shaders compiled successfully =====
+
+REM Deploy compiled .spv to runtime directories
+echo.
+echo Deploying .spv files to runtime directories...
+set DEPLOY1=%~dp0x64\Release\shaders
+set DEPLOY2=%~dp0..\x64\Release\shaders
+set DEPLOY3=%~dp0..\build\Release\shaders
+
+for %%d in ("%DEPLOY1%" "%DEPLOY2%" "%DEPLOY3%") do (
+    if exist %%d (
+        echo   Copying to %%d
+        copy /Y "%OUTPUT_DIR%\*.spv" %%d >nul 2>&1
+    )
+)
+echo Deploy complete.
 pause
 exit /b 0
 

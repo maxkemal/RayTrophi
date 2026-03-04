@@ -147,10 +147,11 @@ struct LogEntry {
 class UILogger {
 public:
     UILogger() {
+        logFilePath = "SceneLog.txt";
         // Program EXE’nin yanına log dosyası oluşturur
-        logFile.open("SceneLog.txt", std::ios::out | std::ios::app);
+        logFile.open(logFilePath, std::ios::out | std::ios::app);
         if (!logFile.is_open()) {
-            std::cerr << "[LOGGER ERROR] Log dosyası açılamadı!\n";
+            std::cerr << "[LOGGER ERROR] Failed to open log file!\n";
         }
     }
 
@@ -159,6 +160,20 @@ public:
             logFile.flush();
             logFile.close();
         }
+    }
+
+    void initLogLocation() {
+        std::lock_guard<std::mutex> guard(lock);
+        if (logFile.is_open()) {
+            logFile.close();
+        }
+        try {
+            logFilePath = std::filesystem::absolute("SceneLog.txt").string();
+        } catch(...) {
+            logFilePath = "SceneLog.txt";
+        }
+        // Re-open in the absolute path
+        logFile.open(logFilePath, std::ios::out | std::ios::app);
     }
 
     void add(const std::string& msg, LogLevel level = LogLevel::Info) {
@@ -186,7 +201,7 @@ public:
         // Dosyayı da sıfırlayalım
         if (logFile.is_open()) {
             logFile.close();
-            logFile.open("SceneLog.txt", std::ios::out | std::ios::trunc);
+            logFile.open(logFilePath, std::ios::out | std::ios::trunc);
         }
     }
 
@@ -203,6 +218,7 @@ private:
     std::mutex lock;
     std::vector<LogEntry> lines;
     std::ofstream logFile;
+    std::string logFilePath;
 
     const char* logLevelToString(LogLevel level) const {
         switch (level) {
@@ -275,6 +291,7 @@ extern bool g_world_dirty;
 // ===========================================================================
 extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
 extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
+extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_optix_rebuild_pending;
 extern bool g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render    // GPU OptiX geometry needs rebuild
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild

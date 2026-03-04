@@ -39,7 +39,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
         // Rebuild BVH after adding geometry
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+        if (ctx.backend_ptr) {
             ctx.renderer.rebuildBackendGeometry(ctx.scene);
         }
         SCENE_LOG_INFO("[Water] Created new water plane");
@@ -711,7 +711,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         // Rebuild BVH after mesh change
                         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                         ctx.renderer.resetCPUAccumulation();
-                        if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                        if (ctx.backend_ptr) {
                             ctx.renderer.rebuildBackendGeometry(ctx.scene);
                         }
                     }
@@ -812,7 +812,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                     
                     // Rebuild BVH for correct raytracing
                     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                    if (ctx.backend_ptr && ctx.render_settings.use_optix) {
+                    if (ctx.backend_ptr) {
                         ctx.renderer.rebuildBackendGeometry(ctx.scene);
                     }
                 }
