@@ -48,6 +48,11 @@ cmake_install.cmake
 _Unused/
 _Old/
 
+# Local build logs & test files
+build_log*.txt
+build_fix_test.txt
+*.wsb
+
 # OS specific
 .DS_Store
 Thumbs.db
