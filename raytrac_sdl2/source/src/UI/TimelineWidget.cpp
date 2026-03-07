@@ -130,19 +130,29 @@ void TimelineWidget::draw(UIContext& ctx) {
     ImGui::EndChild();
     
     // --- PLAYBACK UPDATE ---
+    // --- PLAYBACK TIMER ---
+    // last_time must be reset every time playback starts to prevent accumulated
+    // dead-time from causing a burst of skipped frames on the first tick.
+    static bool was_playing = false;
+    static std::chrono::steady_clock::time_point last_time = std::chrono::steady_clock::now();
+    if (is_playing && !was_playing) {
+        // Playback just started - reset timer
+        last_time = std::chrono::steady_clock::now();
+    }
+    was_playing = is_playing;
+
     if (is_playing) {
         auto now = std::chrono::steady_clock::now();
-        static auto last_time = now;
         float elapsed = std::chrono::duration<float>(now - last_time).count();
         float frame_duration = 1.0f / ctx.render_settings.animation_fps;
 
         if (elapsed >= frame_duration) {
-            // Advance as many frames as have actually elapsed (fixes slow-motion
+            // Advance exactly as many frames as have elapsed (fixes slow-motion
             // when render time > frame_duration, e.g. Vulkan 50ms vs 33ms@30fps)
             int frames_to_advance = static_cast<int>(elapsed / frame_duration);
-            // Cap to ~2s worth to avoid a huge jump after a stall
-            if (frames_to_advance > static_cast<int>(2.0f * ctx.render_settings.animation_fps))
-                frames_to_advance = static_cast<int>(2.0f * ctx.render_settings.animation_fps);
+            // Cap to 1 frame to guarantee correct per-frame animation (prevents
+            // skipping frames on a slow render, which looks like fast forwarding)
+            if (frames_to_advance > 1) frames_to_advance = 1;
 
             current_frame += frames_to_advance;
             int range = end_frame - start_frame + 1;
@@ -318,34 +328,8 @@ void TimelineWidget::draw(UIContext& ctx) {
                         );
                         th->setBase(new_transform);
                         
-                        // PERFORMANCE CRITICAL: Directly update OptiX instances for this object!
-                        // This is O(1) lookup + O(small) instance updates, NOT O(2M) object scan!
-                        if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                            // Get instance IDs for this object
-                            auto instance_ids = ctx.backend_ptr->getInstancesByNodeName(track_name);
-                            
-                            if (!instance_ids.empty()) {
-                                // Convert Matrix4x4 to float[12] for OptiX
-                                float transform_array[12];
-                                transform_array[0] = new_transform.m[0][0]; 
-                                transform_array[1] = new_transform.m[0][1]; 
-                                transform_array[2] = new_transform.m[0][2]; 
-                                transform_array[3] = new_transform.m[0][3];
-                                transform_array[4] = new_transform.m[1][0]; 
-                                transform_array[5] = new_transform.m[1][1]; 
-                                transform_array[6] = new_transform.m[1][2]; 
-                                transform_array[7] = new_transform.m[1][3];
-                                transform_array[8] = new_transform.m[2][0]; 
-                                transform_array[9] = new_transform.m[2][1]; 
-                                transform_array[10] = new_transform.m[2][2]; 
-                                transform_array[11] = new_transform.m[2][3];
-                                
-                                // Update each instance directly (typically 1-3 instances per object)
-                                for (int inst_id : instance_ids) {
-                                    ctx.backend_ptr->updateInstanceTransform(inst_id, transform_array);
-                                }
-                            }
-                        }
+                        // Update each instance directly via backend sync at the end of the frame
+                        // so both OptiX and Vulkan can correctly refit TLAS in one go
                         
                         // GPU mode: Skip CPU vertex update - TLAS handles transforms
                         // CPU mode: Need to update world-space vertices for raytracing
@@ -500,24 +484,20 @@ void TimelineWidget::draw(UIContext& ctx) {
         
         // Trigger updates
         if (needs_bvh_update) {
-            // PERFORMANCE CRITICAL:
-            // We already updated OptiX instance transforms directly above!
-            // DO NOT trigger g_gpu_refit_pending as it calls updateTLASMatricesOnly()
-            // which iterates ALL 2M objects again - causing 3+ second delays!
             
-            // Check if we're actually using GPU rendering (both pointer exists AND use_optix is true)
-            bool using_gpu_render = ctx.backend_ptr && 
-                                    ctx.backend_ptr->isUsingTLAS() && 
-                                    ctx.render_settings.use_optix;
+            // GPU backend is active when backend_ptr exists and TLAS is built.
+            // NOTE: use_optix is FALSE when Vulkan is the active renderer, so we
+            // must NOT gate on use_optix here - both renderers use the same call.
+            bool using_gpu_render = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
             
             if (using_gpu_render) {
-                // GPU rendering mode - use fast TLAS update
-                ctx.backend_ptr->rebuildAccelerationStructure();
+                // Works for both OptiX and Vulkan:
+                // Each backend's updateInstanceTransforms reads from the shared
+                // CPU transform handles (th->setBase done above) and refits its own TLAS.
+                ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
                 // SKIP CPU BVH rebuild in GPU mode during animation!
-                // CPU BVH is only needed for picking, which is disabled during playback.
             } else {
                 // CPU rendering mode - need CPU BVH refit
-                // NOTE: This is still slow for 2M objects, but necessary for CPU rendering
                 g_cpu_bvh_refit_pending = true;
             }
             
@@ -712,6 +692,17 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
     if (ImGui::Button("[]", ImVec2(30, 20))) {
         is_playing = false;
         current_frame = start_frame;
+        // Force animation re-evaluation at start_frame and backend update.
+        // We do NOT call updateInstanceTransforms here directly because keyframes
+        // haven't been evaluated at start_frame yet in this draw call.
+        // Invalidating last_anim_update_frame causes the main animation loop
+        // (just above, in draw()) to re-evaluate ALL tracks at start_frame
+        // and then call updateInstanceTransforms with the correct positions.
+        // The extern linkage lets us reach the static local defined in draw().
+        // We reset via a workaround: last_anim_update_frame is static in draw(),
+        // so use the ctx.scene.timeline.current_frame sentinel trick:
+        ctx.scene.timeline.current_frame = -1; // force frame mismatch next draw
+        ctx.renderer.resetCPUAccumulation();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
     

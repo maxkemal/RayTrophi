@@ -167,7 +167,8 @@ struct VkVolumeInstance {
     float ramp_colors_r[8];
     float ramp_colors_g[8];
     float ramp_colors_b[8];
-    float _ext_reserved[24];
+    float pivot_offset[3];
+    float _ext_reserved[21];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -217,6 +218,15 @@ uint pcgNext(inout uint state) {
 
 float rnd(inout uint seed) {
     return float(pcgNext(seed)) * (1.0 / 4294967296.0);
+}
+
+// ============================================================
+// Powder Effect for volumetric clouds (OptiX Parity)
+// ============================================================
+float gpu_powder_effect(float density, float cos_theta) {
+    float powder = 1.0 - exp(-density * 2.0);
+    float forward_bias = 0.5 + 0.5 * max(0.0, cos_theta);
+    return powder * forward_bias;
 }
 
 // ============================================================
@@ -449,9 +459,16 @@ float sampleTemperature(VkVolumeInstance vol, vec3 worldPos) {
                + vol.inv_transform[6]*worldPos.z + vol.inv_transform[7];
     localPos.z = vol.inv_transform[8]*worldPos.x + vol.inv_transform[9]*worldPos.y
                + vol.inv_transform[10]*worldPos.z + vol.inv_transform[11];
-    if (any(lessThan(localPos, vec3(-0.5))) || any(greaterThan(localPos, vec3(0.5)))) return 0.0;
-    vec3 vdbWorldPos = vol.aabb_min + (localPos + vec3(0.5)) * (vol.aabb_max - vol.aabb_min);
-    return sampleNanoVDBFloatTrilinear(vol.vdb_temp_address, vdbWorldPos);
+    
+    // Safety check bound box instead of 0.5 cube
+    if (any(lessThan(localPos, vol.aabb_min)) || any(greaterThan(localPos, vol.aabb_max))) return 0.0;
+    
+    // Pivot offset correction (OptiX parity)
+    localPos.x -= vol.pivot_offset[0];
+    localPos.y -= vol.pivot_offset[1];
+    localPos.z -= vol.pivot_offset[2];
+    
+    return sampleNanoVDBFloatTrilinear(vol.vdb_temp_address, localPos);
 }
 
 // ============================================================
@@ -467,8 +484,8 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
     localPos.z = vol.inv_transform[8] * worldPos.x + vol.inv_transform[9] * worldPos.y 
                + vol.inv_transform[10] * worldPos.z + vol.inv_transform[11];
     
-    // Check if inside unit cube [-0.5, 0.5]^3
-    if (any(lessThan(localPos, vec3(-0.5))) || any(greaterThan(localPos, vec3(0.5)))) {
+    // Check against real bounding box instead of [-0.5, 0.5]^3
+    if (any(lessThan(localPos, vol.aabb_min)) || any(greaterThan(localPos, vol.aabb_max))) {
         return 0.0;
     }
     
@@ -478,38 +495,45 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
         // Homogeneous: constant density
         density = 1.0;
     } else if (vol.volume_type == 1) {
-        // Procedural noise
-        vec3 noiseCoord = (localPos + vec3(0.5)) * vol.noise_scale;
+        // Procedural noise: convert localPos from world scale back to standard normalized coords
+        // The procedural noise historically mapped [-0.5, 0.5] to fit bounds.
+        // We remap the precise boundary.
+        vec3 normPos = (localPos - vol.aabb_min) / (vol.aabb_max - vol.aabb_min);
+        vec3 noiseCoord = normPos * vol.noise_scale;
         density = fbmNoise(noiseCoord, 4);
+        
         // Smooth falloff near edges
-        vec3 edgeDist = vec3(0.5) - abs(localPos);
+        vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
         float edgeFalloff = min(min(edgeDist.x, edgeDist.y), edgeDist.z);
         density *= smoothstep(0.0, 0.1, edgeFalloff);
+        
     } else if (vol.volume_type == 2) {
         // NanoVDB grid sampling.
-        // Guard: if vdb_grid_address is 0 (source file missing / buffer not ready),
-        // deref would be a null-pointer GPU fault.  Fall back to noise instead.
         if (vol.vdb_grid_address != 0) {
-            // localPos is in [-0.5, 0.5] object space (gizmo transform already applied via inv_transform).
-            // vol.aabb_min/aabb_max store the VDB file's native world-space AABB.
-            vec3 vdbWorldPos = vol.aabb_min + (localPos + vec3(0.5)) * (vol.aabb_max - vol.aabb_min);
+            // Apply OptiX pivot parity since NanoVDB indexing assumes raw bounding spatial coordinates
+            vec3 vdbWorldPos = localPos;
+            vdbWorldPos.x -= vol.pivot_offset[0];
+            vdbWorldPos.y -= vol.pivot_offset[1];
+            vdbWorldPos.z -= vol.pivot_offset[2];
+            
             density = sampleNanoVDBFloatTrilinear(vol.vdb_grid_address, vdbWorldPos);
         } else {
-            // Fallback: procedural noise (volume still renders, just doesn't use real data)
-            vec3 noiseCoord = (localPos + vec3(0.5)) * max(vol.noise_scale, 1.0);
+            // Fallback: procedural noise
+            vec3 normPos = (localPos - vol.aabb_min) / max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
+            vec3 noiseCoord = normPos * max(vol.noise_scale, 1.0);
             density = fbmNoise(noiseCoord, 4);
-            vec3 edgeDist = vec3(0.5) - abs(localPos);
+            vec3 edgeDist = vec3(0.5) - abs(normPos - vec3(0.5));
             density *= smoothstep(0.0, 0.1, min(min(edgeDist.x, edgeDist.y), edgeDist.z));
         }
     }
     
-    // Apply density remap
-    density = clamp((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0, 1.0);
+    // Apply density remap (No upper clamp, matches OptiX fmaxf)
+    density = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
     
     // Apply multiplier
     density *= vol.density_multiplier;
     
-    return max(density, 0.0);
+    return density;
 }
 
 // ============================================================
@@ -648,11 +672,7 @@ void main() {
         vec3  samplePos = rayOrigin + rayDir * t;
         
         float density = sampleDensity(vol, samplePos);
-        // [OPTIX PARITY] Stochastic density gate — matches OptiX raymarch_vdb_volume:
-        //   if (density > curand_uniform(rng) * 0.01f)
-        // This probabilistically skips near-zero density samples (< 0.01), acting as a
-        // natural noise filter. Without it Vulkan renders faint wisps that OptiX ignores,
-        // making the two renderers look structurally different at low density.
+        // Stochastic cutoff for sparse boundaries (OptiX Parity)
         if (density <= rnd(payload.seed) * 0.01) continue;
         
         // Current extinction
@@ -675,8 +695,8 @@ void main() {
         // ── Volume Emission ──
         // Mode 0 = none, 1 = plain color, 2 = blackbody/color-ramp via temperature grid.
         // Energy-stable integration: multiply by one_minus_sampleT (bounded by 1) instead of dt.
+        vec3 emis = vec3(0.0);
         if (vol.emission_mode >= 1) {
-            vec3 emis = vec3(0.0);
             if (vol.emission_mode == 1) {
                 // Plain constant-color emission
                 emis = vol.emission_color * vol.emission_intensity * density;
@@ -698,52 +718,53 @@ void main() {
                     emis = e_color * density * vol.blackbody_intensity;
                 }
             }
-            if (any(greaterThan(emis, vec3(0.0)))) {
-                accumulated_radiance += transmittance * emis * one_minus_sampleT;
-            }
         }
         
         // ── In-Scattering (Direct Lighting) ──
-        if (sigma_s > 0.0 && cam.lightCount > 0u) {
+        if (sigma_s > 0.0) {
             vec3 inscatter = vec3(0.0);
             
             // Sample lights for in-scattering
-            int maxLightsToSample = min(int(cam.lightCount), 4);
-            for (int li = 0; li < maxLightsToSample; li++) {
-                LightData light = lights.l[li];
-                int lightType = int(light.position.w + 0.5);
-                
-                vec3 lightDir;
-                float lightDist;
-                float lightAtten = 1.0;
-                
-                if (lightType == 1) {
-                    // Directional light
-                    lightDir = normalize(light.direction.xyz);
-                    lightDist = 1e6;
-                } else {
-                    // Point/spot/area light
-                    vec3 toLight = light.position.xyz - samplePos;
-                    lightDist = length(toLight);
-                    if (lightDist < EPSILON) continue;
-                    lightDir = toLight / lightDist;
-                    lightAtten = 1.0 / (lightDist * lightDist);
+            if (cam.lightCount > 0u) {
+                int maxLightsToSample = min(int(cam.lightCount), 4);
+                for (int li = 0; li < maxLightsToSample; li++) {
+                    LightData light = lights.l[li];
+                    int lightType = int(light.position.w + 0.5);
+                    
+                    vec3 lightDir;
+                    float lightDist;
+                    float lightAtten = 1.0;
+                    
+                    if (lightType == 1) {
+                        // Directional light
+                        lightDir = normalize(light.direction.xyz);
+                        lightDist = 1e6;
+                    } else {
+                        // Point/spot/area light
+                        vec3 toLight = light.position.xyz - samplePos;
+                        lightDist = length(toLight);
+                        if (lightDist < EPSILON) continue;
+                        lightDir = toLight / lightDist;
+                        lightAtten = 1.0 / (lightDist * lightDist);
+                    }
+                    
+                    // Phase function evaluation
+                    float cosTheta = dot(rayDir, lightDir);
+                    float phase = dualLobeHG(cosTheta, vol.scatter_anisotropy, 
+                                             vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                    float powder = gpu_powder_effect(density, cosTheta);
+                    phase *= (1.0 + powder * 0.5);
+                    
+                    // Light march transmittance through volume toward light.
+                    // Geometry occlusion is NOT checked per-step (matching OptiX raymarch_volumetric_object
+                    // behavior): solid objects are handled by TLAS traversal order, not per-sample rays.
+                    // This prevents hard black shadows from solids inside the volume.
+                    float shadowTr = lightMarch(vol, samplePos, lightDir, min(lightDist, marchDist));
+                    
+                    vec3 lightColor = light.color.rgb * light.color.a;
+                    inscatter += lightColor * lightAtten * phase * shadowTr
+                               * vol.scatter_color * density * sigma_s;
                 }
-                
-                // Phase function evaluation
-                float cosTheta = dot(rayDir, lightDir);
-                float phase = dualLobeHG(cosTheta, vol.scatter_anisotropy, 
-                                         vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
-                
-                // Light march transmittance through volume toward light.
-                // Geometry occlusion is NOT checked per-step (matching OptiX raymarch_volumetric_object
-                // behavior): solid objects are handled by TLAS traversal order, not per-sample rays.
-                // This prevents hard black shadows from solids inside the volume.
-                float shadowTr = lightMarch(vol, samplePos, lightDir, min(lightDist, marchDist));
-                
-                vec3 lightColor = light.color.rgb * light.color.a;
-                inscatter += lightColor * lightAtten * phase * shadowTr
-                           * vol.scatter_color * density * sigma_s;
             }
             
             // Sun/sky light contribution (if Nishita sky active)
@@ -752,25 +773,22 @@ void main() {
                 float cosSun = dot(rayDir, sunDir);
                 float sunPhase = dualLobeHG(cosSun, vol.scatter_anisotropy, 
                                             vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                float sunPowder = gpu_powder_effect(density, cosSun);
+                sunPhase *= (1.0 + sunPowder * 0.5);
+                
                 float sunShadowTr = lightMarch(vol, samplePos, sunDir, marchDist);
                 
                 vec3 sunLi = worldData.w.sunColor * worldData.w.sunIntensity;
                 inscatter += sunLi * sunPhase * sunShadowTr * vol.scatter_color * density * sigma_s;
             }
             
-            // Multi-scatter ambient + source boost (matches OptiX ms_boost & ambient sky)
-            // OptiX: ms_boost = 1 + albedo*scatter_multi*2 on the source term
-            //        + gpu_get_ambient_radiance_volume * 0.15 added to total_light
-            if (vol.scatter_multi > 0.0) {
-                // Ambient sky approximation: matches OptiX `total_light += ambient * 0.15`
-                // NOTE: do NOT multiply by scatter_multi here — that factor appears only in
-                // ms_boost below. Including it twice caused quadratic growth with scatter_multi.
-                vec3 ambientSky = vol.scatter_color * worldData.w.sunColor * 0.15;
-                inscatter += ambientSky * density * sigma_s;
-                // ms_boost: additional scattering from multiple bounces
-                float albedo_avg = dot(vol.scatter_color, vec3(0.2126, 0.7152, 0.0722));
-                inscatter *= (1.0 + albedo_avg * vol.scatter_multi * 2.0);
-            }
+            // 3. Sky/Ambient Lighting (OptiX Parity)
+            vec3 ambientSky = worldData.w.sunColor * 0.15;
+            inscatter += ambientSky * vol.scatter_color * density * sigma_s;
+            
+            // Multi-scatter ambient + source boost (matches OptiX ms_boost)
+            vec3 ms_boost = vec3(1.0) + vol.scatter_color * vol.scatter_multi * 2.0;
+            inscatter *= ms_boost;
             
             // INTEGRATION WEIGHT: use `dt` (the actual step length), NOT one_minus_sampleT.
             //
@@ -784,7 +802,10 @@ void main() {
             // This was causing solid-white clouds when density/scatter/absorption was raised.
             //
             // Emission still uses one_minus_sampleT (energy-stable, bounded by emission_intensity).
-            accumulated_radiance += transmittance * inscatter * dt;
+            accumulated_radiance += transmittance * (inscatter * dt + emis * one_minus_sampleT);
+        } else if (any(greaterThan(emis, vec3(0.0)))) {
+            // Emission only if no scattering
+            accumulated_radiance += transmittance * emis * one_minus_sampleT;
         }
         
         // Update transmittance

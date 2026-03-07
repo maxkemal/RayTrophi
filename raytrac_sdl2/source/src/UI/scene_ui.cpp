@@ -2970,9 +2970,14 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         scene_loading_stage = "Opening project...";
         
         std::thread loader_thread([this, filepath, &ctx]() {
+          try {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             
-            std::string ext = filepath.substr(filepath.find_last_of('.'));
+            std::string ext;
+            {
+                auto dot_pos = filepath.find_last_of('.');
+                if (dot_pos != std::string::npos) ext = filepath.substr(dot_pos);
+            }
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             
             if (ext == ".rtp") {
@@ -3099,6 +3104,21 @@ void SceneUI::performOpenProject(UIContext& ctx) {
             g_scene_loading_in_progress = false;
             rendering_stopped_cpu = false;
             rendering_stopped_gpu = false;
+          } catch (const std::exception& e) {
+            SCENE_LOG_ERROR(std::string("[Open] Loader thread exception: ") + e.what());
+            scene_loading = false;
+            scene_loading_done = true;
+            g_scene_loading_in_progress = false;
+            rendering_stopped_cpu = false;
+            rendering_stopped_gpu = false;
+          } catch (...) {
+            SCENE_LOG_ERROR("[Open] Unknown exception in loader thread.");
+            scene_loading = false;
+            scene_loading_done = true;
+            g_scene_loading_in_progress = false;
+            rendering_stopped_cpu = false;
+            rendering_stopped_gpu = false;
+          }
         });
         loader_thread.detach();
     }

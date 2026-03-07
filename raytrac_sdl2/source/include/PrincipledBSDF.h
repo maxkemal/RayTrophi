@@ -167,6 +167,8 @@ public:
     float subsurfaceAnisotropy = 0.0f;                  // Scatter direction bias (-1 to 1)
     float subsurfaceIOR = 1.4f;                         // Internal SSS IOR
     float subsurface = 0.0f;                            // SSS amount (0-1)
+    bool useRandomWalkSSS = true;                       // Enable bounded random-walk SSS
+    int sssMaxSteps = 6;                                // Max internal scattering steps (bounded)
     
     // Clear Coat
     float clearcoat = 0.0f;                             // Clear coat amount (0-1)

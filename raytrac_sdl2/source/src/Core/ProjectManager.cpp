@@ -354,7 +354,7 @@ static Matrix4x4 sjsonToMat4(simdjson::simdjson_result<simdjson::dom::element> r
 static std::string readStringBinary(std::ifstream& in) {
     uint16_t len = 0;
     in.read(reinterpret_cast<char*>(&len), sizeof(len));
-    if (len == 0) return "";
+    if (!in || len == 0) return "";
     std::string str(len, '\0');
     in.read(&str[0], len);
     return str;
@@ -1404,7 +1404,15 @@ bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
 
     // Load with Assimp - append mode (don't clear existing scene)
     // AssimpLoader usually just takes time, ideally we'd pass progress callback into it too
-    renderer.create_scene(scene, backend, filepath, progress_callback, true, import_prefix);  // append = true, import_prefix = unique id
+    try {
+        renderer.create_scene(scene, backend, filepath, progress_callback, true, import_prefix);  // append = true, import_prefix = unique id
+    } catch (const std::exception& e) {
+        SCENE_LOG_ERROR("Failed to load model '" + filepath + "': " + std::string(e.what()));
+        return false;
+    } catch (...) {
+        SCENE_LOG_ERROR("Unknown error while loading model: " + filepath);
+        return false;
+    }
     
     if (progress_callback) progress_callback(80, "Processing objects...");
 
@@ -1743,6 +1751,10 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     
     uint32_t version;
     in.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (!in) {
+        SCENE_LOG_ERROR("[ProjectManager] Geometry binary: failed to read version.");
+        return false;
+    }
     if (version > RTP_VERSION) {
         SCENE_LOG_WARN("[ProjectManager] Newer geometry format (v" + std::to_string(version) + "), some features may not load.");
     }
@@ -1750,6 +1762,10 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     // Read transforms
     uint32_t transform_count;
     in.read(reinterpret_cast<char*>(&transform_count), sizeof(transform_count));
+    if (!in) {
+        SCENE_LOG_ERROR("[ProjectManager] Invalid transform count in geometry file: " + std::to_string(transform_count));
+        return false;
+    }
     
     std::vector<std::shared_ptr<Transform>> transforms;
     transforms.reserve(transform_count);
@@ -1778,6 +1794,10 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     // Read triangles
     uint32_t tri_count;
     in.read(reinterpret_cast<char*>(&tri_count), sizeof(tri_count));
+    if (!in) {
+        SCENE_LOG_ERROR("[ProjectManager] Invalid triangle count in geometry file: " + std::to_string(tri_count));
+        return false;
+    }
     
     scene.world.objects.reserve(scene.world.objects.size() + tri_count);
     
@@ -1810,6 +1830,12 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         
         // Node name
         std::string node_name = readStringBinary(in);
+        
+        if (!in) {
+            SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed at triangle " +
+                            std::to_string(i) + "/" + std::to_string(tri_count) + ". File may be truncated.");
+            break;
+        }
         
         // Create triangle
         auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);

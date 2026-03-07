@@ -309,6 +309,10 @@ extern bool g_needs_optix_sync;         // Set by loader thread, main loop syncs
 // ===========================================================================
 extern bool g_viewport_hovered;         // True when mouse is over the main RenderView
 
+// Vulkan runtime device-loss indicator (set by Vulkan backend when fatal errors occur)
+extern bool g_vulkan_device_lost;
+extern std::string g_vulkan_device_lost_msg;
+
 #endif // GLOBALS_H
 
 

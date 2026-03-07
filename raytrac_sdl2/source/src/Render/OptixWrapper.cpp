@@ -36,14 +36,14 @@
             /* Bazı SDK'larda dönüş tipi/fonksiyon farklı olabilir, header'a bak */ \
             name = optixGetErrorName ? optixGetErrorName(res) : nullptr;        \
             desc = optixGetErrorString ? optixGetErrorString(res) : nullptr;    \
-            SCENE_LOG_ERROR(                                                    \
+            std::string _optix_err_msg =                                        \
                 std::string("OptiX error ") +                                   \
                 (name ? std::string(name) : std::string("UNKNOWN")) +           \
                 " (" + std::to_string(static_cast<int>(res)) + ")" +            \
-                " at " + std::string(__FILE__) + ":" + std::to_string(__LINE__) \
-            );                                                                  \
-            if (desc) SCENE_LOG_ERROR(std::string("[OptiX msg] ") + desc);      \
-            std::terminate();                                                   \
+                " at " + std::string(__FILE__) + ":" + std::to_string(__LINE__); \
+            if (desc) _optix_err_msg += std::string(" - ") + desc;              \
+            SCENE_LOG_ERROR(_optix_err_msg);                                    \
+            throw std::runtime_error(_optix_err_msg);                           \
         }                                                                       \
     } while (0)
 
@@ -414,6 +414,54 @@ void OptixWrapper::initialize() {
 
     OPTIX_CHECK(optixInit());
     OPTIX_CHECK(optixDeviceContextCreate(0, &options, &context));
+
+    // -------------------------------------------------------------------------
+    // Disk cache: JIT-compiled PTX sonuçlarını exe yanındaki optix_cache/ klasörüne yaz.
+    // GetModuleFileNameW (geniş karakter) kullanılır; Türkçe/Unicode yollar dahil
+    // sorunsuz çalışır. WideCharToMultiByte ile UTF-8'e çevrilerek OptiX API'sine
+    // iletilir. Cache API hataları throw etmez — cache kurulamazsa program yine çalışır.
+    // -------------------------------------------------------------------------
+    {
+        std::string cachePath;
+#ifdef _WIN32
+        wchar_t exeBufW[MAX_PATH] = {};
+        DWORD exeLen = GetModuleFileNameW(nullptr, exeBufW, MAX_PATH);
+        if (exeLen > 0 && exeLen < MAX_PATH) {
+            namespace fs = std::filesystem;
+            fs::path cacheDir = fs::path(exeBufW).parent_path() / "optix_cache";
+            std::error_code ec;
+            fs::create_directories(cacheDir, ec);
+            if (!ec) {
+                // Geniş yolu UTF-8'e çevir — Türkçe/Unicode klasör adları dahil doğru çalışır
+                const std::wstring widePath = cacheDir.wstring();
+                int utf8Len = WideCharToMultiByte(CP_UTF8, 0,
+                    widePath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                if (utf8Len > 1) {
+                    std::string utf8Path(static_cast<size_t>(utf8Len - 1), '\0');
+                    WideCharToMultiByte(CP_UTF8, 0,
+                        widePath.c_str(), -1, utf8Path.data(), utf8Len, nullptr, nullptr);
+                    cachePath = utf8Path;
+                }
+            }
+        }
+#endif
+        // Cache API çağrılarını soft-check ile kullan (OPTIX_CHECK değil —
+        // bu çağrılar kritik değil, başarısız olsa bile program çalışmaya devam eder)
+        if (!cachePath.empty()) {
+            const OptixResult r1 = optixDeviceContextSetCacheEnabled(context, 1);
+            const OptixResult r2 = optixDeviceContextSetCacheLocation(context, cachePath.c_str());
+            if (r1 == OPTIX_SUCCESS && r2 == OPTIX_SUCCESS) {
+                SCENE_LOG_INFO("[OptiX] Disk cache: " + cachePath);
+            } else {
+                SCENE_LOG_WARN("[OptiX] Cache location set failed (r1=" + std::to_string((int)r1) +
+                               " r2=" + std::to_string((int)r2) + "), using default APPDATA cache.");
+                optixDeviceContextSetCacheEnabled(context, 1); // en azından aktif et
+            }
+        } else {
+            optixDeviceContextSetCacheEnabled(context, 1);
+            SCENE_LOG_WARN("[OptiX] Could not resolve local cache path, using default APPDATA cache.");
+        }
+    }
 
     cudaStreamCreate(&stream);
 

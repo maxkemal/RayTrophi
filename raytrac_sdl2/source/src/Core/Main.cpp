@@ -737,6 +737,19 @@ void detectOptixHardware()
             } else {
                 SCENE_LOG_INFO("Selected: " + devName + " (OptiX Compute mode)");
             }
+
+            // OptiX 9.0.0 SDK officially supports up to Ada (SM 8.9).
+            // Blackwell (SM 10.0+) may work but JIT can take minutes on first run,
+            // or initialization may fail outright. The user will get a CPU fallback.
+            if (major >= 10) {
+                SCENE_LOG_WARN("[GPU Compat] " + devName + " is SM " +
+                    std::to_string(major) + "." + std::to_string(minor) +
+                    " (Blackwell or newer). OptiX 9.0.0 SDK may not officially support this "
+                    "architecture. First-time JIT compilation may take several minutes "
+                    "— the splash screen WILL appear frozen during this time, that is normal. "
+                    "If initialization ultimately fails, the app will fall back to CPU rendering. "
+                    "Upgrade to OptiX 9.1+ for full Blackwell support.");
+            }
         }
     }
 
@@ -1032,6 +1045,10 @@ int main(int argc, char* argv[]) try {
     if (splashOk) { 
         if (!ptx_exists) {
             splash.setStatus("Compiling GPU Shaders (First time setup, please wait)...");
+        } else if (!g_gpu_name.empty() && g_hasOptix) {
+            // Blackwell (SM 10.0+) JIT can take several minutes on first run with OptiX 9.0
+            splash.setStatus("Initializing OptiX for " + g_gpu_name +
+                             " — JIT compile in progress, may take 1-3 minutes on first run...");
         } else {
             splash.setStatus("Initializing OptiX (One-time JIT compile, next starts will be fast)...");
         }
@@ -1234,6 +1251,7 @@ int main(int argc, char* argv[]) try {
                     SCENE_LOG_ERROR("Fallback to CPU. Vulkan failed.");
                     render_settings.use_vulkan = false;
                     ui_ctx.render_settings.use_vulkan = false;
+                    ui.addViewportMessage("Vulkan not available on this machine. Switched to CPU rendering.", 7.0f, ImVec4(1.0f, 0.5f, 0.2f, 1.0f));
                     // Keep capability flag intact so user can retry Vulkan later
                     // without restarting the application.
                 }
@@ -1243,7 +1261,23 @@ int main(int argc, char* argv[]) try {
                     SCENE_LOG_ERROR("Fallback to CPU. OptiX failed.");
                     render_settings.use_optix = false;
                     ui_ctx.render_settings.use_optix = false;
+                    ui.addViewportMessage("OptiX not available on this machine. Switched to CPU rendering.", 7.0f, ImVec4(1.0f, 0.5f, 0.2f, 1.0f));
                 }
+            }
+
+            // If Vulkan reported a runtime device loss, ensure the user sees a HUD message
+            // and force a CPU fallback immediately.
+            if (g_vulkan_device_lost) {
+                try {
+                    SCENE_LOG_ERROR(std::string("Vulkan device lost detected: ") + g_vulkan_device_lost_msg);
+                } catch (...) {}
+                ui.addViewportMessage("Vulkan device lost — switched to CPU rendering.", 8.0f, ImVec4(1.0f, 0.4f, 0.2f, 1.0f));
+                render_settings.use_vulkan = false;
+                ui_ctx.render_settings.use_vulkan = false;
+                success = false;
+                // clear the flag so we don't spam messages
+                g_vulkan_device_lost = false;
+                g_vulkan_device_lost_msg.clear();
             }
 
             if (!success && (!render_settings.use_optix && !render_settings.use_vulkan)) {

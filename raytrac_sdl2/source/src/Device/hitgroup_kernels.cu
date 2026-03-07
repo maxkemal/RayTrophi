@@ -695,12 +695,12 @@ extern "C" __global__ void __closesthit__hair() {
         unsigned int sp0, sp1;
         packPayload(&shadow_payload, sp0, sp1);
 
-        float3 shadow_origin = hit_point + normal * 0.001f; 
+        float3 shadow_origin = offset_ray(hit_point, normal); 
         optixTrace(
             optixLaunchParams.handle,
             shadow_origin,
             light_dir,
-            0.001f,
+            0.0f,
             light_dist - 0.001f,
             0.0f,
             OptixVisibilityMask(255),

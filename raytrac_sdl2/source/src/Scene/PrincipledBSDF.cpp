@@ -215,14 +215,19 @@ bool PrincipledBSDF::scatter(
         
         if (Vec3::random_float() < cc_prob) {
             is_specular = true; // Clearcoat is specular on GPU
-            return clearcoat_scatter(r_in, rec, attenuation, scattered);
+            bool ok = clearcoat_scatter(r_in, rec, attenuation, scattered);
+            if (ok) {
+                attenuation = attenuation * (1.0f / std::max(cc_prob, 0.01f));
+                return true;
+            }
+            return false;
         }
     }
 
     // 2. TRANSMISSION (Glass/Water - typically front-face to enter, but Dielectric handles both)
     if (transmissionValue >= 0.01f && Vec3::random_float() < transmissionValue) {
         Dielectric dielectricMat(
-            ior, albedo, 1.0, 1.0, roughness, 0
+            ior, albedo, 0.1, 1.0, roughness, 0
         );
         is_specular = true; // Transmission is specular
         return dielectricMat.scatter(r_in, rec, attenuation, scattered, is_specular);
@@ -704,43 +709,57 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     float cc_f0 = ((cc_ior - 1.0f) / (cc_ior + 1.0f));
     cc_f0 *= cc_f0;
     
+    // Use VNDF sampling to match Vulkan closesthit.rchit behavior
     float cc_rough = (rec.use_custom_data) ? std::max(rec.custom_clearcoat_roughness, 0.001f) : std::max(this->clearcoatRoughness, 0.001f);
-    Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), cc_rough, N);
+    float alpha = std::max(cc_rough * cc_rough, 1e-4f);
+
+    // Sample VNDF using Heitz method
+    float r1 = Vec3::random_float();
+    float r2 = Vec3::random_float();
+    // Transform view vector
+    Vec3 Vh = Vec3(alpha * V.x, alpha * V.y, V.z).normalize();
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    Vec3 T1;
+    if (lensq > 1e-7f) T1 = Vec3(-Vh.y, Vh.x, 0.0f) * (1.0f / std::sqrt(lensq));
+    else T1 = Vec3(1.0f, 0.0f, 0.0f);
+    Vec3 T2 = Vec3::cross(Vh, T1);
+
+    float r = std::sqrt(r1);
+    float phi = 2.0f * M_PI * r2;
+    float t1 = r * std::cos(phi);
+    float t2 = r * std::sin(phi);
+    Vec3 sample = T1 * t1 + T2 * t2 + Vh * std::sqrt(std::max(0.0f, 1.0f - t1 * t1 - t2 * t2));
+    Vec3 H = Vec3(alpha * sample.x, alpha * sample.y, std::max(0.0f, sample.z)).normalize();
     Vec3 L = Vec3::reflect(-V, H).normalize();
-    
-    float NdotL = std::max(Vec3::dot(N, L), 0.001f);
-    if (NdotL <= 0.0f) return false;
-    
-    float VdotH = std::max(Vec3::dot(V, H), 0.001f);
+
+    if (Vec3::dot(N, L) <= 0.0f) {
+        L = Vec3::reflect(-V, N).normalize();
+        if (Vec3::dot(N, L) <= 0.0f) return false;
+    }
+
+    Vec3 H2 = (V + L).normalize();
+    float VdotH = std::max(Vec3::dot(V, H2), 0.001f);
+    float NdotL = std::max(Vec3::dot(N, L), 1e-4f);
+    float NdotV = std::max(Vec3::dot(N, V), 1e-4f);
+
     float fresnel = cc_f0 + (1.0f - cc_f0) * std::pow(1.0f - VdotH, 5.0f);
-    
-    float NdotH = std::max(Vec3::dot(N, H), 0.001f);
-    float NdotV = std::max(Vec3::dot(N, V), 0.001f);
-    
-    float alpha = cc_rough * cc_rough;
-    float alpha2 = std::max(alpha * alpha, 0.001f);
-    float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
-    float D = alpha2 / (M_PI * denom * denom);
-    float G = GeometrySmith(N, V, L, cc_rough);
-    
-    // GPU matching: (f * cos / pdf) leads to (fresnel * G * VdotH) / (NdotV * NdotH)
-    // However, GPU scatter_material returns the full BRDF term directly for attenuation 
-    // and let ray_color handle it.
-    float spec = (fresnel * D * G) / (4.0f * NdotV * NdotL + 0.001f);
-    attenuation = Vec3(spec) * ((rec.use_custom_data) ? rec.custom_clearcoat : this->clearcoat);
+
+    float k = alpha * 0.5f;
+    float G1L = NdotL / (NdotL * (1.0f - k) + k);
+
+    // Attenuation is white specular scaled by Fresnel*G1L. Caller compensates for cc_prob.
+    attenuation = Vec3(fresnel * G1L, fresnel * G1L, fresnel * G1L);
     scattered = Ray(rec.point + N * 0.001f, L);
-    
     return true;
 }
 
 bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     Vec3 N = rec.normal;
-    
     Vec3 sss_color = (rec.use_custom_data) ? rec.custom_subsurface_color : this->subsurfaceColor;
     Vec3 sss_radius = this->subsurfaceRadius;
     float sss_scale = std::max(this->subsurfaceScale, 0.001f);
     float sss_anisotropy = this->subsurfaceAnisotropy;
-    
+
     auto compute_sigma_t = [](const Vec3& radius, float scale) {
         Vec3 scaled_radius = radius * scale;
         return Vec3(
@@ -749,28 +768,76 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
             scaled_radius.z > 0.0001f ? 1.0f / scaled_radius.z : 10000.0f
         );
     };
-    
+
     Vec3 sigma_t = compute_sigma_t(sss_radius, sss_scale);
-    
-    float rand_channel = Vec3::random_float();
-    float sigma_sample;
-    if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
-    else if (rand_channel < 0.666f) sigma_sample = sigma_t.y;
-    else sigma_sample = sigma_t.z;
-    
-    float scatter_dist = -std::log(std::max(Vec3::random_float(), 0.0001f)) / sigma_sample;
-    scatter_dist = std::min(scatter_dist, sss_scale * 10.0f);
-    
-    Vec3 scatter_dir = sample_henyey_greenstein(-N, sss_anisotropy);
-    
-    attenuation = sss_color * Vec3(
-        std::exp(-sigma_t.x * scatter_dist),
-        std::exp(-sigma_t.y * scatter_dist),
-        std::exp(-sigma_t.z * scatter_dist)
-    );
-    
-    scattered = Ray(rec.point - N * 0.001f, scatter_dir);
-    
+
+    // If random-walk is disabled, perform a single-step SSS exit (GPU parity)
+    if (!this->useRandomWalkSSS) {
+        float rand_channel = Vec3::random_float();
+        float sigma_sample;
+        if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
+        else if (rand_channel < 0.666f) sigma_sample = sigma_t.y;
+        else sigma_sample = sigma_t.z;
+
+        float scatter_dist = -std::log(std::max(Vec3::random_float(), 1e-6f)) / sigma_sample;
+        scatter_dist = std::min(scatter_dist, sss_scale * 10.0f);
+
+        Vec3 scatter_dir = sample_henyey_greenstein(-N, sss_anisotropy);
+
+        Vec3 absorb = Vec3(
+            std::exp(-sigma_t.x * scatter_dist),
+            std::exp(-sigma_t.y * scatter_dist),
+            std::exp(-sigma_t.z * scatter_dist)
+        );
+
+        Vec3 out_pos = rec.point - N * 0.001f + scatter_dir * scatter_dist;
+        scattered = Ray(out_pos, scatter_dir.normalize());
+        attenuation = sss_color * absorb;
+        return true;
+    }
+
+    // Multi-scatter random walk (bounded)
+    int maxSteps = this->sssMaxSteps;
+    if (maxSteps <= 0) maxSteps = 1;
+    Vec3 throughput = Vec3(1.0f, 1.0f, 1.0f);
+    Vec3 pos = rec.point - N * 0.001f;
+    Vec3 dir = sample_henyey_greenstein(-N, sss_anisotropy);
+
+    for (int step = 0; step < maxSteps; ++step) {
+        float rand_channel = Vec3::random_float();
+        float sigma_sample;
+        if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
+        else if (rand_channel < 0.666f) sigma_sample = sigma_t.y;
+        else sigma_sample = sigma_t.z;
+
+        float scatter_dist = -std::log(std::max(Vec3::random_float(), 1e-6f)) / sigma_sample;
+        scatter_dist = std::min(scatter_dist, sss_scale * 10.0f);
+
+        pos = pos + dir * scatter_dist;
+
+        Vec3 absorb = Vec3(
+            std::exp(-sigma_t.x * scatter_dist),
+            std::exp(-sigma_t.y * scatter_dist),
+            std::exp(-sigma_t.z * scatter_dist)
+        );
+        throughput = throughput * absorb;
+
+        float survive_prob = std::clamp((throughput.x + throughput.y + throughput.z) / 3.0f, 0.01f, 0.99f);
+        if (Vec3::random_float() > survive_prob) break;
+
+        if (Vec3::dot(dir, N) > 0.0f) {
+            scattered = Ray(pos + N * 0.001f, dir);
+            attenuation = sss_color * throughput;
+            return true;
+        }
+
+        dir = sample_henyey_greenstein(dir, sss_anisotropy);
+    }
+
+    // fallback: cosine exit
+    Vec3 out_dir = Vec3::random_cosine_direction(N);
+    scattered = Ray(pos + N * 0.001f, out_dir);
+    attenuation = sss_color * throughput;
     return true;
 }
 

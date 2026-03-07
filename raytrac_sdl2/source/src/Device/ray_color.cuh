@@ -341,7 +341,9 @@ __device__ float3 render_cloud_layer(
             float absorption = density * stepSize * 0.08f * world.nishita.cloud_absorption;
             float stepTransmittance = expf(-absorption);
             
-            cloudColor += stepColor * transmittance * (1.0f - stepTransmittance);
+            // Enerji koruyucu ayrık integrasyon (Riemann Toplamı, Vulkan ile eşleşir).
+            // Eski hatalı `(1.0f - stepTransmittance)` çarpımı yerine `stepSize` kullanıyoruz.
+            cloudColor += stepColor * transmittance * stepSize;
             transmittance *= stepTransmittance;
             
             if (transmittance < 0.01f) break;
@@ -991,11 +993,12 @@ __device__ float3 raymarch_vdb_volume(
 
             float3 albedo = vol.scatter_color;
             float3 ms_boost = make_float3(1.0f) + albedo * vol.scatter_multi * 2.0f;
-            float3 source = (albedo * total_light * sigma_s * ms_boost + emission);
+            float3 inscatter = (albedo * total_light * sigma_s * ms_boost);
             
-            // 4. Energy-Stable Integration (Matches CPU line 3376)
+            // 4. Energy-Stable Integration (Discrete Riemann Sum matching Vulkan)
+            // Scattering uses `step` (dt), emission uses `(1.0f - step_transmittance)`
             float one_minus_T = 1.0f - step_transmittance;
-            accumulated_color += source * (one_minus_T * transmittance);
+            accumulated_color += transmittance * (inscatter * step + emission * one_minus_T);
             transmittance *= step_transmittance;
         }
         t += step;
@@ -1682,7 +1685,7 @@ __device__ float3 calculate_light_contribution(
     float3 wi;
     float distance = 1.0f;
     float attenuation = 1.0f;
-    const float shadow_bias = SCENE_EPSILON;
+   // const float shadow_bias = SCENE_EPSILON;
 
     if (light.type == 0) { // Point Light
         float3 L = light.position - payload.position;
@@ -1728,7 +1731,7 @@ __device__ float3 calculate_light_contribution(
     float NdotL = max(dot(payload.normal, wi),0.0001);
     //if (NdotL <= 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
 
-    float3 origin = payload.position + payload.normal * shadow_bias;
+    float3 origin = offset_ray(payload.position, payload.normal);
     Ray shadow_ray(origin, wi);
     OptixHitResult shadow_payload = {};
     

@@ -4590,8 +4590,56 @@ void Renderer::uploadHairToGPU() {
             mat.roughness       = mp.roughness;
             mat.radialRoughness = mp.radialRoughness;
             mat.ior             = mp.ior;
-            mat.cuticleAngle    = mp.cuticleAngle;
+            mat.cuticleAngle    = mp.cuticleAngle * 3.14159f / 180.0f;
             mat.colorMode       = (int)mp.colorMode;
+            mat.absorption      = mp.absorptionCoefficient;
+            mat.specularTint    = mp.specularTint;
+            mat.diffuseSoftness = mp.diffuseSoftness;
+            mat.tint            = mp.tint;
+            mat.tintColor       = mp.tintColor;
+            mat.coat            = mp.coat;
+            mat.coatTint        = mp.coatTint;
+            mat.emission        = mp.emission;
+            mat.emissionStrength = mp.emissionStrength;
+            mat.enableRootTipGradient = mp.enableRootTipGradient;
+            mat.tipColor        = mp.tipColor;
+            mat.rootTipBalance  = mp.rootTipBalance;
+            mat.randomHue       = mp.randomHue;
+            mat.randomValue     = mp.randomValue;
+
+            // 1. Albedo Texture
+            if (mp.customAlbedoTexture && mp.customAlbedoTexture->is_loaded()) {
+                if (!mp.customAlbedoTexture->isUploaded()) mp.customAlbedoTexture->upload_to_gpu();
+                if (mp.customAlbedoTexture->isUploaded()) {
+                    mat.albedoTexture = (int64_t)mp.customAlbedoTexture->getTextureObject();
+                }
+            }
+            // 2. Roughness Texture
+            if (mp.customRoughnessTexture && mp.customRoughnessTexture->is_loaded()) {
+                if (!mp.customRoughnessTexture->isUploaded()) mp.customRoughnessTexture->upload_to_gpu();
+                if (mp.customRoughnessTexture->isUploaded()) {
+                    mat.roughnessTexture = (int64_t)mp.customRoughnessTexture->getTextureObject();
+                }
+            }
+            // 3. Scalp Mesh Texture (Automatic detection for ROOT_UV_MAP mode)
+            if (mp.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && mat.albedoTexture == -1) {
+                auto& matMgr = MaterialManager::getInstance();
+                const auto& all_mats = matMgr.getAllMaterials();
+                int scalpMatID = groom->params.defaultMaterialID;
+                if (scalpMatID >= 0 && (size_t)scalpMatID < all_mats.size()) {
+                    const auto& scalpMat = all_mats[scalpMatID];
+                    if (scalpMat) {
+                        if (scalpMat->albedoProperty.texture && scalpMat->albedoProperty.texture->is_loaded()) {
+                            if (!scalpMat->albedoProperty.texture->isUploaded()) scalpMat->albedoProperty.texture->upload_to_gpu();
+                            if (scalpMat->albedoProperty.texture->isUploaded()) {
+                                mat.scalpAlbedoTexture = (int64_t)scalpMat->albedoProperty.texture->getTextureObject();
+                            }
+                        }
+                        mat.scalpBaseColor = scalpMat->albedoProperty.color;
+                    }
+                }
+            }
+
             allMaterials.push_back(mat);
             ++groomMaterialIndex;
         }
@@ -4712,80 +4760,89 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
     this->hairMaterial = mat;
 
     if (m_backend && g_hasCUDA) {
-        Backend::IBackend::HairMaterialData hmd;
-        hmd.color = mat.color;
-        hmd.absorption = mat.absorptionCoefficient;
-        hmd.melanin = mat.melanin;
-        hmd.melaninRedness = mat.melaninRedness;
-        hmd.roughness = mat.roughness;
-        hmd.radialRoughness = mat.radialRoughness;
-        hmd.ior = mat.ior;
-        hmd.coat = mat.coat;
-        hmd.cuticleAngle = mat.cuticleAngle * 3.14159f / 180.0f;
-        hmd.randomHue = mat.randomHue;
-        hmd.randomValue = mat.randomValue;
-        hmd.colorMode = static_cast<int>(mat.colorMode);
-        // Artistic controls
-        hmd.tint = mat.tint;
-        hmd.tintColor = mat.tintColor;
-        hmd.specularTint = mat.specularTint;
-        hmd.diffuseSoftness = mat.diffuseSoftness;
-        hmd.coatTint = mat.coatTint;
-        // Emission
-        hmd.emission = mat.emission;
-        hmd.emissionStrength = mat.emissionStrength;
-        // Root-tip gradient
-        hmd.enableRootTipGradient = mat.enableRootTipGradient;
-        hmd.tipColor = mat.tipColor;
-        hmd.rootTipBalance = mat.rootTipBalance;
+        // Collect ALL hair materials from the system to maintain correct indices
+        // in the Vulkan SSBO. If we only upload the changed material, it always
+        // goes to slot 0, breaking multi-groom setups (e.g. hair and beard).
+        std::vector<Backend::IBackend::HairMaterialData> allMaterials;
+        auto groomNames = hairSystem.getGroomNames();
 
-        // 1. Albedo Texture
-        if (mat.customAlbedoTexture && mat.customAlbedoTexture->is_loaded()) {
-            if (!mat.customAlbedoTexture->isUploaded()) mat.customAlbedoTexture->upload_to_gpu();
-            if (mat.customAlbedoTexture->isUploaded()) {
-                hmd.albedoTexture = (int64_t)mat.customAlbedoTexture->getTextureObject();
+        auto convertParams = [&](const Hair::HairMaterialParams& p, const std::string& gName) {
+            Backend::IBackend::HairMaterialData h;
+            h.color = p.color;
+            h.absorption = p.absorptionCoefficient;
+            h.melanin = p.melanin;
+            h.melaninRedness = p.melaninRedness;
+            h.roughness = p.roughness;
+            h.radialRoughness = p.radialRoughness;
+            h.ior = p.ior;
+            h.coat = p.coat;
+            h.cuticleAngle = p.cuticleAngle * 3.14159f / 180.0f;
+            h.randomHue = p.randomHue;
+            h.randomValue = p.randomValue;
+            h.colorMode = static_cast<int>(p.colorMode);
+            h.tint = p.tint;
+            h.tintColor = p.tintColor;
+            h.specularTint = p.specularTint;
+            h.diffuseSoftness = p.diffuseSoftness;
+            h.coatTint = p.coatTint;
+            h.emission = p.emission;
+            h.emissionStrength = p.emissionStrength;
+            h.enableRootTipGradient = p.enableRootTipGradient;
+            h.tipColor = p.tipColor;
+            h.rootTipBalance = p.rootTipBalance;
+
+            // 1. Albedo Texture
+            if (p.customAlbedoTexture && p.customAlbedoTexture->is_loaded()) {
+                if (!p.customAlbedoTexture->isUploaded()) p.customAlbedoTexture->upload_to_gpu();
+                if (p.customAlbedoTexture->isUploaded()) {
+                    h.albedoTexture = (int64_t)p.customAlbedoTexture->getTextureObject();
+                }
             }
-        }
-
-        // 2. Roughness Texture
-        if (mat.customRoughnessTexture && mat.customRoughnessTexture->is_loaded()) {
-            if (!mat.customRoughnessTexture->isUploaded()) mat.customRoughnessTexture->upload_to_gpu();
-            if (mat.customRoughnessTexture->isUploaded()) {
-                hmd.roughnessTexture = (int64_t)mat.customRoughnessTexture->getTextureObject();
+            // 2. Roughness Texture
+            if (p.customRoughnessTexture && p.customRoughnessTexture->is_loaded()) {
+                if (!p.customRoughnessTexture->isUploaded()) p.customRoughnessTexture->upload_to_gpu();
+                if (p.customRoughnessTexture->isUploaded()) {
+                    h.roughnessTexture = (int64_t)p.customRoughnessTexture->getTextureObject();
+                }
             }
-        }
-
-        // 3. Scalp Mesh Texture (Automatic detection for ROOT_UV_MAP mode)
-        if (mat.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && hmd.albedoTexture == -1) {
-            auto groomNames = hairSystem.getGroomNames();
-            if (!groomNames.empty()) {
-                auto* groom = hairSystem.getGroom(groomNames[0]);
+            // 3. Scalp Mesh Texture (Automatic detection for ROOT_UV_MAP mode)
+            if (p.colorMode == Hair::HairMaterialParams::ColorMode::ROOT_UV_MAP && h.albedoTexture == -1) {
+                auto* groom = hairSystem.getGroom(gName);
                 if (groom) {
                     auto& matMgr = MaterialManager::getInstance();
                     const auto& all_mats = matMgr.getAllMaterials();
                     int scalpMatID = groom->params.defaultMaterialID;
-
                     if (scalpMatID >= 0 && (size_t)scalpMatID < all_mats.size()) {
                         const auto& scalpMat = all_mats[scalpMatID];
                         if (scalpMat) {
                             if (scalpMat->albedoProperty.texture && scalpMat->albedoProperty.texture->is_loaded()) {
                                 if (!scalpMat->albedoProperty.texture->isUploaded()) scalpMat->albedoProperty.texture->upload_to_gpu();
                                 if (scalpMat->albedoProperty.texture->isUploaded()) {
-                                    hmd.scalpAlbedoTexture = (int64_t)scalpMat->albedoProperty.texture->getTextureObject();
+                                    h.scalpAlbedoTexture = (int64_t)scalpMat->albedoProperty.texture->getTextureObject();
                                 }
                             }
-                            hmd.scalpBaseColor = scalpMat->albedoProperty.color;
+                            h.scalpBaseColor = scalpMat->albedoProperty.color;
                         }
                     }
                 }
             }
+            return h;
+        };
+
+        if (groomNames.empty()) {
+            allMaterials.push_back(convertParams(mat, ""));
+        } else {
+            for (const auto& name : groomNames) {
+                const Hair::HairGroom* groom = hairSystem.getGroom(name);
+                if (groom) {
+                    allMaterials.push_back(convertParams(groom->material, name));
+                }
+            }
         }
 
-        std::vector<Backend::IBackend::HairMaterialData> materials = { hmd };
-        m_backend->uploadHairMaterials(materials);
+        m_backend->uploadHairMaterials(allMaterials);
         
-        // For OptiX, we also need to trigger per-groom updates if they are managed separately
-        // Although the combined upload should handle the global params.
+        // For OptiX, we also need to trigger per-groom updates
         Backend::OptixBackend* optixBackend = dynamic_cast<Backend::OptixBackend*>(m_backend);
         if (optixBackend && optixBackend->getOptixWrapper()) {
             optixBackend->getOptixWrapper()->updateHairMaterialsOnly(hairSystem);
@@ -4793,6 +4850,7 @@ void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
         
         m_backend->resetAccumulation();
     }
+    
     resetCPUAccumulation();
 }
 
@@ -5540,6 +5598,8 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                             gpu_mat.subsurface_scale = pbsdf->subsurfaceScale;
                             gpu_mat.subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
                             gpu_mat.subsurface_ior = pbsdf->subsurfaceIOR;
+                            gpu_mat.sss_use_random_walk = pbsdf->useRandomWalkSSS ? 1 : 0;
+                            gpu_mat.sss_max_steps = pbsdf->sssMaxSteps;
                             gpu_mat.clearcoat = pbsdf->clearcoat;
                             gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
                             gpu_mat.translucent = pbsdf->translucent;
@@ -5659,6 +5719,8 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                 data.subsurfaceScale = pbsdf->subsurfaceScale;
                 data.subsurfaceAnisotropy = pbsdf->subsurfaceAnisotropy;
                 data.subsurfaceIOR = pbsdf->subsurfaceIOR;
+                data.useRandomWalkSSS = pbsdf->useRandomWalkSSS;
+                data.sssMaxSteps = pbsdf->sssMaxSteps;
 
                 data.clearcoatRoughness = pbsdf->clearcoatRoughness;
                 data.translucent = pbsdf->translucent;

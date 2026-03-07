@@ -21,6 +21,7 @@
 #extension GL_EXT_ray_tracing                          : require
 #extension GL_EXT_scalar_block_layout                  : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_nonuniform_qualifier : require
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 const float PI      = 3.14159265358979323846;
@@ -72,6 +73,76 @@ struct LightData {
 layout(set = 0, binding = 3, scalar) readonly buffer LightBuffer {
     LightData l[];
 } lights;
+
+// ─── Binding 7: World Data (Atmosphere/Sky) ──────────────────────────────────
+struct VkWorldDataExtended {
+    vec3  sunDir;
+    int   mode;
+    vec3  sunColor;
+    float sunIntensity;
+    float sunSize;
+    float mieAnisotropy;
+    float rayleighDensity;
+    float mieDensity;
+    float humidity;
+    float temperature;
+    float ozoneAbsorptionScale;
+    float _pad0;
+    float airDensity;
+    float dustDensity;
+    float ozoneDensity;
+    float altitude;
+    float planetRadius;
+    float atmosphereHeight;
+    float _pad1;
+    float _pad2;
+    int   cloudsEnabled;
+    float cloudCoverage;
+    float cloudDensity;
+    float cloudScale;
+    float cloudHeightMin;
+    float cloudHeightMax;
+    float cloudOffsetX;
+    float cloudOffsetZ;
+    float cloudQuality;
+    float cloudDetail;
+    int   cloudBaseSteps;
+    int   cloudLightSteps;
+    float cloudShadowStrength;
+    float cloudAmbientStrength;
+    float cloudSilverIntensity;
+    float cloudAbsorption;
+    float cloudAnisotropy;
+    float cloudAnisotropyBack;
+    float cloudLobeMix;
+    float cloudEmissiveIntensity;
+    vec3  cloudEmissiveColor;
+    float _pad3;
+    int   fogEnabled;
+    float fogDensity;
+    float fogHeight;
+    float fogFalloff;
+    float fogDistance;
+    float fogSunScatter;
+    vec3  fogColor;
+    float _pad4;
+    int   godRaysEnabled;
+    float godRaysIntensity;
+    float godRaysDensity;
+    int   godRaysSamples;
+    int   aerialEnabled;
+    float aerialMinDistance;
+    float aerialMaxDistance;
+    float _pad5_aerial;
+    int   envTexSlot;
+    float envIntensity;
+    float envRotation;
+    int   _pad5;
+};
+layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
+
+// --- Binding 6: Material textures (Environment map) ---
+layout(set = 0, binding = 6) uniform sampler2D materialTextures[];
 
 // ─── Binding 10: Hair Segment SSBO ──────────────────────────────────────────
 struct HairSegmentGPU {
@@ -131,6 +202,71 @@ layout(set = 0, binding = 11, scalar) readonly buffer HairMaterialSSBO {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper Functions (synced with hair_bsdf.cuh)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+uint pcg_hash(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+float rand_float(uint seed) {
+    return float(pcg_hash(seed)) / 4294967296.0;
+}
+
+vec3 rgb_to_hsv(vec3 c) {
+    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+vec3 hsv_to_rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// --- Robust Ray Offsetting (Parity with OptiX) ---
+vec3 offset_ray(vec3 p, vec3 n) {
+    const float origin = 1.0 / 32.0;
+    const float float_scale = 1.0 / 65536.0;
+    const float int_scale = 256.0;
+
+    ivec3 of_i = ivec3(int_scale * n.x, int_scale * n.y, int_scale * n.z);
+    vec3 p_i = vec3(
+        intBitsToFloat(floatBitsToInt(p.x) + ((p.x < 0) ? -of_i.x : of_i.x)),
+        intBitsToFloat(floatBitsToInt(p.y) + ((p.y < 0) ? -of_i.y : of_i.y)),
+        intBitsToFloat(floatBitsToInt(p.z) + ((p.z < 0) ? -of_i.z : of_i.z))
+    );
+
+    return vec3(
+        abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
+        abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
+        abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z
+    );
+}
+
+// Simplified sky lookup for ambient matching
+vec3 get_ambient_sky(vec3 dir) {
+    if (worldData.w.mode == 0) return worldData.w.sunColor * worldData.w.envIntensity;
+    if (worldData.w.mode == 1) {
+        int envSlot = worldData.w.envTexSlot;
+        if (envSlot > 0) {
+            float u = 0.5 + atan(dir.z, dir.x) / (2.0 * PI);
+            float v = 0.5 - asin(clamp(dir.y, -1.0, 1.0)) / PI;
+            return texture(materialTextures[nonuniformEXT(envSlot)], vec2(u, v)).rgb * worldData.w.envIntensity;
+        }
+    }
+    // Mode 2: Nishita (simplified directional gradient for ambient)
+    float cosAlt = dir.y;
+    vec3 horizon = vec3(0.7, 0.85, 1.0);
+    vec3 zenith = vec3(0.1, 0.3, 0.9);
+    vec3 sky = mix(horizon, zenith, pow(clamp(cosAlt, 0.0, 1.0), 0.6)) * (worldData.w.sunIntensity / 10.0);
+    if (cosAlt < 0.0) sky = mix(sky, vec3(0.02, 0.015, 0.01), smoothstep(0.0, -0.15, cosAlt));
+    return sky;
+}
 
 float sqr(float x) { return x * x; }
 
@@ -220,13 +356,14 @@ vec3 hair_bsdf_eval(
 
     // Precompute lobe variances from roughness (matching convertToGpu)
     float baseR = max(mat.roughness, 0.08);
+    float baseRadialR = max(mat.radialRoughness, 0.08);
     float v_R   = sqr(baseR * 1.2);
     float v_TT  = sqr(baseR);
     float v_TRT = sqr(baseR);
-    float s_R   = baseR * 1.8 * 0.5;
-    float s_TT  = baseR * 0.7 * 0.5;
-    float s_TRT = baseR * 2.2 * 0.5;
-    float s_MS  = max(baseR * 0.7 * 10.0, 0.2) * 0.5;
+    float s_R   = baseRadialR * 1.8 * 0.5;
+    float s_TT  = baseRadialR * 0.7 * 0.5;
+    float s_TRT = baseRadialR * 2.2 * 0.5;
+    float s_MS  = max(baseRadialR * 0.7 * 10.0, 0.2) * 0.5;
 
     // ════════════════════════════════════════════════════════════════════════
     // R Lobe (Primary Specular)
@@ -325,15 +462,23 @@ void main()
 
     // Material lookup
     uint segIdx = uint(gl_PrimitiveID);
-    uint matID  = hairSegs[segIdx].materialID;
+    HairSegmentGPU seg = hairSegs[segIdx];
+    uint matID  = seg.materialID;
     HairGpuMaterial mat = hairMats[matID];
+
+    // ─── Per-strand Randomization ─────────────────────────────────────────
+    uint strandID = seg.strandID;
+    float r1 = rand_float(strandID * 1973u);
+    float r2 = rand_float(strandID * 9277u + 83492791u);
 
     // ─── Compute sigma_a based on color mode ─────────────────────────────
     vec3 sigma_a;
     vec3 hairColor;
     if (mat.colorMode == 1u) {
         // Melanin (physical)
-        sigma_a = melanin_to_absorption(mat.melanin, mat.melaninRedness);
+        float m = clamp(mat.melanin + (r1 - 0.5) * mat.randomValue, 0.0, 1.0);
+        float red = clamp(mat.melaninRedness + (r2 - 0.5) * mat.randomHue, 0.0, 1.0);
+        sigma_a = melanin_to_absorption(m, red);
         hairColor = exp(-sigma_a * 0.5);
     } else if (mat.colorMode == 2u) {
         // Explicit absorption
@@ -342,6 +487,12 @@ void main()
     } else {
         // Direct color (0) or Root UV Map (3) — derive sigma from color
         hairColor = max(mat.baseColor, vec3(0.001));
+        // Apply HSV variation
+        vec3 hsv = rgb_to_hsv(hairColor);
+        hsv.x = fract(hsv.x + (r1 - 0.5) * mat.randomHue);
+        hsv.z = clamp(hsv.z + (r2 - 0.5) * mat.randomValue, 0.0, 2.0);
+        hairColor = hsv_to_rgb(hsv);
+
         vec3 c = clamp(hairColor, vec3(0.001), vec3(0.99));
         sigma_a = -log(c) * 0.5;
     }
@@ -354,8 +505,12 @@ void main()
     vec3 bitangent = cross(tangent, normalize(wo_perp));
     float h = clamp(dot(normal, bitangent), -1.0, 1.0);
 
-    // ─── Ambient ─────────────────────────────────────────────────────────
-    vec3 radiance = hairColor * 0.07;
+    // ─── Ambient (Parity with OptiX) ─────────────────────────────────────
+    vec3 skyDir_amb = normalize(normal + vec3(0.0, 1.0, 0.0));
+    vec3 skyColor = get_ambient_sky(skyDir_amb);
+    vec3 ambient_bsdf = hairColor * (0.318309886); // 1.0 / PI
+    vec3 radiance = ambient_bsdf * skyColor * 0.15;
+    radiance += 0.01 * hairColor; 
 
     // ─── Light Loop ──────────────────────────────────────────────────────
     uint numLights = cam.lightCount;
@@ -368,7 +523,7 @@ void main()
 
         int lightType = int(light.position.w);
         if (lightType == 1) {
-            lightDir  = -normalize(light.direction.xyz);
+            lightDir  = normalize(light.direction.xyz);
             lightDist = 1e6;
         } else {
             vec3 toLight = light.position.xyz - hitPoint;
@@ -381,10 +536,7 @@ void main()
         if (dot(lightDir, lightDir) < 0.5) continue;
 
         // Shadow ray
-        float dotVT   = dot(V, tangent);
-        vec3 sideNorm = normalize(V - dotVT * tangent);
-        vec3 shadowOrig = hitPoint + sideNorm * max(mat.roughness, 5e-4);
-
+        vec3 shadowOrig = offset_ray(hitPoint, normal); 
         shadowOccluded = true;
         traceRayEXT(
             topLevelAS,

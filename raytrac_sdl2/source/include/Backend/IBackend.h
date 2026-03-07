@@ -287,6 +287,9 @@ public:
         float subsurfaceScale = 1.0f;
         float subsurfaceAnisotropy = 0.0f;
         float subsurfaceIOR = 1.33f;
+        // SSS behavior controls
+        bool useRandomWalkSSS = true; // enable bounded multi-scatter by default
+        int  sssMaxSteps = 6;         // default bounded steps for random-walk
 
         // Clearcoat / Sheen / Anisotropy
         float clearcoat = 0.0f;

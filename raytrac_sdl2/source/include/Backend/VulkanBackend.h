@@ -21,6 +21,8 @@
 #define VULKAN_BACKEND_H
 
 #include <vulkan/vulkan.h>
+#include <vector>
+#include <cstdint>
 
 #include "vulkan_material_types.h"
 #include "vulkan_volume_types.h"
@@ -318,6 +320,7 @@ struct AccelStructHandle {
     BufferHandle persistentBoneMatsBuffer; // GPU bone matrix buffer, grown as needed
     uint64_t    persistentBoneMatsBufSize = 0; // current allocated size in bytes
     VkDescriptorSet skinningDescSet = VK_NULL_HANDLE; // cached desc set (updated in-place)
+    BufferHandle skinScratchBuffer;  // Cached BLAS update scratch buffer (avoids alloc/free per frame)
 };
 
 // ============================================================================
@@ -472,15 +475,16 @@ public:
      * @brief Create ray tracing pipeline from raygen/miss/closesthit SPIR-V
      * @return true on success
      */
-    bool createRTPipeline(const std::vector<uint32_t>& raygenSPV,
-                          const std::vector<uint32_t>& missSPV,
-                          const std::vector<uint32_t>& closestHitSPV,
-                          const std::vector<uint32_t>& anyHitSPV               = std::vector<uint32_t>(),
-                          const std::vector<uint32_t>& volumeClosestHitSPV     = std::vector<uint32_t>(),
-                          const std::vector<uint32_t>& volumeIntersectionSPV   = std::vector<uint32_t>(),
-                          const std::vector<uint32_t>& hairClosestHitSPV       = std::vector<uint32_t>(),
-                          const std::vector<uint32_t>& hairIntersectionSPV     = std::vector<uint32_t>(),
-                          const std::vector<uint32_t>& shadowMissSPV           = std::vector<uint32_t>());
+    bool createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
+                          const std::vector<std::uint32_t>& missSPV,
+                          const std::vector<std::uint32_t>& closestHitSPV,
+                          const std::vector<std::uint32_t>& anyHitSPV               = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& volumeClosestHitSPV     = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& volumeIntersectionSPV   = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& hairClosestHitSPV       = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& hairIntersectionSPV     = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& shadowMissSPV           = std::vector<std::uint32_t>(),
+                          const std::vector<std::uint32_t>& hairAnyHitSPV           = std::vector<std::uint32_t>());
     
     /**
      * @brief Bind RT descriptors (output image + TLAS)
@@ -617,7 +621,8 @@ public:
     
     // Skinning Compute Pipeline
     bool createSkinningPipeline(const std::vector<uint32_t>& computeSPV);
-    void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices);
+    void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices); // legacy shim
+    void dispatchSkinningAll(const std::vector<Matrix4x4>& boneMatrices); // batch: 1 submit for all BLASes
     
     VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;

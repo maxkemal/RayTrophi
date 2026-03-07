@@ -1,0 +1,63 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+/**
+ * @file hair_shadow_anyhit.rahit
+ * @brief Handles stochastic transparency for hair shadow rays in Vulkan.
+ *        Matches OptiX __anyhit__hair_shadow behavior.
+ */
+
+layout(push_constant) uniform CameraPC {
+    vec4 origin;
+    vec4 lowerLeft;
+    vec4 horizontal;
+    vec4 vertical;
+    uint frameCount;
+    uint minSamples;
+    uint lightCount;
+    float varianceThreshold;
+    uint maxSamples;
+    float exposure_factor;
+} cam;
+
+// Shadow payload (matches hair_closesthit.rchit location 1)
+layout(location = 1) rayPayloadInEXT bool shadowOccluded;
+
+// Attributes from procedural intersection (hair_intersection.rint)
+// x,y,z = tangent, w = v parameter along strand (0 to 1)
+hitAttributeEXT vec4 hairAttrib; 
+
+void main() {
+    float v = hairAttrib.w;
+    
+    // Tip transparency (Matches OptiX logic: 1.0 - v * 0.3)
+    // At root (v=0), opacity is 1.0. At tip (v=1), opacity is 0.7.
+    float opacity = 1.0 - v * 0.3;
+    
+    // Fast path: fully opaque root segments
+    if (opacity >= 0.999) {
+        shadowOccluded = true;
+        terminateRayEXT;
+        return;
+    }
+
+    // Stochastic transparency test
+    // Use a hash of launch ID, frame count, and primitive ID for stable but randomized patterns.
+    uint seed = uint(gl_LaunchIDEXT.x) * 1973u + uint(gl_LaunchIDEXT.y) * 9277u;
+    seed ^= cam.frameCount * 83492791u;
+    seed ^= uint(gl_PrimitiveID) * 26699u;
+    
+    // PCG Hash to uniform float [0, 1]
+    seed = seed * 747796405u + 2891336453u;
+    uint word = ((seed >> ((seed >> 28u) + 4u)) ^ seed) * 277803737u;
+    float rnd = float((word >> 22u) ^ word) * (1.0 / 4294967296.0);
+
+    if (rnd < opacity) {
+        // Occluded
+        shadowOccluded = true;
+        terminateRayEXT;
+    } else {
+        // Transparent - let the ray pass through
+        ignoreIntersectionEXT;
+    }
+}

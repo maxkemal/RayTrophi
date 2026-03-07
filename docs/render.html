@@ -67,6 +67,7 @@
                             <td>Limits max brightness to reduce fireflies.</td>
                         </tr>
                     </table>
+                    
                 </div>
             </div>
 
@@ -102,11 +103,54 @@
                 </div>
             </div>
 
-            <h2 id="hw">3. Hardware</h2>
+            <h2 id="postprocess">3. Post-Process</h2>
+            <div class="split-layout">
+                <div class="screenshot-area">
+                    <img src="images/post_prosses.jpg" alt="Post-Process Panel"
+                        onerror="this.style.display='none'; this.nextElementSibling.style.display='block'">
+                    <div class="missing-img">Please save a screenshot of the Post-Process Panel as
+                        <code>docs/images/post_prosses.jpg</code>
+                    </div>
+                </div>
+                <div>
+                    <p>Controls for final image adjustments applied after rendering. The Effects area includes a <strong>Vignette</strong> control for framing.</p>
+                    <table class="param-table">
+                        <tr>
+                            <th>Parameter</th>
+                            <th>Typical Use</th>
+                        </tr>
+                        <tr>
+                            <td>Gamma</td>
+                            <td>Adjust the final image gamma curve.</td>
+                        </tr>
+                        <tr>
+                            <td>Exposure</td>
+                            <td>Adjust overall scene brightness.</td>
+                        </tr>
+                        <tr>
+                            <td>Saturation</td>
+                            <td>Increase or decrease color intensity.</td>
+                        </tr>
+                        <tr>
+                            <td>Temperature (K)</td>
+                            <td>Shift white balance using Kelvin temperature.</td>
+                        </tr>
+                        <tr>
+                            <td>Effects</td>
+                            <td>Vignette available in the Effects area for subtle framing.</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <h2 id="hw">4. Hardware & Backends</h2>
             <div class="card">
-                <h3>OptiX (GPU) vs Embree (CPU)</h3>
-                <p><strong>OptiX:</strong> Uses NVIDIA RT Cores for max speed on RTX cards.</p>
-                <p><strong>Embree:</strong> CPU fallback for compatibility or debugging.</p>
+                <h3>OptiX (GPU), Vulkan (GPU) vs Embree (CPU)</h3>
+                <p><strong>OptiX:</strong> Uses NVIDIA RT Cores for max speed on RTX cards when running the OptiX backend.</p>
+                <p><strong>Vulkan:</strong> Cross-vendor GPU backend. Select <em>Vulkan</em> in Render → Backend to use the Vulkan renderer. Vulkan offers a portable GPU path (including VK_KHR_ray_tracing on supported drivers) and can run on compatible GPUs (NVIDIA, AMD, Intel). Ensure your Vulkan drivers/runtimes are up to date; if ray-tracing extensions are unavailable the renderer will fall back to a compute-based mode.</p>
+                
+                <p><strong>Embree:</strong> CPU fallback for compatibility, debugging, or systems without supported GPU drivers.</p>
+                <p><em>Notes:</em> Switching the render backend applies immediately; a restart is not required. For best Vulkan performance, keep drivers up to date and enable any platform performance modes if available.</p>
             </div>
 
             <div style="height: 50px;"></div>
