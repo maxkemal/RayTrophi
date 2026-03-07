@@ -439,7 +439,9 @@ void main() {
     bool firstHitValid = false;
 
     int effectiveBounces = int(cam.maxBounces); // her zaman UI'dan gelir, C++ tarafı min 1 garantiliyor
-    for (int bounce = 0; bounce < effectiveBounces; bounce++) {
+    int maxTotalPasses = effectiveBounces + 32; // Allow up to 32 extra passes for transparent/volume skipping
+
+    for (int bounce = 0, totalPasses = 0; bounce < effectiveBounces && totalPasses < maxTotalPasses; totalPasses++) {
 
         // Consume skipAABBs flag set by previous bounce (volume solid detection)
         bool useSkipAABBs = payload.skipAABBs;
@@ -493,11 +495,21 @@ void main() {
             throughput /= surviveProb;
         }
 
+        // --- STOCHASTIC TRANSPARENCY BOUNCE PRESERVATION ---
+        // If the ray passed straight through without altering radiance or attenuation (opacity cutout),
+        // do NOT count it as a GI bounce. Keep bounce limit available for actual lighting.
+        bool isTransparentPass = (dot(payload.scatterDir, rayDir) > 0.9999 && 
+                                  payload.radiance == vec3(0.0) && payload.attenuation == vec3(1.0));
+        
+        if (!isTransparentPass && !payload.skipAABBs) {
+            bounce++;
+        }
+
         rayOrigin = payload.scatterOrigin;
         rayDir    = payload.scatterDir;
 
-        // Record first surface hit position for aerial perspective
-        if (bounce == 0 && !firstHitValid) {
+        // Record first surface hit position for aerial perspective (only for first opaque hit)
+        if (bounce == 1 && !firstHitValid && !isTransparentPass) {
             firstHitPos   = payload.scatterOrigin;
             firstHitValid = true;
         }

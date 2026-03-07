@@ -163,17 +163,15 @@ __device__ float3 evaluate_brdf(
     float D = alpha2 / (M_PIf * denom * denom);
 
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    // Roughness-aware Fresnel (F90) matches CPU PrincipledBSDF::fresnelSchlickRoughness
-    float3 F90 = make_float3(fmaxf(1.0f - roughness, F0.x), fmaxf(1.0f - roughness, F0.y), fmaxf(1.0f - roughness, F0.z));
-    float3 F = F0 + (F90 - F0) * powf(1.0f - VdotH, 5.0f);
+    // Standard Schlick Fresnel (F90 = 1.0) matches Vulkan for consistency and correct highlights
+    float3 F = F0 + (make_float3(1.0f) - F0) * powf(1.0f - VdotH, 5.0f);
 
     float G = G_Smith(NdotV, NdotL, roughness);
     float3 spec = (F * D * G) / (4.0f * NdotV * NdotL + 0.001f);   
-    float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
-
-    float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
-
-    float3 diffuse = k_d * albedo/M_PIf;
+    
+    // Diffuse weight (Energy Conservation): Use dynamic (1-F) like Vulkan
+    float3 k_d = (make_float3(1.0f) - F) * (1.0f - metallic);
+    float3 diffuse = k_d * albedo / M_PIf;
   
    
     float transmission = material.transmission;
@@ -214,6 +212,37 @@ __device__ float schlick(float cos_theta, float eta) {
     float r0 = (1.0f - eta) / (1.0f + eta);
     r0 = r0 * r0;
     return r0 + (1.0f - r0) * powf(1.0f - cos_theta, 5.0f);
+}
+
+// GGX VNDF sampling (Heitz 2014) - returns outgoing direction L given N and view V
+__device__ float3 ggxSampleVNDF(const float3& N, const float3& V, float alpha, float r1, float r2) {
+    // Transform view direction to hemisphere configuration
+    float3 Vh = normalize(make_float3(alpha * V.x, alpha * V.y, V.z));
+
+    // Orthonormal basis
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    float3 T1;
+    if (lensq > 1e-7f) {
+        T1 = make_float3(-Vh.y, Vh.x, 0.0f) * (1.0f / sqrtf(lensq));
+    } else {
+        T1 = make_float3(1.0f, 0.0f, 0.0f);
+    }
+    float3 T2 = cross(Vh, T1);
+
+    // Sample point on unit disk
+    float r = sqrtf(r1);
+    float phi = 2.0f * M_PIf * r2;
+    float t1 = r * cosf(phi);
+    float t2 = r * sinf(phi);
+
+    // Reproject onto hemisphere oriented by Vh
+    float3 sample = T1 * t1 + T2 * t2 + Vh * sqrtf(max(0.0f, 1.0f - t1 * t1 - t2 * t2));
+
+    // Transform back to ellipsoid
+    float3 H = normalize(make_float3(alpha * sample.x, alpha * sample.y, max(0.0f, sample.z)));
+    // Reflect view around H to get outgoing L
+    float3 L = normalize(reflect(-V, H));
+    return L;
 }
 __device__ bool refract(const float3& V, const float3& N, float eta, float3* out_refracted) {
     float cos_theta = fminf(dot(-V, N), 1.0f);
@@ -312,14 +341,68 @@ __device__ bool sss_random_walk_scatter(
         expf(-sigma_t.y * scatter_dist),
         expf(-sigma_t.z * scatter_dist)
     );
+    // If GPU material requests single-step behavior, return single scatter
+    if (material.sss_use_random_walk == 0) {
+        float3 out_pos = payload.position - N * 0.001f + scatter_dir * scatter_dist;
+        *scattered = Ray(offset_ray(out_pos, N), normalize(scatter_dir));
+        *attenuation = sss_color * absorption;
+        return true;
+    }
     
-    // Final attenuation: SSS color tinted by absorption
-    *attenuation = sss_color * absorption;
-    
-    // Scatter from slightly inside the surface
-    float3 scatter_origin = payload.position - N * 0.001f;
-    *scattered = Ray(scatter_origin, scatter_dir);
-    
+    // Multi-scatter random walk
+    int maxSteps = material.sss_max_steps;
+    if (maxSteps <= 0) maxSteps = 1;
+    float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
+    float3 pos = payload.position - N * 0.001f; // start slightly inside
+    float3 dir = scatter_dir;
+
+    for (int step = 0; step < maxSteps; ++step) {
+        // Choose a channel to sample free-path (same strategy as single-step impl)
+        float rand_channel = random_float(rng);
+        float sigma_sample;
+        if (rand_channel < 0.333f) sigma_sample = sigma_t.x;
+        else if (rand_channel < 0.666f) sigma_sample = sigma_t.y;
+        else sigma_sample = sigma_t.z;
+
+        float dist = -logf(fmaxf(random_float(rng), 1e-6f)) / max(sigma_sample, 1e-6f);
+        // Move inside
+        pos = pos + dir * dist;
+
+        // Absorption per channel
+        float3 absorb = make_float3(
+            expf(-sigma_t.x * dist),
+            expf(-sigma_t.y * dist),
+            expf(-sigma_t.z * dist)
+        );
+        throughput *= absorb;
+
+        // Russian roulette: terminate internal walk probabilistically to save work
+        float survive_prob = fmaxf(fminf((throughput.x + throughput.y + throughput.z) / 3.0f, 0.99f), 0.01f);
+        if (random_float(rng) > survive_prob) {
+            break;
+        }
+
+        // If direction is leaving towards the surface (dot(dir,N) > 0), exit
+        if (dot(dir, N) > 0.0f) {
+            // outgoing direction — slightly offset to avoid self-intersection
+            *scattered = Ray(offset_ray(pos, N), normalize(dir));
+            // Final attenuation: tint by subsurface color and accumulated throughput
+            *attenuation = sss_color * throughput;
+            return true;
+        }
+
+        // Otherwise, scatter internally and continue
+        dir = sample_hg_direction(dir, rng, sss_anisotropy);
+    }
+
+    // Fallback exit: sample an outward cosine direction and return accumulated throughput
+    float3 out_dir = random_cosine_direction(rng);
+    float3 up = fabsf(N.z) < 0.999f ? make_float3(0,0,1) : make_float3(1,0,0);
+    float3 TX = normalize(cross(up, N));
+    float3 TY = cross(N, TX);
+    float3 world_out = normalize(TX * out_dir.x + TY * out_dir.y + N * out_dir.z);
+    *scattered = Ray(offset_ray(pos, N), world_out);
+    *attenuation = sss_color * throughput;
     return true;
 }
 
@@ -339,39 +422,45 @@ __device__ bool clearcoat_scatter(
     float3 V = -normalize(ray_in.direction);
     
     // Clear coat uses fixed IOR ~1.5 (like lacquer/varnish)
-    const float clearcoat_ior = 1.5f;
-    float cc_f0 = ((clearcoat_ior - 1.0f) / (clearcoat_ior + 1.0f));
-    cc_f0 *= cc_f0;  // ≈ 0.04
-    
-    // Sample microfacet normal using GGX
+    const float CC_F0 = 0.04f;
+
     float cc_roughness = fmaxf(material.clearcoat_roughness, 0.001f);
-    float3 H = importance_sample_ggx(random_float(rng), random_float(rng), cc_roughness, N);
-    float3 L = reflect(-V, H);
-    
-    float NdotL = dot(N, L);
-    if (NdotL <= 0.0f) return false;
-    
-    // Fresnel-Schlick for clear coat
+    float alpha = fmaxf(cc_roughness * cc_roughness, 1e-4f);
+
+    // Sample outgoing direction using GGX VNDF (matches Vulkan GLSL implementation)
+    float r1 = random_float(rng);
+    float r2 = random_float(rng);
+    float3 L = ggxSampleVNDF(N, V, alpha, r1, r2);
+
+    if (dot(N, L) <= 0.0f) {
+        // Fallback to perfect reflection
+        L = reflect(-V, N);
+        if (dot(N, L) <= 0.0f) return false;
+    }
+
+    float3 H = normalize(V + L);
     float VdotH = fmaxf(dot(V, H), 0.001f);
-    float fresnel = cc_f0 + (1.0f - cc_f0) * powf(1.0f - VdotH, 5.0f);
-    
-    // GGX distribution and geometry terms
-    float NdotH = fmaxf(dot(N, H), 0.001f);
-    float NdotV = fmaxf(dot(N, V), 0.001f);
-    
-    float alpha = cc_roughness * cc_roughness;
+    float NdotL = fmaxf(dot(N, L), 1e-4f);
+    float NdotV = fmaxf(dot(N, V), 1e-4f);
+
+    // Schlick Fresnel for clearcoat
+    float fresnel = CC_F0 + (1.0f - CC_F0) * powf(1.0f - VdotH, 5.0f);
+
+    // Geometry G1 for outgoing direction (Schlick-GGX style)
+    float k = alpha * 0.5f;
+    float G1L = NdotL / (NdotL * (1.0f - k) + k);
+
+    // Return white specular scaled by Fresnel*G1L (caller will compensate selection probability)
+    *attenuation = make_float3(fresnel * G1L, fresnel * G1L, fresnel * G1L);
+    *scattered = Ray(offset_ray(payload.position, N), L);
+
+    // PDF approximation using microfacet half-vector formulation
+    float NdotH = fmaxf(dot(N, H), 1e-6f);
     float alpha2 = alpha * alpha;
     float denom = (NdotH * NdotH) * (alpha2 - 1.0f) + 1.0f;
     float D = alpha2 / (M_PIf * denom * denom);
-    float G = G_Smith(NdotV, NdotL, cc_roughness);
-    
-    // Clear coat BRDF (white specular reflection)
-    float spec = fresnel * D * G / (4.0f * NdotV * NdotL + 0.001f);
-    
-    *attenuation = make_float3(spec, spec, spec) * material.clearcoat;
-    *scattered = Ray(payload.position + N * 0.001f, L);
-    *pdf = D * NdotH / (4.0f * VdotH + 0.001f);
-    
+    *pdf = D * NdotH / (4.0f * VdotH + 1e-6f);
+
     return true;
 }
 
@@ -409,7 +498,7 @@ __device__ bool translucent_scatter(
     
     // Tinted by albedo with some absorption
     *attenuation = albedo * 0.8f;  // Slight absorption
-    *scattered = Ray(payload.position - N * 0.001f, world_dir);
+    *scattered = Ray(offset_ray(payload.position, -N), world_dir);
     
     return true;
 }
@@ -521,7 +610,6 @@ __device__ bool transmission_scatter(
     );
     
     // Fresnel katkısını ekle - yüksek transmission'da daha fazla geçiş
-    // Fresnel katkısını ekle - yüksek transmission'da daha fazla geçiş
     float transmission = material.transmission;
     if (payload.use_blended_data) transmission = payload.blended_transmission;
 
@@ -529,10 +617,8 @@ __device__ bool transmission_scatter(
     float transmission_factor = 1.0f - fresnel * (1.0f - transmission);
     
     // Şeffaf camlar için tint yerine transmission_color kullan
-    // Transmission = 1.0 ise neredeyse tam ışık geçisi (hafif tint ile)
     float3 result = lerp(tint, transmission_color, material.transmission) * transmission_factor;
     
-    // Çok şeffaf materyaller için minimum attenuation garantisi
     if (material.transmission > 0.9f) {
         result = make_float3(
             fmaxf(result.x, 0.9f),
@@ -543,10 +629,15 @@ __device__ bool transmission_scatter(
 
     //  Caustic katkısı
     float3 caustic = calculate_caustic_gpu(unit_direction, outward_normal, direction, tint, 0.1f);
-    result += caustic * 0.05f;  // Caustic etkisini azalt
+    result += caustic * 0.05f;  
 
     *attenuation = result;
-    *scattered = Ray(payload.position + outward_normal * 0.00001f, normalize(direction));
+    
+    // Use offset_ray for robust self-intersection avoidance
+    // Flip normal if we are refracting (going through)
+    float3 offset_n = (dot(direction, outward_normal) > 0.0f) ? outward_normal : -outward_normal;
+    *scattered = Ray(offset_ray(payload.position, offset_n), normalize(direction));
+    
     return true;
 }
 
@@ -581,7 +672,7 @@ __device__ bool scatter_material(
         else {
             // Şeffaf yol seçildi - ışın geçer
             *attenuation = make_float3(1.0f, 1.0f, 1.0f);  // Tam geçiş
-            *scattered = Ray(payload.position + ray_in.direction * 0.001f, ray_in.direction);
+            *scattered = Ray(offset_ray(payload.position, ray_in.direction), ray_in.direction);
             *pdf = 1.0f;
             *is_specular = true;  // Delta dağılım
             return true;
@@ -655,16 +746,23 @@ __device__ bool scatter_material(
         cc_f0 *= cc_f0;
         float cc_fresnel = cc_f0 + (1.0f - cc_f0) * powf(1.0f - fmaxf(dot(V, N), 0.0f), 5.0f);
         float cc_prob = clearcoat * cc_fresnel;
-        
+
         if (random_float(rng) < cc_prob) {
-            *is_specular = true;
-            return clearcoat_scatter(material, payload, ray_in, rng, scattered, attenuation, pdf);
+            *is_specular = (material.clearcoat_roughness < 0.02f);
+            bool got = clearcoat_scatter(material, payload, ray_in, rng, scattered, attenuation, pdf);
+            if (got) {
+                // Compensate selection probability (match Vulkan behavior)
+                *attenuation = (*attenuation) * (1.0f / fmaxf(cc_prob, 0.01f));
+                return true;
+            }
+            return false;
         }
+        // If not chosen, continue to base layer (no change here)
     }
     
     // 2. TRANSMISSION (Glass/Water)
     if (transmission > 0.01f && random_float(rng) < transmission) {
-        *is_specular = true;
+        *is_specular = (material.roughness < 0.02f);
         return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
     }
     
@@ -703,20 +801,20 @@ __device__ bool scatter_material(
     p_spec = fminf(fmaxf(p_spec, 0.001f), 0.999f);
 
     if (random_float(rng) < p_spec) {
-        // --- Specular / Metal lob ---
-        // L already sampled from GGX distribution above.
+        // --- Specular / Metal lobe ---
         if (dot(N, L) <= 0.0f) {
-            // Degenerate: fallback to perfect mirror
             L = reflect(-V, N);
         }
-        *scattered = Ray(payload.position + N * 0.001f, L);
-        // For metals: tint by albedo; for dielectrics: white specular
+        *scattered = Ray(offset_ray(payload.position, N), L);
         float3 spec_tint = lerp(make_float3(1.0f, 1.0f, 1.0f), albedo, metallic);
         *attenuation = clamp3f(F * spec_tint / p_spec, 0.0f, 1e4f);
         *pdf = pdf_brdf(material, wo, L, N) * p_spec;
-        *is_specular = true;
+        
+        // --- VULKAN PARITY: Enable NEE for glossy surfaces ---
+        // Only mark as specular if roughness is very low (mirror-like)
+        *is_specular = (roughness < 0.02f);
     } else {
-        // --- Diffuse lob ---
+        // --- Diffuse lobe ---
         float3 diff_dir = random_cosine_direction(rng);
         float3 up = fabsf(N.z) < 0.999f ? make_float3(0.0f, 0.0f, 1.0f) : make_float3(1.0f, 0.0f, 0.0f);
         float3 tangentX = normalize(cross(up, N));
@@ -724,9 +822,9 @@ __device__ bool scatter_material(
         float3 world_diff = normalize(tangentX * diff_dir.x + tangentY * diff_dir.y + N * diff_dir.z);
 
         float NdotD = fmaxf(dot(N, world_diff), GPU_MIN_DOT);
-        float3 diffuse = k_d * albedo;  // path-tracing: albedo (not /PI — PDF cancels PI factor)
+        float3 diffuse = k_d * albedo; 
 
-        *scattered = Ray(payload.position + N * 0.001f, world_diff);
+        *scattered = Ray(offset_ray(payload.position, N), world_diff);
         *attenuation = clamp3f(diffuse / (1.0f - p_spec), 0.0f, 1e4f);
         *pdf = NdotD / M_PIf * (1.0f - p_spec);
         *is_specular = false;

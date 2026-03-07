@@ -100,7 +100,8 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float ramp_colors_r[8];       // stop R components
     float ramp_colors_g[8];       // stop G components
     float ramp_colors_b[8];       // stop B components
-    float _ext_reserved[24];      // padding to reach 512 total bytes
+    float pivot_offset[3];        // Pivot correction identical to OptiX
+    float _ext_reserved[21];      // padding to reach 512 total bytes
 };
 
 // Compile-time size check (512 bytes = 8 cache lines)

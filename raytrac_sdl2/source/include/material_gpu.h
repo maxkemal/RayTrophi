@@ -62,6 +62,10 @@ struct alignas(16) GpuMaterial {
     float sheen_tint;                 // 4 bytes - Sheen color tint
     int flags;                        // 4 bytes - bitfield flags (replaced padding)
 
+    // Subsurface control flags (1 = enable random-walk multi-scatter)
+    int sss_use_random_walk = 1;      // 4 bytes
+    int sss_max_steps = 6;            // 4 bytes - bounded random-walk depth
+
     // Block 8: Water FFT Textures (16 bytes)
     cudaTextureObject_t fft_height_tex; // 8 bytes 
     cudaTextureObject_t fft_normal_tex; // 8 bytes
@@ -235,6 +239,9 @@ namespace std {
             hash_combine_f(h, m.subsurface_radius.z);
             hash_combine_f(h, m.subsurface_scale);
             hash_combine_f(h, m.subsurface_anisotropy);
+            // SSS control fields
+            hash_combine_f(h, (float)m.sss_use_random_walk);
+            hash_combine_f(h, (float)m.sss_max_steps);
 
             // Clear Coat & Translucent
             hash_combine_f(h, m.clearcoat_roughness);
@@ -253,6 +260,10 @@ namespace std {
             hash_combine_f(h, m.fft_wind_direction);
             hash_combine_f(h, m.fft_amplitude);
             hash_combine_f(h, m.fft_time_scale);
+
+                // include sss fields at end for hash stability
+                hash_combine_f(h, (float)m.sss_use_random_walk);
+                hash_combine_f(h, (float)m.sss_max_steps);
 
             return h;  
         }  

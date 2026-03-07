@@ -193,6 +193,7 @@ namespace Hair {
         // Material parameters
         float alpha = params.cuticleAngle * PI / 180.0f;
         float baseRoughness = std::max(params.roughness, 0.08f);
+        float baseRadialRoughness = std::max(params.radialRoughness, 0.08f);
         float eta = params.ior;
 
         // Get absorption coefficient (root color)
@@ -247,7 +248,7 @@ namespace Hair {
 
         // R: Reflection Lobe (Primary Specular)
         float M_R = evalM(baseRoughness * 1.2f, sinThetaI, sinThetaO - 2.0f * alpha, cosThetaO);
-        float N_R = evalN(baseRoughness * 1.8f, phi, phi_R(gammaO, gammaT));
+        float N_R = evalN(baseRadialRoughness * 1.8f, phi, phi_R(gammaO, gammaT));
         
         // --- Specular Tint: blend white highlight with hair body color ---
         Vec3 hairBodyColor(
@@ -262,21 +263,22 @@ namespace Hair {
         Vec3 A = evalAbsorption(sigma, cosGammaT, cosThetaD);
         float F_TT = (1.0f - F_R) * (1.0f - fresnel(cosGammaT, 1.0f / eta));
         float M_TT = evalM(baseRoughness * 0.707f, sinThetaI, sinThetaO + alpha, cosThetaO);
-        float N_TT = evalN(baseRoughness * 0.7f, phi, phi_TT(gammaO, gammaT));
+        float N_TT = evalN(baseRadialRoughness * 0.7f, phi, phi_TT(gammaO, gammaT));
         Vec3 TT = A * (F_TT * M_TT * N_TT);
 
         // TRT: Internal Reflection (Secondary highlight)
         float F_TRT = (1.0f - F_R) * fresnel(cosGammaT, 1.0f / eta) * (1.0f - fresnel(cosGammaT, 1.0f / eta));
         float M_TRT = evalM(baseRoughness * 1.414f, sinThetaI, sinThetaO - 4.0f * alpha, cosThetaO);
-        float N_TRT = evalN(baseRoughness * 2.2f, phi, phi_TRT(gammaO, gammaT));
+        float N_TRT = evalN(baseRadialRoughness * 2.2f, phi, phi_TRT(gammaO, gammaT));
         Vec3 TRT = (A * A) * (F_TRT * M_TRT * N_TRT);
 
         // MS: Multiple Scattering / Cortex Diffusion (Bulk Body Color)
-        float s_ms = std::max(baseRoughness * 0.7f * 10.0f, 0.2f);
+        float s_ms = std::max(baseRadialRoughness * 0.7f * 10.0f, 0.2f);
         float N_MS = evalN(s_ms, phi, 0.0f); 
         // --- Diffuse Softness controls MS weight ---
         float msWeight = params.diffuseSoftness * 1.2f; // 0.5 default -> 0.6 (close to previous 0.6*0.8=0.48)
         Vec3 MS = (A * A) * (msWeight * N_MS);
+
 
         // Final result: Marschner model lobes
         Vec3 bsdf = R + TT + TRT + MS;
@@ -500,10 +502,11 @@ float HairBSDF::pdf(
         gpu.v_TRT = sqr(baseR * 1.0f);
         
         // 7. Precompute Azimuthal Widths (Logistic scale s)
-        gpu.s_R   = baseR * 1.8f * 0.5f;
-        gpu.s_TT  = baseR * 0.7f * 0.5f;
-        gpu.s_TRT = baseR * 2.2f * 0.5f;
-        gpu.s_MS  = std::max(baseR * 0.7f * 10.0f, 0.2f) * 0.5f;
+        float baseAzimuthalR = std::max(params.radialRoughness, 0.08f);
+        gpu.s_R   = baseAzimuthalR * 1.8f * 0.5f;
+        gpu.s_TT  = baseAzimuthalR * 0.7f * 0.5f;
+        gpu.s_TRT = baseAzimuthalR * 2.2f * 0.5f;
+        gpu.s_MS  = std::max(baseAzimuthalR * 0.7f * 10.0f, 0.2f) * 0.5f;
         
         // 8. Textures
         gpu.albedo_tex = params.customAlbedoTexture ? params.customAlbedoTexture->get_cuda_texture() : 0;

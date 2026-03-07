@@ -445,6 +445,8 @@ void MaterialManager::syncAllGpuMaterials_internal() {
             mat->gpuMaterial->subsurface_scale = pbsdf->subsurfaceScale;
             mat->gpuMaterial->subsurface_anisotropy = pbsdf->subsurfaceAnisotropy;
             mat->gpuMaterial->subsurface_ior = pbsdf->subsurfaceIOR;
+            mat->gpuMaterial->sss_use_random_walk = pbsdf->useRandomWalkSSS ? 1 : 0;
+            mat->gpuMaterial->sss_max_steps = pbsdf->sssMaxSteps;
             
             // Clear Coat
             mat->gpuMaterial->clearcoat = pbsdf->clearcoat;

@@ -41,6 +41,10 @@ std::atomic<bool> rendering_stopped_gpu = false;
 std::atomic<bool> rendering_stopped_cpu = false;
 std::atomic<bool> rendering_paused = false;  // Pause animation render
 
+// Vulkan runtime device-loss indicator
+bool g_vulkan_device_lost = false;
+std::string g_vulkan_device_lost_msg;
+
 // Macros are defined in globals.h
 
 RenderSettings render_settings;  // Uses default values from header

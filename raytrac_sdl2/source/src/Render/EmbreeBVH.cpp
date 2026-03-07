@@ -855,6 +855,8 @@ OptixGeometryData EmbreeBVH::exportToOptixData() const {
             gpuMat.subsurface_scale = 0.05f;
             gpuMat.subsurface_anisotropy = 0.0f;
             gpuMat.subsurface_ior = 1.4f;
+            gpuMat.sss_use_random_walk = 1;
+            gpuMat.sss_max_steps = 6;
             
             // Clear Coat defaults
             gpuMat.clearcoat = 0.0f;

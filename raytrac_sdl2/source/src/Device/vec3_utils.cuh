@@ -1,5 +1,6 @@
 #pragma once
 #include <cuda_runtime.h>
+#include <math.h>
 #ifndef M_PIf
 #define M_PIf 3.1415927f
 #endif
@@ -214,4 +215,34 @@ __host__ __device__ inline float3 hsv_to_rgb(float3 hsv) {
     float4 K = make_float4(1.0f, 2.0f / 3.0f, 1.0f / 3.0f, 3.0f);
     float3 p = abs(fract(make_float3(hsv.x, hsv.x, hsv.x) + make_float3(K.x, K.y, K.z)) * 6.0f - make_float3(K.w, K.w, K.w));
     return hsv.z * lerp(make_float3(K.x, K.x, K.x), clamp(p - make_float3(K.x, K.x, K.x), 0.0f, 1.0f), hsv.y);
+}
+
+/**
+ * @brief Physically correct ray offsetting to prevent self-intersection.
+ * Based on "A Fast and Robust Method for Avoiding Self-Intersection" from Ray Tracing Gems.
+ * 
+ * Works on both Host and Device by using bit-casting that is compatible with all compilers.
+ */
+__host__ __device__ inline float3 offset_ray(float3 p, float3 n) {
+    const float origin = 1.0f / 32.0f;
+    const float float_scale = 1.0f / 65536.0f;
+    const float int_scale = 256.0f;
+
+    float p_val[3] = { p.x, p.y, p.z };
+    float n_val[3] = { n.x, n.y, n.z };
+    float res[3];
+
+    for (int i = 0; i < 3; i++) {
+        if (fabsf(p_val[i]) < origin) {
+            res[i] = p_val[i] + float_scale * n_val[i];
+        } else {
+            union { float f; int i_bit; } u;
+            u.f = p_val[i];
+            int of_i = (int)(int_scale * n_val[i]);
+            u.i_bit += (p_val[i] < 0.0f ? -of_i : of_i);
+            res[i] = u.f;
+        }
+    }
+
+    return make_float3(res[0], res[1], res[2]);
 }

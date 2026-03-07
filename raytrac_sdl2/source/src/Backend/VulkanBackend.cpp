@@ -228,7 +228,18 @@ void VulkanDevice::shutdown() {
         if (m_rtPipeline) vkDestroyPipeline(m_device, m_rtPipeline, nullptr);
         if (m_rtPipelineLayout) vkDestroyPipelineLayout(m_device, m_rtPipelineLayout, nullptr);
         if (m_rtDescriptorSetLayout) vkDestroyDescriptorSetLayout(m_device, m_rtDescriptorSetLayout, nullptr);
+        
         destroyBuffer(m_sbtBuffer);
+        destroyBuffer(m_materialBuffer);
+        destroyBuffer(m_lightBuffer);
+        destroyBuffer(m_geometryDataBuffer);
+        destroyBuffer(m_instanceDataBuffer);
+        destroyBuffer(m_worldBuffer);
+        destroyBuffer(m_volumeBuffer);
+        destroyBuffer(m_hairMaterialBuffer);
+        destroyBuffer(m_hairSegmentBuffer);
+        destroyBuffer(m_terrainLayerBuffer);
+
         m_rtPipelineReady = false;
 
         // Destroy compute pipelines
@@ -1584,15 +1595,16 @@ void VulkanDevice::traceRays(uint32_t w, uint32_t h, uint32_t d) {
 // RT Pipeline Creation
 // ========================================================================
 
-bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
-                                     const std::vector<uint32_t>& missSPV,
-                                     const std::vector<uint32_t>& closestHitSPV,
-                                     const std::vector<uint32_t>& anyHitSPV,
-                                     const std::vector<uint32_t>& volumeClosestHitSPV,
-                                     const std::vector<uint32_t>& volumeIntersectionSPV,
-                                     const std::vector<uint32_t>& hairClosestHitSPV,
-                                     const std::vector<uint32_t>& hairIntersectionSPV,
-                                     const std::vector<uint32_t>& shadowMissSPV) {
+bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
+                                     const std::vector<std::uint32_t>& missSPV,
+                                     const std::vector<std::uint32_t>& closestHitSPV,
+                                     const std::vector<std::uint32_t>& anyHitSPV,
+                                     const std::vector<std::uint32_t>& volumeClosestHitSPV,
+                                     const std::vector<std::uint32_t>& volumeIntersectionSPV,
+                                     const std::vector<std::uint32_t>& hairClosestHitSPV,
+                                     const std::vector<std::uint32_t>& hairIntersectionSPV,
+                                     const std::vector<std::uint32_t>& shadowMissSPV,
+                                     const std::vector<std::uint32_t>& hairAnyHitSPV) {
     if (!hasHardwareRT() || !fpCreateRayTracingPipelinesKHR) {
         VK_ERROR() << "[VulkanDevice] Hardware RT not available" << std::endl;
         return false;
@@ -1601,7 +1613,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
     VK_INFO() << "[VulkanDevice] Creating RT pipeline..." << std::endl;
 
     // --- 1) Create shader modules ---
-    auto createModule = [&](const std::vector<uint32_t>& code) -> VkShaderModule {
+    auto createModule = [&](const std::vector<std::uint32_t>& code) -> VkShaderModule {
         VkShaderModuleCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         ci.codeSize = code.size() * sizeof(uint32_t);
@@ -1620,6 +1632,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
     VkShaderModule hairChitModule= hairClosestHitSPV.empty()      ? VK_NULL_HANDLE : createModule(hairClosestHitSPV);
     VkShaderModule hairIntModule = hairIntersectionSPV.empty()    ? VK_NULL_HANDLE : createModule(hairIntersectionSPV);
     VkShaderModule shadowMissModule = shadowMissSPV.empty()       ? VK_NULL_HANDLE : createModule(shadowMissSPV);
+    VkShaderModule hairAnyHitModule = hairAnyHitSPV.empty()       ? VK_NULL_HANDLE : createModule(hairAnyHitSPV);
 
     bool hasVolume     = (volChitModule  != VK_NULL_HANDLE && volIntModule  != VK_NULL_HANDLE);
     bool hasHair       = (hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE);
@@ -1634,6 +1647,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
         if (hairChitModule)   vkDestroyShaderModule(m_device, hairChitModule, nullptr);
         if (hairIntModule)    vkDestroyShaderModule(m_device, hairIntModule, nullptr);
         if (shadowMissModule) vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
+        if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
         VK_ERROR() << "[VulkanDevice] Failed to load RT shader modules!" << std::endl;
         return false;
     }
@@ -1699,7 +1713,16 @@ bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
         stages.push_back(makeStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, hairChitModule));
         hairIntStageIdx = (uint32_t)stages.size();
         stages.push_back(makeStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, hairIntModule));
-        VK_INFO() << "[VulkanDevice] Hair shaders loaded (closesthit stage=" << hairChitStageIdx << ", intersection stage=" << hairIntStageIdx << ")" << std::endl;
+
+        uint32_t hairAnyHitStageIdx = VK_SHADER_UNUSED_KHR;
+        if (hairAnyHitModule != VK_NULL_HANDLE) {
+            hairAnyHitStageIdx = (uint32_t)stages.size();
+            stages.push_back(makeStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, hairAnyHitModule));
+        }
+
+        VK_INFO() << "[VulkanDevice] Hair shaders loaded (closesthit stage=" << hairChitStageIdx 
+                  << ", intersection stage=" << hairIntStageIdx 
+                  << (hairAnyHitModule != VK_NULL_HANDLE ? ", anyhit stage=" + std::to_string(hairAnyHitStageIdx) : "") << ")" << std::endl;
     }
 
     // --- 3) Shader groups ---
@@ -1775,7 +1798,19 @@ bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
         g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
         g.generalShader      = VK_SHADER_UNUSED_KHR;
         g.closestHitShader   = hairChitStageIdx;
-        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
+        
+        // Use the newly added hair any-hit stage if available
+        uint32_t hairAhStage = VK_SHADER_UNUSED_KHR;
+        if (hairAnyHitModule != VK_NULL_HANDLE) {
+            // Find the stage index for hairAnyHitModule
+            for (size_t s = 0; s < stages.size(); ++s) {
+                if (stages[s].module == hairAnyHitModule) {
+                    hairAhStage = (uint32_t)s;
+                    break;
+                }
+            }
+        }
+        g.anyHitShader       = hairAhStage;
         g.intersectionShader = hairIntStageIdx;
         groups.push_back(g);
         VK_INFO() << "[VulkanDevice] Hair procedural hit group added (group index " << hairHitGroupIdx << ")" << std::endl;
@@ -1969,6 +2004,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<uint32_t>& raygenSPV,
     if (hairChitModule)   vkDestroyShaderModule(m_device, hairChitModule, nullptr);
     if (hairIntModule)    vkDestroyShaderModule(m_device, hairIntModule, nullptr);
     if (shadowMissModule) vkDestroyShaderModule(m_device, shadowMissModule, nullptr);
+    if (hairAnyHitModule) vkDestroyShaderModule(m_device, hairAnyHitModule, nullptr);
 
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateRayTracingPipelinesKHR failed: " << result << std::endl;
@@ -2070,6 +2106,24 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage) {
         defaultLight.position[0] = 5.0f; defaultLight.position[1] = 10.0f; defaultLight.position[2] = 5.0f; defaultLight.position[3] = 0.0f; // Point
         defaultLight.color[0] = 1.0f; defaultLight.color[1] = 1.0f; defaultLight.color[2] = 1.0f; defaultLight.color[3] = 100.0f; // White, intensity 100
         updateLightBuffer(&defaultLight, sizeof(::VulkanRT::VkGpuLight), 1);
+    }
+    if (!m_hairMaterialBuffer.buffer) {
+        VulkanRT::HairGpuMaterial defaultHair{};
+        defaultHair.baseColor[0] = 0.8f; defaultHair.baseColor[1] = 0.5f; defaultHair.baseColor[2] = 0.3f;
+        defaultHair.roughness = 0.2f;
+        defaultHair.melanin = 0.5f;
+        defaultHair.melaninRedness = 0.2f;
+        defaultHair.ior = 1.55f;
+        defaultHair.cuticleAngle = 0.05f;
+        defaultHair.colorMode = 1; // Melanin
+        defaultHair.radialRoughness = 0.3f;
+        std::vector<VulkanRT::HairGpuMaterial> dummy(64, defaultHair);
+        updateHairMaterialBuffer(dummy);
+    }
+    if (!m_hairSegmentBuffer.buffer) {
+        VulkanRT::HairSegmentGPU dummySeg{};
+        std::vector<VulkanRT::HairSegmentGPU> dummy(1, dummySeg);
+        updateHairSegmentBuffer(dummy);
     }
 
     // Allocate geometry data if needed
@@ -3597,7 +3651,7 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
         m_device->destroyBuffer(m_device->m_geometryDataBuffer);
     }
     
-    SCENE_LOG_INFO("[Vulkan] Uploaded mesh: " + meshName + " (" + std::to_string(triangles.size()) + " tris)");
+   // SCENE_LOG_INFO("[Vulkan] Uploaded mesh: " + meshName + " (" + std::to_string(triangles.size()) + " tris)");
     return blasIndex;
 }
 
@@ -3628,6 +3682,27 @@ void VulkanBackendAdapter::clearHairGeometry() {
     }
     m_hairVkInstances.clear();
     m_hairGroomRegistry.clear();
+
+    // [CRITICAL FIX] Rebuild TLAS immediately after clearing hair.
+    // Otherwise, the next traceRays() will use a stale TLAS that points 
+    // to the deleted hair BLASes, causing a GPU crash/hang.
+    if (m_device && m_device->isInitialized()) {
+        // Re-calculate combining MESHES ONLY (since m_hairVkInstances was cleared above).
+        std::vector<VulkanRT::TLASInstance> allInstances = m_vkInstances;
+        
+        if (!allInstances.empty()) {
+            VulkanRT::TLASCreateInfo tlasInfo;
+            tlasInfo.instances   = allInstances;
+            tlasInfo.allowUpdate = false; // full rebuild when topology changes
+            m_device->createTLAS(tlasInfo);
+        } else {
+            // If the scene is completely empty, potentially clear TLAS and disable RT.
+            VulkanRT::TLASCreateInfo tlasInfo; // empty
+            m_device->createTLAS(tlasInfo);
+            m_device->m_rtPipelineReady = false; 
+        }
+        resetAccumulation();
+    }
 }
 
 uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) {
@@ -3718,8 +3793,13 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
         tlasInfo.instances   = allInstances;
         tlasInfo.allowUpdate = false; // full rebuild when topology changes
         m_device->createTLAS(tlasInfo);
-        resetAccumulation();
+    } else {
+        // [VULKAN FIX] Even if empty, we MUST clear the TLAS and stop dispatcher
+        VulkanRT::TLASCreateInfo tlasInfo; 
+        m_device->createTLAS(tlasInfo);
+        m_device->m_rtPipelineReady = false;
     }
+    resetAccumulation();
 
     uint32_t groomHandle = (uint32_t)(m_hairVkInstances.size() - 1);
     m_hairGroomRegistry[groomName] = groomHandle;
@@ -4144,9 +4224,6 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         m_device->createTLAS(tlasInfo);
 
         // [CRASH GUARD] Re-enable ray tracing now that a valid TLAS exists.
-        // rebuildAccelerationStructure() cleared m_rtPipelineReady to prevent traceRays() from
-        // dispatching with a null TLAS. The RT pipeline itself was not destroyed, so it is still
-        // valid and we can safely mark it ready again.
         if (m_device->m_rtPipeline != VK_NULL_HANDLE) {
             m_device->m_rtPipelineReady = true;
         }
@@ -4174,7 +4251,6 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         resetAccumulation();
 
         // [OPTIMIZATION] Pre-populate the sync cache now while we have the mapping fresh.
-        // This avoids the O(N^2) scan in syncInstanceTransforms later.
         m_instance_sync_cache.clear();
         for (size_t i = 0; i < m_instanceSources.size(); ++i) {
             if (m_instanceSources[i]) {
@@ -4191,6 +4267,11 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             + std::to_string(m_hairVkInstances.size()) + " hair).");
     } else {
         SCENE_LOG_WARN("[Vulkan] updateGeometry: No valid geometry found in the scene.");
+        // [VULKAN FIX] Also clear TLAS and disable RT when empty to prevent crash
+        VulkanRT::TLASCreateInfo emptyTlas;
+        m_device->createTLAS(emptyTlas);
+        m_device->m_rtPipelineReady = false;
+        resetAccumulation();
     }
 }
 
@@ -4218,6 +4299,8 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.subsurface_radius_r = m.subsurfaceRadius.x; gm.subsurface_radius_g = m.subsurfaceRadius.y; gm.subsurface_radius_b = m.subsurfaceRadius.z;
         gm.subsurface_scale = m.subsurfaceScale;
         gm.subsurface_ior = m.subsurfaceIOR;
+        // SSS control flags (match VkGpuMaterial layout Block 12)
+       
         gm.clearcoat = m.clearcoat;
         gm.clearcoat_roughness = m.clearcoatRoughness;
         gm.translucent = m.translucent;
@@ -5136,15 +5219,15 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         using namespace VulkanRT;
         
         // Load RT Shaders
-        std::vector<uint32_t> raygenSPV = loadSPV(shaderDir + "/raygen.spv");
-        std::vector<uint32_t> missSPV = loadSPV(shaderDir + "/miss.spv");
-        std::vector<uint32_t> chitSPV = loadSPV(shaderDir + "/closesthit.spv");
-        std::vector<uint32_t> ahitSPV;
+        std::vector<std::uint32_t> raygenSPV = loadSPV(shaderDir + "/raygen.spv");
+        std::vector<std::uint32_t> missSPV = loadSPV(shaderDir + "/miss.spv");
+        std::vector<std::uint32_t> chitSPV = loadSPV(shaderDir + "/closesthit.spv");
+        std::vector<std::uint32_t> ahitSPV;
         if (std::filesystem::exists(shaderDir + "/shadow_anyhit.spv")) ahitSPV = loadSPV(shaderDir + "/shadow_anyhit.spv");
         
         // Load Volume Shaders (optional — gracefully skipped if not compiled)
-        std::vector<uint32_t> volChitSPV;
-        std::vector<uint32_t> volIntSPV;
+        std::vector<std::uint32_t> volChitSPV;
+        std::vector<std::uint32_t> volIntSPV;
         if (std::filesystem::exists(shaderDir + "/volume_closesthit.spv") &&
             std::filesystem::exists(shaderDir + "/volume_intersection.spv")) {
             volChitSPV = loadSPV(shaderDir + "/volume_closesthit.spv");
@@ -5154,20 +5237,24 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             SCENE_LOG_INFO("[Vulkan] Volume shaders not found — volume rendering disabled.");
         }
 
-        // Load Hair Shaders (optional — gracefully skipped if not compiled)
-        std::vector<uint32_t> hairChitSPV;
-        std::vector<uint32_t> hairIntSPV;
+        // Load Hair Shaders
+        std::vector<std::uint32_t> hairChitSPV;
+        std::vector<std::uint32_t> hairIntSPV;
+        std::vector<std::uint32_t> hairAhitSPV;
         if (std::filesystem::exists(shaderDir + "/hair_closesthit.spv") &&
             std::filesystem::exists(shaderDir + "/hair_intersection.spv")) {
             hairChitSPV = loadSPV(shaderDir + "/hair_closesthit.spv");
             hairIntSPV  = loadSPV(shaderDir + "/hair_intersection.spv");
+            if (std::filesystem::exists(shaderDir + "/hair_shadow_anyhit.spv")) {
+                hairAhitSPV = loadSPV(shaderDir + "/hair_shadow_anyhit.spv");
+            }
             SCENE_LOG_INFO("[Vulkan] Hair shaders loaded successfully.");
         } else {
             SCENE_LOG_INFO("[Vulkan] Hair shaders not found — hair rendering disabled.");
         }
 
         // Load Shadow Miss Shader (optional — enables shadow rays from hit shaders)
-        std::vector<uint32_t> shadowMissSPV;
+        std::vector<std::uint32_t> shadowMissSPV;
         if (std::filesystem::exists(shaderDir + "/shadow_miss.spv")) {
             shadowMissSPV = loadSPV(shaderDir + "/shadow_miss.spv");
             SCENE_LOG_INFO("[Vulkan] Shadow miss shader loaded successfully.");
@@ -5177,7 +5264,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
 
         // Load Skinning Compute Shader
         if (std::filesystem::exists(shaderDir + "/skinning.spv")) {
-            std::vector<uint32_t> skinningSPV = loadSPV(shaderDir + "/skinning.spv");
+            std::vector<std::uint32_t> skinningSPV = loadSPV(shaderDir + "/skinning.spv");
             if (m_device->createSkinningPipeline(skinningSPV)) {
                 SCENE_LOG_INFO("[Vulkan] Skinning compute pipeline created successfully.");
             } else {
@@ -5186,7 +5273,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         }
 
         if (!m_device->createRTPipeline(raygenSPV, missSPV, chitSPV, ahitSPV,
-                volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV)) {
+                volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV)) {
             SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
             return;
         }
@@ -5813,28 +5900,16 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         if (!orderedVols[i]) continue; // deleted/missing → leave inactive slot
         const auto& src = *orderedVols[i];
 
-        // Construct transform and inv_transform that map from world space to [-0.5, 0.5]^3
-        Vec3 center((src.world_bbox_min.x + src.world_bbox_max.x) * 0.5f,
-                    (src.world_bbox_min.y + src.world_bbox_max.y) * 0.5f,
-                    (src.world_bbox_min.z + src.world_bbox_max.z) * 0.5f);
-        Vec3 size(src.world_bbox_max.x - src.world_bbox_min.x,
-                  src.world_bbox_max.y - src.world_bbox_min.y,
-                  src.world_bbox_max.z - src.world_bbox_min.z);
-        if (size.x < 1e-4f) size.x = 1e-4f;
-        if (size.y < 1e-4f) size.y = 1e-4f;
-        if (size.z < 1e-4f) size.z = 1e-4f;
-        
-        Matrix4x4 scale = Matrix4x4::scaling(size);
-        Matrix4x4 trans = Matrix4x4::translation(center);
-        Matrix4x4 m = trans * scale;
-        Matrix4x4 inv = m.inverse();
-
-        for (int row = 0; row < 3; ++row) {
-            for (int col = 0; col < 4; ++col) {
-                dst.transform[row * 4 + col]     = m.m[row][col];
-                dst.inv_transform[row * 4 + col] = inv.m[row][col];
-            }
+        // Copy original transforms directly (preserves rotation)
+        for (int i = 0; i < 12; ++i) {
+            dst.transform[i]     = src.transform[i];
+            dst.inv_transform[i] = src.inv_transform[i];
         }
+        
+        // Pivot offset for OptiX parity
+        dst.pivot_offset[0] = src.pivot_offset[0];
+        dst.pivot_offset[1] = src.pivot_offset[1];
+        dst.pivot_offset[2] = src.pivot_offset[2];
 
         // VDB native (original file) world-space AABB — used by the shader to remap
         // localPos [-0.5,0.5] → VDB world space before NanoVDB index lookup.
@@ -6004,28 +6079,19 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
         auto& dst = instances[i];
         memset(&dst, 0, sizeof(dst));
 
-        Vec3 center((src.world_bbox_min.x + src.world_bbox_max.x) * 0.5f,
-                    (src.world_bbox_min.y + src.world_bbox_max.y) * 0.5f,
-                    (src.world_bbox_min.z + src.world_bbox_max.z) * 0.5f);
-        Vec3 size(src.world_bbox_max.x - src.world_bbox_min.x,
-                  src.world_bbox_max.y - src.world_bbox_min.y,
-                  src.world_bbox_max.z - src.world_bbox_min.z);
-        if (size.x < 1e-4f) size.x = 1e-4f;
-        if (size.y < 1e-4f) size.y = 1e-4f;
-        if (size.z < 1e-4f) size.z = 1e-4f;
-        Matrix4x4 scale = Matrix4x4::scaling(size);
-        Matrix4x4 trans = Matrix4x4::translation(center);
-        Matrix4x4 m = trans * scale;
-        Matrix4x4 inv = m.inverse();
-        for (int row = 0; row < 3; ++row) {
-            for (int col = 0; col < 4; ++col) {
-                dst.transform[row * 4 + col]     = m.m[row][col];
-                dst.inv_transform[row * 4 + col] = inv.m[row][col];
-            }
+        for (int i = 0; i < 12; ++i) {
+            dst.transform[i]     = src.transform[i];
+            dst.inv_transform[i] = src.inv_transform[i];
         }
+        
+        // GasVolume does not have pivot tracking, default to 0
+        dst.pivot_offset[0] = 0.0f;
+        dst.pivot_offset[1] = 0.0f;
+        dst.pivot_offset[2] = 0.0f;
 
-        dst.aabb_min[0] = src.world_bbox_min.x; dst.aabb_min[1] = src.world_bbox_min.y; dst.aabb_min[2] = src.world_bbox_min.z;
-        dst.aabb_max[0] = src.world_bbox_max.x; dst.aabb_max[1] = src.world_bbox_max.y; dst.aabb_max[2] = src.world_bbox_max.z;
+        // Use local bounding box for accurate containment check of localPos
+        dst.aabb_min[0] = src.local_bbox_min.x; dst.aabb_min[1] = src.local_bbox_min.y; dst.aabb_min[2] = src.local_bbox_min.z;
+        dst.aabb_max[0] = src.local_bbox_max.x; dst.aabb_max[1] = src.local_bbox_max.y; dst.aabb_max[2] = src.local_bbox_max.z;
 
         dst.density_multiplier = src.density_multiplier;
         dst.density_remap_low = src.density_remap_low;

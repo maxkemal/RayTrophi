@@ -40,7 +40,8 @@ struct Material {
     uint opacity_tex;
     uint transmission_tex;
     float subsurface_ior;
-    uint _reserved_1, _reserved_2, _reserved_3;
+    uint _terrain_layer_idx;
+    uint _reserved_2, _reserved_3;
 };
 
 struct VkInstanceData {
@@ -73,9 +74,18 @@ layout(location = 1) rayPayloadInEXT bool shadowOccluded;
 // Barycentrics from triangle intersection
 hitAttributeEXT vec2 baryCoord;
 
+layout(buffer_reference, scalar) readonly buffer MaterialIndexBuffer { uint m[]; };
+
 void main() {
     VkInstanceData inst = instances.i[gl_InstanceID];
-    Material mat = materials.m[inst.materialIndex];
+    VkGeometryData geo  = geometries.g[inst.blasIndex];
+    
+    uint matIndex = inst.materialIndex;
+    if (geo.materialAddr != 0) {
+        MaterialIndexBuffer mi = MaterialIndexBuffer(geo.materialAddr);
+        matIndex = mi.m[gl_PrimitiveID];
+    }
+    Material mat = materials.m[matIndex];
 
     // --- Determine opacity value (0=fully transparent, 1=fully opaque) ---
     float maskValue = mat.opacity; // default: uniform material opacity
@@ -83,7 +93,7 @@ void main() {
     // Compute interpolated UV (needed for any texture lookup below)
     vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
     vec2 hitUV = vec2(0.5, 0.5);
-    VkGeometryData geo = geometries.g[inst.blasIndex];
+    
     if (geo.uvAddr != 0) {
         UVBuffer2 uvBuf = UVBuffer2(geo.uvAddr);
         uint ui0, ui1, ui2;

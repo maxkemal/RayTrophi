@@ -967,7 +967,7 @@ void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
                 vec3 sssColor, float sssAmount, float sssScale,
                 vec3 sssRadius, float sssAnisotropy,
                 inout uint seed) {
-    // Extinction coefficients: sigma_t = 1 / (radius * scale)
+    // Multiscatter random-walk SSS (bounded)
     float safeScale = max(sssScale, 0.001);
     vec3 scaledRadius = sssRadius * safeScale;
     vec3 sigma_t = vec3(
@@ -976,31 +976,48 @@ void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
         scaledRadius.z > 0.0001 ? 1.0 / scaledRadius.z : 10000.0
     );
 
-    // Sample scatter distance using exponential distribution (mean free path)
-    float randCh = rnd(seed);
-    float sigmaSample;
-    if (randCh < 0.333) sigmaSample = sigma_t.x;
-    else if (randCh < 0.666) sigmaSample = sigma_t.y;
-    else sigmaSample = sigma_t.z;
+    const int maxSteps = 6;
+    vec3 throughput = vec3(1.0);
+    vec3 pos = hitPos - normal * 0.001; // start slightly inside
+    vec3 dir = sampleHG(-normal, sssAnisotropy, seed);
 
-    float scatterDist = -log(max(rnd(seed), 0.0001)) / max(sigmaSample, 1e-6);
-    scatterDist = min(scatterDist, safeScale * 10.0);
+    for (int step = 0; step < maxSteps; ++step) {
+        float randCh = rnd(seed);
+        float sigmaSample = (randCh < 0.333) ? sigma_t.x : (randCh < 0.666) ? sigma_t.y : sigma_t.z;
+        float scatterDist = -log(max(rnd(seed), 1e-6)) / max(sigmaSample, 1e-6);
+        scatterDist = min(scatterDist, safeScale * 10.0);
 
-    // Henyey-Greenstein direction — scattering goes inward
-    vec3 scatterDir = sampleHG(-normal, sssAnisotropy, seed);
+        pos += dir * scatterDist;
 
-    // Beer-Lambert attenuation per channel
-    vec3 absorption = exp(-sigma_t * scatterDist);
+        vec3 absorb = vec3(
+            exp(-sigma_t.x * scatterDist),
+            exp(-sigma_t.y * scatterDist),
+            exp(-sigma_t.z * scatterDist)
+        );
+        throughput *= absorb;
 
-    // SSS color tinted by absorption, blended with base diffuse by sssAmount
-    vec3 sssAttenuation = sssColor * absorption;
-    vec3 diffuseAttenuation = albedo;
-    payload.attenuation *= mix(diffuseAttenuation, sssAttenuation, sssAmount);
+        float survive = clamp((throughput.x + throughput.y + throughput.z) / 3.0, 0.01, 0.99);
+        if (rnd(seed) > survive) break;
 
-    // Origin slightly inside surface, direction follows HG scatter
-    payload.scatterOrigin = hitPos - normal * 0.001;
-    payload.scatterDir    = scatterDir;
-    payload.scattered     = true;
+        if (dot(dir, normal) > 0.0) {
+            // Exiting to surface: apply accumulated SSS tint and exit
+            payload.attenuation *= sssColor * throughput;
+            payload.scatterOrigin = pos + normal * RAY_OFFSET;
+            payload.scatterDir = normalize(dir);
+            payload.scattered = true;
+            return;
+        }
+
+        // Scatter internally
+        dir = sampleHG(dir, sssAnisotropy, seed);
+    }
+
+    // Fallback exit: cosine hemisphere outward
+    vec3 outDir = cosineSampleHemisphere(normal, seed);
+    payload.attenuation *= sssColor * throughput;
+    payload.scatterOrigin = pos + normal * RAY_OFFSET;
+    payload.scatterDir = outDir;
+    payload.scattered = true;
 }
 
 // ============================================================
@@ -1220,26 +1237,38 @@ void main() {
     Material         mat  = materials.m[matIndex];
 
     // ----------------------------------------------------------
-    // 2. Barycentric koordinatlarla smooth normal hesapla
+    // 2. Vertex & Index Verilerini Çekip Gerçek Yüzey Normalini Bul
     // ----------------------------------------------------------
-    vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
+    uint i0, i1, i2;
+    if (geo.indexAddr != 0) {
+        IndexBuffer iBuf = IndexBuffer(geo.indexAddr);
+        i0 = iBuf.i[gl_PrimitiveID * 3 + 0];
+        i1 = iBuf.i[gl_PrimitiveID * 3 + 1];
+        i2 = iBuf.i[gl_PrimitiveID * 3 + 2];
+    } else {
+        i0 = uint(gl_PrimitiveID) * 3 + 0;
+        i1 = uint(gl_PrimitiveID) * 3 + 1;
+        i2 = uint(gl_PrimitiveID) * 3 + 2;
+    }
+
     vec3 worldNormal;
+    vec3 geomNormal; // The physical flat non-interpolated triangle normal
+
+    if (geo.vertexAddr != 0) {
+        VertexBuffer vBuf = VertexBuffer(geo.vertexAddr);
+        vec3 v0 = vBuf.v[i0];
+        vec3 v1 = vBuf.v[i1];
+        vec3 v2 = vBuf.v[i2];
+        vec3 localFaceNormal = normalize(cross(v1 - v0, v2 - v0));
+        geomNormal = normalize(vec3(localFaceNormal * mat3(gl_WorldToObjectEXT)));
+    } else {
+        geomNormal = normalize(vec3(0, 1, 0));  // Fallback
+    }
+
+    vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
 
     if (geo.normalAddr != 0) {
         NormalBuffer nBuf = NormalBuffer(geo.normalAddr);
-
-        uint i0, i1, i2;
-        if (geo.indexAddr != 0) {
-            IndexBuffer iBuf = IndexBuffer(geo.indexAddr);
-            i0 = iBuf.i[gl_PrimitiveID * 3 + 0];
-            i1 = iBuf.i[gl_PrimitiveID * 3 + 1];
-            i2 = iBuf.i[gl_PrimitiveID * 3 + 2];
-        } else {
-            i0 = uint(gl_PrimitiveID) * 3 + 0;
-            i1 = uint(gl_PrimitiveID) * 3 + 1;
-            i2 = uint(gl_PrimitiveID) * 3 + 2;
-        }
-
         vec3 localNormal = nBuf.n[i0] * bary.x
                          + nBuf.n[i1] * bary.y
                          + nBuf.n[i2] * bary.z;
@@ -1247,18 +1276,8 @@ void main() {
         // Object → world dönüşümü (ölçeği yok saymak için: inverse transpose)
         worldNormal = normalize(vec3(localNormal * mat3(gl_WorldToObjectEXT)));
     } else {
-        // Normal buffer yoksa ham üçgen normalini hesapla
-        if (geo.vertexAddr != 0) {
-            VertexBuffer vBuf = VertexBuffer(geo.vertexAddr);
-            uint base = uint(gl_PrimitiveID) * 3;
-            vec3 v0 = vBuf.v[base + 0];
-            vec3 v1 = vBuf.v[base + 1];
-            vec3 v2 = vBuf.v[base + 2];
-            vec3 localFaceNormal = normalize(cross(v1 - v0, v2 - v0));
-            worldNormal = normalize(vec3(localFaceNormal * mat3(gl_WorldToObjectEXT)));
-        } else {
-            worldNormal = normalize(vec3(0, 1, 0));  // Fallback
-        }
+        // Normal buffer yoksa ham üçgen normalini kullan
+        worldNormal = geomNormal;
     }
 
     vec3 hitPos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
@@ -1268,32 +1287,20 @@ void main() {
     vec2 hitUV = vec2(0.0);
     if (geo.uvAddr != 0) {
         UVBuffer uvBuf = UVBuffer(geo.uvAddr);
-        uint ui0, ui1, ui2;
-        if (geo.indexAddr != 0) {
-            IndexBuffer iBuf = IndexBuffer(geo.indexAddr);
-            ui0 = iBuf.i[gl_PrimitiveID * 3 + 0];
-            ui1 = iBuf.i[gl_PrimitiveID * 3 + 1];
-            ui2 = iBuf.i[gl_PrimitiveID * 3 + 2];
-        } else {
-            ui0 = uint(gl_PrimitiveID) * 3 + 0;
-            ui1 = uint(gl_PrimitiveID) * 3 + 1;
-            ui2 = uint(gl_PrimitiveID) * 3 + 2;
-        }
-        hitUV = uvBuf.u[ui0] * bary.x + uvBuf.u[ui1] * bary.y + uvBuf.u[ui2] * bary.z;
+        hitUV = uvBuf.u[i0] * bary.x + uvBuf.u[i1] * bary.y + uvBuf.u[i2] * bary.z;
     }
 
     // Vulkan shader coordinate origin differs; flip V to match OptiX (and texture upload)
     hitUV.y = 1.0 - hitUV.y;
 
-    // Double-sided: normal her zaman ray'e karşı baksın
+    // Double-sided: Normaller her zaman ray'e karşı baksın
     if (dot(worldNormal, rayDir) > 0.0) {
         worldNormal = -worldNormal;
     }
-    // Save the pre-normal-map geometric normal for shadow ray origin offset.
-    // Normal maps can perturb worldNormal tangentially — using a perturbed normal
-    // for offset at grazing angles pushes the origin nearly parallel to the surface,
-    // causing self-intersection. Geometric normal always points cleanly away.
-    vec3 geomNormal = worldNormal;
+    // Geometrik normali de kamera/ışın yönüne çeviriyoruz (kendi kendine çarpışmayı önlemek için)
+    if (dot(geomNormal, rayDir) > 0.0) {
+        geomNormal = -geomNormal;
+    }
 
     // ----------------------------------------------------------
     // 2b. Terrain Splat-Layer Blending (FLAG_TERRAIN = bit 16)
@@ -1427,6 +1434,8 @@ void main() {
     // Mode 2: No opacity_tex → mat.opacity for glass/transmission only
     // ----------------------------------------------------------------
     int opacityTexID = int(mat.opacity_tex);
+    float finalAlpha = mat.opacity;
+    
     if (opacityTexID > 0) {
         // --- MODE 1: Explicit opacity texture connected ---
         // Bit 8 of mat.flags is set by C++ if the opacity texture has RGBA alpha data.
@@ -1434,34 +1443,37 @@ void main() {
         // Bit 8 set   = RGBA texture with opacity in alpha → use A channel
         float maskValue;
         if ((mat.flags & 256u) != 0u) {
-            // RGBA opacity texture — opacity is stored in the alpha channel
             maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], hitUV).a;
         } else {
-            // Grayscale mask texture — opacity is luminance (R channel)
             maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], hitUV).r;
         }
-        if (maskValue < 0.5) {
-            // Transparent pixel — ray continues forward (no black spot)
-            payload.scatterOrigin = hitPos + rayDir * 1e-3;
+        finalAlpha *= maskValue;
+    }
+    
+    if (finalAlpha < 0.1) {
+        finalAlpha = 0.0;
+    }
+    
+    if (finalAlpha < 0.99) {
+        // Stochastic transparency matching OptiX `anyhit` implementation
+        float randVal = rnd(payload.seed);
+        if (randVal > finalAlpha) {
+            // Transparent pixel — ray continues forward cleanly.
+            // Push ray safely to the BACK side of the triangle using offset_ray.
+            // geomNormal already faces the incoming ray (due to flip earlier).
+            // So -geomNormal points to the other side of the surface.
+            payload.scatterOrigin = offset_ray(hitPos, -geomNormal);
             payload.scatterDir    = rayDir;
             payload.scattered     = true;
             return;
         }
-        // Opaque pixel — continue to shading normally
-    } else {
-        // --- MODE 2: mat.opacity slider (glass/transmission) ---
-        float matOpacity = mat.opacity;
-        if (matOpacity < 0.5) {
-            // Fully transparent material — ray passes through
-            payload.scatterOrigin = hitPos + rayDir * 1e-3;
-            payload.scatterDir    = rayDir;
-            payload.scattered     = true;
-            return;
-        }
-        // Semi-transparent → auto-convert to Principled Transmission (glass)
-        if (matOpacity < 0.99 && metallic < 0.1 && transmission < 0.01) {
-            transmission = 1.0 - matOpacity;
-        }
+    }
+    
+    // Opaque pixel — continue to shading normally
+    
+    // --- MODE 2: glass/transmission adjustment ---
+    if (mat.opacity < 0.99 && metallic < 0.1 && transmission < 0.01) {
+        transmission = 1.0 - mat.opacity;
     }
 
 
