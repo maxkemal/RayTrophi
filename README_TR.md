@@ -34,6 +34,20 @@
 
 ---
 
+## 📊 Proje İstatistikleri
+<!-- STATS_START -->
+| Metric | Value |
+| :--- | :--- |
+| **Files (Source)** | 249 |
+| **Lines of Code** | 136,184 |
+| **UI Control Points** | 1,015+ |
+| **Last Updated** | 2026-03-10 |
+<!-- STATS_END -->
+
+Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
+
+---
+
 
 
 ## ✨ Özellikler

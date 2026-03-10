@@ -314,7 +314,7 @@ void Triangle::apply_skinning(const std::vector<Matrix4x4>& finalBoneMatrices) {
         float invWeight = 1.0f / totalWeight;
 
         for (const auto& [boneIdx, weight] : boneWeights[vi]) {
-            if (boneIdx >= static_cast<int>(finalBoneMatrices.size()) || weight < 1e-7f) {
+            if (boneIdx < 0 || boneIdx >= static_cast<int>(finalBoneMatrices.size()) || weight < 1e-7f) {
                 continue;
             }
             
@@ -347,6 +347,10 @@ Vec3 Triangle::apply_bone_to_normal(const Vec3& originalNormal,
                                      const std::vector<Matrix4x4>& finalBoneMatrices) const {
     Vec3 blended = Vec3(0);
     for (const auto& [boneIdx, weight] : boneWeights) {
+        if (boneIdx < 0 || boneIdx >= static_cast<int>(finalBoneMatrices.size())) {
+            continue;
+        }
+
         Matrix4x4 normalMat = finalBoneMatrices[boneIdx].inverse().transpose();
         Vec3 transformed = normalMat.transform_vector(originalNormal);
         blended += transformed * weight;

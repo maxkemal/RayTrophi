@@ -1168,20 +1168,35 @@ int main(int argc, char* argv[]) try {
 	
     // Initialize OptiX
     bool ptx_exists = std::filesystem::exists("raygen.ptx");
-    if (splashOk) { 
+    if (splashOk && g_hasOptix) { 
         if (!ptx_exists) {
-            splash.setStatus("Compiling GPU Shaders (First time setup, please wait)...");
+            splash.beginBusyStatus("Compiling GPU Shaders (First time setup, please wait)...");
         } else if (!g_gpu_name.empty() && g_hasOptix) {
             // Blackwell (SM 10.0+) JIT can take several minutes on first run with OptiX 9.0
-            splash.setStatus("Initializing OptiX for " + g_gpu_name +
-                             " — JIT compile in progress, may take 1-3 minutes on first run...");
+            splash.beginBusyStatus("Initializing OptiX for " + g_gpu_name +
+                                   " - JIT compile in progress, may take 1-3 minutes on first run...");
         } else {
-            splash.setStatus("Initializing OptiX (One-time JIT compile, next starts will be fast)...");
+            splash.beginBusyStatus("Initializing OptiX (One-time JIT compile, next starts will be fast)...");
         }
-        splash.render(); 
     }
-    
-    if (initializeOptixIfAvailable()) {
+
+    bool optixInitialized = false;
+    if (g_hasOptix && splashOk) {
+        auto optixInitFuture = std::async(std::launch::async, []() {
+            return initializeOptixIfAvailable();
+        });
+
+        while (optixInitFuture.wait_for(std::chrono::milliseconds(16)) != std::future_status::ready) {
+            splash.tick();
+        }
+
+        optixInitialized = optixInitFuture.get();
+        splash.stopBusyStatus();
+    } else {
+        optixInitialized = initializeOptixIfAvailable();
+    }
+
+    if (optixInitialized) {
         SCENE_LOG_INFO("OptiX is ready!");
         
     if (g_backend) {
@@ -1287,15 +1302,7 @@ int main(int argc, char* argv[]) try {
         }
         g_backend->setLights(scene.lights);
         if (scene.camera) {
-            Backend::CameraParams cp;
-            cp.origin = scene.camera->lookfrom;
-            cp.lookAt = scene.camera->lookat;
-            cp.up = scene.camera->vup;
-            cp.fov = scene.camera->vfov;
-            cp.aperture = scene.camera->aperture;
-            cp.focusDistance = scene.camera->focus_dist;
-            cp.aspectRatio = scene.camera->aspect;
-            g_backend->setCamera(cp);
+            g_backend->syncCamera(*scene.camera);
         }
     }
     // Update initial camera vectors
@@ -3189,15 +3196,7 @@ int main(int argc, char* argv[]) try {
                 g_backend->updateInstanceTransforms(scene.world.objects);
                 g_backend->setLights(scene.lights);
                 if (scene.camera) {
-                    Backend::CameraParams cp;
-                    cp.origin = scene.camera->lookfrom;
-                    cp.lookAt = scene.camera->lookat;
-                    cp.up = scene.camera->vup;
-                    cp.fov = scene.camera->vfov;
-                    cp.aspectRatio = scene.camera->aspect_ratio;
-                    cp.aperture = scene.camera->aperture;
-                    cp.focusDistance = scene.camera->focus_dist;
-                    g_backend->setCamera(cp);
+                    g_backend->syncCamera(*scene.camera);
                 }
                 g_backend->resetAccumulation();
                 start_render = true;

@@ -123,6 +123,8 @@ AnimationClip* AnimationController::getClip(const std::string& name) {
 // ========================================================================
 
 void AnimationController::play(const std::string& clipName, float blendTime, int layer) {
+    if (layer < 0) return;
+
     // Ensure layer exists
     while (layers.size() <= static_cast<size_t>(layer)) {
         AnimationLayer newLayer;
@@ -172,6 +174,8 @@ void AnimationController::queue(const std::string& clipName, float blendTime, in
 }
 
 void AnimationController::queue(const AnimationQueueItem& item, int layer) {
+    if (layer < 0) return;
+
     while (layers.size() <= static_cast<size_t>(layer)) {
         AnimationLayer newLayer;
         newLayer.name = "Layer_" + std::to_string(layers.size());
@@ -183,6 +187,7 @@ void AnimationController::queue(const AnimationQueueItem& item, int layer) {
 }
 
 void AnimationController::stop(int layer, float blendOutTime) {
+    if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     
     // TODO: Implement blend out to bind pose
@@ -212,6 +217,7 @@ void AnimationController::setPaused(bool paused) {
 }
 
 void AnimationController::setTime(float time, int layer) {
+    if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     
     layers[layer].blendState.timeA = time;
@@ -223,6 +229,7 @@ void AnimationController::setSpeed(float speed, int layer) {
 }
 
 void AnimationController::setLoop(bool loop, int layer) {
+    if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     
     auto& state = layers[layer].blendState;
@@ -237,16 +244,19 @@ void AnimationController::setLoop(bool loop, int layer) {
 // ========================================================================
 
 void AnimationController::setLayerWeight(int layer, float weight) {
+    if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     layers[layer].weight = std::max(0.0f, std::min(1.0f, weight));
 }
 
 void AnimationController::setLayerBlendMode(int layer, BlendMode mode) {
+    if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     layers[layer].blendMode = mode;
 }
 
 void AnimationController::setLayerBoneMask(int layer, const std::vector<std::string>& bones) {
+    if (layer < 0) return;
     if (layer >= static_cast<int>(layers.size())) return;
     layers[layer].affectedBones = bones;
 }
@@ -770,21 +780,25 @@ void AnimationController::extractRootMotion(
 // ========================================================================
 
 bool AnimationController::isPlaying(int layer) const {
+    if (layer < 0) return false;
     if (layer >= static_cast<int>(layers.size())) return false;
     return layers[layer].blendState.clipA != nullptr;
 }
 
 bool AnimationController::isBlending(int layer) const {
+    if (layer < 0) return false;
     if (layer >= static_cast<int>(layers.size())) return false;
     return layers[layer].blendState.isBlending();
 }
 
 float AnimationController::getCurrentTime(int layer) const {
+    if (layer < 0) return 0.0f;
     if (layer >= static_cast<int>(layers.size())) return 0.0f;
     return layers[layer].blendState.timeA;
 }
 
 float AnimationController::getNormalizedTime(int layer) const {
+    if (layer < 0) return 0.0f;
     if (layer >= static_cast<int>(layers.size())) return 0.0f;
     
     const auto& state = layers[layer].blendState;
@@ -795,6 +809,7 @@ float AnimationController::getNormalizedTime(int layer) const {
 }
 
 const std::string& AnimationController::getCurrentClipName(int layer) const {
+    if (layer < 0) return emptyString;
     if (layer >= static_cast<int>(layers.size())) return emptyString;
     
     const auto& state = layers[layer].blendState;
