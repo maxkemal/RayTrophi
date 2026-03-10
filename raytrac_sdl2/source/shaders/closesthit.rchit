@@ -1378,6 +1378,8 @@ void main() {
             vec3  blendAlbedo    = vec3(0.0);
             float blendRoughness = 0.0;
             float blendMetallic  = 0.0;
+            float blendTransmission = 0.0;
+            float blendIor = 0.0;
             // [FIX] Accumulate per-layer normal maps in tangent space
             vec3  blendNormal_ts = vec3(0.0);  // weighted sum of tangent-space normals
             bool  anyNormalTex   = false;
@@ -1409,6 +1411,13 @@ void main() {
                 }
                 blendMetallic += weights[k] * lMetal;
 
+                float lTransmission = clamp(lm.transmission, 0.0, 1.0);
+                if (int(lm.transmission_tex) > 0) {
+                    lTransmission = texture(materialTextures[nonuniformEXT(int(lm.transmission_tex))], layerUV).r;
+                }
+                blendTransmission += weights[k] * lTransmission;
+                blendIor += weights[k] * max(lm.ior, 1.0);
+
                 // Layer normal map — blend tangent-space normals by weight.
                 // Keep channel orientation aligned with OptiX path (no ad-hoc X/Y flips).
                 // Layers without a normal map contribute a flat (0,0,1) tangent-space vector.
@@ -1431,10 +1440,13 @@ void main() {
             mat.albedo_b   = blendAlbedo.b;
             mat.roughness  = blendRoughness;
             mat.metallic   = blendMetallic;
+            mat.transmission = clamp(blendTransmission, 0.0, 1.0);
+            mat.ior = (blendIor > 0.01) ? blendIor : mat.ior;
             // Clear per-material texture slots — blending already resolved them above
             mat.albedo_tex    = 0u;
             mat.roughness_tex = 0u;
             mat.metallic_tex  = 0u;
+            mat.transmission_tex = 0u;
 
             // [FIX] Apply blended normal map to world-space normal immediately.
             // Set mat.normal_tex = 0 so the standard normal-map section below does nothing.

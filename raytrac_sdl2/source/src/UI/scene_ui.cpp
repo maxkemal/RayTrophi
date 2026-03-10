@@ -1014,6 +1014,17 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         UIWidgets::ColoredHeader("Final Render (F12)", ImVec4(0.7f, 0.7f, 0.7f, 1.0f));
                         ImGui::DragInt("Samples##final", &ctx.render_settings.final_render_samples, 1, 1, 100000);
                         ImGui::Checkbox("Apply Denoiser##final", &ctx.render_settings.render_use_denoiser);
+                        if (ctx.render_settings.render_use_denoiser) {
+                            const char* denoiser_mode_items[] = {
+                                "Fast: beauty only",
+                                "Quality: beauty + albedo + normal"
+                            };
+                            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
+                            if (ImGui::Combo("Denoiser Mode##final", &denoiser_mode, denoiser_mode_items,
+                                IM_ARRAYSIZE(denoiser_mode_items))) {
+                                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+                            }
+                        }
                         
                         UIWidgets::EndSection();
                     }

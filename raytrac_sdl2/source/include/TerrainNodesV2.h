@@ -203,7 +203,7 @@ namespace TerrainNodesV2 {
             result.semantic = NodeSystem::ImageSemantic::Mask;
             return result;
         }
-        
+
         // ========================================================================
         // SERIALIZATION
         // ========================================================================
@@ -621,7 +621,7 @@ namespace TerrainNodesV2 {
     class HydraulicErosionNode : public TerrainNodeBase {
     public:
         HydraulicErosionParams params;
-        bool useGPU = false;
+        bool useGPU = true;
         
         // Edge Falloff Settings
         float edgeFalloffWidth = 0.0f;
@@ -640,6 +640,8 @@ namespace TerrainNodesV2 {
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             
             metadata.displayName = "Hydraulic Erosion";
             metadata.category = "Erosion";
@@ -775,6 +777,8 @@ namespace TerrainNodesV2 {
             
             outputs.push_back(NodeSystem::Pin::createOutput(
                 "Height Out", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Height));
+            outputs.push_back(NodeSystem::Pin::createOutput(
+                "Erosion Map", NodeSystem::DataType::Image2D, NodeSystem::ImageSemantic::Mask));
             
             metadata.displayName = "Fluvial Erosion";
             metadata.category = "Erosion";
