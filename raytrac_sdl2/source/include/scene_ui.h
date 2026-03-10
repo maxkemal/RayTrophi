@@ -38,6 +38,7 @@ class GasVolume;
 #include <map>
 #include <set> // For lazy CPU sync
 #include <atomic> // For thread-safe flags
+#include <mutex>
 #include <string>
 #include <memory>
 #include <vector>
@@ -226,6 +227,8 @@ public:
     void performNewProject(UIContext& ctx);
     void performOpenProject(UIContext& ctx);
     void resetMaterialUI(); // Reset material editor state
+    void setSceneLoadingStage(const std::string& stage);
+    std::string getSceneLoadingStage() const;
     
     // Existing functions...
     void tryExit();
@@ -253,6 +256,7 @@ public:
      std::atomic<bool> scene_loading_done{false};
      std::atomic<int> scene_loading_progress{0};  // 0-100
      std::string scene_loading_stage = "";        // Current stage description
+     mutable std::mutex scene_loading_stage_mutex;
      
      // Viewport Display Settings (Blender-style overlay)
      struct ViewportDisplaySettings {

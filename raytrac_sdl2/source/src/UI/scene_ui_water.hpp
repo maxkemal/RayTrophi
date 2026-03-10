@@ -822,9 +822,9 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 
                 // Reset accumulation and sync GPU materials for real-time preview
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr) {
+                if (ctx.backend_ptr) {
                     ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.optix_gpu_ptr->resetAccumulation();
+                    ctx.backend_ptr->resetAccumulation();
                 }
             }
             
@@ -837,8 +837,10 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 WaterManager::getInstance().removeWaterSurface(ctx.scene, surf.id);
                 ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.optix_gpu_ptr && ctx.render_settings.use_optix) {
+                if (ctx.backend_ptr) {
                     ctx.renderer.rebuildBackendGeometry(ctx.scene);
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
                 }
                 selected_water_idx = -1;
             }

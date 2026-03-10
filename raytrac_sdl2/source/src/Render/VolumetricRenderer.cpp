@@ -381,7 +381,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
                 );
             }
 
-            if (!gv.temperature_grid && gv.density_grid && shader->emission.mode == VolumeEmissionMode::Blackbody) {
+            if (!gv.temperature_grid && gv.density_grid &&
+                (shader->emission.mode == VolumeEmissionMode::Blackbody ||
+                 shader->emission.mode == VolumeEmissionMode::ChannelDriven)) {
                 gv.temperature_grid = gv.density_grid;
             }
         }

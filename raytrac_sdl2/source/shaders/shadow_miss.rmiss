@@ -27,6 +27,10 @@ struct RayPayload {
     bool     scattered;
     bool     hitEmissive;
     uint     occluded;
+    bool     skipAABBs;
+    vec3     primaryAlbedo;
+    vec3     primaryNormal;
+    uint     primaryHit;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;

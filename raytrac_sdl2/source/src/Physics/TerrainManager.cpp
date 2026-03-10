@@ -3463,9 +3463,8 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     if (!cudaInitialized) {
         initCuda();
         if (!cudaInitialized) {
-            SCENE_LOG_ERROR("[GPU Erosion] CUDA not initialized, falling back to CPU or aborting.");
-            // Fallback?
-            // hydraulicErosion(terrain, params); 
+            SCENE_LOG_WARN("[GPU Erosion] CUDA not initialized. Falling back to CPU hydraulic erosion.");
+            hydraulicErosion(terrain, params, mask);
             return;
         }
     }
@@ -3478,7 +3477,8 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     CUdeviceptr d_heightmap;
     CUresult res = cuMemAlloc(&d_heightmap, mapSize);
     if (res != CUDA_SUCCESS) {
-        SCENE_LOG_ERROR("[GPU Erosion] Memory Allocation Failed");
+        SCENE_LOG_WARN("[GPU Erosion] Memory allocation failed. Falling back to CPU.");
+        hydraulicErosion(terrain, params, mask);
         return;
     }
     
@@ -3486,7 +3486,8 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     res = cuMemcpyHtoD(d_heightmap, terrain->heightmap.data.data(), mapSize);
     if (res != CUDA_SUCCESS) {
         cuMemFree(d_heightmap);
-        SCENE_LOG_ERROR("[GPU Erosion] HtoD Copy Failed");
+        SCENE_LOG_WARN("[GPU Erosion] HtoD copy failed. Falling back to CPU.");
+        hydraulicErosion(terrain, params, mask);
         return;
     }
     
@@ -3539,6 +3540,7 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
         if (res != CUDA_SUCCESS) {
             SCENE_LOG_ERROR("[GPU Erosion] Launch Failed at droplet " + std::to_string(dropletsProcessed) + ": Error " + std::to_string(res));
             cuMemFree(d_heightmap);
+            hydraulicErosion(terrain, params, mask);
             return;
         }
         
@@ -3635,7 +3637,11 @@ void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalEros
     
     if (!cudaInitialized) {
         initCuda();
-        if (!cudaInitialized) return;
+        if (!cudaInitialized) {
+            SCENE_LOG_WARN("[GPU Thermal] CUDA not initialized. Falling back to CPU thermal erosion.");
+            thermalErosion(terrain, p, mask);
+            return;
+        }
     }
     
     int w = terrain->heightmap.width;
@@ -3646,7 +3652,8 @@ void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalEros
     CUdeviceptr d_heightmap;
     CUresult res = cuMemAlloc(&d_heightmap, mapSize);
     if (res != CUDA_SUCCESS) {
-        SCENE_LOG_ERROR("[GPU Thermal] Alloc Failed");
+        SCENE_LOG_WARN("[GPU Thermal] Allocation failed. Falling back to CPU.");
+        thermalErosion(terrain, p, mask);
         return;
     }
     
@@ -3734,7 +3741,14 @@ void TerrainManager::thermalErosionGPU(TerrainObject* terrain, const ThermalEros
 
 void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {
     if (!terrain) return;
-    if (!cudaInitialized) { initCuda(); if (!cudaInitialized) return; }
+    if (!cudaInitialized) {
+        initCuda();
+        if (!cudaInitialized) {
+            SCENE_LOG_WARN("[GPU Fluvial] CUDA not initialized. Falling back to CPU fluvial erosion.");
+            fluvialErosion(terrain, p, mask);
+            return;
+        }
+    }
     
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
@@ -3863,7 +3877,14 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
 
 void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, float direction, int iterations, const std::vector<float>& mask) {
     if (!terrain) return;
-    if (!cudaInitialized) { initCuda(); if (!cudaInitialized) return; }
+    if (!cudaInitialized) {
+        initCuda();
+        if (!cudaInitialized) {
+            SCENE_LOG_WARN("[GPU Wind] CUDA not initialized. Falling back to CPU wind erosion.");
+            windErosion(terrain, strength, direction, iterations, mask);
+            return;
+        }
+    }
     
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
@@ -3873,7 +3894,8 @@ void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, floa
     CUdeviceptr d_heightmap;
     CUresult res = cuMemAlloc(&d_heightmap, mapSize);
     if (res != CUDA_SUCCESS) {
-        SCENE_LOG_ERROR("[GPU Wind] Alloc Failed");
+        SCENE_LOG_WARN("[GPU Wind] Allocation failed. Falling back to CPU.");
+        windErosion(terrain, strength, direction, iterations, mask);
         return;
     }
     

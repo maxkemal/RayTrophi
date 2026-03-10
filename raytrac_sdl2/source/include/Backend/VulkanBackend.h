@@ -489,7 +489,10 @@ public:
     /**
      * @brief Bind RT descriptors (output image + TLAS)
      */
-    void bindRTDescriptors(const ImageHandle& outputImage);
+    void bindRTDescriptors(const ImageHandle& outputImage,
+                           const ImageHandle* denoiserColorImage = nullptr,
+                           const ImageHandle* denoiserAlbedoImage = nullptr,
+                           const ImageHandle* denoiserNormalImage = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
     
@@ -574,6 +577,8 @@ public:
     void updateVolumeBuffer(const void* data, uint64_t size, uint32_t count);
     void updateTerrainLayerBuffer(const void* data, uint64_t size, uint32_t count);
     void updateAtmosphereLUTs(const ImageHandle* lutImages);  // uint256_t array of 4 LUT textures
+    void clearPendingRTTextureDescriptors();
+    void removePendingRTTextureDescriptor(const ImageHandle& image);
     
     // RT Resources (SSBOs)
     VulkanRT::BufferHandle m_materialBuffer;
@@ -596,6 +601,8 @@ public:
     std::vector<AccelStructHandle> m_blasList;
     // Pending texture descriptor updates (slot -> ImageHandle) queued until RT descriptor set exists
     std::vector<std::pair<uint32_t, ImageHandle>> m_pendingTextureDescriptors;
+    // Guards m_pendingTextureDescriptors and m_rtDescriptorSet access during async uploads/switch.
+    mutable std::mutex m_rtDescriptorMutex;
     // Extension function pointers (loaded dynamically per-device)
     PFN_vkCreateAccelerationStructureKHR fpCreateAccelerationStructureKHR = nullptr;
     PFN_vkDestroyAccelerationStructureKHR fpDestroyAccelerationStructureKHR = nullptr;
@@ -759,7 +766,7 @@ public:
     // ========================================================================
     uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
-    void clearHairGeometry();
+    void clearHairGeometry(bool rebuild_tlas = true);
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;
     void showAllInstances() override;
@@ -796,6 +803,7 @@ public:
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,
                            int width, int height, void* outFramebuffer, void* outTexture) override;
     void downloadImage(void* outPixels) override;
+    bool getDenoiserFrame(DenoiserFrameData& frame) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;
 
@@ -831,6 +839,8 @@ public:
     void uploadAtmosphereLUT(const AtmosphereLUT* lut);
 
 private:
+    void purgeUploadedTextureCacheLocked();
+
     std::unique_ptr<VulkanRT::VulkanDevice> m_device;
     
     // Render state
@@ -845,9 +855,18 @@ private:
     float m_varianceThreshold = 0.05f;
     int m_maxBounces = 12;
     std::vector<float> m_hdrPixels;   // Float32 HDR readback buffer — her frame realloc önler
+    std::vector<float> m_denoiserColorPixels;
+    std::vector<float> m_denoiserAlbedoPixels;
+    std::vector<float> m_denoiserNormalPixels;
     // Output resources
     VulkanRT::ImageHandle m_outputImage;
     VulkanRT::BufferHandle m_stagingBuffer;
+    VulkanRT::ImageHandle m_denoiserColorImage;
+    VulkanRT::ImageHandle m_denoiserAlbedoImage;
+    VulkanRT::ImageHandle m_denoiserNormalImage;
+    VulkanRT::BufferHandle m_denoiserColorStagingBuffer;
+    VulkanRT::BufferHandle m_denoiserAlbedoStagingBuffer;
+    VulkanRT::BufferHandle m_denoiserNormalStagingBuffer;
     
     // Status callback
     std::function<void(const std::string&, int)> m_statusCallback;

@@ -75,6 +75,7 @@ layout(location = 1) rayPayloadInEXT bool shadowOccluded;
 hitAttributeEXT vec2 baryCoord;
 
 layout(buffer_reference, scalar) readonly buffer MaterialIndexBuffer { uint m[]; };
+const float ALPHA_SHADOW_NEAR_IGNORE_T = 2e-3;
 
 void main() {
     VkInstanceData inst = instances.i[gl_InstanceID];
@@ -113,6 +114,21 @@ void main() {
 
     int opacityTexID = int(mat.opacity_tex);
     if (opacityTexID > 0) {
+        // Alpha-card style geometry (eyelashes/foliage) often causes contact darkening
+        // when the shadow ray first touches the back face of a near-coplanar card.
+        if (gl_HitKindEXT == gl_HitKindBackFacingTriangleEXT) {
+            ignoreIntersectionEXT;
+            return;
+        }
+
+        // Alpha cards very close to the receiver (e.g. eyelashes touching eyelid)
+        // can produce hard black seams due to near-hit self/adjacent occlusion.
+        // Ignore only extremely near intersections for opacity-textured materials.
+        if (gl_HitTEXT <= ALPHA_SHADOW_NEAR_IGNORE_T) {
+            ignoreIntersectionEXT;
+            return;
+        }
+
         // Use LOD 0 explicitly — ray tracing has no implicit derivatives.
         // Without this, thin features (eyelashes, foliage) blur to grey at higher LODs
         // and produce incorrect partial shadows where the area should be fully transparent.

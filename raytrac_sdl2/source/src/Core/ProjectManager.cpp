@@ -470,6 +470,7 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     bool was_optix = render_settings.use_optix;
     bool was_vulkan = render_settings.use_vulkan;
     bool was_denoiser = render_settings.use_denoiser;
+    DenoiserMode was_denoiser_mode = render_settings.denoiser_mode;
     
     render_settings = RenderSettings(); // Default constructor resets to defaults
     
@@ -477,6 +478,7 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     render_settings.use_optix = was_optix;
     render_settings.use_vulkan = was_vulkan;
     render_settings.use_denoiser = was_denoiser;
+    render_settings.denoiser_mode = was_denoiser_mode;
 
     renderer.world.reset();             // Reset Atmosphere/Godrays
     
@@ -488,6 +490,11 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     InstanceManager::getInstance().clearAll();  // Clear foliage/scatter instances 
     VDBVolumeManager::getInstance().unloadAll(); // Clear VDB/Gas GPU handles and reset IDs
     renderer.getHairSystem().clearAll();        // Clear all hair grooms
+
+    // Ensure scene containers are empty before backend geometry rebuild.
+    // This guarantees "empty scene" cleanup path and prevents stale instance carryover.
+    scene.clear();
+
     renderer.uploadHairToGPU();                 // Sync GPU (clear it)
 
     // 4. CRITICAL: Rebuild OptiX geometry for the empty scene.
@@ -1348,10 +1355,10 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     // Backend can be switched/destroyed concurrently (e.g. project requests different engine),
     // causing null/dangling backend access. Main thread performs deferred full GPU sync.
     
-    g_needs_geometry_rebuild = true;
+    g_needs_geometry_rebuild.store(true);
     // IMPORTANT: Must be true so main-thread scene-load finalization performs full backend sync.
     // Otherwise GPU backend may keep stale scene state until a manual backend toggle occurs.
-    g_needs_optix_sync = true;
+    g_needs_optix_sync.store(true);
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
@@ -2109,6 +2116,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["use_embree"] = settings.UI_use_embree;
     j["use_denoiser"] = settings.use_denoiser;
     j["render_use_denoiser"] = settings.render_use_denoiser;
+    j["denoiser_mode"] = static_cast<int>(settings.denoiser_mode);
     j["max_samples"] = settings.max_samples;
     j["min_samples"] = settings.min_samples;
     j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
@@ -2151,6 +2159,7 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.UI_use_embree = j.value("use_embree", true);
     settings.use_denoiser = j.value("use_denoiser", false);
     settings.render_use_denoiser = j.value("render_use_denoiser", true);
+    settings.denoiser_mode = static_cast<DenoiserMode>(j.value("denoiser_mode", static_cast<int>(DenoiserMode::Quality)));
     settings.max_samples = j.value("max_samples", 32);
     settings.min_samples = j.value("min_samples", 1);
     settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);

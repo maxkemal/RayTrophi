@@ -405,9 +405,24 @@ extern "C" __global__ void __closesthit__ch() {
     }
 
     // 8. Pack Payload
+    float3 primary_albedo = make_float3(0.8f, 0.8f, 0.8f);
+    if (payload->use_blended_data) {
+        primary_albedo = payload->blended_albedo;
+    } else if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+        const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
+        primary_albedo = mat.albedo;
+        if (hgd->has_albedo_tex) {
+            float4 c = tex2D<float4>(hgd->albedo_tex, uv.x, uv.y);
+            primary_albedo = make_float3(c.x, c.y, c.z);
+        }
+    }
+
     payload->hit = 1;
     payload->position = hitPoint;
     payload->normal = final_normal;
+    payload->primary_albedo = primary_albedo;
+    payload->primary_normal = final_normal;
+    payload->primary_hit = hgd->is_volumetric ? 0 : 1;
     payload->material_id = hgd->material_id;
     payload->uv = uv;
     
@@ -727,6 +742,9 @@ extern "C" __global__ void __closesthit__hair() {
     payload->t = t;
     payload->position = hit_point;
     payload->normal = normal;
+    payload->primary_albedo = hair_color;
+    payload->primary_normal = normal;
+    payload->primary_hit = 1;
     payload->color = result_color;
     payload->emission = hair_mat_final.emission * hair_mat_final.emissionStrength;
     payload->albedo = hair_color;

@@ -57,6 +57,7 @@ public:
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer, 
                            int width, int height, void* outFramebuffer, void* outTexture) override;
     void downloadImage(void* outPixels) override;
+    bool getDenoiserFrame(DenoiserFrameData& frame) override;
     int getCurrentSampleCount() const override;
     bool isAccumulationComplete() const override;
 

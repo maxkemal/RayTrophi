@@ -90,10 +90,21 @@ struct UIContext;
 
 class Renderer {
 public:
+    struct OIDNFrameData {
+        int width = 0;
+        int height = 0;
+        const float* color = nullptr;
+        const float* albedo = nullptr;
+        const float* normal = nullptr;
+    };
 
     static bool isCudaAvailable();
 
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
+    bool applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output);
+    bool applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliary = true);
+    bool hasCPUDenoisedBuffer() const;
+    void invalidateCPUDenoisedBuffer();
 
     Renderer(int image_width, int image_height, int max_depth, int samples_per_pixel);
     void resetResolution(int w, int h);
@@ -242,7 +253,8 @@ private:
 
     void apply_normal_map( HitRecord& rec);
   
-    Vec3 ray_color(const Ray& r, const   Hittable* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int depth, int sample_index, const SceneData& scene);
+    Vec3 ray_color(const Ray& r, const   Hittable* bvh, const std::vector<std::shared_ptr<Light>>& lights, const Vec3& background_color, int depth, int sample_index, const SceneData& scene,
+        Vec3* primary_albedo = nullptr, Vec3* primary_normal = nullptr, bool* primary_hit = nullptr);
     float radical_inverse(unsigned int bits);
     // God Rays (CPU) - Moved to VolumetricRenderer
 
@@ -270,11 +282,15 @@ private:
     // OIDN Buffer Cache - performans optimizasyonu
     // Boyut değişmedikçe buffer'lar yeniden kullanılır
     oidn::BufferRef oidnColorBuffer;
+    oidn::BufferRef oidnAlbedoBuffer;
+    oidn::BufferRef oidnNormalBuffer;
     oidn::BufferRef oidnOutputBuffer;
     std::vector<float> oidnColorData;      // CPU tarafı color buffer cache
     std::vector<float> oidnOriginalData;   // Original pixel cache (blend için, double-read eliminasyonu)
     int oidnCachedWidth = 0;
     int oidnCachedHeight = 0;
+    bool oidnUsingAlbedo = false;
+    bool oidnUsingNormal = false;
 
     void initOIDN(); // Helper to init device
     float lastAnimationUpdateTime = -1.0f; // Track animation time
@@ -294,9 +310,13 @@ public:
     
     // Accumulation state
     std::vector<Vec4> cpu_accumulation_buffer;
+    std::vector<Vec4> cpu_albedo_accumulation_buffer;
+    std::vector<Vec4> cpu_normal_accumulation_buffer;
     int cpu_accumulated_samples = 0;
     uint64_t cpu_last_camera_hash = 0;
     bool cpu_accumulation_valid = false;
+    std::vector<float> cpu_denoised_buffer;   // Top-down linear RGB, optional OIDN output for display
+    bool cpu_denoised_valid = false;
     
     // Variance buffer for adaptive sampling (tracks per-pixel noise level)
     std::vector<float> cpu_variance_buffer;

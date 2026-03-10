@@ -53,6 +53,9 @@ struct RayPayload {
     bool  hitEmissive;
     uint  occluded;
     bool  skipAABBs;    // set by volume_closesthit when a solid surface is found inside
+    vec3  primaryAlbedo;
+    vec3  primaryNormal;
+    uint  primaryHit;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -462,8 +465,33 @@ void main()
 
     // Material lookup
     uint segIdx = uint(gl_PrimitiveID);
+    uint segCount = hairSegs.length();
+    if (segIdx >= segCount) {
+        payload.radiance      = vec3(0.0);
+        payload.attenuation   = vec3(0.0);
+        payload.scatterOrigin = hitPoint;
+        payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
+        payload.scattered     = false;
+        payload.hitEmissive   = false;
+        payload.occluded      = 0u;
+        payload.skipAABBs     = false;
+        return;
+    }
     HairSegmentGPU seg = hairSegs[segIdx];
     uint matID  = seg.materialID;
+    uint matCount = hairMats.length();
+    if (matCount == 0u) {
+        payload.radiance      = vec3(0.0);
+        payload.attenuation   = vec3(0.0);
+        payload.scatterOrigin = hitPoint;
+        payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
+        payload.scattered     = false;
+        payload.hitEmissive   = false;
+        payload.occluded      = 0u;
+        payload.skipAABBs     = false;
+        return;
+    }
+    if (matID >= matCount) matID = 0u;
     HairGpuMaterial mat = hairMats[matID];
 
     // ─── Per-strand Randomization ─────────────────────────────────────────
@@ -558,10 +586,19 @@ void main()
     // Exposure
     radiance *= cam.exposure_factor;
 
+    if (payload.primaryHit == 0u) {
+        payload.primaryAlbedo = hairColor;
+        payload.primaryNormal = normal;
+        payload.primaryHit = 1u;
+    }
+
     // Payload
     payload.radiance    = radiance;
     payload.attenuation = vec3(0.0);
+    payload.scatterOrigin = offset_ray(hitPoint, normal);
+    payload.scatterDir    = normalize(gl_WorldRayDirectionEXT);
     payload.scattered   = false;
     payload.hitEmissive = false;
     payload.occluded    = 0u;
+    payload.skipAABBs   = false;
 }

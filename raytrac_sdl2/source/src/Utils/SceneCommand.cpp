@@ -241,22 +241,33 @@ void TransformCommand::applyState(UIContext& ctx, const TransformState& state) {
     if (found) {
         // TLAS MODE: Fast instance transform update (no BLAS rebuild!)
         if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-            // Convert Matrix4x4 to 3x4 row-major float array
-            float t[12];
-            t[0] = state.matrix.m[0][0]; t[1] = state.matrix.m[0][1]; t[2] = state.matrix.m[0][2]; t[3] = state.matrix.m[0][3];
-            t[4] = state.matrix.m[1][0]; t[5] = state.matrix.m[1][1]; t[6] = state.matrix.m[1][2]; t[7] = state.matrix.m[1][3];
-            t[8] = state.matrix.m[2][0]; t[9] = state.matrix.m[2][1]; t[10] = state.matrix.m[2][2]; t[11] = state.matrix.m[2][3];
-            
-            // Update all instances matching this object name
-            std::vector<int> inst_ids = ctx.backend_ptr->getInstancesByNodeName(object_name_);
-            for (int inst_id : inst_ids) {
-                ctx.backend_ptr->updateInstanceTransform(inst_id, t);
+            if (isVulkanBackend(ctx.backend_ptr)) {
+                // CRITICAL INVARIANT (Vulkan Undo/Redo):
+                // Use updateObjectTransform() here. Do not redirect transform-only undo/redo
+                // through full scene rebuild paths. That reintroduces frozen viewport /
+                // ghosting issues until backend switch.
+                ctx.backend_ptr->updateObjectTransform(object_name_, state.matrix);
+                ctx.backend_ptr->resetAccumulation();
+                extern bool g_cpu_sync_pending;
+                g_cpu_sync_pending = true;
+            } else {
+                // Convert Matrix4x4 to 3x4 row-major float array
+                float t[12];
+                t[0] = state.matrix.m[0][0]; t[1] = state.matrix.m[0][1]; t[2] = state.matrix.m[0][2]; t[3] = state.matrix.m[0][3];
+                t[4] = state.matrix.m[1][0]; t[5] = state.matrix.m[1][1]; t[6] = state.matrix.m[1][2]; t[7] = state.matrix.m[1][3];
+                t[8] = state.matrix.m[2][0]; t[9] = state.matrix.m[2][1]; t[10] = state.matrix.m[2][2]; t[11] = state.matrix.m[2][3];
+                
+                // Update all instances matching this object name
+                std::vector<int> inst_ids = ctx.backend_ptr->getInstancesByNodeName(object_name_);
+                for (int inst_id : inst_ids) {
+                    ctx.backend_ptr->updateInstanceTransform(inst_id, t);
+                }
+                ctx.backend_ptr->rebuildAccelerationStructure();  // Fast TLAS update
+                ctx.backend_ptr->resetAccumulation();
+                // Mark CPU data as needing sync when switching to CPU mode
+                extern bool g_cpu_sync_pending;
+                g_cpu_sync_pending = true;
             }
-            ctx.backend_ptr->rebuildAccelerationStructure();  // Fast TLAS update
-            ctx.backend_ptr->resetAccumulation();
-            // Mark CPU data as needing sync when switching to CPU mode
-            extern bool g_cpu_sync_pending;
-            g_cpu_sync_pending = true;
         } else if (ctx.backend_ptr) {
             // GAS MODE: Defer to async handler
             extern bool g_gpu_refit_pending;

@@ -3,6 +3,11 @@
 
 
 void SceneHistory::record(std::unique_ptr<SceneCommand> command) {
+    if (!command) {
+        SCENE_LOG_WARN("History: Ignored null command.");
+        return;
+    }
+
     // Clear redo stack (new action invalidates redo)
     redo_stack_.clear();
     
@@ -12,7 +17,7 @@ void SceneHistory::record(std::unique_ptr<SceneCommand> command) {
     // Limit Configuration
     const size_t LIMIT_HEAVY = 5;      // Delete, Duplicate
     const size_t LIMIT_TRANSFORM = 20; // Move, Rotate, Scale
-    const size_t LIMIT_GLOBAL = 50;    // Safety cap
+    const size_t LIMIT_GLOBAL = (max_history_ > 0) ? max_history_ : 50; // Safety cap
     
     // 1. Enforce Type Specific Limits
     {

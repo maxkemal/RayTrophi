@@ -13,6 +13,7 @@
 #include <future>
 #include <thread>
 #include <functional>
+#include <atomic>
 #include <vector_types.h>  // CUDA float4, float3 types for hair GPU upload
 #include "Hair/HairBSDF.h"
 
@@ -99,123 +100,43 @@ void Renderer::initOIDN() {
 
 void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend) {
     if (!surface) return;
-    std::lock_guard<std::mutex> lock(oidnMutex);
+    std::vector<float> linearColor;
+    linearColor.resize((size_t)surface->w * (size_t)surface->h * 3);
 
-    if (!oidnInitialized) {
-        initOIDN();
-        if (!oidnInitialized) return;
-    }
-
-    int width = surface->w;
-    int height = surface->h;
-    size_t pixelCount = (size_t)width * height;
-    size_t bufferSize = pixelCount * 3;  // Float3
-
-    bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
-    if (sizeChanged) {
-        oidnColorData.resize(bufferSize);
-        oidnOriginalData.resize(bufferSize);
-
-        try {
-            // Buffer'ları device'a göre oluştur
-            // CUDA device'da newBuffer → GPU memory
-            // CPU device'da newBuffer  → CPU memory
-            oidnColorBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
-            oidnOutputBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
-
-            oidnFilter = oidnDevice.newFilter("RT");
-            oidnFilter.setImage("color", oidnColorBuffer,
-                oidn::Format::Float3, width, height);
-            oidnFilter.setImage("output", oidnOutputBuffer,
-                oidn::Format::Float3, width, height);
-
-            // HDR: Vulkan'dan gelen veri linear float — hdr:true olmalı
-            // srgb: false — tonemap/gamma SDL'e yazarken biz yapıyoruz
-            oidnFilter.set("hdr", true);
-            oidnFilter.set("srgb", false);
-            oidnFilter.commit();
-
-            oidnCachedWidth = width;
-            oidnCachedHeight = height;
-        }
-        catch (const std::exception& e) {
-            SCENE_LOG_ERROR(std::string("[OIDN] Buffer creation failed: ") + e.what());
-            return;
-        }
-    }
-
-    // ===========================================================================
-    // SDL surface → OIDN input
-    // Eğer Vulkan buffer'ı direkt expose edilebilirse bu kısım tamamen kalkar
-    // Şimdilik: CPU'da float dönüşümü → buffer write
-    // ===========================================================================
     const SDL_PixelFormat* fmt = surface->format;
     Uint32* pixels = static_cast<Uint32*>(surface->pixels);
     const float inv255 = 1.0f / 255.0f;
-    const float blend_inv = 1.0f - blend;
 
-    // Pixel okuma + linear'e çevir
-    // sRGB → linear: OIDN HDR mode linear input bekliyor
-    // Eğer SDL surface zaten gamma corrected (8bit sRGB) ise düzeltmemiz lazım
-    for (size_t i = 0; i < pixelCount; ++i) {
-        Uint32 pixel = pixels[i];
-        float r = ((pixel & fmt->Rmask) >> fmt->Rshift) * inv255;
-        float g = ((pixel & fmt->Gmask) >> fmt->Gshift) * inv255;
-        float b = ((pixel & fmt->Bmask) >> fmt->Bshift) * inv255;
+    for (int y = 0; y < surface->h; ++y) {
+        for (int x = 0; x < surface->w; ++x) {
+            const size_t pixelIndex = (size_t)y * (size_t)surface->w + (size_t)x;
+            Uint32 pixel = pixels[pixelIndex];
+            float r = ((pixel & fmt->Rmask) >> fmt->Rshift) * inv255;
+            float g = ((pixel & fmt->Gmask) >> fmt->Gshift) * inv255;
+            float b = ((pixel & fmt->Bmask) >> fmt->Bshift) * inv255;
 
-        // sRGB → linear (OIDN HDR mode için gerekli)
-        // Yaklaşık: pow(x, 2.2) yerine hızlı versiyon
-        r = r * r;
-        g = g * g;
-        b = b * b;
-
-        size_t idx = i * 3;
-        oidnColorData[idx] = r;
-        oidnColorData[idx + 1] = g;
-        oidnColorData[idx + 2] = b;
-        oidnOriginalData[idx] = r;
-        oidnOriginalData[idx + 1] = g;
-        oidnOriginalData[idx + 2] = b;
-    }
-
-    try {
-        oidnColorBuffer.write(0, bufferSize * sizeof(float), oidnColorData.data());
-        oidnFilter.execute();
-
-        const char* errMsg;
-        if (oidnDevice.getError(errMsg) != oidn::Error::None) {
-            SCENE_LOG_ERROR(std::string("[OIDN] ") + errMsg);
-            return;
+            const size_t idx = pixelIndex * 3;
+            linearColor[idx] = r * r;
+            linearColor[idx + 1] = g * g;
+            linearColor[idx + 2] = b * b;
         }
-
-        oidnOutputBuffer.read(0, bufferSize * sizeof(float), oidnColorData.data());
     }
-    catch (const std::exception& e) {
-        SCENE_LOG_ERROR(std::string("[OIDN] Execution failed: ") + e.what());
+
+    OIDNFrameData frame;
+    frame.width = surface->w;
+    frame.height = surface->h;
+    frame.color = linearColor.data();
+
+    std::vector<float> denoised;
+    if (!applyOIDNDenoising(frame, blend, denoised)) {
         return;
     }
 
-    // ===========================================================================
-    // Blend + write back — linear → sRGB + tonemap
-    // ===========================================================================
-    for (size_t i = 0; i < pixelCount; ++i) {
-        size_t idx = i * 3;
-
-        float r = oidnColorData[idx];
-        float g = oidnColorData[idx + 1];
-        float b = oidnColorData[idx + 2];
-
-        // Blend (düşük sample'larda denoised ile original karıştır)
-        if (blend < 0.999f) {
-            r = r * blend + oidnOriginalData[idx] * blend_inv;
-            g = g * blend + oidnOriginalData[idx + 1] * blend_inv;
-            b = b * blend + oidnOriginalData[idx + 2] * blend_inv;
-        }
-
-        // Linear → sRGB (sqrt yaklaşımı, pow(x, 1/2.2) yerine)
-        r = sqrtf(std::max(r, 0.0f));
-        g = sqrtf(std::max(g, 0.0f));
-        b = sqrtf(std::max(b, 0.0f));
+    for (size_t i = 0, pixelCount = (size_t)surface->w * (size_t)surface->h; i < pixelCount; ++i) {
+        const size_t idx = i * 3;
+        float r = std::max(denoised[idx], 0.0f);
+        float g = std::max(denoised[idx + 1], 0.0f);
+        float b = std::max(denoised[idx + 2], 0.0f);
 
         Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
         Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
@@ -227,6 +148,179 @@ void Renderer::applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool den
             | ((Uint32)gi << fmt->Gshift)
             | ((Uint32)bi << fmt->Bshift);
     }
+}
+
+bool Renderer::applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output) {
+    if (!frame.color || frame.width <= 0 || frame.height <= 0) return false;
+    std::lock_guard<std::mutex> lock(oidnMutex);
+
+    if (!oidnInitialized) {
+        initOIDN();
+        if (!oidnInitialized) return false;
+    }
+
+    const int width = frame.width;
+    const int height = frame.height;
+    size_t pixelCount = (size_t)width * height;
+    size_t bufferSize = pixelCount * 3;  // Float3
+    const bool useAlbedo = frame.albedo != nullptr;
+    const bool useNormal = frame.normal != nullptr;
+    const bool filterLayoutChanged =
+        (useAlbedo != oidnUsingAlbedo) ||
+        (useNormal != oidnUsingNormal);
+    bool sizeChanged = (width != oidnCachedWidth || height != oidnCachedHeight);
+    if (sizeChanged || filterLayoutChanged) {
+        oidnColorData.resize(bufferSize);
+        oidnOriginalData.resize(bufferSize);
+        output.resize(bufferSize);
+
+        try {
+            oidnColorBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
+            oidnAlbedoBuffer = useAlbedo ? oidnDevice.newBuffer(bufferSize * sizeof(float)) : oidn::BufferRef();
+            oidnNormalBuffer = useNormal ? oidnDevice.newBuffer(bufferSize * sizeof(float)) : oidn::BufferRef();
+            oidnOutputBuffer = oidnDevice.newBuffer(bufferSize * sizeof(float));
+
+            oidnFilter = oidnDevice.newFilter("RT");
+            oidnFilter.setImage("color", oidnColorBuffer,
+                oidn::Format::Float3, width, height);
+            if (useAlbedo) {
+                oidnFilter.setImage("albedo", oidnAlbedoBuffer,
+                    oidn::Format::Float3, width, height);
+            }
+            if (useNormal) {
+                oidnFilter.setImage("normal", oidnNormalBuffer,
+                    oidn::Format::Float3, width, height);
+            }
+            oidnFilter.setImage("output", oidnOutputBuffer,
+                oidn::Format::Float3, width, height);
+            oidnFilter.set("hdr", true);
+            oidnFilter.set("srgb", false);
+            oidnFilter.commit();
+
+            oidnCachedWidth = width;
+            oidnCachedHeight = height;
+            oidnUsingAlbedo = useAlbedo;
+            oidnUsingNormal = useNormal;
+        }
+        catch (const std::exception& e) {
+            SCENE_LOG_ERROR(std::string("[OIDN] Buffer creation failed: ") + e.what());
+            return false;
+        }
+    }
+
+    output.resize(bufferSize);
+    const float blend_inv = 1.0f - blend;
+
+    for (size_t i = 0; i < pixelCount; ++i) {
+        size_t idx = i * 3;
+        oidnColorData[idx] = frame.color[idx];
+        oidnColorData[idx + 1] = frame.color[idx + 1];
+        oidnColorData[idx + 2] = frame.color[idx + 2];
+        oidnOriginalData[idx] = frame.color[idx];
+        oidnOriginalData[idx + 1] = frame.color[idx + 1];
+        oidnOriginalData[idx + 2] = frame.color[idx + 2];
+    }
+
+    try {
+        oidnColorBuffer.write(0, bufferSize * sizeof(float), oidnColorData.data());
+        if (useAlbedo) {
+            oidnAlbedoBuffer.write(0, bufferSize * sizeof(float), frame.albedo);
+        }
+        if (useNormal) {
+            oidnNormalBuffer.write(0, bufferSize * sizeof(float), frame.normal);
+        }
+        oidnFilter.execute();
+
+        const char* errMsg;
+        if (oidnDevice.getError(errMsg) != oidn::Error::None) {
+            SCENE_LOG_ERROR(std::string("[OIDN] ") + errMsg);
+            return false;
+        }
+
+        oidnOutputBuffer.read(0, bufferSize * sizeof(float), oidnColorData.data());
+    }
+    catch (const std::exception& e) {
+        SCENE_LOG_ERROR(std::string("[OIDN] Execution failed: ") + e.what());
+        return false;
+    }
+
+    for (size_t i = 0; i < pixelCount; ++i) {
+        size_t idx = i * 3;
+
+        float r = oidnColorData[idx];
+        float g = oidnColorData[idx + 1];
+        float b = oidnColorData[idx + 2];
+
+        if (blend < 0.999f) {
+            r = r * blend + oidnOriginalData[idx] * blend_inv;
+            g = g * blend + oidnOriginalData[idx + 1] * blend_inv;
+            b = b * blend + oidnOriginalData[idx + 2] * blend_inv;
+        }
+
+        output[idx] = r;
+        output[idx + 1] = g;
+        output[idx + 2] = b;
+    }
+
+    return true;
+}
+
+bool Renderer::applyOIDNDenoisingToCPUAccumulation(float blend, bool useAuxiliary) {
+    const size_t pixelCount = (size_t)image_width * (size_t)image_height;
+    if (!cpu_accumulation_valid || cpu_accumulation_buffer.size() != pixelCount || pixelCount == 0) {
+        cpu_denoised_valid = false;
+        return false;
+    }
+
+    std::vector<float> linearColor(pixelCount * 3);
+    std::vector<float> linearAlbedo;
+    std::vector<float> linearNormal;
+    const bool hasAlbedo = useAuxiliary && cpu_albedo_accumulation_buffer.size() == pixelCount;
+    const bool hasNormal = useAuxiliary && cpu_normal_accumulation_buffer.size() == pixelCount;
+    if (hasAlbedo) linearAlbedo.resize(pixelCount * 3);
+    if (hasNormal) linearNormal.resize(pixelCount * 3);
+
+    for (int y = 0; y < image_height; ++y) {
+        const int bufferY = image_height - 1 - y;
+        for (int x = 0; x < image_width; ++x) {
+            const Vec4& src = cpu_accumulation_buffer[(size_t)bufferY * (size_t)image_width + (size_t)x];
+            const size_t idx = ((size_t)y * (size_t)image_width + (size_t)x) * 3;
+            linearColor[idx] = src.x;
+            linearColor[idx + 1] = src.y;
+            linearColor[idx + 2] = src.z;
+            if (hasAlbedo) {
+                const Vec4& alb = cpu_albedo_accumulation_buffer[(size_t)bufferY * (size_t)image_width + (size_t)x];
+                linearAlbedo[idx] = alb.x;
+                linearAlbedo[idx + 1] = alb.y;
+                linearAlbedo[idx + 2] = alb.z;
+            }
+            if (hasNormal) {
+                const Vec4& nrm = cpu_normal_accumulation_buffer[(size_t)bufferY * (size_t)image_width + (size_t)x];
+                linearNormal[idx] = nrm.x;
+                linearNormal[idx + 1] = nrm.y;
+                linearNormal[idx + 2] = nrm.z;
+            }
+        }
+    }
+
+    OIDNFrameData frame;
+    frame.width = image_width;
+    frame.height = image_height;
+    frame.color = linearColor.data();
+    frame.albedo = hasAlbedo ? linearAlbedo.data() : nullptr;
+    frame.normal = hasNormal ? linearNormal.data() : nullptr;
+
+    cpu_denoised_valid = applyOIDNDenoising(frame, blend, cpu_denoised_buffer);
+    return cpu_denoised_valid;
+}
+
+bool Renderer::hasCPUDenoisedBuffer() const {
+    return cpu_denoised_valid &&
+        cpu_denoised_buffer.size() == (size_t)image_width * (size_t)image_height * 3;
+}
+
+void Renderer::invalidateCPUDenoisedBuffer() {
+    cpu_denoised_valid = false;
 }
 Renderer::Renderer(int image_width, int image_height, int samples_per_pixel, int max_depth)
     : image_width(image_width), image_height(image_height), aspect_ratio(static_cast<double>(image_width) / image_height), halton_cache(new float[MAX_DIMENSIONS * MAX_SAMPLES_HALTON]), color_processor(image_width, image_height)
@@ -265,6 +359,7 @@ void Renderer::resetResolution(int w, int h) {
     // OIDN cache invalidate - buffer'lar bir sonraki denoise'da yeniden olu�turulacak
     oidnCachedWidth = 0;
     oidnCachedHeight = 0;
+    invalidateCPUDenoisedBuffer();
 
     // Pixel list cache invalidate - resolution changed
     cpu_pixel_list_valid = false;
@@ -2703,7 +2798,8 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
 Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     const std::vector<std::shared_ptr<Light>>& lights,
-    const Vec3& background_color, int depth, int sample_index, const SceneData& scene) {
+    const Vec3& background_color, int depth, int sample_index, const SceneData& scene,
+    Vec3* primary_albedo, Vec3* primary_normal, bool* primary_hit) {
 
     // =========================================================================
     // UNIFIED RAY COLOR - Matches GPU ray_color.cuh exactly
@@ -2717,6 +2813,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     float first_hit_t = -1.0f;
     float vol_trans_accum = 1.0f;
     float first_vol_t = -1.0f;
+    if (primary_hit) *primary_hit = false;
+    if (primary_albedo) *primary_albedo = Vec3(0.0f);
+    if (primary_normal) *primary_normal = Vec3(0.0f);
 
     int light_count = static_cast<int>(lights.size());
 
@@ -3612,8 +3711,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             }
                         }
 
-                        // Sky Lighting (Physical Parity: Sample atmospheric color)
-                        total_radiance += toVec3f(world.evaluate(Vec3(0, 1, 0))) * 0.15f * world.data.nishita.sun_intensity;
+                        // Sky Lighting (directional ambient): blend up with view direction
+                        Vec3 sky_dir = (current_ray.direction * 0.45f + Vec3(0, 1, 0) * 0.55f).normalize();
+                        total_radiance += toVec3f(world.evaluate(sky_dir, current_ray.origin))
+                                       * 0.15f * world.data.nishita.sun_intensity;
 
                         // --- EMISSION ---
                         Vec3f step_emission(0.0f);
@@ -4190,6 +4291,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             }
         }
 
+        if (bounce == 0 && primary_hit && !(*primary_hit)) {
+            *primary_hit = true;
+            if (primary_albedo) *primary_albedo = toVec3(albedo);
+            if (primary_normal) *primary_normal = toVec3(N.normalize());
+        }
+
         // --- Add Emission (Volumetric & Surface) ---
         if (rec.material && rec.material->type() == MaterialType::Volumetric) {
             auto vol = std::static_pointer_cast<Volumetric>(rec.material);
@@ -4487,8 +4594,15 @@ void Renderer::resetCPUAccumulation() {
     cpu_accumulation_valid = false;
     cpu_last_camera_hash = 0;  // Reset camera hash for animation frames
     cpu_pixel_list_valid = false;  // Force pixel list rebuild + shuffle on next pass
+    invalidateCPUDenoisedBuffer();
     if (!cpu_accumulation_buffer.empty()) {
         std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    if (!cpu_albedo_accumulation_buffer.empty()) {
+        std::fill(cpu_albedo_accumulation_buffer.begin(), cpu_albedo_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    if (!cpu_normal_accumulation_buffer.empty()) {
+        std::fill(cpu_normal_accumulation_buffer.begin(), cpu_normal_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
     }
     // Reset variance buffer for adaptive sampling
     if (!cpu_variance_buffer.empty()) {
@@ -4508,7 +4622,8 @@ void Renderer::uploadHairToGPU() {
     // ── Vulkan path ──────────────────────────────────────────────────────────
     auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(m_backend);
     if (vulkanBackend) {
-        vulkanBackend->clearHairGeometry();
+        const bool noHair = (hairSystem.getTotalStrandCount() == 0);
+        vulkanBackend->clearHairGeometry(noHair);
         if (hairSystem.getTotalStrandCount() == 0) {
             vulkanBackend->resetAccumulation();
             return;
@@ -4552,7 +4667,7 @@ void Renderer::uploadHairToGPU() {
                 // so the hair intersection shader fetches the correct material.
                 sd.materialID = groomMaterialIndex;
                 sd.rootUV     = s.rootUV;
-                
+
                 size_t estimatedPoints = s.points.size() + (useBSpline ? 4 : 0);
                 sd.points.reserve(estimatedPoints);
                 sd.radii.reserve(estimatedPoints);
@@ -4759,7 +4874,7 @@ void Renderer::updateHairGeometryOnGPU(bool forceRebuild) {
 void Renderer::setHairMaterial(const Hair::HairMaterialParams& mat) {
     this->hairMaterial = mat;
 
-    if (m_backend && g_hasCUDA) {
+    if (m_backend) {
         // Collect ALL hair materials from the system to maintain correct indices
         // in the Vulkan SSBO. If we only upload the changed material, it always
         // goes to slot 0, breaking multi-groom setups (e.g. hair and beard).
@@ -4893,6 +5008,12 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     if (cpu_accumulation_buffer.size() != pixel_count) {
         cpu_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
     }
+    if (cpu_albedo_accumulation_buffer.size() != pixel_count) {
+        cpu_albedo_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
+    if (cpu_normal_accumulation_buffer.size() != pixel_count) {
+        cpu_normal_accumulation_buffer.resize(pixel_count, Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+    }
     cpu_accumulation_valid = true;
 
     // Ensure variance buffer is allocated for adaptive sampling
@@ -4908,9 +5029,12 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
         if (current_hash != cpu_last_camera_hash) {
             // Camera changed - reset accumulation and variance
             std::fill(cpu_accumulation_buffer.begin(), cpu_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+            std::fill(cpu_albedo_accumulation_buffer.begin(), cpu_albedo_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
+            std::fill(cpu_normal_accumulation_buffer.begin(), cpu_normal_accumulation_buffer.end(), Vec4{ 0.0f, 0.0f, 0.0f, 0.0f });
             std::fill(cpu_variance_buffer.begin(), cpu_variance_buffer.end(), 0.0f);
             cpu_accumulated_samples = 0;
             cpu_pixel_list_valid = false;  // Force pixel list rebuild + shuffle
+            invalidateCPUDenoisedBuffer();
 
             if (!is_first) {
                 // SCENE_LOG_INFO("CPU: Camera changed - resetting accumulation");
@@ -4980,13 +5104,19 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     // Use cached pixel list (no per-pass allocation or shuffle!)
     const auto& pixel_list = cpu_cached_pixel_list;
 
-    // Sparse progressive: First few samples render fewer pixels for faster preview
-    // Sample 1: 1/16 pixels, Sample 2: 1/8, Sample 3: 1/4, Sample 5+: all
     int sparse_divisor = 1;
-    if (cpu_accumulated_samples == 0) sparse_divisor = 16;  // First pass: 1/16 pixels
-    else if (cpu_accumulated_samples == 1) sparse_divisor = 8;
-    else if (cpu_accumulated_samples == 2) sparse_divisor = 4;
-    else if (cpu_accumulated_samples == 3) sparse_divisor = 2;
+    const bool any_cpu_denoiser_enabled =
+        render_settings.use_denoiser ||
+        render_settings.timeline_use_denoiser ||
+        render_settings.render_use_denoiser;
+    if (!any_cpu_denoiser_enabled) {
+        // Sparse progressive: First few samples render fewer pixels for faster preview
+        // Sample 1: 1/16 pixels, Sample 2: 1/8, Sample 3: 1/4, Sample 5+: all
+        if (cpu_accumulated_samples == 0) sparse_divisor = 16;  // First pass: 1/16 pixels
+        else if (cpu_accumulated_samples == 1) sparse_divisor = 8;
+        else if (cpu_accumulated_samples == 2) sparse_divisor = 4;
+        else if (cpu_accumulated_samples == 3) sparse_divisor = 2;
+    }
 
     size_t pixels_to_render = pixel_list.size() / sparse_divisor;
     if (pixels_to_render < 1000) pixels_to_render = pixel_list.size();  // Safety minimum
@@ -5076,6 +5206,9 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
             }
 
             Vec3 color_sum(0.0f);
+            Vec3 albedo_sum(0.0f);
+            Vec3 normal_sum(0.0f);
+            int primary_hit_count = 0;
 
             // Render samples for this pass in 8-wide packets
             for (int s = 0; s < samples_this_pass; ++s) {
@@ -5084,11 +5217,29 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
                 Ray r = scene.camera->get_ray(u, v);
 
+                Vec3 primary_albedo(0.0f);
+                Vec3 primary_normal(0.0f);
+                bool primary_hit = false;
+
                 // Scalar path tracing call
-                color_sum = color_sum + ray_color(r, scene.bvh.get(), scene.lights, scene.background_color, max_depth, 0, scene);
+                color_sum = color_sum + ray_color(
+                    r, scene.bvh.get(), scene.lights, scene.background_color, max_depth, 0, scene,
+                    &primary_albedo, &primary_normal, &primary_hit);
+
+                if (primary_hit) {
+                    albedo_sum = albedo_sum + primary_albedo;
+                    normal_sum = normal_sum + primary_normal;
+                    primary_hit_count++;
+                }
             }
 
             Vec3 new_color = color_sum / float(samples_this_pass);
+            Vec3 new_albedo(0.0f);
+            Vec3 new_normal(0.0f);
+            if (primary_hit_count > 0) {
+                new_albedo = albedo_sum / float(primary_hit_count);
+                new_normal = (normal_sum / float(primary_hit_count)).normalize();
+            }
 
             // Accumulate with previous samples
             Vec4& accum = cpu_accumulation_buffer[pixel_index];
@@ -5113,6 +5264,38 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 accum.y = new_color.y;
                 accum.z = new_color.z;
                 accum.w = float(samples_this_pass);
+            }
+
+            Vec4& accum_albedo = cpu_albedo_accumulation_buffer[pixel_index];
+            Vec4& accum_normal = cpu_normal_accumulation_buffer[pixel_index];
+            if (primary_hit_count > 0) {
+                if (prev_samples > 0.0f) {
+                    Vec3 prev_albedo(accum_albedo.x, accum_albedo.y, accum_albedo.z);
+                    Vec3 prev_normal(accum_normal.x, accum_normal.y, accum_normal.z);
+                    Vec3 blended_albedo = (prev_albedo * prev_samples + new_albedo * samples_this_pass) / new_total_samples;
+                    Vec3 blended_normal = (prev_normal * prev_samples + new_normal * samples_this_pass) / new_total_samples;
+                    blended_normal = blended_normal.normalize();
+                    accum_albedo.x = blended_albedo.x;
+                    accum_albedo.y = blended_albedo.y;
+                    accum_albedo.z = blended_albedo.z;
+                    accum_albedo.w = new_total_samples;
+                    accum_normal.x = blended_normal.x;
+                    accum_normal.y = blended_normal.y;
+                    accum_normal.z = blended_normal.z;
+                    accum_normal.w = new_total_samples;
+                } else {
+                    accum_albedo.x = new_albedo.x;
+                    accum_albedo.y = new_albedo.y;
+                    accum_albedo.z = new_albedo.z;
+                    accum_albedo.w = float(samples_this_pass);
+                    accum_normal.x = new_normal.x;
+                    accum_normal.y = new_normal.y;
+                    accum_normal.z = new_normal.z;
+                    accum_normal.w = float(samples_this_pass);
+                }
+            } else if (prev_samples <= 0.0f) {
+                accum_albedo = Vec4{ 0.0f, 0.0f, 0.0f, float(samples_this_pass) };
+                accum_normal = Vec4{ 0.0f, 0.0f, 0.0f, float(samples_this_pass) };
             }
 
             // ===================================================================
@@ -5242,6 +5425,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
     }
 
     cpu_accumulated_samples += samples_this_pass;
+    invalidateCPUDenoisedBuffer();
         // SCENE_LOG_INFO("CPU Render Pass Completed. Total samples: " + std::to_string(cpu_accumulated_samples));
 
     // Update window title with progress
@@ -5327,8 +5511,8 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
 
 
     // Global flag to block concurrent updates
-    extern bool g_optix_rebuild_in_progress;
-    g_optix_rebuild_in_progress = true;
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    g_optix_rebuild_in_progress.store(true, std::memory_order_release);
 
     try {
         // Parallel Extraction of Triangles from Hittable objects
@@ -5493,7 +5677,7 @@ void Renderer::rebuildBackendGeometryWithList(const std::vector<std::shared_ptr<
         optix_gpu_ptr->clearScene();
     }
 
-    g_optix_rebuild_in_progress = false;
+    g_optix_rebuild_in_progress.store(false, std::memory_order_release);
 }
 
 

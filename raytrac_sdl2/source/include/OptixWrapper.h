@@ -258,6 +258,7 @@ public:
     
     // Download image from GPU to host memory
     void downloadFramebuffer(uchar4* host_ptr, int width, int height);
+    bool downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal);
 
 private:
     // Hair rendering members
@@ -415,6 +416,11 @@ private:
     int accumulated_samples = 0;              // Total samples accumulated so far
     bool accumulation_valid = false;          // Is current accumulation buffer valid?
     float4* d_accumulation_float4 = nullptr;  // High precision accumulation buffer (float4)
+    float4* d_denoiser_albedo = nullptr;
+    float4* d_denoiser_normal = nullptr;
+    std::vector<float> host_denoiser_color;
+    std::vector<float> host_denoiser_albedo;
+    std::vector<float> host_denoiser_normal;
     float frozen_water_time = 0.0f;           // Water time frozen at accumulation start
     
     // FFT Ocean (Tessendorf) state

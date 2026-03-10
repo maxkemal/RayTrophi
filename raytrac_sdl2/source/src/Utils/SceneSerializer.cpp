@@ -423,7 +423,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
     // 5. Render Settings
     simdjson::dom::element s;
     if (!root["settings"].get(s)) {
-        int64_t q = 0, spp = 1, bounces = 10;
+        int64_t q = 0, spp = 1, bounces = 10, denoiser_mode = static_cast<int64_t>(DenoiserMode::Quality);
         bool adaptive = true, denoiser = false, optix = true, vulkan = false, tonemap = false;
         std::string backend_name;
         std::string_view backend_name_sv;
@@ -433,6 +433,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         s["max_bounces"].get(bounces);
         s["use_adaptive"].get(adaptive);
         s["use_denoiser"].get(denoiser);
+        s["denoiser_mode"].get(denoiser_mode);
         s["use_optix"].get(optix);
         s["use_vulkan"].get(vulkan);
         if (!s["backend"].get(backend_name_sv)) {
@@ -462,6 +463,7 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
         settings.max_bounces = (int)bounces;
         settings.use_adaptive_sampling = adaptive;
         settings.use_denoiser = denoiser;
+        settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
         settings.use_optix = optix;
         settings.use_vulkan = vulkan;
         settings.persistent_tonemap = tonemap;

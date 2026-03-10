@@ -391,6 +391,7 @@ public:
         int shadow_steps = 8;              ///< Steps for self-shadowing
         float shadow_strength = 0.8f;      ///< Self-shadow intensity (0-1)
         bool adaptive_stepping = true;     ///< Adjust step based on density
+        int quality_preset = 1;            ///< 0=Fast, 1=Balanced, 2=Exact, 3=Custom
 
         // Serialization
         json toJson() const {
@@ -400,6 +401,7 @@ public:
             j["shadow_steps"] = shadow_steps;
             j["shadow_strength"] = shadow_strength;
             j["adaptive_stepping"] = adaptive_stepping;
+            j["quality_preset"] = quality_preset;
             return j;
         }
 
@@ -409,6 +411,13 @@ public:
             if (j.contains("shadow_steps")) shadow_steps = j["shadow_steps"];
             if (j.contains("shadow_strength")) shadow_strength = j["shadow_strength"];
             if (j.contains("adaptive_stepping")) adaptive_stepping = j["adaptive_stepping"];
+            if (j.contains("quality_preset")) {
+                quality_preset = j["quality_preset"];
+            } else {
+                // Backward compatibility for old scene files without preset selection.
+                quality_preset = 1; // Balanced
+            }
+            if (quality_preset < 0 || quality_preset > 3) quality_preset = 1;
         }
     } quality;
 
