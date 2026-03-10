@@ -28,6 +28,7 @@
 #include "scene_ui_guides.hpp"  // Viewport guides (safe areas, letterbox, grids)
 #include "default_scene_creator.hpp"
 #include "ColorProcessingParams.h"
+#include "CameraPresets.h"
 #include "scene_data.h"       // Added explicit include
 #include "OptixWrapper.h"     // Added explicit include
 #include "SceneSelection.h"   // Added explicit include
@@ -38,6 +39,7 @@
 #include <filesystem>
 #include <windows.h>
 #include <commdlg.h>
+#include <malloc.h>
 #include "SplashScreen.h"  // Splash screen support
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -415,11 +417,12 @@ bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
 bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
 bool g_optix_rebuild_pending = false;
-bool g_optix_rebuild_in_progress = false; // True while TLAS rebuild is happening    // GPU OptiX geometry needs rebuild
+std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
 bool g_viewport_hovered = false;         // True when mouse is over the main RenderView
+int g_backend_switch_cooldown_frames = 0; // Skip a few GPU animation/render ticks right after backend switch
 
 // Helper to ensure original_surface matches main surface dimensions
 // This prevents tonemap accumulation issues by giving us a clean "Raw" buffer
@@ -437,8 +440,12 @@ void EnsureOriginalSurface(SDL_Surface* reference) {
 // SCENE LOADING FLAGS - Thread safety for project load/save operations
 // ===========================================================================
 std::atomic<bool> g_scene_loading_in_progress{false};  // Prevents concurrent load operations
-bool g_needs_geometry_rebuild = false;   // Set by loader thread, main loop does actual rebuild
-bool g_needs_optix_sync = false;         // Set by loader thread, main loop syncs OptiX buffers
+std::atomic<bool> g_needs_geometry_rebuild{false};   // Set by loader thread, main loop does actual rebuild
+std::atomic<bool> g_needs_optix_sync{false};         // Set by loader thread, main loop syncs backend buffers
+
+// Async OptiX rebuild handle/state. Kept at file scope so backend switch can safely wait.
+std::future<void> g_optix_future;
+bool g_optix_rebuilding = false;
 
 
 Vec3 applyVignette(const Vec3& color, int x, int y, int width, int height, float strength = 1.0f) {
@@ -463,6 +470,42 @@ SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
 std::unique_ptr<Backend::IBackend> g_backend;
 ColorProcessor color_processor(image_width, image_height);
+
+static void shutdownAndResetBackendSafe(const char* reason) {
+    if (!g_backend) return;
+    try {
+        g_backend->waitForCompletion();
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("[Backend] waitForCompletion failed during reset (") +
+                       (reason ? reason : "unknown") + "): " + e.what());
+    } catch (...) {
+        SCENE_LOG_WARN(std::string("[Backend] waitForCompletion failed during reset (") +
+                       (reason ? reason : "unknown") + ").");
+    }
+
+    try {
+        g_backend->shutdown();
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("[Backend] shutdown failed during reset (") +
+                       (reason ? reason : "unknown") + "): " + e.what());
+    } catch (...) {
+        SCENE_LOG_WARN(std::string("[Backend] shutdown failed during reset (") +
+                       (reason ? reason : "unknown") + ").");
+    }
+
+    g_backend.reset();
+
+#ifdef _WIN32
+    // Heavy Vulkan scene rebuild/switch patterns can leave large freed pages in
+    // process working set and CRT heap caches. Trim once after backend teardown
+    // so repeated Vulkan<->OptiX switches do not show runaway RAM growth.
+    (void)_heapmin();
+    HANDLE hProc = GetCurrentProcess();
+    if (!SetProcessWorkingSetSize(hProc, (SIZE_T)-1, (SIZE_T)-1)) {
+        SCENE_LOG_WARN("[Backend] SetProcessWorkingSetSize trim request failed.");
+    }
+#endif
+}
 
 std::string active_model_path;
 SceneSelection scene_selection;  // Scene selection manager
@@ -517,9 +560,18 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
                 Vec3 raw_color;
                 
                 if (use_float_buffer) {
-                    // Read directly from HDR float buffer (linear color) using flipped Y
-                    const auto& pixel_data = renderer->cpu_accumulation_buffer[buffer_y * width + i];
-                    raw_color = Vec3(pixel_data.x, pixel_data.y, pixel_data.z);
+                    if (renderer->hasCPUDenoisedBuffer()) {
+                        const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
+                        raw_color = Vec3(
+                            renderer->cpu_denoised_buffer[idx],
+                            renderer->cpu_denoised_buffer[idx + 1],
+                            renderer->cpu_denoised_buffer[idx + 2]
+                        );
+                    } else {
+                        // Read directly from HDR float buffer (linear color) using flipped Y
+                        const auto& pixel_data = renderer->cpu_accumulation_buffer[buffer_y * width + i];
+                        raw_color = Vec3(pixel_data.x, pixel_data.y, pixel_data.z);
+                    }
                 } else {
                     // Fallback to LDR surface (sRGB/Gamma usually) - already Top-Down
                     if (!src) continue;
@@ -551,6 +603,65 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
     // Wait for all threads to complete
     for (auto& f : futures) {
         f.get();
+    }
+}
+
+void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, const Camera* camera) {
+    if (!surface || !surface->pixels || !renderer.hasCPUDenoisedBuffer()) return;
+
+    Uint32* pixels = (Uint32*)surface->pixels;
+    SDL_PixelFormat* fmt = surface->format;
+    const int width = surface->w;
+    const int height = surface->h;
+
+    auto toSRGB = [](float c) {
+        if (c <= 0.0031308f) return 12.92f * c;
+        return 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
+    };
+
+    float exposure_factor = 1.0f;
+    if (camera) {
+        if (camera->auto_exposure) {
+            exposure_factor = std::pow(2.0f, camera->ev_compensation);
+        } else if (camera->use_physical_exposure) {
+            float iso_mult = (camera->iso_preset_index >= 0 && camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) ?
+                CameraPresets::ISO_PRESETS[camera->iso_preset_index].exposure_multiplier : 1.0f;
+            float shutter_time = (camera->shutter_preset_index >= 0 && camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) ?
+                CameraPresets::SHUTTER_SPEED_PRESETS[camera->shutter_preset_index].speed_seconds : 0.004f;
+
+            float f_number = 16.0f;
+            if (camera->fstop_preset_index > 0 && camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
+                f_number = CameraPresets::FSTOP_PRESETS[camera->fstop_preset_index].f_number;
+            } else if (camera->aperture > 0.001f) {
+                f_number = 0.8f / camera->aperture;
+            }
+
+            float aperture_sq = f_number * f_number;
+            float ev_comp = std::pow(2.0f, camera->ev_compensation);
+            float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
+            float baseline_val = 0.00003125f;
+            exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f;
+        } else {
+            exposure_factor = std::pow(2.0f, camera->ev_compensation);
+        }
+    }
+
+    for (int j = 0; j < height; ++j) {
+        for (int i = 0; i < width; ++i) {
+            const size_t idx = ((size_t)j * (size_t)width + (size_t)i) * 3;
+            float r = std::max(renderer.cpu_denoised_buffer[idx] * exposure_factor, 0.0f);
+            float g = std::max(renderer.cpu_denoised_buffer[idx + 1] * exposure_factor, 0.0f);
+            float b = std::max(renderer.cpu_denoised_buffer[idx + 2] * exposure_factor, 0.0f);
+
+            r = r / (1.0f + r);
+            g = g / (1.0f + g);
+            b = b / (1.0f + b);
+
+            Uint8 ri = static_cast<Uint8>(255.0f * std::clamp(toSRGB(r), 0.0f, 1.0f));
+            Uint8 gi = static_cast<Uint8>(255.0f * std::clamp(toSRGB(g), 0.0f, 1.0f));
+            Uint8 bi = static_cast<Uint8>(255.0f * std::clamp(toSRGB(b), 0.0f, 1.0f));
+            pixels[j * width + i] = SDL_MapRGB(fmt, ri, gi, bi);
+        }
     }
 }
 void reset_render_resolution(int w, int h)
@@ -782,11 +893,20 @@ bool initializeOptixIfAvailable() {
         g_backend = std::move(backend);
         
         // Initialize the backend
-        g_backend->initialize();
+        if (!g_backend->initialize()) {
+            SCENE_LOG_ERROR("OptiX backend initialize() returned false.");
+            shutdownAndResetBackendSafe("optix_initialize_failed");
+            return false;
+        }
         
         // Set backend to renderer and UI
         ray_renderer.setBackend(g_backend.get());
         ui_ctx.backend_ptr = g_backend.get();
+        if (auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(g_backend.get())) {
+            ui_ctx.optix_gpu_ptr = optixBackend->getOptixWrapper();
+        } else {
+            ui_ctx.optix_gpu_ptr = nullptr;
+        }
 
         auto load_ptx = [](const std::wstring& filename) -> std::string {
             std::filesystem::path ptx_path = filename;
@@ -810,7 +930,12 @@ bool initializeOptixIfAvailable() {
     }
     catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("OptiX initialization failed: ") + e.what());
-        g_hasOptix = false;
+        shutdownAndResetBackendSafe("optix_initialize_exception");
+        return false;
+    }
+    catch (...) {
+        SCENE_LOG_ERROR("OptiX initialization failed with unknown exception.");
+        shutdownAndResetBackendSafe("optix_initialize_unknown_exception");
         return false;
     }
 
@@ -835,6 +960,7 @@ bool initializeVulkanIfAvailable() {
         g_backend = std::move(backend);
         ray_renderer.setBackend(g_backend.get());
         ui_ctx.backend_ptr = g_backend.get();
+        ui_ctx.optix_gpu_ptr = nullptr;
         return true;
     }
     catch (const std::exception& e) {
@@ -1215,38 +1341,88 @@ int main(int argc, char* argv[]) try {
 
     SDL_Event e;
     while (!quit) {
+        // If Vulkan reported memory pressure (typically OOM/shared-memory exhaustion),
+        // schedule a safe backend recreate using the already hardened switch path.
+        if (ui_ctx.render_settings.use_vulkan &&
+            g_vulkan_trim_recreate_requested.exchange(false, std::memory_order_acq_rel)) {
+            if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
+                SCENE_LOG_WARN("Vulkan memory pressure detected. Scheduling safe Vulkan backend recreate.");
+                ui.addViewportMessage("Vulkan bellek baskisi: aygit yenileniyor...", 5.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+                render_settings.backend_changed = true;
+                ui_ctx.render_settings.backend_changed = true;
+                // Force a fresh accumulation after device recreate.
+                start_render = true;
+            } else {
+                // Loader is active; defer to next safe loop iteration.
+                g_vulkan_trim_recreate_requested.store(true, std::memory_order_release);
+            }
+        }
+
         if (render_settings.backend_changed) {
             // Avoid backend destruction/recreation while a scene load thread is active.
             // The switch will be processed immediately after loading completes.
             if (ui.scene_loading.load() || g_scene_loading_in_progress.load()) {
                 SDL_Delay(1);
             } else {
+            // If user re-selects the already active backend, skip costly teardown/recreate.
+            const bool currentIsVulkan = (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
+            const bool currentIsOptix  = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
+            const bool requestedVulkan = render_settings.use_vulkan;
+            const bool requestedOptix  = render_settings.use_optix;
+            const bool sameBackendRequested =
+                (requestedVulkan && currentIsVulkan) ||
+                (requestedOptix && currentIsOptix) ||
+                ((!requestedVulkan && !requestedOptix) && !g_backend);
+
+            if (sameBackendRequested) {
+                render_settings.backend_changed = false;
+                ui_ctx.render_settings.backend_changed = false;
+                ui_ctx.render_settings.use_optix = render_settings.use_optix;
+                ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
+                if (g_backend) g_backend->resetAccumulation();
+                continue;
+            }
+
             bool success = true;
+
+            // If an async OptiX rebuild is still running, wait for it before backend teardown.
+            if (g_optix_rebuilding && g_optix_future.valid()) {
+                try {
+                    g_optix_future.get();
+                } catch (const std::exception& e) {
+                    SCENE_LOG_WARN(std::string("OptiX async rebuild join failed during backend switch: ") + e.what());
+                } catch (...) {
+                    SCENE_LOG_WARN("OptiX async rebuild join failed during backend switch (unknown exception).");
+                }
+                g_optix_rebuilding = false;
+                g_optix_rebuild_in_progress.store(false, std::memory_order_release);
+            }
 
             // Detach renderer from current backend first to avoid renderer using a destroyed backend
             ray_renderer.setBackend(nullptr);
             ui_ctx.backend_ptr = nullptr;
+            ui_ctx.optix_gpu_ptr = nullptr;
 
-            // Wait for any in-progress render to finish (short timeout)
-            int wait_count = 0;
-            while (rendering_in_progress.load() && wait_count < 50) { // ~500ms
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                ++wait_count;
-            }
-
-            // [CRASH GUARD] Wait for GPU to drain any in-flight commands before destroying the backend.
-            // The CPU-side rendering_in_progress flag may clear before the GPU finishes its last submit.
-            // Calling waitForCompletion() (wraps vkDeviceWaitIdle / cuStreamSynchronize) ensures no GPU
-            // work is active when the Vulkan/OptiX device is destroyed below.
-            if (g_backend) {
-                g_backend->waitForCompletion();
+            // Never switch backend while a render/animation pass is still active.
+            // The previous timeout-based behavior could tear down GPU objects while
+            // animation thread was still touching backend resources (race/crash).
+            if (rendering_in_progress.load()) {
+                ui.addViewportMessage("Backend degisimi render/animasyon bitince uygulanacak.", 3.0f, ImVec4(1.0f, 0.85f, 0.3f, 1.0f));
+                SDL_Delay(1);
+                continue;
             }
 
             // Now safe to destroy existing backend
-            g_backend.reset();
+            shutdownAndResetBackendSafe("backend_switch");
 
             if (render_settings.use_vulkan) {
                 success = initializeVulkanIfAvailable();
+                if (!success) {
+                    // After OptiX shutdown, WDDM/driver residency updates may lag briefly.
+                    // Retry once after a short settle delay before CPU fallback.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(180));
+                    success = initializeVulkanIfAvailable();
+                }
                 if (!success) {
                     SCENE_LOG_ERROR("Fallback to CPU. Vulkan failed.");
                     render_settings.use_vulkan = false;
@@ -1257,6 +1433,11 @@ int main(int argc, char* argv[]) try {
                 }
             } else if (render_settings.use_optix) {
                 success = initializeOptixIfAvailable();
+                if (!success) {
+                    // Mirror Vulkan path: allow one short retry for transient driver/runtime hiccups.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(180));
+                    success = initializeOptixIfAvailable();
+                }
                 if (!success) {
                     SCENE_LOG_ERROR("Fallback to CPU. OptiX failed.");
                     render_settings.use_optix = false;
@@ -1292,6 +1473,11 @@ int main(int argc, char* argv[]) try {
                 // Reattach renderer to the new backend
                 ray_renderer.setBackend(g_backend.get());
                 ui_ctx.backend_ptr = g_backend.get();
+                if (auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(g_backend.get())) {
+                    ui_ctx.optix_gpu_ptr = optixBackend->getOptixWrapper();
+                } else {
+                    ui_ctx.optix_gpu_ptr = nullptr;
+                }
 
                 // IMPORTANT: Full scene sync on backend change
                 ray_renderer.rebuildBackendGeometry(scene);
@@ -1313,6 +1499,10 @@ int main(int argc, char* argv[]) try {
 
                 g_backend->resetAccumulation();
             }
+
+            // Let backend/device settle for a few frames before animation-driven GPU updates
+            // (dispatchSkinning/updateSceneGeometry) to avoid switch-edge races.
+            g_backend_switch_cooldown_frames = 3;
 
             ui_ctx.render_settings.use_optix = render_settings.use_optix;
             ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
@@ -1639,6 +1829,56 @@ int main(int argc, char* argv[]) try {
         static int last_volume_frame = -1;
         int current_volume_frame = ui.timeline.getCurrentFrame();
         
+        // =========================================================================
+        // EARLY SCENE LOADING GUARD
+        // Prevent any scene/backend mutation while loader thread is active.
+        // =========================================================================
+        if (ui.scene_loading.load()) {
+            ImGui_ImplSDLRenderer2_NewFrame();
+            ImGui_ImplSDL2_NewFrame();
+            ImGui::NewFrame();
+
+            if (!ImGui::IsPopupOpen("Loading Scene...")) {
+                ImGui::OpenPopup("Loading Scene...");
+            }
+
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(420, 160));
+
+            if (ImGui::BeginPopupModal("Loading Scene...", nullptr,
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Loading / Saving...");
+                ImGui::Spacing();
+
+                int progress = ui.scene_loading_progress.load();
+                float progress_f = progress / 100.0f;
+                char overlay[32];
+                snprintf(overlay, sizeof(overlay), "%d%%", progress);
+                ImGui::ProgressBar(progress_f, ImVec2(-1, 22), overlay);
+
+                ImGui::Spacing();
+                const std::string loading_stage = ui.getSceneLoadingStage();
+                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s", loading_stage.c_str());
+                ImGui::EndPopup();
+            }
+
+            SDL_SetRenderDrawColor(renderer, 20, 20, 25, 255);
+            SDL_RenderClear(renderer);
+            if (raytrace_texture) {
+                SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+            }
+
+            ImGui::Render();
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+            SDL_RenderPresent(renderer);
+
+            SDL_Delay(10);
+            continue;
+        }
+
         if (current_volume_frame != last_volume_frame) {
             bool volume_changed = false;
             
@@ -1717,7 +1957,7 @@ int main(int argc, char* argv[]) try {
              
              // Force redraw (break accumulation)
              start_render = true;
-             g_needs_optix_sync = true; // Signal that params changed
+             g_needs_optix_sync.store(true, std::memory_order_release); // Signal that params changed
              
         } else {
              // Static update (for editor changes)
@@ -1758,7 +1998,8 @@ int main(int argc, char* argv[]) try {
                 ImGui::ProgressBar(progress_f, ImVec2(-1, 22), overlay);
                 
                 ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s", ui.scene_loading_stage.c_str());
+                const std::string loading_stage = ui.getSceneLoadingStage();
+                ImGui::TextColored(ImVec4(0.7f, 0.9f, 0.7f, 1.0f), "%s", loading_stage.c_str());
                 ImGui::EndPopup();
             }
 
@@ -1789,14 +2030,15 @@ int main(int argc, char* argv[]) try {
             ui.invalidateCache();
             
             // Rebuild BVH and OptiX on main thread (required for GPU context safety)
-            if (g_needs_geometry_rebuild) {
+            if (g_needs_geometry_rebuild.exchange(false, std::memory_order_acq_rel)) {
                 ui_ctx.renderer.rebuildBVH(ui_ctx.scene, ui_ctx.render_settings.UI_use_embree);
-                g_needs_geometry_rebuild = false;
             }
             
             ui_ctx.renderer.resetCPUAccumulation();
             
-            if (ui_ctx.backend_ptr && g_needs_optix_sync && !ui_ctx.render_settings.backend_changed) {
+            if (ui_ctx.backend_ptr &&
+                g_needs_optix_sync.load(std::memory_order_acquire) &&
+                !ui_ctx.render_settings.backend_changed) {
                 ui_ctx.renderer.rebuildBackendGeometry(ui_ctx.scene);
                 ui_ctx.renderer.updateBackendMaterials(ui_ctx.scene);
                 ui_ctx.renderer.updateBackendGasVolumes(ui_ctx.scene);
@@ -1812,7 +2054,7 @@ int main(int argc, char* argv[]) try {
                 ui_ctx.backend_ptr->setLights(ui_ctx.scene.lights);
                 if (ui_ctx.scene.camera) ui_ctx.renderer.syncCameraToBackend(*ui_ctx.scene.camera);
                 ui_ctx.backend_ptr->resetAccumulation();
-                g_needs_optix_sync = false;
+                g_needs_optix_sync.store(false, std::memory_order_release);
             }
             
             // Mark all buffers dirty for fresh scene
@@ -2106,8 +2348,11 @@ int main(int argc, char* argv[]) try {
             // 2. Handle Interactive Render (One Frame / Progressive)
             // ONLY if no background rendering is happening
             if (start_render) {
-                 if (rendering_in_progress) {
-                     // Block interactive render if animation is running
+                 // CRITICAL INVARIANT:
+                 // rendering_in_progress may remain true in some non-animation GPU flows.
+                 // Only block interactive rendering while animation mode is actively running.
+                 if (rendering_in_progress && ui_ctx.is_animation_mode) {
+                     // Block interactive render only while animation render thread is active
                      start_render = false;
                  }
                  else {
@@ -2133,6 +2378,15 @@ int main(int argc, char* argv[]) try {
                     }
 
                     if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                        if (render_settings.backend_changed || ui_ctx.render_settings.backend_changed) {
+                            SDL_Delay(1);
+                            continue;
+                        }
+                        if (g_backend_switch_cooldown_frames > 0) {
+                            --g_backend_switch_cooldown_frames;
+                            SDL_Delay(1);
+                            continue;
+                        }
                         // ============ SYNCHRONOUS GPU RENDER (No Thread) ============
                         // Each pass is ~10-50ms for 1 sample, fast enough for UI
                         
@@ -2427,11 +2681,91 @@ int main(int argc, char* argv[]) try {
                         } else {
                             effective_denoiser = render_settings.use_denoiser;
                         }
+                        const bool use_denoiser_aux = (ui_ctx.render_settings.denoiser_mode == DenoiserMode::Quality);
                         
                         if (effective_denoiser && g_backend && g_backend->getCurrentSampleCount() > 0) {
-                                // Must denoise the Raw Buffer (original_surface) so Tonemapper gets clean input
+                            Backend::DenoiserFrameData denoiserFrame;
+                            if (g_backend->getDenoiserFrame(denoiserFrame)) {
+                                Renderer::OIDNFrameData frame;
+                                frame.width = denoiserFrame.width;
+                                frame.height = denoiserFrame.height;
+                                frame.color = denoiserFrame.color;
+                                frame.albedo = use_denoiser_aux ? denoiserFrame.albedo : nullptr;
+                                frame.normal = use_denoiser_aux ? denoiserFrame.normal : nullptr;
+
+                                std::vector<float> denoised;
+                                if (ray_renderer.applyOIDNDenoising(frame, ui_ctx.render_settings.denoiser_blend_factor, denoised) &&
+                                    original_surface && original_surface->pixels &&
+                                    original_surface->w == frame.width && original_surface->h == frame.height) {
+                                    float exposure_factor = 1.0f;
+                                    if (scene.camera) {
+                                        if (scene.camera->auto_exposure) {
+                                            exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
+                                        } else if (scene.camera->use_physical_exposure) {
+                                            float iso_mult = 1.0f;
+                                            if (scene.camera->iso_preset_index >= 0 &&
+                                                scene.camera->iso_preset_index < (int)CameraPresets::ISO_PRESET_COUNT) {
+                                                iso_mult = CameraPresets::ISO_PRESETS[scene.camera->iso_preset_index].exposure_multiplier;
+                                            }
+
+                                            float shutter_time = 0.004f;
+                                            if (scene.camera->shutter_preset_index >= 0 &&
+                                                scene.camera->shutter_preset_index < (int)CameraPresets::SHUTTER_SPEED_PRESET_COUNT) {
+                                                shutter_time = CameraPresets::SHUTTER_SPEED_PRESETS[scene.camera->shutter_preset_index].speed_seconds;
+                                            }
+
+                                            float f_number = 16.0f;
+                                            if (scene.camera->fstop_preset_index > 0 &&
+                                                scene.camera->fstop_preset_index < (int)CameraPresets::FSTOP_PRESET_COUNT) {
+                                                f_number = CameraPresets::FSTOP_PRESETS[scene.camera->fstop_preset_index].f_number;
+                                            } else if (scene.camera->aperture > 0.001f) {
+                                                f_number = 0.8f / scene.camera->aperture;
+                                            }
+
+                                            float aperture_sq = f_number * f_number;
+                                            float ev_comp = std::pow(2.0f, scene.camera->ev_compensation);
+                                            float current_val = (iso_mult * shutter_time) / (aperture_sq + 1e-6f);
+                                            float baseline_val = 0.00003125f;
+                                            exposure_factor = (current_val / baseline_val) * ev_comp * 2.0f;
+                                        } else {
+                                            exposure_factor = std::pow(2.0f, scene.camera->ev_compensation);
+                                        }
+                                    }
+
+                                    Uint32* pixels = static_cast<Uint32*>(original_surface->pixels);
+                                    SDL_PixelFormat* fmt = original_surface->format;
+                                    const int row_stride = original_surface->pitch / 4;
+                                    const size_t pixelCount = (size_t)frame.width * (size_t)frame.height;
+                                    for (size_t i = 0; i < pixelCount; ++i) {
+                                        const size_t idx = i * 3;
+                                        const int x = (int)(i % (size_t)frame.width);
+                                        const int y = (int)(i / (size_t)frame.width);
+                                        const int screen_y = frame.height - 1 - y;
+                                        const size_t screen_index = (size_t)screen_y * (size_t)row_stride + (size_t)x;
+
+                                        float r = std::max(denoised[idx] * exposure_factor, 0.0f);
+                                        float g = std::max(denoised[idx + 1] * exposure_factor, 0.0f);
+                                        float b = std::max(denoised[idx + 2] * exposure_factor, 0.0f);
+
+                                        r = r / (1.0f + r);
+                                        g = g / (1.0f + g);
+                                        b = b / (1.0f + b);
+
+                                        r = std::pow(r, 1.0f / 2.2f);
+                                        g = std::pow(g, 1.0f / 2.2f);
+                                        b = std::pow(b, 1.0f / 2.2f);
+
+                                        Uint8 ri = static_cast<Uint8>(std::min(r, 1.0f) * 255.0f + 0.5f);
+                                        Uint8 gi = static_cast<Uint8>(std::min(g, 1.0f) * 255.0f + 0.5f);
+                                        Uint8 bi = static_cast<Uint8>(std::min(b, 1.0f) * 255.0f + 0.5f);
+                                        pixels[screen_index] = SDL_MapRGB(fmt, ri, gi, bi);
+                                    }
+                                }
+                            } else {
+                                // Fallback path for backends without auxiliary denoiser buffers
                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
                             }
+                        }
                         }
                     else {
                         // ============ SYNCHRONOUS CPU RENDER (Like OptiX) ============
@@ -2551,12 +2885,12 @@ int main(int argc, char* argv[]) try {
                             effective_denoiser = render_settings.use_denoiser;
                         }
                         
-                        if (effective_denoiser && ray_renderer.getCPUAccumulatedSamples() > 0) {
-                                 // Denoise the Raw Buffer
-                                 EnsureOriginalSurface(surface);
-                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true,
-                                     ui_ctx.render_settings.denoiser_blend_factor);
-                             }
+                        if (effective_denoiser &&
+                            ray_renderer.getCPUAccumulatedSamples() > 0) {
+                            ray_renderer.applyOIDNDenoisingToCPUAccumulation(
+                                ui_ctx.render_settings.denoiser_blend_factor,
+                                ui_ctx.render_settings.denoiser_mode == DenoiserMode::Quality);
+                        }
                         }
                     }
                  }
@@ -2598,9 +2932,17 @@ int main(int argc, char* argv[]) try {
             post_processing_happened = true;
         } 
         else if (did_render_this_frame && original_surface && surface) {
-            // If tonemapping is disabled, we must still copy the Raw Render (original_surface)
-            // to the Display Surface (surface) so the user sees the output!
-            SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
+            // If CPU denoiser produced a float buffer, display it even when persistent tonemap is off.
+            // Otherwise denoiser appears to do nothing because original_surface still contains raw pre-denoise pixels.
+            if (!ui_ctx.render_settings.use_optix &&
+                !ui_ctx.render_settings.use_vulkan &&
+                ray_renderer.hasCPUDenoisedBuffer()) {
+                applyCPUDenoisedPreviewToSurface(surface, ray_renderer, scene.camera.get());
+            } else {
+                // If tonemapping is disabled, we must still copy the Raw Render (original_surface)
+                // to the Display Surface (surface) so the user sees the output!
+                SDL_BlitSurface(original_surface, nullptr, surface, nullptr);
+            }
         }
 
         // Image save
@@ -2835,9 +3177,15 @@ int main(int argc, char* argv[]) try {
         // ===========================================================================
         if (g_gpu_refit_pending) {
             // ui.addViewportMessage("Updating GPU...", 2.0f); // Removed to prevent spam
-            if (g_hasOptix && g_backend) {
-                // LIGHTWEIGHT UPDATE: Transforms only (fast)
-                // If actual geometry (vertices) changed, use g_optix_rebuild_pending instead.
+            if (g_backend &&
+                ((ui_ctx.render_settings.use_optix && g_hasOptix) ||
+                 (ui_ctx.render_settings.use_vulkan && g_hasVulkan))) {
+                // CRITICAL INVARIANT:
+                // This block is for transform-only refit. Do NOT call
+                // rebuildAccelerationStructure() here for Vulkan.
+                // VulkanBackendAdapter::rebuildAccelerationStructure() is a full scene reset
+                // that clears mesh registry/BLAS/TLAS and expects a later updateGeometry() pass.
+                // For undo/redo transform this causes the "frozen viewport until backend switch" behavior.
                 g_backend->updateInstanceTransforms(scene.world.objects);
                 g_backend->setLights(scene.lights);
                 if (scene.camera) {
@@ -2852,6 +3200,7 @@ int main(int argc, char* argv[]) try {
                     g_backend->setCamera(cp);
                 }
                 g_backend->resetAccumulation();
+                start_render = true;
             }
             g_gpu_refit_pending = false;
         }
@@ -2943,9 +3292,6 @@ int main(int argc, char* argv[]) try {
         // -----------------------------------------------------------------
         // ASYNC OPTIX REBUILD (Non-blocking)
         // -----------------------------------------------------------------
-        static std::future<void> g_optix_future;
-        static bool g_optix_rebuilding = false;
-        
         if (g_optix_rebuild_pending && ui_ctx.render_settings.use_optix && g_hasOptix) {
             // Only start if not already rebuilding
             if (!g_optix_rebuilding) {
@@ -2957,7 +3303,7 @@ int main(int argc, char* argv[]) try {
                 auto& renderer_ref = ray_renderer;
                 
                 // CRITICAL FIX: Set global flag to pause rendering in OptixWrapper
-                g_optix_rebuild_in_progress = true;
+                g_optix_rebuild_in_progress.store(true, std::memory_order_release);
 
                 // CRITICAL FIX: COPY the objects list to avoid race condition with Main Thread modifications 
                 // such as syncInstancesToScene or object deletion.
@@ -2993,7 +3339,7 @@ int main(int argc, char* argv[]) try {
                     g_camera_dirty = true;
                     g_lights_dirty = true;
                     g_world_dirty = true;
-                    g_needs_optix_sync = true;
+                    g_needs_optix_sync.store(true, std::memory_order_release);
                     
                     start_render = true;
                 } catch (const std::exception& e) {
@@ -3001,7 +3347,7 @@ int main(int argc, char* argv[]) try {
                 }
                 g_optix_rebuilding = false;
                 // CRITICAL FIX: Resume rendering
-                g_optix_rebuild_in_progress = false;
+                g_optix_rebuild_in_progress.store(false, std::memory_order_release);
             }
         }
         

@@ -13,6 +13,23 @@
 #include <cuda_runtime.h>
 
 namespace Backend {
+namespace {
+    inline void trimCudaMemoryPool() {
+        int device = -1;
+        if (cudaGetDevice(&device) != cudaSuccess || device < 0) return;
+
+        // Ensure all pending work is done before trimming allocator caches.
+        cudaDeviceSynchronize();
+
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
+        cudaMemPool_t pool = nullptr;
+        if (cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess && pool) {
+            // Release cached pages back to the driver/OS.
+            cudaMemPoolTrimTo(pool, 0);
+        }
+#endif
+    }
+}
 
 OptixBackend::OptixBackend() 
     : m_optix_owned(std::make_unique<OptixWrapper>()), m_optix(m_optix_owned.get()) {}
@@ -33,7 +50,13 @@ bool OptixBackend::initialize() {
 }
 
 void OptixBackend::shutdown() {
-    m_optix->cleanup();
+    if (m_optix) {
+        m_optix->cleanup();
+    }
+    // Important for OptiX -> Vulkan switches:
+    // release CUDA allocator cache so shared GPU memory pressure does not
+    // accumulate across backend toggles in long sessions.
+    trimCudaMemoryPool();
 }
 
 void OptixBackend::loadShaders(const ShaderProgramData& data) {
@@ -262,6 +285,24 @@ void OptixBackend::renderProgressive(void* outSurface, void* outWindow, void* ou
 void OptixBackend::downloadImage(void* outPixels) {
     if (!outPixels) return;
     m_optix->downloadFramebuffer(static_cast<uchar4*>(outPixels), m_optix->getImageWidth(), m_optix->getImageHeight());
+}
+
+bool OptixBackend::getDenoiserFrame(DenoiserFrameData& frame) {
+    if (!m_optix) return false;
+
+    static std::vector<float> color;
+    static std::vector<float> albedo;
+    static std::vector<float> normal;
+    if (!m_optix->downloadDenoiserBuffers(color, albedo, normal)) {
+        return false;
+    }
+
+    frame.width = m_optix->getImageWidth();
+    frame.height = m_optix->getImageHeight();
+    frame.color = color.data();
+    frame.albedo = albedo.data();
+    frame.normal = normal.data();
+    return true;
 }
 
 int OptixBackend::getCurrentSampleCount() const {

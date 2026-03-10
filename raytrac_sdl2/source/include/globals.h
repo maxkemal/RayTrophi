@@ -53,6 +53,11 @@ enum class ResolutionSource {
     FromAspect = 2    // Calculate from aspect ratio + base height
 };
 
+enum class DenoiserMode {
+    Fast = 0,         // beauty only
+    Quality = 1       // beauty + albedo + normal
+};
+
 struct RenderSettings {
     // Input / Interaction
     float mouse_sensitivity = 0.4f;
@@ -76,6 +81,7 @@ struct RenderSettings {
     bool use_denoiser = false;        // Viewport Denoiser
     bool render_use_denoiser = true;  // Final Render Denoiser
     float denoiser_blend_factor = 1.0f;
+    DenoiserMode denoiser_mode = DenoiserMode::Quality;
 
     // Backend
     bool use_optix = false;
@@ -183,6 +189,13 @@ public:
 
         // UI için hafızaya
         lines.push_back({ msg, level });
+        // Bound in-memory log growth to avoid unbounded RAM usage during long sessions
+        // (e.g. repeated backend switches generating thousands of Vulkan/OptiX lines).
+        static constexpr size_t kMaxInMemoryLines = 5000;
+        if (lines.size() > kMaxInMemoryLines) {
+            const size_t excess = lines.size() - kMaxInMemoryLines;
+            lines.erase(lines.begin(), lines.begin() + excess);
+        }
 
         // Dosyaya — CRASH olsa bile satır kaybolmaz (Öncelikli Yazım)
         if (logFile.is_open()) {
@@ -293,7 +306,7 @@ extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
 extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
 extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
 extern bool g_optix_rebuild_pending;
-extern bool g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render    // GPU OptiX geometry needs rebuild
+extern std::atomic<bool> g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render // GPU OptiX geometry needs rebuild
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild
 extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
 
@@ -301,8 +314,8 @@ extern bool g_cpu_bvh_refit_pending;    // CPU BVH fast refit (Embree only)
 // SCENE LOADING FLAGS - Thread safety for project load/save operations
 // ===========================================================================
 extern std::atomic<bool> g_scene_loading_in_progress;  // Prevents concurrent load operations
-extern bool g_needs_geometry_rebuild;   // Set by loader thread, main loop does actual rebuild
-extern bool g_needs_optix_sync;         // Set by loader thread, main loop syncs OptiX buffers
+extern std::atomic<bool> g_needs_geometry_rebuild;   // Set by loader thread, main loop does actual rebuild
+extern std::atomic<bool> g_needs_optix_sync;         // Set by loader thread, main loop syncs backend buffers
 
 // ===========================================================================
 // UI INTERACTION FLAGS
@@ -312,6 +325,9 @@ extern bool g_viewport_hovered;         // True when mouse is over the main Rend
 // Vulkan runtime device-loss indicator (set by Vulkan backend when fatal errors occur)
 extern bool g_vulkan_device_lost;
 extern std::string g_vulkan_device_lost_msg;
+// Vulkan memory-pressure indicator (set by Vulkan backend on OOM/alloc pressure).
+// Main loop performs a safe backend recreate at the next synchronization point.
+extern std::atomic<bool> g_vulkan_trim_recreate_requested;
 
 #endif // GLOBALS_H
 

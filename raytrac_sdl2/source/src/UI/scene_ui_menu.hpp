@@ -281,7 +281,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                     scene_loading = true;
                     scene_loading_done = false;
                     scene_loading_progress = 0;
-                    scene_loading_stage = "Importing model...";
+                    setSceneLoadingStage("Importing model...");
 
                     std::thread loader_thread([this, file, &ctx]() {
                          int wait_count = 0;
@@ -294,13 +294,15 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          bool success = ProjectManager::getInstance().importModel(file, ctx.scene, ctx.renderer, ctx.backend_ptr,
                              [this](int p, const std::string& s) {
                                  scene_loading_progress = p; 
-                                 scene_loading_stage = s;
+                                 setSceneLoadingStage(s);
                              }, false); // false = DO NOT REBUILD in thread (Crash fix)
                          
                          // Set flags to trigger rebuild on MAIN thread
                          if (success) {
-                             g_needs_geometry_rebuild = true;
-                             g_needs_optix_sync = (ctx.optix_gpu_ptr != nullptr);
+                             g_needs_geometry_rebuild.store(true);
+                             // Despite the legacy name, this flag triggers deferred backend sync
+                             // for both OptiX and Vulkan in Main.cpp scene-load finalization.
+                             g_needs_optix_sync.store(ctx.backend_ptr != nullptr);
                          }
 
                          if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
@@ -361,7 +363,12 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         }
 
         if (ImGui::BeginMenu("Edit")) {
-             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, history.canUndo())) {
+             const bool block_history_actions =
+                 g_scene_loading_in_progress.load() ||
+                 scene_loading.load() ||
+                 rendering_in_progress.load() ||
+                 ctx.render_settings.backend_changed;
+             if (ImGui::MenuItem("Undo", "Ctrl+Z", false, history.canUndo() && !block_history_actions)) {
                  history.undo(ctx);
                  rebuildMeshCache(ctx.scene.world.objects);
                  mesh_cache_valid = false;
@@ -369,7 +376,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                  ctx.selection.selected.has_cached_aabb = false;
                  g_ProjectManager.markModified();
             }
-            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, history.canRedo())) {
+            if (ImGui::MenuItem("Redo", "Ctrl+Y", false, history.canRedo() && !block_history_actions)) {
                  history.redo(ctx);
                  rebuildMeshCache(ctx.scene.world.objects);
                  mesh_cache_valid = false;

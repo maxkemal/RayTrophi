@@ -294,6 +294,8 @@ struct GpuGasVolume {
 
 struct RayGenParams {
     uchar4* framebuffer;
+    float4* denoiser_albedo;
+    float4* denoiser_normal;
     int image_width;
     int image_height;
     int launch_offset_x;

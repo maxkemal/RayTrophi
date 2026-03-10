@@ -21,6 +21,8 @@
 struct OptixHitResult {
     float3 position;
     float3 normal;
+    float3 primary_albedo;
+    float3 primary_normal;
     float3 emission;
     GpuMaterial material;
     float2 uv;
@@ -28,6 +30,7 @@ struct OptixHitResult {
     int material_id;
     float t;
     int hit;
+    int primary_hit;
     // Texture object'leri
     cudaTextureObject_t albedo_tex;
     cudaTextureObject_t roughness_tex;

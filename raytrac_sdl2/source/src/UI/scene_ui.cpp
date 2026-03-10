@@ -985,7 +985,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         } else if (!g_hasVulkan && engine_type == 2) {
                             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[Vulkan Not Supported]");
                         }
-                        
+
                         if (!ctx.render_settings.use_optix && !ctx.render_settings.use_vulkan) {
                             const char* bvh_items[] = { "Custom RayTrophi BVH", "Intel Embree (Recommended)" };
                             int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
@@ -1035,6 +1035,14 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     if (UIWidgets::BeginSection("Denoising", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
                         ImGui::Checkbox("Enable Viewport Denoising", &ctx.render_settings.use_denoiser);
                         if (ctx.render_settings.use_denoiser) {
+                            const char* denoiser_mode_items[] = {
+                                "Fast: beauty only",
+                                "Quality: beauty + albedo + normal"
+                            };
+                            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
+                            if (ImGui::Combo("Denoiser Mode", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
+                                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+                            }
                             ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
                         }
                         UIWidgets::EndSection();
@@ -1598,6 +1606,11 @@ void SceneUI::draw(UIContext& ctx)
 void SceneUI::handleEditorShortcuts(UIContext& ctx)
 {
     ImGuiIO& io = ImGui::GetIO();
+    const bool block_history_actions =
+        g_scene_loading_in_progress.load() ||
+        scene_loading.load() ||
+        rendering_in_progress.load() ||
+        ctx.render_settings.backend_changed;
 
     if (!io.WantCaptureKeyboard && ctx.selection.hasSelection()) {
         handleDeleteShortcut(ctx);
@@ -1620,7 +1633,7 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
 
     // Undo / Redo
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift) {
-        if (history.canUndo()) {
+        if (!block_history_actions && history.canUndo()) {
             history.undo(ctx);
             rebuildMeshCache(ctx.scene.world.objects);
             ctx.selection.updatePositionFromSelection();
@@ -1630,7 +1643,7 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
 
     if ((ImGui::IsKeyPressed(ImGuiKey_Y) && io.KeyCtrl) ||
         (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && io.KeyShift)) {
-        if (history.canRedo()) {
+        if (!block_history_actions && history.canRedo()) {
             history.redo(ctx);
             rebuildMeshCache(ctx.scene.world.objects);
             ctx.selection.updatePositionFromSelection();
@@ -2717,6 +2730,16 @@ void SceneUI::tryOpen(UIContext& ctx) {
     }
 }
 
+void SceneUI::setSceneLoadingStage(const std::string& stage) {
+    std::lock_guard<std::mutex> lock(scene_loading_stage_mutex);
+    scene_loading_stage = stage;
+}
+
+std::string SceneUI::getSceneLoadingStage() const {
+    std::lock_guard<std::mutex> lock(scene_loading_stage_mutex);
+    return scene_loading_stage;
+}
+
 void SceneUI::drawExitConfirmation(UIContext& ctx) {
     if (!show_exit_confirmation) return;
 
@@ -2840,10 +2863,19 @@ void SceneUI::performNewProject(UIContext& ctx) {
      // Stop rendering while resetting
      rendering_stopped_cpu = true;
      rendering_stopped_gpu = true;
+
+     // Ensure no in-flight render/update is still touching scene/backend.
+     int wait_count = 0;
+     while (rendering_in_progress.load() && wait_count < 200) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+         ++wait_count;
+     }
+     if (ctx.backend_ptr) {
+         ctx.backend_ptr->waitForCompletion();
+     }
      
      // 1. Reset Global Project System
      g_ProjectManager.newProject(ctx.scene, ctx.renderer);
-     ctx.scene.clear();
      
      // 2. Reset UI-Side Persistent Data (Node Graphs, History, Cache)
      terrainNodeGraph.clear();
@@ -2896,11 +2928,11 @@ void SceneUI::performNewProject(UIContext& ctx) {
      extern bool g_camera_dirty;
      extern bool g_lights_dirty;
      extern bool g_world_dirty;
-     extern bool g_needs_optix_sync;
+     extern std::atomic<bool> g_needs_optix_sync;
      g_camera_dirty = true;
      g_lights_dirty = true;
      g_world_dirty = true;
-     g_needs_optix_sync = true;
+     g_needs_optix_sync.store(true);
      
      active_model_path = "Untitled";
      ctx.active_model_path = "Untitled";
@@ -2967,158 +2999,151 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         scene_loading_done = false;
         scene_loading_progress = 0;
         ctx.sample_count = 0;
-        scene_loading_stage = "Opening project...";
+        setSceneLoadingStage("Opening project...");
         
         std::thread loader_thread([this, filepath, &ctx]() {
-          try {
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            
-            std::string ext;
-            {
-                auto dot_pos = filepath.find_last_of('.');
-                if (dot_pos != std::string::npos) ext = filepath.substr(dot_pos);
-            }
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            
-            if (ext == ".rtp") {
-                g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.backend_ptr,
-                    [this](int p, const std::string& s) {
-                        scene_loading_progress = p;
-                        scene_loading_stage = s;
-                    });
-                
+            try {
+                scene_loading_progress = 1;
+                setSceneLoadingStage("Preparing loader...");
+
+                // Ensure no in-flight render/update is touching scene/backend before load.
+                int wait_count = 0;
+                while (rendering_in_progress.load() && wait_count < 200) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    ++wait_count;
+                }
+                if (ctx.backend_ptr) {
+                    ctx.backend_ptr->waitForCompletion();
+                }
+
+                std::string ext;
                 {
-                    std::string auxPath = filepath + ".aux.json";
-                    std::string oldGraphPath = filepath + ".nodegraph.json";
-                    bool loaded = false;
+                    auto dot_pos = filepath.find_last_of('.');
+                    if (dot_pos != std::string::npos) ext = filepath.substr(dot_pos);
+                }
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-                    if (std::filesystem::exists(auxPath)) {
-                        try {
-                            std::ifstream file(auxPath);
-                            if (file.is_open()) {
-                                nlohmann::json rootJson;
-                                file >> rootJson;
-                                file.close();
+                if (ext == ".rtp") {
+                    g_ProjectManager.openProject(filepath, ctx.scene, ctx.render_settings, ctx.renderer, ctx.backend_ptr,
+                        [this](int p, const std::string& s) {
+                            scene_loading_progress = p;
+                            setSceneLoadingStage(s);
+                        });
 
-                                TerrainObject* terrain = nullptr;
-                                auto& terrains = TerrainManager::getInstance().getTerrains();
-                                if (!terrains.empty()) terrain = &terrains[0];
+                    {
+                        std::string auxPath = filepath + ".aux.json";
+                        std::string oldGraphPath = filepath + ".nodegraph.json";
+                        bool loaded = false;
 
-                                if (rootJson.contains("terrain_graph")) {
-                                     terrainNodeGraph.fromJson(rootJson["terrain_graph"], terrain);
+                        if (std::filesystem::exists(auxPath)) {
+                            try {
+                                std::ifstream file(auxPath);
+                                if (file.is_open()) {
+                                    nlohmann::json rootJson;
+                                    file >> rootJson;
+                                    file.close();
+
+                                    TerrainObject* terrain = nullptr;
+                                    auto& terrains = TerrainManager::getInstance().getTerrains();
+                                    if (!terrains.empty()) terrain = &terrains[0];
+
+                                    if (rootJson.contains("terrain_graph")) {
+                                        terrainNodeGraph.fromJson(rootJson["terrain_graph"], terrain);
+                                    }
+
+                                    if (rootJson.contains("viewport_settings")) {
+                                        auto& vs = rootJson["viewport_settings"];
+                                        viewport_settings.shading_mode = vs.value("shading_mode", 1);
+                                        viewport_settings.show_gizmos = vs.value("show_gizmos", true);
+                                        viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
+                                        viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
+                                        viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);
+                                        viewport_settings.focus_mode = vs.value("focus_mode", 1); // Reset to AF-S if missing
+                                    }
+
+                                    if (rootJson.contains("guide_settings")) {
+                                        auto& gs = rootJson["guide_settings"];
+                                        guide_settings.show_safe_areas = gs.value("show_safe_areas", false);
+                                        guide_settings.safe_area_type = gs.value("safe_area_type", 0);
+                                        guide_settings.show_letterbox = gs.value("show_letterbox", false);
+                                        guide_settings.aspect_ratio_index = gs.value("aspect_ratio_index", 0);
+                                        guide_settings.show_grid = gs.value("show_grid", false);
+                                        guide_settings.grid_type = gs.value("grid_type", 0);
+                                        guide_settings.show_center = gs.value("show_center", false);
+                                    }
+
+                                    if (rootJson.contains("sync_sun_with_light")) {
+                                        sync_sun_with_light = rootJson["sync_sun_with_light"].get<bool>();
+                                    }
+
+                                    SCENE_LOG_INFO("[Load] Auxiliary settings loaded.");
+                                    loaded = true;
                                 }
+                            } catch (...) {}
+                        }
 
-                                if (rootJson.contains("viewport_settings")) {
-                                    auto& vs = rootJson["viewport_settings"];
-                                    viewport_settings.shading_mode = vs.value("shading_mode", 1);
-                                    viewport_settings.show_gizmos = vs.value("show_gizmos", true);
-                                    viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
-                                    viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
-                                    viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);
-                                    viewport_settings.focus_mode = vs.value("focus_mode", 1); // Reset to AF-S if missing
+                        if (!loaded && std::filesystem::exists(oldGraphPath)) {
+                            try {
+                                std::ifstream ngFile(oldGraphPath);
+                                if (ngFile.is_open()) {
+                                    nlohmann::json graphJson;
+                                    ngFile >> graphJson;
+                                    ngFile.close();
+                                    TerrainObject* terrain = nullptr;
+                                    auto& terrains = TerrainManager::getInstance().getTerrains();
+                                    if (!terrains.empty()) terrain = &terrains[0];
+                                    terrainNodeGraph.fromJson(graphJson, terrain);
                                 }
-
-                                if (rootJson.contains("guide_settings")) {
-                                    auto& gs = rootJson["guide_settings"];
-                                    guide_settings.show_safe_areas = gs.value("show_safe_areas", false);
-                                    guide_settings.safe_area_type = gs.value("safe_area_type", 0);
-                                    guide_settings.show_letterbox = gs.value("show_letterbox", false);
-                                    guide_settings.aspect_ratio_index = gs.value("aspect_ratio_index", 0);
-                                    guide_settings.show_grid = gs.value("show_grid", false);
-                                    guide_settings.grid_type = gs.value("grid_type", 0);
-                                    guide_settings.show_center = gs.value("show_center", false);
-                                }
-
-                                if (rootJson.contains("sync_sun_with_light")) {
-                                    sync_sun_with_light = rootJson["sync_sun_with_light"].get<bool>();
-                                }
-                                
-                                SCENE_LOG_INFO("[Load] Auxiliary settings loaded.");
-                                loaded = true;
-                            }
-                        } catch (...) {}
-                    } 
-                    
-                    if (!loaded && std::filesystem::exists(oldGraphPath)) {
-                        try {
-                            std::ifstream ngFile(oldGraphPath);
-                            if (ngFile.is_open()) {
-                                nlohmann::json graphJson;
-                                ngFile >> graphJson;
-                                ngFile.close();
-                                TerrainObject* terrain = nullptr;
-                                auto& terrains = TerrainManager::getInstance().getTerrains();
-                                if (!terrains.empty()) terrain = &terrains[0];
-                                terrainNodeGraph.fromJson(graphJson, terrain);
-                            }
-                        } catch (...) {}
+                            } catch (...) {}
+                        }
                     }
+                } else {
+                    SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.backend_ptr, filepath);
                 }
-            } else {
-                SceneSerializer::Deserialize(ctx.scene, ctx.render_settings, ctx.renderer, ctx.backend_ptr, filepath);
-            }
-            
-            invalidateCache();
-            active_model_path = g_ProjectManager.getProjectName();
-            
-            if (ctx.backend_ptr && g_hasCUDA) {
-                 ctx.backend_ptr->waitForCompletion();
-            }
-            
-            // Register animation clips with AnimationController
-            // This ensures bone animations work immediately after project load
-            if (!ctx.scene.animationDataList.empty()) {
-                auto& animCtrl = AnimationController::getInstance();
-                animCtrl.registerClips(ctx.scene.animationDataList);
-                
-                // Auto-play first animation clip
-                const auto& clips = animCtrl.getAllClips();
-                if (!clips.empty()) {
-                    animCtrl.play(clips[0].name, 0.0f);  // Instant start, no blend
-                    SCENE_LOG_INFO("[SceneUI] Auto-playing animation: " + clips[0].name);
+
+                invalidateCache();
+                active_model_path = g_ProjectManager.getProjectName();
+
+                if (ctx.backend_ptr) {
+                    ctx.backend_ptr->waitForCompletion();
                 }
-                
-                SCENE_LOG_INFO("[SceneUI] Registered " + std::to_string(ctx.scene.animationDataList.size()) + " animation clips after project load.");
+
+                if (!ctx.scene.animationDataList.empty()) {
+                    auto& animCtrl = AnimationController::getInstance();
+                    animCtrl.registerClips(ctx.scene.animationDataList);
+                    const auto& clips = animCtrl.getAllClips();
+                    if (!clips.empty()) {
+                        animCtrl.play(clips[0].name, 0.0f);
+                        SCENE_LOG_INFO("[SceneUI] Auto-playing animation: " + clips[0].name);
+                    }
+                    SCENE_LOG_INFO("[SceneUI] Registered " + std::to_string(ctx.scene.animationDataList.size()) + " animation clips after project load.");
+                }
+
+                g_ProjectManager.getProjectData().is_modified = false;
+
+                TerrainObject* terrain = nullptr;
+                auto& terrains = TerrainManager::getInstance().getTerrains();
+                if (!terrains.empty()) terrain = &terrains[0];
+                if (terrain) {
+                    terrainNodeGraph.evaluateTerrain(terrain, ctx.scene);
+                    SCENE_LOG_INFO("[Load] Terrain graph evaluated.");
+                }
+
+                hairUI.clear();
+                SceneUI::syncVDBVolumesToGPU(ctx);
+
+                ctx.active_model_path = filepath; // Update project name for window title
+            } catch (const std::exception& e) {
+                SCENE_LOG_ERROR(std::string("[Open] Exception: ") + e.what());
+            } catch (...) {
+                SCENE_LOG_ERROR("[Open] Unknown exception.");
             }
-            
-            g_ProjectManager.getProjectData().is_modified = false;
 
-            // Trigger terrain graph evaluation after load
-            TerrainObject* terrain = nullptr;
-            auto& terrains = TerrainManager::getInstance().getTerrains();
-            if (!terrains.empty()) terrain = &terrains[0];
-            if (terrain) {
-                terrainNodeGraph.evaluateTerrain(terrain, ctx.scene);
-                SCENE_LOG_INFO("[Load] Terrain graph evaluated.");
-            }
-
-            // Reset Hair UI to force refresh from new data
-            hairUI.clear();
-
-            // Ensure VDB parameters are synchronized to GPU after load
-            SceneUI::syncVDBVolumesToGPU(ctx);
-
-            scene_loading = false;
-            scene_loading_done = true;
-            ctx.active_model_path = filepath; // Update project name for window title
-            g_scene_loading_in_progress = false;
-            rendering_stopped_cpu = false;
-            rendering_stopped_gpu = false;
-          } catch (const std::exception& e) {
-            SCENE_LOG_ERROR(std::string("[Open] Loader thread exception: ") + e.what());
             scene_loading = false;
             scene_loading_done = true;
             g_scene_loading_in_progress = false;
             rendering_stopped_cpu = false;
             rendering_stopped_gpu = false;
-          } catch (...) {
-            SCENE_LOG_ERROR("[Open] Unknown exception in loader thread.");
-            scene_loading = false;
-            scene_loading_done = true;
-            g_scene_loading_in_progress = false;
-            rendering_stopped_cpu = false;
-            rendering_stopped_gpu = false;
-          }
         });
         loader_thread.detach();
     }
@@ -3332,10 +3357,58 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     // ─────────────────────────────────────────────────────────────────────────
     if (UIWidgets::BeginSection("Ray Marching Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
         ImGui::Indent();
-        if (ImGui::SliderFloat("Step Size", &shader->quality.step_size, 0.001f, 1.0f, "%.3f")) changed = true;
-        if (ImGui::SliderInt("Max Steps", &shader->quality.max_steps, 8, 4096)) changed = true;
-        if (ImGui::SliderInt("Shadow Steps", &shader->quality.shadow_steps, 0, 128)) changed = true;
+        enum VolumeQualityPresetUI { VolQualityFast = 0, VolQualityBalanced = 1, VolQualityExact = 2, VolQualityCustom = 3 };
+        const char* qualityPresetNames[] = { "Fast", "Balanced", "Exact", "Custom" };
+        int qualityPreset = shader->quality.quality_preset;
+        if (qualityPreset < VolQualityFast || qualityPreset > VolQualityCustom) {
+            qualityPreset = VolQualityBalanced;
+            shader->quality.quality_preset = VolQualityBalanced;
+            changed = true;
+        }
+        if (ImGui::Combo("Quality Preset", &qualityPreset, qualityPresetNames, IM_ARRAYSIZE(qualityPresetNames))) {
+            if (qualityPreset == VolQualityFast) {
+                shader->quality.step_size = 0.20f;
+                shader->quality.max_steps = 256;
+                shader->quality.shadow_steps = 8;
+                shader->quality.quality_preset = VolQualityFast;
+                changed = true;
+            } else if (qualityPreset == VolQualityBalanced) {
+                shader->quality.step_size = 0.08f;
+                shader->quality.max_steps = 512;
+                shader->quality.shadow_steps = 12;
+                shader->quality.quality_preset = VolQualityBalanced;
+                changed = true;
+            } else if (qualityPreset == VolQualityExact) {
+                shader->quality.step_size = 0.04f;
+                shader->quality.max_steps = 1024;
+                shader->quality.shadow_steps = 20;
+                shader->quality.quality_preset = VolQualityExact;
+                changed = true;
+            } else {
+                shader->quality.quality_preset = VolQualityCustom;
+                changed = true;
+            }
+        }
+        UIWidgets::HelpMarker("Fast: hizli preview, Balanced: varsayilan, Exact: parity/quality.");
+
+        if (ImGui::SliderFloat("Step Size", &shader->quality.step_size, 0.005f, 0.5f, "%.3f")) {
+            shader->quality.quality_preset = VolQualityCustom;
+            changed = true;
+        }
+        if (ImGui::SliderInt("Max Steps", &shader->quality.max_steps, 16, 1024)) {
+            shader->quality.quality_preset = VolQualityCustom;
+            changed = true;
+        }
+        if (ImGui::SliderInt("Shadow Steps", &shader->quality.shadow_steps, 0, 48)) {
+            shader->quality.quality_preset = VolQualityCustom;
+            changed = true;
+        }
         if (ImGui::SliderFloat("Shadow Strength", &shader->quality.shadow_strength, 0.0f, 1.0f)) changed = true;
+
+        // Hard safety clamp for loaded scenes / manual edits beyond UI limits.
+        shader->quality.step_size = (std::max)(0.005f, (std::min)(shader->quality.step_size, 0.5f));
+        shader->quality.max_steps = (std::max)(16, (std::min)(shader->quality.max_steps, 1024));
+        shader->quality.shadow_steps = (std::max)(0, (std::min)(shader->quality.shadow_steps, 48));
         ImGui::Unindent();
         UIWidgets::EndSection();
     }
@@ -3464,6 +3537,7 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
         static Vec3 lastHitPos = Vec3(0,0,0);
         static bool wasMouseDown = false;
 
+        bool strokeJustEnded = false;
         if (is_left_down) {
             float deltaTime = io.DeltaTime;
             
@@ -3516,6 +3590,7 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
             // --- UNDO: End stroke on mouse-up ---
             if (wasMouseDown) {
                 hairUI.endStroke(ctx.renderer.getHairSystem());
+                strokeJustEnded = true;
             }
             wasMouseDown = false;
             // Handle brush release
@@ -3523,9 +3598,17 @@ void SceneUI::handleHairBrush(UIContext& ctx) {
         }
 
         if (hairUI.isDirty()) {
-            ctx.renderer.uploadHairToGPU();  
-            ctx.renderer.resetCPUAccumulation(); 
-            hairUI.clearDirty();
+            static uint32_t s_lastHairUploadMs = 0;
+            const uint32_t nowMs = SDL_GetTicks();
+            const uint32_t kHairUploadIntervalMs = 66; // ~15Hz during brush drag
+            const bool uploadNow = strokeJustEnded || (nowMs - s_lastHairUploadMs >= kHairUploadIntervalMs);
+
+            if (uploadNow) {
+                ctx.renderer.uploadHairToGPU();
+                ctx.renderer.resetCPUAccumulation();
+                hairUI.clearDirty();
+                s_lastHairUploadMs = nowMs;
+            }
         }
     }
     

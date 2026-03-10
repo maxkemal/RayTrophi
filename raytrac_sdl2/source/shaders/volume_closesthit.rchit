@@ -82,6 +82,9 @@ struct RayPayload {
     bool  hitEmissive;
     uint  occluded;
     bool  skipAABBs;    // set when solid surface detected inside volume
+    vec3  primaryAlbedo;
+    vec3  primaryNormal;
+    uint  primaryHit;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -201,6 +204,7 @@ struct VkWorldDataExtended {
 };
 
 layout(set = 0, binding = 7, scalar) readonly buffer WorldBuffer { VkWorldDataExtended w; } worldData;
+layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
 
 // ============================================================
 // Hit Attributes from intersection shader
@@ -218,6 +222,38 @@ uint pcgNext(inout uint state) {
 
 float rnd(inout uint seed) {
     return float(pcgNext(seed)) * (1.0 / 4294967296.0);
+}
+
+vec3 sampleTransmittanceLUT(vec3 worldPos, vec3 sunDir) {
+    if (worldData.w.mode != 2) return vec3(1.0);
+    if (worldData.w.atmosphereHeight <= 0.0) return vec3(1.0);
+    if (worldData.w.transmittanceLUT.x == 0u && worldData.w.transmittanceLUT.y == 0u) return vec3(1.0);
+    float Rg = max(worldData.w.planetRadius, 1.0);
+    vec3 p = worldPos + vec3(0.0, Rg, 0.0);
+    float altitude = max(length(p) - Rg, 0.0);
+    vec3 up = normalize(p);
+    float cosTheta = dot(up, normalize(sunDir));
+    float u = clamp((cosTheta + 0.2) / 1.2, 0.0, 1.0);
+    float v = clamp(altitude / worldData.w.atmosphereHeight, 0.0, 1.0);
+    return textureLod(atmosphereLUTs[0], vec2(u, v), 0.0).rgb;
+}
+
+vec3 sampleSkyAmbient(vec3 viewDir) {
+    // Directional sky ambient: blend up-direction with view direction
+    // so horizon/sun tint mixes into the medium more naturally.
+    vec3 ambDir = normalize(mix(vec3(0.0, 1.0, 0.0), normalize(viewDir), 0.45));
+    ambDir = normalize(ambDir + normalize(worldData.w.sunDir) * 0.15);
+
+    if (worldData.w.mode == 2 &&
+        ((worldData.w.skyviewLUT.x | worldData.w.skyviewLUT.y) != 0u)) {
+        float az = atan(ambDir.z, ambDir.x);
+        if (az < 0.0) az += TWO_PI;
+        float u = az / TWO_PI;
+        float v = (1.0 - clamp(ambDir.y, -1.0, 1.0)) * 0.5;
+        return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb
+             * (0.15 * worldData.w.sunIntensity);
+    }
+    return worldData.w.sunColor * (0.15 * worldData.w.sunIntensity);
 }
 
 // ============================================================
@@ -498,7 +534,7 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
         // Procedural noise: convert localPos from world scale back to standard normalized coords
         // The procedural noise historically mapped [-0.5, 0.5] to fit bounds.
         // We remap the precise boundary.
-        vec3 normPos = (localPos - vol.aabb_min) / (vol.aabb_max - vol.aabb_min);
+        vec3 normPos = (localPos - vol.aabb_min) / max(vol.aabb_max - vol.aabb_min, vec3(1e-5));
         vec3 noiseCoord = normPos * vol.noise_scale;
         density = fbmNoise(noiseCoord, 4);
         
@@ -542,22 +578,34 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
 // ============================================================
 float lightMarch(VkVolumeInstance vol, vec3 pos, vec3 lightDir, float maxDist) {
     if (vol.shadow_steps <= 0) return 1.0;
+    if (maxDist <= 1e-4) return 1.0;
     
     // [SHADOW FIX] Match OptiX: s_step_world = world_vol_extent / (shadow_steps * 2)
     // This covers half of maxDist with shadow_steps samples.
     // OLD code used  min(maxDist, step_size*2) / shadow_steps  which for a large cloud
     // (maxDist=10, step_size=0.1) would only march 0.2 world units — missing 98% of the
     // volume. That left dense cores fully lit → solid white.
-    float stepSize = maxDist / (float(vol.shadow_steps) * 2.0);
+    float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
+    if (sigma_t <= EPSILON) return 1.0;
+
+    int reqSteps = clamp(vol.shadow_steps, 1, 64);
+    float dMid = sampleDensity(vol, pos + lightDir * (0.5 * maxDist));
+    float tauHint = max(0.0, dMid) * sigma_t * maxDist;
+    if (tauHint <= 0.02) return 1.0;
+    float stepScale = clamp(sqrt(tauHint), 0.25, 1.0);
+    int steps = int(ceil(float(reqSteps) * stepScale));
+    steps = clamp(steps, 3, min(reqSteps, 16));
+
+    float stepSize = maxDist / (float(steps) * 2.0);
     // Clamp to avoid NaN/zero-step if shadow_steps was set very high
     stepSize = max(stepSize, 1e-5);
-    
-    float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
+    float jitter = fract(sin(dot(pos, vec3(12.9898, 78.233, 37.719)) +
+                             dot(lightDir, vec3(39.346, 11.135, 83.155))) * 43758.5453);
     
     // Accumulate optical depth (matches OptiX: density_sum += sigma_t * step)
     float s_trans = 0.0;
-    for (int i = 0; i < vol.shadow_steps; i++) {
-        vec3 samplePos = pos + lightDir * (float(i) + 0.5) * stepSize;
+    for (int i = 0; i < steps; i++) {
+        vec3 samplePos = pos + lightDir * (float(i) + jitter + 0.5) * stepSize;
         float d = sampleDensity(vol, samplePos);
         s_trans += d * sigma_t * stepSize;
         if (s_trans > 10.0) break; // fully occluded
@@ -585,6 +633,11 @@ void main() {
     // Volume instance index from gl_InstanceCustomIndexEXT
     // (Set via TLASInstance::customIndex when building TLAS for volume objects)
     uint volIdx = gl_InstanceCustomIndexEXT;
+    uint volCount = uint(max(int(cam.pad0), 0));
+    if (volIdx >= volCount) {
+        payload.scattered = false;
+        return;
+    }
     VkVolumeInstance vol = volumes.v[volIdx];
     
     // Skip inactive volumes
@@ -598,8 +651,10 @@ void main() {
     vec3 rayDir    = normalize(gl_WorldRayDirectionEXT);
     
     // Get intersection range from the intersection shader
-    float tNear = volumeHitAttrib.x;
+    float rawTNear = volumeHitAttrib.x;
+    float tNear = rawTNear;
     float tFar  = volumeHitAttrib.y;
+    bool cameraInsideVolume = (rawTNear <= 0.0);
     
     // Ensure valid march range
     tNear = max(tNear, 0.001);
@@ -620,29 +675,59 @@ void main() {
     // ══════════════════════════════════════════════════════════════════════════
     float solidT = -1.0;  // -1 = no solid found
     {
-        const uint PROBE_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
-                               | gl_RayFlagsSkipClosestHitShaderEXT
-                               | gl_RayFlagsOpaqueEXT;
-        const uint PROBE_MASK  = 0x01; // triangles only
+        // Performance gate:
+        // In optically thick segments, inner solid surfaces are effectively invisible.
+        // Skip costly triangle probes in those cases.
+        bool needSolidProbe = true;
+        float marchDistProbe = max(tFar - tNear, 0.0);
+        float sigmaTCoeff = max(vol.scatter_coefficient + vol.absorption_coefficient, 0.0);
+        if (sigmaTCoeff > EPSILON && marchDistProbe > 1e-4) {
+            float tA = tNear + min(0.05 * marchDistProbe, 0.25);
+            float tB = tNear + 0.5 * marchDistProbe;
+            float dA = sampleDensity(vol, rayOrigin + rayDir * tA);
+            float dB = sampleDensity(vol, rayOrigin + rayDir * tB);
+            float dAvg = max(0.0, 0.4 * dA + 0.6 * dB);
+            float tauEst = dAvg * sigmaTCoeff * marchDistProbe;
+            float transEst = exp(-tauEst);
+            float probeThreshold = cameraInsideVolume ? 0.08 : 0.03;
+            needSolidProbe = (transEst > probeThreshold);
+        }
 
-        // Initial check: any solid in [tNear, tFar]?
-        shadowOccluded = true;
-        traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
-                    rayOrigin, tNear + 0.002, rayDir, tFar - 0.001, 1);
-        if (shadowOccluded) {
-            // Binary search to find approximate t of first solid hit
-            float lo = tNear, hi = tFar;
-            for (int it = 0; it < 6; it++) {
-                float mid = (lo + hi) * 0.5;
-                shadowOccluded = true;
-                traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
-                            rayOrigin, lo + 0.001, rayDir, mid, 1);
-                if (shadowOccluded) hi = mid;  // solid is in [lo, mid]
-                else                lo = mid;  // solid is in (mid, hi]
+        if (needSolidProbe) {
+            const uint PROBE_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
+                                   | gl_RayFlagsSkipClosestHitShaderEXT
+                                   | gl_RayFlagsOpaqueEXT;
+            const uint PROBE_MASK  = 0x01; // triangles only
+
+            // Initial check: any solid in [tNear, tFar]?
+            shadowOccluded = true;
+            traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
+                        rayOrigin, tNear + 0.002, rayDir, tFar - 0.001, 1);
+            if (shadowOccluded) {
+                // Binary search to find approximate t of first solid hit
+                float lo = tNear, hi = tFar;
+                int probeIters = cameraInsideVolume ? 2 : 4;
+                for (int it = 0; it < probeIters; it++) {
+                    float mid = (lo + hi) * 0.5;
+                    shadowOccluded = true;
+                    traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
+                                rayOrigin, lo + 0.001, rayDir, mid, 1);
+                    if (shadowOccluded) hi = mid;  // solid is in [lo, mid]
+                    else                lo = mid;  // solid is in (mid, hi]
+                }
+                solidT = lo;
+                // Clamp march to just before the solid
+                tFar = solidT - 0.01;
+                if (tFar <= tNear) {
+                    payload.radiance = vec3(0.0);
+                    payload.scatterOrigin = rayOrigin + rayDir * max(solidT - 0.01, tNear);
+                    payload.scatterDir = rayDir;
+                    payload.scattered = true;
+                    payload.hitEmissive = false;
+                    payload.skipAABBs = true;
+                    return;
+                }
             }
-            solidT = lo;
-            // Clamp march to just before the solid
-            tFar = solidT - 0.01;
         }
     }
 
@@ -650,41 +735,61 @@ void main() {
     // RAY MARCH through volume (Regular stepping with jitter)
     // Matches OptiX volumetric ray march approach
     // ══════════════════════════════════════════════════════════════════════════
-    float stepSize = vol.step_size;
+    float stepSize = max(vol.step_size, 1e-4);
     float marchDist = tFar - tNear;
-    int numSteps = min(int(ceil(marchDist / stepSize)), vol.max_steps);
-    float actualStep = marchDist / float(numSteps);
+    int maxSteps = max(vol.max_steps, 1);
+    float minStepToCover = marchDist / float(maxSteps);
+    float baseStep = max(stepSize, minStepToCover);
+    float minStep = max(baseStep * 0.25, 1e-4);
+    const float tauMax = 0.2;
     
-    float sigma_s = vol.scatter_coefficient;
-    float sigma_a = vol.absorption_coefficient;
-    float sigma_t = sigma_s + sigma_a;
+    float sigma_s_coeff = vol.scatter_coefficient;
+    float sigma_a_coeff = vol.absorption_coefficient;
     
     vec3  accumulated_radiance = vec3(0.0);
     float transmittance = 1.0;
     bool  didScatter = false;
     float scatterT = tFar; // will be set if scatter event happens
-    
+    vec3 ambientSky = sampleSkyAmbient(rayDir);
+
     // Jitter first sample to reduce banding
-    float jitter = rnd(payload.seed);
-    
-    for (int step = 0; step < numSteps; step++) {
-        float t = tNear + (float(step) + jitter) * actualStep;
+    float t = tNear + rnd(payload.seed) * baseStep;
+    int step = 0;
+    while (t < tFar && step < maxSteps) {
         vec3  samplePos = rayOrigin + rayDir * t;
         
         float density = sampleDensity(vol, samplePos);
         // Stochastic cutoff for sparse boundaries (OptiX Parity)
-        if (density <= rnd(payload.seed) * 0.01) continue;
+        if (density <= rnd(payload.seed) * 0.01) {
+            t += baseStep;
+            step++;
+            continue;
+        }
+
+        float sigma_s_local = density * sigma_s_coeff;
+        float sigma_a_local = density * sigma_a_coeff;
+        float sigma_t_local = sigma_s_local + sigma_a_local;
+        if (sigma_t_local <= EPSILON) {
+            t += baseStep;
+            step++;
+            continue;
+        }
         
+        // Optical-depth-limited adaptive step (industry-standard robustness in dense regions)
+        float dt = min(baseStep, tauMax / sigma_t_local);
+        dt = max(dt, minStep);
+        dt = min(dt, tFar - t);
+        if (dt <= 1e-6) break;
+
         // Current extinction
-        float dt = actualStep;
-        float extinction = density * sigma_t * dt;
+        float extinction = sigma_t_local * dt;
         float sampleTransmittance = exp(-extinction);
         
         // ── Multi-scatter transmittance blend (matches OptiX) ──
         // Blends single-scatter (Beer's law) with a softer 0.25x extinction approximation
         // to model multiple scattering. When scatter_multi > 0, volumes appear brighter
         // and more translucent — matching the OptiX renderer output.
-        if (vol.scatter_multi > 0.0 && sigma_s > 0.0) {
+        if (vol.scatter_multi > 0.0 && sigma_s_local > 0.0) {
             float albedo_avg = dot(vol.scatter_color, vec3(0.2126, 0.7152, 0.0722));
             float T_multi = exp(-extinction * 0.25);
             sampleTransmittance = sampleTransmittance * (1.0 - vol.scatter_multi * albedo_avg)
@@ -700,34 +805,39 @@ void main() {
             if (vol.emission_mode == 1) {
                 // Plain constant-color emission
                 emis = vol.emission_color * vol.emission_intensity * density;
-            } else if (vol.emission_mode == 2) {
-                // Blackbody / color-ramp — driven by temperature grid
+            } else if (vol.emission_mode >= 2) {
+                // Blackbody / color-ramp — temperature grid first, density fallback for parity.
                 float temperature = sampleTemperature(vol, samplePos);
-                if (temperature > 0.0) {
-                    vec3 e_color;
-                    if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
-                        float t_ramp = clamp(temperature * vol.temperature_scale, 0.0, 1.0);
-                        e_color = sampleColorRamp(vol, t_ramp);
-                    } else {
-                        // Matches OptiX: raw kelvin if temp > 20 (already in K), else normalize [0..1]→[1000..4000K]
-                        float kelvin = (temperature > 20.0)
-                            ? temperature * vol.temperature_scale
-                            : (temperature * 3000.0 + 1000.0) * vol.temperature_scale;
-                        e_color = blackbodyToRGB(kelvin);
-                    }
-                    emis = e_color * density * vol.blackbody_intensity;
+                if (temperature <= 0.0) temperature = density;
+
+                vec3 e_color;
+                if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
+                    float t_ramp = (temperature > 20.0)
+                        ? ((vol.max_temperature > 20.0) ? (temperature / vol.max_temperature) : (temperature / 6000.0))
+                        : temperature;
+                    e_color = sampleColorRamp(vol, clamp(t_ramp * vol.temperature_scale, 0.0, 1.0));
+                } else {
+                    // Matches OptiX: raw kelvin if temp > 20 (already in K), else normalize [0..1]→[1000..4000K]
+                    float kelvin = (temperature > 20.0)
+                        ? temperature * vol.temperature_scale
+                        : (temperature * 3000.0 + 1000.0) * vol.temperature_scale;
+                    e_color = blackbodyToRGB(kelvin);
                 }
+                emis = e_color * density * vol.blackbody_intensity;
             }
         }
         
         // ── In-Scattering (Direct Lighting) ──
-        if (sigma_s > 0.0) {
+        if (sigma_s_local > 0.0) {
             vec3 inscatter = vec3(0.0);
             
             // Sample lights for in-scattering
             if (cam.lightCount > 0u) {
-                int maxLightsToSample = min(int(cam.lightCount), 4);
-                for (int li = 0; li < maxLightsToSample; li++) {
+                int maxLightsToSample = min(int(cam.lightCount), 2);
+                float lightWeight = float(cam.lightCount) / float(maxLightsToSample);
+                for (int ls = 0; ls < maxLightsToSample; ls++) {
+                    int li = int(floor(rnd(payload.seed) * float(cam.lightCount)));
+                    li = clamp(li, 0, int(cam.lightCount) - 1);
                     LightData light = lights.l[li];
                     int lightType = int(light.position.w + 0.5);
                     
@@ -759,11 +869,15 @@ void main() {
                     // Geometry occlusion is NOT checked per-step (matching OptiX raymarch_volumetric_object
                     // behavior): solid objects are handled by TLAS traversal order, not per-sample rays.
                     // This prevents hard black shadows from solids inside the volume.
-                    float shadowTr = lightMarch(vol, samplePos, lightDir, min(lightDist, marchDist));
+                    float shadowTr = 1.0;
+                    if (sigma_t_local * dt > 0.02) {
+                        float shadowMaxDist = min(lightDist, max(8.0 * baseStep, marchDist * 0.35));
+                        shadowTr = lightMarch(vol, samplePos, lightDir, shadowMaxDist);
+                    }
                     
                     vec3 lightColor = light.color.rgb * light.color.a;
-                    inscatter += lightColor * lightAtten * phase * shadowTr
-                               * vol.scatter_color * density * sigma_s;
+                    inscatter += lightWeight * lightColor * lightAtten * phase * shadowTr
+                               * vol.scatter_color * sigma_s_local;
                 }
             }
             
@@ -776,35 +890,29 @@ void main() {
                 float sunPowder = gpu_powder_effect(density, cosSun);
                 sunPhase *= (1.0 + sunPowder * 0.5);
                 
-                float sunShadowTr = lightMarch(vol, samplePos, sunDir, marchDist);
+                float sunShadowTr = 1.0;
+                if (sigma_t_local * dt > 0.02) {
+                    float sunShadowMaxDist = max(12.0 * baseStep, marchDist * 0.45);
+                    sunShadowTr = lightMarch(vol, samplePos, sunDir, sunShadowMaxDist);
+                }
                 
-                vec3 sunLi = worldData.w.sunColor * worldData.w.sunIntensity;
-                inscatter += sunLi * sunPhase * sunShadowTr * vol.scatter_color * density * sigma_s;
+                vec3 sunLi = sampleTransmittanceLUT(samplePos, sunDir) * worldData.w.sunColor * worldData.w.sunIntensity;
+                inscatter += sunLi * sunPhase * sunShadowTr * vol.scatter_color * sigma_s_local;
             }
             
-            // 3. Sky/Ambient Lighting (OptiX Parity)
-            vec3 ambientSky = worldData.w.sunColor * 0.15;
-            inscatter += ambientSky * vol.scatter_color * density * sigma_s;
+            // 3. Sky/Ambient lighting (closer to CPU world.evaluate(up) behavior)
+            inscatter += ambientSky * vol.scatter_color * sigma_s_local;
             
             // Multi-scatter ambient + source boost (matches OptiX ms_boost)
             vec3 ms_boost = vec3(1.0) + vol.scatter_color * vol.scatter_multi * 2.0;
             inscatter *= ms_boost;
             
-            // INTEGRATION WEIGHT: use `dt` (the actual step length), NOT one_minus_sampleT.
-            //
-            // Why: the discrete Riemann sum  Σ T_i * sigma_s * L * dt  integrates the
-            // radiative-transfer source term and naturally yields:
-            //   total ≈ (sigma_s / sigma_t) * L * (1 - T_total)   [energy-conserving]
-            // 
-            // Using one_minus_sampleT instead gives  sigma_s * L * (1 - T_total), which
-            // grows unboundedly with scatter/absorption (for sigma_t*dt >> 1, one_minus_T→1
-            // while dt stays fixed → up to 1/dt amplification = 10× for dt=0.1).
-            // This was causing solid-white clouds when density/scatter/absorption was raised.
-            //
-            // Emission still uses one_minus_sampleT (energy-stable, bounded by emission_intensity).
-            accumulated_radiance += transmittance * (inscatter * dt + emis * one_minus_sampleT);
+            // CPU parity integration:
+            // step_color = source * (1 - step_transmittance)
+            // accumulated += step_color * current_transparency
+            accumulated_radiance += transmittance * (inscatter + emis) * one_minus_sampleT;
         } else if (any(greaterThan(emis, vec3(0.0)))) {
-            // Emission only if no scattering
+            // Emission-only medium segment
             accumulated_radiance += transmittance * emis * one_minus_sampleT;
         }
         
@@ -813,7 +921,8 @@ void main() {
         
         // ── Stochastic Scatter Event (Delta Tracking) ──
         // Probability of scattering at this step
-        float scatterProb = density * sigma_s * dt;
+        float scatterProb = 1.0 - exp(-sigma_s_local * dt);
+        scatterProb = clamp(scatterProb, 0.0, 1.0);
         if (rnd(payload.seed) < scatterProb && !didScatter) {
             didScatter = true;
             scatterT = t;
@@ -824,6 +933,8 @@ void main() {
             transmittance = 0.0;
             break;
         }
+        t += dt;
+        step++;
     }
     
     // ══════════════════════════════════════════════════════════════════════════
@@ -868,7 +979,8 @@ void main() {
         payload.attenuation *= vec3(transmittance);
         
         // Set scattered = true with original direction to let the ray continue through
-        payload.scatterOrigin = rayOrigin + rayDir * tFar;
+        // Ensure forward progress to avoid re-hitting the same boundary when camera is inside.
+        payload.scatterOrigin = rayOrigin + rayDir * (tFar + 0.002);
         payload.scatterDir    = rayDir;
         payload.scattered     = (transmittance > 0.01); // Stop if fully absorbed
         payload.hitEmissive   = (vol.emission_mode >= 1 && transmittance < 0.99);

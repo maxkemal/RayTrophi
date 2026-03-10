@@ -68,10 +68,16 @@ extern "C" __global__ void __raygen__rg() {
 
     const int samples_this_pass = optixLaunchParams.samples_per_pixel;
     float3 color_sum = make_float3(0.0f, 0.0f, 0.0f);
+    float3 albedo_sum = make_float3(0.0f, 0.0f, 0.0f);
+    float3 normal_sum = make_float3(0.0f, 0.0f, 0.0f);
+    int primary_hits = 0;
 
     for (int s = 0; s < samples_this_pass; ++s) {
         float u = (i + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_width);
         float v = (j + pcg_float(&pcg_rng)) / float(optixLaunchParams.image_height);
+        float3 primary_albedo = make_float3(0.0f);
+        float3 primary_normal = make_float3(0.0f);
+        int primary_hit = 0;
 
         if (optixLaunchParams.camera.chromatic_aberration_enabled && 
             optixLaunchParams.camera.chromatic_aberration > 0.0001f) {
@@ -82,15 +88,21 @@ extern "C" __global__ void __raygen__rg() {
             Ray ray_r = get_ray_from_camera(optixLaunchParams.camera, uv_r.x, uv_r.y, &rng);
             float3 color_r = ray_color(ray_r, &rng);
             Ray ray_g = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-            float3 color_g = ray_color(ray_g, &rng);
+            float3 color_g = ray_color(ray_g, &rng, &primary_albedo, &primary_normal, &primary_hit);
             float2 uv_b = apply_chromatic_aberration(u, v, ca_amount, b_scale);
             Ray ray_b = get_ray_from_camera(optixLaunchParams.camera, uv_b.x, uv_b.y, &rng);
             float3 color_b = ray_color(ray_b, &rng);
             color_sum += make_float3(color_r.x, color_g.y, color_b.z);
         } else {
             Ray ray = get_ray_from_camera(optixLaunchParams.camera, u, v, &rng);
-            float3 sample = ray_color(ray, &rng);
+            float3 sample = ray_color(ray, &rng, &primary_albedo, &primary_normal, &primary_hit);
             color_sum += sample;
+        }
+
+        if (primary_hit) {
+            albedo_sum += primary_albedo;
+            normal_sum += primary_normal * 0.5f + make_float3(0.5f, 0.5f, 0.5f);
+            primary_hits++;
         }
     }
 
@@ -108,6 +120,30 @@ extern "C" __global__ void __raygen__rg() {
             accum_buffer[pixel_index] = make_float4(blended_color.x, blended_color.y, blended_color.z, new_total_samples);
         } else {
             accum_buffer[pixel_index] = make_float4(new_color.x, new_color.y, new_color.z, float(samples_this_pass));
+        }
+    }
+
+    if (optixLaunchParams.denoiser_albedo != nullptr && optixLaunchParams.denoiser_normal != nullptr) {
+        float4 prevAlb = optixLaunchParams.denoiser_albedo[pixel_index];
+        float4 prevNrm = optixLaunchParams.denoiser_normal[pixel_index];
+        if (primary_hits > 0) {
+            float hitWeight = 1.0f / float(primary_hits);
+            float3 sample_albedo = albedo_sum * hitWeight;
+            float3 sample_normal = normal_sum * hitWeight;
+            float prev_samples = prevAlb.w;
+            if (prev_samples > 0.0f) {
+                float total_samples = prev_samples + samples_this_pass;
+                sample_albedo = (make_float3(prevAlb.x, prevAlb.y, prevAlb.z) * prev_samples + sample_albedo * samples_this_pass) / total_samples;
+                sample_normal = (make_float3(prevNrm.x, prevNrm.y, prevNrm.z) * prev_samples + sample_normal * samples_this_pass) / total_samples;
+                optixLaunchParams.denoiser_albedo[pixel_index] = make_float4(sample_albedo.x, sample_albedo.y, sample_albedo.z, total_samples);
+                optixLaunchParams.denoiser_normal[pixel_index] = make_float4(sample_normal.x, sample_normal.y, sample_normal.z, total_samples);
+            } else {
+                optixLaunchParams.denoiser_albedo[pixel_index] = make_float4(sample_albedo.x, sample_albedo.y, sample_albedo.z, float(samples_this_pass));
+                optixLaunchParams.denoiser_normal[pixel_index] = make_float4(sample_normal.x, sample_normal.y, sample_normal.z, float(samples_this_pass));
+            }
+        } else if (optixLaunchParams.frame_number == 0) {
+            optixLaunchParams.denoiser_albedo[pixel_index] = make_float4(0.0f, 0.0f, 0.0f, float(samples_this_pass));
+            optixLaunchParams.denoiser_normal[pixel_index] = make_float4(0.5f, 0.5f, 0.5f, float(samples_this_pass));
         }
     }
     

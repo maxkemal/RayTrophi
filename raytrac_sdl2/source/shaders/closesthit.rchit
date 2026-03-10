@@ -73,6 +73,7 @@ const float TWO_PI      = 6.28318530717958647692;
 const float INV_PI      = 0.31830988618379067154;
 const float EPSILON     = 1e-4;
 const float RAY_OFFSET  = 1e-3;   // Yüzey offset (self-intersection önleme)
+const float SHADOW_TMIN = 1e-3;   // Shadow rays: avoid near-field self/adjacent contact acne
 const float OPACITY_THRESHOLD = 0.5;  // Alpha cutout threshold
 
 // ============================================================
@@ -88,6 +89,9 @@ struct RayPayload {
     bool     hitEmissive;
     uint     occluded;
     bool     skipAABBs;    // set by volume_closesthit when a solid surface is found inside
+    vec3     primaryAlbedo;
+    vec3     primaryNormal;
+    uint     primaryHit;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -282,7 +286,20 @@ struct VkVolumeInstance {
     float    inv_transform[12];
     uint64_t vdb_grid_address;   // NanoVDB grid device address (or 0)
     uint64_t vdb_temp_address;   // secondary grid (temperature etc.)
-    float    _reserved[2];       // padding to 256-byte total
+    float    _reserved[2];       // padding to complete 24 bytes
+    int   emission_mode;
+    float temperature_scale;
+    float blackbody_intensity;
+    float max_temperature;
+    int   color_ramp_enabled;
+    int   ramp_stop_count;
+    int   _ramp_pad[2];
+    float ramp_positions[8];
+    float ramp_colors_r[8];
+    float ramp_colors_g[8];
+    float ramp_colors_b[8];
+    float pivot_offset[3];
+    float _ext_reserved[21];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
@@ -370,37 +387,47 @@ float ch_volDensity(VkVolumeInstance vol, vec3 wp) {
     lp.x = vol.inv_transform[0]*wp.x + vol.inv_transform[1]*wp.y + vol.inv_transform[2]*wp.z + vol.inv_transform[3];
     lp.y = vol.inv_transform[4]*wp.x + vol.inv_transform[5]*wp.y + vol.inv_transform[6]*wp.z + vol.inv_transform[7];
     lp.z = vol.inv_transform[8]*wp.x + vol.inv_transform[9]*wp.y + vol.inv_transform[10]*wp.z + vol.inv_transform[11];
-    if (any(lessThan(lp,vec3(-0.5))) || any(greaterThan(lp,vec3(0.5)))) return 0.0;
+    vec3 bmin = vec3(vol.aabb_min[0], vol.aabb_min[1], vol.aabb_min[2]);
+    vec3 bmax = vec3(vol.aabb_max[0], vol.aabb_max[1], vol.aabb_max[2]);
+    if (any(lessThan(lp, bmin)) || any(greaterThan(lp, bmax))) return 0.0;
     float density = 1.0;
     if (vol.volume_type == 1) {
-        vec3 nc = (lp + vec3(0.5)) * vol.noise_scale;
+        vec3 span = max(bmax - bmin, vec3(1e-5));
+        vec3 norm = (lp - bmin) / span;
+        vec3 nc = norm * vol.noise_scale;
         density = ch_fbmNoise(nc, 4);
-        vec3 ed = vec3(0.5) - abs(lp);
-        density *= smoothstep(0.0, 0.1, min(min(ed.x,ed.y),ed.z));
+        vec3 ed = vec3(0.5) - abs(norm - vec3(0.5));
+        density *= smoothstep(0.0, 0.1, min(min(ed.x, ed.y), ed.z));
     } else if (vol.volume_type == 2) {
         // NanoVDB: sample the actual grid data.
         // Guard: vdb_grid_address may be 0 when the source VDB file is missing or
         // the Vulkan buffer has not yet been uploaded (e.g. project opened without
         // the original .vdb file present).  Dereferencing address 0 = GPU crash.
         if (vol.vdb_grid_address != 0) {
-            vec3 vdbWorldPos = vol.aabb_min + (lp + vec3(0.5)) * (vol.aabb_max - vol.aabb_min);
+            vec3 vdbWorldPos = lp;
+            vdbWorldPos.x -= vol.pivot_offset[0];
+            vdbWorldPos.y -= vol.pivot_offset[1];
+            vdbWorldPos.z -= vol.pivot_offset[2];
             density = ch_sampleNanoVDB(vol.vdb_grid_address, vdbWorldPos);
         } else {
             // Fallback: procedural noise so the volume still renders visibly
-            vec3 nc = (lp + vec3(0.5)) * max(vol.noise_scale, 1.0);
+            vec3 span = max(bmax - bmin, vec3(1e-5));
+            vec3 norm = (lp - bmin) / span;
+            vec3 nc = norm * max(vol.noise_scale, 1.0);
             density = ch_fbmNoise(nc, 4);
         }
     }
-    density = clamp((density - vol.density_remap_low) /
-                    max(vol.density_remap_high - vol.density_remap_low, 1e-6), 0.0, 1.0);
+    density = max((density - vol.density_remap_low) /
+                  max(vol.density_remap_high - vol.density_remap_low, 1e-6), 0.0);
     return max(density * vol.density_multiplier, 0.0);
 }
 
 // Ray-march all active volumes between shadowOrigin and light (maxDist).
 // Returns transmittance in [0,1]: 1.0 = fully lit, 0.0 = fully shadowed.
 float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist) {
-    int volCount = int(cam.pad0);   // float(volumeCount) packed by C++ each frame
+    int volCount = int(cam.pad0);
     if (volCount <= 0) return 1.0;
+    if (maxDist <= 1e-4) return 1.0;
     const float EPS = 1e-6;
     float transmittance = 1.0;
     for (int vi = 0; vi < min(volCount, 16); vi++) {
@@ -408,40 +435,63 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
         if (vol.is_active == 0) continue;
         float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
         if (sigma_t < EPS || vol.density_multiplier < EPS) continue;
-        // Transform ray to volume local space for unit-cube slab test
+
         vec3 lo, ld;
-        lo.x=vol.inv_transform[0]*shadowOrigin.x+vol.inv_transform[1]*shadowOrigin.y+vol.inv_transform[2]*shadowOrigin.z+vol.inv_transform[3];
-        lo.y=vol.inv_transform[4]*shadowOrigin.x+vol.inv_transform[5]*shadowOrigin.y+vol.inv_transform[6]*shadowOrigin.z+vol.inv_transform[7];
-        lo.z=vol.inv_transform[8]*shadowOrigin.x+vol.inv_transform[9]*shadowOrigin.y+vol.inv_transform[10]*shadowOrigin.z+vol.inv_transform[11];
-        ld.x=vol.inv_transform[0]*lightDir.x+vol.inv_transform[1]*lightDir.y+vol.inv_transform[2]*lightDir.z;
-        ld.y=vol.inv_transform[4]*lightDir.x+vol.inv_transform[5]*lightDir.y+vol.inv_transform[6]*lightDir.z;
-        ld.z=vol.inv_transform[8]*lightDir.x+vol.inv_transform[9]*lightDir.y+vol.inv_transform[10]*lightDir.z;
-        // Safe inverse direction for slab test
+        lo.x = vol.inv_transform[0] * shadowOrigin.x + vol.inv_transform[1] * shadowOrigin.y + vol.inv_transform[2] * shadowOrigin.z + vol.inv_transform[3];
+        lo.y = vol.inv_transform[4] * shadowOrigin.x + vol.inv_transform[5] * shadowOrigin.y + vol.inv_transform[6] * shadowOrigin.z + vol.inv_transform[7];
+        lo.z = vol.inv_transform[8] * shadowOrigin.x + vol.inv_transform[9] * shadowOrigin.y + vol.inv_transform[10] * shadowOrigin.z + vol.inv_transform[11];
+        ld.x = vol.inv_transform[0] * lightDir.x + vol.inv_transform[1] * lightDir.y + vol.inv_transform[2] * lightDir.z;
+        ld.y = vol.inv_transform[4] * lightDir.x + vol.inv_transform[5] * lightDir.y + vol.inv_transform[6] * lightDir.z;
+        ld.z = vol.inv_transform[8] * lightDir.x + vol.inv_transform[9] * lightDir.y + vol.inv_transform[10] * lightDir.z;
+
         vec3 inv;
-        inv.x = abs(ld.x)>EPS ? 1.0/ld.x : (ld.x>=0.0 ?  1e7:-1e7);
-        inv.y = abs(ld.y)>EPS ? 1.0/ld.y : (ld.y>=0.0 ?  1e7:-1e7);
-        inv.z = abs(ld.z)>EPS ? 1.0/ld.z : (ld.z>=0.0 ?  1e7:-1e7);
-        vec3 t0 = (vec3(-0.5)-lo)*inv;  vec3 t1 = (vec3(0.5)-lo)*inv;
-        vec3 tS = min(t0,t1);           vec3 tL = max(t0,t1);
-        float tNL = max(max(tS.x,tS.y),max(tS.z,0.0));
-        float tFL = min(min(tL.x,tL.y),tL.z);
+        inv.x = abs(ld.x) > EPS ? 1.0 / ld.x : (ld.x >= 0.0 ? 1e7 : -1e7);
+        inv.y = abs(ld.y) > EPS ? 1.0 / ld.y : (ld.y >= 0.0 ? 1e7 : -1e7);
+        inv.z = abs(ld.z) > EPS ? 1.0 / ld.z : (ld.z >= 0.0 ? 1e7 : -1e7);
+
+        vec3 bmin = vec3(vol.aabb_min[0], vol.aabb_min[1], vol.aabb_min[2]);
+        vec3 bmax = vec3(vol.aabb_max[0], vol.aabb_max[1], vol.aabb_max[2]);
+        vec3 t0 = (bmin - lo) * inv;
+        vec3 t1 = (bmax - lo) * inv;
+        vec3 tS = min(t0, t1);
+        vec3 tL = max(t0, t1);
+        float tNL = max(max(tS.x, tS.y), max(tS.z, 0.0));
+        float tFL = min(min(tL.x, tL.y), tL.z);
         if (tNL >= tFL) continue;
-        // tNL/tFL ARE already world-space t values.
-        // The affine inv_transform shares the same scalar t as the world ray:
-        //   P_local(t) = lo + t*ld  ↔  P_world(t) = origin + t*lightDir
-        // No scale conversion is needed — dividing by length(ld) was wrong.
+
         float tNW = max(tNL, 0.001);
         float tFW = min(tFL, maxDist);
         if (tFW <= tNW) continue;
-        // Ray march in world space (ch_volDensity does world→local internally)
-        int steps = clamp(vol.shadow_steps, 4, 16);
-        float stepW = (tFW - tNW) / float(steps);
+
+        int reqSteps = clamp(vol.shadow_steps, 1, 64);
+        float segLen = tFW - tNW;
+        if (segLen <= 1e-5) continue;
+        float dMid = ch_volDensity(vol, shadowOrigin + lightDir * (tNW + 0.5 * segLen));
+        float tauHint = max(0.0, dMid) * sigma_t * segLen;
+        if (tauHint <= 0.02) continue;
+        float stepScale = clamp(sqrt(tauHint), 0.25, 1.0);
+        int steps = int(ceil(float(reqSteps) * stepScale));
+        steps = clamp(steps, 3, min(reqSteps, 16));
+        float stepW = segLen / (float(steps) * 2.0);
+        stepW = max(stepW, 1e-5);
+        float jitter = fract(sin(dot(shadowOrigin + lightDir * float(vi + 1), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        float opticalDepth = 0.0;
         for (int s = 0; s < steps; s++) {
-            vec3 sp = shadowOrigin + lightDir*(tNW + (float(s)+0.5)*stepW);
+            vec3 sp = shadowOrigin + lightDir * (tNW + (float(s) + jitter + 0.5) * stepW);
             float d = ch_volDensity(vol, sp);
-            transmittance *= exp(-d * sigma_t * stepW * vol.shadow_strength);
-            if (transmittance < 0.01) { transmittance = 0.0; break; }
+            opticalDepth += d * sigma_t * stepW;
+            if (opticalDepth > 10.0) break;
         }
+
+        float beers = exp(-opticalDepth);
+        float physTrans = beers;
+        if (vol.scatter_multi > 0.0 && vol.scatter_coefficient > 0.0) {
+            float albedoLum = dot(vol.scatter_color, vec3(0.2126, 0.7152, 0.0722));
+            float beersSoft = exp(-opticalDepth * 0.25);
+            physTrans = beers * (1.0 - vol.scatter_multi * albedoLum) + beersSoft * (vol.scatter_multi * albedoLum);
+        }
+        float strength = clamp(vol.shadow_strength, 0.0, 1.0);
+        transmittance *= (1.0 - strength * (1.0 - physTrans));
         if (transmittance <= 0.0) break;
     }
     return transmittance;
@@ -1359,13 +1409,14 @@ void main() {
                 }
                 blendMetallic += weights[k] * lMetal;
 
-                // [FIX] Layer normal map — blend tangent-space normals by weight.
+                // Layer normal map — blend tangent-space normals by weight.
+                // Keep channel orientation aligned with OptiX path (no ad-hoc X/Y flips).
                 // Layers without a normal map contribute a flat (0,0,1) tangent-space vector.
                 if (int(lm.normal_tex) > 0) {
                     vec3 ns = texture(materialTextures[nonuniformEXT(int(lm.normal_tex))], layerUV).rgb;
                     ns = ns * 2.0 - vec3(1.0); // [0,1] -> [-1,1]
-                    ns.x = -ns.x;               // [FIX] Flip X for basis consistency
-                    ns.y = -ns.y;               // [FIX] Flip Y for DirectX/OpenGL normal map convention
+                    // hitUV V is flipped globally; compensate tangent-space Y (green) for normal maps.
+                    ns.y = -ns.y;
                     ns.z = abs(ns.z);           // ensure outward-pointing Z
                     blendNormal_ts += weights[k] * ns;
                     anyNormalTex = true;
@@ -1462,6 +1513,8 @@ void main() {
             // Push ray safely to the BACK side of the triangle using offset_ray.
             // geomNormal already faces the incoming ray (due to flip earlier).
             // So -geomNormal points to the other side of the surface.
+            payload.radiance      = vec3(0.0);
+            payload.hitEmissive   = false;
             payload.scatterOrigin = offset_ray(hitPos, -geomNormal);
             payload.scatterDir    = rayDir;
             payload.scattered     = true;
@@ -1527,7 +1580,9 @@ if (emissionTexID > 0) {
         if (mapLength > 0.1) {  // Non-zero check
             // Convert from [0, 1] to [-1, 1] range
             vec3 normalMapDir = normalMapSample * 2.0 - vec3(1.0);
-            
+            // hitUV V is flipped globally; compensate tangent-space Y (green) for normal maps.
+            normalMapDir.y = -normalMapDir.y;
+
             // Ensure Z is positive (pointing outward in tangent space)
             normalMapDir.z = abs(normalMapDir.z);
             
@@ -1553,6 +1608,12 @@ if (emissionTexID > 0) {
             }
             // else: keep geometry normal if perturbed normal points wrong way
         }
+    }
+
+    if (payload.primaryHit == 0u) {
+        payload.primaryAlbedo = albedo;
+        payload.primaryNormal = worldNormal;
+        payload.primaryHit = 1u;
     }
     worldNormal = tangentNormal;
 
@@ -1627,7 +1688,7 @@ if (emissionTexID > 0) {
                         shadowOccluded = true;
                         // ULP-based offset: self-intersection-safe on thin/distant geometry
                         vec3 shadowOrigin = offset_ray(hitPos, geomNormal);
-                        float tmin = 0.0;
+                        float tmin = SHADOW_TMIN;
                         float tmax = min(max(0.0, dist - 1e-3), 10000.0);
                         if (tmax > tmin) {
                             // No OpaqueEXT → any-hit shader tests transparency per pixel
@@ -1699,7 +1760,7 @@ if (emissionTexID > 0) {
             shadowOccluded = true;
             // ULP-based offset: self-intersection-safe on thin/distant geometry
             vec3 sunShadowOrigin = offset_ray(hitPos, geomNormal);
-            float sunTmin = 0.0;
+            float sunTmin = SHADOW_TMIN;
             float sunTmax = 1e8;
             uint sunShadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
                                 | gl_RayFlagsSkipClosestHitShaderEXT
@@ -1830,3 +1891,4 @@ if (emissionTexID > 0) {
         }
     }
 }
+

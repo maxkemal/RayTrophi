@@ -7,6 +7,7 @@
 #include "scene_data.h"
 #include "TerrainManager.h"
 #include "TerrainFFT.h"  // FFT-accelerated noise with CUDA fallback
+#include "globals.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
 #include <cmath>
@@ -537,7 +538,11 @@ namespace TerrainNodesV2 {
     }
     
     void HydraulicErosionNode::drawContent() {
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
         if (ImGui::Checkbox("Use GPU (Hybrid Fluvial)", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
         
         if (useGPU) {
             ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Mode: GPU Stream Power (Parity)");
@@ -640,7 +645,11 @@ namespace TerrainNodesV2 {
     }
     
     void ThermalErosionNode::drawContent() {
-        ImGui::Checkbox("Use GPU", &useGPU);
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
         ImGui::DragInt("Iterations", &params.iterations, 1, 1, 500);
         
         float uiDegrees = std::atan(params.talusAngle) * 180.0f / 3.14159f;
@@ -717,7 +726,11 @@ namespace TerrainNodesV2 {
     }
     
     void FluvialErosionNode::drawContent() {
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
         if (ImGui::Checkbox("Use GPU (River Carver)", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
         
         if (useGPU) {
             if (ImGui::Button("Reset GPU Params")) {
@@ -816,7 +829,11 @@ namespace TerrainNodesV2 {
     }
     
     void WindErosionNode::drawContent() {
-        ImGui::Checkbox("Use GPU", &useGPU);
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
         ImGui::SliderFloat("Strength", &strength, 0.0f, 1.0f);
         ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f);
         ImGui::DragInt("Iterations", &iterations, 1, 1, 200);
@@ -1351,7 +1368,11 @@ namespace TerrainNodesV2 {
         ImGui::SliderFloat("Temperature", &temperatureFactor, 0.0f, 2.0f);
         ImGui::SliderFloat("Wind", &windFactor, 0.0f, 2.0f);
         ImGui::SliderInt("Quality", &qualityLevel, 1, 3);
+        if (!g_hasCUDA) useGPU = false;
+        ImGui::BeginDisabled(!g_hasCUDA);
         ImGui::Checkbox("Use GPU", &useGPU);
+        ImGui::EndDisabled();
+        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
         ImGui::EndDisabled();
 
         ImGui::Separator();

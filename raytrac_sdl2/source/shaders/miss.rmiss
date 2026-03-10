@@ -44,6 +44,10 @@ struct RayPayload {
     bool  scattered;
     bool  hitEmissive;
     uint  occluded;
+    bool  skipAABBs;
+    vec3  primaryAlbedo;
+    vec3  primaryNormal;
+    uint  primaryHit;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -199,8 +203,8 @@ vec3 skyColor(vec3 dir) {
 
     vec3 sky;
 
-    // _pad5 is set to 1 by VulkanBackendAdapter::uploadAtmosphereLUT() once textures are ready.
-    if (worldData.w._pad5 != 0) {
+    bool hasAtmosLUTs = (worldData.w.transmittanceLUT.x | worldData.w.transmittanceLUT.y) != 0u;
+    if (hasAtmosLUTs) {
         // Sample the full-sphere LUT (covers cosTheta -1..+1, i.e. below horizon too).
         // This lets the LUT provide natural warm/orange horizon glow just like OptiX ray-sphere
         // integration does — no early-return that would create a hard horizon edge.
@@ -294,7 +298,7 @@ vec3 skyColor(vec3 dir) {
         float phaseM_cap  = min(phaseM_full, 2.0);       // capped version for background halo
 
         // ── Excess phase glow (the missing "fluffy" corona) ──────────────────
-        if (excessPhase > 0.0 && worldData.w._pad5 != 0) {
+        if (excessPhase > 0.0 && hasAtmosLUTs) {
             // Transmittance LUT [binding 8, slot 0]
             // UV matches AtmosphereLUT::sampleTransmittance:
             //   u = (cosTheta + 0.2) / 1.2,  v = altitude / atmosphereHeight

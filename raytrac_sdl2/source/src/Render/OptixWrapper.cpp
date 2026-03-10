@@ -9,6 +9,7 @@
 #include <cstring>      // memcpy for camera hash
 #include <cmath>        // std::isfinite for hair validation
 #include <set>          // for unique_nodes in TLAS building
+#include <atomic>
 
 
 #include "TerrainManager.h"
@@ -188,6 +189,17 @@ void OptixWrapper::partialCleanup() {
         accumulation_valid = false;
         accumulated_samples = 0;
     }
+    if (d_denoiser_albedo) {
+        cudaFree(reinterpret_cast<void*>(d_denoiser_albedo));
+        d_denoiser_albedo = nullptr;
+    }
+    if (d_denoiser_normal) {
+        cudaFree(reinterpret_cast<void*>(d_denoiser_normal));
+        d_denoiser_normal = nullptr;
+    }
+    host_denoiser_color.clear();
+    host_denoiser_albedo.clear();
+    host_denoiser_normal.clear();
 
     // SBT kaynakları
     if (sbt.hitgroupRecordBase) {
@@ -203,20 +215,84 @@ void OptixWrapper::partialCleanup() {
 }
 
 void OptixWrapper::clearScene() {
+    // Keep core initialization (context/stream/pipeline) alive, but fully drop scene-owned GPU data.
+    if (accel_manager) {
+        accel_manager->cleanup();
+    }
+
+    // Clear host-side scene mappings/caches tied to previous project contents.
+    hitgroup_records.clear();
+    node_to_instance.clear();
+    instance_to_node.clear();
+    m_groomToCurveID.clear();
+    m_cached_materials.clear();
+    m_cached_textures.clear();
+    m_cached_volumetrics.clear();
+
+    // Free per-BLAS allocations explicitly.
+    for (auto& blas : per_blas_data) {
+        if (blas.d_vertices) cudaFree(reinterpret_cast<void*>(blas.d_vertices));
+        if (blas.d_indices) cudaFree(reinterpret_cast<void*>(blas.d_indices));
+        if (blas.d_normals) cudaFree(reinterpret_cast<void*>(blas.d_normals));
+        if (blas.d_uvs) cudaFree(reinterpret_cast<void*>(blas.d_uvs));
+        if (blas.d_tangents) cudaFree(reinterpret_cast<void*>(blas.d_tangents));
+        if (blas.d_material_indices) cudaFree(reinterpret_cast<void*>(blas.d_material_indices));
+        if (blas.d_gas_output) cudaFree(reinterpret_cast<void*>(blas.d_gas_output));
+    }
+    per_blas_data.clear();
+
+    // Drop scene geometry/AS/SBT/accumulation buffers.
+    partialCleanup();
+
+    // Clear scene-scoped volume/picking buffers that partialCleanup() does not own.
+    if (d_vdb_volumes) {
+        cudaFree(reinterpret_cast<void*>(d_vdb_volumes));
+        d_vdb_volumes = nullptr;
+    }
+    d_vdb_volumes_capacity = 0;
+
+    if (d_gas_volumes) {
+        cudaFree(d_gas_volumes);
+        d_gas_volumes = nullptr;
+    }
+    d_gas_volumes_capacity = 0;
+
+    if (d_pick_buffer) {
+        cudaFree(d_pick_buffer);
+        d_pick_buffer = nullptr;
+    }
+    if (d_pick_depth_buffer) {
+        cudaFree(d_pick_depth_buffer);
+        d_pick_depth_buffer = nullptr;
+    }
+    pick_buffer_size = 0;
+
+    // Hair scene resources
+    if (m_d_hairVertices) { cudaFree(reinterpret_cast<void*>(m_d_hairVertices)); m_d_hairVertices = 0; }
+    if (m_d_hairIndices)  { cudaFree(reinterpret_cast<void*>(m_d_hairIndices));  m_d_hairIndices = 0; }
+    if (m_d_hairTangents) { cudaFree(reinterpret_cast<void*>(m_d_hairTangents)); m_d_hairTangents = 0; }
+    if (m_d_hairStrandIDs){ cudaFree(reinterpret_cast<void*>(m_d_hairStrandIDs)); m_d_hairStrandIDs = 0; }
+    if (m_d_hairGas)      { cudaFree(reinterpret_cast<void*>(m_d_hairGas));      m_d_hairGas = 0; }
+    m_hairHandle = 0;
+    m_hairVertexCount = 0;
+    m_hairSegmentCount = 0;
+
     traversable_handle = 0;
     params.handle = 0;
-    
-    if (d_bvh_output) {
-        cudaFree(reinterpret_cast<void*>(d_bvh_output)); 
-        d_bvh_output = 0;
-    }
-    if (d_vertices) { cudaFree(reinterpret_cast<void*>(d_vertices)); d_vertices = 0; }
-    if (d_indices) { cudaFree(reinterpret_cast<void*>(d_indices)); d_indices = 0; }
-    
+    params.hair_enabled = 0;
+    params.hair_handle = 0;
+    params.vdb_volumes = nullptr;
+    params.vdb_volume_count = 0;
+    params.gas_volumes = nullptr;
+    params.gas_volume_count = 0;
+    params.pick_buffer = nullptr;
+    params.pick_depth_buffer = nullptr;
+    params_dirty = true;
+
     if (d_params) {
         CUDA_CHECK(cudaMemcpy(reinterpret_cast<void*>(d_params), &params, sizeof(RayGenParams), cudaMemcpyHostToDevice));
     }
-    SCENE_LOG_INFO("[OptiX] Scene cleared (Handle=0)");
+    SCENE_LOG_INFO("[OptiX] Scene cleared (preserved core context/pipeline)");
 }
 
 // Overload for internal use (clean render launch)
@@ -284,20 +360,92 @@ void OptixWrapper::downloadFramebuffer(uchar4* host_ptr, int width, int height) 
     CUDA_CHECK(cudaMemcpy(host_ptr, d_framebuffer, width * height * sizeof(uchar4), cudaMemcpyDeviceToHost));
 }
 
+bool OptixWrapper::downloadDenoiserBuffers(std::vector<float>& color, std::vector<float>& albedo, std::vector<float>& normal) {
+    if (!d_accumulation_float4 || !d_denoiser_albedo || !d_denoiser_normal || prev_width <= 0 || prev_height <= 0) {
+        return false;
+    }
+
+    const size_t pixelCount = (size_t)prev_width * (size_t)prev_height;
+    std::vector<float4> accum(pixelCount);
+    std::vector<float4> alb(pixelCount);
+    std::vector<float4> nrm(pixelCount);
+
+    CUDA_CHECK(cudaMemcpy(accum.data(), d_accumulation_float4, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(alb.data(), d_denoiser_albedo, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(nrm.data(), d_denoiser_normal, pixelCount * sizeof(float4), cudaMemcpyDeviceToHost));
+
+    color.resize(pixelCount * 3);
+    albedo.resize(pixelCount * 3);
+    normal.resize(pixelCount * 3);
+
+    for (size_t i = 0; i < pixelCount; ++i) {
+        const size_t idx = i * 3;
+        color[idx] = accum[i].x;
+        color[idx + 1] = accum[i].y;
+        color[idx + 2] = accum[i].z;
+        albedo[idx] = alb[i].x;
+        albedo[idx + 1] = alb[i].y;
+        albedo[idx + 2] = alb[i].z;
+        normal[idx] = nrm[i].x * 2.0f - 1.0f;
+        normal[idx + 1] = nrm[i].y * 2.0f - 1.0f;
+        normal[idx + 2] = nrm[i].z * 2.0f - 1.0f;
+    }
+
+    return true;
+}
+
 void OptixWrapper::cleanup() {
-    if (d_vertices) {
-        cudaFree(reinterpret_cast<void*>(d_vertices));
-        d_vertices = 0;
+    if (stream) {
+        cudaStreamSynchronize(stream);
+    } else {
+        cudaDeviceSynchronize();
     }
 
-    if (d_indices) {
-        cudaFree(reinterpret_cast<void*>(d_indices));
-        d_indices = 0;
+    // Release texture objects / arrays created from scene materials.
+    destroyTextureObjects();
+
+    // Release scene-owned CUDA/OptiX data (GAS/TLAS buffers, SBT hitgroups, volumes, hair, etc.).
+    clearScene();
+
+    // Release SBT raygen/miss records (not covered by partialCleanup/clearScene).
+    if (sbt.raygenRecord) {
+        cudaFree(reinterpret_cast<void*>(sbt.raygenRecord));
+        sbt.raygenRecord = 0;
+    }
+    if (sbt.missRecordBase) {
+        cudaFree(reinterpret_cast<void*>(sbt.missRecordBase));
+        sbt.missRecordBase = 0;
+    }
+    sbt.missRecordCount = 0;
+    sbt.missRecordStrideInBytes = 0;
+
+    // Release OptiX pipeline objects.
+    if (pipeline) { optixPipelineDestroy(pipeline); pipeline = nullptr; }
+    if (raygen_pg) { optixProgramGroupDestroy(raygen_pg); raygen_pg = nullptr; }
+    if (miss_pg) { optixProgramGroupDestroy(miss_pg); miss_pg = nullptr; }
+    if (miss_shadow_pg) { optixProgramGroupDestroy(miss_shadow_pg); miss_shadow_pg = nullptr; }
+    if (hit_pg) { optixProgramGroupDestroy(hit_pg); hit_pg = nullptr; }
+    if (hit_shadow_pg) { optixProgramGroupDestroy(hit_shadow_pg); hit_shadow_pg = nullptr; }
+    if (hair_hit_pg) { optixProgramGroupDestroy(hair_hit_pg); hair_hit_pg = nullptr; }
+    if (hair_shadow_pg) { optixProgramGroupDestroy(hair_shadow_pg); hair_shadow_pg = nullptr; }
+    if (raygen_module) { optixModuleDestroy(raygen_module); raygen_module = nullptr; }
+    if (miss_module) { optixModuleDestroy(miss_module); miss_module = nullptr; }
+    if (hitgroup_module) { optixModuleDestroy(hitgroup_module); hitgroup_module = nullptr; }
+
+    if (d_converged_count) {
+        cudaFree(d_converged_count);
+        d_converged_count = nullptr;
     }
 
-    if (d_bvh_output) {
-        cudaFree(reinterpret_cast<void*>(d_bvh_output));
-        d_bvh_output = 0;
+    // Persistent buffers
+    if (d_params_persistent) {
+        cudaFree(reinterpret_cast<void*>(d_params_persistent));
+        d_params_persistent = 0;
+    }
+    if (d_lights_persistent) {
+        cudaFree(reinterpret_cast<void*>(d_lights_persistent));
+        d_lights_persistent = 0;
+        d_lights_capacity = 0;
     }
 
     if (stream) {
@@ -309,28 +457,12 @@ void OptixWrapper::cleanup() {
         optixDeviceContextDestroy(context);
         context = nullptr;
     }
-    if (d_accumulation_buffer) cudaFree(d_accumulation_buffer);
-    if (d_variance_buffer) cudaFree(d_variance_buffer);
-    if (d_sample_count_buffer) cudaFree(d_sample_count_buffer);
-    if (d_converged_count) cudaFree(d_converged_count);
-    if (d_framebuffer) cudaFree(d_framebuffer);
-    if (d_accumulation_float4) cudaFree(d_accumulation_float4);
-    d_accumulation_float4 = nullptr;
-    d_converged_count = nullptr;
+
+    if (accel_manager) {
+        accel_manager.reset();
+    }
+
     traversable_handle = 0;
-    
-    // ===========================================================================
-    // PERSISTENT BUFFER CLEANUP (Animation Performance Optimization)
-    // ===========================================================================
-    if (d_params_persistent) {
-        cudaFree(reinterpret_cast<void*>(d_params_persistent));
-        d_params_persistent = 0;
-    }
-    if (d_lights_persistent) {
-        cudaFree(reinterpret_cast<void*>(d_lights_persistent));
-        d_lights_persistent = 0;
-        d_lights_capacity = 0;
-    }
 }
 
 OptixWrapper::~OptixWrapper() {
@@ -1116,8 +1248,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     SDL_Texture* raytrace_texture
 ) {
     // CRASH FIX: Don't render while geometry is being rebuilt
-    extern bool g_optix_rebuild_in_progress;
-    if (g_optix_rebuild_in_progress) {
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    if (g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
         rendering_in_progress = false;
         return;
     }
@@ -1129,7 +1261,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     // ------------------ BUFFER ALLOCATION -----------------------
     // Framebuffer for display (uchar4)
-    if (!d_framebuffer || prev_width != width || prev_height != height) {
+    const bool resolution_changed = (prev_width != width || prev_height != height);
+    if (!d_framebuffer || resolution_changed) {
         if (d_framebuffer) cudaFree(d_framebuffer);
         cudaMalloc(&d_framebuffer, pixel_count * sizeof(uchar4));
         prev_width = width;
@@ -1143,6 +1276,14 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
         cudaMalloc(&d_accumulation_float4, pixel_count * sizeof(float4));
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
         accumulation_valid = true;
+    }
+    if (!d_denoiser_albedo || !d_denoiser_normal || !accumulation_valid || resolution_changed) {
+        if (d_denoiser_albedo) cudaFree(d_denoiser_albedo);
+        if (d_denoiser_normal) cudaFree(d_denoiser_normal);
+        cudaMalloc(&d_denoiser_albedo, pixel_count * sizeof(float4));
+        cudaMalloc(&d_denoiser_normal, pixel_count * sizeof(float4));
+        cudaMemset(d_denoiser_albedo, 0, pixel_count * sizeof(float4));
+        cudaMemset(d_denoiser_normal, 0, pixel_count * sizeof(float4));
     }
 
     // Variance buffer for adaptive sampling (float: per-pixel noise estimate)
@@ -1166,6 +1307,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     if (camera_changed) {
         // Camera moved - reset accumulation and variance
         cudaMemset(d_accumulation_float4, 0, pixel_count * sizeof(float4));
+        if (d_denoiser_albedo) cudaMemset(d_denoiser_albedo, 0, pixel_count * sizeof(float4));
+        if (d_denoiser_normal) cudaMemset(d_denoiser_normal, 0, pixel_count * sizeof(float4));
         if (d_variance_buffer) {
             cudaMemset(d_variance_buffer, 0, pixel_count * sizeof(float));
         }
@@ -1200,6 +1343,8 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
 
     // ------------------ SETUP PARAMS -----------------------
     params.framebuffer = d_framebuffer;
+    params.denoiser_albedo = d_denoiser_albedo;
+    params.denoiser_normal = d_denoiser_normal;
     params.accumulation_buffer = reinterpret_cast<float*>(d_accumulation_float4);
     params.image_width = width;
     params.image_height = height;
@@ -1732,6 +1877,8 @@ void OptixWrapper::resetBuffers(int width, int height) {
         
         // Critical Fix: Also free float4 accumulation buffer to prevent crash on resize
         if (d_accumulation_float4) { cudaFree(d_accumulation_float4); d_accumulation_float4 = nullptr; }
+        if (d_denoiser_albedo) { cudaFree(d_denoiser_albedo); d_denoiser_albedo = nullptr; }
+        if (d_denoiser_normal) { cudaFree(d_denoiser_normal); d_denoiser_normal = nullptr; }
         
         // Also invalidate framebuffer so launch functions re-allocate
         if (d_framebuffer) { cudaFree(d_framebuffer); d_framebuffer = nullptr; }
@@ -1742,6 +1889,8 @@ void OptixWrapper::resetBuffers(int width, int height) {
         
         // Re-allocate float4 accumulation buffer used by progressive renderer
         cudaMalloc(&d_accumulation_float4, sizeof(float4) * width * height);
+        cudaMalloc(&d_denoiser_albedo, sizeof(float4) * width * height);
+        cudaMalloc(&d_denoiser_normal, sizeof(float4) * width * height);
 
         prev_width = width;
         prev_height = height;
@@ -1760,6 +1909,12 @@ void OptixWrapper::resetBuffers(int width, int height) {
     if (d_accumulation_float4) {
         cudaMemset(d_accumulation_float4, 0, sizeof(float4) * width * height);
     }
+    if (d_denoiser_albedo) {
+        cudaMemset(d_denoiser_albedo, 0, sizeof(float4) * width * height);
+    }
+    if (d_denoiser_normal) {
+        cudaMemset(d_denoiser_normal, 0, sizeof(float4) * width * height);
+    }
     
     frame_counter = 1;
     Image_width = width;
@@ -1775,6 +1930,12 @@ void OptixWrapper::resetAccumulation() {
     // Reset the Cycles-style accumulation buffer for new frame
     if (d_accumulation_float4 && prev_width > 0 && prev_height > 0) {
         cudaMemset(d_accumulation_float4, 0, prev_width * prev_height * sizeof(float4));
+    }
+    if (d_denoiser_albedo && prev_width > 0 && prev_height > 0) {
+        cudaMemset(d_denoiser_albedo, 0, prev_width * prev_height * sizeof(float4));
+    }
+    if (d_denoiser_normal && prev_width > 0 && prev_height > 0) {
+        cudaMemset(d_denoiser_normal, 0, prev_width * prev_height * sizeof(float4));
     }
     // Reset variance buffer for adaptive sampling
     if (d_variance_buffer && prev_width > 0 && prev_height > 0) {
@@ -2359,8 +2520,8 @@ MeshGeometry OptixWrapper::extractMeshGeometry(
 void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data, 
                                       const std::vector<std::shared_ptr<Hittable>>& objects) {
     // Block render while rebuilding
-    extern bool g_optix_rebuild_in_progress;
-    g_optix_rebuild_in_progress = true;
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    g_optix_rebuild_in_progress.store(true, std::memory_order_release);
     cudaDeviceSynchronize(); // Ensure previous kernels finished
     
     // [FIX] Crucially clear previous scene state to avoid memory leaks and ghost geometry
@@ -2784,7 +2945,7 @@ void OptixWrapper::buildFromDataTLAS(const OptixGeometryData& data,
     sbt.hitgroupRecordStrideInBytes = accel_sbt.hitgroupRecordStrideInBytes;
     sbt.hitgroupRecordCount = accel_sbt.hitgroupRecordCount;
     
-    g_optix_rebuild_in_progress = false;
+    g_optix_rebuild_in_progress.store(false, std::memory_order_release);
    // SCENE_LOG_INFO("[OptiX TLAS] Build complete. Instances: " + std::to_string(accel_manager->getInstanceCount()));
 }
 
@@ -2938,8 +3099,8 @@ void OptixWrapper::rebuildTLAS() {
 }
 
 void OptixWrapper::updateTLASGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) {
-    extern bool g_optix_rebuild_in_progress;
-    if (!accel_manager || !use_tlas_mode || g_optix_rebuild_in_progress) {
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    if (!accel_manager || !use_tlas_mode || g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
         // SCENE_LOG_ERROR("[OptiX] updateTLASGeometry called but not in TLAS mode or rebuild in progress");
         return;
     }

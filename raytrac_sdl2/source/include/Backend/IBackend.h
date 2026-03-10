@@ -62,6 +62,14 @@ struct RenderParams {
     float adaptiveThreshold;
 };
 
+struct DenoiserFrameData {
+    int width = 0;
+    int height = 0;
+    const float* color = nullptr;
+    const float* albedo = nullptr;
+    const float* normal = nullptr;
+};
+
 struct CameraParams {
     Vec3 origin;
     Vec3 lookAt;
@@ -483,6 +491,10 @@ public:
      * @param outPixels Output buffer (RGBA float or uint8 depending on format)
      */
     virtual void downloadImage(void* outPixels) = 0;
+    virtual bool getDenoiserFrame(DenoiserFrameData& frame) {
+        (void)frame;
+        return false;
+    }
     
     virtual int getCurrentSampleCount() const = 0;
     

@@ -74,6 +74,9 @@ void bsplineBasisDeriv(float t,
 void main()
 {
     uint segIdx = uint(gl_PrimitiveID);
+    if (segIdx >= hairSegs.length()) {
+        return;
+    }
     HairSegmentGPU seg = hairSegs[segIdx];
 
     // Kontrol noktaları ve yarıçaplar (dünya uzayı)
