@@ -87,6 +87,32 @@ void SplashScreen::setStatus(const std::string& text) {
     render();
 }
 
+void SplashScreen::beginBusyStatus(const std::string& text) {
+    m_busy = true;
+    m_ready = false;
+    m_busyStart = std::chrono::steady_clock::now();
+    m_statusText = text;
+    render();
+}
+
+void SplashScreen::stopBusyStatus() {
+    m_busy = false;
+    render();
+}
+
+void SplashScreen::tick() {
+    if (!m_initialized) return;
+
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_QUIT) {
+            m_ready = false;
+        }
+    }
+
+    render();
+}
+
 void SplashScreen::render() {
     if (!m_initialized || !m_renderer) return;
     
@@ -118,18 +144,65 @@ void SplashScreen::render() {
     SDL_Rect border = { 0, 0, m_windowWidth, m_windowHeight };
     SDL_RenderDrawRect(m_renderer, &border);
     
-    // Draw text indicator
-    SDL_SetRenderDrawColor(m_renderer, 100, 255, 100, 255);
+    const auto now = std::chrono::steady_clock::now();
+    const auto busyMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_busyStart).count();
+    const int elapsedSeconds = static_cast<int>(busyMs / 1000);
+
+    // Draw animated status indicator
     SDL_Rect statusIndicator = { 20, m_windowHeight - 32, 10, 10 };
     if (m_ready) {
         SDL_SetRenderDrawColor(m_renderer, 0, 255, 150, 255);
-        statusIndicator.w = 12; statusIndicator.h = 12;
+        statusIndicator.w = 12;
+        statusIndicator.h = 12;
+    } else if (m_busy) {
+        const Uint8 pulse = static_cast<Uint8>(140 + ((busyMs / 6) % 80));
+        SDL_SetRenderDrawColor(m_renderer, 80, pulse, 120, 255);
+    } else {
+        SDL_SetRenderDrawColor(m_renderer, 100, 255, 100, 255);
     }
     SDL_RenderFillRect(m_renderer, &statusIndicator);
 
+    // Draw activity bar so long operations look alive even without deterministic progress.
+    SDL_Rect progressTrack = { 45, m_windowHeight - 20, m_windowWidth - 90, 4 };
+    SDL_SetRenderDrawColor(m_renderer, 55, 55, 62, 255);
+    SDL_RenderFillRect(m_renderer, &progressTrack);
+    if (m_ready) {
+        SDL_SetRenderDrawColor(m_renderer, 0, 255, 150, 255);
+        SDL_RenderFillRect(m_renderer, &progressTrack);
+    } else if (m_busy) {
+        const int segmentWidth = (progressTrack.w / 5) > 40 ? (progressTrack.w / 5) : 40;
+        const int travel = (progressTrack.w - segmentWidth) > 1 ? (progressTrack.w - segmentWidth) : 1;
+        const int offset = static_cast<int>((busyMs / 10) % travel);
+        SDL_SetRenderDrawColor(m_renderer, 90, 220, 160, 255);
+        SDL_Rect movingSegment = { progressTrack.x + offset, progressTrack.y, segmentWidth, progressTrack.h };
+        SDL_RenderFillRect(m_renderer, &movingSegment);
+    }
+
+    std::string statusLine = m_statusText;
+    if (m_busy) {
+        static const char* kFrames[] = {"-", "/", "-", "\\"};
+        statusLine += " ";
+        statusLine += kFrames[(busyMs / 200) % 4];
+    }
+
     // Render status text string
     SDL_Color textColor = { 200, 200, 210, 255 };
-    drawText(m_statusText, 45, m_windowHeight - 35, textColor);
+    drawText(statusLine, 45, m_windowHeight - 35, textColor);
+    if (m_busy) {
+        const std::string timerText =
+            std::to_string(elapsedSeconds / 60) + ":" +
+            ((elapsedSeconds % 60) < 10 ? "0" : "") +
+            std::to_string(elapsedSeconds % 60);
+
+        SDL_SetRenderDrawColor(m_renderer, 24, 30, 34, 220);
+        SDL_Rect timerBadge = { m_windowWidth - 96, 14, 78, 22 };
+        SDL_RenderFillRect(m_renderer, &timerBadge);
+        SDL_SetRenderDrawColor(m_renderer, 90, 220, 160, 255);
+        SDL_RenderDrawRect(m_renderer, &timerBadge);
+
+        SDL_Color accent = { 120, 220, 170, 255 };
+        drawText(timerText, m_windowWidth - 87, 18, accent, 2);
+    }
     
     SDL_RenderPresent(m_renderer);
 }
@@ -190,8 +263,9 @@ void SplashScreen::close() {
     m_initialized = false;
 }
 
-void SplashScreen::drawText(const std::string& text, int x, int y, SDL_Color color) {
+void SplashScreen::drawText(const std::string& text, int x, int y, SDL_Color color, int scale) {
     if (!m_renderer || text.empty()) return;
+    if (scale < 1) scale = 1;
 
     auto getCharData = [](char c) -> const unsigned char* {
         static const unsigned char fontData[][6] = {
@@ -236,13 +310,18 @@ void SplashScreen::drawText(const std::string& text, int x, int y, SDL_Color col
                 unsigned char line = data[i];
                 for (int j = 0; j < 8; j++) {
                     if (line & (1 << j)) {
-                        SDL_RenderDrawPoint(m_renderer, curX + i, y + j);
-                        SDL_RenderDrawPoint(m_renderer, curX + i + 1, y + j);
+                        SDL_Rect pixelRect = {
+                            curX + (i * scale),
+                            y + (j * scale),
+                            scale,
+                            scale
+                        };
+                        SDL_RenderFillRect(m_renderer, &pixelRect);
                     }
                 }
             }
         }
-        curX += 8;
+        curX += 8 * scale;
     }
 }
 

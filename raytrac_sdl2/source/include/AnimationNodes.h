@@ -568,12 +568,14 @@ namespace AnimationGraph {
              
              if(j.contains("states")) {
                  states.clear();
+                 inputs.clear();
                  for(const auto& s : j["states"]) {
                      State state;
                      state.name = s.value("name", "State");
                      state.nodeId = s.value("nodeId", 0u);
                      state.isDefault = s.value("isDefault", false);
                      states.push_back(state);
+                     addInput(state.name + " Pose", NodeSystem::DataType::Custom);
                  }
              }
              

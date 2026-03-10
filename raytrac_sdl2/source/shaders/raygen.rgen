@@ -425,13 +425,25 @@ void main() {
         v = (v - 0.5) * caFactor + 0.5;
     }
 
+    vec3 shakeOffset = vec3(0.0);
     vec3 rayOrigin = cam.origin.xyz;
     if (cam.shakeEnabled != 0) {
-        rayOrigin += vec3(cam.shakeOffsetX, cam.shakeOffsetY, cam.shakeOffsetZ);
+        shakeOffset = vec3(cam.shakeOffsetX, cam.shakeOffsetY, cam.shakeOffsetZ);
+        rayOrigin += shakeOffset;
     }
 
     // Camera ray direction calculation with DOF
-    vec3 rayTarget = cam.lowerLeft.xyz + u * cam.horizontal.xyz + v * cam.vertical.xyz;
+    vec3 rayTarget = cam.lowerLeft.xyz + shakeOffset + u * cam.horizontal.xyz + v * cam.vertical.xyz;
+    if (cam.shakeEnabled != 0) {
+        vec3 camU = normalize(cam.horizontal.xyz);
+        vec3 camV = normalize(cam.vertical.xyz);
+        vec3 center = cam.lowerLeft.xyz + shakeOffset + cam.horizontal.xyz * 0.5 + cam.vertical.xyz * 0.5;
+        center += camU * cam.shakeRotY * 10.0;
+        center += camV * cam.shakeRotX * 10.0;
+        vec3 shakenLowerLeft = center - cam.horizontal.xyz * 0.5 - cam.vertical.xyz * 0.5;
+        rayTarget = shakenLowerLeft + u * cam.horizontal.xyz + v * cam.vertical.xyz;
+    }
+
     vec3 rayDir;
 
     if (cam.aperture > 0.001) {

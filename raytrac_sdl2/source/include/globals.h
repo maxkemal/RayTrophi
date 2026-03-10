@@ -69,7 +69,6 @@ struct RenderSettings {
     int samples_per_pixel = 1;
     int samples_per_pass = 1;
     int max_bounces = 10;
-    int transparent_max_bounces = 10;
 
     // Adaptive Sampling
     bool use_adaptive_sampling = true;

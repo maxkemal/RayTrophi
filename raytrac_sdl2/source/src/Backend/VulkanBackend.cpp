@@ -5447,6 +5447,20 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.autoAE = cam.auto_exposure;
     cp.usePhysicalExposure = cam.use_physical_exposure;
     cp.exposureFactor = cam.getPhysicalExposureMultiplier();
+
+    cp.shake_enabled = cam.enable_camera_shake;
+    cp.shake_intensity = cam.shake_intensity;
+    cp.shake_frequency = cam.shake_frequency;
+    cp.handheld_sway_amplitude = cam.handheld_sway_amplitude;
+    cp.handheld_sway_frequency = cam.handheld_sway_frequency;
+    cp.breathing_amplitude = cam.breathing_amplitude;
+    cp.breathing_frequency = cam.breathing_frequency;
+    cp.enable_focus_drift = cam.enable_focus_drift;
+    cp.focus_drift_amount = cam.focus_drift_amount;
+    cp.operator_skill = (int)cam.operator_skill;
+    cp.ibis_enabled = cam.ibis_enabled;
+    cp.ibis_effectiveness = cam.ibis_effectiveness;
+    cp.rig_mode = (int)cam.rig_mode;
     
     setCamera(cp);
 }
@@ -6069,16 +6083,50 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     if (pushConst.shakeEnabled) {
         float time = (float)SDL_GetTicks() / 1000.0f;
         float freq = this->m_camera.shake_frequency;
-        float intensity = this->m_camera.shake_intensity;
-        
-        // Simplified shake for Vulkan (mirroring OptixWrapper logic)
+        float skill_mult = 1.0f;
+        switch (this->m_camera.operator_skill) {
+            case 0: skill_mult = 1.0f; break;
+            case 1: skill_mult = 0.6f; break;
+            case 2: skill_mult = 0.25f; break;
+            case 3: skill_mult = 0.1f; break;
+            default: break;
+        }
+
+        float intensity = this->m_camera.shake_intensity * skill_mult;
+        if (this->m_camera.ibis_enabled) {
+            intensity /= powf(2.0f, this->m_camera.ibis_effectiveness);
+        }
+
         pushConst.shakeOffsetX = sinf(time * freq * 1.0f) * this->m_camera.handheld_sway_amplitude * intensity;
-        pushConst.shakeOffsetY = sinf(time * freq * 1.3f + 1.5f) * this->m_camera.handheld_sway_amplitude * intensity;
+        pushConst.shakeOffsetY =
+            sinf(time * freq * 1.3f + 1.5f) * this->m_camera.handheld_sway_amplitude * intensity +
+            sinf(time * this->m_camera.breathing_frequency * 6.28f) * this->m_camera.breathing_amplitude * intensity;
         pushConst.shakeOffsetZ = sinf(time * freq * 0.7f + 3.0f) * this->m_camera.handheld_sway_amplitude * intensity * 0.3f;
         
         pushConst.shakeRotX = sinf(time * freq * 1.1f) * 0.003f * intensity;
         pushConst.shakeRotY = sinf(time * freq * 0.9f + 1.0f) * 0.003f * intensity;
         pushConst.shakeRotZ = sinf(time * freq * 0.5f + 2.0f) * 0.001f * intensity;
+
+        if (this->m_camera.enable_focus_drift && this->m_camera.focus_drift_amount > 0.0f) {
+            float base_intensity = this->m_camera.shake_intensity * skill_mult;
+            float focus_wave = sinf(time * freq * 0.4f + 2.5f);
+            float distance_scale = 1.0f / (1.0f + this->m_camera.focusDistance * 0.1f);
+            float aperture_scale = this->m_camera.aperture * 10.0f;
+            float focus_variation =
+                focus_wave *
+                this->m_camera.focus_drift_amount *
+                base_intensity *
+                distance_scale *
+                aperture_scale;
+            pushConst.focusDistance = this->m_camera.focusDistance + focus_variation;
+        }
+    } else {
+        pushConst.shakeOffsetX = 0.0f;
+        pushConst.shakeOffsetY = 0.0f;
+        pushConst.shakeOffsetZ = 0.0f;
+        pushConst.shakeRotX = 0.0f;
+        pushConst.shakeRotY = 0.0f;
+        pushConst.shakeRotZ = 0.0f;
     }
 
     // Detect camera movement/rotation by hashing camera push-constant vectors.
@@ -6099,6 +6147,13 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     mix32(pushConst.caEnabled);
     mix32(pushConst.vignetteEnabled);
     mix32(pushConst.shakeEnabled);
+    mix32(*(uint32_t*)&pushConst.shakeOffsetX);
+    mix32(*(uint32_t*)&pushConst.shakeOffsetY);
+    mix32(*(uint32_t*)&pushConst.shakeOffsetZ);
+    mix32(*(uint32_t*)&pushConst.shakeRotX);
+    mix32(*(uint32_t*)&pushConst.shakeRotY);
+    mix32(*(uint32_t*)&pushConst.shakeRotZ);
+    mix32(*(uint32_t*)&pushConst.focusDistance);
 
     if (camHash != this->m_lastCameraHash) {
         this->m_lastCameraHash = camHash;

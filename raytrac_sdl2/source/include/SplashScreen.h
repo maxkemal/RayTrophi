@@ -11,6 +11,7 @@
 #pragma once
 
 #include <SDL.h>
+#include <chrono>
 #include <string>
 
 /**
@@ -34,6 +35,13 @@ public:
     
     // Update loading status text (bottom-left corner)
     void setStatus(const std::string& text);
+
+    // Start/stop a visible busy state for long-running startup work.
+    void beginBusyStatus(const std::string& text);
+    void stopBusyStatus();
+
+    // Pump animation/events while startup work runs on another thread.
+    void tick();
     
     // Render current state (call after setStatus)
     void render();
@@ -70,8 +78,10 @@ private:
     
     bool m_ready = false;
     bool m_initialized = false;
+    bool m_busy = false;
+    std::chrono::steady_clock::time_point m_busyStart = std::chrono::steady_clock::now();
     
     // Simple bitmap font rendering (no SDL_ttf dependency)
-    void drawText(const std::string& text, int x, int y, SDL_Color color);
+    void drawText(const std::string& text, int x, int y, SDL_Color color, int scale = 1);
 };
 

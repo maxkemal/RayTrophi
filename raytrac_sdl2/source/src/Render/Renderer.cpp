@@ -2092,15 +2092,7 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
             update_progress(90, "Configuring OptiX camera...");
             if (scene.camera) {
                 SCENE_LOG_INFO("Setting up OptiX camera parameters...");
-                Backend::CameraParams cp;
-                cp.origin = scene.camera->lookfrom;
-                cp.lookAt = scene.camera->lookat;
-                cp.up = scene.camera->vup;
-                cp.fov = scene.camera->vfov;
-                cp.aperture = scene.camera->aperture;
-                cp.focusDistance = scene.camera->focus_dist;
-                cp.aspectRatio = scene.camera->aspect;
-                backend->setCamera(cp);
+                backend->syncCamera(*scene.camera);
                 SCENE_LOG_INFO("OptiX camera configured successfully.");
             }
 
@@ -4092,7 +4084,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         // Pass-through: move ray and refund bounce count if under limit
                         current_ray = Ray(rec.point + current_ray.direction * 0.001f, current_ray.direction);
 
-                        if (transparent_hits <= render_settings.transparent_max_bounces) {
+                        constexpr int kCpuTransparentPassThroughLimit = 10;
+                        if (transparent_hits <= kCpuTransparentPassThroughLimit) {
                             bounce--;
                         }
                         continue;

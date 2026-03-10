@@ -1568,6 +1568,38 @@ namespace AnimationGraph {
                     
                     // Allow node to load custom data
                     node->onLoad(nodeJson);
+
+                    // Some nodes reconstruct dynamic pins during onLoad (e.g. StateMachine states).
+                    // Re-apply saved pin IDs after custom data load so links can reconnect correctly.
+                    if (nodeJson.contains("inputIDs")) {
+                        auto ids = nodeJson["inputIDs"];
+                        for (size_t i = 0; i < node->inputs.size() && i < ids.size(); ++i) {
+                            node->inputs[i].id = ids[i];
+                            node->inputs[i].nodeId = node->id;
+                        }
+                    } else {
+                        for (auto& pin : node->inputs) {
+                            if (pin.id == 0) {
+                                pin.id = nextPinId++;
+                            }
+                            pin.nodeId = node->id;
+                        }
+                    }
+
+                    if (nodeJson.contains("outputIDs")) {
+                        auto ids = nodeJson["outputIDs"];
+                        for (size_t i = 0; i < node->outputs.size() && i < ids.size(); ++i) {
+                            node->outputs[i].id = ids[i];
+                            node->outputs[i].nodeId = node->id;
+                        }
+                    } else {
+                        for (auto& pin : node->outputs) {
+                            if (pin.id == 0) {
+                                pin.id = nextPinId++;
+                            }
+                            pin.nodeId = node->id;
+                        }
+                    }
                     
                     if (typeId == "FinalPose") {
                         outputNode = static_cast<FinalPoseNode*>(node.get());

@@ -1034,7 +1034,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     // ─────────────────────────────────────────────────────────────────────────
                     if (UIWidgets::BeginSection("Light Paths", ImVec4(1.0f, 0.8f, 0.3f, 1.0f))) {
                         ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 0, 64);
-                        ImGui::DragInt("Transparent Bounces", &ctx.render_settings.transparent_max_bounces, 1, 0, 64);
                         
                         UIWidgets::HelpMarker("Higher bounces increase realism for glass and interiors but slow down rendering.");
                         UIWidgets::EndSection();

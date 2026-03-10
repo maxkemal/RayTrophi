@@ -53,6 +53,12 @@ for %%e in (rgen rmiss rchit rahit rint) do (
 echo.
 echo ===== All shaders compiled successfully =====
 
+REM Remove stale shader artifacts that are no longer loaded by the Vulkan backend
+if exist "%OUTPUT_DIR%\gradient_test.spv" del /Q "%OUTPUT_DIR%\gradient_test.spv"
+if exist "%OUTPUT_DIR%\miss.rmiss.spv" del /Q "%OUTPUT_DIR%\miss.rmiss.spv"
+if exist "%OUTPUT_DIR%\raygen.rgen.spv" del /Q "%OUTPUT_DIR%\raygen.rgen.spv"
+if exist "%OUTPUT_DIR%\rgen.spv" del /Q "%OUTPUT_DIR%\rgen.spv"
+
 REM Deploy compiled .spv to runtime directories
 echo.
 echo Deploying .spv files to runtime directories...
@@ -64,6 +70,10 @@ for %%d in ("%DEPLOY1%" "%DEPLOY2%" "%DEPLOY3%") do (
     if exist %%d (
         echo   Copying to %%d
         copy /Y "%OUTPUT_DIR%\*.spv" %%d >nul 2>&1
+        if exist "%%~fd\gradient_test.spv" del /Q "%%~fd\gradient_test.spv"
+        if exist "%%~fd\miss.rmiss.spv" del /Q "%%~fd\miss.rmiss.spv"
+        if exist "%%~fd\raygen.rgen.spv" del /Q "%%~fd\raygen.rgen.spv"
+        if exist "%%~fd\rgen.spv" del /Q "%%~fd\rgen.spv"
     )
 )
 echo Deploy complete.
