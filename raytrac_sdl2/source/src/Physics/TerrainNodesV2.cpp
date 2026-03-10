@@ -20,6 +20,73 @@
 
 namespace TerrainNodesV2 {
 
+    static NodeSystem::Image2DData buildPackedErosionMap(
+        const std::vector<float>& before,
+        const std::vector<float>& after,
+        int w,
+        int h,
+        const std::vector<float>* flowMap,
+        const std::vector<float>* hardnessMap,
+        const std::vector<float>* mask)
+    {
+        NodeSystem::Image2DData result;
+        result.data = std::make_shared<std::vector<float>>(static_cast<size_t>(w) * h * 4, 0.0f);
+        result.width = w;
+        result.height = h;
+        result.channels = 4;
+        result.semantic = NodeSystem::ImageSemantic::Mask;
+
+        float maxErosion = 0.0f;
+        float maxDeposition = 0.0f;
+        float maxFlow = 0.0f;
+
+        const bool hasFlow = flowMap && flowMap->size() == static_cast<size_t>(w) * h;
+        const bool hasHardness = hardnessMap && hardnessMap->size() == static_cast<size_t>(w) * h;
+        const bool hasMask = mask && mask->size() == static_cast<size_t>(w) * h;
+
+        std::vector<float> localFlow(static_cast<size_t>(w) * h, 0.0f);
+        if (!hasFlow) {
+            for (int y = 1; y < h - 1; ++y) {
+                for (int x = 1; x < w - 1; ++x) {
+                    const int idx = y * w + x;
+                    const float slopeX = std::fabs(after[idx + 1] - after[idx - 1]) * 0.5f;
+                    const float slopeY = std::fabs(after[idx + w] - after[idx - w]) * 0.5f;
+                    const float delta = std::fabs(before[idx] - after[idx]);
+                    localFlow[idx] = slopeX + slopeY + delta * 2.0f;
+                    maxFlow = (std::max)(maxFlow, localFlow[idx]);
+                }
+            }
+        }
+
+        for (int i = 0; i < w * h; ++i) {
+            const float erosion = (std::max)(before[i] - after[i], 0.0f);
+            const float deposition = (std::max)(after[i] - before[i], 0.0f);
+            maxErosion = (std::max)(maxErosion, erosion);
+            maxDeposition = (std::max)(maxDeposition, deposition);
+            if (hasFlow) {
+                maxFlow = (std::max)(maxFlow, (*flowMap)[i]);
+            }
+        }
+
+        const float logFlowDenom = static_cast<float>(std::log1p((std::max)(maxFlow, 1e-6f)));
+        for (int i = 0; i < w * h; ++i) {
+            const float erosion = (std::max)(before[i] - after[i], 0.0f);
+            const float deposition = (std::max)(after[i] - before[i], 0.0f);
+            const float rawFlow = hasFlow ? (*flowMap)[i] : localFlow[i];
+            const float normalizedFlow = (logFlowDenom > 0.0f)
+                ? (static_cast<float>(std::log1p((std::max)(rawFlow, 0.0f))) / logFlowDenom) : 0.0f;
+            const float alpha = hasHardness ? std::clamp((*hardnessMap)[i], 0.0f, 1.0f)
+                : (hasMask ? std::clamp((*mask)[i], 0.0f, 1.0f) : 1.0f);
+
+            (*result.data)[i * 4 + 0] = (maxErosion > 1e-6f) ? (erosion / maxErosion) : 0.0f;
+            (*result.data)[i * 4 + 1] = (maxDeposition > 1e-6f) ? (deposition / maxDeposition) : 0.0f;
+            (*result.data)[i * 4 + 2] = std::clamp(normalizedFlow, 0.0f, 1.0f);
+            (*result.data)[i * 4 + 3] = alpha;
+        }
+
+        return result;
+    }
+
 
     // ============================================================================
     // HEIGHTMAP FILE LOADING
@@ -498,6 +565,7 @@ namespace TerrainNodesV2 {
             terrain->heightmap.height = inputHeight.height;
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
+        const std::vector<float> originalHeight = *inputHeight.data;
         terrain->heightmap.data = *inputHeight.data;
         
         // Apply scale from context (guaranteed valid)
@@ -533,45 +601,50 @@ namespace TerrainNodesV2 {
         if (this->edgeFalloffWidth > 0.01f) {
             applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
         }
-        
-        return result;
+
+        auto erosionMap = buildPackedErosionMap(
+            originalHeight,
+            *result.data,
+            inputHeight.width,
+            inputHeight.height,
+            nullptr,
+            terrain->hardnessMap.empty() ? nullptr : &terrain->hardnessMap,
+            mask.empty() ? nullptr : &mask);
+        terrain->erosionMapRGBA = *erosionMap.data;
+
+        ctx.setCachedValue(id, 0, result);
+        ctx.setCachedValue(id, 1, erosionMap);
+        return (outputIndex == 1) ? NodeSystem::PinValue{erosionMap} : NodeSystem::PinValue{result};
     }
     
     void HydraulicErosionNode::drawContent() {
         if (!g_hasCUDA) useGPU = false;
         ImGui::BeginDisabled(!g_hasCUDA);
-        if (ImGui::Checkbox("Use GPU (Hybrid Fluvial)", &useGPU)) dirty = true;
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
         ImGui::EndDisabled();
-        if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
-        
-        if (useGPU) {
-            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Mode: GPU Stream Power (Parity)");
-            if (ImGui::DragInt("Intensity", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
-            if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.05f, 0.1f, 20.0f)) dirty = true;
-            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.01f, 2.0f)) dirty = true;
-            if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
-            if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f)) dirty = true;
-            
-            if (ImGui::Button("Reset GPU Params")) {
-                params.iterations = 50000;
-            params.sedimentCapacity = 2.0f;
-            params.erodeSpeed = 0.05f;
-            params.erosionRadius = 2;
-            params.minSlope = 0.005f;
-            dirty = true;
-            }
+        if (g_hasCUDA) {
+            ImGui::TextDisabled("CUDA available. You can switch between GPU and CPU.");
         } else {
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "Mode: CPU Droplet Sim");
-            if (ImGui::DragInt("Iterations", &params.iterations, 1000, 1000, 1000000)) dirty = true;
-            if (ImGui::DragInt("Droplet Lifetime", &params.dropletLifetime, 1, 32, 512)) dirty = true;
-            if (ImGui::DragFloat("Inertia", &params.inertia, 0.01f, 0.0f, 1.0f)) dirty = true;
-            if (ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.1f, 0.1f, 100.0f)) dirty = true;
-            if (ImGui::DragFloat("Deposit Speed", &params.depositSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
-            if (ImGui::DragFloat("Erode Speed", &params.erodeSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
-            if (ImGui::DragFloat("Evaporate Speed", &params.evaporateSpeed, 0.001f, 0.0f, 0.2f)) dirty = true;
-            if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.0001f, 0.0f, 0.1f, "%.4f")) dirty = true;
-            if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 50.0f)) dirty = true;
-            if (ImGui::DragInt("Erosion Radius", &params.erosionRadius, 1, 1, 12)) dirty = true;
+            ImGui::TextDisabled("CUDA unavailable. Hydraulic erosion falls back to CPU.");
+        }
+        
+        ImGui::TextColored(
+            useGPU ? ImVec4(0.4f, 0.7f, 1.0f, 1.0f) : ImVec4(0.4f, 1.0f, 0.7f, 1.0f),
+            useGPU ? "Mode: GPU Hydraulic Droplet Solver" : "Mode: CPU Hydraulic Droplet Solver");
+        if (ImGui::DragInt("Droplets", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
+        if (ImGui::DragInt("Lifetime", &params.dropletLifetime, 1, 16, 512)) dirty = true;
+        if (ImGui::DragFloat("Inertia", &params.inertia, 0.01f, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Capacity", &params.sedimentCapacity, 0.05f, 0.1f, 20.0f)) dirty = true;
+        if (ImGui::DragFloat("Erode Rate", &params.erodeSpeed, 0.01f, 0.01f, 2.0f)) dirty = true;
+        if (ImGui::DragFloat("Deposit Rate", &params.depositSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
+        if (ImGui::DragFloat("Evaporate", &params.evaporateSpeed, 0.001f, 0.0f, 0.2f)) dirty = true;
+        if (ImGui::DragFloat("Gravity", &params.gravity, 0.1f, 1.0f, 50.0f)) dirty = true;
+        if (ImGui::DragFloat("Min Slope", &params.minSlope, 0.001f, 0.0f, 0.1f, "%.4f")) dirty = true;
+        if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
+
+        if (ImGui::Button(useGPU ? "Reset GPU Params" : "Reset CPU Params")) {
+            params = HydraulicErosionParams();
+            dirty = true;
         }
 
         ImGui::Separator();
@@ -692,6 +765,7 @@ namespace TerrainNodesV2 {
             terrain->heightmap.height = inputHeight.height;
             terrain->heightmap.data.resize(inputHeight.width * inputHeight.height);
         }
+        const std::vector<float> originalHeight = *inputHeight.data;
         terrain->heightmap.data = *inputHeight.data;
         terrain->heightmap.scale_xz = preserved_scale_xz;
         terrain->heightmap.scale_y = preserved_scale_y;
@@ -721,48 +795,46 @@ namespace TerrainNodesV2 {
         if (this->edgeFalloffWidth > 0.01f) {
             applyEdgeFalloff(*result.data, inputHeight.width, inputHeight.height, this->edgeFalloffWidth, this->edgeFalloffValue);
         }
-        
-        return result;
+
+        auto erosionMap = buildPackedErosionMap(
+            originalHeight,
+            *result.data,
+            inputHeight.width,
+            inputHeight.height,
+            terrain->flowMap.empty() ? nullptr : &terrain->flowMap,
+            terrain->hardnessMap.empty() ? nullptr : &terrain->hardnessMap,
+            mask.empty() ? nullptr : &mask);
+        terrain->erosionMapRGBA = *erosionMap.data;
+
+        ctx.setCachedValue(id, 0, result);
+        ctx.setCachedValue(id, 1, erosionMap);
+        return (outputIndex == 1) ? NodeSystem::PinValue{erosionMap} : NodeSystem::PinValue{result};
     }
     
     void FluvialErosionNode::drawContent() {
         if (!g_hasCUDA) useGPU = false;
         ImGui::BeginDisabled(!g_hasCUDA);
-        if (ImGui::Checkbox("Use GPU (River Carver)", &useGPU)) dirty = true;
+        if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
         ImGui::EndDisabled();
         if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
-        
-        if (useGPU) {
-            if (ImGui::Button("Reset GPU Params")) {
-                params = HydraulicErosionParams();
-                params.iterations = 250000;
-                params.sedimentCapacity = 2.0f;
-                params.erosionRadius = 4;
-                params.erodeSpeed = 0.5f;
-                dirty = true;
-            }
-            ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Mode: GPU Global Hydrological (Parity)");
-            if (ImGui::DragInt("Intensity", &params.iterations, 25000, 25000, 1000000, "%d hits")) dirty = true;
-            if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.1f, 0.1f, 20.0f)) dirty = true;
-            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.0f, 2.0f)) dirty = true;
-            if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 15)) dirty = true;
-            if (ImGui::DragFloat("Cutoff Slope", &params.minSlope, 0.001f, 0.0f, 0.1f)) dirty = true;
-            ImGui::TextDisabled("Using Hybrid CPU/GPU workflow for accuracy.");
-        } else {
-            if (ImGui::Button("Reset CPU Params")) {
-                params = HydraulicErosionParams();
-                params.iterations = 100000;
-                params.sedimentCapacity = 1.0f; 
-                params.erosionRadius = 4;
-                dirty = true;
-            }
-            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.7f, 1.0f), "Mode: CPU Global Analysis");
-            if (ImGui::DragInt("Sim Passes", &params.iterations, 25000, 25000, 500000, "%d units")) dirty = true;
-            if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.1f, 0.1f, 10.0f)) dirty = true;
-            if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.0f, 1.0f)) dirty = true;
-            if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 10)) dirty = true;
-            if (ImGui::DragFloat("Cutoff Slope", &params.minSlope, 0.001f, 0.0f, 0.1f)) dirty = true;
+
+        if (ImGui::Button(useGPU ? "Reset GPU Params" : "Reset CPU Params")) {
+            params = HydraulicErosionParams();
+            params.iterations = 250000;
+            params.sedimentCapacity = 2.0f;
+            params.erosionRadius = 4;
+            params.erodeSpeed = 0.5f;
+            params.minSlope = 0.005f;
+            dirty = true;
         }
+        ImGui::TextColored(
+            useGPU ? ImVec4(0.4f, 0.7f, 1.0f, 1.0f) : ImVec4(0.4f, 1.0f, 0.7f, 1.0f),
+            useGPU ? "Mode: GPU Stream Power River Carver" : "Mode: CPU Stream Power River Carver");
+        if (ImGui::DragInt("Intensity", &params.iterations, 25000, 25000, 1500000, "%d hits")) dirty = true;
+        if (ImGui::DragFloat("Stream Power", &params.sedimentCapacity, 0.05f, 0.25f, 8.0f)) dirty = true;
+        if (ImGui::DragFloat("Erosion Rate", &params.erodeSpeed, 0.01f, 0.01f, 1.5f)) dirty = true;
+        if (ImGui::DragInt("Channel Width", &params.erosionRadius, 1, 1, 12)) dirty = true;
+        if (ImGui::DragFloat("Cutoff Slope", &params.minSlope, 0.001f, 0.001f, 0.05f, "%.4f")) dirty = true;
         
         ImGui::Separator();
         ImGui::Text("Edge Falloff");
@@ -834,9 +906,9 @@ namespace TerrainNodesV2 {
         if (ImGui::Checkbox("Use GPU", &useGPU)) dirty = true;
         ImGui::EndDisabled();
         if (!g_hasCUDA) ImGui::TextDisabled("CUDA required for GPU mode.");
-        ImGui::SliderFloat("Strength", &strength, 0.0f, 1.0f);
+        ImGui::SliderFloat("Strength", &strength, 0.0f, 2.0f);
         ImGui::SliderFloat("Direction", &direction, 0.0f, 360.0f);
-        ImGui::DragInt("Iterations", &iterations, 1, 1, 200);
+        ImGui::DragInt("Iterations", &iterations, 10, 1, 1000);
 
         ImGui::Separator();
         ImGui::Text("Edge Falloff");
@@ -966,10 +1038,10 @@ namespace TerrainNodesV2 {
     }
     
     void SedimentDepositionNode::drawContent() {
-        ImGui::SliderInt("Iterations", &iterations, 1, 50);
-        ImGui::SliderFloat("Deposit Rate", &depositionRate, 0.1f, 1.0f);
-        ImGui::SliderFloat("Transport Cap", &transportCapacity, 0.1f, 5.0f);
-        ImGui::SliderFloat("Settling", &settlingSpeed, 0.1f, 0.9f);
+        ImGui::SliderInt("Iterations", &iterations, 1, 150);
+        ImGui::DragFloat("Deposit Rate", &depositionRate, 0.01f, 0.01f, 2.0f);
+        ImGui::DragFloat("Transport Cap", &transportCapacity, 0.05f, 0.05f, 20.0f);
+        ImGui::SliderFloat("Settling", &settlingSpeed, 0.0f, 0.99f);
     }
     
     NodeSystem::PinValue AlluvialFanNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -1064,10 +1136,10 @@ namespace TerrainNodesV2 {
     }
     
     void AlluvialFanNode::drawContent() {
-        ImGui::SliderFloat("Slope Threshold", &slopeThreshold, 10.0f, 60.0f);
-        ImGui::SliderFloat("Spread Angle", &fanSpreadAngle, 20.0f, 120.0f);
-        ImGui::SliderFloat("Deposit Strength", &depositionStrength, 0.1f, 2.0f);
-        ImGui::SliderInt("Fan Length", &fanLength, 10, 200);
+        ImGui::SliderFloat("Slope Threshold", &slopeThreshold, 5.0f, 70.0f);
+        ImGui::SliderFloat("Spread Angle", &fanSpreadAngle, 10.0f, 140.0f);
+        ImGui::DragFloat("Deposit Strength", &depositionStrength, 0.05f, 0.1f, 10.0f);
+        ImGui::SliderInt("Fan Length", &fanLength, 4, 300);
     }
     
     NodeSystem::PinValue DeltaFormationNode::compute(int outputIndex, NodeSystem::EvaluationContext& ctx) {
@@ -1175,10 +1247,10 @@ namespace TerrainNodesV2 {
     }
     
     void DeltaFormationNode::drawContent() {
-        ImGui::SliderFloat("Sea Level", &seaLevel, 0.0f, 0.5f);
-        ImGui::SliderFloat("Delta Spread", &deltaSpread, 15.0f, 90.0f);
-        ImGui::SliderInt("Branches", &branchingFactor, 1, 7);
-        ImGui::SliderFloat("Sediment Ratio", &sedimentRatio, 0.1f, 1.0f);
+        ImGui::SliderFloat("Sea Level", &seaLevel, 0.0f, 1.0f);
+        ImGui::SliderFloat("Delta Spread", &deltaSpread, 5.0f, 140.0f);
+        ImGui::SliderInt("Branches", &branchingFactor, 1, 9);
+        ImGui::DragFloat("Sediment Ratio", &sedimentRatio, 0.05f, 0.1f, 10.0f);
     }
 
     // ============================================================================
@@ -1990,15 +2062,24 @@ namespace TerrainNodesV2 {
             flow = blurred;
         }
 
-        // 5. Final Scaling & Normalization
+        // 5. Persist raw accumulation for terrain-level Generate Mask / Bake Flow to Alpha.
+        if (tctx->terrain) {
+            tctx->terrain->flowMap.resize(w * h);
+            for (int i = 0; i < w * h; i++) {
+                tctx->terrain->flowMap[i] = flow[i] * strength;
+            }
+        }
+
+        // 6. Final scaling for node output
         float maxFlow = 0.001f;
         for (float f : flow) if (f > maxFlow) maxFlow = f;
         
         float finalStrength = strength;
         for (int i = 0; i < w * h; i++) {
-            float val = (flow[i] / maxFlow) * finalStrength;
+            float rawVal = flow[i] * finalStrength;
+            float val = normalize ? (rawVal / maxFlow) : rawVal;
             // Gamma-like curve for better visual contrast in small streams
-            val = std::pow(val, 0.6f); 
+            val = std::pow(std::max(val, 0.0f), 0.6f);
             (*result.data)[i] = clampValue(val, 0.0f, 1.0f);
         }
 
@@ -3266,6 +3347,15 @@ namespace TerrainNodesV2 {
         if (heightData.isValid() && heightData.data) {
             // Check if resize needed
             bool resized = (terrain->heightmap.width != heightData.width || terrain->heightmap.height != heightData.height);
+            size_t expectedTriCount = 0;
+            if (heightData.width > 1 && heightData.height > 1) {
+                expectedTriCount = static_cast<size_t>(heightData.width - 1) * static_cast<size_t>(heightData.height - 1) * 2ull;
+            }
+            // Important: some intermediate terrain nodes mutate terrain->heightmap dimensions before the
+            // final Height Output is pulled. In that case `resized` can be false even though the mesh still
+            // has the old triangle topology. Rebuild when triangle count does not match the current height
+            // grid, otherwise the terrain collapses into a thin / corrupted strip on first evaluate.
+            bool topologyMismatch = terrain->mesh_triangles.size() != expectedTriCount;
             
             // Resize terrain heightmap manually (vector resize)
             if (resized) {
@@ -3283,7 +3373,7 @@ namespace TerrainNodesV2 {
             terrain->heightmap.scale_y = preserved_scale_y;
             
             // Update mesh visualization (Rebuild if resized, Update if content changed)
-            if (resized) {
+            if (resized || topologyMismatch) {
                 TerrainManager::getInstance().resizeSplatMap(terrain);
                 TerrainManager::getInstance().rebuildTerrainMesh(scene, terrain);
             } else {

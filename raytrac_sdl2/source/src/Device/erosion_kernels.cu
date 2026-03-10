@@ -476,6 +476,73 @@ __device__ void updateHeight(float* map, int width, int height, float x, float y
     atomicAdd(&map[y1 * width + x1], change * tx * ty);
 }
 
+__device__ float sampleOptionalMap(const float* map, int width, int height, float x, float y, float defaultValue) {
+    if (map == nullptr) return defaultValue;
+
+    x = fminf(fmaxf(x, 0.0f), (float)(width - 1));
+    y = fminf(fmaxf(y, 0.0f), (float)(height - 1));
+
+    int x0 = (int)x;
+    int y0 = (int)y;
+    int x1 = min(x0 + 1, width - 1);
+    int y1 = min(y0 + 1, height - 1);
+
+    float tx = x - x0;
+    float ty = y - y0;
+
+    float v00 = map[y0 * width + x0];
+    float v10 = map[y0 * width + x1];
+    float v01 = map[y1 * width + x0];
+    float v11 = map[y1 * width + x1];
+
+    float a = v00 + (v10 - v00) * tx;
+    float b = v01 + (v11 - v01) * tx;
+    return a + (b - a) * ty;
+}
+
+__device__ void erodeWithBrush(float* map, int width, int height, float x, float y, float amount, int radius) {
+    if (amount <= 0.0f) return;
+    if (radius <= 1) {
+        updateHeight(map, width, height, x, y, -amount);
+        return;
+    }
+
+    int minX = max(0, (int)floorf(x) - radius);
+    int maxX = min(width - 1, (int)floorf(x) + radius);
+    int minY = max(0, (int)floorf(y) - radius);
+    int maxY = min(height - 1, (int)floorf(y) + radius);
+
+    float weightSum = 0.0f;
+    for (int iy = minY; iy <= maxY; ++iy) {
+        for (int ix = minX; ix <= maxX; ++ix) {
+            float dx = ((float)ix + 0.5f) - x;
+            float dy = ((float)iy + 0.5f) - y;
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (dist > (float)radius) continue;
+            float t = 1.0f - dist / fmaxf(1.0f, (float)radius);
+            float weight = t * t * (3.0f - 2.0f * t);
+            weightSum += weight;
+        }
+    }
+
+    if (weightSum <= 1e-6f) {
+        updateHeight(map, width, height, x, y, -amount);
+        return;
+    }
+
+    for (int iy = minY; iy <= maxY; ++iy) {
+        for (int ix = minX; ix <= maxX; ++ix) {
+            float dx = ((float)ix + 0.5f) - x;
+            float dy = ((float)iy + 0.5f) - y;
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (dist > (float)radius) continue;
+            float t = 1.0f - dist / fmaxf(1.0f, (float)radius);
+            float weight = t * t * (3.0f - 2.0f * t);
+            atomicAdd(&map[iy * width + ix], -(amount * weight / weightSum));
+        }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Smoothing Kernel (Fixes Spikes in O(1) pass)
 // -----------------------------------------------------------------------
@@ -766,23 +833,34 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
         float newH = bilinearInterpolate(heightmap, p.mapWidth, p.mapHeight, newPosX, newPosY);
         float deltaHeight = newH - oldH;
         
-        // Physical slope calculation
-        float localSlope = -deltaHeight * p.heightScale * invCellSize; // Physical slope
+        // Keep GPU solver on the same normalized sediment contract as the CPU path.
+        float localSlope = -deltaHeight * invCellSize;
         float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity * sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope);
+
+        float hardness = sampleOptionalMap(p.hardnessMap, p.mapWidth, p.mapHeight, posX, posY, 0.0f);
+        float hardnessFactor = 1.0f - hardness * 0.9f;
+        float maskValue = sampleOptionalMap(p.maskMap, p.mapWidth, p.mapHeight, posX, posY, 1.0f);
+        if (maskValue < 0.001f) {
+            // Frozen area: unload remaining sediment softly and terminate.
+            if (sediment > 0.0f) {
+                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, sediment * 0.5f);
+            }
+            break;
+        }
         
-        // Convert capacity back to normalized units if necessary? 
-        // No, p.sedimentCapacity should be tuned for the physical slope.
-        // BUT deltaHeight is in 0..1 units. Capacity must match sediment units.
-        // If sediment is picked up in 0..1 units, capacity should also be in 0..1 units.
-        capacity /= fmaxf(1.0f, p.heightScale);
-        
+        float downhillSlope = fmaxf(localSlope, 0.0f);
+        float flatness = 1.0f - fminf(1.0f, downhillSlope / fmaxf(p.minSlope * 8.0f, 0.001f));
+
+        float speedBeforePhysics = speed;
+
         if (deltaHeight > 0.0f) {
             // UPHILL - MOMENTUM CHECK
             if (speed > 0.5f && sediment < capacity) {
                 // High momentum: carve through obstacle (creates channels)
                 // STABILITY: Cap at 30% of height diff and 5% of absolute height
                 float erodeAmount = fminf(deltaHeight * 0.3f, oldH * 0.05f);
-                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, -erodeAmount);
+                erodeAmount *= hardnessFactor * maskValue;
+                erodeWithBrush(heightmap, p.mapWidth, p.mapHeight, newPosX, newPosY, erodeAmount, p.brushRadius);
                 sediment += erodeAmount;
                 speed *= 0.6f; // Significant penalty for climbing
             } else {
@@ -797,7 +875,8 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
             // DOWNHILL - DEPOSITION (Droplet overloaded)
             float depoAmount = (sediment - capacity) * p.depositSpeed;
             // STABILITY: Prevent massive spikes
-            depoAmount = fminf(depoAmount, -deltaHeight * 0.5f);
+            float flatDepositCap = sediment * flatness * 0.35f;
+            depoAmount = fminf(depoAmount, fmaxf(-deltaHeight * 0.5f, flatDepositCap));
             updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, depoAmount);
             sediment -= depoAmount;
         } else {
@@ -805,17 +884,43 @@ extern "C" __global__ void hydraulicErosionKernel(float* heightmap, HydraulicEro
             float erodeAmount = fminf((capacity - sediment) * p.erodeSpeed, -deltaHeight);
             // STABILITY: Prevent deep pits (max 5% of local height)
             erodeAmount = fminf(erodeAmount, oldH * 0.05f);
-            updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, -erodeAmount);
+            erodeAmount *= hardnessFactor * maskValue;
+            erodeWithBrush(heightmap, p.mapWidth, p.mapHeight, posX, posY, erodeAmount, p.brushRadius);
             sediment += erodeAmount;
+        }
+
+        if (deltaHeight <= 0.0f && sediment > 0.0f && flatness > 0.0f) {
+            float slowFactor = 1.0f - fminf(speed, 1.0f);
+            float settlingRate = (0.04f + p.depositSpeed * 0.25f) * flatness * (0.35f + 0.65f * slowFactor);
+            float settlingAmount = fminf(sediment, sediment * settlingRate);
+            if (settlingAmount > 1e-6f) {
+                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, settlingAmount);
+                sediment -= settlingAmount;
+            }
         }
         
         // Physics update (Correct gravity logic)
         // Kinetic Energy: v_new^2 = v_old^2 + g * (h_old - h_new) = v_old^2 - g * deltaHeight
         speed = sqrtf(fmaxf(0.001f, speed*speed - deltaHeight * p.gravity));
         water *= (1.0f - p.evaporateSpeed);
+
+        if (deltaHeight <= 0.0f && sediment > 0.0f) {
+            float speedDrop = fmaxf(0.0f, speedBeforePhysics - speed);
+            float speedDropNorm = fminf(1.0f, speedDrop / fmaxf(speedBeforePhysics + 1e-4f, 0.25f));
+            float transitionSettling = sediment * speedDropNorm * (0.12f + 0.38f * flatness) * (0.4f + 0.6f * (1.0f - water));
+            if (transitionSettling > 1e-6f) {
+                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, transitionSettling);
+                sediment -= transitionSettling;
+            }
+        }
         posX = newPosX; 
         posY = newPosY;
         
-        if (water < 0.01f || speed < 0.01f) break;
+        if (water < 0.01f || speed < 0.01f) {
+            if (sediment > 0.0f) {
+                updateHeight(heightmap, p.mapWidth, p.mapHeight, posX, posY, sediment);
+            }
+            break;
+        }
     }
 }

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <random>
 #include <queue>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include "Texture.h"
@@ -1292,6 +1293,9 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
     SCENE_LOG_INFO("[autoMask] SplatMap: " + std::to_string(w) + "x" + std::to_string(h) + 
                    ", Heightmap: " + std::to_string(terrain->heightmap.width) + "x" + std::to_string(terrain->heightmap.height) +
                    ", scale_xz=" + std::to_string(scale) + ", scale_y=" + std::to_string(max_h));
+
+    const bool hasErosionMap =
+        terrain->erosionMapRGBA.size() == static_cast<size_t>(terrain->heightmap.width) * terrain->heightmap.height * 4;
     
     // Calculate cell size for correct slope calculation (Rise / Run)
     // Run = Distance between HEIGHTMAP pixels in world space (since we sample neighbors in heightmap)
@@ -1360,6 +1364,18 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
             float final_G = w_rock * (1.0f - w_snow); // Rock
             float final_B = w_snow; // Snow
             float final_A = 0.0f; // Dirt/Flow Mask
+
+            float erosionWear = 0.0f;
+            float erosionDeposit = 0.0f;
+            float erosionFlow = 0.0f;
+            float erosionInfluence = 1.0f;
+            if (hasErosionMap) {
+                size_t eIdx = static_cast<size_t>(hy * terrain->heightmap.width + hx) * 4;
+                erosionWear = std::clamp(terrain->erosionMapRGBA[eIdx + 0], 0.0f, 1.0f);
+                erosionDeposit = std::clamp(terrain->erosionMapRGBA[eIdx + 1], 0.0f, 1.0f);
+                erosionFlow = std::clamp(terrain->erosionMapRGBA[eIdx + 2], 0.0f, 1.0f);
+                erosionInfluence = std::clamp(terrain->erosionMapRGBA[eIdx + 3], 0.0f, 1.0f);
+            }
             
             if (!terrain->flowMap.empty()) {
                 float flowVal = terrain->flowMap[hy * terrain->heightmap.width + hx];
@@ -1383,6 +1399,23 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
                 final_A = std::clamp(final_A, 0.0f, 1.0f);
                 final_A *= (1.0f - w_rock * 0.05f); 
             }
+
+            if (hasErosionMap) {
+                final_R *= (1.0f + erosionDeposit * 0.35f);
+                final_R *= (1.0f - erosionWear * 0.45f);
+
+                final_G *= (1.0f + erosionWear * 0.40f);
+                final_G *= (1.0f - erosionDeposit * 0.20f);
+
+                final_B *= (1.0f - erosionFlow * 0.25f);
+                final_B *= (1.0f - erosionWear * 0.15f);
+
+                float erosionAlphaBoost = erosionFlow * (0.65f + erosionWear * 0.35f);
+                final_A = std::max(final_A, erosionAlphaBoost);
+                final_A *= (0.85f + erosionInfluence * 0.15f);
+                final_A = std::clamp(final_A, 0.0f, 1.0f);
+            }
+
     // Normalize with a 'soft' blend for the alpha channel
             // Instead of full normalization which erases other layers, 
             // we let Alpha act more as an overlay weight
@@ -1533,8 +1566,8 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     int h = terrain->heightmap.height;
     auto& data = terrain->heightmap.data;
     float cellSize = terrain->heightmap.scale_xz / w;
-    bool hasHardness = !terrain->hardnessMap.empty();
-    bool hasMask = !mask.empty() && mask.size() == w * h;
+    bool hasHardness = !terrain->hardnessMap.empty() && terrain->hardnessMap.size() == (size_t)(w * h);
+    bool hasMask = !mask.empty() && mask.size() == (size_t)(w * h);
     
     // EDGE PRESERVATION: Save original heights before erosion
     std::vector<float> originalHeights = data;
@@ -1543,151 +1576,226 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<float> distrib(0.0f, 1.0f);
-    
-    // Brush weights for erosion distribution (prevents spikes)
-    std::vector<float> brushWeights;
-    std::vector<int> brushOffsets;
-    int brushRadius = p.erosionRadius;
-    float weightSum = 0.0f;
-    
-    for (int dy = -brushRadius; dy <= brushRadius; dy++) {
-        for (int dx = -brushRadius; dx <= brushRadius; dx++) {
-            float dist = sqrtf((float)(dx*dx + dy*dy));
-            if (dist <= brushRadius) {
-                float weight = 1.0f - (dist / brushRadius);
-                weight = weight * weight * (3 - 2 * weight); // Smoothstep
-                brushWeights.push_back(weight);
-                brushOffsets.push_back(dy * w + dx);
-                weightSum += weight;
+
+    auto sampleHeight = [&](float x, float y) -> float {
+        x = std::clamp(x, 0.0f, (float)(w - 1));
+        y = std::clamp(y, 0.0f, (float)(h - 1));
+        int x0 = (int)x;
+        int y0 = (int)y;
+        int x1 = std::min(x0 + 1, w - 1);
+        int y1 = std::min(y0 + 1, h - 1);
+        float tx = x - x0;
+        float ty = y - y0;
+        float v00 = data[y0 * w + x0];
+        float v10 = data[y0 * w + x1];
+        float v01 = data[y1 * w + x0];
+        float v11 = data[y1 * w + x1];
+        float a = v00 + (v10 - v00) * tx;
+        float b = v01 + (v11 - v01) * tx;
+        return a + (b - a) * ty;
+    };
+
+    auto sampleMap = [&](const std::vector<float>& src, float x, float y, float defaultValue) -> float {
+        if (src.empty()) return defaultValue;
+        x = std::clamp(x, 0.0f, (float)(w - 1));
+        y = std::clamp(y, 0.0f, (float)(h - 1));
+        int x0 = (int)x;
+        int y0 = (int)y;
+        int x1 = std::min(x0 + 1, w - 1);
+        int y1 = std::min(y0 + 1, h - 1);
+        float tx = x - x0;
+        float ty = y - y0;
+        float v00 = src[y0 * w + x0];
+        float v10 = src[y0 * w + x1];
+        float v01 = src[y1 * w + x0];
+        float v11 = src[y1 * w + x1];
+        float a = v00 + (v10 - v00) * tx;
+        float b = v01 + (v11 - v01) * tx;
+        return a + (b - a) * ty;
+    };
+
+    auto updateHeight = [&](float x, float y, float change) {
+        int x0 = (int)x;
+        int y0 = (int)y;
+        int x1 = x0 + 1;
+        int y1 = y0 + 1;
+        if (x0 < 0 || x0 >= w || y0 < 0 || y0 >= h) return;
+        if (x1 < 0 || x1 >= w || y1 < 0 || y1 >= h) return;
+
+        float tx = x - x0;
+        float ty = y - y0;
+        data[y0 * w + x0] += change * (1.0f - tx) * (1.0f - ty);
+        data[y0 * w + x1] += change * tx * (1.0f - ty);
+        data[y1 * w + x0] += change * (1.0f - tx) * ty;
+        data[y1 * w + x1] += change * tx * ty;
+    };
+
+    auto erodeWithBrush = [&](float x, float y, float amount) {
+        if (amount <= 0.0f) return;
+        if (p.erosionRadius <= 1) {
+            updateHeight(x, y, -amount);
+            return;
+        }
+
+        int minX = std::max(0, (int)std::floor(x) - p.erosionRadius);
+        int maxX = std::min(w - 1, (int)std::floor(x) + p.erosionRadius);
+        int minY = std::max(0, (int)std::floor(y) - p.erosionRadius);
+        int maxY = std::min(h - 1, (int)std::floor(y) + p.erosionRadius);
+
+        float weightSum = 0.0f;
+        for (int iy = minY; iy <= maxY; ++iy) {
+            for (int ix = minX; ix <= maxX; ++ix) {
+                float dx = ((float)ix + 0.5f) - x;
+                float dy = ((float)iy + 0.5f) - y;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > (float)p.erosionRadius) continue;
+                float t = 1.0f - dist / std::max(1.0f, (float)p.erosionRadius);
+                weightSum += t * t * (3.0f - 2.0f * t);
             }
         }
-    }
-    // Normalize weights
-    for (float& w : brushWeights) w /= weightSum;
+
+        if (weightSum <= 1e-6f) {
+            updateHeight(x, y, -amount);
+            return;
+        }
+
+        for (int iy = minY; iy <= maxY; ++iy) {
+            for (int ix = minX; ix <= maxX; ++ix) {
+                float dx = ((float)ix + 0.5f) - x;
+                float dy = ((float)iy + 0.5f) - y;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > (float)p.erosionRadius) continue;
+                float t = 1.0f - dist / std::max(1.0f, (float)p.erosionRadius);
+                float weight = t * t * (3.0f - 2.0f * t);
+                data[iy * w + ix] -= amount * (weight / weightSum);
+            }
+        }
+    };
     
     for (int iter = 0; iter < p.iterations; iter++) {
-        float posX = distrib(gen) * (w - 3) + 1;
-        float posY = distrib(gen) * (h - 3) + 1;
-        float dirX = 0, dirY = 0;
+        float posX = distrib(gen) * (w - 1);
+        float posY = distrib(gen) * (h - 1);
+        float dirX = 0.0f, dirY = 0.0f;
         float speed = 1.0f;
         float water = 1.0f;
         float sediment = 0.0f;
+        float invCellSize = 1.0f / std::max(0.001f, cellSize);
         
         for (int lifetime = 0; lifetime < p.dropletLifetime; lifetime++) {
             int nodeX = (int)posX;
             int nodeY = (int)posY;
-            if (nodeX < brushRadius || nodeX >= w - brushRadius || 
-                nodeY < brushRadius || nodeY >= h - brushRadius) break;
-            int idx = nodeY * w + nodeX;
-            
-            float invCellSize = 1.0f / std::max(0.001f, cellSize);
-            
-            // Calculate gradient (downhill direction) - Normalized by cellSize
-            float gradX = (data[idx + 1] - data[idx - 1]) * 0.5f * invCellSize;
-            float gradY = (data[idx + w] - data[idx - w]) * 0.5f * invCellSize;
-            
-            // Store previous direction for momentum preservation
-            float prevDirX = dirX;
-            float prevDirY = dirY;
-            
-            // Update direction with inertia
-            dirX = dirX * p.inertia - gradX * (1 - p.inertia);
-            dirY = dirY * p.inertia - gradY * (1 - p.inertia);
-            
-            float len = sqrtf(dirX*dirX + dirY*dirY);
-            if (len < 0.0001f) {
-                // No gradient AND no momentum - use previous direction with slight random perturbation
-                // This prevents droplets from stopping in pits
-                dirX = prevDirX + (distrib(gen) * 0.4f - 0.2f);
-                dirY = prevDirY + (distrib(gen) * 0.4f - 0.2f);
-                len = sqrtf(dirX*dirX + dirY*dirY);
-                if (len < 0.0001f) {
-                    // Truly stuck - pick random
-                    dirX = distrib(gen) * 2.0f - 1.0f;
-                    dirY = distrib(gen) * 2.0f - 1.0f;
-                    len = sqrtf(dirX*dirX + dirY*dirY);
-                }
+            if (nodeX <= 1 || nodeX >= w - 2 || nodeY <= 1 || nodeY >= h - 2) break;
+            int gridIdx = nodeY * w + nodeX;
+
+            float h00 = data[gridIdx];
+            float h10 = data[gridIdx + 1];
+            float h01 = data[gridIdx + w];
+            float h11 = data[gridIdx + w + 1];
+
+            float u = posX - nodeX;
+            float v = posY - nodeY;
+
+            float gradX = ((h10 - h00) * (1.0f - v) + (h11 - h01) * v) * invCellSize;
+            float gradY = ((h01 - h00) * (1.0f - u) + (h11 - h10) * u) * invCellSize;
+
+            dirX = dirX * p.inertia - gradX * (1.0f - p.inertia);
+            dirY = dirY * p.inertia - gradY * (1.0f - p.inertia);
+
+            float len = std::sqrt(dirX * dirX + dirY * dirY);
+            if (len < 1e-6f) {
+                dirX = distrib(gen) * 0.2f - 0.1f;
+                dirY = distrib(gen) * 0.2f - 0.1f;
+            } else {
+                dirX /= len;
+                dirY /= len;
             }
-            dirX /= len; dirY /= len;
             
             float newPosX = posX + dirX;
             float newPosY = posY + dirY;
             
-            if (newPosX < brushRadius || newPosX >= w - brushRadius || 
-                newPosY < brushRadius || newPosY >= h - brushRadius) break;
-            
-            int newIdx = (int)newPosY * w + (int)newPosX;
-            float deltaHeight = data[newIdx] - data[idx];
-            
-            // Normalize slope by cellSize for resolution independence
-            float localSlope = -deltaHeight * invCellSize; // Positive for downhill
+            if (newPosX <= 1.0f || newPosX >= w - 2.0f || newPosY <= 1.0f || newPosY >= h - 2.0f) break;
+
+            float oldH = sampleHeight(posX, posY);
+            float newH = sampleHeight(newPosX, newPosY);
+            float deltaHeight = newH - oldH;
+            float localSlope = -deltaHeight * invCellSize;
             float capacity = fmaxf(localSlope * speed * water * p.sedimentCapacity * sqrtf(fmaxf(0.0f, localSlope) + 0.001f), p.minSlope);
             
-            // Hardness factor
-            float hardness = 0.0f;
-            if (!terrain->hardnessMap.empty() && idx < (int)terrain->hardnessMap.size()) {
-                hardness = terrain->hardnessMap[idx];
-            }
+            float hardness = hasHardness ? sampleMap(terrain->hardnessMap, posX, posY, 0.0f) : 0.0f;
             float hardnessFactor = 1.0f - hardness * 0.9f;
+            float maskValue = hasMask ? sampleMap(mask, posX, posY, 1.0f) : 1.0f;
+            if (maskValue < 0.001f) {
+                if (sediment > 0.0f) {
+                    updateHeight(posX, posY, sediment * 0.5f);
+                }
+                break;
+            }
             
-            // EROSION vs DEPOSITION decision
+            float downhillSlope = std::max(localSlope, 0.0f);
+            float flatness = 1.0f - std::min(1.0f, downhillSlope / std::max(p.minSlope * 8.0f, 0.001f));
+            float speedBeforePhysics = speed;
+
             if (deltaHeight > 0) {
-                // Going UPHILL
                 if (speed > 0.5f && sediment < capacity) {
-                    // High momentum - erode the obstacle to create channel
-                    // STABILITY: Cap amount
-                    float erodeAmount = fminf(deltaHeight * 0.3f * hardnessFactor, data[newIdx] * 0.05f);
-                    
-                    for (size_t b = 0; b < brushOffsets.size(); b++) {
-                        int brushIdx = newIdx + brushOffsets[b];
-                        if (brushIdx >= 0 && brushIdx < w * h) {
-                            data[brushIdx] -= erodeAmount * brushWeights[b];
-                        }
-                    }
+                    float erodeAmount = fminf(deltaHeight * 0.3f, oldH * 0.05f);
+                    erodeAmount *= hardnessFactor * maskValue;
+                    erodeWithBrush(newPosX, newPosY, erodeAmount);
                     sediment += erodeAmount;
                     speed *= 0.6f;
                 } else {
-                    // Low momentum - deposit
                     float deposit = fminf(sediment * 0.3f, deltaHeight * 0.5f);
+                    updateHeight(posX, posY, deposit);
                     sediment -= deposit;
-                    data[idx] += deposit;
                     speed = 0.0f;
                 }
             }
             else if (sediment > capacity) {
-                // DEPOSITION (overloaded)
                 float deposit = (sediment - capacity) * p.depositSpeed;
-                // STABILITY: Prevents spikes
-                deposit = fminf(deposit, -deltaHeight * 0.5f);
-                
+                float flatDepositCap = sediment * flatness * 0.35f;
+                deposit = fminf(deposit, std::max(-deltaHeight * 0.5f, flatDepositCap));
+                updateHeight(posX, posY, deposit);
                 sediment -= deposit;
-                data[idx] += deposit;
             }
             else {
-                // EROSION (hungry)
                 float erode = fminf((capacity - sediment) * p.erodeSpeed, -deltaHeight);
-                // STABILITY: Prevents deep pits
-                erode = fminf(erode, data[idx] * 0.05f);
-                erode *= hardnessFactor;
-                
-                if (hasMask) erode *= mask[idx];
-                
-                for (size_t b = 0; b < brushOffsets.size(); b++) {
-                    int brushIdx = idx + brushOffsets[b];
-                    if (brushIdx >= 0 && brushIdx < w * h) {
-                        data[brushIdx] -= erode * brushWeights[b];
-                    }
-                }
+                erode = fminf(erode, oldH * 0.05f);
+                erode *= hardnessFactor * maskValue;
+                erodeWithBrush(posX, posY, erode);
                 sediment += erode;
             }
+
+            if (deltaHeight <= 0.0f && sediment > 0.0f && flatness > 0.0f) {
+                float slowFactor = 1.0f - std::min(speed, 1.0f);
+                float settlingRate = (0.04f + p.depositSpeed * 0.25f) * flatness * (0.35f + 0.65f * slowFactor);
+                float settlingAmount = std::min(sediment, sediment * settlingRate);
+                if (settlingAmount > 1e-6f) {
+                    updateHeight(posX, posY, settlingAmount);
+                    sediment -= settlingAmount;
+                }
+            }
             
-            // Update physics (Corrected gravity)
             speed = sqrtf(fmaxf(0.001f, speed*speed - deltaHeight * p.gravity));
-            water *= (1 - p.evaporateSpeed);
+            water *= (1.0f - p.evaporateSpeed);
+
+            if (deltaHeight <= 0.0f && sediment > 0.0f) {
+                float speedDrop = std::max(0.0f, speedBeforePhysics - speed);
+                float speedDropNorm = std::min(1.0f, speedDrop / std::max(speedBeforePhysics + 1e-4f, 0.25f));
+                float transitionSettling = sediment * speedDropNorm * (0.12f + 0.38f * flatness) * (0.4f + 0.6f * (1.0f - water));
+                if (transitionSettling > 1e-6f) {
+                    updateHeight(posX, posY, transitionSettling);
+                    sediment -= transitionSettling;
+                }
+            }
+
             posX = newPosX;
             posY = newPosY;
             
-            if (water < 0.01f || speed < 0.01f) break; 
+            if (water < 0.01f || speed < 0.01f) {
+                if (sediment > 0.0f) {
+                    updateHeight(posX, posY, sediment);
+                }
+                break;
+            }
         }
     }
     
@@ -1742,7 +1850,7 @@ void TerrainManager::hydraulicErosion(TerrainObject* terrain, const HydraulicEro
     data = smoothed;
     
     // EDGE FADE-OUT: Prevent "wall" effect at terrain boundaries
-    int edgeFadeWidth = std::max(3, w / 80);  // Smaller fade for hydraulic
+    int edgeFadeWidth = std::max(3, w / 40);
     
     #pragma omp parallel for
     for (int y = 0; y < h; y++) {
@@ -2048,373 +2156,164 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
     int h = terrain->heightmap.height;
     auto& height = terrain->heightmap.data;
     float cellSize = terrain->heightmap.scale_xz / w;
-    float maxTerrainHeight = terrain->heightmap.scale_y;
     bool hasHardness = !terrain->hardnessMap.empty();
     bool hasMask = !mask.empty() && mask.size() == w * h;
     
-    SCENE_LOG_INFO("Fluvial Erosion: Starting...");
-    
-    // ========================================================
-    // STEP 1: PIT FILLING (Depression Breaching)
-    // ========================================================
-    // This ensures water can flow from any point to the edge
-    // by raising pits to their "spill level"
-    SCENE_LOG_INFO("Fluvial: Filling pits...");
-    
-    std::vector<float> filledHeight = height;  
-    std::vector<int> drainageParent(w * h, -1); // Guaranteed path to edge
-    const float epsilon = 0.00001f;
-    
-    // Initialize boundary cells (edges always drain)
-    std::vector<bool> processed(w * h, false);
-    std::priority_queue<std::pair<float, int>, 
-                       std::vector<std::pair<float, int>>,
-                       std::greater<std::pair<float, int>>> pq;
-    
-    for (int x = 0; x < w; x++) {
-        pq.push({filledHeight[x], x});
-        pq.push({filledHeight[(h-1)*w + x], (h-1)*w + x});
-        processed[x] = processed[(h-1)*w + x] = true;
-    }
-    for (int y = 1; y < h-1; y++) {
-        pq.push({filledHeight[y*w], y*w});
-        pq.push({filledHeight[y*w + w-1], y*w + w-1});
-        processed[y*w] = processed[y*w + w-1] = true;
-    }
-    
-    int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-    int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
-    
-    while (!pq.empty()) {
-        auto [cellHeight, idx] = pq.top();
-        pq.pop();
-        
-        int x = idx % w;
-        int y = idx / w;
-        
-        for (int d = 0; d < 8; d++) {
-            int nx = x + dx8[d];
-            int ny = y + dy8[d];
-            if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-            
-            int nIdx = ny * w + nx;
-            if (processed[nIdx]) continue;
-            
-            float targetH = fmaxf(filledHeight[nIdx], cellHeight + epsilon);
-            filledHeight[nIdx] = targetH;
-            drainageParent[nIdx] = idx; // Parent is the cell that provided the downhill path
-            processed[nIdx] = true;
-            pq.push({targetH, nIdx});
-        }
-    }
-    
-    SCENE_LOG_INFO("Fluvial: Pit filling complete");
-    
-    std::vector<float> flowAccum(w * h, 1.0f);
-    std::vector<int> indices(w * h);
-    for (int i = 0; i < w * h; i++) indices[i] = i;
+    SCENE_LOG_INFO("[CPU Fluvial] Starting Stream Power River Carver...");
 
-    auto updateDrainage = [&]() {
-        // Step 1: Update filled height and drainage parents from CURRENT height
-        std::fill(processed.begin(), processed.end(), false);
-        filledHeight = height;
-        while(!pq.empty()) pq.pop();
+    auto updateFlowCPU = [&]() {
+        std::vector<float> filledHeight = height;
+        std::vector<int> drainageParent(w * h, -1);
+        std::vector<bool> processed(w * h, false);
+        std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> pq;
+        const float eps = 0.0001f;
+        int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
 
         for (int x = 0; x < w; x++) {
             pq.push({filledHeight[x], x});
-            pq.push({filledHeight[(h-1)*w + x], (h-1)*w + x});
-            processed[x] = processed[(h-1)*w + x] = true;
+            pq.push({filledHeight[(h - 1) * w + x], (h - 1) * w + x});
+            processed[x] = processed[(h - 1) * w + x] = true;
         }
-        for (int y = 1; y < h-1; y++) {
-            pq.push({filledHeight[y*w], y*w});
-            pq.push({filledHeight[y*w + w-1], y*w + w-1});
-            processed[y*w] = processed[y*w + w-1] = true;
+        for (int y = 1; y < h - 1; y++) {
+            pq.push({filledHeight[y * w], y * w});
+            pq.push({filledHeight[y * w + w - 1], y * w + w - 1});
+            processed[y * w] = processed[y * w + w - 1] = true;
         }
 
         while (!pq.empty()) {
-            auto [cellHeight, idx] = pq.top(); pq.pop();
+            auto [cH, idx] = pq.top(); pq.pop();
             int x = idx % w, y = idx / w;
             for (int d = 0; d < 8; d++) {
                 int nx = x + dx8[d], ny = y + dy8[d];
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 if (processed[nIdx]) continue;
-                float targetH = fmaxf(filledHeight[nIdx], cellHeight + epsilon);
-                filledHeight[nIdx] = targetH;
+                float tH = fmaxf(filledHeight[nIdx], cH + eps);
+                filledHeight[nIdx] = tH;
                 drainageParent[nIdx] = idx;
                 processed[nIdx] = true;
-                pq.push({targetH, nIdx});
+                pq.push({tH, nIdx});
             }
         }
 
-        // Step 2: Recalculate accumulation order
+        std::vector<int> indices(w * h);
         for (int i = 0; i < w * h; i++) indices[i] = i;
-        std::sort(indices.begin(), indices.end(), [&](int a, int b) {
-            return filledHeight[a] > filledHeight[b];
-        });
+        std::sort(indices.begin(), indices.end(), [&](int a, int b) { return filledHeight[a] > filledHeight[b]; });
 
-        // Step 3: MFD Accumulation
-        std::fill(flowAccum.begin(), flowAccum.end(), 1.0f);
+        terrain->flowMap.assign(w * h, 1.0f);
         for (int i : indices) {
             int x = i % w, y = i / w;
+            float currentH = filledHeight[i];
             float totalSlopePower = 0.0f;
-            struct Neighbor { int id; float weight; };
-            std::vector<Neighbor> neighbors;
+            struct FlowNeighbor { int id; float weight; };
+            std::vector<FlowNeighbor> neighbors;
 
             for (int d = 0; d < 8; d++) {
                 int nx = x + dx8[d], ny = y + dy8[d];
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 float dist = (abs(dx8[d]) + abs(dy8[d]) == 2) ? 1.414f : 1.0f;
-                float slope = (filledHeight[i] - filledHeight[nIdx]) / (dist * cellSize);
+                float slope = (currentH - filledHeight[nIdx]) / (dist * cellSize);
                 if (slope > 0.0f) {
-                    float power = powf(slope, 2.0f); // Increased exponent for artery formation
-                    neighbors.push_back({nIdx, power});
+                    float power = powf(slope, 2.0f);
+                    neighbors.push_back({ nIdx, power });
                     totalSlopePower += power;
                 }
             }
 
             if (totalSlopePower > 0.0f) {
-                for (auto& n : neighbors) {
-                    flowAccum[n.id] += flowAccum[i] * (n.weight / totalSlopePower);
+                for (const auto& n : neighbors) {
+                    terrain->flowMap[n.id] += terrain->flowMap[i] * (n.weight / totalSlopePower);
                 }
             } else if (drainageParent[i] != -1) {
-                flowAccum[drainageParent[i]] += flowAccum[i];
+                terrain->flowMap[drainageParent[i]] += terrain->flowMap[i];
             }
         }
     };
 
-    updateDrainage(); // Initial pathfinding
+    int numPasses = std::max(1, p.iterations / 1000);
+    if (numPasses > 10) numPasses = 10;
 
-    // ========================================================
-    // STEP 3: STREAM POWER EROSION
-    // ========================================================
-    SCENE_LOG_INFO("Fluvial: Eroding river channels...");
-    float Ks = p.erodeSpeed * 0.02f; // Base erosion factor
-    float capacityFactor = p.sedimentCapacity; // User control over sediment pickup
     std::vector<float> erosionAmount(w * h, 0.0f);
-    
-    // Scale iterations to passes (e.g. 100k -> 4 passes, 250k -> 10 passes)
-    int numPasses = std::clamp(p.iterations / 25000, 1, 20); 
-    
-    for (int pass = 0; pass < numPasses; pass++) {
-        if (pass > 0) updateDrainage(); // Crucial: Re-fill pits and re-calculate flow as channels form!
-        
+    const float Ks = p.erodeSpeed * 0.02f;
+
+    for (int pass = 0; pass < numPasses; ++pass) {
+        updateFlowCPU();
         std::fill(erosionAmount.begin(), erosionAmount.end(), 0.0f);
-        
-        // Calculate erosion based on stream power law with hardness-dependent width
+
         #pragma omp parallel for
-        for (int i = 0; i < w * h; i++) {
-            int x = i % w;
-            int y = i / w;
-            
-            if (x <= 2 || x >= w-3 || y <= 2 || y >= h-3) continue;
-            
-            float flow = flowAccum[i];
-            
-            // Lower threshold - even small streams should erode
-            if (flow < 3.0f) continue;
-            
-            // Calculate local slope
-            float slopeX = (height[i+1] - height[i-1]) / (2.0f * cellSize);
-            float slopeY = (height[i+w] - height[i-w]) / (2.0f * cellSize);
-            float slope = sqrtf(slopeX*slopeX + slopeY*slopeY);
-            
-            // Add minimum slope to ensure erosion even on flat areas
-            slope = fmaxf(slope, p.minSlope);
-            
-            // Stream Power Law: E = K * sqrt(A) * S
-            float streamPower = Ks * sqrtf(flow) * slope;
-            
-            // ========================================
-            // CHAOS FACTOR: Simulated Dissolution & Turbulence
-            // ========================================
-            // On flat areas, water shouldn't stop abruptly. 
-            // We add a "turbulent" component that depends primarily on flow volume.
-            float chaosFactor = 0.0f;
-            if (slope < 0.05f) {
-                // Pseudo-random noise based on cell index to break lines
-                float noise = (float)((i * 1103515245 + 12345) & 0x7FFFFFFF) / 2147483647.0f;
-                
-                // Chaos increases as slope decreases (water becomes less predictable)
-                float flatIntensity = 1.0f - (slope / 0.05f);
-                chaosFactor = Ks * sqrtf(flow) * 0.15f * flatIntensity * (0.8f + noise * 0.4f);
-                
-                streamPower += chaosFactor;
-            }
-            
-            // ========================================
-            // DYNAMIC CHANNEL WIDTH (Prevents square artifacts)
-            // ========================================
-            float hardness = hasHardness ? terrain->hardnessMap[i] : 0.3f;
-            
-            // radius scales with flow - tiny streams are 0-1px, big rivers reach max radius
-            float flowScale = fminf(1.0f, (flow - 3.0f) / 100.0f);
-            float baseRadius = (float)p.erosionRadius * 0.5f; 
-            float dynamicRadius = fmaxf(0.5f, baseRadius * sqrtf(flowScale) * (1.5f - hardness));
-            int channelRadius = (int)ceilf(dynamicRadius);
-            channelRadius = std::clamp(channelRadius, 0, 10);
-            
-            // Erosion multiplier: soft erodes faster, and scale by flow intensity
-            float hardnessMultiplier = 1.0f - hardness * 0.7f;
-            float flowPower = fminf(1.5f, sqrtf(flow) * 0.2f); // Cap impact of high flow
-            
-            // Dampen erosion on extremely flat areas to prevent "sheet erosion" blocks
-            float slopeDampening = fminf(1.0f, slope * 50.0f); 
-            streamPower *= hardnessMultiplier * capacityFactor * flowPower * slopeDampening;
-            
-            if (hasMask) {
-                streamPower *= mask[i];
-            }
-            
-            // Apply erosion with circular falloff
-            for (int dy = -channelRadius; dy <= channelRadius; dy++) {
-                for (int dx = -channelRadius; dx <= channelRadius; dx++) {
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                    
-                    float distSq = (float)(dx*dx + dy*dy);
-                    if (distSq > dynamicRadius * dynamicRadius) continue; // Strict circular check
-                    
-                    int nIdx = ny * w + nx;
-                    float dist = sqrtf(distSq);
-                    
-                    // Smooth circular falloff (Cubic)
-                    float t = dist / (dynamicRadius + 0.001f);
-                    float falloff = 1.0f - t * t * (3.0f - 2.0f * t);
-                    falloff = fmaxf(falloff, 0.0f);
-                    
-                    float erode = streamPower * falloff;
-                    // Protect bedrock (max 10% of height)
-                    erode = fminf(erode, height[nIdx] * 0.1f);
-                    
-                    #pragma omp atomic
-                    erosionAmount[nIdx] += erode;
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                if (x <= 2 || x >= w - 3 || y <= 2 || y >= h - 3) continue;
+                int idx = y * w + x;
+
+                if (hasMask && mask[idx] < 0.01f) continue;
+
+                float flow = terrain->flowMap[idx];
+                if (flow < 3.0f) continue;
+
+                float invCellSize = 1.0f / fmaxf(0.001f, cellSize);
+                float slopeX = (height[idx + 1] - height[idx - 1]) * 0.5f * invCellSize;
+                float slopeY = (height[idx + w] - height[idx - w]) * 0.5f * invCellSize;
+                float slope = sqrtf(slopeX * slopeX + slopeY * slopeY);
+                slope = fmaxf(slope, p.minSlope);
+
+                float streamPower = Ks * sqrtf(flow) * slope;
+                if (slope < 0.05f) {
+                    float noise = (float)((idx * 1103515245 + 12345) & 0x7FFFFFFF) / 2147483647.0f;
+                    float flatIntensity = 1.0f - (slope / 0.05f);
+                    streamPower += Ks * sqrtf(flow) * 0.25f * flatIntensity * (0.7f + noise * 0.6f);
                 }
-            }
-            
-            // ========================================
-            // LATERAL EROSION (Meandering support)
-            // ========================================
-            // If flow is high and slope is low, water tends to erode horizontally (banks)
-            if (flow > 15.0f && slope < 0.03f) {
-                float lateralPower = streamPower * 0.4f * (1.0f - slope / 0.03f);
-                // Apply a small push to neighbors to simulate bank undercut
-                for (int d = 0; d < 8; d++) {
-                    int nx = x + dx8[d], ny = y + dy8[d];
-                    if (nx < 2 || nx >= w-3 || ny < 2 || ny >= h-3) continue;
-                    #pragma omp atomic
-                    erosionAmount[ny * w + nx] += lateralPower * 0.125f; // Split among neighbors
+
+                float hardness = hasHardness ? terrain->hardnessMap[idx] : 0.3f;
+                float flowScale = fminf(1.0f, (flow - 3.0f) / 100.0f);
+                float baseRadius = (float)p.erosionRadius * 0.5f;
+                float dynamicRadius = fmaxf(0.5f, baseRadius * sqrtf(flowScale) * (1.5f - hardness));
+                int channelRadius = (int)ceilf(dynamicRadius);
+                if (channelRadius > 10) channelRadius = 10;
+
+                float hardnessMultiplier = 1.0f - hardness * 0.7f;
+                float flowPower = fminf(1.5f, sqrtf(flow) * 0.2f);
+                float slopeDampening = fminf(1.0f, slope * 60.0f);
+                streamPower *= hardnessMultiplier * p.sedimentCapacity * flowPower * slopeDampening;
+                if (hasMask) streamPower *= mask[idx];
+
+                for (int dy = -channelRadius; dy <= channelRadius; ++dy) {
+                    for (int dx = -channelRadius; dx <= channelRadius; ++dx) {
+                        int nx = x + dx;
+                        int ny = y + dy;
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+
+                        float distSq = (float)(dx * dx + dy * dy);
+                        if (distSq > dynamicRadius * dynamicRadius) continue;
+
+                        int nIdx = ny * w + nx;
+                        float dist = sqrtf(distSq);
+                        float t = dist / (dynamicRadius + 0.001f);
+                        float falloff = 1.0f - t * t * (3.0f - 2.0f * t);
+                        falloff = fmaxf(falloff, 0.0f);
+
+                        float erode = streamPower * falloff;
+                        erode = fminf(erode, height[nIdx] * 0.1f);
+
+                        #pragma omp atomic
+                        erosionAmount[nIdx] += erode;
+                    }
                 }
-            }
-            
-            // ========================================
-            // DELTA FORMATION (where rivers meet flat areas)
-            // ========================================
-            // If slope is very low and flow is high, spread sediment
-            if (slope < 0.02f && flow > 20.0f) {
-                // This is a potential delta area - reduce erosion, increase deposition
-                float deltaSpread = 0.3f * (1.0f - slope / 0.02f);
-                erosionAmount[i] *= (1.0f - deltaSpread);
             }
         }
-        
-        // Apply erosion directly
+
         #pragma omp parallel for
-        for (int i = 0; i < w * h; i++) {
+        for (int i = 0; i < w * h; ++i) {
             height[i] -= erosionAmount[i];
             if (height[i] < 0.0f) height[i] = 0.0f;
         }
     }
-    
-    // ========================================================
-    // STEP 4: BANK COLLAPSE (Isotropic widening)
-    // ========================================================
-    SCENE_LOG_INFO("Fluvial: Channel widening...");
-    
-    std::vector<float> smoothed = height;
-    #pragma omp parallel for
-    for (int y = 1; y < h - 1; y++) {
-        for (int x = 1; x < w - 1; x++) {
-            int idx = y * w + x;
-            
-            if (flowAccum[idx] > 3.0f) {
-                float hC = height[idx];
-                float avgLower = 0.0f;
-                int lowerCount = 0;
-                
-                // 8-neighbor check to avoid square bias
-                for (int d = 0; d < 8; d++) {
-                    int nx = x + dx8[d], ny = y + dy8[d];
-                    float hN = height[ny * w + nx];
-                    if (hN < hC) {
-                        avgLower += hN;
-                        lowerCount++;
-                    }
-                }
-                
-                if (lowerCount > 0) {
-                    avgLower /= lowerCount;
-                    smoothed[idx] = hC * 0.75f + avgLower * 0.25f;
-                }
-            }
-        }
-    }
-    height = smoothed;
-    
-    // ========================================================
-    // STEP 5: EDGE FADE-OUT (Prevent "wall" effect at boundaries)
-    // ========================================================
-    SCENE_LOG_INFO("Fluvial: Edge fade-out...");
-    
-    int edgeFadeWidth = std::max(5, w / 50);  // ~2% of terrain width, minimum 5 cells
-    
-    #pragma omp parallel for
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int idx = y * w + x;
-            
-            // Calculate distance from nearest edge
-            int distFromEdge = std::min({x, y, w - 1 - x, h - 1 - y});
-            
-            if (distFromEdge < edgeFadeWidth) {
-                // Smooth falloff: 0 at edge, 1 at edgeFadeWidth
-                float t = (float)distFromEdge / (float)edgeFadeWidth;
-                float smoothT = t * t * (3.0f - 2.0f * t);  // Smoothstep
-                
-                // Blend towards lower height at edges
-                // Use average of neighbor heights as reference
-                float avgNeighbor = 0.0f;
-                int neighborCount = 0;
-                
-                // Look inward for reference height
-                int inwardX = std::clamp(x + (x < w/2 ? edgeFadeWidth : -edgeFadeWidth), 0, w-1);
-                int inwardY = std::clamp(y + (y < h/2 ? edgeFadeWidth : -edgeFadeWidth), 0, h-1);
-                float inwardHeight = height[inwardY * w + inwardX];
-                
-                // Fade edge cells towards a fraction of the inward height
-                // Use stronger blending to eliminate walls
-                height[idx] = height[idx] * smoothT + inwardHeight * (1.0f - smoothT);
-            }
-        }
-    }
-    
-    // ========================================================
-    // STEP 6: AGGRESSIVE THERMAL SMOOTHING (for edge blending)
-    // ========================================================
-    // More iterations to smooth out any remaining sharp edges
-    SCENE_LOG_INFO("Fluvial: Thermal smoothing...");
-    ThermalErosionParams tp;
-    tp.iterations = 15;  // Increased from 5 for better edge smoothing
-    tp.talusAngle = 0.4f;  // Lower talus = more smoothing on slopes
-    tp.erosionAmount = 0.4f;
-    this->thermalErosion(terrain, tp);  // This also calls updateTerrainMesh
-    
-    SCENE_LOG_INFO("Fluvial Erosion Complete!");
-    // Store flow accumulation for export/visualization
-    terrain->flowMap = std::move(flowAccum);
-    // Note: thermalErosion already updates mesh, no need to call again
+
+    updateTerrainMesh(terrain);
+    terrain->dirty_mesh = true;
+    SCENE_LOG_INFO("[CPU Fluvial] Stream Power River Carver complete.");
 }
 
 // Helper to save a float map (0-1 range) to 8-bit grayscale PNG
@@ -3472,9 +3371,21 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     size_t mapSize = w * h * sizeof(float);
+    bool hasHardness = !terrain->hardnessMap.empty() && terrain->hardnessMap.size() == (size_t)(w * h);
+    bool hasMask = !mask.empty() && mask.size() == (size_t)(w * h);
     
     // Allocate Device Memory
-    CUdeviceptr d_heightmap;
+    CUdeviceptr d_heightmap = 0;
+    CUdeviceptr d_original = 0;
+    CUdeviceptr d_hardness = 0;
+    CUdeviceptr d_mask = 0;
+    auto freeGpuBuffers = [&]() {
+        if (d_mask) cuMemFree(d_mask);
+        if (d_hardness) cuMemFree(d_hardness);
+        if (d_original) cuMemFree(d_original);
+        if (d_heightmap) cuMemFree(d_heightmap);
+    };
+
     CUresult res = cuMemAlloc(&d_heightmap, mapSize);
     if (res != CUDA_SUCCESS) {
         SCENE_LOG_WARN("[GPU Erosion] Memory allocation failed. Falling back to CPU.");
@@ -3485,10 +3396,47 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     // Copy Host to Device
     res = cuMemcpyHtoD(d_heightmap, terrain->heightmap.data.data(), mapSize);
     if (res != CUDA_SUCCESS) {
-        cuMemFree(d_heightmap);
+        freeGpuBuffers();
         SCENE_LOG_WARN("[GPU Erosion] HtoD copy failed. Falling back to CPU.");
         hydraulicErosion(terrain, params, mask);
         return;
+    }
+
+    res = cuMemAlloc(&d_original, mapSize);
+    if (res == CUDA_SUCCESS) {
+        res = cuMemcpyHtoD(d_original, terrain->heightmap.data.data(), mapSize);
+    }
+    if (res != CUDA_SUCCESS) {
+        freeGpuBuffers();
+        SCENE_LOG_WARN("[GPU Erosion] Failed to preserve original heights on GPU. Falling back to CPU.");
+        hydraulicErosion(terrain, params, mask);
+        return;
+    }
+
+    if (hasHardness) {
+        res = cuMemAlloc(&d_hardness, mapSize);
+        if (res == CUDA_SUCCESS) {
+            res = cuMemcpyHtoD(d_hardness, terrain->hardnessMap.data(), mapSize);
+        }
+        if (res != CUDA_SUCCESS) {
+            freeGpuBuffers();
+            SCENE_LOG_WARN("[GPU Erosion] Hardness upload failed. Falling back to CPU.");
+            hydraulicErosion(terrain, params, mask);
+            return;
+        }
+    }
+
+    if (hasMask) {
+        res = cuMemAlloc(&d_mask, mapSize);
+        if (res == CUDA_SUCCESS) {
+            res = cuMemcpyHtoD(d_mask, mask.data(), mapSize);
+        }
+        if (res != CUDA_SUCCESS) {
+            freeGpuBuffers();
+            SCENE_LOG_WARN("[GPU Erosion] Mask upload failed. Falling back to CPU.");
+            hydraulicErosion(terrain, params, mask);
+            return;
+        }
     }
     
     // Prepare Params
@@ -3509,7 +3457,8 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     gpuParams.cellSize = (float)terrain->heightmap.scale_xz / (float)w;
     gpuParams.heightScale = (float)terrain->heightmap.scale_y;
     gpuParams.seed = (unsigned int)rand();
-    gpuParams.hardnessMap = nullptr; // Explicitly null
+    gpuParams.hardnessMap = hasHardness ? reinterpret_cast<float*>(d_hardness) : nullptr;
+    gpuParams.maskMap = hasMask ? reinterpret_cast<float*>(d_mask) : nullptr;
     
     unsigned long long seed_offset = 0;
     
@@ -3539,7 +3488,7 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
                              
         if (res != CUDA_SUCCESS) {
             SCENE_LOG_ERROR("[GPU Erosion] Launch Failed at droplet " + std::to_string(dropletsProcessed) + ": Error " + std::to_string(res));
-            cuMemFree(d_heightmap);
+            freeGpuBuffers();
             hydraulicErosion(terrain, params, mask);
             return;
         }
@@ -3591,10 +3540,8 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     }
     
     // 3. EDGE PRESERVATION PASS (matches CPU edge fade-out)
-    // Note: For edge preservation, we need original heights which we don't have on GPU
-    // So we use the simplified version that blends with inward reference
+    // We now preserve a copy of the original heights on device for a closer match.
     if (edgePreservationKernelFunc) {
-        CUdeviceptr d_original = 0; // nullptr - we don't have original heights saved
         void* edgeArgs[] = { &d_heightmap, &d_original, &postParams };
         res = cuLaunchKernel((CUfunction)edgePreservationKernelFunc,
                              bx, by, 1, tx, ty, 1, 0, nullptr, edgeArgs, nullptr);
@@ -3624,7 +3571,7 @@ void TerrainManager::hydraulicErosionGPU(TerrainObject* terrain, const Hydraulic
     }
     
     // Cleanup
-    cuMemFree(d_heightmap);
+    freeGpuBuffers();
     
     // Update Mesh (Visuals)
     updateTerrainMesh(terrain);
@@ -3828,16 +3775,43 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
         for (int i : indices) {
             int x = i % w, y = i / w;
             float currentH = filledHeight[i];
-            int bestN = -1; float maxSlope = 0.0f;
+            float totalSlopePower = 0.0f;
+            struct FlowNeighbor { int id; float weight; };
+            std::vector<FlowNeighbor> neighbors;
             for (int d = 0; d < 8; d++) {
                 int nx = x + dx8[d], ny = y + dy8[d];
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 float dist = (abs(dx8[d]) + abs(dy8[d]) == 2) ? 1.414f : 1.0f;
                 float slope = (currentH - filledHeight[nIdx]) / (dist * cellSize);
-                if (slope > maxSlope) { maxSlope = slope; bestN = nIdx; }
+                if (slope > 0.0f) {
+                    float power = powf(slope, 2.0f);
+                    neighbors.push_back({ nIdx, power });
+                    totalSlopePower += power;
+                }
             }
-            if (bestN != -1) terrain->flowMap[bestN] += terrain->flowMap[i];
+
+            if (totalSlopePower > 0.0f) {
+                for (const auto& n : neighbors) {
+                    terrain->flowMap[n.id] += terrain->flowMap[i] * (n.weight / totalSlopePower);
+                }
+            } else {
+                int drainageParent = -1;
+                float minDrop = std::numeric_limits<float>::max();
+                for (int d = 0; d < 8; d++) {
+                    int nx = x + dx8[d], ny = y + dy8[d];
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                    int nIdx = ny * w + nx;
+                    float drop = fabsf(currentH - filledHeight[nIdx]);
+                    if (drop < minDrop) {
+                        minDrop = drop;
+                        drainageParent = nIdx;
+                    }
+                }
+                if (drainageParent != -1) {
+                    terrain->flowMap[drainageParent] += terrain->flowMap[i];
+                }
+            }
         }
     };
 

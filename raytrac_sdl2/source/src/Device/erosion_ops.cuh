@@ -26,6 +26,7 @@ struct HydraulicErosionParamsGPU {
     float heightScale;
     unsigned int seed;
     float* hardnessMap;  // Optional hardness map (nullptr if not used)
+    float* maskMap;      // Optional erosion mask (nullptr if not used)
 };
 
 struct ThermalErosionParamsGPU {

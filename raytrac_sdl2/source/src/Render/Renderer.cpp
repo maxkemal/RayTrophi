@@ -4111,6 +4111,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         Vec3f b_albedo(0.0f);
                         float b_rough = 0.0f;
                         float b_metal = 0.0f;
+                        float b_trans = 0.0f;
+                        float b_ior = 0.0f;
                         Vec3 blended_n(0.0f);
                         bool has_n = false;
 
@@ -4124,6 +4126,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                 b_albedo += toVec3f(layer->getPropertyValue(layer->albedoProperty, luv)) * weights[i];
                                 b_rough += static_cast<float>(layer->getPropertyValue(layer->roughnessProperty, luv).y) * weights[i];
                                 b_metal += static_cast<float>(layer->getPropertyValue(layer->metallicProperty, luv).z) * weights[i];
+                                b_trans += layer->getTransmission(luv) * weights[i];
+                                b_ior += layer->getIOR() * weights[i];
                                 
                                 if (layer->has_normal_map()) {
                                     Vec3 ns = layer->get_normal_from_map(luv.u, luv.v) * 2.0f - Vec3(1.0f);
@@ -4137,6 +4141,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         albedo = b_albedo.clamp(0.01f, 1.0f);
                         roughness = std::clamp(b_rough, 0.01f, 1.0f);
                         metallic = std::clamp(b_metal, 0.0f, 1.0f);
+                        transmission = std::clamp(b_trans, 0.0f, 1.0f);
                         
                         if (has_n) {
                             Vec3 T, B;
@@ -4152,6 +4157,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         rec.custom_roughness = roughness;
                         rec.custom_metallic = metallic;
                         rec.custom_transmission = transmission;
+                        rec.custom_ior = (b_ior > 0.01f) ? b_ior : 1.45f;
                         
                         terrain_handled = true;
                     }
@@ -4172,7 +4178,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 }
 
                 // Transmission
-                transmission = pbsdf->getTransmission(uv);
+                if (!terrain_handled) {
+                    transmission = pbsdf->getTransmission(uv);
+                }
 
                 // === WATER WAVE SHADER (CPU) ===
                 // Detect water materials using sheen > 0 (IS_WATER flag)

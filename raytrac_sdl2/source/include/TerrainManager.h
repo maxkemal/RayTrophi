@@ -31,14 +31,14 @@ static constexpr int TERRAIN_SERIALIZATION_VERSION = 2;
 
 struct HydraulicErosionParams {
     int iterations = 50000;        // Number of 'hits' (Determines passes in GPU)
-    int dropletLifetime = 128;     // Max steps per droplet (Legacy CPU)
+    int dropletLifetime = 64;      // Max steps per droplet
     float inertia = 0.05f;         // direction momentum (0-1)
-    float sedimentCapacity = 1.5f; // Tamed for Stream Power Law
-    float minSlope = 0.01f;        // Minimal slope for flow
-    float erodeSpeed = 0.1f;       // Tamed erosion rate
-    float depositSpeed = 0.3f;     // Deposit rate
+    float sedimentCapacity = 2.0f; // Sediment carrying capacity
+    float minSlope = 0.005f;       // Minimal slope for flow
+    float erodeSpeed = 0.05f;      // Erosion rate
+    float depositSpeed = 0.1f;     // Deposit rate
     float evaporateSpeed = 0.01f;  // Evaporation rate
-    float gravity = 4.0f;          // Reset to moderate
+    float gravity = 9.8f;          // Gravitational acceleration
     int erosionRadius = 2;         // Default channel width
 };
 

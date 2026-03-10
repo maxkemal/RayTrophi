@@ -124,6 +124,9 @@ struct TerrainObject {
     // Flow accumulation map: Higher values indicate streams/rivers
     std::vector<float> flowMap;      // Same resolution as heightmap
 
+    // Packed erosion helper map: RGBA = erosion / deposition / flow / influence
+    std::vector<float> erosionMapRGBA; // Same resolution as heightmap, 4 channels
+
     // Non-destructive editing support (Node Graph)
     std::vector<float> original_heightmap_data; // Initial state before node graph evaluation
     
