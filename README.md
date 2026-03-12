@@ -10,8 +10,8 @@
 
 **A high-performance, production-ready ray tracing renderer with hybrid CPU/GPU rendering**
 
-[![RayTrophi V0.05 Showcase](https://img.youtube.com/vi/Y03YvX5EHEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y03YvX5EHEM)
-**[▶️ Watch Showcase on YouTube](https://www.youtube.com/watch?v=Y03YvX5EHEM)**
+[![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
+**[▶️ Watch Showcase on YouTube](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
 [Features](#-features) • [Quick Start](#-quick-start) • [Architecture](#-architecture) • [Performance](#-performance) • [Gallery](#-gallery)
 
@@ -404,9 +404,9 @@ RayTrophi/
 
 ### 🎬 Demo Reel
 
-[![RayTrophi 2025 Showreel](https://img.youtube.com/vi/Vcn4Dp0ICxk/maxresdefault.jpg)](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)
+[![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
 
-**[▶️ Watch Full Demo Reel on YouTube](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)**
+**[▶️ Watch Full Demo Reel on YouTube](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
 ### 🖼️ Render Samples
 

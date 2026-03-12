@@ -10,8 +10,8 @@
 
 **Hibrit CPU/GPU rendering ile yüksek performanslı, üretime hazır ray tracing renderleyici**
 
-[![RayTrophi V0.05 Showcase](https://img.youtube.com/vi/Y03YvX5EHEM/maxresdefault.jpg)](https://www.youtube.com/watch?v=Y03YvX5EHEM)
-**[▶️ Showcase Videosunu YouTube'da İzleyin](https://www.youtube.com/watch?v=Y03YvX5EHEM)**
+[![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
+**[▶️ Showcase Videosunu YouTube'da İzleyin](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
 [Özellikler](#-özellikler) • [Hızlı Başlangıç](#-hızlı-başlangıç) • [Mimari](#-mimari) • [Performans](#-performans) • [Galeri](#-galeri)
 
@@ -363,9 +363,9 @@ RayTrophi/
 
 ### 🎬 Demo Reel
 
-[![RayTrophi 2025 Showreel](https://img.youtube.com/vi/Vcn4Dp0ICxk/maxresdefault.jpg)](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)
+[![RayTrophi Showcase](https://img.youtube.com/vi/-xRiPhc-p6k/maxresdefault.jpg)](https://www.youtube.com/watch?v=-xRiPhc-p6k)
 
-**[▶️ Demo Reel'i YouTube'da İzleyin](https://www.youtube.com/watch?v=Vcn4Dp0ICxk)**
+**[▶️ Demo Reel'i YouTube'da İzleyin](https://www.youtube.com/watch?v=-xRiPhc-p6k)**
 
 ### 🖼️ Render Örnekleri
 
