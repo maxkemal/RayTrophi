@@ -4,6 +4,7 @@
 #include "VDBVolumeManager.h"
 #include <cassert>
 #include <chrono>
+#include <limits>
 #include <Volumetric.h>
 
 // Static member initialization
@@ -273,12 +274,9 @@ void EmbreeBVH::userIntersectFunc(const RTCIntersectFunctionNArguments* args) {
         float t_enter, t_exit;
         // Pass -infinity instead of tnear to detect if we are inside the box (t_enter < tnear)
         if (vdb->intersectTransformedAABB(r, -std::numeric_limits<float>::infinity(), tfar, t_enter, t_exit)) {
-            
-            float reported_hit = t_enter;
-            if (reported_hit < tnear) reported_hit = tnear;
-            
-            // Check if valid interval exists (exit must be AFTER near plane)
-            bool is_inside_or_enter = (t_exit > tnear);
+            const bool starts_inside = (t_enter < tnear);
+            float reported_hit = starts_inside ? t_exit : t_enter;
+            bool is_inside_or_enter = starts_inside ? (t_exit > tnear) : (t_enter >= tnear);
 
             if (is_inside_or_enter && reported_hit < tfar) {
                 // Update Ray (shorten to hit)

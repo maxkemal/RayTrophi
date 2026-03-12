@@ -1625,13 +1625,14 @@ int main(int argc, char* argv[]) try {
 
                     if (scene.bvh->hit(r, 0.001f, 10000.0f, rec)) {
                         // Cap the nav distance to something sane for panning/sensitivity (prevents "extreme movement")
-                        current_nav_dist = std::min(rec.t, 500.0f);
+                        const float safe_focus_dist = std::max(rec.t, 0.05f);
+                        current_nav_dist = std::min(safe_focus_dist, 500.0f);
                         
                         // If not in Manual Focus mode (mode 0), sync pivot and focus_dist
                         if (ui.viewport_settings.focus_mode != 0) {
-                            scene.camera->focus_dist = rec.t;
+                            scene.camera->focus_dist = safe_focus_dist;
                             // FIXED: Use current forward direction instead of ray 'r' to prevent camera "turn snap"
-                            scene.camera->lookat = scene.camera->lookfrom + dir * rec.t;
+                            scene.camera->lookat = scene.camera->lookfrom + dir * safe_focus_dist;
                             scene.camera->update_camera_vectors();
                             g_camera_dirty = true;
                         }
@@ -1954,13 +1955,15 @@ int main(int argc, char* argv[]) try {
              float time_seconds = current_volume_frame / 24.0f;
 
              // Calculate wind transforms on CPU
-             InstanceManager::getInstance().updateWind(time_seconds, scene);
+            FoliageWindUpdateStats wind_stats = InstanceManager::getInstance().updateWind(time_seconds, scene, g_backend.get());
 
              // Update OptiX Time
              if (g_backend) g_backend->setTime(time_seconds, time_seconds);
              
              // Efficiently update instance transforms on GPU (no full rebuild)
-             if (g_backend) g_backend->updateInstanceTransforms(scene.world.objects);
+             if (g_backend && (wind_stats.any_cpu_update || wind_stats.gpu_deform_applied)) {
+                 g_backend->updateInstanceTransforms(scene.world.objects);
+             }
              
              // Force redraw (break accumulation)
              start_render = true;
@@ -2413,12 +2416,8 @@ int main(int argc, char* argv[]) try {
                         
 
                         if (std::abs(time - last_wind_time) > 0.001f) {
-                            ray_renderer.updateWind(scene, time);
-                            
-                            // Check if wind actually modified anything
-                            for(const auto& group : InstanceManager::getInstance().getGroups()) {
-                                if(group.gpu_dirty) { wind_active = true; break; }
-                            }
+                            FoliageWindUpdateStats wind_stats = ray_renderer.updateWind(scene, time);
+                            wind_active = wind_stats.any_cpu_update || wind_stats.gpu_deform_applied;
                             
                             if (wind_active) {
                                 // geometry_updated = true; // REMOVED: Managed by updateWind (Direct Instance Update + Refit)
@@ -3046,9 +3045,6 @@ int main(int argc, char* argv[]) try {
                         if (has_file_animations) {
                             if (g_backend) g_backend->updateGeometry(scene.world.objects);
                         } else if (wind_active) {
-                            if (g_backend) {
-                                g_backend->updateGeometry(scene.world.objects);
-                            }
                             if (g_backend) g_backend->updateInstanceTransforms(scene.world.objects);
                         } else if (has_manual_keyframes) {
                             // PERFORMANCE CRITICAL: 
@@ -3324,11 +3320,6 @@ int main(int argc, char* argv[]) try {
             if (g_optix_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 try {
                     g_optix_future.get();
-
-                    // REAPPLY FOLIAGE persistence on main thread with current, valid backend pointer.
-                    if (auto optix_backend = dynamic_cast<Backend::OptixBackend*>(g_backend.get())) {
-                        TerrainManager::getInstance().reapplyAllFoliage(optix_backend->getOptixWrapper());
-                    }
 
                     if (g_backend) g_backend->resetAccumulation();
                     ui.clearViewportMessages();

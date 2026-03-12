@@ -540,6 +540,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 }
 
                 if (found_hit) {
+                    min_dist = std::max(min_dist, 0.05f);
                     ctx.scene.camera->focus_dist = min_dist;
                     ctx.scene.camera->update_camera_vectors();
                     if (ctx.backend_ptr) {

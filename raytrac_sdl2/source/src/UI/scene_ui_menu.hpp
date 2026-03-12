@@ -280,6 +280,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                     
                     scene_loading = true;
                     scene_loading_done = false;
+                    pending_project_ui_restore = false;
                     scene_loading_progress = 0;
                     setSceneLoadingStage("Importing model...");
 
@@ -314,13 +315,14 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
                          
                          scene_loading = false;
                          scene_loading_done = true;
+                         pending_project_ui_restore = true;
                          // NOTE: ctx.start_render will be set by main loop when it sees scene_loading_done
                     });
                     loader_thread.detach();
                 }
 #endif
             }
-            
+
             if (ImGui::MenuItem("Export Scene (.glb/.gltf)...", nullptr)) {
                  SceneExporter::getInstance().show_export_popup = true;
             }
@@ -567,6 +569,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         {
             ImGui::MenuItem("Properties Panel", nullptr, &showSidePanel);
             ImGui::MenuItem("Bottom Panel", nullptr, &show_animation_panel);
+            ImGui::MenuItem("Asset Browser", nullptr, &show_asset_browser);
             // Auto open log if check (optional)
             if (ImGui::MenuItem("Log Window", nullptr, &show_scene_log)) {
                  if (show_scene_log) show_animation_panel = false;

@@ -153,6 +153,15 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
 - Sahne hiyerarşi görüntüleyici ve Materyal editörü
 - Performans metrikleri (FPS, rays/s, bellek kullanımı)
 
+### 📦 Asset Browser & Kütüphane Sistemi
+
+- Metadata tabanlı asset tarama: `model`, `anim_clip`, `vdb`, `vdb_sequence`
+- Proje içi `assets` kökü + kullanıcı ek kütüphaneleri (multi-library)
+- VDB / VDB sequence için grid, bounds, shader preset ve sequence metadata desteği
+- Asset kartları için preview/thumbnail cache, favoriler, etiketler ve kayıtlı collection/smart folder presetleri
+- Sürükle-bırak ile sahneye ekleme, viewport ghost preview ve eklenen nesnenin seçili kalması
+- Proje bazlı UI state kalıcılığı: asset browser düzeni, library listesi ve collection filtreleri geri yüklenir
+
 ---
 
 ## 🛠️ Prosedürel Araçlar ve Sistemler
