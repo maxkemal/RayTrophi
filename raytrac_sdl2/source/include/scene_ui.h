@@ -39,6 +39,7 @@ class GasVolume;
 #include <set> // For lazy CPU sync
 #include <atomic> // For thread-safe flags
 #include <mutex>
+#include <future>
 #include <string>
 #include <memory>
 #include <vector>
@@ -47,6 +48,7 @@ class GasVolume;
 #include "instancegroup.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
+#include "AssetRegistry.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HEADER
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -104,6 +106,7 @@ struct UIContext {
 
 class SceneUI {
 public:   
+    ~SceneUI();
     // UI State
     int pivot_mode = 0; // 0=Median Point (Group), 1=Individual Origins
     int active_properties_tab = 0; // NEW: Vertical side tab index
@@ -333,6 +336,7 @@ public:
         int active_terrain_id = -1;
         float radius = 5.0f;
         float strength = 0.5f;
+        float curve = 2.0f;
         int mode = 0; // 0=Raise, 1=Lower, 2=Flatten, 3=Smooth, 4=Stamp
         bool show_preview = true;
         
@@ -391,7 +395,26 @@ private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
     void drawStatusAndBottom(UIContext& ctx, float screen_x, float screen_y, float left_offset);
-    void drawAuxWindows(UIContext& ctx);
+     void drawAuxWindows(UIContext& ctx);
+     void drawAssetBrowser(UIContext& ctx, bool embedded = false);
+     void appendAssetToScene(UIContext& ctx, const std::filesystem::path& asset_path, const std::string& display_name);
+     bool appendAnimationClipAssetToScene(UIContext& ctx, const AssetRecord& asset, const std::string& display_name);
+     bool raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos, Vec3& hit_point, Vec3& hit_normal) const;
+     void drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, const Vec3& hit_point, const Vec3& bounds_min, const Vec3& bounds_max) const;
+     bool ensureSelectedAssetPreviewTexture(UIContext& ctx, const std::filesystem::path& preview_path, int& width, int& height);
+     bool ensureAssetBrowserThumbnailTexture(UIContext& ctx, const std::filesystem::path& preview_path, SDL_Texture*& out_texture, int& width, int& height);
+     void releaseSelectedAssetPreviewTexture();
+     void releaseAssetBrowserThumbnailTextures();
+     void startAsyncAssetLibraryRefresh(const std::filesystem::path& root_path, const std::string& status_text = "Scanning assets...");
+     void pollAsyncAssetLibraryRefresh();
+     struct AssetSmartFolderPreset {
+         std::string name;
+         std::string search;
+         std::string tag_filter;
+         std::string folder_relative_dir;
+         bool favorites_only = false;
+         bool only_3d = true;
+     };
 
     // --- Input / Editor ---
     void handleEditorShortcuts(UIContext& ctx);
@@ -423,7 +446,43 @@ private:
     // --- Deferred / Maintenance ---
     void processDeferredSceneUpdates(UIContext& ctx);
     bool showSidePanel = true;
-    bool show_controls_window = false; // Controls/Help window visibility
+     bool show_controls_window = false; // Controls/Help window visibility
+     bool show_asset_browser = false;
+     AssetRegistry asset_registry;
+     std::vector<std::filesystem::path> asset_library_paths;
+     int active_asset_library_index = 0;
+     std::unordered_map<std::string, std::pair<Vec3, Vec3>> asset_drag_bbox_cache;
+     std::string asset_browser_search;
+     std::string asset_browser_tag_filter;
+     std::string asset_smart_folder_name;
+     int asset_browser_view_mode = 1; // 0=Tiles, 1=Compact, 2=Details
+     float asset_browser_thumbnail_size = 170.0f;
+     bool asset_browser_only_3d = true;
+     bool asset_browser_favorites_only = false;
+     std::vector<AssetSmartFolderPreset> asset_smart_folders;
+     int active_asset_smart_folder_index = -1;
+     float asset_browser_folder_width = 260.0f;
+     float asset_browser_details_height = 250.0f;
+     std::string selected_asset_relative_dir;
+     std::string selected_asset_folder_relative_dir;
+     std::string selected_asset_tags_edit;
+     std::string selected_asset_tags_edit_target;
+     std::filesystem::path selected_asset_preview_texture_path;
+     SDL_Texture* selected_asset_preview_texture = nullptr;
+     int selected_asset_preview_texture_width = 0;
+     int selected_asset_preview_texture_height = 0;
+     struct AssetThumbnailCacheEntry {
+         SDL_Texture* texture = nullptr;
+         int width = 0;
+         int height = 0;
+         uint64_t last_used = 0;
+     };
+     std::unordered_map<std::string, AssetThumbnailCacheEntry> asset_browser_thumbnail_cache;
+     uint64_t asset_browser_thumbnail_use_counter = 0;
+     std::future<std::pair<AssetRegistry, bool>> asset_registry_refresh_future;
+     std::filesystem::path pending_asset_library_root;
+     std::string asset_library_refresh_status;
+     bool asset_library_refresh_in_progress = false;
     bool showResolutionPanel = true; // class üyesi
     bool camera_initialized = false;
     Vec3 camera_initial_pos;
@@ -431,6 +490,8 @@ private:
     float camera_initial_fov;
    
     bool show_scene_log = false; // Default closed
+    bool focus_bottom_panel_next_frame = false;
+    bool pending_project_ui_restore = false;
     float side_panel_width = 360.0f; // Resizable Left Panel width
     float bottom_panel_height = 100.0f; // Default to minimum height
     float hierarchy_panel_height = 250.0f; // New: Resizable hierarchy list height

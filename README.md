@@ -178,6 +178,15 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Render Quality Presets (Low, Medium, High, Ultra)
 - Dynamic Resolution Scaling
 - Scene hierarchy viewer and Material editor
+
+### 📦 Asset Browser & Library System
+
+- Metadata-driven asset discovery for `model`, `anim_clip`, `vdb`, and `vdb_sequence`
+- Hybrid library workflow: built-in project `assets` root plus user-added local libraries
+- Extended VDB / VDB sequence metadata with grids, bounds, shader presets, and sequence info
+- Asset cards with preview/thumbnail cache, favorites, tags, and saved collection/smart-folder presets
+- Drag-and-drop scene placement with viewport ghost preview and auto-selection of the newly appended object
+- Project-scoped UI persistence for asset browser layout, library list, and saved collection filters
 - Performance metrics (FPS, rays/s, memory usage)
 - Box Selection: Right-click drag for multi-selection
 - Transform Gizmo Idle Preview: Pause during drag to preview position

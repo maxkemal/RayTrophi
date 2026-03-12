@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include "RayPacket.h"
 #include "HitRecordPacket.h"
 
@@ -268,18 +269,24 @@ bool VDBVolume::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool
     if (!visible || ignore_volumes || !isLoaded()) return false;
     
     float t_enter, t_exit;
-    if (!intersectTransformedAABB(r, t_min, t_max, t_enter, t_exit)) {
+    if (!intersectTransformedAABB(r, -std::numeric_limits<float>::infinity(), t_max, t_enter, t_exit)) {
+        return false;
+    }
+
+    const bool starts_inside = (t_enter < t_min);
+    const float reported_t = starts_inside ? t_exit : t_enter;
+    if (reported_t < t_min || reported_t > t_max) {
         return false;
     }
     
-    // We hit the volume bounding box
-    // Actual ray marching happens during shading
-    rec.t = t_enter;
-    rec.point = r.at(t_enter);
+    // If the ray starts inside the volume, report the exit face instead of an
+    // artificial near-plane hit. This keeps camera focus/navigation stable.
+    rec.t = reported_t;
+    rec.point = r.at(reported_t);
     
     // Normal points toward ray origin (outward from box)
-    Vec3 entry_point = r.at(t_enter);
-    Vec3 local_entry = world_transform_inv.transform_point(entry_point);
+    Vec3 hit_point = r.at(reported_t);
+    Vec3 local_entry = world_transform_inv.transform_point(hit_point);
     
     // Determine which face was hit
     Vec3 center = (local_bbox_min + local_bbox_max) * 0.5;

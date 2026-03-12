@@ -17,6 +17,9 @@
 #include <thread>
 #include <filesystem>
 #include <algorithm>
+#include <array>
+#include <cstdio>
+#include <cctype>
 #include <fstream>
 #include "json.hpp"
 #include "ProjectManager.h"
@@ -30,6 +33,8 @@
 #include "scene_data.h"    // Added explicit include
 #include "ui_modern.h"
 #include "imgui.h"
+#include <SDL_image.h>
+#include "stb_image.h"
 #include "ImGuizmo.h"  // Transform gizmo
 #include <string>
 #include <memory>  // For std::make_unique
@@ -53,6 +58,7 @@
 #include "PrincipledBSDF.h" // For material editing
 #include "Volumetric.h"     // For volumetric material
 #include "VDBVolume.h"      // For VDB volume UI panel
+#include "VolumetricRenderer.h"
 #include "AssimpLoader.h"  // For scene rebuild after object changes
 #include "SceneCommand.h"  // For undo/redo
 #include "default_scene_creator.hpp"
@@ -67,8 +73,557 @@
 #include <chrono>  // Playback timing için
 #include <filesystem>  // Frame dosyalarını kontrol için
 #include <unordered_map>
+#include <atomic>
+#include <vector>
+#include <sstream>
 
 bool show_documentation_window = false; // Global toggle (unused now, kept for linkage if needed or remove)
+
+namespace {
+bool readBinaryFileBytes(const std::filesystem::path& path, std::vector<unsigned char>& out_bytes) {
+    out_bytes.clear();
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    const std::streamsize size = file.tellg();
+    if (size <= 0) {
+        return false;
+    }
+
+    out_bytes.resize(static_cast<size_t>(size));
+    file.seekg(0, std::ios::beg);
+    return file.read(reinterpret_cast<char*>(out_bytes.data()), size).good();
+}
+
+bool loadPreviewTextureFromPath(SDL_Renderer* active_renderer,
+                                const std::filesystem::path& preview_path,
+                                SDL_Texture*& out_texture,
+                                int& out_width,
+                                int& out_height) {
+    out_texture = nullptr;
+    out_width = 0;
+    out_height = 0;
+
+    if (preview_path.empty() || !active_renderer || !std::filesystem::exists(preview_path)) {
+        return false;
+    }
+
+    std::vector<unsigned char> image_bytes;
+    if (!readBinaryFileBytes(preview_path, image_bytes)) {
+        return false;
+    }
+
+    SDL_RWops* rw = SDL_RWFromConstMem(image_bytes.data(), static_cast<int>(image_bytes.size()));
+    if (!rw) {
+        return false;
+    }
+
+    SDL_Surface* preview_surface = IMG_Load_RW(rw, 1);
+    if (!preview_surface) {
+        int image_width = 0;
+        int image_height = 0;
+        int channels = 0;
+        stbi_uc* stbi_pixels = stbi_load_from_memory(
+            image_bytes.data(),
+            static_cast<int>(image_bytes.size()),
+            &image_width,
+            &image_height,
+            &channels,
+            4);
+        if (!stbi_pixels) {
+            return false;
+        }
+
+        SDL_Surface* rgba_surface = SDL_CreateRGBSurfaceWithFormatFrom(
+            stbi_pixels,
+            image_width,
+            image_height,
+            32,
+            image_width * 4,
+            SDL_PIXELFORMAT_RGBA32);
+        if (!rgba_surface) {
+            stbi_image_free(stbi_pixels);
+            return false;
+        }
+
+        preview_surface = SDL_ConvertSurfaceFormat(rgba_surface, SDL_PIXELFORMAT_RGBA32, 0);
+        SDL_FreeSurface(rgba_surface);
+        stbi_image_free(stbi_pixels);
+        if (!preview_surface) {
+            return false;
+        }
+    }
+
+    SDL_Texture* preview_texture = SDL_CreateTextureFromSurface(active_renderer, preview_surface);
+    if (!preview_texture) {
+        SDL_FreeSurface(preview_surface);
+        return false;
+    }
+
+    out_texture = preview_texture;
+    out_width = preview_surface->w;
+    out_height = preview_surface->h;
+    SDL_FreeSurface(preview_surface);
+    return true;
+}
+
+std::string makeUniqueAssetImportPrefix(const std::filesystem::path& asset_path) {
+    static std::atomic<uint64_t> import_counter{ 1 };
+    const std::string stem = asset_path.stem().string().empty() ? "asset" : asset_path.stem().string();
+    const uint64_t counter = import_counter.fetch_add(1, std::memory_order_relaxed);
+    const auto now = std::chrono::high_resolution_clock::now().time_since_epoch();
+    const auto stamp = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+    return stem + "_" + std::to_string(stamp) + "_" + std::to_string(counter);
+}
+
+bool computeAssetPreviewBounds(const std::filesystem::path& asset_path, Vec3& out_min, Vec3& out_max) {
+    Assimp::Importer importer;
+    unsigned int import_flags =
+        aiProcess_Triangulate |
+        aiProcess_JoinIdenticalVertices |
+        aiProcess_ImproveCacheLocality;
+
+    const std::string ext = AssetRegistry::toLowerCopy(asset_path.extension().string());
+    if (ext == ".fbx") {
+        import_flags |= aiProcess_GlobalScale;
+    }
+
+    std::vector<unsigned char> file_bytes;
+    const aiScene* scene = nullptr;
+    if (readBinaryFileBytes(asset_path, file_bytes)) {
+        scene = importer.ReadFileFromMemory(file_bytes.data(), file_bytes.size(), import_flags, ext.c_str());
+    }
+    if (!scene) {
+        scene = importer.ReadFile(asset_path.string(), import_flags);
+    }
+    if (!scene || !scene->mRootNode) {
+        return false;
+    }
+
+    aiVector3D bb_min(1e30f, 1e30f, 1e30f);
+    aiVector3D bb_max(-1e30f, -1e30f, -1e30f);
+    bool found_vertex = false;
+
+    std::function<void(aiNode*, const aiMatrix4x4&)> walk =
+        [&](aiNode* node, const aiMatrix4x4& parent_transform) {
+            if (!node) {
+                return;
+            }
+
+            const aiMatrix4x4 world = parent_transform * node->mTransformation;
+            for (unsigned int mesh_idx = 0; mesh_idx < node->mNumMeshes; ++mesh_idx) {
+                const aiMesh* mesh = scene->mMeshes[node->mMeshes[mesh_idx]];
+                if (!mesh || !mesh->HasPositions()) {
+                    continue;
+                }
+
+                for (unsigned int v = 0; v < mesh->mNumVertices; ++v) {
+                    const aiVector3D p = world * mesh->mVertices[v];
+                    bb_min.x = (std::min)(bb_min.x, p.x);
+                    bb_min.y = (std::min)(bb_min.y, p.y);
+                    bb_min.z = (std::min)(bb_min.z, p.z);
+                    bb_max.x = (std::max)(bb_max.x, p.x);
+                    bb_max.y = (std::max)(bb_max.y, p.y);
+                    bb_max.z = (std::max)(bb_max.z, p.z);
+                    found_vertex = true;
+                }
+            }
+
+            for (unsigned int child_idx = 0; child_idx < node->mNumChildren; ++child_idx) {
+                walk(node->mChildren[child_idx], world);
+            }
+        };
+
+    walk(scene->mRootNode, aiMatrix4x4());
+
+    if (!found_vertex) {
+        return false;
+    }
+
+    out_min = Vec3(bb_min.x, bb_min.y, bb_min.z);
+    out_max = Vec3(bb_max.x, bb_max.y, bb_max.z);
+    return true;
+}
+
+bool computeVDBPreviewBounds(const AssetRecord& asset, Vec3& out_min, Vec3& out_max) {
+    if (asset.entry_path.empty()) {
+        return false;
+    }
+
+    VDBVolume vdb;
+    const bool loaded = asset.is_sequence ? vdb.loadVDBSequence(asset.entry_path.string()) : vdb.loadVDB(asset.entry_path.string());
+    if (!loaded) {
+        return false;
+    }
+
+    Vec3 bmin = vdb.getLocalBoundsMin();
+    Vec3 bmax = vdb.getLocalBoundsMax();
+    const Vec3 size = bmax - bmin;
+    float max_dim = (std::max)(size.x, (std::max)(size.y, size.z));
+    float scale_factor = 1.0f;
+
+    if (max_dim > 50.0f) {
+        scale_factor = 5.0f / max_dim;
+    } else if (max_dim > 0.0f && max_dim < 0.01f) {
+        scale_factor = 5.0f / (std::max)(max_dim, 0.001f);
+    }
+
+    scale_factor = (std::max)(0.0001f, (std::min)(scale_factor, 1000.0f));
+
+    const Vec3 center = (bmin + bmax) * 0.5f;
+    const Vec3 pivot_offset(-center.x, -bmin.y, -center.z);
+    out_min = (bmin + pivot_offset) * scale_factor;
+    out_max = (bmax + pivot_offset) * scale_factor;
+    vdb.unload();
+    return true;
+}
+
+bool isPlaceableAssetRecord(const AssetRecord& asset) {
+    return asset.asset_kind == "model" || asset.asset_kind == "vdb" || asset.asset_kind == "vdb_sequence" || asset.asset_kind == "anim_clip";
+}
+
+bool computeAssetPreviewBounds(const AssetRecord& asset, Vec3& out_min, Vec3& out_max) {
+    if (asset.asset_kind == "vdb" || asset.asset_kind == "vdb_sequence") {
+        return computeVDBPreviewBounds(asset, out_min, out_max);
+    }
+    if (asset.asset_kind == "anim_clip") {
+        return false;
+    }
+    return computeAssetPreviewBounds(asset.entry_path, out_min, out_max);
+}
+
+std::string retargetAnimationNodeName(const std::string& node_name, const std::string& source_prefix, const std::string& target_prefix) {
+    if (source_prefix.empty()) {
+        return node_name;
+    }
+
+    const std::string source_token = source_prefix + "_";
+    if (node_name.find(source_token) != 0) {
+        return node_name;
+    }
+
+    const std::string local_name = node_name.substr(source_token.size());
+    if (target_prefix.empty()) {
+        return local_name;
+    }
+    return target_prefix + "_" + local_name;
+}
+
+template <typename TKey>
+std::map<std::string, std::vector<TKey>> retargetAnimationKeyMap(
+    const std::map<std::string, std::vector<TKey>>& source,
+    const std::string& source_prefix,
+    const std::string& target_prefix) {
+    std::map<std::string, std::vector<TKey>> result;
+    for (const auto& [node_name, keys] : source) {
+        result[retargetAnimationNodeName(node_name, source_prefix, target_prefix)] = keys;
+    }
+    return result;
+}
+
+std::string makeUniqueAnimationClipName(const std::vector<std::shared_ptr<AnimationData>>& existing_clips, const std::string& base_name) {
+    std::string candidate = base_name.empty() ? "Anim Clip" : base_name;
+    std::unordered_set<std::string> used_names;
+    for (const auto& clip : existing_clips) {
+        if (clip) {
+            used_names.insert(clip->name);
+        }
+    }
+
+    if (used_names.find(candidate) == used_names.end()) {
+        return candidate;
+    }
+
+    for (int suffix = 2; suffix < 10000; ++suffix) {
+        const std::string numbered = candidate + " " + std::to_string(suffix);
+        if (used_names.find(numbered) == used_names.end()) {
+            return numbered;
+        }
+    }
+
+    return candidate;
+}
+
+std::string findSelectedModelImportName(UIContext& ctx) {
+    if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
+        for (const auto& model_ctx : ctx.scene.importedModelContexts) {
+            for (const auto& member : model_ctx.members) {
+                if (member == ctx.selection.selected.object) {
+                    return model_ctx.importName;
+                }
+            }
+        }
+    }
+
+    const std::string selected_name = ctx.selection.selected.name;
+    if (!selected_name.empty()) {
+        for (const auto& model_ctx : ctx.scene.importedModelContexts) {
+            if (selected_name == model_ctx.importName || selected_name.find(model_ctx.importName + "_") == 0) {
+                return model_ctx.importName;
+            }
+        }
+    }
+
+    if (ctx.scene.importedModelContexts.size() == 1) {
+        return ctx.scene.importedModelContexts.front().importName;
+    }
+
+    return {};
+}
+
+std::string fitTextToWidth(const std::string& text, float max_width) {
+    if (text.empty() || max_width <= 8.0f) {
+        return text;
+    }
+
+    if (ImGui::CalcTextSize(text.c_str()).x <= max_width) {
+        return text;
+    }
+
+    const std::string ellipsis = "...";
+    const float ellipsis_width = ImGui::CalcTextSize(ellipsis.c_str()).x;
+    if (ellipsis_width >= max_width) {
+        return ellipsis;
+    }
+
+    std::string trimmed = text;
+    while (!trimmed.empty()) {
+        trimmed.pop_back();
+        const std::string candidate = trimmed + ellipsis;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= max_width) {
+            return candidate;
+        }
+    }
+
+    return ellipsis;
+}
+
+std::string trimCopy(const std::string& value) {
+    size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start]))) {
+        ++start;
+    }
+    size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+    return value.substr(start, end - start);
+}
+
+std::vector<std::string> splitTagString(const std::string& text) {
+    std::vector<std::string> tags;
+    std::unordered_set<std::string> seen;
+    std::string current;
+
+    auto flush_token = [&]() {
+        std::string token = AssetRegistry::toLowerCopy(trimCopy(current));
+        current.clear();
+        if (!token.empty() && seen.insert(token).second) {
+            tags.push_back(token);
+        }
+    };
+
+    for (char ch : text) {
+        if (ch == ',' || ch == ';' || ch == '\n') {
+            flush_token();
+            continue;
+        }
+        current.push_back(ch);
+    }
+    flush_token();
+    return tags;
+}
+
+std::string joinTags(const std::vector<std::string>& tags) {
+    std::string joined;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        if (i > 0) {
+            joined += ", ";
+        }
+        joined += tags[i];
+    }
+    return joined;
+}
+
+std::string makeSmartFolderDefaultName(const std::string& folder_relative_dir,
+                                       const std::string& search,
+                                       const std::string& tag_filter,
+                                       bool favorites_only) {
+    if (favorites_only) {
+        return "Favorites";
+    }
+    if (!tag_filter.empty()) {
+        return "Tags: " + tag_filter;
+    }
+    if (!search.empty()) {
+        return "Search: " + search;
+    }
+    if (!folder_relative_dir.empty()) {
+        return folder_relative_dir;
+    }
+    return "Collection";
+}
+
+bool saveAssetMetadataChanges(AssetRegistry& registry, const AssetRecord& source_asset, bool favorite, const std::vector<std::string>& tags) {
+    AssetRecord updated = source_asset;
+    updated.favorite = favorite;
+    updated.tags = tags;
+    return registry.writeMetadataStub(updated);
+}
+
+bool assetMatchesFilters(const AssetRecord& asset,
+                         const std::string& lowered_search,
+                         const std::vector<std::string>& required_tags,
+                         bool favorites_only) {
+    if (favorites_only && !asset.favorite) {
+        return false;
+    }
+
+    if (!required_tags.empty()) {
+        std::unordered_set<std::string> asset_tags;
+        for (const auto& tag : asset.tags) {
+            asset_tags.insert(AssetRegistry::toLowerCopy(tag));
+        }
+        for (const auto& required_tag : required_tags) {
+            if (asset_tags.find(required_tag) == asset_tags.end()) {
+                return false;
+            }
+        }
+    }
+
+    if (lowered_search.empty()) {
+        return true;
+    }
+
+    const std::string rel_file = AssetRegistry::toLowerCopy(asset.relative_entry_path.generic_string());
+    const std::string rel_dir = AssetRegistry::toLowerCopy(asset.relative_directory.generic_string());
+    const std::string display_name = AssetRegistry::toLowerCopy(asset.name);
+    const std::string kind = AssetRegistry::toLowerCopy(asset.asset_kind);
+    const std::string tag_blob = AssetRegistry::toLowerCopy(joinTags(asset.tags));
+
+    return rel_file.find(lowered_search) != std::string::npos ||
+           rel_dir.find(lowered_search) != std::string::npos ||
+           display_name.find(lowered_search) != std::string::npos ||
+           kind.find(lowered_search) != std::string::npos ||
+           tag_blob.find(lowered_search) != std::string::npos;
+}
+
+std::filesystem::path normalizeAbsolutePath(const std::filesystem::path& path) {
+    if (path.empty()) {
+        return {};
+    }
+
+    std::error_code ec;
+    const std::filesystem::path absolute_path = std::filesystem::absolute(path, ec);
+    if (ec) {
+        return path;
+    }
+    return absolute_path.lexically_normal();
+}
+
+std::filesystem::path projectDirectoryPath() {
+    if (g_project.current_file_path.empty()) {
+        return {};
+    }
+
+    std::error_code ec;
+    const std::filesystem::path project_path = std::filesystem::absolute(g_project.current_file_path, ec);
+    if (ec) {
+        return {};
+    }
+    return project_path.parent_path();
+}
+
+nlohmann::json serializeLibraryPathEntry(const std::filesystem::path& path) {
+    nlohmann::json j;
+    const std::filesystem::path normalized = normalizeAbsolutePath(path);
+    const std::filesystem::path project_dir = projectDirectoryPath();
+
+    std::error_code ec;
+    const std::filesystem::path relative = project_dir.empty() ? std::filesystem::path() : std::filesystem::relative(normalized, project_dir, ec);
+    if (!project_dir.empty() && !ec && !relative.empty()) {
+        j["path"] = relative.generic_string();
+        j["relative_to_project"] = true;
+    } else {
+        j["path"] = normalized.string();
+        j["relative_to_project"] = false;
+    }
+    return j;
+}
+
+std::filesystem::path deserializeLibraryPathEntry(const nlohmann::json& j) {
+    if (!j.is_object()) {
+        return {};
+    }
+
+    const std::string raw_path = j.value("path", std::string());
+    if (raw_path.empty()) {
+        return {};
+    }
+
+    std::filesystem::path path(raw_path);
+    if (j.value("relative_to_project", false)) {
+        const std::filesystem::path project_dir = projectDirectoryPath();
+        if (!project_dir.empty()) {
+            path = project_dir / path;
+        }
+    }
+
+    return normalizeAbsolutePath(path);
+}
+
+void ensureDefaultAssetLibrary(std::vector<std::filesystem::path>& library_paths) {
+    const std::filesystem::path default_root = normalizeAbsolutePath(AssetRegistry::resolveDefaultRoot());
+    if (default_root.empty()) {
+        return;
+    }
+
+    auto it = std::find_if(library_paths.begin(), library_paths.end(), [&](const std::filesystem::path& candidate) {
+        return normalizeAbsolutePath(candidate) == default_root;
+    });
+    if (it == library_paths.end()) {
+        library_paths.insert(library_paths.begin(), default_root);
+    } else if (it != library_paths.begin()) {
+        const std::filesystem::path existing = *it;
+        library_paths.erase(it);
+        library_paths.insert(library_paths.begin(), existing);
+    }
+}
+
+bool refreshAssetLibrarySafely(AssetRegistry& registry, const std::filesystem::path& root_path, std::string* out_error = nullptr) {
+    try {
+        const std::filesystem::path normalized = normalizeAbsolutePath(root_path);
+        std::error_code ec;
+        if (normalized.empty()) {
+            if (out_error) *out_error = "Empty path";
+            return false;
+        }
+        if (!std::filesystem::exists(normalized, ec)) {
+            if (out_error) *out_error = ec ? ("Path check failed: " + ec.message()) : "Folder does not exist";
+            return false;
+        }
+        ec.clear();
+        if (!std::filesystem::is_directory(normalized, ec)) {
+            if (out_error) *out_error = ec ? ("Directory check failed: " + ec.message()) : "Selected path is not a folder";
+            return false;
+        }
+        if (!registry.refresh(normalized)) {
+            if (out_error) *out_error = "Asset scan failed";
+            return false;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (out_error) *out_error = e.what();
+        return false;
+    } catch (...) {
+        if (out_error) *out_error = "Unknown error";
+        return false;
+    }
+}
+}
 
 
 
@@ -1379,8 +1934,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
 void SceneUI::draw(UIContext& ctx)
 {
-    // Check if background loading just finished
-    if (scene_loading_done.exchange(false)) {
+    // Apply project-scoped UI state after load finalization on the main thread.
+    if (pending_project_ui_restore) {
+        pending_project_ui_restore = false;
         if (!g_project.ui_layout_data.empty()) {
             // Disable auto-save to ini momentarily to avoid conflicts
             ImGui::GetIO().IniFilename = nullptr; 
@@ -1725,7 +2281,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         if (UIWidgets::HorizontalTab("Timeline", UIWidgets::IconType::Timeline, show_animation_panel))
         {
             show_animation_panel = !show_animation_panel;
-            if (show_animation_panel) show_scene_log = false;
+            if (show_animation_panel) {
+                show_scene_log = false;
+                focus_bottom_panel_next_frame = true;
+            }
         }
 
         if (UIWidgets::HorizontalTab("Console", UIWidgets::IconType::Console, show_scene_log))
@@ -1734,6 +2293,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             if (show_scene_log) { 
                 show_animation_panel = false; 
                 show_terrain_graph = false; 
+                focus_bottom_panel_next_frame = true;
             }
         }
         
@@ -1744,6 +2304,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 show_scene_log = false;
                 show_animation_panel = false;
                 show_anim_graph = false;
+                focus_bottom_panel_next_frame = true;
             }
         }
         
@@ -1754,6 +2315,20 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 show_scene_log = false;
                 show_animation_panel = false;
                 show_terrain_graph = false;
+                show_asset_browser = false;
+                focus_bottom_panel_next_frame = true;
+            }
+        }
+
+        if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Scene, show_asset_browser))
+        {
+            show_asset_browser = !show_asset_browser;
+            if (show_asset_browser) {
+                show_scene_log = false;
+                show_animation_panel = false;
+                show_terrain_graph = false;
+                show_anim_graph = false;
+                focus_bottom_panel_next_frame = true;
             }
         }
 
@@ -1948,7 +2523,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     ImGui::PopStyleVar(2);
 
     // ---------------- BOTTOM PANEL (Resizable) ----------------
-    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph);
+    bool show_bottom = (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph || show_asset_browser);
     if (!show_bottom) return;
 
     // Use class member for persistent height
@@ -2000,6 +2575,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     // --- MAIN BOTTOM PANEL ---
     ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(screen_x, bottom_panel_height), ImGuiCond_Always);
+    if (focus_bottom_panel_next_frame) {
+        ImGui::SetNextWindowFocus();
+    }
 
     // Use theme color with alpha
     ImGui::SetNextWindowBgAlpha(panel_alpha);
@@ -2012,6 +2590,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse))
     {
+        if (focus_bottom_panel_next_frame) {
+            ImGui::SetWindowFocus();
+            focus_bottom_panel_next_frame = false;
+        }
         if (show_animation_panel) {
             drawTimelineContent(ctx);
         }
@@ -2061,6 +2643,9 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         else if (show_anim_graph) {
             // Animation Node Graph Editor
             drawAnimationGraphPanel(ctx);
+        }
+        else if (show_asset_browser) {
+            drawAssetBrowser(ctx, true);
         }
     }
     ImGui::End();
@@ -2150,6 +2735,89 @@ bool SceneUI::drawOverlays(UIContext& ctx)
     drawZebraOverlay(ctx);
     drawAFPointsOverlay(ctx);
 
+    // Asset Browser -> Viewport drag & drop target
+    if (ImGui::IsDragDropActive()) {
+        if (const ImGuiPayload* drag_payload = ImGui::GetDragDropPayload()) {
+            if (drag_payload->IsDataType("ASSET_BROWSER_ENTRY") && drag_payload->Data) {
+                const char* payload_text = static_cast<const char*>(drag_payload->Data);
+                if (payload_text && payload_text[0] != '\0') {
+                    const AssetRecord* dragged_asset = asset_registry.findByRelativeDirectory(payload_text);
+                    if (!dragged_asset || !isPlaceableAssetRecord(*dragged_asset)) {
+                        dragged_asset = nullptr;
+                    }
+                    Vec3 ghost_hit_point, ghost_hit_normal;
+                    if (dragged_asset && raycastViewportPlacement(ctx, ImGui::GetMousePos(), ghost_hit_point, ghost_hit_normal)) {
+                        const std::string payload_key = dragged_asset->relative_entry_path.generic_string();
+                        auto it = asset_drag_bbox_cache.find(payload_key);
+                        if (it == asset_drag_bbox_cache.end()) {
+                            Vec3 preview_min, preview_max;
+                            if (computeAssetPreviewBounds(*dragged_asset, preview_min, preview_max)) {
+                                it = asset_drag_bbox_cache.emplace(payload_key, std::make_pair(preview_min, preview_max)).first;
+                            }
+                        }
+
+                        if (it != asset_drag_bbox_cache.end()) {
+                            drawAssetDragGhost(
+                                ctx,
+                                dragged_asset->name,
+                                ghost_hit_point,
+                                it->second.first,
+                                it->second.second);
+                        }
+                    }
+                }
+            }
+        }
+
+        const bool show_bottom =
+            (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph || show_asset_browser);
+        const float menu_height = 19.0f;
+        const float status_bar_height = 24.0f;
+        const float left_offset = showSidePanel ? side_panel_width : 0.0f;
+        const float top = menu_height;
+        const float right = ImGui::GetIO().DisplaySize.x;
+        const float bottom = ImGui::GetIO().DisplaySize.y -
+            status_bar_height -
+            (show_bottom ? bottom_panel_height : 0.0f);
+        const float width = (std::max)(0.0f, right - left_offset);
+        const float height = (std::max)(0.0f, bottom - top);
+
+        if (width > 1.0f && height > 1.0f) {
+            ImGui::SetNextWindowPos(ImVec2(left_offset, top), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.0f);
+
+            const ImGuiWindowFlags drop_flags =
+                ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoScrollbar |
+                ImGuiWindowFlags_NoScrollWithMouse |
+                ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoBringToFrontOnFocus |
+                ImGuiWindowFlags_NoNav |
+                ImGuiWindowFlags_NoDecoration;
+
+            if (ImGui::Begin("##ViewportAssetDropTarget", nullptr, drop_flags)) {
+                ImGui::SetCursorScreenPos(ImVec2(left_offset, top));
+                ImGui::InvisibleButton("##ViewportDropSurface", ImVec2(width, height));
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_BROWSER_ENTRY")) {
+                        const char* payload_text = static_cast<const char*>(payload->Data);
+                        if (payload_text && payload_text[0] != '\0') {
+                            if (const AssetRecord* dropped_asset = asset_registry.findByRelativeDirectory(payload_text)) {
+                                appendAssetToScene(ctx, dropped_asset->entry_path, dropped_asset->name);
+                            }
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+            }
+            ImGui::End();
+        }
+    }
+
     // === VIEWPORT EDGE FRAME ===
     // Draw a subtle border on the right edge of the viewport to clearly delineate the area
     {
@@ -2211,6 +2879,1477 @@ void SceneUI::drawAuxWindows(UIContext& ctx)
         }
         ImGui::End();
     }
+
+}
+
+bool SceneUI::raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos, Vec3& hit_point, Vec3& hit_normal) const
+{
+    if (!ctx.scene.camera || !ctx.scene.bvh) {
+        return false;
+    }
+
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    if (display.x <= 1.0f || display.y <= 1.0f) {
+        return false;
+    }
+
+    const float u = std::clamp(screen_pos.x / display.x, 0.0f, 1.0f);
+    const float v = std::clamp(1.0f - (screen_pos.y / display.y), 0.0f, 1.0f);
+    Ray ray = ctx.scene.camera->get_ray(u, v);
+
+    HitRecord rec;
+    if (ctx.scene.bvh->hit(ray, 0.001f, 1e30f, rec)) {
+        hit_point = rec.point;
+        hit_normal = rec.normal.length_squared() > 0.0001f ? rec.normal.normalize() : Vec3(0, 1, 0);
+        return true;
+    }
+
+    const float denom = ray.direction.y;
+    if (std::abs(denom) > 1e-5f) {
+        const float t = -ray.origin.y / denom;
+        if (t > 0.0f) {
+            hit_point = ray.origin + ray.direction * t;
+            hit_normal = Vec3(0, 1, 0);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void SceneUI::drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, const Vec3& hit_point, const Vec3& bounds_min, const Vec3& bounds_max) const
+{
+    if (!ctx.scene.camera) {
+        return;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    Camera& cam = *ctx.scene.camera;
+    const Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    const Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+    const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+    const float fov_rad = static_cast<float>(cam.vfov * 3.14159265359 / 180.0);
+    const float tan_half_fov = tanf(fov_rad * 0.5f);
+    const float aspect = io.DisplaySize.x / (std::max)(1.0f, io.DisplaySize.y);
+
+    auto project_point = [&](const Vec3& point, ImVec2& out) -> bool {
+        const Vec3 to_point = point - cam.lookfrom;
+        const float depth = to_point.dot(cam_forward);
+        if (depth <= 0.01f) {
+            return false;
+        }
+
+        const float local_x = to_point.dot(cam_right);
+        const float local_y = to_point.dot(cam_up);
+        const float half_height = depth * tan_half_fov;
+        const float half_width = half_height * aspect;
+        if (std::abs(half_width) < 1e-5f || std::abs(half_height) < 1e-5f) {
+            return false;
+        }
+
+        const float ndc_x = local_x / half_width;
+        const float ndc_y = local_y / half_height;
+        out = ImVec2(
+            (ndc_x * 0.5f + 0.5f) * io.DisplaySize.x,
+            (0.5f - ndc_y * 0.5f) * io.DisplaySize.y);
+        return true;
+    };
+
+    const Vec3 base_center(
+        (bounds_min.x + bounds_max.x) * 0.5f,
+        bounds_min.y,
+        (bounds_min.z + bounds_max.z) * 0.5f);
+    const Vec3 delta = hit_point - base_center;
+    const Vec3 placed_min = bounds_min + delta;
+    const Vec3 placed_max = bounds_max + delta;
+
+    const Vec3 corners[8] = {
+        Vec3(placed_min.x, placed_min.y, placed_min.z),
+        Vec3(placed_max.x, placed_min.y, placed_min.z),
+        Vec3(placed_min.x, placed_max.y, placed_min.z),
+        Vec3(placed_max.x, placed_max.y, placed_min.z),
+        Vec3(placed_min.x, placed_min.y, placed_max.z),
+        Vec3(placed_max.x, placed_min.y, placed_max.z),
+        Vec3(placed_min.x, placed_max.y, placed_max.z),
+        Vec3(placed_max.x, placed_max.y, placed_max.z)
+    };
+
+    ImVec2 screen_corners[8];
+    bool any_projected = false;
+    for (int i = 0; i < 8; ++i) {
+        any_projected = project_point(corners[i], screen_corners[i]) || any_projected;
+    }
+    if (!any_projected) {
+        return;
+    }
+
+    ImVec2 center;
+    if (!project_point(hit_point, center)) {
+        center = ImGui::GetMousePos();
+    }
+
+    ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+    const float radius = 18.0f;
+    const ImU32 outer = IM_COL32(110, 255, 190, 210);
+    const ImU32 inner = IM_COL32(110, 255, 190, 80);
+    const ImU32 text_shadow = IM_COL32(0, 0, 0, 180);
+    const ImU32 box_fill = IM_COL32(110, 255, 190, 20);
+
+    const int edges[12][2] = {
+        {0, 1}, {1, 3}, {3, 2}, {2, 0},
+        {4, 5}, {5, 7}, {7, 6}, {6, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}
+    };
+
+    draw_list->AddQuadFilled(screen_corners[0], screen_corners[1], screen_corners[3], screen_corners[2], box_fill);
+    draw_list->AddQuadFilled(screen_corners[4], screen_corners[5], screen_corners[7], screen_corners[6], box_fill);
+    for (const auto& edge : edges) {
+        draw_list->AddLine(screen_corners[edge[0]], screen_corners[edge[1]], outer, 1.5f);
+    }
+
+    draw_list->AddCircle(center, radius, outer, 32, 2.0f);
+    draw_list->AddCircle(center, radius * 0.45f, inner, 24, 2.0f);
+    draw_list->AddLine(ImVec2(center.x - radius * 0.7f, center.y), ImVec2(center.x + radius * 0.7f, center.y), outer, 1.5f);
+    draw_list->AddLine(ImVec2(center.x, center.y - radius * 0.7f), ImVec2(center.x, center.y + radius * 0.7f), outer, 1.5f);
+
+    const std::string label = "Drop: " + asset_name;
+    const ImVec2 text_pos(center.x + 22.0f, center.y - 8.0f);
+    draw_list->AddText(ImVec2(text_pos.x + 1.0f, text_pos.y + 1.0f), text_shadow, label.c_str());
+    draw_list->AddText(text_pos, outer, label.c_str());
+}
+
+bool SceneUI::appendAnimationClipAssetToScene(UIContext& ctx, const AssetRecord& asset, const std::string& display_name)
+{
+    auto loader = std::make_shared<AssimpLoader>();
+    auto [loaded_triangles, loaded_animations, loaded_bone_data] = loader->loadModelToTriangles(asset.entry_path.string(), nullptr, "");
+    (void)loaded_triangles;
+    (void)loaded_bone_data;
+
+    if (loaded_animations.empty()) {
+        addViewportMessage("No animation clips found in asset: " + display_name, 3.5f, ImVec4(1.0f, 0.4f, 0.3f, 1.0f));
+        return false;
+    }
+
+    const std::string source_prefix = loader->currentImportName;
+    std::string target_import_name;
+    if (asset.animation_binding != "global") {
+        target_import_name = findSelectedModelImportName(ctx);
+    }
+
+    if (asset.animation_binding != "global" && target_import_name.empty() && ctx.scene.importedModelContexts.size() > 1) {
+        addViewportMessage("Select a target character first; clip imported as global.", 3.5f, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+    }
+
+    for (auto& anim : loaded_animations) {
+        if (!anim) {
+            continue;
+        }
+
+        anim->positionKeys = retargetAnimationKeyMap(anim->positionKeys, source_prefix, target_import_name);
+        anim->rotationKeys = retargetAnimationKeyMap(anim->rotationKeys, source_prefix, target_import_name);
+        anim->scalingKeys = retargetAnimationKeyMap(anim->scalingKeys, source_prefix, target_import_name);
+        anim->name = makeUniqueAnimationClipName(
+            ctx.scene.animationDataList,
+            retargetAnimationNodeName(anim->name, source_prefix, target_import_name));
+        anim->modelName = target_import_name;
+        ctx.scene.animationDataList.push_back(anim);
+    }
+
+    if (!target_import_name.empty()) {
+        for (auto& model_ctx : ctx.scene.importedModelContexts) {
+            if (model_ctx.importName == target_import_name) {
+                model_ctx.hasAnimation = true;
+                break;
+            }
+        }
+    }
+
+    ctx.renderer.initializeAnimationSystem(ctx.scene);
+    for (auto& model_ctx : ctx.scene.importedModelContexts) {
+        if (!model_ctx.animator) {
+            continue;
+        }
+
+        std::vector<std::shared_ptr<AnimationData>> model_clips;
+        for (const auto& anim : ctx.scene.animationDataList) {
+            if (!anim) {
+                continue;
+            }
+            if (anim->modelName == model_ctx.importName || (anim->modelName.empty() && ctx.scene.importedModelContexts.size() == 1)) {
+                model_clips.push_back(anim);
+            }
+        }
+        model_ctx.animator->registerClips(model_clips);
+    }
+
+    AnimationController::getInstance().registerClips(ctx.scene.animationDataList);
+
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.backend_ptr) {
+        ctx.backend_ptr->resetAccumulation();
+    }
+
+    g_ProjectManager.markModified();
+    addViewportMessage(
+        "Animation clips imported: " + std::to_string(loaded_animations.size()) +
+        (target_import_name.empty() ? "" : " -> " + target_import_name),
+        3.0f,
+        ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+    return true;
+}
+
+void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& asset_path, const std::string& display_name)
+{
+    const AssetRecord* asset_record = nullptr;
+    for (const auto& asset : asset_registry.getAssets()) {
+        if (asset.entry_path == asset_path) {
+            asset_record = &asset;
+            break;
+        }
+    }
+
+    if (asset_record && asset_record->asset_kind == "anim_clip") {
+        appendAnimationClipAssetToScene(ctx, *asset_record, display_name);
+        return;
+    }
+
+    if (asset_record && (asset_record->asset_kind == "vdb" || asset_record->asset_kind == "vdb_sequence")) {
+        Vec3 drop_hit_point(0, 0, 0);
+        Vec3 drop_hit_normal(0, 1, 0);
+        const bool has_drop_point = raycastViewportPlacement(ctx, ImGui::GetMousePos(), drop_hit_point, drop_hit_normal);
+
+        auto vdb = std::make_shared<VDBVolume>();
+        const bool loaded = asset_record->is_sequence
+            ? vdb->loadVDBSequence(asset_record->entry_path.string())
+            : vdb->loadVDB(asset_record->entry_path.string());
+        if (!loaded) {
+            addViewportMessage("Failed to load VDB asset: " + display_name, 3.0f, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+            return;
+        }
+
+        Vec3 bmin = vdb->getLocalBoundsMin();
+        Vec3 bmax = vdb->getLocalBoundsMax();
+        const Vec3 size = bmax - bmin;
+        float max_dim = (std::max)(size.x, (std::max)(size.y, size.z));
+        float scale_factor = 1.0f;
+        if (max_dim > 50.0f) {
+            scale_factor = 5.0f / max_dim;
+        } else if (max_dim > 0.0f && max_dim < 0.01f) {
+            scale_factor = 5.0f / (std::max)(max_dim, 0.001f);
+        }
+        scale_factor = (std::max)(0.0001f, (std::min)(scale_factor, 1000.0f));
+        vdb->setScale(Vec3(scale_factor));
+        vdb->centerPivotToBottomCenter();
+        vdb->setPosition(has_drop_point ? drop_hit_point : Vec3(0, 0, 0));
+
+        if (!vdb->uploadToGPU()) {
+            SCENE_LOG_WARN("VDB asset uploaded to CPU only (GPU upload failed)");
+        }
+
+        if (vdb->hasGrid("temperature")) {
+            vdb->setShader(VolumeShader::createFirePreset());
+        } else {
+            vdb->setShader(VolumeShader::createSmokePreset());
+        }
+
+        if (asset_record->vdb_shader_preset == "fire") {
+            vdb->setShader(VolumeShader::createFirePreset());
+        } else if (asset_record->vdb_shader_preset == "smoke") {
+            vdb->setShader(VolumeShader::createSmokePreset());
+        }
+
+        if (auto shader = vdb->getShader()) {
+            shader->density.multiplier = asset_record->vdb_density_multiplier;
+            shader->emission.temperature_scale = asset_record->vdb_temperature_scale;
+            if (shader->emission.mode == VolumeEmissionMode::Constant) {
+                shader->emission.intensity = asset_record->vdb_emission_intensity;
+            } else if (shader->emission.mode == VolumeEmissionMode::Blackbody) {
+                shader->emission.blackbody_intensity = (std::max)(0.0f, asset_record->vdb_emission_intensity);
+            }
+        }
+
+        if (!display_name.empty()) {
+            vdb->name = display_name;
+        }
+
+        ctx.scene.addVDBVolume(vdb);
+        ctx.scene.world.objects.push_back(vdb);
+        ctx.selection.selectVDBVolume(vdb, static_cast<int>(ctx.scene.vdb_volumes.size()) - 1, vdb->name);
+        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        ctx.renderer.resetCPUAccumulation();
+
+        if (ctx.backend_ptr) {
+            if (ctx.render_settings.use_vulkan) {
+                g_vulkan_rebuild_pending = true;
+            } else {
+                VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.backend_ptr);
+                ctx.backend_ptr->resetAccumulation();
+            }
+        }
+
+        g_ProjectManager.markModified();
+        addViewportMessage("Appended VDB asset: " + display_name, 2.5f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
+        return;
+    }
+
+    const size_t objects_before = ctx.scene.world.objects.size();
+    Vec3 drop_hit_point(0, 0, 0);
+    Vec3 drop_hit_normal(0, 1, 0);
+    const bool has_drop_point = raycastViewportPlacement(ctx, ImGui::GetMousePos(), drop_hit_point, drop_hit_normal);
+    const std::string import_prefix = makeUniqueAssetImportPrefix(asset_path);
+    ctx.renderer.create_scene(
+        ctx.scene,
+        ctx.backend_ptr,
+        asset_path.string(),
+        nullptr,
+        true,
+        import_prefix);
+
+    if (has_drop_point && ctx.scene.world.objects.size() > objects_before) {
+        Vec3 bounds_min(1e30f, 1e30f, 1e30f);
+        Vec3 bounds_max(-1e30f, -1e30f, -1e30f);
+        std::vector<std::shared_ptr<Transform>> new_transforms;
+        std::shared_ptr<Triangle> first_new_triangle;
+
+        for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
+            if (!tri) {
+                continue;
+            }
+
+            if (!first_new_triangle) {
+                first_new_triangle = tri;
+            }
+
+            AABB bounds;
+            if (tri->bounding_box(0.0f, 0.0f, bounds)) {
+                bounds_min.x = (std::min)(bounds_min.x, bounds.min.x);
+                bounds_min.y = (std::min)(bounds_min.y, bounds.min.y);
+                bounds_min.z = (std::min)(bounds_min.z, bounds.min.z);
+                bounds_max.x = (std::max)(bounds_max.x, bounds.max.x);
+                bounds_max.y = (std::max)(bounds_max.y, bounds.max.y);
+                bounds_max.z = (std::max)(bounds_max.z, bounds.max.z);
+            }
+
+            if (auto th = tri->getTransformHandle()) {
+                if (std::find(new_transforms.begin(), new_transforms.end(), th) == new_transforms.end()) {
+                    new_transforms.push_back(th);
+                }
+            }
+        }
+
+        if (!new_transforms.empty() && bounds_min.x < 1e20f && bounds_max.x > -1e20f) {
+            const Vec3 current_base_center(
+                (bounds_min.x + bounds_max.x) * 0.5f,
+                bounds_min.y,
+                (bounds_min.z + bounds_max.z) * 0.5f);
+            const Vec3 delta = drop_hit_point - current_base_center;
+            const Matrix4x4 translation = Matrix4x4::translation(delta);
+
+            for (const auto& transform : new_transforms) {
+                if (transform) {
+                    transform->setBase(translation * transform->base);
+                }
+            }
+            for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
+                if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
+                    tri->updateTransformedVertices();
+                }
+            }
+        }
+
+        if (first_new_triangle) {
+            ctx.selection.selectObject(first_new_triangle, -1, first_new_triangle->nodeName);
+        }
+    }
+    else if (ctx.scene.world.objects.size() > objects_before) {
+        for (size_t i = objects_before; i < ctx.scene.world.objects.size(); ++i) {
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i])) {
+                ctx.selection.selectObject(tri, -1, tri->nodeName);
+                break;
+            }
+        }
+    }
+
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+
+    if (ctx.backend_ptr) {
+        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        ctx.backend_ptr->setLights(ctx.scene.lights);
+        if (ctx.scene.camera) {
+            ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+        }
+        ctx.backend_ptr->resetAccumulation();
+    }
+
+    ctx.start_render = true;
+    addViewportMessage("Asset appended: " + display_name, 2.5f, ImVec4(0.3f, 1.0f, 0.5f, 1.0f));
+}
+
+void SceneUI::startAsyncAssetLibraryRefresh(const std::filesystem::path& root_path, const std::string& status_text)
+{
+    const std::filesystem::path normalized = normalizeAbsolutePath(root_path);
+    if (asset_library_refresh_in_progress) {
+        if (pending_asset_library_root == normalized) {
+            return;
+        }
+        return;
+    }
+
+    asset_library_refresh_in_progress = true;
+    pending_asset_library_root = normalized;
+    asset_library_refresh_status = status_text;
+    asset_registry_refresh_future = std::async(std::launch::async, [normalized]() -> std::pair<AssetRegistry, bool> {
+        AssetRegistry refreshed_registry;
+        const bool success = normalized.empty()
+            ? refreshed_registry.refresh(std::filesystem::path())
+            : refreshed_registry.refresh(normalized);
+        return std::make_pair(std::move(refreshed_registry), success);
+    });
+}
+
+void SceneUI::pollAsyncAssetLibraryRefresh()
+{
+    if (!asset_library_refresh_in_progress || !asset_registry_refresh_future.valid()) {
+        return;
+    }
+
+    if (asset_registry_refresh_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        return;
+    }
+
+    auto refresh_result = asset_registry_refresh_future.get();
+    asset_library_refresh_in_progress = false;
+    releaseAssetBrowserThumbnailTextures();
+    asset_registry = std::move(refresh_result.first);
+
+    if (!refresh_result.second) {
+        asset_library_refresh_status = "Asset scan failed";
+    } else {
+        asset_library_refresh_status.clear();
+    }
+}
+
+void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
+{
+    pollAsyncAssetLibraryRefresh();
+
+    const auto resetAssetDetailState = [&]() {
+        releaseSelectedAssetPreviewTexture();
+        selected_asset_tags_edit.clear();
+        selected_asset_tags_edit_target.clear();
+    };
+
+    ensureDefaultAssetLibrary(asset_library_paths);
+    if (asset_library_paths.empty()) {
+        if (asset_registry.getRootPath() != std::filesystem::path() && !asset_library_refresh_in_progress) {
+            asset_registry.refresh(std::filesystem::path());
+        }
+    } else {
+        active_asset_library_index = (std::max)(0, (std::min)(active_asset_library_index, static_cast<int>(asset_library_paths.size()) - 1));
+        const std::filesystem::path active_library_root = normalizeAbsolutePath(asset_library_paths[active_asset_library_index]);
+        if (asset_registry.getRootPath() != active_library_root || !std::filesystem::exists(active_library_root)) {
+            if (!asset_library_refresh_in_progress || pending_asset_library_root != active_library_root) {
+                startAsyncAssetLibraryRefresh(active_library_root, "Scanning assets in background...");
+                selected_asset_relative_dir.clear();
+                selected_asset_folder_relative_dir.clear();
+                asset_drag_bbox_cache.clear();
+                resetAssetDetailState();
+            }
+        }
+    }
+
+    if (!embedded) {
+        ImGui::SetNextWindowSize(ImVec2(1080, 720), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Asset Browser", &show_asset_browser, ImGuiWindowFlags_NoCollapse)) {
+            ImGui::End();
+            return;
+        }
+    }
+
+    const std::filesystem::path root_path = asset_registry.getRootPath();
+    std::vector<std::string> library_labels;
+    library_labels.reserve(asset_library_paths.size());
+    for (std::size_t i = 0; i < asset_library_paths.size(); ++i) {
+        const std::filesystem::path& library_path = asset_library_paths[i];
+        std::string label = library_path.filename().string();
+        if (label.empty()) {
+            label = library_path.string();
+        }
+        if (i == 0) {
+            label += " (default)";
+        }
+        library_labels.push_back(label);
+    }
+
+    ImGui::TextWrapped("Asset Root: %s", root_path.empty() ? "<not found>" : root_path.string().c_str());
+    ImGui::SameLine();
+    if (ImGui::Button("Refresh")) {
+        releaseAssetBrowserThumbnailTextures();
+        if (!asset_library_paths.empty() &&
+            active_asset_library_index >= 0 &&
+            active_asset_library_index < static_cast<int>(asset_library_paths.size())) {
+            startAsyncAssetLibraryRefresh(normalizeAbsolutePath(asset_library_paths[active_asset_library_index]), "Refreshing asset library...");
+        } else {
+            asset_registry.refresh(std::filesystem::path());
+        }
+    }
+    if (asset_library_refresh_in_progress) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", asset_library_refresh_status.empty() ? "Scanning assets..." : asset_library_refresh_status.c_str());
+    }
+    if (!library_labels.empty()) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(240.0f);
+        std::vector<const char*> combo_items;
+        combo_items.reserve(library_labels.size());
+        for (const auto& label : library_labels) {
+            combo_items.push_back(label.c_str());
+        }
+        int selected_library = active_asset_library_index;
+        if (ImGui::Combo("Library", &selected_library, combo_items.data(), static_cast<int>(combo_items.size()))) {
+            if (selected_library >= 0 && selected_library < static_cast<int>(asset_library_paths.size())) {
+                const std::filesystem::path target_library = normalizeAbsolutePath(asset_library_paths[selected_library]);
+                active_asset_library_index = selected_library;
+                selected_asset_relative_dir.clear();
+                selected_asset_folder_relative_dir.clear();
+                asset_drag_bbox_cache.clear();
+                resetAssetDetailState();
+                startAsyncAssetLibraryRefresh(target_library, "Opening asset library...");
+            }
+        }
+        if (asset_library_paths.size() > 1 && active_asset_library_index > 0) {
+            ImGui::SameLine();
+            if (ImGui::Button("Remove Library")) {
+                asset_library_paths.erase(asset_library_paths.begin() + active_asset_library_index);
+                active_asset_library_index = 0;
+                ensureDefaultAssetLibrary(asset_library_paths);
+                if (!asset_library_paths.empty()) {
+                    releaseAssetBrowserThumbnailTextures();
+                    startAsyncAssetLibraryRefresh(normalizeAbsolutePath(asset_library_paths[active_asset_library_index]), "Opening asset library...");
+                } else {
+                    asset_registry.refresh(std::filesystem::path());
+                }
+                selected_asset_relative_dir.clear();
+                selected_asset_folder_relative_dir.clear();
+                asset_drag_bbox_cache.clear();
+                resetAssetDetailState();
+                g_ProjectManager.markModified();
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Add Library")) {
+        const std::string folder = selectFolderDialogW(L"Select Asset Library Folder");
+        if (!folder.empty()) {
+            const std::filesystem::path normalized = normalizeAbsolutePath(folder);
+            std::error_code path_ec;
+            if (!std::filesystem::exists(normalized, path_ec) || !std::filesystem::is_directory(normalized, path_ec)) {
+                const std::string reason = path_ec ? path_ec.message() : "not a directory";
+                addViewportMessage("Selected folder is not a valid asset library: " + reason, 4.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
+            } else {
+                const auto existing = std::find_if(asset_library_paths.begin(), asset_library_paths.end(), [&](const std::filesystem::path& candidate) {
+                return normalizeAbsolutePath(candidate) == normalized;
+                });
+                if (existing != asset_library_paths.end()) {
+                    addViewportMessage("Asset library already added.", 2.5f, ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+                } else {
+                    asset_library_paths.push_back(normalized);
+                    active_asset_library_index = static_cast<int>(asset_library_paths.size()) - 1;
+                    selected_asset_relative_dir.clear();
+                    selected_asset_folder_relative_dir.clear();
+                    asset_drag_bbox_cache.clear();
+                    resetAssetDetailState();
+                    g_ProjectManager.markModified();
+                    addViewportMessage("Asset library added.", 2.5f, ImVec4(0.3f, 1.0f, 0.5f, 1.0f));
+                    startAsyncAssetLibraryRefresh(normalized, "Scanning new asset library...");
+                }
+            }
+        }
+    }
+
+    std::array<char, 256> search_buffer{};
+    std::snprintf(search_buffer.data(), search_buffer.size(), "%s", asset_browser_search.c_str());
+    ImGui::SetNextItemWidth(240.0f);
+    if (ImGui::InputText("Search", search_buffer.data(), search_buffer.size())) {
+        asset_browser_search = search_buffer.data();
+        active_asset_smart_folder_index = -1;
+    }
+    ImGui::SameLine();
+    std::array<char, 192> tag_filter_buffer{};
+    std::snprintf(tag_filter_buffer.data(), tag_filter_buffer.size(), "%s", asset_browser_tag_filter.c_str());
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::InputTextWithHint("Tags", "fire, smoke", tag_filter_buffer.data(), tag_filter_buffer.size())) {
+        asset_browser_tag_filter = tag_filter_buffer.data();
+        active_asset_smart_folder_index = -1;
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(110.0f);
+    ImGui::Combo("View", &asset_browser_view_mode, "Tiles\0Compact\0Details\0");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(150.0f);
+    ImGui::SliderFloat("Size", &asset_browser_thumbnail_size, 96.0f, 220.0f, "%.0f px");
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Only 3D", &asset_browser_only_3d)) {
+        active_asset_smart_folder_index = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Favorites", &asset_browser_favorites_only)) {
+        active_asset_smart_folder_index = -1;
+    }
+    ImGui::SameLine();
+    std::array<char, 128> smart_folder_name_buffer{};
+    std::snprintf(smart_folder_name_buffer.data(), smart_folder_name_buffer.size(), "%s", asset_smart_folder_name.c_str());
+    ImGui::SetNextItemWidth(180.0f);
+    if (ImGui::InputTextWithHint("Collection", "save current filter", smart_folder_name_buffer.data(), smart_folder_name_buffer.size())) {
+        asset_smart_folder_name = smart_folder_name_buffer.data();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Save Collection")) {
+        AssetSmartFolderPreset preset;
+        preset.name = trimCopy(asset_smart_folder_name);
+        preset.search = asset_browser_search;
+        preset.tag_filter = asset_browser_tag_filter;
+        preset.folder_relative_dir = selected_asset_folder_relative_dir;
+        preset.favorites_only = asset_browser_favorites_only;
+        preset.only_3d = asset_browser_only_3d;
+        if (preset.name.empty()) {
+            preset.name = makeSmartFolderDefaultName(
+                preset.folder_relative_dir,
+                preset.search,
+                preset.tag_filter,
+                preset.favorites_only);
+        }
+
+        bool replaced = false;
+        int preset_index = -1;
+        for (auto& existing : asset_smart_folders) {
+            ++preset_index;
+            if (existing.name == preset.name) {
+                existing = preset;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) {
+            asset_smart_folders.push_back(preset);
+            preset_index = static_cast<int>(asset_smart_folders.size()) - 1;
+        }
+        active_asset_smart_folder_index = preset_index;
+        asset_smart_folder_name = preset.name;
+        g_ProjectManager.getProjectData().ui_layout_data = serialize();
+        g_ProjectManager.markModified();
+        addViewportMessage(replaced ? "Collection updated" : "Collection saved", 1.8f, ImVec4(0.4f, 0.9f, 1.0f, 1.0f));
+    }
+
+    const AssetRecord* selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+    if (!selected_asset && !asset_registry.getAssets().empty()) {
+        selected_asset_relative_dir = asset_registry.getAssets().front().relative_entry_path.generic_string();
+        selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+        resetAssetDetailState();
+    }
+    if (selected_asset && selected_asset_folder_relative_dir.empty()) {
+        selected_asset_folder_relative_dir = selected_asset->relative_directory.generic_string();
+    }
+
+    ImGui::Separator();
+
+    const float avail_width_total = ImGui::GetContentRegionAvail().x;
+    asset_browser_folder_width = (std::max)(180.0f, (std::min)(asset_browser_folder_width, avail_width_total * 0.6f));
+    ImGui::BeginChild("AssetBrowserFolders", ImVec2(asset_browser_folder_width, 0), true);
+    ImGui::TextDisabled("Collections");
+    ImGui::Separator();
+    if (ImGui::Selectable("All Assets", active_asset_smart_folder_index < 0)) {
+        active_asset_smart_folder_index = -1;
+        asset_smart_folder_name.clear();
+        g_ProjectManager.getProjectData().ui_layout_data = serialize();
+    }
+    for (int i = 0; i < static_cast<int>(asset_smart_folders.size()); ++i) {
+        const auto& preset = asset_smart_folders[i];
+        if (ImGui::Selectable(preset.name.c_str(), active_asset_smart_folder_index == i)) {
+            active_asset_smart_folder_index = i;
+            asset_smart_folder_name = preset.name;
+            asset_browser_search = preset.search;
+            asset_browser_tag_filter = preset.tag_filter;
+            asset_browser_favorites_only = preset.favorites_only;
+            asset_browser_only_3d = preset.only_3d;
+            selected_asset_folder_relative_dir = preset.folder_relative_dir;
+            selected_asset_relative_dir.clear();
+            resetAssetDetailState();
+            g_ProjectManager.getProjectData().ui_layout_data = serialize();
+        }
+        if (ImGui::BeginPopupContextItem(("SmartFolderContext##" + std::to_string(i)).c_str())) {
+            if (ImGui::MenuItem("Update From Current Filters")) {
+                asset_smart_folders[i].search = asset_browser_search;
+                asset_smart_folders[i].tag_filter = asset_browser_tag_filter;
+                asset_smart_folders[i].favorites_only = asset_browser_favorites_only;
+                asset_smart_folders[i].only_3d = asset_browser_only_3d;
+                asset_smart_folders[i].folder_relative_dir = selected_asset_folder_relative_dir;
+                asset_smart_folder_name = asset_smart_folders[i].name;
+                g_ProjectManager.getProjectData().ui_layout_data = serialize();
+                g_ProjectManager.markModified();
+            }
+            if (ImGui::MenuItem("Delete Collection")) {
+                asset_smart_folders.erase(asset_smart_folders.begin() + i);
+                if (active_asset_smart_folder_index == i) {
+                    active_asset_smart_folder_index = -1;
+                } else if (active_asset_smart_folder_index > i) {
+                    --active_asset_smart_folder_index;
+                }
+                g_ProjectManager.getProjectData().ui_layout_data = serialize();
+                g_ProjectManager.markModified();
+                ImGui::EndPopup();
+                break;
+            }
+            ImGui::EndPopup();
+        }
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("Folders");
+    ImGui::Separator();
+
+    if (root_path.empty()) {
+        ImGui::TextDisabled("Asset root not found.");
+        ImGui::TextDisabled("You can still use Add Library to attach a custom asset folder.");
+    } else {
+        std::function<void(const std::filesystem::path&)> drawFolderNode = [&](const std::filesystem::path& directory) {
+            std::error_code ec;
+            std::vector<std::filesystem::path> child_dirs;
+            for (std::filesystem::directory_iterator it(directory, ec), end; it != end; it.increment(ec)) {
+                if (ec || !it->is_directory()) {
+                    continue;
+                }
+                child_dirs.push_back(it->path());
+            }
+            std::sort(child_dirs.begin(), child_dirs.end());
+
+            const std::filesystem::path rel_path = std::filesystem::relative(directory, root_path, ec);
+            const std::string rel_string = rel_path.empty() ? std::string() : rel_path.generic_string();
+            ImGuiTreeNodeFlags flags = child_dirs.empty() ? ImGuiTreeNodeFlags_Leaf : 0;
+            if (selected_asset_folder_relative_dir == rel_string) {
+                flags |= ImGuiTreeNodeFlags_Selected;
+            }
+            if (rel_path.empty()) {
+                flags |= ImGuiTreeNodeFlags_DefaultOpen;
+            }
+
+            const std::string label = rel_path.empty() ? "assets" : directory.filename().string();
+            const bool opened = ImGui::TreeNodeEx((label + "##" + rel_string).c_str(), flags);
+            if (ImGui::IsItemClicked()) {
+                if (selected_asset_folder_relative_dir != rel_string) {
+                    selected_asset_relative_dir.clear();
+                    resetAssetDetailState();
+                }
+                selected_asset_folder_relative_dir = rel_string;
+            }
+
+            if (opened) {
+                for (const auto& child_dir : child_dirs) {
+                    drawFolderNode(child_dir);
+                }
+                ImGui::TreePop();
+            }
+        };
+
+        drawFolderNode(root_path);
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+    ImGui::InvisibleButton("##AssetBrowserFolderSplitter", ImVec2(6.0f, ImGui::GetContentRegionAvail().y));
+    if (ImGui::IsItemActive()) {
+        asset_browser_folder_width += ImGui::GetIO().MouseDelta.x;
+    }
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginChild("AssetBrowserExplorer", ImVec2(0, 0), true);
+    ImGui::TextDisabled("Folder Contents");
+    ImGui::Separator();
+    if (asset_library_refresh_in_progress) {
+        ImGui::TextDisabled("%s", asset_library_refresh_status.empty() ? "Scanning assets..." : asset_library_refresh_status.c_str());
+        ImGui::Separator();
+    }
+
+    const std::filesystem::path selected_folder_path =
+        selected_asset_folder_relative_dir.empty() ? root_path : (root_path / selected_asset_folder_relative_dir);
+    ImGui::TextWrapped("Selected Folder: %s",
+        selected_asset_folder_relative_dir.empty() ? "assets" : selected_asset_folder_relative_dir.c_str());
+    ImGui::Separator();
+
+    const float explorer_avail_height = ImGui::GetContentRegionAvail().y;
+    asset_browser_details_height = (std::max)(140.0f, (std::min)(asset_browser_details_height, explorer_avail_height - 120.0f));
+    const float grid_height = (std::max)(120.0f, explorer_avail_height - asset_browser_details_height - 10.0f);
+    ImGui::BeginChild("AssetBrowserGrid", ImVec2(0, grid_height), false);
+    if (!root_path.empty() && std::filesystem::exists(selected_folder_path)) {
+        std::vector<std::filesystem::path> directories;
+        std::vector<std::filesystem::path> files;
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(selected_folder_path, ec), end; it != end; it.increment(ec)) {
+            if (ec) {
+                continue;
+            }
+            if (it->is_directory()) {
+                directories.push_back(it->path());
+                continue;
+            }
+            if (it->is_regular_file()) {
+                files.push_back(it->path());
+            }
+        }
+        std::sort(directories.begin(), directories.end());
+        std::sort(files.begin(), files.end());
+
+        const bool compact_view = (asset_browser_view_mode == 1);
+        const bool details_view = (asset_browser_view_mode == 2);
+        const float card_width = details_view ? ImGui::GetContentRegionAvail().x - 4.0f : asset_browser_thumbnail_size;
+        const float card_height = details_view ? 30.0f : (compact_view ? 76.0f : 110.0f);
+        const float avail_width = ImGui::GetContentRegionAvail().x;
+        const int columns = details_view ? 1 : (std::max)(1, static_cast<int>(avail_width / (card_width + 12.0f)));
+        int index = 0;
+        const std::string lowered_search = AssetRegistry::toLowerCopy(asset_browser_search);
+        const std::vector<std::string> required_tags = splitTagString(asset_browser_tag_filter);
+
+        for (const auto& directory : directories) {
+            const std::string relative_dir = std::filesystem::relative(directory, root_path).generic_string();
+            bool folder_matches = false;
+            for (const auto& asset : asset_registry.getAssets()) {
+                if (asset.relative_directory.generic_string() != relative_dir) {
+                    continue;
+                }
+                if (asset_browser_only_3d && !isPlaceableAssetRecord(asset)) {
+                    continue;
+                }
+                if (assetMatchesFilters(asset, lowered_search, required_tags, asset_browser_favorites_only)) {
+                    folder_matches = true;
+                    break;
+                }
+            }
+            if (!folder_matches) {
+                const std::string lowered_name = AssetRegistry::toLowerCopy(relative_dir);
+                if (asset_browser_only_3d || !required_tags.empty() || asset_browser_favorites_only ||
+                    (!lowered_search.empty() && lowered_name.find(lowered_search) == std::string::npos)) {
+                    continue;
+                }
+            }
+
+            ImGui::PushID(relative_dir.c_str());
+            if (index > 0 && (index % columns) != 0) {
+                ImGui::SameLine();
+            }
+
+            ImVec2 card_pos = ImGui::GetCursorScreenPos();
+            ImGui::BeginGroup();
+            ImGui::InvisibleButton("##AssetDirectoryCard", ImVec2(card_width, card_height));
+            const bool hovered = ImGui::IsItemHovered();
+            const bool selected = (selected_asset_folder_relative_dir == relative_dir);
+
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            ImU32 bg = selected ? IM_COL32(100, 95, 35, 180) : (hovered ? IM_COL32(88, 78, 38, 175) : IM_COL32(60, 55, 36, 160));
+            draw_list->AddRectFilled(card_pos, ImVec2(card_pos.x + card_width, card_pos.y + card_height), bg, 8.0f);
+            draw_list->AddRect(card_pos, ImVec2(card_pos.x + card_width, card_pos.y + card_height), IM_COL32(255, 230, 160, 42), 8.0f);
+
+            int child_count = 0;
+            std::error_code child_ec;
+            for (std::filesystem::directory_iterator child_it(directory, child_ec), child_end; child_it != child_end; child_it.increment(child_ec)) {
+                if (!child_ec) {
+                    ++child_count;
+                }
+            }
+            const std::string count_label = std::to_string(child_count) + " items";
+            const std::string directory_name_fit = fitTextToWidth(directory.filename().string(), card_width - 20.0f);
+            const std::string relative_dir_fit = fitTextToWidth(relative_dir, card_width - 20.0f);
+            if (details_view) {
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 7), IM_COL32(255, 225, 120, 255), "[DIR]");
+                draw_list->AddText(ImVec2(card_pos.x + 64, card_pos.y + 7), IM_COL32(255, 255, 255, 255), directory_name_fit.c_str());
+                draw_list->AddText(ImVec2(card_pos.x + card_width - 120, card_pos.y + 7), IM_COL32(235, 215, 160, 255), count_label.c_str());
+            } else if (compact_view) {
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 10), IM_COL32(255, 225, 120, 255), "FOLDER");
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 30), IM_COL32(255, 255, 255, 255), directory_name_fit.c_str());
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 50), IM_COL32(235, 215, 160, 255), count_label.c_str());
+            } else {
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 10), IM_COL32(255, 225, 120, 255), "FOLDER");
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 36), IM_COL32(255, 255, 255, 255), directory_name_fit.c_str());
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 66), IM_COL32(235, 215, 160, 255), count_label.c_str());
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 84), IM_COL32(210, 210, 220, 220), relative_dir_fit.c_str());
+            }
+
+            if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                if (selected_asset_folder_relative_dir != relative_dir) {
+                    selected_asset_relative_dir.clear();
+                    resetAssetDetailState();
+                }
+                selected_asset_folder_relative_dir = relative_dir;
+            }
+            if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (selected_asset_folder_relative_dir != relative_dir) {
+                    selected_asset_relative_dir.clear();
+                    resetAssetDetailState();
+                }
+                selected_asset_folder_relative_dir = relative_dir;
+            }
+
+            ImGui::EndGroup();
+            ImGui::PopID();
+            ++index;
+        }
+
+        for (const auto& file : files) {
+            const std::string relative_file = std::filesystem::relative(file, root_path).generic_string();
+            const std::string ext = AssetRegistry::toLowerCopy(file.extension().string());
+            const AssetRecord* file_asset = nullptr;
+            for (const auto& asset : asset_registry.getAssets()) {
+                if (asset.entry_path == file || asset.preview_path == file || asset.metadata_path == file) {
+                    file_asset = &asset;
+                    break;
+                }
+            }
+
+            if (file_asset && file_asset->entry_path != file) {
+                continue;
+            }
+
+            const bool is_placeable_asset = file_asset && isPlaceableAssetRecord(*file_asset);
+            if (asset_browser_only_3d && !is_placeable_asset) {
+                continue;
+            }
+            if (file_asset && !assetMatchesFilters(*file_asset, lowered_search, required_tags, asset_browser_favorites_only)) {
+                continue;
+            }
+            if (!file_asset) {
+                const std::string lowered_name = AssetRegistry::toLowerCopy(relative_file);
+                if (asset_browser_favorites_only || !required_tags.empty() ||
+                    (!lowered_search.empty() && lowered_name.find(lowered_search) == std::string::npos)) {
+                    continue;
+                }
+            }
+
+            ImGui::PushID(relative_file.c_str());
+            if (index > 0 && (index % columns) != 0) {
+                ImGui::SameLine();
+            }
+
+            ImVec2 card_pos = ImGui::GetCursorScreenPos();
+            ImGui::BeginGroup();
+            ImGui::InvisibleButton("##AssetFileCard", ImVec2(card_width, card_height));
+            const bool hovered = ImGui::IsItemHovered();
+            const bool selected = file_asset && (selected_asset_relative_dir == file_asset->relative_entry_path.generic_string());
+
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            ImU32 bg = selected ? IM_COL32(30, 120, 110, 180) : (hovered ? IM_COL32(70, 70, 80, 180) : IM_COL32(45, 45, 52, 170));
+            draw_list->AddRectFilled(card_pos, ImVec2(card_pos.x + card_width, card_pos.y + card_height), bg, 8.0f);
+            draw_list->AddRect(card_pos, ImVec2(card_pos.x + card_width, card_pos.y + card_height), IM_COL32(255, 255, 255, 28), 8.0f);
+            const std::string asset_name_fit = fitTextToWidth(file_asset ? file_asset->name : "No asset metadata", card_width - 20.0f);
+            const std::string relative_file_fit = fitTextToWidth(relative_file, card_width - 20.0f);
+            const char* type_label =
+                file_asset && file_asset->asset_kind == "anim_clip" ? "ANIM" :
+                file_asset && file_asset->asset_kind == "vdb_sequence" ? "VDB SEQ" :
+                file_asset && file_asset->asset_kind == "vdb" ? "VDB" :
+                file_asset && file_asset->asset_kind == "model" ? "MODEL" :
+                (ext == ".json" ? "META" : "FILE");
+            const std::string title_text = fitTextToWidth(
+                file.filename().string() + (file_asset && file_asset->favorite ? " *" : ""),
+                card_width - (details_view ? 92.0f : 20.0f));
+            SDL_Texture* thumb_texture = nullptr;
+            int thumb_w = 0;
+            int thumb_h = 0;
+            const bool has_thumb = file_asset && file_asset->has_preview &&
+                ensureAssetBrowserThumbnailTexture(ctx, file_asset->preview_path, thumb_texture, thumb_w, thumb_h);
+            (void)thumb_w;
+            (void)thumb_h;
+
+            if (details_view) {
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 7), IM_COL32(220, 220, 230, 255), type_label);
+                draw_list->AddText(ImVec2(card_pos.x + 72, card_pos.y + 7), IM_COL32(255, 255, 255, 255), title_text.c_str());
+                if (file_asset) {
+                    const std::string details_name_fit = fitTextToWidth(file_asset->name, 220.0f);
+                    draw_list->AddText(ImVec2(card_pos.x + card_width - 240, card_pos.y + 7), IM_COL32(120, 230, 210, 255), details_name_fit.c_str());
+                }
+            } else if (compact_view) {
+                if (has_thumb && thumb_texture) {
+                    const float thumb_size = 36.0f;
+                    const ImVec2 thumb_min(card_pos.x + card_width - thumb_size - 8.0f, card_pos.y + 8.0f);
+                    const ImVec2 thumb_max(card_pos.x + card_width - 8.0f, card_pos.y + 8.0f + thumb_size);
+                    draw_list->AddImage((ImTextureID)thumb_texture, thumb_min, thumb_max);
+                    draw_list->AddRect(thumb_min, thumb_max, IM_COL32(255, 255, 255, 45), 4.0f);
+                }
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 10), IM_COL32(220, 220, 230, 255), type_label);
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 30), IM_COL32(255, 255, 255, 255), title_text.c_str());
+                draw_list->AddText(
+                    ImVec2(card_pos.x + 10, card_pos.y + 50),
+                    file_asset ? IM_COL32(120, 230, 210, 255) : IM_COL32(180, 180, 190, 255),
+                    asset_name_fit.c_str());
+            } else {
+                if (has_thumb && thumb_texture) {
+                    const float preview_height = 48.0f;
+                    const ImVec2 thumb_min(card_pos.x + card_width - 58.0f, card_pos.y + 10.0f);
+                    const ImVec2 thumb_max(card_pos.x + card_width - 10.0f, card_pos.y + 10.0f + preview_height);
+                    draw_list->AddImage((ImTextureID)thumb_texture, thumb_min, thumb_max);
+                    draw_list->AddRect(thumb_min, thumb_max, IM_COL32(255, 255, 255, 45), 4.0f);
+                }
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 10), IM_COL32(220, 220, 230, 255), type_label);
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 34), IM_COL32(255, 255, 255, 255), title_text.c_str());
+
+                if (file_asset) {
+                    draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 62), IM_COL32(120, 230, 210, 255), asset_name_fit.c_str());
+                } else {
+                    draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 62), IM_COL32(180, 180, 190, 255), "No asset metadata");
+                }
+                draw_list->AddText(ImVec2(card_pos.x + 10, card_pos.y + 84), IM_COL32(180, 180, 190, 220), relative_file_fit.c_str());
+            }
+
+            if (hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && file_asset && is_placeable_asset) {
+                const std::string new_selection = file_asset->relative_entry_path.generic_string();
+                if (selected_asset_relative_dir != new_selection) {
+                    resetAssetDetailState();
+                }
+                selected_asset_relative_dir = new_selection;
+                selected_asset = file_asset;
+            } else if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && file_asset) {
+                const std::string new_selection = file_asset->relative_entry_path.generic_string();
+                if (selected_asset_relative_dir != new_selection) {
+                    resetAssetDetailState();
+                }
+                selected_asset_relative_dir = new_selection;
+                selected_asset = file_asset;
+            } else if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !file_asset) {
+                if (!selected_asset_relative_dir.empty()) {
+                    selected_asset_relative_dir.clear();
+                    selected_asset = nullptr;
+                    resetAssetDetailState();
+                }
+            }
+
+            if (file_asset && is_placeable_asset && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                const std::string payload_key = file_asset->relative_entry_path.generic_string();
+                if (asset_drag_bbox_cache.find(payload_key) == asset_drag_bbox_cache.end()) {
+                    Vec3 preview_min, preview_max;
+                    if (computeAssetPreviewBounds(*file_asset, preview_min, preview_max)) {
+                        asset_drag_bbox_cache.emplace(payload_key, std::make_pair(preview_min, preview_max));
+                    }
+                }
+                ImGui::SetDragDropPayload("ASSET_BROWSER_ENTRY", payload_key.c_str(), payload_key.size() + 1);
+                ImGui::TextUnformatted(file_asset->name.c_str());
+                ImGui::TextDisabled("%s", file_asset->entry_path.filename().string().c_str());
+                ImGui::EndDragDropSource();
+            }
+            if (file_asset && ImGui::BeginPopupContextItem("AssetCardContext")) {
+                if (ImGui::MenuItem(file_asset->favorite ? "Unfavorite" : "Add Favorite")) {
+                    if (saveAssetMetadataChanges(asset_registry, *file_asset, !file_asset->favorite, file_asset->tags)) {
+                        asset_registry.refresh();
+                        selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+                        g_ProjectManager.markModified();
+                    }
+                }
+                if (ImGui::MenuItem("Copy Asset Path")) {
+                    SDL_SetClipboardText(file_asset->entry_path.string().c_str());
+                    addViewportMessage("Asset path copied", 1.8f, ImVec4(0.5f, 1.0f, 0.6f, 1.0f));
+                }
+                if (ImGui::MenuItem("Regenerate Metadata")) {
+                    if (saveAssetMetadataChanges(asset_registry, *file_asset, file_asset->favorite, file_asset->tags)) {
+                        asset_registry.refresh();
+                        selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+                        g_ProjectManager.markModified();
+                        addViewportMessage("Metadata regenerated", 1.8f, ImVec4(0.4f, 0.9f, 1.0f, 1.0f));
+                    }
+                }
+                if (ImGui::MenuItem("Clear Preview Cache")) {
+                    releaseSelectedAssetPreviewTexture();
+                    releaseAssetBrowserThumbnailTextures();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::EndGroup();
+            ImGui::PopID();
+            ++index;
+        }
+
+        if (index == 0) {
+            ImGui::TextDisabled("This folder has no matching files.");
+        }
+    } else {
+        ImGui::TextDisabled("Select a folder from the left tree.");
+    }
+    ImGui::EndChild();
+
+    ImGui::InvisibleButton("##AssetBrowserDetailSplitter", ImVec2(ImGui::GetContentRegionAvail().x, 6.0f));
+    if (ImGui::IsItemActive()) {
+        asset_browser_details_height -= ImGui::GetIO().MouseDelta.y;
+    }
+    if (ImGui::IsItemHovered() || ImGui::IsItemActive()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    }
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Selected Asset Details");
+    ImGui::Separator();
+    ImGui::BeginChild("AssetBrowserDetails", ImVec2(0, 0), false);
+
+    if (!selected_asset) {
+        releaseSelectedAssetPreviewTexture();
+        ImGui::TextDisabled("Pick a placeable asset in the current folder to inspect its metadata.");
+    } else {
+        if (selected_asset_tags_edit_target != selected_asset->relative_entry_path.generic_string()) {
+            selected_asset_tags_edit_target = selected_asset->relative_entry_path.generic_string();
+            selected_asset_tags_edit = joinTags(selected_asset->tags);
+        }
+
+        nlohmann::json asset_metadata_json;
+        bool has_asset_metadata_json = false;
+        if (selected_asset->has_metadata && !selected_asset->metadata_path.empty()) {
+            try {
+                std::ifstream metadata_file(selected_asset->metadata_path);
+                if (metadata_file.is_open()) {
+                    metadata_file >> asset_metadata_json;
+                    has_asset_metadata_json = true;
+                }
+            } catch (...) {
+                has_asset_metadata_json = false;
+            }
+        }
+
+        ImGui::Text("%s", selected_asset->name.c_str());
+        ImGui::TextDisabled("%s", selected_asset->id.c_str());
+        if (selected_asset->favorite) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f), "Favorite");
+        }
+        if (selected_asset->has_preview) {
+            int preview_width = 0;
+            int preview_height = 0;
+            if (ensureSelectedAssetPreviewTexture(ctx, selected_asset->preview_path, preview_width, preview_height)) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Preview");
+
+                float draw_width = (std::min)(ImGui::GetContentRegionAvail().x, 320.0f);
+                float draw_height = draw_width;
+                if (preview_width > 0 && preview_height > 0) {
+                    const float aspect = static_cast<float>(preview_width) / static_cast<float>(preview_height);
+                    draw_height = draw_width / (aspect > 0.001f ? aspect : 1.0f);
+                    if (draw_height > 220.0f) {
+                        const float scale = 220.0f / draw_height;
+                        draw_width *= scale;
+                        draw_height *= scale;
+                    }
+                }
+
+                ImGui::Image((ImTextureID)selected_asset_preview_texture, ImVec2(draw_width, draw_height));
+            } else {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Preview");
+                ImGui::TextDisabled("Preview image could not be loaded.");
+            }
+        } else {
+            releaseSelectedAssetPreviewTexture();
+        }
+
+        ImGui::BulletText("Folder: %s", selected_asset->relative_directory.generic_string().c_str());
+        ImGui::BulletText("Entry: %s", selected_asset->entry_path.filename().string().c_str());
+        ImGui::BulletText("Kind: %s", selected_asset->asset_kind.empty() ? "asset" : selected_asset->asset_kind.c_str());
+        ImGui::BulletText("Preview: %s", selected_asset->has_preview ? selected_asset->preview_path.filename().string().c_str() : "missing");
+        ImGui::BulletText("Metadata: %s", selected_asset->has_metadata ? selected_asset->metadata_path.filename().string().c_str() : "auto-derived");
+        ImGui::BulletText("Tags: %s", selected_asset->tags.empty() ? "none" : joinTags(selected_asset->tags).c_str());
+        if (selected_asset->is_sequence) {
+            ImGui::BulletText("Sequence: %d - %d", selected_asset->sequence_start_frame, selected_asset->sequence_end_frame);
+        }
+        if (selected_asset->animation_clip_count > 0) {
+            ImGui::BulletText("Animation Clips: %llu", static_cast<unsigned long long>(selected_asset->animation_clip_count));
+        }
+        if (selected_asset->asset_kind == "anim_clip") {
+            ImGui::BulletText("Clip Mode: %s", selected_asset->clip_mode.empty() ? "skeletal" : selected_asset->clip_mode.c_str());
+            ImGui::BulletText("Binding: %s", selected_asset->animation_binding.empty() ? "selected-model" : selected_asset->animation_binding.c_str());
+        }
+        if (selected_asset->asset_kind == "vdb" || selected_asset->asset_kind == "vdb_sequence") {
+            const std::string grid_list = selected_asset->vdb_grids.empty() ? "none" : [&]() {
+                std::string joined;
+                for (size_t i = 0; i < selected_asset->vdb_grids.size(); ++i) {
+                    if (i > 0) {
+                        joined += ", ";
+                    }
+                    joined += selected_asset->vdb_grids[i];
+                }
+                return joined;
+            }();
+            ImGui::BulletText("Grids: %s", grid_list.c_str());
+            ImGui::BulletText("Primary Grid: %s", selected_asset->vdb_primary_grid.empty() ? "density" : selected_asset->vdb_primary_grid.c_str());
+            ImGui::BulletText("Voxel Size: %.5f", selected_asset->vdb_voxel_size);
+            ImGui::BulletText("Preset: %s", selected_asset->vdb_shader_preset.empty() ? "auto" : selected_asset->vdb_shader_preset.c_str());
+        }
+
+        if (has_asset_metadata_json && asset_metadata_json.contains("metrics") && asset_metadata_json["metrics"].is_object()) {
+            const auto& metrics = asset_metadata_json["metrics"];
+            ImGui::Spacing();
+            ImGui::TextDisabled("Cost / Metrics");
+            ImGui::BulletText("Triangles: %llu", static_cast<unsigned long long>(metrics.value("triangleCount", 0ull)));
+            ImGui::BulletText("Meshes: %llu", static_cast<unsigned long long>(metrics.value("meshCount", 0ull)));
+            ImGui::BulletText("Materials: %llu", static_cast<unsigned long long>(metrics.value("materialCount", 0ull)));
+            ImGui::BulletText("Texture Refs: %llu", static_cast<unsigned long long>(metrics.value("textureReferenceCount", 0ull)));
+            ImGui::BulletText("Anim Clips: %llu", static_cast<unsigned long long>(metrics.value("animationClipCount", 0ull)));
+        }
+
+        if (has_asset_metadata_json && asset_metadata_json.contains("dimensions") && asset_metadata_json["dimensions"].is_object()) {
+            const auto& dimensions = asset_metadata_json["dimensions"];
+            ImGui::Spacing();
+            ImGui::TextDisabled("Dimensions");
+            ImGui::BulletText(
+                "Size: %.2f x %.2f x %.2f",
+                dimensions.value("width", 0.0),
+                dimensions.value("height", 0.0),
+                dimensions.value("depth", 0.0));
+        }
+
+        if (selected_asset->asset_kind == "vdb" || selected_asset->asset_kind == "vdb_sequence") {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Volume");
+            if (selected_asset->vdb_has_bounds) {
+                ImGui::BulletText(
+                    "Bounds Min: %.2f, %.2f, %.2f",
+                    selected_asset->vdb_bounds_min_x,
+                    selected_asset->vdb_bounds_min_y,
+                    selected_asset->vdb_bounds_min_z);
+                ImGui::BulletText(
+                    "Bounds Max: %.2f, %.2f, %.2f",
+                    selected_asset->vdb_bounds_max_x,
+                    selected_asset->vdb_bounds_max_y,
+                    selected_asset->vdb_bounds_max_z);
+            }
+            ImGui::BulletText("Hint Fire: %s", selected_asset->vdb_is_fire ? "yes" : "no");
+            ImGui::BulletText("Hint Smoke: %s", selected_asset->vdb_is_smoke ? "yes" : "no");
+            ImGui::BulletText("Velocity Grid: %s", selected_asset->vdb_has_velocity ? "yes" : "no");
+            ImGui::BulletText("Density Mult: %.2f", selected_asset->vdb_density_multiplier);
+            ImGui::BulletText("Temp Scale: %.2f", selected_asset->vdb_temperature_scale);
+            ImGui::BulletText("Emission Intensity: %.2f", selected_asset->vdb_emission_intensity);
+            if (selected_asset->is_sequence) {
+                ImGui::BulletText("FPS: %.2f", selected_asset->sequence_fps);
+            }
+        }
+
+        if (has_asset_metadata_json && asset_metadata_json.contains("placementPivot") && asset_metadata_json["placementPivot"].is_object()) {
+            const auto& pivot = asset_metadata_json["placementPivot"];
+            ImGui::Spacing();
+            ImGui::TextDisabled("Placement");
+            ImGui::BulletText(
+                "Pivot: %.2f, %.2f, %.2f",
+                pivot.value("x", 0.0),
+                pivot.value("y", 0.0),
+                pivot.value("z", 0.0));
+            const std::string pivot_mode = pivot.value("mode", std::string());
+            if (!pivot_mode.empty()) {
+                ImGui::BulletText("Pivot Mode: %s", pivot_mode.c_str());
+            }
+        }
+
+        if (has_asset_metadata_json) {
+            const std::string source_tool = asset_metadata_json.value("sourceTool", std::string());
+            if (!source_tool.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("Pipeline");
+                ImGui::BulletText("Source Tool: %s", source_tool.c_str());
+            }
+        }
+
+        if (!selected_asset->description.empty()) {
+            ImGui::Spacing();
+            ImGui::TextWrapped("%s", selected_asset->description.c_str());
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Library");
+        bool favorite_value = selected_asset->favorite;
+        if (ImGui::Checkbox("Favorite Asset", &favorite_value)) {
+            if (saveAssetMetadataChanges(asset_registry, *selected_asset, favorite_value, splitTagString(selected_asset_tags_edit))) {
+                asset_registry.refresh();
+                selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+                g_ProjectManager.markModified();
+            }
+        }
+        std::array<char, 512> tags_buffer{};
+        std::snprintf(tags_buffer.data(), tags_buffer.size(), "%s", selected_asset_tags_edit.c_str());
+        if (ImGui::InputTextWithHint("Asset Tags", "comma separated tags", tags_buffer.data(), tags_buffer.size())) {
+            selected_asset_tags_edit = tags_buffer.data();
+        }
+        if (ImGui::BeginPopupContextItem("SelectedAssetDetailsContext")) {
+            if (ImGui::MenuItem("Copy Asset Path")) {
+                SDL_SetClipboardText(selected_asset->entry_path.string().c_str());
+                addViewportMessage("Asset path copied", 1.8f, ImVec4(0.5f, 1.0f, 0.6f, 1.0f));
+            }
+            if (ImGui::MenuItem("Regenerate Metadata")) {
+                if (saveAssetMetadataChanges(asset_registry, *selected_asset, favorite_value, splitTagString(selected_asset_tags_edit))) {
+                    asset_registry.refresh();
+                    selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+                    g_ProjectManager.markModified();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        if (ImGui::Button("Save Asset Metadata", ImVec2(190, 0))) {
+            if (saveAssetMetadataChanges(asset_registry, *selected_asset, favorite_value, splitTagString(selected_asset_tags_edit))) {
+                asset_registry.refresh();
+                selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+                if (selected_asset) {
+                    selected_asset_tags_edit_target = selected_asset->relative_entry_path.generic_string();
+                    selected_asset_tags_edit = joinTags(selected_asset->tags);
+                }
+                g_ProjectManager.markModified();
+                addViewportMessage("Asset metadata saved", 1.8f, ImVec4(0.4f, 0.9f, 1.0f, 1.0f));
+            } else {
+                addViewportMessage("Asset metadata save failed", 2.4f, ImVec4(1.0f, 0.5f, 0.35f, 1.0f));
+            }
+        }
+
+        ImGui::Spacing();
+        const char* append_button_label = selected_asset->asset_kind == "anim_clip" ? "Import Clip" : "Append To Scene";
+        if (ImGui::Button(append_button_label, ImVec2(160, 0)) && isPlaceableAssetRecord(*selected_asset)) {
+            appendAssetToScene(ctx, selected_asset->entry_path, selected_asset->name);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Generate Metadata", ImVec2(190, 0))) {
+            int generated_count = 0;
+            for (const auto& asset : asset_registry.getAssets()) {
+                if (asset.directory_path == selected_folder_path) {
+                    if (asset_registry.writeMetadataStub(asset)) {
+                        ++generated_count;
+                    }
+                }
+            }
+
+            releaseAssetBrowserThumbnailTextures();
+            asset_registry.refresh();
+            selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
+
+            if (generated_count > 0) {
+                addViewportMessage(
+                    std::to_string(generated_count) + " metadata file(s) created in folder",
+                    2.5f,
+                    ImVec4(0.3f, 0.8f, 1.0f, 1.0f));
+            } else {
+                addViewportMessage("No metadata files were created for this folder", 3.0f, ImVec4(1.0f, 0.7f, 0.2f, 1.0f));
+            }
+        }
+    }
+
+    ImGui::EndChild();
+    ImGui::EndChild();
+    if (!embedded) {
+        ImGui::End();
+    }
+}
+
+SceneUI::~SceneUI() {
+    releaseSelectedAssetPreviewTexture();
+}
+
+bool SceneUI::ensureSelectedAssetPreviewTexture(UIContext& ctx, const std::filesystem::path& preview_path, int& width, int& height)
+{
+    extern SDL_Renderer* renderer;
+
+    width = 0;
+    height = 0;
+
+    SDL_Renderer* active_renderer = ctx.renderer.sdlRenderer ? ctx.renderer.sdlRenderer : renderer;
+
+    if (preview_path.empty() || !std::filesystem::exists(preview_path) || !active_renderer) {
+        releaseSelectedAssetPreviewTexture();
+        return false;
+    }
+
+    if (selected_asset_preview_texture &&
+        selected_asset_preview_texture_path == preview_path) {
+        width = selected_asset_preview_texture_width;
+        height = selected_asset_preview_texture_height;
+        return true;
+    }
+
+    releaseSelectedAssetPreviewTexture();
+    if (!loadPreviewTextureFromPath(active_renderer, preview_path, selected_asset_preview_texture, width, height)) {
+        return false;
+    }
+
+    selected_asset_preview_texture_path = preview_path;
+    selected_asset_preview_texture_width = width;
+    selected_asset_preview_texture_height = height;
+    return true;
+}
+
+bool SceneUI::ensureAssetBrowserThumbnailTexture(UIContext& ctx, const std::filesystem::path& preview_path, SDL_Texture*& out_texture, int& width, int& height)
+{
+    extern SDL_Renderer* renderer;
+
+    out_texture = nullptr;
+    width = 0;
+    height = 0;
+
+    SDL_Renderer* active_renderer = ctx.renderer.sdlRenderer ? ctx.renderer.sdlRenderer : renderer;
+    if (preview_path.empty() || !active_renderer || !std::filesystem::exists(preview_path)) {
+        return false;
+    }
+
+    const std::string cache_key = normalizeAbsolutePath(preview_path).generic_string();
+    auto found = asset_browser_thumbnail_cache.find(cache_key);
+    if (found != asset_browser_thumbnail_cache.end() && found->second.texture) {
+        found->second.last_used = ++asset_browser_thumbnail_use_counter;
+        out_texture = found->second.texture;
+        width = found->second.width;
+        height = found->second.height;
+        return true;
+    }
+
+    SDL_Texture* preview_texture = nullptr;
+    if (!loadPreviewTextureFromPath(active_renderer, preview_path, preview_texture, width, height)) {
+        return false;
+    }
+
+    AssetThumbnailCacheEntry entry;
+    entry.texture = preview_texture;
+    entry.width = width;
+    entry.height = height;
+    entry.last_used = ++asset_browser_thumbnail_use_counter;
+    asset_browser_thumbnail_cache[cache_key] = entry;
+
+    constexpr size_t kMaxThumbnailCacheEntries = 48;
+    if (asset_browser_thumbnail_cache.size() > kMaxThumbnailCacheEntries) {
+        auto lru_it = asset_browser_thumbnail_cache.end();
+        for (auto it = asset_browser_thumbnail_cache.begin(); it != asset_browser_thumbnail_cache.end(); ++it) {
+            if (lru_it == asset_browser_thumbnail_cache.end() || it->second.last_used < lru_it->second.last_used) {
+                lru_it = it;
+            }
+        }
+        if (lru_it != asset_browser_thumbnail_cache.end() && lru_it->second.texture) {
+            SDL_DestroyTexture(lru_it->second.texture);
+            asset_browser_thumbnail_cache.erase(lru_it);
+        }
+    }
+
+    out_texture = preview_texture;
+    return true;
+}
+
+void SceneUI::releaseSelectedAssetPreviewTexture()
+{
+    if (selected_asset_preview_texture) {
+        SDL_DestroyTexture(selected_asset_preview_texture);
+        selected_asset_preview_texture = nullptr;
+    }
+
+    selected_asset_preview_texture_path.clear();
+    selected_asset_preview_texture_width = 0;
+    selected_asset_preview_texture_height = 0;
+}
+
+void SceneUI::releaseAssetBrowserThumbnailTextures()
+{
+    for (auto& [key, entry] : asset_browser_thumbnail_cache) {
+        if (entry.texture) {
+            SDL_DestroyTexture(entry.texture);
+            entry.texture = nullptr;
+        }
+    }
+    asset_browser_thumbnail_cache.clear();
+    asset_browser_thumbnail_use_counter = 0;
 }
 
 void SceneUI::drawControlsContent()
@@ -3007,6 +5146,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
         
         scene_loading = true;
         scene_loading_done = false;
+        pending_project_ui_restore = false;
         scene_loading_progress = 0;
         ctx.sample_count = 0;
         setSceneLoadingStage("Opening project...");
@@ -3151,6 +5291,7 @@ void SceneUI::performOpenProject(UIContext& ctx) {
 
             scene_loading = false;
             scene_loading_done = true;
+            pending_project_ui_restore = true;
             g_scene_loading_in_progress = false;
             rendering_stopped_cpu = false;
             rendering_stopped_gpu = false;
@@ -3897,6 +6038,33 @@ std::string SceneUI::serialize() {
     
     // extern bool show_controls_window;
     j["show_controls_window"] = show_controls_window; 
+    j["show_asset_browser"] = show_asset_browser;
+    j["asset_browser_search"] = asset_browser_search;
+    j["asset_browser_tag_filter"] = asset_browser_tag_filter;
+    j["asset_browser_view_mode"] = asset_browser_view_mode;
+    j["asset_browser_thumbnail_size"] = asset_browser_thumbnail_size;
+    j["asset_browser_only_3d"] = asset_browser_only_3d;
+    j["asset_browser_favorites_only"] = asset_browser_favorites_only;
+    j["active_asset_smart_folder_index"] = active_asset_smart_folder_index;
+    j["asset_smart_folders"] = nlohmann::json::array();
+    for (const auto& preset : asset_smart_folders) {
+        j["asset_smart_folders"].push_back({
+            { "name", preset.name },
+            { "search", preset.search },
+            { "tag_filter", preset.tag_filter },
+            { "folder_relative_dir", preset.folder_relative_dir },
+            { "favorites_only", preset.favorites_only },
+            { "only_3d", preset.only_3d }
+        });
+    }
+    j["asset_browser_folder_width"] = asset_browser_folder_width;
+    j["asset_browser_details_height"] = asset_browser_details_height;
+    j["active_asset_library_index"] = active_asset_library_index;
+    j["asset_libraries"] = nlohmann::json::array();
+    ensureDefaultAssetLibrary(asset_library_paths);
+    for (const auto& library_path : asset_library_paths) {
+        j["asset_libraries"].push_back(serializeLibraryPathEntry(library_path));
+    }
 
     j["show_scene_log"] = show_scene_log;
 
@@ -3940,6 +6108,49 @@ void SceneUI::deserialize(const std::string& data) {
         
         // extern bool show_controls_window;
         if (j.contains("show_controls_window")) show_controls_window = j["show_controls_window"];
+        if (j.contains("show_asset_browser")) show_asset_browser = j["show_asset_browser"];
+        if (j.contains("asset_browser_search")) asset_browser_search = j["asset_browser_search"];
+        if (j.contains("asset_browser_tag_filter")) asset_browser_tag_filter = j["asset_browser_tag_filter"];
+        if (j.contains("asset_browser_view_mode")) asset_browser_view_mode = j["asset_browser_view_mode"];
+        if (j.contains("asset_browser_thumbnail_size")) asset_browser_thumbnail_size = j["asset_browser_thumbnail_size"];
+        if (j.contains("asset_browser_only_3d")) asset_browser_only_3d = j["asset_browser_only_3d"];
+        if (j.contains("asset_browser_favorites_only")) asset_browser_favorites_only = j["asset_browser_favorites_only"];
+        asset_smart_folders.clear();
+        if (j.contains("asset_smart_folders") && j["asset_smart_folders"].is_array()) {
+            for (const auto& entry : j["asset_smart_folders"]) {
+                AssetSmartFolderPreset preset;
+                preset.name = entry.value("name", std::string());
+                preset.search = entry.value("search", std::string());
+                preset.tag_filter = entry.value("tag_filter", std::string());
+                preset.folder_relative_dir = entry.value("folder_relative_dir", std::string());
+                preset.favorites_only = entry.value("favorites_only", false);
+                preset.only_3d = entry.value("only_3d", true);
+                if (!preset.name.empty()) {
+                    asset_smart_folders.push_back(preset);
+                }
+            }
+        }
+        active_asset_smart_folder_index = j.value("active_asset_smart_folder_index", -1);
+        if (active_asset_smart_folder_index < -1 || active_asset_smart_folder_index >= static_cast<int>(asset_smart_folders.size())) {
+            active_asset_smart_folder_index = -1;
+        }
+        if (j.contains("asset_browser_folder_width")) asset_browser_folder_width = j["asset_browser_folder_width"];
+        if (j.contains("asset_browser_details_height")) asset_browser_details_height = j["asset_browser_details_height"];
+        asset_library_paths.clear();
+        if (j.contains("asset_libraries") && j["asset_libraries"].is_array()) {
+            for (const auto& library_entry : j["asset_libraries"]) {
+                const std::filesystem::path library_path = deserializeLibraryPathEntry(library_entry);
+                if (!library_path.empty()) {
+                    asset_library_paths.push_back(library_path);
+                }
+            }
+        }
+        ensureDefaultAssetLibrary(asset_library_paths);
+        active_asset_library_index = j.value("active_asset_library_index", 0);
+        if (!asset_library_paths.empty()) {
+            active_asset_library_index = (std::max)(0, (std::min)(active_asset_library_index, static_cast<int>(asset_library_paths.size()) - 1));
+            refreshAssetLibrarySafely(asset_registry, normalizeAbsolutePath(asset_library_paths[active_asset_library_index]));
+        }
         
         if (j.contains("show_scene_log")) show_scene_log = j["show_scene_log"];
 
