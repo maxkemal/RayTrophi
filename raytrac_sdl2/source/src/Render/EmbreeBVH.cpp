@@ -192,7 +192,7 @@ void EmbreeBVH::build(const std::vector<std::shared_ptr<Hittable>>& objects) {
             if (instance_objects.size() <= geomID) {
                 instance_objects.resize(geomID + 1, nullptr);
             }
-            instance_objects[geomID] = inst.get();
+            instance_objects[geomID] = inst;
         }
     }
 
@@ -410,6 +410,21 @@ void EmbreeBVH::updateGeometryFromTriangles() {
 void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::shared_ptr<Hittable>>& objects) {
     bool geometry_committed = false;
 
+    // Topology changes require a full rebuild. Refit is only safe when the dense
+    // triangle set still matches Embree's existing vertex/index buffers.
+    size_t active_triangle_count = 0;
+    for (const auto& obj : objects) {
+        if (!obj || !obj->visible) continue;
+        if (std::dynamic_pointer_cast<Triangle>(obj)) {
+            ++active_triangle_count;
+        }
+    }
+    if (active_triangle_count != triangle_data.size()) {
+        extern bool g_bvh_rebuild_pending;
+        g_bvh_rebuild_pending = true;
+        return;
+    }
+
     // 1. Update Triangle Geometry (Deformable)
     if (triangle_geom_id != RTC_INVALID_GEOMETRY_ID) {
         RTCGeometry geom = rtcGetGeometry(scene, triangle_geom_id);
@@ -471,7 +486,7 @@ void EmbreeBVH::updateGeometryFromTrianglesFromSource(const std::vector<std::sha
     if (!instance_objects.empty()) {
         // Iterate over stored instances and update their transforms
         for (size_t geomID = 0; geomID < instance_objects.size(); ++geomID) {
-            const HittableInstance* inst = instance_objects[geomID];
+            const auto& inst = instance_objects[geomID];
             if (!inst) continue;
             
             // Skip if this slot matches triangle_geom_id (though instance_objects should be null there usually? 
@@ -544,39 +559,55 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
 
         if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
 
+        const unsigned top_inst_id = rayhit.hit.instID[0];
+        const bool hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
+                                   top_inst_id < instance_objects.size() &&
+                                   instance_objects[top_inst_id] != nullptr);
+
         // 1. Triangle Alpha Test
-        if (rayhit.hit.geomID == triangle_geom_id || rayhit.hit.geomID < instance_objects.size()) {
+        if (!hit_instance && rayhit.hit.geomID == triangle_geom_id) {
             Material* mat = nullptr;
             Vec2 uv(0,0);
             
-            if (rayhit.hit.geomID == triangle_geom_id) {
-                const TriangleData& tri = triangle_data[rayhit.hit.primID];
-                float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
-                uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-                mat = tri.getMaterial();
-            } else {
-                const HittableInstance* inst = instance_objects[rayhit.hit.geomID];
-                if (inst) {
-                    auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
-                    if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
-                        const TriangleData& tri = child_bvh->triangle_data[rayhit.hit.primID];
-                        float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
-                        uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-                        mat = tri.getMaterial();
-                    }
-                }
-            }
+            const TriangleData& tri = triangle_data[rayhit.hit.primID];
+            float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
+            uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+            mat = tri.getMaterial();
 
             if (mat && mat->isTransparent()) {
                 float opacity = mat->get_opacity(uv);
-                if (Vec3::random_float() > opacity) {
+                if (opacity <= 0.5f) {
                     t_min = rayhit.ray.tfar + 0.001f;
                     if (t_min >= t_max) return false;
                     continue; // Skip and check behind
                 }
             }
             return true; // Opaque hit
-        } 
+        }
+        else if (hit_instance) {
+            Material* mat = nullptr;
+            Vec2 uv(0,0);
+            const auto& inst = instance_objects[top_inst_id];
+            if (inst) {
+                auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+                if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
+                    const TriangleData& tri = child_bvh->triangle_data[rayhit.hit.primID];
+                    float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
+                    uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
+                    mat = tri.getMaterial();
+                }
+            }
+
+            if (mat && mat->isTransparent()) {
+                float opacity = mat->get_opacity(uv);
+                if (opacity <= 0.5f) {
+                    t_min = rayhit.ray.tfar + 0.001f;
+                    if (t_min >= t_max) return false;
+                    continue; // Skip and check behind
+                }
+            }
+            return true; // Opaque hit
+        }
         // 2. Volume Shadowing
         else if (rayhit.hit.geomID == vdb_geom_id) {
             unsigned int prim_id = rayhit.hit.primID;
@@ -680,17 +711,22 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
 
         if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
 
+        const unsigned top_inst_id = rayhit.hit.instID[0];
+        const bool hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
+                                   top_inst_id < instance_objects.size() &&
+                                   instance_objects[top_inst_id] != nullptr);
+
         // Check Alpha if it's a triangle
         mat = nullptr;
-        if (rayhit.hit.geomID == triangle_geom_id) {
+        if (!hit_instance && rayhit.hit.geomID == triangle_geom_id) {
             const TriangleData& tri = triangle_data[rayhit.hit.primID];
             float u = rayhit.hit.u;
             float v = rayhit.hit.v;
             float w = 1.0f - u - v;
             uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
             mat = tri.getMaterial();
-        } else if (rayhit.hit.geomID < instance_objects.size()) {
-            const HittableInstance* inst = instance_objects[rayhit.hit.geomID];
+        } else if (hit_instance) {
+            const auto& inst = instance_objects[top_inst_id];
             if (inst) {
                 auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
                 if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
@@ -706,7 +742,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
 
         if (mat && mat->isTransparent()) {
             float opacity = mat->get_opacity(uv);
-            if (Vec3::random_float() > opacity) {
+            if (opacity <= 0.5f) {
                 // Transparent: continue ray from this point
                 t_min = rayhit.ray.tfar + 0.001f;
                 if (t_min >= t_max) return false;
@@ -718,6 +754,10 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
     }
 
     if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID) {
+        const unsigned top_inst_id = rayhit.hit.instID[0];
+        const bool hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
+                                   top_inst_id < instance_objects.size() &&
+                                   instance_objects[top_inst_id] != nullptr);
         
         // [New Logic]
         if (rayhit.hit.geomID == vdb_geom_id) {
@@ -733,7 +773,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                 return true;
             }
         }
-        else if (rayhit.hit.geomID == triangle_geom_id) {
+        else if (!hit_instance && rayhit.hit.geomID == triangle_geom_id) {
             // Hit Local Triangle
             int prim_id = rayhit.hit.primID;
             const TriangleData& tri = triangle_data[prim_id];
@@ -749,18 +789,17 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             rec.t = rayhit.ray.tfar;
             rec.point = ray.at(rec.t); 
             rec.set_face_normal(ray, rec.normal);
-            rec.material = tri.getMaterialShared();
-            rec.materialPtr = mat; // Use the raw pointer we already fetched
+            rec.materialPtr = mat; // Reuse the alpha-test lookup; shared_ptr is resolved later
             rec.materialID = tri.materialID;
             rec.terrain_id = tri.terrain_id;
             rec.is_instance_hit = false; // Local geometry (e.g. Terrain)
             rec.triangle = tri.original_ptr; // Restore identity
             return true;
         } 
-        else if (rayhit.hit.geomID < instance_objects.size()) {
+        else if (hit_instance) {
             // Hit Instance
             rec.is_instance_hit = true; // Mark as instance for filtering
-            const HittableInstance* inst = instance_objects[rayhit.hit.geomID];
+            const auto& inst = instance_objects[top_inst_id];
             if (inst) {
                 // We need to fetch the child data
                 auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
@@ -788,8 +827,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                          rec.t = rayhit.ray.tfar;
                          rec.point = ray.at(rec.t); 
                          rec.set_face_normal(ray, rec.normal);
-                         rec.material = tri.getMaterialShared();
-                         rec.materialPtr = mat; // Use the raw pointer we already fetched
+                         rec.materialPtr = mat; // Reuse the alpha-test lookup; shared_ptr is resolved later
                          rec.materialID = tri.materialID;
                          rec.terrain_id = tri.terrain_id;
                          rec.triangle = tri.original_ptr; // Restore identity (Source Mesh)

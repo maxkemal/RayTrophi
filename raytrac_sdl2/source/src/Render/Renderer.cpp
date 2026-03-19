@@ -57,8 +57,10 @@
 #include "water_shaders_cpu.h"  // CPU water shader functions
 #include "HittableInstance.h"
 #include "VolumetricRenderer.h"
+#include "HitMaterialResolver.h"
 #include "AtmosphereLUT.h"       // Required for CPU transmittance sampling
 #include "Hair/HairBSDF.h"       // Hair BSDF for shading
+#include "FoliageWindSystem.h"
 #include <Backend/VulkanBackend.h>
 bool Renderer::isCudaAvailable() {
     try {
@@ -473,10 +475,66 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
         std::vector<Matrix4x4> modelBoneMatrices;
         bool modelChanged = false;
 
-        if (ctx.useAnimGraph && ctx.graph) {
+        auto activeGraph = ctx.runtimeGraph ? ctx.runtimeGraph : ctx.graph;
+        if (ctx.useAnimGraph && activeGraph) {
+            float graphDeltaTime = deltaTime;
+            if (!ctx.animGraphFollowTimeline && graphDeltaTime == 0.0f) {
+                graphDeltaTime = 1.0f / 60.0f;
+            }
+            if (ctx.animator && ctx.animator->isPaused()) {
+                graphDeltaTime = 0.0f;
+            }
+
             // EVALUATE NODE GRAPH (Unity/Unreal style)
             if (ctx.animator) {
-                ctx.graph->evalContext.clipsPtr = &ctx.animator->getAllClips();
+                activeGraph->evalContext.clipsPtr = &ctx.animator->getAllClips();
+            }
+
+            // Timeline-driven anim graph overrides for cinematic shots.
+            activeGraph->evalContext.triggerParams.clear();
+            auto trackIt = scene.timeline.tracks.find(ctx.importName);
+            if (trackIt != scene.timeline.tracks.end()) {
+                Keyframe animKf = trackIt->second.evaluate(scene.timeline.current_frame);
+                if (animKf.has_anim_graph) {
+                    for (auto& node : activeGraph->nodes) {
+                        auto* clipNode = dynamic_cast<AnimationGraph::AnimClipNode*>(node.get());
+                        if (!clipNode) continue;
+
+                        auto clipIt = animKf.anim_graph.clip_overrides.find(clipNode->id);
+                        if (clipIt != animKf.anim_graph.clip_overrides.end() && !clipIt->second.empty()) {
+                            if (clipNode->clipName != clipIt->second) {
+                                clipNode->clipName = clipIt->second;
+                                clipNode->reset();
+                            }
+                        }
+
+                        auto speedIt = animKf.anim_graph.clip_speed_overrides.find(clipNode->id);
+                        if (speedIt != animKf.anim_graph.clip_speed_overrides.end()) {
+                            clipNode->playbackSpeed = speedIt->second;
+                        }
+                    }
+                    for (const auto& [name, value] : animKf.anim_graph.float_params) {
+                        activeGraph->evalContext.floatParams[name] = value;
+                    }
+                    for (const auto& [name, value] : animKf.anim_graph.bool_params) {
+                        activeGraph->evalContext.boolParams[name] = value;
+                    }
+                    for (const auto& [name, value] : animKf.anim_graph.int_params) {
+                        activeGraph->evalContext.intParams[name] = value;
+                    }
+                    for (const auto& triggerName : animKf.anim_graph.triggers) {
+                        activeGraph->evalContext.triggerParams[triggerName] = triggerName;
+                    }
+                    if (!animKf.anim_graph.force_state.empty()) {
+                        for (auto& node : activeGraph->nodes) {
+                            auto* smNode = dynamic_cast<AnimationGraph::StateMachineNode*>(node.get());
+                            if (smNode) {
+                                smNode->forceState(animKf.anim_graph.force_state);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             // CRITICAL FIX: Fetch robust global inverse transform from boneData
@@ -487,19 +545,19 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                  if (invIt != scene.boneData.perModelInverses.end()) finalInv = invIt->second;
             }
             ctx.globalInverseTransform = finalInv; // Update cache
-            ctx.graph->evalContext.globalInverseTransform = finalInv;
+            activeGraph->evalContext.globalInverseTransform = finalInv;
             
             // --- ROOT MOTION PREPARATION FOR ANIM GRAPH ---
-            ctx.graph->evalContext.useRootMotion = ctx.useRootMotion;
+            activeGraph->evalContext.useRootMotion = ctx.useRootMotion;
             if (ctx.useRootMotion && ctx.animator) {
                 auto clips = ctx.animator->getAllClips();
                 if (!clips.empty() && clips[0].sourceData) {
-                    ctx.graph->evalContext.rootMotionBone = ctx.animator->findBestRootMotionBone(clips[0].name);
+                    activeGraph->evalContext.rootMotionBone = ctx.animator->findBestRootMotionBone(clips[0].name);
                 }
             }
-            ctx.graph->evalContext.rootMotion = RootMotionDelta(); // reset
+            activeGraph->evalContext.rootMotion = RootMotionDelta(); // reset
 
-            AnimationGraph::PoseData pose = ctx.graph->evaluate(deltaTime, scene.boneData);
+            AnimationGraph::PoseData pose = activeGraph->evaluate(graphDeltaTime, scene.boneData);
 
             if (pose.isValid()) {
                 if (pose.wasUpdated) {
@@ -766,22 +824,19 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     if (useAnimationController) {
         static float last_sim_time = -1.0f;
         static int last_timeline_frame = -1;
-        static auto last_wall_time = std::chrono::steady_clock::now();
-
-        auto now = std::chrono::steady_clock::now();
-        float wallDelta = std::chrono::duration<float>(now - last_wall_time).count();
-        last_wall_time = now;
-        if (wallDelta > 0.1f) wallDelta = 1.0f / 60.0f;
-
         float deltaTime = (last_sim_time >= 0.0f) ? (current_time - last_sim_time) : (1.0f / 60.0f);
         if (deltaTime < -0.5f || deltaTime > 0.5f) deltaTime = 0.0f;
 
         // SCRUBBING FIX: Absolute time seek support
         // If current_time changed drastically or timeline was scrubbed, sync animators
-        bool timelineScrubbed = (scene.timeline.current_frame != last_timeline_frame);
+        bool timelineScrubbed = false;
+        if (last_timeline_frame >= 0) {
+            const int frameDelta = scene.timeline.current_frame - last_timeline_frame;
+            timelineScrubbed = std::abs(frameDelta) > 1;
+        }
         
         if (!timelineScrubbed && std::abs(deltaTime) < 0.0001f) {
-            deltaTime = wallDelta;
+            deltaTime = 0.0f;
         }
 
         if (timelineScrubbed) {
@@ -1415,13 +1470,15 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // --- WIND ANIMATION ---
         // Apply wind simulation for this frame
         // FIX: Use same pattern as Play Mode (Main.cpp line 691-697) for consistent behavior
-        if (run_optix && m_backend) {
+        if (run_optix && m_backend && InstanceManager::getInstance().getGroupCount() > 0) {
             // Calculate wind transforms on CPU (same as Play Mode)
-            InstanceManager::getInstance().updateWind(current_time, scene);
+            FoliageWindUpdateStats wind_stats = InstanceManager::getInstance().updateWind(current_time, scene, this->m_backend);
 
             // Efficiently update instance transforms on GPU (no full rebuild)
             // This is the critical step that was missing - ensures GPU TLAS has updated matrices
-            m_backend->updateInstanceTransforms(scene.world.objects);
+            if (wind_stats.any_cpu_update || wind_stats.gpu_deform_applied) {
+                m_backend->updateInstanceTransforms(scene.world.objects);
+            }
 
             // Wind updates don't require geometry_changed = true
             // Only instance transforms changed, not vertex data
@@ -1849,9 +1906,9 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
     SceneData::ImportedModelContext modelCtx;
     modelCtx.loader = newLoader;
     modelCtx.importName = newLoader->currentImportName;
+    modelCtx.animGraphAssetKey = modelCtx.importName;
     modelCtx.hasAnimation = (newLoader->getScene() && newLoader->getScene()->mNumAnimations > 0);
     modelCtx.globalInverseTransform = loaded_bone_data.globalInverseTransform;
-    scene.importedModelContexts.push_back(modelCtx);
 
     update_progress(40, "Processing triangles...");
 
@@ -1859,70 +1916,74 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         SCENE_LOG_ERROR("No triangle data, scene loading failed: " + model_path);
         SCENE_LOG_ERROR("Please provide a valid model file.");
     }
+
+    // --- MERGE ANIMATION DATA & BONES ---
+    // Verify bone/animation usage
+    bool hasBones = !loaded_bone_data.boneNameToIndex.empty();
+
+    // Calculate Offset for Bone Indices (Append Mode)
+    unsigned int boneIndexOffset = 0;
+    if (append) {
+        boneIndexOffset = static_cast<unsigned int>(scene.boneData.boneNameToIndex.size());
+    }
     else {
-        // --- MERGE ANIMATION DATA & BONES ---
-        // Verify bone/animation usage
-        bool hasBones = !loaded_bone_data.boneNameToIndex.empty();
+        // New Scene - already cleared in Step 0, but ensure boneData is fresh
+        scene.boneData.boneNameToIndex.clear();
+        scene.boneData.boneOffsetMatrices.clear();
+        scene.boneData.boneNameToNode.clear();
+        scene.boneData.boneParents.clear();
+        scene.boneData.boneDefaultTransforms.clear();
+        scene.boneData.perModelInverses.clear();
+        scene.boneData.weightedBoneNames.clear();
+    }
 
-        // Calculate Offset for Bone Indices (Append Mode)
-        unsigned int boneIndexOffset = 0;
-        if (append) {
-            boneIndexOffset = static_cast<unsigned int>(scene.boneData.boneNameToIndex.size());
-        }
-        else {
-            // New Scene - already cleared in Step 0, but ensure boneData is fresh
-            scene.boneData.boneNameToIndex.clear();
-            scene.boneData.boneOffsetMatrices.clear();
-            scene.boneData.boneNameToNode.clear();
-        }
-
-        // 1. Update Triangle Bone Indices with Offset
-        if (hasBones && boneIndexOffset > 0) {
-            for (auto& tri : loaded_triangles) {
-                if (tri->hasSkinData()) {
-                    // Access bone weights via accessor which returns reference to internal data
-                    auto& vertexWeightsList = tri->getVertexBoneWeights();
-                    for (auto& vertexWeights : vertexWeightsList) {
-                        for (auto& bw : vertexWeights) {
-                            bw.first += boneIndexOffset; // .first is the bone index
-                        }
+    // 1. Update Triangle Bone Indices with Offset
+    if (hasBones && boneIndexOffset > 0) {
+        for (auto& tri : loaded_triangles) {
+            if (tri->hasSkinData()) {
+                // Access bone weights via accessor which returns reference to internal data
+                auto& vertexWeightsList = tri->getVertexBoneWeights();
+                for (auto& vertexWeights : vertexWeightsList) {
+                    for (auto& bw : vertexWeights) {
+                        bw.first += boneIndexOffset; // .first is the bone index
                     }
                 }
             }
         }
-
-        // 2. Merge Bone Data
-        if (hasBones) {
-            for (const auto& [name, id] : loaded_bone_data.boneNameToIndex) {
-                scene.boneData.boneNameToIndex[name] = id + boneIndexOffset;
-            }
-            // Merge Offset Matrices and Node Pointers
-            scene.boneData.boneOffsetMatrices.insert(loaded_bone_data.boneOffsetMatrices.begin(), loaded_bone_data.boneOffsetMatrices.end());
-            scene.boneData.boneNameToNode.insert(loaded_bone_data.boneNameToNode.begin(), loaded_bone_data.boneNameToNode.end());
-            scene.boneData.perModelInverses.insert(loaded_bone_data.perModelInverses.begin(), loaded_bone_data.perModelInverses.end());
-            scene.boneData.boneParents.insert(loaded_bone_data.boneParents.begin(), loaded_bone_data.boneParents.end());
-            scene.boneData.boneDefaultTransforms.insert(loaded_bone_data.boneDefaultTransforms.begin(), loaded_bone_data.boneDefaultTransforms.end());
-
-            // Only set global inverse if it's the first model or handle separately? 
-            // It seems unused for skinning (offset matrix handles it), so valid to leave or overwrite.
-            if (!append) scene.boneData.globalInverseTransform = loaded_bone_data.globalInverseTransform;
-
-            // CRITICAL: Rebuild reverse lookup after merge for O(1) index->name queries
-            scene.boneData.rebuildReverseLookup();
-        }
-
-        // 3. Merge Animations
-        if (append) {
-            scene.animationDataList.insert(scene.animationDataList.end(), loaded_animations.begin(), loaded_animations.end());
-        }
-        else {
-            scene.animationDataList = loaded_animations;
-        }
-
-        SCENE_LOG_INFO("Successfully loaded triangles: " + std::to_string(loaded_triangles.size()));
-        SCENE_LOG_INFO("Loaded animations: " + std::to_string(loaded_animations.size()));
-        SCENE_LOG_INFO("Total Bones (Merged): " + std::to_string(scene.boneData.boneNameToIndex.size()));
     }
+
+    // 2. Merge Bone Data
+    if (hasBones) {
+        for (const auto& [name, id] : loaded_bone_data.boneNameToIndex) {
+            scene.boneData.boneNameToIndex[name] = id + boneIndexOffset;
+        }
+        // Merge Offset Matrices and Node Pointers
+        scene.boneData.boneOffsetMatrices.insert(loaded_bone_data.boneOffsetMatrices.begin(), loaded_bone_data.boneOffsetMatrices.end());
+        scene.boneData.boneNameToNode.insert(loaded_bone_data.boneNameToNode.begin(), loaded_bone_data.boneNameToNode.end());
+        scene.boneData.perModelInverses.insert(loaded_bone_data.perModelInverses.begin(), loaded_bone_data.perModelInverses.end());
+        scene.boneData.boneParents.insert(loaded_bone_data.boneParents.begin(), loaded_bone_data.boneParents.end());
+        scene.boneData.boneDefaultTransforms.insert(loaded_bone_data.boneDefaultTransforms.begin(), loaded_bone_data.boneDefaultTransforms.end());
+        scene.boneData.weightedBoneNames.insert(loaded_bone_data.weightedBoneNames.begin(), loaded_bone_data.weightedBoneNames.end());
+
+        // Only set global inverse if it's the first model or handle separately? 
+        // It seems unused for skinning (offset matrix handles it), so valid to leave or overwrite.
+        if (!append) scene.boneData.globalInverseTransform = loaded_bone_data.globalInverseTransform;
+
+        // CRITICAL: Rebuild reverse lookup after merge for O(1) index->name queries
+        scene.boneData.rebuildReverseLookup();
+    }
+
+    // 3. Merge Animations
+    if (append) {
+        scene.animationDataList.insert(scene.animationDataList.end(), loaded_animations.begin(), loaded_animations.end());
+    }
+    else {
+        scene.animationDataList = loaded_animations;
+    }
+
+    SCENE_LOG_INFO("Successfully loaded triangles: " + std::to_string(loaded_triangles.size()));
+    SCENE_LOG_INFO("Loaded animations: " + std::to_string(loaded_animations.size()));
+    SCENE_LOG_INFO("Total Bones (Merged): " + std::to_string(scene.boneData.boneNameToIndex.size()));
 
     update_progress(45, "Adding triangles to scene...");
     SCENE_LOG_INFO("Adding triangles to scene world...");
@@ -1934,6 +1995,8 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
         scene.world.add(tri);
         modelCtx.members.push_back(tri);
     }
+    modelCtx.rebuildSkeletonRepresentation(scene.boneData);
+    scene.importedModelContexts.push_back(modelCtx);
     SCENE_LOG_INFO("Added " + std::to_string(loaded_triangles.size()) + " triangles to scene member list.");
 
     // Initialize animation system for the new model
@@ -2155,27 +2218,26 @@ std::uniform_int_distribution<> dis_height(0, image_height - 1);
 
 
 void Renderer::apply_normal_map(HitRecord& rec) {
-    if (!rec.material) {
+    HitMaterialResolver::resolveMaterialPointers(rec);
+    Material* material = rec.materialPtr;
+    if (!material) {
         return;
     }
 
-    if (rec.material->has_normal_map()) {
-        Vec3 tangent = rec.tangent;
-        Vec3 bitangent = rec.bitangent;
-
-        if (!rec.has_tangent) {
-            create_coordinate_system(rec.normal, tangent, bitangent);
-            tangent = (tangent - rec.normal * Vec3::dot(rec.normal, tangent));
-            bitangent = Vec3::cross(rec.normal, tangent);
-            if (Vec3::dot(Vec3::cross(tangent, bitangent), rec.normal) < 0.0f) {
-                bitangent = -bitangent;
-            }
+    if (material->has_normal_map()) {
+        Vec3 tangent;
+        Vec3 bitangent;
+        create_coordinate_system(rec.normal, tangent, bitangent);
+        tangent = (tangent - rec.normal * Vec3::dot(rec.normal, tangent));
+        bitangent = Vec3::cross(rec.normal, tangent);
+        if (Vec3::dot(Vec3::cross(tangent, bitangent), rec.normal) < 0.0f) {
+            bitangent = -bitangent;
         }
 
-        Vec3 normal_from_map = rec.material->get_normal_from_map(rec.u, rec.v);
+        Vec3 normal_from_map = material->get_normal_from_map(rec.u, rec.v);
         normal_from_map = normal_from_map * 2.0 - Vec3(1.0, 1.0, 1.0);
 
-        float normal_strength = rec.material->get_normal_strength();
+        float normal_strength = material->get_normal_strength();
         normal_from_map.x *= normal_strength;
         normal_from_map.y *= normal_strength;
 
@@ -2360,25 +2422,30 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
     // Malzeme �zellikleri
     // Malzeme �zellikleri (Blending Support)
+    Material* material = rec.materialPtr;
+    if (!material) {
+        return direct_light;
+    }
+
     Vec3 albedo;
     float metallic;
     float roughness;
     float clearcoat = 0.0f;
     float clearcoatRoughness = 0.03f;
 
-    if (rec.use_custom_data) {
-        albedo = rec.custom_albedo;
-        metallic = rec.custom_metallic;
-        roughness = rec.custom_roughness;
-        clearcoat = rec.custom_clearcoat;
-        clearcoatRoughness = rec.custom_clearcoat_roughness;
+    if (rec.surface_override.valid) {
+        albedo = rec.surface_override.albedo;
+        metallic = rec.surface_override.metallic;
+        roughness = rec.surface_override.roughness;
+        clearcoat = rec.surface_override.clearcoat;
+        clearcoatRoughness = rec.surface_override.clearcoat_roughness;
     } else {
-        albedo = rec.material->getPropertyValue(rec.material->albedoProperty, uv);
-        metallic = rec.material->getPropertyValue(rec.material->metallicProperty, uv).z;
-        roughness = rec.material->getPropertyValue(rec.material->roughnessProperty, uv).y;
+        albedo = material->getPropertyValue(material->albedoProperty, uv);
+        metallic = material->getPropertyValue(material->metallicProperty, uv).z;
+        roughness = material->getPropertyValue(material->roughnessProperty, uv).y;
         
         // Try to get clearcoat from material
-        if (auto pMat = std::dynamic_pointer_cast<PrincipledBSDF>(rec.material)) {
+        if (auto pMat = dynamic_cast<PrincipledBSDF*>(material)) {
             clearcoat = pMat->clearcoat;
             clearcoatRoughness = pMat->clearcoatRoughness;
         }
@@ -2510,6 +2577,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     while (remaining_dist > 0.001f && shadow_layers < 4) {
         HitRecord shadow_rec;
         if (bvh->hit(shadow_ray_current, 0.001f, remaining_dist, shadow_rec)) {
+            HitMaterialResolver::resolveMaterialPointers(shadow_rec);
 
             // Check if blocker is a Volume (VDB or Unified Gas)
             const VDBVolume* vdb = shadow_rec.vdb_volume;
@@ -2593,9 +2661,9 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
             else {
                 // Check for Generic Mesh Volume Traversal
                 bool is_volumetric = false;
-                if (shadow_rec.material && shadow_rec.material->type() == MaterialType::Volumetric) {
+                if (shadow_rec.materialPtr && shadow_rec.materialPtr->type() == MaterialType::Volumetric) {
                     is_volumetric = true;
-                    auto vol = std::static_pointer_cast<Volumetric>(shadow_rec.material);
+                    auto vol = static_cast<Volumetric*>(shadow_rec.materialPtr);
 
                     // Find exit point (assume convex/closed mesh for now)
                     Ray exit_ray(shadow_ray_current.at(shadow_rec.t + 0.001f), shadow_ray_current.direction);
@@ -2608,6 +2676,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
                     bool found_exit = false;
 
                     if (bvh->hit(exit_ray, 0.001f, exit_dist, exit_rec)) {
+                        HitMaterialResolver::resolveMaterialPointers(exit_rec);
                         // If we hit something, assume it's the exit if it's the same material
                         // Or just treat the segment [enter, next_hit] as the volume
                         t_vol_exit = exit_rec.t;
@@ -2671,8 +2740,8 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
                     bool is_transparent = false;
                     Vec3 transmission_filter(1.0f);
 
-                    if (shadow_rec.material) {
-                        auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(shadow_rec.material);
+                    if (shadow_rec.materialPtr) {
+                        auto pbsdf = dynamic_cast<PrincipledBSDF*>(shadow_rec.materialPtr);
                         if (pbsdf) {
                             Vec2 uv(shadow_rec.u, shadow_rec.v);
                             float tr = pbsdf->getTransmission(uv);
@@ -2832,6 +2901,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         bool hit_any = false;
         if (bvh) {
             hit_any = bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), rec, false);
+            if (hit_any) {
+                HitMaterialResolver::resolveSurfaceData(rec);
+            }
         }
         
         // Check hair intersection (if hair system has strands)
@@ -3149,28 +3221,17 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
             }
 
-            if (bounce == 0 && hit_any) {
-                first_hit_t = rec.t;
-            }
         }
-        // --- God Rays (Bounce 0 only) ---
-        if (bounce == 0 && world.data.mode == WORLD_MODE_NISHITA && world.data.nishita.godrays_enabled && world.data.nishita.godrays_intensity > 0.0f) {
-            float hit_dist = hit_any ? rec.t : world.data.nishita.fog_distance * 0.5f;
-            Vec3 god_rays = VolumetricRenderer::calculateGodRays(scene, world.data, current_ray, hit_dist, bvh, world.getLUT());
-
-            // Check for NaNs/Infs to prevent black screen
-            if (std::isfinite(god_rays.x) && std::isfinite(god_rays.y) && std::isfinite(god_rays.z)) {
-                color += throughput * toVec3f(god_rays);
-            }
-        }
-
         if (!hit_any) {
             // No hit at all? Skip second pass and go to background
         }
-        else if (rec.gas_volume || rec.vdb_volume || (rec.material && rec.material->type() == MaterialType::Volumetric)) {
+        else if (rec.gas_volume || rec.vdb_volume || (rec.materialPtr && rec.materialPtr->type() == MaterialType::Volumetric)) {
             // Hit a volume? 2. Second Pass: Find what's behind/inside (ignore volumes)
             if (bvh) {
                 hit_solid = bvh->hit(current_ray, 0.001f, std::numeric_limits<float>::infinity(), solid_rec, true);
+                if (hit_solid) {
+                    HitMaterialResolver::resolveSurfaceData(solid_rec);
+                }
             }
         }
         else {
@@ -3179,8 +3240,23 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             hit_solid = true;
         }
 
-        if (bounce == 0) {
-            first_hit_t = hit_solid ? solid_rec.t : -1.0f;
+        if (bounce == 0 && hit_solid) {
+            // Preserve the primary hit distance for volume-first paths so aerial
+            // perspective stays stable while progressive samples accumulate.
+            first_hit_t = solid_rec.t;
+        }
+
+        // --- God Rays (Bounce 0 only) ---
+        if (bounce == 0 && world.data.mode == WORLD_MODE_NISHITA &&
+            world.data.nishita.godrays_enabled && world.data.nishita.godrays_intensity > 0.0f) {
+            float hit_dist = hit_any ? rec.t : world.data.nishita.fog_distance * 0.5f;
+            Vec3 god_rays = VolumetricRenderer::calculateGodRays(
+                scene, world.data, current_ray, hit_dist, bvh, world.getLUT());
+
+            // Check for NaNs/Infs to prevent black screen
+            if (std::isfinite(god_rays.x) && std::isfinite(god_rays.y) && std::isfinite(god_rays.z)) {
+                color += throughput * toVec3f(god_rays);
+            }
         }
 
         // === VOLUMETRIC ABSORPTION (Beer's Law) ===
@@ -3651,6 +3727,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             HitRecord shadow_rec;
                             
                             if (bvh->hit(shadow_ray_vol, 0.001f, light_dist, shadow_rec)) {
+                                HitMaterialResolver::resolveMaterialPointers(shadow_rec);
                                 if (!shadow_rec.vdb_volume) {
                                     shadow_transmittance = 0.0f;
                                 } else {
@@ -3803,8 +3880,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         }
 
         // --- Mesh Volume Rendering ---
-        if (rec.material && rec.material->type() == MaterialType::Volumetric) {
-            auto vol = std::static_pointer_cast<Volumetric>(rec.material);
+        if (rec.materialPtr && rec.materialPtr->type() == MaterialType::Volumetric) {
+            auto vol = static_cast<Volumetric*>(rec.materialPtr);
             float step_size = vol->getStepSize();
             float density_mult = vol->getDensity();
 
@@ -3818,6 +3895,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
             // Trace to find backface
             if (bvh->hit(exit_ray, 0.001f, std::numeric_limits<float>::infinity(), exit_rec)) {
+                HitMaterialResolver::resolveMaterialPointers(exit_rec);
                 // Next hit (could be backface or another object)
                 march_dist = exit_rec.t;
                 t_vol_exit = t_vol_enter + march_dist;
@@ -3903,6 +3981,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             while (dist_trace > 0.001f && shadow_layers < 2) {
                                 HitRecord sidx_rec;
                                 if (bvh->hit(shadow_ray_vol, 0.001f, dist_trace, sidx_rec)) {
+                                    HitMaterialResolver::resolveMaterialPointers(sidx_rec);
 
                                     bool is_transp_shadow = false;
 
@@ -3944,8 +4023,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                             dist_trace -= adv;
                                         }
                                     }
-                                    else if (sidx_rec.material && sidx_rec.material->type() == MaterialType::Volumetric) {
-                                        auto vol_s = std::static_pointer_cast<Volumetric>(sidx_rec.material);
+                                    else if (sidx_rec.materialPtr && sidx_rec.materialPtr->type() == MaterialType::Volumetric) {
+                                        auto vol_s = static_cast<Volumetric*>(sidx_rec.materialPtr);
                                         is_transp_shadow = true;
 
                                         // Find Exit Point or Obstruction
@@ -3954,6 +4033,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                         float s_march_dist = dist_trace;
 
                                         if (bvh->hit(s_exit_ray, 0.001f, dist_trace, s_exit_rec)) {
+                                            HitMaterialResolver::resolveMaterialPointers(s_exit_rec);
                                             s_march_dist = s_exit_rec.t;
                                         }
 
@@ -4067,8 +4147,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         float transmission = 0.0f;
         Vec3f emission(0.0f);
 
-        if (rec.material) {
-            auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(rec.material);
+        if (rec.materialPtr) {
+            auto pbsdf = dynamic_cast<PrincipledBSDF*>(rec.materialPtr);
             if (pbsdf) {
                 Vec2 uv(rec.u, rec.v);
 
@@ -4077,7 +4157,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                 // === STOCHASTIC TRANSPARENCY BOUNCE REFUND ===
                 // Prevents "Ghost Silhouette" when max bounces is reached on transparent geometry.
-                if (opacity < 0.999f) {
+                const bool has_opacity_texture = (pbsdf->opacityProperty.texture != nullptr);
+                if (!has_opacity_texture && opacity < 0.999f) {
                     if (Vec3::random_float() > opacity) {
                         transparent_hits++;
 
@@ -4092,71 +4173,13 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     }
                 }
 
-                // --- Albedo, Roughness, Metallic, Normal (Terrain vs Standard) ---
-                bool terrain_handled = false;
-                if (rec.terrain_id != -1) {
-                    TerrainObject* terrain = TerrainManager::getInstance().getTerrain(rec.terrain_id);
-                    if (terrain && terrain->splatMap && !terrain->layers.empty()) {
-                        Vec3 splat_rgb = terrain->splatMap->get_color(uv.u, uv.v);
-                        float splat_a = terrain->splatMap->get_alpha(uv.u, uv.v);
-                        float weights[4] = { (float)splat_rgb.x, (float)splat_rgb.y, (float)splat_rgb.z, splat_a };
-                        
-                        Vec3f b_albedo(0.0f);
-                        float b_rough = 0.0f;
-                        float b_metal = 0.0f;
-                        float b_trans = 0.0f;
-                        float b_ior = 0.0f;
-                        Vec3 blended_n(0.0f);
-                        bool has_n = false;
-
-                        for (int i = 0; i < 4 && i < (int)terrain->layers.size(); ++i) {
-                            if (weights[i] < 0.001f) continue;
-                            auto layer = std::dynamic_pointer_cast<PrincipledBSDF>(terrain->layers[i]);
-                            if (layer) {
-                                float scale = (i < (int)terrain->layer_uv_scales.size()) ? terrain->layer_uv_scales[i] : 1.0f;
-                                Vec2 luv(uv.u * scale, uv.v * scale);
-                                
-                                b_albedo += toVec3f(layer->getPropertyValue(layer->albedoProperty, luv)) * weights[i];
-                                b_rough += static_cast<float>(layer->getPropertyValue(layer->roughnessProperty, luv).y) * weights[i];
-                                b_metal += static_cast<float>(layer->getPropertyValue(layer->metallicProperty, luv).z) * weights[i];
-                                b_trans += layer->getTransmission(luv) * weights[i];
-                                b_ior += layer->getIOR() * weights[i];
-                                
-                                if (layer->has_normal_map()) {
-                                    Vec3 ns = layer->get_normal_from_map(luv.u, luv.v) * 2.0f - Vec3(1.0f);
-                                    ns.x = -ns.x; // [FIX] Flip X for basis consistency (matching OptiX)
-                                    ns.y = -ns.y; // [FIX] Flip Y for terrain normal map orientation
-                                    blended_n += ns * weights[i];
-                                    has_n = true;
-                                }
-                            }
-                        }
-                        albedo = b_albedo.clamp(0.01f, 1.0f);
-                        roughness = std::clamp(b_rough, 0.01f, 1.0f);
-                        metallic = std::clamp(b_metal, 0.0f, 1.0f);
-                        transmission = std::clamp(b_trans, 0.0f, 1.0f);
-                        
-                        if (has_n) {
-                            Vec3 T, B;
-                            Renderer::create_coordinate_system(rec.normal, T, B);
-                            Mat3x3 TBN(T, B, rec.normal);
-                            rec.interpolated_normal = (TBN * blended_n.normalize()).normalize();
-                            N = toVec3f(rec.interpolated_normal);
-                        }
-                        
-                        // Pass blended data to HitRecord for scatter/pdf
-                        rec.use_custom_data = true;
-                        rec.custom_albedo = toVec3(albedo);
-                        rec.custom_roughness = roughness;
-                        rec.custom_metallic = metallic;
-                        rec.custom_transmission = transmission;
-                        rec.custom_ior = (b_ior > 0.01f) ? b_ior : 1.45f;
-                        
-                        terrain_handled = true;
-                    }
-                }
-
-                if (!terrain_handled) {
+                // --- Albedo, Roughness, Metallic (Terrain is pre-resolved into custom data) ---
+                if (rec.surface_override.valid) {
+                    albedo = toVec3f(rec.surface_override.albedo).clamp(0.01f, 1.0f);
+                    roughness = std::clamp(rec.surface_override.roughness, 0.01f, 1.0f);
+                    metallic = std::clamp(rec.surface_override.metallic, 0.0f, 1.0f);
+                    transmission = std::clamp(rec.surface_override.transmission, 0.0f, 1.0f);
+                } else {
                     // Albedo
                     Vec3 alb = pbsdf->getPropertyValue(pbsdf->albedoProperty, uv);
                     albedo = toVec3f(alb).clamp(0.01f, 1.0f);
@@ -4168,11 +4191,43 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     // Metallic (Z channel)
                     Vec3 metal = pbsdf->getPropertyValue(pbsdf->metallicProperty, uv);
                     metallic = static_cast<float>(metal.z);
+                    transmission = pbsdf->getTransmission(uv);
                 }
 
-                // Transmission
-                if (!terrain_handled) {
-                    transmission = pbsdf->getTransmission(uv);
+                // Terrain normal blending still lives here because it needs the
+                // final shading basis after hit-resolution but before BRDF usage.
+                if (rec.terrain_id != -1) {
+                    TerrainObject* terrain = TerrainManager::getInstance().getTerrain(rec.terrain_id);
+                    if (terrain && terrain->splatMap && !terrain->layers.empty()) {
+                        Vec3 splat_rgb = terrain->splatMap->get_color_bilinear(uv.u, uv.v);
+                        float splat_a = terrain->splatMap->get_alpha_bilinear(uv.u, uv.v);
+                        float weights[4] = { (float)splat_rgb.x, (float)splat_rgb.y, (float)splat_rgb.z, splat_a };
+
+                        Vec3 blended_n(0.0f);
+                        bool has_n = false;
+
+                        for (int i = 0; i < 4 && i < (int)terrain->layers.size(); ++i) {
+                            if (weights[i] < 0.001f) continue;
+                            auto layer = dynamic_cast<PrincipledBSDF*>(terrain->layers[i].get());
+                            if (!layer || !layer->has_normal_map()) continue;
+
+                            float scale = (i < (int)terrain->layer_uv_scales.size()) ? terrain->layer_uv_scales[i] : 1.0f;
+                            Vec2 luv(uv.u * scale, uv.v * scale);
+                            Vec3 ns = layer->get_normal_from_map(luv.u, luv.v) * 2.0f - Vec3(1.0f);
+                            ns.x = -ns.x; // [FIX] Flip X for basis consistency (matching OptiX)
+                            ns.y = -ns.y; // [FIX] Flip Y for terrain normal map orientation
+                            blended_n += ns * weights[i];
+                            has_n = true;
+                        }
+
+                        if (has_n) {
+                            Vec3 T, B;
+                            Renderer::create_coordinate_system(rec.normal, T, B);
+                            Mat3x3 TBN(T, B, rec.normal);
+                            rec.interpolated_normal = (TBN * blended_n.normalize()).normalize();
+                            N = toVec3f(rec.interpolated_normal);
+                        }
+                    }
                 }
 
                 // === WATER WAVE SHADER (CPU) ===
@@ -4186,8 +4241,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
                     // Pack parameters (Mirror GPU raygen.cu packing)
                     WaterParamsCPU params;
-                    if (rec.material->gpuMaterial) {
-                        auto& g_mat = *rec.material->gpuMaterial;
+                    if (rec.materialPtr->gpuMaterial) {
+                        auto& g_mat = *rec.materialPtr->gpuMaterial;
                         params.wave_speed = g_mat.anisotropic;
                         params.wave_strength = g_mat.sheen;
                         params.wave_frequency = g_mat.sheen_tint;
@@ -4299,8 +4354,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         }
 
         // --- Add Emission (Volumetric & Surface) ---
-        if (rec.material && rec.material->type() == MaterialType::Volumetric) {
-            auto vol = std::static_pointer_cast<Volumetric>(rec.material);
+        if (rec.materialPtr && rec.materialPtr->type() == MaterialType::Volumetric) {
+            auto vol = static_cast<Volumetric*>(rec.materialPtr);
 
             // Calculate AABB for Object Space Noise
             Vec3 aabb_min(0), aabb_max(0);
@@ -4348,14 +4403,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         // Vulkan closesthit: payload.radiance = emColor * emStrength (before scatter decision)
         // Vulkan raygen: radiance += throughput * payload.radiance (before scatter check)
         // This ensures emissive-only surfaces still contribute even if scatter fails.
-        Vec3 emitted = rec.material ? rec.material->getEmission(rec.uv, rec.point) : Vec3(0.0f);
+        Vec3 emitted = rec.materialPtr ? rec.materialPtr->getEmission(rec.uv, rec.point) : Vec3(0.0f);
         emission = toVec3f(emitted);
 
         // --- Scatter ray (GPU Parity: Happens before contribution accumulation) ---
         Vec3 attenuation(1.0f);
         Ray scattered;
         bool is_specular = false;
-        bool can_scatter = rec.material && rec.material->scatter(current_ray, rec, attenuation, scattered, is_specular);
+        bool can_scatter = rec.materialPtr && rec.materialPtr->scatter(current_ray, rec, attenuation, scattered, is_specular);
 
         if (!can_scatter) {
             // Vulkan parity: emissive-only surfaces still emit light.
@@ -4385,7 +4440,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             if (entering) {
                 // Entering medium: Set absorption coefficient
                 // sigma_a = (1 - color) * density
-                auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(rec.material);
+                auto pbsdf = dynamic_cast<PrincipledBSDF*>(rec.materialPtr);
                 if (pbsdf) {
                     Vec3 subColor = pbsdf->subsurfaceColor; 
                     float subScale = pbsdf->subsurfaceScale;
@@ -4624,13 +4679,27 @@ void Renderer::uploadHairToGPU() {
     auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(m_backend);
     if (vulkanBackend) {
         const bool noHair = (hairSystem.getTotalStrandCount() == 0);
-        vulkanBackend->clearHairGeometry(noHair);
-        if (hairSystem.getTotalStrandCount() == 0) {
+        auto groomNames = hairSystem.getGroomNames();
+
+        bool hasVisibleHair = false;
+        for (const auto& name : groomNames) {
+            const Hair::HairGroom* groom = hairSystem.getGroom(name);
+            if (!groom || !groom->isVisible) continue;
+
+            const auto& srcStrands = (!groom->interpolated.empty() && !hideInterpolatedHair)
+                ? groom->interpolated : groom->guides;
+            if (!srcStrands.empty()) {
+                hasVisibleHair = true;
+                break;
+            }
+        }
+
+        vulkanBackend->clearHairGeometry(noHair || !hasVisibleHair);
+        if (noHair || !hasVisibleHair) {
+            SCENE_LOG_INFO("[Hair GPU/Vulkan] Uploaded 0 grooms, 0 strands (combined)");
             vulkanBackend->resetAccumulation();
             return;
         }
-
-        auto groomNames = hairSystem.getGroomNames();
 
         // [FIX] Combine ALL visible grooms into ONE strand list so that only a
         // single AABB BLAS and a single segment SSBO are created.  The old
@@ -5966,158 +6035,8 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
 
 
 
-void Renderer::updateWind(SceneData& scene, float time) {
-    auto& im = InstanceManager::getInstance();
-    bool any_update = false;
-
-    // Iterate all instance groups
-    for (auto& groupRef : im.getGroups()) {
-        InstanceGroup* group = &groupRef;
-
-        // 1. Initial State Capture (Lazy Init)
-        // If we loaded a scene from disk, initial_instances might be empty.
-        // We capture the current state as the "Rest Pose".
-        if (group->initial_instances.empty() && !group->instances.empty()) {
-            group->initial_instances = group->instances;
-        }
-
-        // Safety sync if size mismatch (e.g. instances deleted externally without sync)
-        if (group->initial_instances.size() != group->instances.size()) {
-            group->initial_instances = group->instances; // Reset rest pose to current to capture new layout
-        }
-
-        if (!group->wind_settings.enabled) continue;
-
-        // 2. Wind Parameters
-        float speed = group->wind_settings.speed;
-        float strength = group->wind_settings.strength;
-        float turbulence = group->wind_settings.turbulence;
-        float wave = group->wind_settings.wave_size > 0.1f ? group->wind_settings.wave_size : 50.0f;
-        Vec3 dir = group->wind_settings.direction.normalize();
-
-        // ===========================================================================
-        // ENHANCED WIND PARAMETERS
-        // ===========================================================================
-
-        // Constant lean: How much the tree bends TOWARDS wind direction (in degrees)
-        // This creates the "permanently bent by strong wind" look
-        float lean_amount = strength * 0.6f;  // 60% of strength goes to constant lean
-
-        // Oscillation: The back-and-forth sway
-        float sway_amount = strength * 0.4f;  // 40% of strength goes to dynamic sway
-
-        // Maximum bend angle (prevents unnatural 90-degree bends)
-        const float max_bend_angle = 25.0f;  // degrees
-
-        // 3. Animation Loop
-        bool has_active_links = (group->active_hittables.size() == group->instances.size());
-
-        for (size_t i = 0; i < group->instances.size(); ++i) {
-            const auto& init = group->initial_instances[i];
-            auto& curr = group->instances[i];
-
-            // ===========================================================================
-            // MULTI-FREQUENCY OSCILLATION
-            // Creates natural, organic movement by combining multiple wave frequencies
-            // ===========================================================================
-
-            // Phase based on world position (creates wave propagation effect)
-            float pos_phase = (init.position.x * dir.x + init.position.z * dir.z) / wave;
-            float t_phase = time * speed;
-
-            // Primary wave: Slow, large movement
-            float wave_primary = sinf(pos_phase + t_phase) * 1.0f;
-
-            // Secondary wave: Faster, smaller movement (flutter)
-            float wave_secondary = sinf(pos_phase * 2.3f + t_phase * 1.7f) * 0.35f;
-
-            // Tertiary wave: High frequency micro-movement (turbulence)
-            float wave_tertiary = sinf(pos_phase * 4.1f + t_phase * 2.9f * turbulence) * 0.15f;
-
-            // Combined oscillation (-1 to +1 range, weighted)
-            float oscillation = wave_primary + wave_secondary + wave_tertiary;
-            oscillation = oscillation / 1.5f;  // Normalize back to ~[-1, 1]
-
-            // ===========================================================================
-            // DIRECTIONAL BENDING
-            // Tree leans TOWARDS wind direction + oscillates around that lean
-            // ===========================================================================
-
-            // Constant lean towards wind direction
-            // R�zgar +X y�n�nde esiyorsa, a�a� +X y�n�ne do�ru e�ilir
-            float lean_x = dir.z * lean_amount;   // Lean around X-axis based on wind Z component
-            float lean_z = -dir.x * lean_amount;  // Lean around Z-axis based on wind X component
-
-            // Dynamic oscillation around the lean point
-            float osc_x = dir.z * oscillation * sway_amount;
-            float osc_z = -dir.x * oscillation * sway_amount;
-
-            // Combined rotation = initial + constant lean + oscillation
-            float final_rot_x = init.rotation.x + lean_x + osc_x;
-            float final_rot_z = init.rotation.z + lean_z + osc_z;
-
-            // ===========================================================================
-            // ANGLE CLAMPING (Prevent unnatural over-bending)
-            // ===========================================================================
-            float total_bend = sqrtf((final_rot_x - init.rotation.x) * (final_rot_x - init.rotation.x) +
-                (final_rot_z - init.rotation.z) * (final_rot_z - init.rotation.z));
-
-            if (total_bend > max_bend_angle) {
-                float scale = max_bend_angle / total_bend;
-                final_rot_x = init.rotation.x + (final_rot_x - init.rotation.x) * scale;
-                final_rot_z = init.rotation.z + (final_rot_z - init.rotation.z) * scale;
-            }
-
-            // Apply final rotation
-            curr.rotation.x = final_rot_x;
-            curr.rotation.z = final_rot_z;
-
-            // Update Active HittableInstance if linked
-            if (has_active_links) {
-                if (auto hittable = group->active_hittables[i].lock()) {
-                    if (auto hi = std::dynamic_pointer_cast<HittableInstance>(hittable)) {
-                        Matrix4x4 new_mat = curr.toMatrix();
-                        hi->setTransform(new_mat);
-
-                        // OPTIMIZATION: Direct GPU Update
-                        if (this->m_backend && g_hasCUDA && !hi->optix_instance_ids.empty()) {
-                            float t[12];
-                            const Matrix4x4& m = new_mat;
-                            t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
-                            t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
-                            t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
-
-                            for (int id : hi->optix_instance_ids) {
-                                this->m_backend->updateInstanceTransform(id, t);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        group->gpu_dirty = true;
-        any_update = true;
-
-        // ===========================================================================
-        // GPU SHADER WIND PARAMETERS
-        // Upload wind direction, strength, speed, time for shader-based displacement
-        // ===========================================================================
-            if (this->m_backend && g_hasCUDA) {
-            // Normalize strength to 0-1 range for shader (divide by max angle)
-            float normalized_strength = strength / 25.0f;  // max_bend_angle = 25 degrees
-            this->m_backend->setWindParams(
-                group->wind_settings.direction,
-                normalized_strength,
-                speed,
-                time
-            );
-        }
-        // Commit changes to TLAS if any updates occurred
-        if (any_update && this->m_backend && g_hasCUDA) {
-            this->m_backend->rebuildAccelerationStructure(); // Fast refit/update
-        }
-    }
+FoliageWindUpdateStats Renderer::updateWind(SceneData& scene, float time) {
+    return FoliageWindSystem::update(scene, time, this->m_backend);
 }
 
 // ===============================================================================

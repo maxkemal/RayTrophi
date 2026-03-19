@@ -6,7 +6,6 @@
 #include <filesystem>
 #include <limits>
 #include "RayPacket.h"
-#include "HitRecordPacket.h"
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTRUCTION
@@ -318,7 +317,7 @@ bool VDBVolume::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool
     rec.vdb_volume = this;
     
     // For now, we don't set material - the renderer will handle VDB specially
-    rec.material = nullptr;
+    rec.materialPtr = nullptr;
     rec.materialID = 0xFFFF;
     
     return true;
@@ -389,21 +388,37 @@ bool VDBVolume::bounding_box(float time0, float time1, AABB& output_box) const {
 // TRANSFORM
 // ═══════════════════════════════════════════════════════════════════════════════
 
-void VDBVolume::setTransform(const Matrix4x4& transform) {
-    world_transform = transform;
-    world_transform_inv = transform.inverse();
-    
-    // CRITICAL: Decompose matrix to update internal members.
-    // This ensures that 'updateTransformMatrix' (called by UI or frame updates) 
-    // uses the values derived from the Gizmo/Input.
-    transform.decompose(position, rotation_euler, scale_vec);
-
-    // Update transform handle if present
-    if (transform_handle) {
-        transform_handle->setBase(transform);
-    }
-    
+void VDBVolume::syncTransformStateFromHandle() {
+    if (!transform_handle) return;
+    world_transform = transform_handle->base;
+    world_transform_inv = world_transform.inverse();
+    position = transform_handle->position;
+    rotation_euler = transform_handle->rotation;
+    scale_vec = transform_handle->scale;
+    pivot_offset = transform_handle->pivot_offset;
     invalidateWorldBounds();
+}
+
+void VDBVolume::setTransform(const Matrix4x4& transform) {
+    if (transform_handle) {
+        transform_handle->setPivotOffset(pivot_offset, false);
+        transform_handle->setBase(transform);
+        syncTransformStateFromHandle();
+    } else {
+        world_transform = transform;
+        world_transform_inv = transform.inverse();
+        transform.decompose(position, rotation_euler, scale_vec);
+    }
+    invalidateWorldBounds();
+}
+
+void VDBVolume::setPivotMatrix(const Matrix4x4& pivotMatrix) {
+    if (!transform_handle) {
+        transform_handle = std::make_shared<Transform>();
+    }
+    transform_handle->setPivotOffset(pivot_offset, false);
+    transform_handle->setPivotMatrix(pivotMatrix);
+    syncTransformStateFromHandle();
 }
 
 void VDBVolume::setPosition(const Vec3& pos) {
@@ -421,6 +436,15 @@ void VDBVolume::setScale(const Vec3& scale) {
     updateTransformMatrix();
 }
 
+void VDBVolume::setPivotOffset(const Vec3& po, bool preserve_world) {
+    pivot_offset = po;
+    if (transform_handle) {
+        transform_handle->setPivotOffset(po, preserve_world);
+        syncTransformStateFromHandle();
+    }
+    updateBoundsFromVDB();
+}
+
 void VDBVolume::centerPivotToBottomCenter() {
     // Calculate pivot offset: center X/Z, bottom Y
     Vec3 center = (local_bbox_min + local_bbox_max) * 0.5f;
@@ -429,36 +453,28 @@ void VDBVolume::centerPivotToBottomCenter() {
     offset_needed.x = -center.x;
     offset_needed.y = -local_bbox_min.y;
     offset_needed.z = -center.z;
-    
-    pivot_offset += offset_needed;
-    
-    // Applying offset to current bounds
-    local_bbox_min += offset_needed;
-    local_bbox_max += offset_needed;
-    
-    if (has_first_frame_bounds) {
-        first_frame_bbox_min += offset_needed;
-        first_frame_bbox_max += offset_needed;
-    }
-    
-    invalidateWorldBounds();
+
+    setPivotOffset(pivot_offset + offset_needed);
 }
 
 void VDBVolume::updateTransformMatrix() {
-    // Build TRS matrix using standard Euler order (T * Rz * Ry * Rx * S)
-    Matrix4x4 T = Matrix4x4::translation(position);
-    Matrix4x4 Rx = Matrix4x4::rotationX(rotation_euler.x * 0.0174532925f);
-    Matrix4x4 Ry = Matrix4x4::rotationY(rotation_euler.y * 0.0174532925f);
-    Matrix4x4 Rz = Matrix4x4::rotationZ(rotation_euler.z * 0.0174532925f);
-    Matrix4x4 S = Matrix4x4::scaling(scale_vec);
-    
-    world_transform = T * Rz * Ry * Rx * S;
-    world_transform_inv = world_transform.inverse();
-    
     if (transform_handle) {
-        transform_handle->setBase(world_transform);
+        transform_handle->setPivotOffset(pivot_offset, false);
+        transform_handle->position = position;
+        transform_handle->rotation = rotation_euler;
+        transform_handle->scale = scale_vec;
+        transform_handle->updateMatrix();
+        syncTransformStateFromHandle();
+    } else {
+        Matrix4x4 T = Matrix4x4::translation(position);
+        Matrix4x4 Rx = Matrix4x4::rotationX(rotation_euler.x * 0.0174532925f);
+        Matrix4x4 Ry = Matrix4x4::rotationY(rotation_euler.y * 0.0174532925f);
+        Matrix4x4 Rz = Matrix4x4::rotationZ(rotation_euler.z * 0.0174532925f);
+        Matrix4x4 S = Matrix4x4::scaling(scale_vec);
+
+        world_transform = T * Rz * Ry * Rx * S;
+        world_transform_inv = world_transform.inverse();
     }
-    
     invalidateWorldBounds();
 }
 
@@ -485,9 +501,10 @@ void VDBVolume::updateBoundsFromVDB() {
         bbox_valid = false;
     }
 
-    // Applying Pivot
-    Vec3 new_bbox_min = raw_bbox_min + pivot_offset;
-    Vec3 new_bbox_max = raw_bbox_max + pivot_offset;
+    // Keep VDB local bounds in native grid space.
+    // Pivot offset is handled by the transform matrix, not by shifting the data bounds.
+    Vec3 new_bbox_min = raw_bbox_min;
+    Vec3 new_bbox_max = raw_bbox_max;
 
     // Auto-Scale Logic: Handled only once on import/initial load (if scale is identity)
     float dx = new_bbox_max.x - new_bbox_min.x;
@@ -495,10 +512,13 @@ void VDBVolume::updateBoundsFromVDB() {
     float dz = new_bbox_max.z - new_bbox_min.z;
     float max_d = std::max({dx, dy, dz});
 
-    if (bbox_valid && max_d > 50.0f && std::abs(scale_vec.x - 1.0f) < 0.0001f) {
+    // Only auto-scale truly absurd import bounds. The previous thresholds were so low
+    // that legitimate large cloud/smoke VDBs (tens/hundreds of meters) were silently
+    // shrunk and then appeared to "disappear" at distance on the CPU path.
+    if (bbox_valid && max_d > 50000.0f && std::abs(scale_vec.x - 1.0f) < 0.0001f) {
         float corrected_scale = 0.01f;
-        if (max_d > 500.0f) corrected_scale = 0.001f;
-        if (max_d > 5000.0f) corrected_scale = 0.0001f;
+        if (max_d > 500000.0f) corrected_scale = 0.001f;
+        if (max_d > 5000000.0f) corrected_scale = 0.0001f;
         
         scale_vec = Vec3(corrected_scale);
         updateTransformMatrix(); // Apply scale immediately
