@@ -49,6 +49,7 @@
 #include <OpenImageDenoise/oidn.hpp>
 #include <ColorProcessingParams.h>
 #include <functional>
+#include "FoliageWindSystem.h"
 #include "AssimpLoader.h"
 #include "AnimationController.h"  // New animation management system
 #include "Hair/HairSystem.h"      // Hair/Fur rendering system
@@ -132,7 +133,7 @@ public:
     std::vector<Matrix4x4> finalBoneMatrices; // Stores computed bone matrices for the current frame
     
     // Wind Animation System
-    void updateWind(SceneData& scene, float time);
+    FoliageWindUpdateStats updateWind(SceneData& scene, float time);
 
     // ============ NEW ANIMATION SYSTEM ============
     // Initialize animation controller with scene clips
@@ -202,7 +203,7 @@ public:
     bool hideInterpolatedHair = false; // [NEW] Toggle to hide child hairs (interpolated) for performance during grooming
 
     Backend::IBackend* m_backend = nullptr; 
-
+    SDL_Renderer* sdlRenderer; // SDL_Renderer pointer'ı ekleyin
 private:
     std::vector<float> variance_buffer;
     static constexpr size_t CACHE_SIZE = 8;
@@ -242,7 +243,7 @@ private:
     // Adaptive sampling için ekstra bufferlar
     std::vector<Vec3> variance_map;
 
-    SDL_Renderer* sdlRenderer; // SDL_Renderer pointer'ı ekleyin
+  
     std::shared_ptr<Texture> background_texture;
     Vec3 sample_directional_light(const ParallelBVHNode* bvh, const DirectionalLight* light, const HitRecord& rec, const Vec3& light_contribution);
     Vec3 sample_point_light(const ParallelBVHNode* bvh, const PointLight* light, const HitRecord& rec, const Vec3& light_contribution);

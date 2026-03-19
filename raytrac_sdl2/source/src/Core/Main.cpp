@@ -1953,15 +1953,19 @@ int main(int argc, char* argv[]) try {
              
              // Use frame count from timeline (24 FPS assumption or settings)
              float time_seconds = current_volume_frame / 24.0f;
+             const bool has_instance_groups = InstanceManager::getInstance().getGroupCount() > 0;
 
              // Calculate wind transforms on CPU
-            FoliageWindUpdateStats wind_stats = InstanceManager::getInstance().updateWind(time_seconds, scene, g_backend.get());
+            FoliageWindUpdateStats wind_stats;
+            if (has_instance_groups) {
+                wind_stats = InstanceManager::getInstance().updateWind(time_seconds, scene, g_backend.get());
+            }
 
              // Update OptiX Time
              if (g_backend) g_backend->setTime(time_seconds, time_seconds);
              
              // Efficiently update instance transforms on GPU (no full rebuild)
-             if (g_backend && (wind_stats.any_cpu_update || wind_stats.gpu_deform_applied)) {
+             if (has_instance_groups && g_backend && (wind_stats.any_cpu_update || wind_stats.gpu_deform_applied)) {
                  g_backend->updateInstanceTransforms(scene.world.objects);
              }
              
@@ -2099,12 +2103,14 @@ int main(int argc, char* argv[]) try {
             if (is_dirty || is_shaking || is_af_c) {
                  // Ensure vectors are up to date
                  scene.camera->update_camera_vectors();
+                 ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
                  
                     if (ui_ctx.backend_ptr) {
                         ui_ctx.renderer.syncCameraToBackend(*scene.camera);
                         ui_ctx.backend_ptr->resetAccumulation();
                     }
                  ray_renderer.resetCPUAccumulation();
+                 g_camera_dirty = false;
                  
                  start_render = true;
             }
@@ -3070,8 +3076,7 @@ int main(int argc, char* argv[]) try {
                         // If !has_file_animations && !has_manual_keyframes, we don't reach here
                         
                         if (scene.camera) ray_renderer.syncCameraToBackend(*scene.camera);
-                        ray_renderer.updateBackendMaterials(scene);
-                        
+
                         // Update GPU materials for material keyframe animation
                         ray_renderer.updateBackendMaterials(scene);
                         
@@ -3157,14 +3162,14 @@ int main(int argc, char* argv[]) try {
         SDL_RenderPresent(renderer);
 
         // ===========================================================================
-        // IDLE OPTIMIZATION: Longer sleep when render is complete
+        // IDLE OPTIMIZATION
+        // Keep the UI responsive even when rendering is complete. Large sleeps here
+        // make camera motion feel stuttery despite the GPU render path itself being fast.
         // ===========================================================================
         if (accumulation_done_for_display && !camera_moved && !dragging && !start_render && !ImGui::GetIO().WantCaptureMouse) {
-            // Render complete and no user interaction - aggressive sleep
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         } else if (!ui_ctx.render_settings.is_rendering_active && !camera_moved) {
-            // Not rendering but may have UI interaction - light sleep
-            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         
         // ===========================================================================
@@ -3380,8 +3385,6 @@ int main(int argc, char* argv[]) try {
                 g_world_dirty = true;
             }
         }
-
-        SDL_Delay(16); // ~60 FPS cap
 
     }
     

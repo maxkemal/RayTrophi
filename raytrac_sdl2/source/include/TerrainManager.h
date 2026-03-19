@@ -69,7 +69,7 @@ public:
     TerrainObject* createTerrainFromHeightmap(SceneData& scene, const std::string& filepath, float size, float maxHeight, int max_resolution = 1024);
     
     // Update mesh vertices based on heightmap (Call after sculpting)
-    void updateTerrainMesh(TerrainObject* terrain);
+    void updateTerrainMesh(TerrainObject* terrain, bool signalRebuild = true);
 
     // Rebuild mesh topology (Call when resolution changes)
     void rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain);
@@ -84,12 +84,14 @@ public:
     Vec3 calculateSobelNormal(TerrainObject* terrain, int x, int y);  // 8-neighbor Sobel filter
     Vec3 calculateFastNormal(TerrainObject* terrain, int x, int y);   // 4-neighbor central difference
     
+   
     // Sculpting
     // mode: 0=Raise, 1=Lower, 2=Flatten, 3=Smooth, 4=Stamp
-    void sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mode, float radius, float strength, float dt, 
-                float targetHeight = 0.0f, std::shared_ptr<class Texture> stampTexture = nullptr, float rotation = 0.0f);
+    void sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mode, float radius, float strength, float dt,
+                float curve = 2.0f, float targetHeight = 0.0f,
+                std::shared_ptr<class Texture> stampTexture = nullptr, float rotation = 0.0f,
+                bool signalHeavyRebuild = true);
     
-    // Smooth terrain (Box blur to reduce quantization noise)
     void smoothTerrain(TerrainObject* terrain, int iterations);
 
     // Layer System & Painting
@@ -101,15 +103,13 @@ public:
     
     // Internal helper to sync CPU splat data to GPU texture
     void updateSplatMapTexture(TerrainObject* terrain);
-    
-    // Resize splatmap to match heightmap dimensions (bilinear interpolation)
     void resizeSplatMap(TerrainObject* terrain);
-    
-    // Export splat map to PNG file
     void exportSplatMap(TerrainObject* terrain, const std::string& filepath);
-
-    // Import splat map from image file
     void importSplatMap(TerrainObject* terrain, const std::string& filepath);
+    void exportHeightmap(TerrainObject* terrain, const std::string& filepath);
+
+    // Flow Analysis (New)
+    void calculateFlowMap(TerrainObject* terrain);
 
     // ===========================================================================
     // FOLIAGE SYSTEM
@@ -117,6 +117,8 @@ public:
     void updateFoliage(TerrainObject* terrain, OptixWrapper* optix);
     void clearFoliage(TerrainObject* terrain, OptixWrapper* optix);
     void reapplyAllFoliage(OptixWrapper* optix); // Re-adds persistence after rebuild
+    int migrateLegacyFoliageToInstanceGroups(SceneData& scene, bool clearLegacy = true);
+    bool hasLegacyFoliage() const;
     
     // Serialization===========================================================================
     // EROSION SYSTEM
@@ -155,7 +157,7 @@ public:
     // ===========================================================================
     // HEIGHTMAP EXPORT/IMPORT
     // ===========================================================================
-    void exportHeightmap(TerrainObject* terrain, const std::string& filepath);
+   
     void importMaskChannel(TerrainObject* terrain, const std::string& filepath, int channel);
     
     // ===========================================================================
@@ -362,6 +364,7 @@ private:
     void* fluvWaterKernelFunc = nullptr;
     void* fluvErodeKernelFunc = nullptr;
     void* streamPowerKernelFunc = nullptr;
+    void* applyStreamPowerKernelFunc = nullptr;
     void* windKernelFunc = nullptr;
     // Post-processing kernels (for CPU-GPU parity)
     void* pitFillKernelFunc = nullptr;

@@ -3,6 +3,8 @@
 #include "scene_data.h"
 #include "EmbreeBVH.h"
 #include "OptixWrapper.h"
+#include "Backend/IBackend.h"
+#include "FoliageWindSystem.h"
 #include "TerrainManager.h"
 #include "globals.h"
 #include <random>
@@ -202,12 +204,8 @@ std::vector<Vec3> InstanceManager::generatePoissonPoints(const Vec3& center, flo
 // GPU SYNCHRONIZATION (Placeholder - will integrate with OptixWrapper)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-void InstanceManager::updateWind(float time, SceneData& scene) {
-    for (auto& group : groups) {
-        if (group.wind_settings.enabled) {
-            group.updateWind(time);
-        }
-    }
+FoliageWindUpdateStats InstanceManager::updateWind(float time, SceneData& scene, Backend::IBackend* backend) {
+    return FoliageWindSystem::update(scene, time, backend);
 }
 
 void InstanceManager::syncToGPU(OptixWrapper* optix) {
@@ -315,7 +313,11 @@ json InstanceManager::serialize() {
             {"strength", group.wind_settings.strength},
             {"direction", {group.wind_settings.direction.x, group.wind_settings.direction.y, group.wind_settings.direction.z}},
             {"turbulence", group.wind_settings.turbulence},
-            {"wave_size", group.wind_settings.wave_size}
+            {"wave_size", group.wind_settings.wave_size},
+            {"use_source_profiles", group.wind_settings.use_source_profiles},
+            {"allow_gpu_deform", group.wind_settings.allow_gpu_deform},
+            {"gpu_deform_max_distance", group.wind_settings.gpu_deform_max_distance},
+            {"gpu_deform_max_instances", group.wind_settings.gpu_deform_max_instances}
         };
         
         // Source Settings
@@ -332,7 +334,12 @@ json InstanceManager::serialize() {
                 {"y_offset_min", src.settings.y_offset_min},
                 {"y_offset_max", src.settings.y_offset_max},
                 {"align_to_normal", src.settings.align_to_normal},
-                {"normal_influence", src.settings.normal_influence}
+                {"normal_influence", src.settings.normal_influence},
+                {"wind_strength_scale", src.settings.wind_strength_scale},
+                {"wind_speed_scale", src.settings.wind_speed_scale},
+                {"wind_turbulence_scale", src.settings.wind_turbulence_scale},
+                {"wind_bend_limit_scale", src.settings.wind_bend_limit_scale},
+                {"wind_phase_offset", src.settings.wind_phase_offset}
             };
             j_sources.push_back(j_src);
         }
@@ -415,6 +422,10 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
             }
             group.wind_settings.turbulence = w.value("turbulence", 1.5f);
             group.wind_settings.wave_size = w.value("wave_size", 50.0f);
+            group.wind_settings.use_source_profiles = w.value("use_source_profiles", true);
+            group.wind_settings.allow_gpu_deform = w.value("allow_gpu_deform", true);
+            group.wind_settings.gpu_deform_max_distance = w.value("gpu_deform_max_distance", 35.0f);
+            group.wind_settings.gpu_deform_max_instances = w.value("gpu_deform_max_instances", 32);
         }
         
         // Sources
@@ -434,6 +445,11 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
                     src.settings.y_offset_max = s.value("y_offset_max", 0.0f);
                     src.settings.align_to_normal = s.value("align_to_normal", true);
                     src.settings.normal_influence = s.value("normal_influence", 0.8f);
+                    src.settings.wind_strength_scale = s.value("wind_strength_scale", 1.0f);
+                    src.settings.wind_speed_scale = s.value("wind_speed_scale", 1.0f);
+                    src.settings.wind_turbulence_scale = s.value("wind_turbulence_scale", 1.0f);
+                    src.settings.wind_bend_limit_scale = s.value("wind_bend_limit_scale", 1.0f);
+                    src.settings.wind_phase_offset = s.value("wind_phase_offset", 0.0f);
                 }
                 
                 // Re-link triangles from Scene

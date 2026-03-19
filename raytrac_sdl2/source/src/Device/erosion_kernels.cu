@@ -289,7 +289,7 @@ extern "C" __global__ void fluvialErosionKernel(float* heightMap, float* waterMa
 
 // 5. Stream Power Law Erosion - Matches CPU "Global Hydrological" Model
 // Based on E = K * sqrt(A) * S
-extern "C" __global__ void fluvialStreamPowerKernel(float* heightMap, float* flowMap, float* hardnessMap, float* maskMap, StreamPowerParamsGPU p) {
+extern "C" __global__ void fluvialStreamPowerKernel(const float* heightMap, float* erosionAccum, float* flowMap, float* hardnessMap, float* maskMap, StreamPowerParamsGPU p) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     
@@ -358,13 +358,45 @@ extern "C" __global__ void fluvialStreamPowerKernel(float* heightMap, float* flo
             float falloff = 1.0f - t * t * (3.0f - 2.0f * t);
             falloff = fmaxf(falloff, 0.0f);
             
+            float targetHeight = heightMap[nIdx];
+            if (!isfinite(targetHeight) || targetHeight <= 0.0f) continue;
+
             float erode = streamPower * falloff;
-            // Protect bedrock (max 10% of height)
-            erode = fminf(erode, heightMap[nIdx] * 0.1f);
-            
-            atomicAdd(&heightMap[nIdx], -erode);
+            // Protect bedrock on each contribution before pass-level clamping.
+            erode = fminf(erode, targetHeight * 0.1f);
+            if (!isfinite(erode) || erode <= 0.0f) continue;
+
+            atomicAdd(&erosionAccum[nIdx], erode);
         }
     }
+}
+
+extern "C" __global__ void applyFluvialStreamPowerKernel(float* heightMap, float* erosionAccum, StreamPowerParamsGPU p) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x >= p.mapWidth || y >= p.mapHeight) return;
+    int idx = y * p.mapWidth + x;
+
+    float currentHeight = heightMap[idx];
+    float accumulated = erosionAccum[idx];
+
+    if (!isfinite(currentHeight) || currentHeight <= 0.0f) {
+        heightMap[idx] = 0.0f;
+        erosionAccum[idx] = 0.0f;
+        return;
+    }
+
+    if (!isfinite(accumulated) || accumulated <= 0.0f) {
+        erosionAccum[idx] = 0.0f;
+        return;
+    }
+
+    float maxPassErode = currentHeight * fmaxf(0.0f, p.maxPassErosionFraction);
+    accumulated = fminf(accumulated, maxPassErode);
+
+    heightMap[idx] = fmaxf(currentHeight - accumulated, 0.0f);
+    erosionAccum[idx] = 0.0f;
 }
 
 // -----------------------------------------------------------------------

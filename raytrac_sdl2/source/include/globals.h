@@ -78,7 +78,7 @@ struct RenderSettings {
 
     // Denoiser
     bool use_denoiser = false;        // Viewport Denoiser
-    bool render_use_denoiser = true;  // Final Render Denoiser
+    bool render_use_denoiser = false;  // Final Render Denoiser
     float denoiser_blend_factor = 1.0f;
     DenoiserMode denoiser_mode = DenoiserMode::Quality;
 
@@ -134,7 +134,7 @@ struct RenderSettings {
     bool show_background = true;       // NEW: Toggle background visibility
     float grid_fade_distance = 500.0f;  // Units where grid fades out completely
     float viewport_near_clip = 0.01f;   // Objects closer than this won't be seen
-    float viewport_far_clip = 5000.0f; // Objects further than this won't be seen
+    float viewport_far_clip = 1000000.0f; // Keep far volumes/clouds visible in large-scale scenes
     bool persistent_tonemap = false;     // NEW: Persistent tonemapping (Renamed from tonemap_auto_apply)
 };
 enum class LogLevel { Info, Warning, Error };

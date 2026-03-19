@@ -35,10 +35,18 @@ inline void createDefaultScene(SceneData& scene, Renderer& renderer, Backend::IB
     }
     
     // Check for default asset file
-    std::string defaultAssetPath = "assets/default.glb";
+    std::string defaultAssetPath = "assets/scenes/default/scene.glb";
     bool found = false;
     try {
         if (std::filesystem::exists(defaultAssetPath)) found = true;
+        else if (std::filesystem::exists("../assets/scenes/default/scene.glb")) {
+            defaultAssetPath = "../assets/scenes/default/scene.glb";
+            found = true;
+        }
+        else if (std::filesystem::exists("assets/default.glb")) {
+            defaultAssetPath = "assets/default.glb";
+            found = true;
+        }
         else if (std::filesystem::exists("../assets/default.glb")) {
             defaultAssetPath = "../assets/default.glb";
             found = true;

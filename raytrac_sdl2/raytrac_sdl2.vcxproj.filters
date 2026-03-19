@@ -312,6 +312,12 @@
     <ClInclude Include="source\include\Backend\VulkanBackend.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\AssetRegistry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\FoliageWindSystem.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc">
@@ -373,6 +379,8 @@
     <None Include="source\shaders\shadow_miss.rmiss">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
+    <None Include="source\shaders\volume_closesthit.rchit" />
+    <None Include="source\shaders\volume_intersection.rint" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="source\resources\RayTrophi_icon.ico">
@@ -672,6 +680,21 @@
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AssetRegistry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\FoliageWindSystem.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\image_resample.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\image_filters.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\HitMaterialResolver.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

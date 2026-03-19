@@ -17,6 +17,7 @@
 #include "ray.h"
 #include "scatter_volume_step.h"
 #include "params.h"  // For GpuVDBVolume
+#include "GodRaysModel.h"
 
 
 // Helper function to render a single cloud layer
@@ -664,7 +665,10 @@ __device__ float get_stochastic_volumetric_occlusion(
                     
                     if (t_exit > 0.0f && t_enter < max_dist) {
                         float t_hit = fmaxf(t_enter, 0.0f);
-                        float dither = (curand_uniform(rng) - 0.5f) * 50.0f; // 50m scale dither
+                        float layer_thickness = fmaxf(t_exit - t_enter, 1.0f);
+                        float norm_entry = fminf((t_hit - t_enter) / layer_thickness, 1.0f);
+                        float entry_ramp = norm_entry * norm_entry * (3.0f - 2.0f * norm_entry);
+                        float dither = (curand_uniform(rng) - 0.5f) * 50.0f * (1.0f - entry_ramp);
                         t_min = fminf(t_min, t_hit + dither);
                     }
                 }
@@ -1252,7 +1256,10 @@ __device__ float3 calculate_volumetric_god_rays(
     curandState* rng
 ) {
     // 1. EARLY EXIT & PARAMETERS
-    if (!world.nishita.godrays_enabled || world.nishita.godrays_intensity <= 0.001f || world.nishita.godrays_density <= 0.0f) {
+    if (!GodRaysModel::isEnabled(
+            world.nishita.godrays_enabled,
+            world.nishita.godrays_intensity,
+            world.nishita.godrays_density)) {
         return make_float3(0.0f);
     }
     
@@ -1261,31 +1268,26 @@ __device__ float3 calculate_volumetric_god_rays(
 
     // Mie scattering is extremely forward-heavy. We fade based on anisotropy.
     float g = world.nishita.mie_anisotropy;
-    float anisotropyFade = powf(fmaxf(0.0f, sunDot), 1.0f + (1.0f - g) * 10.0f);
-    if (anisotropyFade < 0.001f) return make_float3(0.0f);
+    float anisotropyFade = GodRaysModel::anisotropyFade(sunDot, g);
+    if (anisotropyFade < 1e-6f) return make_float3(0.0f);
     
-    if (sunDir.y < -0.05f) return make_float3(0.0f);
+    if (GodRaysModel::isSunBelowHorizon(sunDir.y)) return make_float3(0.0f);
 
-    // 2. STOCHASTIC ADAPTIVE STEPPING (Performance Focus)
-    float marchDistance = fminf(maxDistance, world.nishita.fog_distance);
-    marchDistance = fminf(marchDistance, 5000.0f); // Balanced for most scenes
+    // 2. STOCHASTIC ADAPTIVE STEPPING
+    float marchDistance = GodRaysModel::computeMarchDistance(maxDistance, world.nishita.fog_distance);
     
-    // Reduced steps for major performance gain (was 8-48, now 8-24)
-    int numSteps = (sunDot > 0.98f) ? world.nishita.godrays_samples : (world.nishita.godrays_samples / 2);
-    numSteps = clamp(numSteps, 8, 24); 
+    int numSteps = GodRaysModel::computeStepCount(sunDot, world.nishita.godrays_samples);
     
-    float stepSize = marchDistance / (float)numSteps;
+    float stepSize = GodRaysModel::computeStepSize(marchDistance, numSteps);
     float3 godRayColor = make_float3(0.0f);
     float transmittance = 1.0f;
 
-    // 3. PHASE & DENSITY - Physically Plausible Scale
-    float g2 = g * g;
-    float phase = (1.0f - g2) / (4.0f * M_PI * powf(1.0f + g2 - 2.0f * g * sunDot, 1.5f));
-    phase = fminf(phase, 6.0f); // Toned down Peak
+    // 3. PHASE & DENSITY
+    float phase = GodRaysModel::computeMiePhase(sunDot, g);
+    float solarCoreFade = GodRaysModel::computeSolarCoreFade(sunDot, world.nishita.sun_size);
     
-    // REDUCED DENSITY (0.03 -> 0.002): Now scales correctly for kilometer-scale mountains
-    float mediaDensity = world.nishita.godrays_density * 0.002f; 
-    float3 sunRadianceBase = make_float3(1.0f, 0.98f, 0.95f) * world.nishita.sun_intensity * 0.15f;
+    float mediaDensity = GodRaysModel::computeMediaDensity(world.nishita.godrays_density);
+    float3 sunRadianceBase = make_float3(1.0f, 0.98f, 0.95f) * world.nishita.sun_intensity * (GodRaysModel::kSunRadianceScale * 1.35f);
 
     // 4. RAYMARCHING LOOP
     float jitter = curand_uniform(rng);
@@ -1294,39 +1296,33 @@ __device__ float3 calculate_volumetric_god_rays(
     for (int i = 0; i < numSteps; ++i) {
         if (t > marchDistance) break;
         
-        float nearFade = fminf(1.0f, fmaxf(0.0f, (t - 0.2f) * 4.0f));
+        float nearFade = GodRaysModel::computeNearFade(t);
         if (nearFade > 0.001f) {
             float3 samplePos = rayOrigin + rayDir * t;
             
-            float h = fmaxf(0.0f, samplePos.y + world.nishita.altitude);
-            float heightFactor = expf(-h * 0.0002f); 
+            float heightFactor = GodRaysModel::computeHeightFactor(samplePos.y, world.nishita.altitude);
             
             float sigma_s = mediaDensity * heightFactor;
-            float sigma_t = sigma_s; // Decay removed for simplicity
-            float stepTrans = expf(-sigma_t * stepSize);
+            float sigma_t = sigma_s;
+            float stepTrans = GodRaysModel::computeStepTransmittance(sigma_t, stepSize);
             
             float3 sunTrans = gpu_get_transmittance(world, samplePos, sunDir);
             float3 currentSunRadiance = sunRadianceBase * sunTrans;
 
-            // SOFT SHADOWS: Jitter sun direction sample based on sun size for God Rays
-            // This prevents sharp 'leaking' lines on mountain ridges.
-            float3 jitteredSunDir = sunDir;
-            if (world.nishita.sun_size > 0.1f) {
-                float3 spread = sample_sphere_cap(sunDir, world.nishita.sun_size * 0.01745f, rng); // deg to rad
-                jitteredSunDir = normalize(spread);
-            }
-            
-            float occlusion = calculate_sun_transmittance(samplePos, jitteredSunDir, 100000.0f, rng);
+            // Keep the shaft direction stable here. calculate_sun_transmittance already
+            // performs soft/jittered visibility against the solar disk, and double-jittering
+            // makes OptiX shafts noticeably weaker than Vulkan.
+            float occlusion = calculate_sun_transmittance(samplePos, sunDir, 100000.0f, rng);
             
             if (occlusion > 0.001f && sigma_t > 1e-6f) {
-                float3 inscatter = currentSunRadiance * phase * occlusion * (sigma_s / sigma_t) * nearFade;
+                float3 inscatter = currentSunRadiance * phase * occlusion * (sigma_s / sigma_t) * nearFade * solarCoreFade;
                 godRayColor += transmittance * inscatter * (1.0f - stepTrans);
             }
             
             transmittance *= stepTrans;
         }
         
-        if (transmittance < 0.01f) break;
+        if (transmittance < GodRaysModel::kTransmittanceCutoff) break;
         t += stepSize;
     }
     
@@ -1492,9 +1488,10 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
             // HALO LEAK PROTECTION: Add shadow test for halo to prevent bleeding through solid objects
             if (!trace_shadow_test(origin, sunDir, 100000.0f)) {
                 float3 transToSun = gpu_get_transmittance(world, origin, sunDir);
+                float3 haloTint = make_float3(0.35f) + transToSun * 0.65f;
                 float3 mieScat = make_float3(world.nishita.mie_density, world.nishita.mie_density, world.nishita.mie_density); 
-                mieScat = mieScat * world.nishita.mie_scattering * 0.15f;
-                radiance += transToSun * mieScat * excessPhase * world.nishita.sun_intensity;
+                mieScat = mieScat * world.nishita.mie_scattering * (0.15f * 2.5f);
+                radiance += haloTint * mieScat * excessPhase * world.nishita.sun_intensity;
             }
         }
 
@@ -1506,10 +1503,11 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
         // fixed sunColor — spectrum is naturally orange/red when sun is near horizon.
         {
             float phaseM_cap = fminf(phaseM, 2.0f);
-            float mie_scale  = fminf(world.nishita.dust_density * 0.015f, 0.15f);
+            float mie_scale  = fminf(world.nishita.dust_density * 0.0225f, 0.225f);
             if (mie_scale > 0.0f) {
                 float3 transToSun = gpu_get_transmittance(world, origin, sunDir);
-                radiance += transToSun * world.nishita.sun_intensity * phaseM_cap * mie_scale;
+                float3 haloTint = make_float3(0.35f) + transToSun * 0.65f;
+                radiance += haloTint * world.nishita.sun_intensity * phaseM_cap * mie_scale;
             }
         }
 
@@ -1755,12 +1753,22 @@ __device__ float3 calculate_light_contribution(
     float NdotL = max(dot(payload.normal, wi),0.0001);
     //if (NdotL <= 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
 
-    float3 origin = offset_ray(payload.position, payload.normal);
+    // Terrain is a special case:
+    // using the smoothed shading normal for shadow origin caused large-scale terrains
+    // to self-shadow in a pixelated / low-resolution-looking way, especially as area size grew.
+    // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
+    float3 shadow_normal = payload.is_terrain
+        ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
+        : compute_cpu_like_shadow_normal(payload.geom_normal, payload.normal, wi);
+    float3 origin = offset_ray(payload.position, shadow_normal);
     Ray shadow_ray(origin, wi);
     OptixHitResult shadow_payload = {};
     
     trace_shadow_ray(shadow_ray, &shadow_payload, SCENE_EPSILON, distance);
-    if (shadow_payload.hit) return make_float3(0.0f, 0.0f, 0.0f);
+    float shadow_visibility = shadow_payload.hit
+        ? compute_shadow_terminator_visibility(payload.geom_normal, payload.normal, wi)
+        : 1.0f;
+    if (shadow_visibility <= 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
     
     // Check VDB Occlusion (Volumetric Shadow)
     float vdb_transmittance = calculate_vdb_occlusion(origin, wi, distance, rng);
@@ -1770,7 +1778,7 @@ __device__ float3 calculate_light_contribution(
     float pdf_brdf_val = pdf_brdf(material, wo, wi, payload.normal);
     float pdf_brdf_val_mis = clamp(pdf_brdf_val, 0.001f, 5000.0f);
 
-    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance;
+    float3 Li = light.color * light.intensity * attenuation * vdb_transmittance * shadow_visibility;
 
     // Vulkan parity: Delta ışıklar (point/directional) için MIS uygulanmaz
     bool isDelta = (light.type == 0 || light.type == 1);
@@ -1832,16 +1840,7 @@ __device__ float3 calculate_direct_lighting(
         attenuation = 1.0f / (distance * distance);
     }
     else if (light.type == 1) { // Directional Light
-        float3 L = normalize(light.direction);
-        float3 tangent = normalize(cross(L, make_float3(0.0f, 1.0f, 0.0f)));
-        if (length(tangent) < 1e-3f) tangent = normalize(cross(L, make_float3(1.0f, 0.0f, 0.0f)));
-        float3 bitangent = normalize(cross(L, tangent));
-
-        float2 disk_p = random_in_unit_disk(rng);
-        float3 offset = (tangent * disk_p.x + bitangent * disk_p.y) * light.radius;
-
-        float3 light_pos = L * 1000.0f + offset;
-        wi = normalize(light_pos);
+        wi = sample_directional_light(light, payload.position, rng, wi);
         attenuation = 1.0f;
         distance = 1e8f;
     }
@@ -1874,7 +1873,14 @@ __device__ float3 calculate_direct_lighting(
     if (NdotL <= 0.001f) return result;
 
     // ==== Shadow ray ====
-    float3 origin = payload.position + payload.normal * shadow_bias;
+    // Terrain is a special case:
+    // using the smoothed shading normal for shadow origin caused large-scale terrains
+    // to self-shadow in a pixelated / low-resolution-looking way, especially as area size grew.
+    // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
+    float3 shadow_normal = payload.is_terrain
+        ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
+        : compute_cpu_like_shadow_normal(payload.geom_normal, payload.normal, wi);
+    float3 origin = offset_ray(payload.position, shadow_normal);
     Ray shadow_ray(origin, wi);
 
     OptixHitResult shadow_payload = {};
@@ -2061,7 +2067,7 @@ __device__ float3 raymarch_volumetric_object(
     
     while (t < t_exit && steps < max_steps && (transmittance.x + transmittance.y + transmittance.z) > 0.03f) {
         // --- STOCHASTIC EDGE SMOOTHING ---
-        float threshold = curand_uniform(rng) * 0.01f;
+        
         
         float3 pos = ray_origin + ray_dir * t;
         
@@ -2130,7 +2136,7 @@ __device__ float3 raymarch_volumetric_object(
             // Simple density modulation: noise_val ~0.3-0.7, scale to 0.0-1.0 range
             local_density *= noise_val;
         }
-        
+        float edge_factor = 1.0f;
         // ═══════════════════════════════════════════════════════════
         // EDGE FALLOFF - Smooth transition at AABB boundaries
         // ═══════════════════════════════════════════════════════════
@@ -2151,7 +2157,7 @@ __device__ float3 raymarch_volumetric_object(
             float d_edge = fminf(fminf(fminf(dx_min, dx_max), fminf(dy_min, dy_max)), fminf(dz_min, dz_max));
             
             // Smooth falloff using smoothstep
-            float edge_factor = 1.0f;
+           
             if (d_edge < falloff_dist && falloff_dist > 0.001f) {
                 float t_f = d_edge / falloff_dist;
                 // Smoothstep: 3t^2 - 2t^3
@@ -2160,7 +2166,7 @@ __device__ float3 raymarch_volumetric_object(
             
             local_density *= edge_factor;
         }
-        
+        float threshold = curand_uniform(rng) * 0.01f * edge_factor;
         if (local_density > threshold) {
             // Compute extinction coefficient
             float sigma_a = local_density * vol_absorption; 
@@ -2179,7 +2185,17 @@ __device__ float3 raymarch_volumetric_object(
                 for (int j = 1; j <= light_steps; ++j) {
                     float3 light_pos = pos + sun_dir * (light_step_size * (float)j);
                     if (light_pos.x < aabb_min.x || light_pos.x > aabb_max.x || light_pos.y < aabb_min.y || light_pos.y > aabb_max.y || light_pos.z < aabb_min.z || light_pos.z > aabb_max.z) break;
-                    density_accum += local_density * (vol_absorption + vol_scattering) * light_step_size;
+
+                    float3 aabb_size_l = aabb_max - aabb_min;
+                    float falloff_l = fminf(fminf(aabb_size_l.x, aabb_size_l.y), aabb_size_l.z) * 0.15f;
+                    float dx_l = fminf(light_pos.x - aabb_min.x, aabb_max.x - light_pos.x);
+                    float dy_l = fminf(light_pos.y - aabb_min.y, aabb_max.y - light_pos.y);
+                    float dz_l = fminf(light_pos.z - aabb_min.z, aabb_max.z - light_pos.z);
+                    float d_edge_l = fminf(fminf(dx_l, dy_l), dz_l);
+                    float t_f_l = fminf(1.0f, d_edge_l / fmaxf(falloff_l, 0.001f));
+                    float light_fade = t_f_l * t_f_l * (3.0f - 2.0f * t_f_l);
+
+                    density_accum += local_density * light_fade * (vol_absorption + vol_scattering) * light_step_size;
                     if (density_accum > 5.0f) break;
                 }
                 // --- STABLE SHADOWING (Matches CPU 1.0 - strength * (1-T)) ---
@@ -2514,79 +2530,48 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             );
             throughput *= transmission;
         }
-        
-        // ═══════════════════════════════════════════════════════════
-        // VOLUMETRIC GOD RAYS - Only on primary ray for performance
-        // God rays are accumulated to the point of first hit or infinity
-        // ═══════════════════════════════════════════════════════════
-        if (bounce == 0 && optixLaunchParams.world.nishita.godrays_enabled) {
-            float maxDist = payload.hit ? payload.t : 200000.0f;
-            
-            // --- STOCHASTIC DEPTH PROBE (Film Quality Occlusion) ---
-            float t_vol_min = get_stochastic_volumetric_occlusion(
-                ray.origin, ray.direction, maxDist, rng, 
-                0.0f
-            );
-            
-            // Clamp God Ray march to the visual surface
-            maxDist = fminf(maxDist, t_vol_min);
-
-            float3 godRayContribution = calculate_volumetric_god_rays(
-                optixLaunchParams.world,
-                ray.origin,
-                normalize(ray.direction),
-                maxDist,
-                rng
-            );
-            color += godRayContribution;
-        }
-        
-        // ═══════════════════════════════════════════════════════════
-        // VDB VOLUME RAY MARCHING (Independent volumes)
-        // Each VDB is rendered as a participating medium
-        // ═══════════════════════════════════════════════════════════
         if (optixLaunchParams.vdb_volumes && optixLaunchParams.vdb_volume_count > 0) {
             float3 sun_dir = normalize(optixLaunchParams.world.nishita.sun_direction);
             float sun_intensity = optixLaunchParams.world.nishita.sun_intensity;
-            
+
             // ═══════════════════════════════════════════════════════════
             // INDUSTRY-STANDARD: Per-ray depth sorting for correct compositing
             // Compute entry distances, sort front-to-back, then render
             // ═══════════════════════════════════════════════════════════
             const int MAX_VDB_SORT = 16;  // Max VDBs to sort per ray
             int vdb_count = min(optixLaunchParams.vdb_volume_count, MAX_VDB_SORT);
-            
+
             // Store VDB indices and their entry distances
             int   sorted_indices[MAX_VDB_SORT];
             float entry_distances[MAX_VDB_SORT];
             int   valid_count = 0;
-            
+
             float3 ray_dir_norm = normalize(ray.direction);
-            
+
             // Step 1: Compute entry distances for all VDBs
             for (int v = 0; v < vdb_count; ++v) {
                 const GpuVDBVolume& vdb = optixLaunchParams.vdb_volumes[v];
                 if (!vdb.density_grid) continue;
-                
+
                 // Transform ray to local space and compute AABB intersection
                 float3 local_origin = transform_point_affine(ray.origin, vdb.inv_transform);
                 float3 local_dir = transform_vector_affine(ray_dir_norm, vdb.inv_transform);
                 float dir_len = length(local_dir);
                 if (dir_len < 1e-8f) continue;
                 local_dir = local_dir / dir_len;
-                
+
                 float t_enter, t_exit;
                 if (intersect_aabb_vdb(local_origin, local_dir, vdb.local_bbox_min, vdb.local_bbox_max, t_enter, t_exit)) {
                     // Convert to world space distance
                     float world_t_enter = t_enter / dir_len;
                     if (world_t_enter < 0.0f) world_t_enter = 0.0f;
-                    
+
                     sorted_indices[valid_count] = v;
                     entry_distances[valid_count] = world_t_enter;
                     valid_count++;
                 }
             }
-            
+
             // Step 2: Sort by entry distance (insertion sort - efficient for small N)
             for (int i = 1; i < valid_count; ++i) {
                 int   key_idx = sorted_indices[i];
@@ -2600,11 +2585,11 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                 sorted_indices[j + 1] = key_idx;
                 entry_distances[j + 1] = key_dist;
             }
-            
+
             // Step 3: Render in sorted order (front-to-back)
             for (int i = 0; i < valid_count; ++i) {
                 const GpuVDBVolume& vdb = optixLaunchParams.vdb_volumes[sorted_indices[i]];
-                
+
                 // Determine occlusion distance (depth clipping)
                 float max_dist = payload.hit ? payload.t : 1e16f;
                 if (bounce == 0 && max_dist > optixLaunchParams.clip_far) max_dist = optixLaunchParams.clip_far;
@@ -2620,26 +2605,65 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                     max_dist,
                     rng
                 );
-                
+
                 // Accumulate volume contribution
                 color += throughput * vol_color;
                 throughput *= vol_transmittance;
-                
+
                 // NEW: Update depth for fogging calculation
                 // If this is the primary ray and we hit substantive volume, pull the fog distance forward.
                 if (bounce == 0) {
-                    if (vol_depth < 0.0f || entry_distances[i] < vol_depth) {
-                        vol_depth = entry_distances[i];
+                    if (vol_transmittance < 0.999f) {
+                        if (vol_depth < 0.0f || entry_distances[i] < vol_depth) {
+                            vol_depth = entry_distances[i];
+                        }
                     }
                     vol_trans_accum *= vol_transmittance;
                 }
-                
+
                 // Early termination if fully absorbed
                 if (throughput.x < 0.001f && throughput.y < 0.001f && throughput.z < 0.001f) {
                     return color;
                 }
             }
         }
+        // ═══════════════════════════════════════════════════════════
+        // VOLUMETRIC GOD RAYS - Only on primary ray for performance
+        // God rays are accumulated to the point of first hit or infinity
+        // ═══════════════════════════════════════════════════════════
+        if (bounce == 0 && optixLaunchParams.world.nishita.godrays_enabled) {
+            float maxDist = payload.hit ? payload.t : 200000.0f;
+            
+            // --- STOCHASTIC DEPTH PROBE (Film Quality Occlusion) ---
+            // Probe for near volumetric occluders, but avoid overly-aggressive
+            // clamps caused by tiny dithered probes (which produce only a
+            // local halo). Require a sensible minimum distance before clamping.
+            float t_vol_min = get_stochastic_volumetric_occlusion(
+                ray.origin, ray.direction, maxDist, rng,
+                0.0f
+            );
+
+            // If probe returned a very small distance (noise/dither), ignore it.
+            const float kMinProbeDistance = 5.0f; // meters — prevent tiny clamps
+            if (t_vol_min > kMinProbeDistance && t_vol_min < maxDist * 0.98f) {
+                maxDist = fminf(maxDist, t_vol_min);
+            }
+
+            float3 godRayContribution = calculate_volumetric_god_rays(
+                optixLaunchParams.world,
+                ray.origin,
+                normalize(ray.direction),
+                maxDist,
+                rng
+            );
+            color += godRayContribution;
+        }
+        
+        // ═══════════════════════════════════════════════════════════
+        // VDB VOLUME RAY MARCHING (Independent volumes)
+        // Each VDB is rendered as a participating medium
+        // ═══════════════════════════════════════════════════════════
+     
 
 
 
@@ -2683,8 +2707,10 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
                         float t0, t1;
                         if (intersect_aabb_vdb(local_origin, local_dir, vol.local_bbox_min, vol.local_bbox_max, t0, t1)) {
                             float current_t = fmaxf(t0 / dir_len, 0.0f);
-                            if (vol_depth < 0.0f || current_t < vol_depth) {
-                                vol_depth = current_t;
+                            if (vol_transmittance < 0.999f) {
+                                if (vol_depth < 0.0f || current_t < vol_depth) {
+                                    vol_depth = current_t;
+                                }
                             }
                         }
                     }
@@ -2853,7 +2879,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
             // Find exit point and continue
             Ray exit_ray(payload.position + ray.direction * SCENE_EPSILON, ray.direction);
             OptixHitResult exit_payload = {};
-            trace_ray(exit_ray, &exit_payload,t_min,t_max);
+            trace_ray(exit_ray, &exit_payload, SCENE_EPSILON, 1e16f);
             
             if (exit_payload.hit) {
                 scattered = Ray(exit_payload.position + ray.direction * 0.01f, ray.direction);
@@ -2876,18 +2902,11 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         }
         
         // --- Russian roulette - bounce > 2'den sonra ---
-        float p = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
-        p = clamp(p, 0.05f, 0.95f);  // Daha sıkı sınırlar
         if (bounce > 2) {
-            if (random_float(rng) > p)
-                break;
-            throughput /= p;
-            
-            // Russian roulette sonrası tekrar clamp
-            max_throughput = fmaxf(throughput.x, fmaxf(throughput.y, throughput.z));
-            if (max_throughput > MAX_CONTRIBUTION) {
-                throughput *= (MAX_CONTRIBUTION / max_throughput);
-            }
+            float p = fminf(fmaxf(throughput.x, fmaxf(throughput.y, throughput.z)), 0.95f);
+            if (random_float(rng) > p) break;
+            throughput /= p;            
+           
         }
         // emission zaten scatter'dan önce hesaplandı (yukarıda)
         // --- Eğer hiç ışık yoksa sadece emissive katkı yap ---
@@ -2991,21 +3010,14 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         // If we apply full distance fog (100km+) to background, sun and sky get washed out.
         // Solution: If it's a miss (dist > 1M), we use a shorter effective distance for 'atmospheric feel'
         // without killing the sun disk.
-        float dist = first_hit_t;
-        
         // --- WEIGHTED FOG DISTANCE ---
         // Logic: if we have volumes, blend the fog distance based on cloud opacity.
         // This ensures thin cloud edges use background haze, while opaque centers use cloud-depth haze.
-        if (vol_depth > 0.0f) {
-            float background_t = (first_hit_t > 0.0f) ? first_hit_t : 10000.0f;
-            float weight = 1.0f - vol_trans_accum;
-            dist = lerp(background_t, vol_depth, weight);
-        }
-        else if (dist <= 0.0f) {
-             dist = 10000.0f; 
-        }
-        
-        color = gpu_get_aerial_perspective(world, color, first_ray_origin, first_ray_dir, dist);
+        float aerial_dist = (vol_depth > 0.0f) ? vol_depth : first_hit_t;
+        // Prepare ray origin/dir for aerial perspective sampling (use the first ray)
+        float3 rayOrigin = first_ray_origin;
+        float3 rayDir = normalize(first_ray_dir);
+        color = gpu_get_aerial_perspective(world, color, rayOrigin, rayDir, aerial_dist);
     }
     else if (world.nishita.fog_enabled && world.nishita.fog_density > 0.0f) {
         // Fallback to simple height fog for non-Nishita modes

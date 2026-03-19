@@ -10,6 +10,7 @@
 */
 #pragma once
 
+#include "FoliageWindSystem.h"
 #include "InstanceGroup.h"
 #include <vector>
 #include <memory>
@@ -17,6 +18,9 @@
 #include <json.hpp>
 class OptixWrapper;
 class SceneData;
+namespace Backend {
+class IBackend;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INSTANCE MANAGER - Central manager for all instance groups
@@ -70,7 +74,7 @@ public:
     // ─────────────────────────────────────────────────────────────────────────
     
     // Update Wind Animation for all groups
-    void updateWind(float time, SceneData& scene);
+    FoliageWindUpdateStats updateWind(float time, SceneData& scene, Backend::IBackend* backend = nullptr);
     
     // Sync all dirty groups to GPU
     void syncToGPU(OptixWrapper* optix);

@@ -1,4 +1,4 @@
-﻿#include "TerrainManager.h"
+#include "TerrainManager.h"
 #include "scene_data.h"
 #include "Triangle.h" // Added for explicit type visibility
 #include "Hittable.h" // Added for explicit type visibility
@@ -9,6 +9,7 @@
 #include "stb_image_write.h"
 #include "globals.h"
 #include <algorithm>
+#include <cmath>
 #include <random>
 #include <queue>
 #include <limits>
@@ -16,6 +17,7 @@
 #include <fstream>
 #include "Texture.h"
 #include "Material.h" // Ensure Material class is fully defined
+#include "InstanceManager.h"
 
 // CUDA Driver API
 #include <cuda.h>
@@ -23,6 +25,8 @@
 #include "erosion_ops.cuh"
 #include "OptixWrapper.h"
 #include "OptixAccelManager.h"
+#include "../Utils/image_resample.h"
+#include "../Utils/image_filters.h"
 
 // For linking with CUDA Driver API (nvcuda.dll is loaded by driver usually, but we need cuda.lib for symbols)
 #pragma comment(lib, "cuda.lib")
@@ -38,6 +42,101 @@ inline float smoothstep(float edge0, float edge1, float x) {
 // Helper for sigmoid clamping
 static float padding_sigmoid(float x, float k) {
     return x / (x + k); 
+}
+
+// Remove single-pixel spikes using a 3x3 median filter applied selectively.
+// If a pixel differs from the local median by more than `threshold`,
+// replace it with the median (or blend if blend_factor < 1).
+static void remove_spikes_3x3(std::vector<float>& data, int w, int h, float threshold = 0.05f, float blend_factor = 1.0f) {
+    if (w <= 0 || h <= 0) return;
+    std::vector<float> copy = data;
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float neigh[9];
+            int idx = 0;
+            for (int oy = -1; oy <= 1; ++oy) {
+                int yy = y + oy;
+                if (yy < 0) yy = 0; if (yy >= h) yy = h - 1;
+                for (int ox = -1; ox <= 1; ++ox) {
+                    int xx = x + ox;
+                    if (xx < 0) xx = 0; if (xx >= w) xx = w - 1;
+                    neigh[idx++] = copy[yy * w + xx];
+                }
+            }
+            // median of 9
+            std::sort(neigh, neigh + 9);
+            float med = neigh[4];
+            float cur = copy[y * w + x];
+            float diff = fabsf(cur - med);
+            if (diff > threshold) {
+                float out = med * blend_factor + cur * (1.0f - blend_factor);
+                data[y * w + x] = out;
+            }
+        }
+    }
+}
+
+namespace {
+std::vector<std::shared_ptr<Triangle>> findLegacyFoliageSourceTriangles(
+    const std::string& meshPathOrNodeName,
+    const SceneData& scene) {
+    std::vector<std::shared_ptr<Triangle>> triangles;
+    if (meshPathOrNodeName.empty()) return triangles;
+
+    const std::string stem = std::filesystem::path(meshPathOrNodeName).stem().string();
+
+    for (const auto& obj : scene.world.objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (!tri) continue;
+        const std::string nodeName = tri->getNodeName();
+        if (nodeName.empty()) continue;
+        if (nodeName == meshPathOrNodeName || (!stem.empty() && nodeName == stem)) {
+            triangles.push_back(tri);
+        }
+    }
+
+    return triangles;
+}
+
+std::string makeUniqueFoliageGroupName(const std::string& baseName, InstanceManager& im) {
+    std::string candidate = baseName.empty() ? "Foliage_Legacy" : baseName;
+    int suffix = 1;
+    while (im.findGroupByName(candidate) != nullptr) {
+        candidate = baseName + "_" + std::to_string(suffix++);
+    }
+    return candidate;
+}
+
+Vec3 computeLegacyFoliageNormal(TerrainManager& mgr, TerrainObject* terrain, const Vec3& worldPos) {
+    if (!terrain || terrain->heightmap.width <= 1 || terrain->heightmap.height <= 1) {
+        return Vec3(0.0f, 1.0f, 0.0f);
+    }
+
+    Vec3 localPos = worldPos;
+    if (terrain->transform) {
+        Matrix4x4 inv = terrain->transform->getFinal().inverse();
+        localPos = inv.multiplyVector(Vec4(worldPos, 1.0f)).xyz();
+    }
+
+    float normalizedX = std::clamp(localPos.x / terrain->heightmap.scale_xz, 0.0f, 1.0f);
+    float normalizedZ = std::clamp(localPos.z / terrain->heightmap.scale_xz, 0.0f, 1.0f);
+    int ix = std::clamp((int)(normalizedX * (terrain->heightmap.width - 1) + 0.5f), 0, terrain->heightmap.width - 1);
+    int iz = std::clamp((int)(normalizedZ * (terrain->heightmap.height - 1) + 0.5f), 0, terrain->heightmap.height - 1);
+
+    Vec3 localNormal = mgr.calculateSobelNormal(terrain, ix, iz);
+    if (terrain->transform) {
+        localNormal = terrain->transform->getFinal().multiplyVector(Vec4(localNormal, 0.0f)).xyz().normalize();
+    }
+    return localNormal;
+}
+
+void applyLegacyNormalAlignment(InstanceTransform& inst, const Vec3& normal, float influence) {
+    if (influence <= 0.0f || normal.length() <= 0.01f) return;
+    Vec3 up(0.0f, 1.0f, 0.0f);
+    Vec3 target = (up * (1.0f - influence) + normal.normalize() * influence).normalize();
+    inst.rotation.x += asinf(-target.z) * 180.0f / 3.14159f * influence;
+    inst.rotation.z += asinf(target.x) * 180.0f / 3.14159f * influence;
+}
 }
 
 TerrainObject* TerrainManager::getTerrain(int id) {
@@ -200,21 +299,74 @@ TerrainObject* TerrainManager::createTerrainFromHeightmap(SceneData& scene, cons
     // Resize data
     terrain.heightmap.data.resize(new_w * new_h);
     
-    // Copy data with stride
-    for (int y = 0; y < new_h; y++) {
-        for (int x = 0; x < new_w; x++) {
-            int src_x = x * stride;
-            int src_y = y * stride;
-            // Clamp
-            if (src_x >= w) src_x = w - 1;
-            if (src_y >= h) src_y = h - 1;
-            
-            int src_idx = src_y * w + src_x;
-            terrain.heightmap.data[y * new_w + x] = img[src_idx] / 255.0f;
+    // If stride == 1, simple copy; if downsampling needed, use Lanczos resampling for better quality
+    bool downsampled = (stride > 1);
+    bool high_input = (w >= 3000 || h >= 3000);
+
+    if (stride == 1) {
+        // Direct copy with sRGB->linear conversion. Apply light dithering
+        // only on small/medium images to break banding; skip for very large inputs.
+        std::mt19937 rng(1337);
+        std::uniform_real_distribution<float> dither_dist(-0.5f / 255.0f, 0.5f / 255.0f);
+        const float gamma = 2.2f;
+        bool apply_dither = !high_input; // disable dithering for very large (4k+) inputs
+        for (int y = 0; y < new_h; y++) {
+            for (int x = 0; x < new_w; x++) {
+                int srcIdx = y * w + x;
+                float v = (float)img[srcIdx] / 255.0f;
+                // Assume common grayscale PNG is gamma-encoded; convert to linear
+                v = powf(v, gamma);
+                if (apply_dither) {
+                    v = v + dither_dist(rng);
+                }
+                v = std::clamp(v, 0.0f, 1.0f);
+                terrain.heightmap.data[y * new_w + x] = v;
+            }
         }
+    } else {
+        // Use Lanczos resampler (single-channel 8-bit)
+        std::vector<uint8_t> dstBuf((size_t)new_w * new_h);
+        // Use a slightly smaller Lanczos window to reduce ringing on aggressive downsampling
+        int lanczos_a = 2;
+        ImageResample::lanczos_resample_u8(img, w, h, dstBuf.data(), new_w, new_h, lanczos_a);
+        for (int i = 0; i < new_w * new_h; ++i) terrain.heightmap.data[i] = dstBuf[i] / 255.0f;
     }
     
     stbi_image_free(img);
+    
+    // Apply frequency-separation (high-quality): lowpass + detail restore
+    try {
+        std::vector<float> fs_out;
+        float fs_sigma = 1.0f;
+        float fs_detail_strength = 0.85f;
+        if (downsampled) {
+            // stronger lowpass when we downsample to remove aliasing
+            fs_sigma = 1.4f;
+            fs_detail_strength = 0.8f;
+        } else if (high_input) {
+            // for high-res native maps, be conservative
+            fs_sigma = 0.6f;
+            fs_detail_strength = 0.97f;
+        }
+        ImageFilters::frequency_separation(terrain.heightmap.data, new_w, new_h, fs_out, fs_sigma, fs_detail_strength);
+        terrain.heightmap.data.swap(fs_out);
+    } catch (...) {
+        // If any failure, leave original data
+    }
+
+    // Remove isolated spikes (selective median) to avoid mesh 'peaks' at low-res
+    // Compute global stddev and apply median only on low-variance maps to avoid removing real detail
+    {
+        double mean = 0.0, sq = 0.0;
+        int N = new_w * new_h;
+        for (int i = 0; i < N; ++i) { mean += terrain.heightmap.data[i]; sq += terrain.heightmap.data[i] * terrain.heightmap.data[i]; }
+        mean /= (double)N;
+        double var = sq / (double)N - mean * mean;
+        double stddev = (var > 0.0) ? sqrt(var) : 0.0;
+        if (stddev < 0.03 || downsampled) {
+            remove_spikes_3x3(terrain.heightmap.data, new_w, new_h, 0.06f, 1.0f);
+        }
+    }
     
     // Create Material
     auto mat = std::make_shared<PrincipledBSDF>();
@@ -573,18 +725,20 @@ Vec3 TerrainManager::calculateNormal(TerrainObject* terrain, int x, int z) {
     }
 }
 
-void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
+void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuild) {
     if (!terrain) return;
-    
-    // Check if we need to CREATE triangles (first time) or UPDATE existing
-    bool create_new = terrain->mesh_triangles.empty();
     
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     float scale = terrain->heightmap.scale_xz;
     float max_h = terrain->heightmap.scale_y;
+
+    // Rebuild topology whenever terrain resolution changes triangle count.
+    const size_t required_triangle_count = (size_t)(std::max(0, w - 1)) * (size_t)(std::max(0, h - 1)) * 2ull;
+    bool create_new = terrain->mesh_triangles.empty() || terrain->mesh_triangles.size() != required_triangle_count;
     
     // Calculate step to preserve aspect ratio
+
     // Calculate step to Stretch to Fit (Square Terrain)
     // Use independent X and Z steps to ensure terrain fills scale_xz * scale_xz area
     float step_x = scale / (float)(std::max(1, w - 1));
@@ -614,10 +768,15 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
     }
     
     // 3. Create/Update Triangles
-    int tri_idx = 0;
-    
-    for (int z = 0; z < h - 1; z++) {
-        for (int x = 0; x < w - 1; x++) {
+    if (create_new) {
+        terrain->mesh_triangles.resize(required_triangle_count);
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int z = 0; z < (h - 1); z++) {
+        for (int x = 0; x < (w - 1); x++) {
+            size_t tri_idx = (static_cast<size_t>(z) * (w - 1) + x) * 2;
+            
             // Indices
             int i0 = z * w + x;
             int i1 = z * w + (x + 1);
@@ -636,9 +795,6 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
             Vec3 n3 = normals[i3];
             
             // UVs - Standard 0..1 Mapping
-            // Vertex 0 -> UV 0.0
-            // Vertex N -> UV 1.0
-            // This aligns perfectly with 0..1 generated mask data.
             float divW = (float)(w > 1 ? w - 1 : 1);
             float divH = (float)(h > 1 ? h - 1 : 1);
             
@@ -648,11 +804,10 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
             Vec2 uv3((float)x / divW, (float)(z + 1) / divH);
             
             if (create_new) {
-                // Tri 1 - Corrected Winding Order (CCW for Upward Normal)
-                // v0(TL) -> v2(BR) -> v1(TR)
+                // Tri 1
                 auto tri1 = std::make_shared<Triangle>(
                     v0, v2, v1, 
-                    n0, n2, n1, // Normals match vertices
+                    n0, n2, n1,
                     uv0, uv2, uv1, 
                     terrain->material_id
                 );
@@ -661,11 +816,10 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
                 tri1->setTransformHandle(terrain->transform);
                 tri1->updateTransformedVertices();
                 
-                // Tri 2 - Corrected Winding Order (CCW for Upward Normal)
-                // v0(TL) -> v3(BL) -> v2(BR)
+                // Tri 2
                 auto tri2 = std::make_shared<Triangle>(
                     v0, v3, v2, 
-                    n0, n3, n2, // Normals match vertices
+                    n0, n3, n2,
                     uv0, uv3, uv2, 
                     terrain->material_id
                 );
@@ -674,9 +828,8 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
                 tri2->setTransformHandle(terrain->transform);
                 tri2->updateTransformedVertices();
 
-                // Add to detailed list
-                terrain->mesh_triangles.push_back(tri1);
-                terrain->mesh_triangles.push_back(tri2);
+                terrain->mesh_triangles[tri_idx] = tri1;
+                terrain->mesh_triangles[tri_idx + 1] = tri2;
             } 
             else {
                 // UPDATE existing
@@ -684,8 +837,6 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
                     auto& tri1 = terrain->mesh_triangles[tri_idx];
                     auto& tri2 = terrain->mesh_triangles[tri_idx+1];
                     
-                    // Update Original Vertices & Normals (Bind Pose)
-                    // Tri 1: v0 -> v2 -> v1
                     tri1->terrain_id = terrain->id;
                     tri1->setOriginalVertexPosition(0, v0);
                     tri1->setOriginalVertexPosition(1, v2);
@@ -695,7 +846,6 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
                     tri1->setOriginalVertexNormal(2, n1);
                     tri1->updateTransformedVertices();
                     
-                    // Tri 2: v0 -> v3 -> v2
                     tri2->terrain_id = terrain->id;
                     tri2->setOriginalVertexPosition(0, v0);
                     tri2->setOriginalVertexPosition(1, v3);
@@ -706,7 +856,6 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
                     tri2->updateTransformedVertices();
                 }
             }
-            tri_idx += 2;
         }
     }
     
@@ -714,12 +863,14 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain) {
     terrain->dirty_region.clear();
 
     // [CPU/GPU REBUILD FIX] Ensure changes are uploaded to backend
-    extern bool g_bvh_rebuild_pending;
-    extern bool g_optix_rebuild_pending;
-    extern bool g_vulkan_rebuild_pending;
-    g_bvh_rebuild_pending = true;
-    g_optix_rebuild_pending = true;
-    g_vulkan_rebuild_pending = true;
+    if (signalRebuild) {
+        extern bool g_bvh_rebuild_pending;
+        extern bool g_optix_rebuild_pending;
+        extern bool g_vulkan_rebuild_pending;
+        g_bvh_rebuild_pending = true;
+        g_optix_rebuild_pending = true;
+        g_vulkan_rebuild_pending = true;
+    }
 }
 
 void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain) {
@@ -862,8 +1013,9 @@ void TerrainManager::updateDirtySectors(TerrainObject* terrain, bool clearRegion
 }
 
 // mode: 0=Raise, 1=Lower, 2=Flatten, 3=Smooth, 4=Stamp
-void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mode, float radius, float strength, float dt, 
-                            float targetHeight, std::shared_ptr<Texture> stampTexture, float rotation) {
+void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mode, float radius, float strength, float dt,
+                            float curve, float targetHeight, std::shared_ptr<Texture> stampTexture, float rotation,
+                            bool signalHeavyRebuild) {
     if (!terrain) return;
     
     // 1. Transform HitPoint to Local Space
@@ -890,14 +1042,15 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
     int r_pixels = (int)((radius / size) * (w - 1));
     if (r_pixels < 1) r_pixels = 1;
     
-    float brush_strength_frame = strength * dt * 5.0f; // Adjusted for frame
+    bool changed = false;
+    float brush_delta_world = strength * dt * 2.0f;
+    float scaleY = terrain->heightmap.scale_y;
+    if (scaleY < 0.001f) scaleY = 1.0f;
+    float brush_strength_frame = brush_delta_world / scaleY;
+    curve = std::clamp(curve, 0.25f, 4.0f);
     
     // Smooth kernel pre-calculation or on-the-fly?
     // Using on-the-fly for dynamic updates
-    
-    bool changed = false;
-    float scaleY = terrain->heightmap.scale_y;
-    if (scaleY < 0.001f) scaleY = 1.0f;
 
     // Normalizing target height to 0-1 range
     float normalizedTarget = targetHeight / scaleY;
@@ -914,7 +1067,7 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
             
             // Gauss Falloff
             float falloff = 1.0f - (dist / r_pixels);
-            falloff = falloff * falloff;
+            falloff = std::pow(std::clamp(falloff, 0.0f, 1.0f), curve);
             
             float val = terrain->heightmap.data[y * w + x];
             
@@ -924,10 +1077,12 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
                 val -= brush_strength_frame * falloff;
             } else if (mode == 2) { // Flatten
                 // Lerp towards target
+                float maxDelta = brush_strength_frame * falloff;
+                float delta = normalizedTarget - val;
+                delta = std::clamp(delta, -maxDelta, maxDelta);
                 float t = brush_strength_frame * falloff; // Influence
                 if (t > 1.0f) t = 1.0f;
-                // Move current 'val' towards 'normalizedTarget'
-                val = val + (normalizedTarget - val) * t;
+                val = val + delta * t;
             } else if (mode == 3) { // Smooth
                 // Local box blur (5x5)
                 float sum = 0.0f;
@@ -946,9 +1101,11 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
                 float avg = (wSum > 0) ? sum / wSum : val;
                 
                 // Lerp towards average
-                float t = brush_strength_frame * falloff; 
+                float t = brush_strength_frame * falloff;
                 if (t > 1.0f) t = 1.0f;
-                val = val + (avg - val) * t;
+                float maxDelta = brush_strength_frame * falloff;
+                float delta = std::clamp(avg - val, -maxDelta, maxDelta);
+                val = val + delta * t;
 
             } else if (mode == 4) { // Stamp
                 if (stampTexture && stampTexture->is_loaded()) {
@@ -982,10 +1139,12 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
                          // If generic Texture class doesn't keep CPU data, we can't stamp easily.
                          // FALLBACK: Use a simple noise function if texture access is hard, OR check Texture.h
                          
-                         float texVal = stampTexture->sampleIntensity(u, v); // Hypothetical method
-                         
-                         // Apply
-                         val += texVal * brush_strength_frame * falloff;
+                         float texVal = stampTexture->sampleIntensity(u, v);
+                         texVal = std::clamp(texVal, 0.0f, 1.0f);
+
+                         float stampMask = texVal * falloff;
+                         float stampDelta = (stampMask * brush_delta_world) / scaleY;
+                         val += stampDelta;
                      }
                 }
             }
@@ -1003,11 +1162,11 @@ void TerrainManager::sculpt(TerrainObject* terrain, const Vec3& hitPoint, int mo
     if (changed) {
         // If brush is very large, full update is faster than many sectors
         if (r_pixels > (w / 8)) {
-            updateTerrainMesh(terrain);
+            updateTerrainMesh(terrain, signalHeavyRebuild);
         } else {
             updateDirtySectors(terrain, false);
         }
-        terrain->dirty_mesh = true; // Signal for BVH rebuild
+        terrain->dirty_mesh = signalHeavyRebuild;
     }
 }
 
@@ -1285,6 +1444,11 @@ void TerrainManager::paintSplatMap(TerrainObject* terrain, const Vec3& hitPoint,
 void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float heightWeight, float heightMin, float heightMax, float slopeSteepness) {
     if (!terrain || !terrain->splatMap) return;
     
+    // Automatically calculate flow if missing
+    if (terrain->flowMap.empty()) {
+        calculateFlowMap(terrain);
+    }
+
     int w = terrain->splatMap->width;
     int h = terrain->splatMap->height;
     float max_h = terrain->heightmap.scale_y;
@@ -2151,51 +2315,60 @@ void TerrainManager::windErosion(TerrainObject* terrain, float strength, float d
 
 void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosionParams& p, const std::vector<float>& mask) {
     if (!terrain) return;
-    
+
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     auto& height = terrain->heightmap.data;
     float cellSize = terrain->heightmap.scale_xz / w;
     bool hasHardness = !terrain->hardnessMap.empty();
     bool hasMask = !mask.empty() && mask.size() == w * h;
-    
+
     SCENE_LOG_INFO("[CPU Fluvial] Starting Stream Power River Carver...");
 
+    std::vector<float> globalFilledHeight;
     auto updateFlowCPU = [&]() {
         std::vector<float> filledHeight = height;
         std::vector<int> drainageParent(w * h, -1);
         std::vector<bool> processed(w * h, false);
         std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> pq;
         const float eps = 0.0001f;
-        int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
-        int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+        int dx8[] = { -1, 0, 1, -1, 1, -1, 0, 1 };
+        int dy8[] = { -1, -1, -1, 0, 0, 1, 1, 1 };
 
         for (int x = 0; x < w; x++) {
-            pq.push({filledHeight[x], x});
-            pq.push({filledHeight[(h - 1) * w + x], (h - 1) * w + x});
+            pq.push({ filledHeight[x], x });
+            pq.push({ filledHeight[(h - 1) * w + x], (h - 1) * w + x });
             processed[x] = processed[(h - 1) * w + x] = true;
         }
         for (int y = 1; y < h - 1; y++) {
-            pq.push({filledHeight[y * w], y * w});
-            pq.push({filledHeight[y * w + w - 1], y * w + w - 1});
+            pq.push({ filledHeight[y * w], y * w });
+            pq.push({ filledHeight[y * w + w - 1], y * w + w - 1 });
             processed[y * w] = processed[y * w + w - 1] = true;
         }
 
         while (!pq.empty()) {
-            auto [cH, idx] = pq.top(); pq.pop();
+            auto [priority, idx] = pq.top(); pq.pop();
             int x = idx % w, y = idx / w;
+            float cH = filledHeight[idx];
+
             for (int d = 0; d < 8; d++) {
                 int nx = x + dx8[d], ny = y + dy8[d];
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 if (processed[nIdx]) continue;
+                
+                // Tie-breaker for organic paths
+                float tieBreaker = height[nIdx] * 1e-6f;
                 float tH = fmaxf(filledHeight[nIdx], cH + eps);
+                
                 filledHeight[nIdx] = tH;
                 drainageParent[nIdx] = idx;
                 processed[nIdx] = true;
-                pq.push({tH, nIdx});
+                pq.push({ tH + tieBreaker, nIdx });
             }
         }
+        globalFilledHeight = filledHeight;
+
 
         std::vector<int> indices(w * h);
         for (int i = 0; i < w * h; i++) indices[i] = i;
@@ -2216,7 +2389,7 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
                 float dist = (abs(dx8[d]) + abs(dy8[d]) == 2) ? 1.414f : 1.0f;
                 float slope = (currentH - filledHeight[nIdx]) / (dist * cellSize);
                 if (slope > 0.0f) {
-                    float power = powf(slope, 2.0f);
+                    float power = powf(slope, 1.5f); // Slightly lower power for better branching
                     neighbors.push_back({ nIdx, power });
                     totalSlopePower += power;
                 }
@@ -2226,8 +2399,42 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
                 for (const auto& n : neighbors) {
                     terrain->flowMap[n.id] += terrain->flowMap[i] * (n.weight / totalSlopePower);
                 }
-            } else if (drainageParent[i] != -1) {
+            }
+            else if (drainageParent[i] != -1) {
                 terrain->flowMap[drainageParent[i]] += terrain->flowMap[i];
+            }
+        }
+
+        // Resolution-aware diffusion:
+        // low-res maps need extra de-gridding on flats, while high-res maps should keep their sharper channels.
+        std::vector<float> diffused = terrain->flowMap;
+        for (int y = 1; y < h - 1; ++y) {
+            for (int x = 1; x < w - 1; ++x) {
+                int idx = y * w + x;
+                float sum = diffused[idx] * 4.0f;
+                for (int d = 0; d < 8; d++) sum += diffused[(y + dy8[d]) * w + (x + dx8[d])];
+                terrain->flowMap[idx] = sum / 12.0f;
+            }
+        }
+
+        const float lowResFactor = std::clamp((1024.0f - (float)std::min(w, h)) / 768.0f, 0.0f, 1.0f);
+        const int extraDiffusionPasses = (lowResFactor > 0.35f ? 1 : 0) + (lowResFactor > 0.75f ? 1 : 0);
+        const float invCellSize = 1.0f / fmaxf(0.001f, cellSize);
+        for (int pass = 0; pass < extraDiffusionPasses; ++pass) {
+            std::vector<float> sourceFlow = terrain->flowMap;
+            for (int y = 1; y < h - 1; ++y) {
+                for (int x = 1; x < w - 1; ++x) {
+                    int idx = y * w + x;
+                    float sum = sourceFlow[idx] * 4.0f;
+                    for (int d = 0; d < 8; ++d) sum += sourceFlow[(y + dy8[d]) * w + (x + dx8[d])];
+                    float blurred = sum / 12.0f;
+
+                    float slopeX = (filledHeight[idx + 1] - filledHeight[idx - 1]) * 0.5f * invCellSize;
+                    float slopeY = (filledHeight[idx + w] - filledHeight[idx - w]) * 0.5f * invCellSize;
+                    float localSlope = sqrtf(slopeX * slopeX + slopeY * slopeY);
+                    float flatBlend = lowResFactor * (1.0f - std::clamp(localSlope / 0.03f, 0.0f, 1.0f));
+                    terrain->flowMap[idx] = sourceFlow[idx] * (1.0f - flatBlend) + blurred * flatBlend;
+                }
             }
         }
     };
@@ -2237,12 +2444,13 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
 
     std::vector<float> erosionAmount(w * h, 0.0f);
     const float Ks = p.erodeSpeed * 0.02f;
+    const float maxPassErosionFraction = 0.2f;
 
     for (int pass = 0; pass < numPasses; ++pass) {
         updateFlowCPU();
         std::fill(erosionAmount.begin(), erosionAmount.end(), 0.0f);
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 if (x <= 2 || x >= w - 3 || y <= 2 || y >= h - 3) continue;
@@ -2257,6 +2465,14 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
                 float slopeX = (height[idx + 1] - height[idx - 1]) * 0.5f * invCellSize;
                 float slopeY = (height[idx + w] - height[idx - w]) * 0.5f * invCellSize;
                 float slope = sqrtf(slopeX * slopeX + slopeY * slopeY);
+
+                // Guide slope on flat areas using filledHeight gradient
+                if (slope < 0.01f && !globalFilledHeight.empty()) {
+                    float fSX = (globalFilledHeight[idx + 1] - globalFilledHeight[idx - 1]) * 0.5f * invCellSize;
+                    float fSY = (globalFilledHeight[idx + w] - globalFilledHeight[idx - w]) * 0.5f * invCellSize;
+                    slope = fmaxf(slope, sqrtf(fSX * fSX + fSY * fSY) * 0.5f);
+                }
+                
                 slope = fmaxf(slope, p.minSlope);
 
                 float streamPower = Ks * sqrtf(flow) * slope;
@@ -2294,24 +2510,39 @@ void TerrainManager::fluvialErosion(TerrainObject* terrain, const HydraulicErosi
                         float falloff = 1.0f - t * t * (3.0f - 2.0f * t);
                         falloff = fmaxf(falloff, 0.0f);
 
-                        float erode = streamPower * falloff;
-                        erode = fminf(erode, height[nIdx] * 0.1f);
+                        float targetHeight = height[nIdx];
+                        if (!std::isfinite(targetHeight) || targetHeight <= 0.0f) continue;
 
-                        #pragma omp atomic
+                        float erode = streamPower * falloff;
+                        erode = fminf(erode, targetHeight * 0.1f);
+                        if (!std::isfinite(erode) || erode <= 0.0f) continue;
+
+#pragma omp atomic
                         erosionAmount[nIdx] += erode;
                     }
                 }
             }
         }
 
-        #pragma omp parallel for
+#pragma omp parallel for
         for (int i = 0; i < w * h; ++i) {
-            height[i] -= erosionAmount[i];
-            if (height[i] < 0.0f) height[i] = 0.0f;
+            float currentHeight = height[i];
+            float accumulated = erosionAmount[i];
+
+            if (!std::isfinite(currentHeight) || currentHeight <= 0.0f) {
+                height[i] = 0.0f;
+                continue;
+            }
+
+            if (!std::isfinite(accumulated) || accumulated <= 0.0f) continue;
+
+            float maxPassErode = currentHeight * maxPassErosionFraction;
+            accumulated = fminf(accumulated, maxPassErode);
+            height[i] = fmaxf(currentHeight - accumulated, 0.0f);
         }
     }
 
-    updateTerrainMesh(terrain);
+    updateTerrainMesh(terrain, false);
     terrain->dirty_mesh = true;
     SCENE_LOG_INFO("[CPU Fluvial] Stream Power River Carver complete.");
 }
@@ -2962,24 +3193,6 @@ json TerrainManager::serialize(const std::string& terrainDir) const {
         tJson["am_slope"] = t.am_slope;
         tJson["am_flow_threshold"] = t.am_flow_threshold;
 
-        // Foliage Layers (Legacy/Direct system)
-        json foliageArray = json::array();
-        for (const auto& fl : t.foliageLayers) {
-            json flJson;
-            flJson["name"] = fl.name;
-            flJson["enabled"] = fl.enabled;
-            flJson["meshPath"] = fl.meshPath;
-            flJson["density"] = fl.density;
-            flJson["targetMaskLayerId"] = fl.targetMaskLayerId;
-            flJson["maskThreshold"] = fl.maskThreshold;
-            flJson["scaleRange"] = {fl.scaleRange.x, fl.scaleRange.y};
-            flJson["rotationRange"] = {fl.rotationRange.x, fl.rotationRange.y};
-            flJson["alignToNormal"] = fl.alignToNormal;
-            flJson["yOffsetRange"] = {fl.yOffsetRange.x, fl.yOffsetRange.y};
-            foliageArray.push_back(flJson);
-        }
-        tJson["foliage_layers"] = foliageArray;
-        
         terrainsArray.push_back(tJson);
     }
     
@@ -3343,6 +3556,7 @@ void TerrainManager::initCuda() {
     cuModuleGetFunction((CUfunction*)&fluvWaterKernelFunc, (CUmodule)cudaModule, "fluvialWaterKernel");
     cuModuleGetFunction((CUfunction*)&fluvErodeKernelFunc, (CUmodule)cudaModule, "fluvialErosionKernel");
     cuModuleGetFunction((CUfunction*)&streamPowerKernelFunc, (CUmodule)cudaModule, "fluvialStreamPowerKernel");
+    cuModuleGetFunction((CUfunction*)&applyStreamPowerKernelFunc, (CUmodule)cudaModule, "applyFluvialStreamPowerKernel");
     cuModuleGetFunction((CUfunction*)&windKernelFunc, (CUmodule)cudaModule, "windErosionKernel");
 
     // Post-processing kernels (for CPU-GPU parity)
@@ -3706,11 +3920,12 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     SCENE_LOG_INFO("[GPU Fluvial] Starting High-Power River Carver...");
     
     // Alloc temporary buffers
-    CUdeviceptr d_height, d_flow, d_mask, d_hardness;
+    CUdeviceptr d_height, d_flow, d_mask, d_hardness, d_erosionAccum;
     cuMemAlloc(&d_height, numPixels * sizeof(float));
     cuMemAlloc(&d_flow, numPixels * sizeof(float));
     cuMemAlloc(&d_mask, numPixels * sizeof(float));
     cuMemAlloc(&d_hardness, numPixels * sizeof(float));
+    cuMemAlloc(&d_erosionAccum, numPixels * sizeof(float));
     
     if (!terrain->hardnessMap.empty()) {
         cuMemcpyHtoD(d_hardness, terrain->hardnessMap.data(), numPixels * sizeof(float));
@@ -3733,12 +3948,14 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     sp.sedimentCapacity = p.sedimentCapacity;
     sp.minSlope = p.minSlope;
     sp.erosionRadius = p.erosionRadius;
+    sp.maxPassErosionFraction = 0.2f;
     
     // --------------------------------------------------------
     // Step 1: Flow Accumulation (CPU for accuracy, then HtoD)
     // --------------------------------------------------------
     auto updateFlowCPU = [&]() {
         std::vector<float> filledHeight = height;
+        std::vector<int> drainageParent(numPixels, -1);
         std::vector<bool> processed(numPixels, false);
         std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> pq;
         const float eps = 0.0001f;
@@ -3754,16 +3971,23 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
             processed[y*w] = processed[y*w + w-1] = true;
         }
         while (!pq.empty()) {
-            auto [cH, idx] = pq.top(); pq.pop();
+            auto [priority, idx] = pq.top(); pq.pop();
             int x = idx % w, y = idx / w;
+            float cH = filledHeight[idx];
             for (int d = 0; d < 8; d++) {
                 int nx = x + dx8[d], ny = y + dy8[d];
                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
                 int nIdx = ny * w + nx;
                 if (processed[nIdx]) continue;
+                
+                // Tie-breaker for organic paths on flats
+                float tieBreaker = height[nIdx] * 1e-6f;
                 float tH = fmaxf(filledHeight[nIdx], cH + eps);
+                
                 filledHeight[nIdx] = tH; 
-                processed[nIdx] = true; pq.push({tH, nIdx});
+                drainageParent[nIdx] = idx;
+                processed[nIdx] = true; 
+                pq.push({tH + tieBreaker, nIdx});
             }
         }
 
@@ -3785,7 +4009,7 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
                 float dist = (abs(dx8[d]) + abs(dy8[d]) == 2) ? 1.414f : 1.0f;
                 float slope = (currentH - filledHeight[nIdx]) / (dist * cellSize);
                 if (slope > 0.0f) {
-                    float power = powf(slope, 2.0f);
+                    float power = powf(slope, 1.5f);
                     neighbors.push_back({ nIdx, power });
                     totalSlopePower += power;
                 }
@@ -3795,21 +4019,40 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
                 for (const auto& n : neighbors) {
                     terrain->flowMap[n.id] += terrain->flowMap[i] * (n.weight / totalSlopePower);
                 }
-            } else {
-                int drainageParent = -1;
-                float minDrop = std::numeric_limits<float>::max();
-                for (int d = 0; d < 8; d++) {
-                    int nx = x + dx8[d], ny = y + dy8[d];
-                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                    int nIdx = ny * w + nx;
-                    float drop = fabsf(currentH - filledHeight[nIdx]);
-                    if (drop < minDrop) {
-                        minDrop = drop;
-                        drainageParent = nIdx;
-                    }
-                }
-                if (drainageParent != -1) {
-                    terrain->flowMap[drainageParent] += terrain->flowMap[i];
+            } else if (drainageParent[i] != -1) {
+                terrain->flowMap[drainageParent[i]] += terrain->flowMap[i];
+            }
+        }
+
+        // Resolution-aware diffusion:
+        // low-res maps need extra de-gridding on flats, while high-res maps should keep their sharper channels.
+        std::vector<float> diffused = terrain->flowMap;
+        for (int y = 1; y < h - 1; ++y) {
+            for (int x = 1; x < w - 1; ++x) {
+                int idx = y * w + x;
+                float sum = diffused[idx] * 4.0f;
+                for (int d = 0; d < 8; d++) sum += diffused[(y + dy8[d]) * w + (x + dx8[d])];
+                terrain->flowMap[idx] = sum / 12.0f;
+            }
+        }
+
+        const float lowResFactor = std::clamp((1024.0f - (float)std::min(w, h)) / 768.0f, 0.0f, 1.0f);
+        const int extraDiffusionPasses = (lowResFactor > 0.35f ? 1 : 0) + (lowResFactor > 0.75f ? 1 : 0);
+        const float invCellSize = 1.0f / fmaxf(0.001f, cellSize);
+        for (int pass = 0; pass < extraDiffusionPasses; ++pass) {
+            std::vector<float> sourceFlow = terrain->flowMap;
+            for (int y = 1; y < h - 1; ++y) {
+                for (int x = 1; x < w - 1; ++x) {
+                    int idx = y * w + x;
+                    float sum = sourceFlow[idx] * 4.0f;
+                    for (int d = 0; d < 8; ++d) sum += sourceFlow[(y + dy8[d]) * w + (x + dx8[d])];
+                    float blurred = sum / 12.0f;
+
+                    float slopeX = (filledHeight[idx + 1] - filledHeight[idx - 1]) * 0.5f * invCellSize;
+                    float slopeY = (filledHeight[idx + w] - filledHeight[idx - w]) * 0.5f * invCellSize;
+                    float localSlope = sqrtf(slopeX * slopeX + slopeY * slopeY);
+                    float flatBlend = lowResFactor * (1.0f - std::clamp(localSlope / 0.03f, 0.0f, 1.0f));
+                    terrain->flowMap[idx] = sourceFlow[idx] * (1.0f - flatBlend) + blurred * flatBlend;
                 }
             }
         }
@@ -3829,9 +4072,14 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
         updateFlowCPU();
         cuMemcpyHtoD(d_height, height.data(), numPixels * sizeof(float));
         cuMemcpyHtoD(d_flow, terrain->flowMap.data(), numPixels * sizeof(float));
+        cuMemsetD8(d_erosionAccum, 0, numPixels * sizeof(float));
         
-        void* args[] = { &d_height, &d_flow, &d_hardness, &d_mask, &sp };
+        void* args[] = { &d_height, &d_erosionAccum, &d_flow, &d_hardness, &d_mask, &sp };
         cuLaunchKernel((CUfunction)streamPowerKernelFunc, bx, by, 1, tx, ty, 1, 0, nullptr, args, nullptr);
+        if (applyStreamPowerKernelFunc) {
+            void* applyArgs[] = { &d_height, &d_erosionAccum, &sp };
+            cuLaunchKernel((CUfunction)applyStreamPowerKernelFunc, bx, by, 1, tx, ty, 1, 0, nullptr, applyArgs, nullptr);
+        }
         cuCtxSynchronize();
         
         cuMemcpyDtoH(height.data(), d_height, numPixels * sizeof(float));
@@ -3842,6 +4090,7 @@ void TerrainManager::fluvialErosionGPU(TerrainObject* terrain, const HydraulicEr
     cuMemFree(d_flow);
     cuMemFree(d_mask);
     cuMemFree(d_hardness);
+    cuMemFree(d_erosionAccum);
 
     updateTerrainMesh(terrain);
     terrain->dirty_mesh = true;
@@ -3920,7 +4169,6 @@ void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, floa
     
     // DtoH
     cuMemcpyDtoH(terrain->heightmap.data.data(), d_heightmap, mapSize);
-    
     cuMemFree(d_heightmap);
     
     updateTerrainMesh(terrain);
@@ -3928,9 +4176,99 @@ void TerrainManager::windErosionGPU(TerrainObject* terrain, float strength, floa
     SCENE_LOG_INFO("[GPU Wind] Completed " + std::to_string(iterations) + " iterations with smoothing.");
 }
 
+void TerrainManager::calculateFlowMap(TerrainObject* terrain) {
+    if (!terrain) return;
+    
+    int w = terrain->heightmap.width;
+    int h = terrain->heightmap.height;
+    if (w < 2 || h < 2) return;
 
-// ===========================================================================
-// FOLIAGE SYSTEM
+    auto& height = terrain->heightmap.data;
+    float heightScale = terrain->heightmap.scale_y;
+
+    SCENE_LOG_INFO("[TerrainManager] Calculating Organic Flow Map (MFD + Diffusion)...");
+
+    // 1. Sort indices by height (Descending)
+    std::vector<int> indices(w * h);
+    for (int i = 0; i < w * h; i++) indices[i] = i;
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) { 
+        return height[a] > height[b]; 
+    });
+
+    // 2. Accumulate Flow (Multiple Flow Direction)
+    // Initial flow is 1.0 (Rain)
+    std::vector<float> flow(w * h, 1.0f);
+    
+    const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+    const float dist[] = {1.414f, 1.0f, 1.414f, 1.0f, 1.0f, 1.414f, 1.0f, 1.414f};
+
+    for (int idx : indices) {
+        int x = idx % w;
+        int y = idx / w;
+        if (x == 0 || x == w - 1 || y == 0 || y == h - 1) continue;
+
+        float centerH = height[idx] * heightScale;
+        float currentFlow = flow[idx];
+
+        float totalSlopePower = 0.0f;
+        float power[8];
+        int downhillCount = 0;
+
+        for (int d = 0; d < 8; d++) {
+            int nidx = (y + dy[d]) * w + (x + dx[d]);
+            float slope = (centerH - height[nidx] * heightScale) / dist[d];
+            if (slope > 0.001f) {
+                float p = powf(slope, 1.1f); // Exponent for channelization
+                power[d] = p;
+                totalSlopePower += p;
+                downhillCount++;
+            } else {
+                power[d] = 0.0f;
+            }
+        }
+
+        if (totalSlopePower > 0.0f) {
+            // Distribute flow to all downhill neighbors (MFD)
+            for (int d = 0; d < 8; d++) {
+                if (power[d] > 0.0f) {
+                    int nidx = (y + dy[d]) * w + (x + dx[d]);
+                    flow[nidx] += currentFlow * (power[d] / totalSlopePower);
+                }
+            }
+        } else {
+            // SOFT FLAT AREA HANDLING: Spread flow to all neighbors
+            // This avoids the "sharp geometric line" artifacts caused by sink-filling.
+            // On a plateau, water spreads out like a pool.
+            for (int d = 0; d < 8; d++) {
+                int nidx = (y + dy[d]) * w + (x + dx[d]);
+                flow[nidx] += currentFlow * 0.125f; 
+            }
+        }
+    }
+
+    // 3. Post-Processing: Flow Diffusion Pass
+    // Softens the resulting mask to make it look organic and handle micro-noise
+    std::vector<float> diffuseFlow = flow;
+    for (int dPass = 0; dPass < 1; dPass++) {
+        std::vector<float> temp = diffuseFlow;
+        #pragma omp parallel for collapse(2)
+        for (int y = 1; y < h - 1; y++) {
+            for (int x = 1; x < w - 1; x++) {
+                int idx = y * w + x;
+                float sum = diffuseFlow[idx] * 2.0f;
+                for (int d = 0; d < 8; d++) {
+                    sum += diffuseFlow[(y + dy[d]) * w + (x + dx[d])];
+                }
+                temp[idx] = sum / 10.0f;
+            }
+        }
+        diffuseFlow = temp;
+    }
+
+    terrain->flowMap = diffuseFlow;
+}
+
 // ===========================================================================
 
 void TerrainManager::updateFoliage(TerrainObject* terrain, OptixWrapper* optix) {
@@ -4145,6 +4483,119 @@ void TerrainManager::reapplyAllFoliage(OptixWrapper* optix) {
             updateFoliage(&t, optix);
         }
     }
+}
+
+bool TerrainManager::hasLegacyFoliage() const {
+    for (const auto& terrain : terrains) {
+        if (!terrain.foliageLayers.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int TerrainManager::migrateLegacyFoliageToInstanceGroups(SceneData& scene, bool clearLegacy) {
+    InstanceManager& im = InstanceManager::getInstance();
+    int migratedGroups = 0;
+
+    for (auto& terrain : terrains) {
+        for (const auto& layer : terrain.foliageLayers) {
+            if (!layer.enabled || layer.density <= 0 || layer.meshPath.empty()) continue;
+
+            std::vector<std::shared_ptr<Triangle>> sourceTriangles = layer.sourceTriangles;
+            if (sourceTriangles.empty()) {
+                sourceTriangles = findLegacyFoliageSourceTriangles(layer.meshPath, scene);
+            }
+            if (sourceTriangles.empty()) {
+                SCENE_LOG_WARN("[Foliage Migration] Could not resolve source mesh for legacy layer '" + layer.name +
+                               "' (meshPath=" + layer.meshPath + ")");
+                continue;
+            }
+
+            std::string groupBase = "Foliage_" + terrain.name + "_" + layer.name;
+            std::string groupName = makeUniqueFoliageGroupName(groupBase, im);
+            int groupId = im.createGroup(groupName, layer.meshPath, {});
+            InstanceGroup* group = im.getGroup(groupId);
+            if (!group) continue;
+
+            group->sources.clear();
+            group->sources.emplace_back(layer.meshPath, sourceTriangles);
+            group->brush_settings.use_global_settings = true;
+            group->brush_settings.target_count = layer.density;
+            group->brush_settings.scale_min = layer.scaleRange.x;
+            group->brush_settings.scale_max = layer.scaleRange.y;
+            group->brush_settings.rotation_random_y = std::max(0.0f, layer.rotationRange.y - layer.rotationRange.x);
+            group->brush_settings.y_offset_min = layer.yOffsetRange.x;
+            group->brush_settings.y_offset_max = layer.yOffsetRange.y;
+            group->brush_settings.align_to_normal = layer.alignToNormal > 0.001f;
+            group->brush_settings.normal_influence = std::clamp(layer.alignToNormal, 0.0f, 1.0f);
+            group->brush_settings.splat_map_channel = layer.targetMaskLayerId;
+
+            Texture* splatTex = terrain.splatMap.get();
+            const int targetCount = layer.density;
+            const int maxAttempts = targetCount * 5;
+            std::mt19937 rng(12345 + terrain.id * 7 + (int)migratedGroups * 101);
+            std::uniform_real_distribution<float> dist01(0.0f, 1.0f);
+            std::uniform_real_distribution<float> distScale(layer.scaleRange.x, layer.scaleRange.y);
+            std::uniform_real_distribution<float> distRot(layer.rotationRange.x, layer.rotationRange.y);
+            std::uniform_real_distribution<float> distYOffset(layer.yOffsetRange.x, layer.yOffsetRange.y);
+
+            int spawnedCount = 0;
+            for (int attempt = 0; attempt < maxAttempts && spawnedCount < targetCount; ++attempt) {
+                float u = dist01(rng);
+                float v = dist01(rng);
+
+                float maskValue = 1.0f;
+                if (splatTex && splatTex->is_loaded()) {
+                    Vec3 color = splatTex->get_color(u, v);
+                    float alpha = splatTex->get_alpha(u, v);
+                    const int ch = layer.targetMaskLayerId;
+                    if (ch == 0) maskValue = color.x;
+                    else if (ch == 1) maskValue = color.y;
+                    else if (ch == 2) maskValue = color.z;
+                    else if (ch == 3) maskValue = alpha;
+                }
+                if (maskValue < layer.maskThreshold) continue;
+
+                int gx = std::clamp((int)(u * (terrain.heightmap.width - 1)), 0, terrain.heightmap.width - 1);
+                int gy = std::clamp((int)(v * (terrain.heightmap.height - 1)), 0, terrain.heightmap.height - 1);
+
+                float localX = u * terrain.heightmap.scale_xz;
+                float localZ = v * terrain.heightmap.scale_xz;
+                float localY = terrain.heightmap.getHeight(gx, gy);
+                Vec3 worldPos(localX, localY, localZ);
+                if (terrain.transform) {
+                    worldPos = terrain.transform->getFinal().multiplyVector(Vec4(worldPos, 1.0f)).xyz();
+                }
+
+                InstanceTransform inst;
+                inst.position = worldPos;
+                inst.position.y += distYOffset(rng);
+                float uniformScale = distScale(rng);
+                inst.scale = Vec3(uniformScale, uniformScale, uniformScale);
+                inst.rotation = Vec3(0.0f, distRot(rng), 0.0f);
+                inst.source_index = 0;
+
+                if (layer.alignToNormal > 0.001f) {
+                    Vec3 normal = computeLegacyFoliageNormal(*this, &terrain, worldPos);
+                    applyLegacyNormalAlignment(inst, normal, std::clamp(layer.alignToNormal, 0.0f, 1.0f));
+                }
+
+                group->addInstance(inst);
+                spawnedCount++;
+            }
+
+            SCENE_LOG_INFO("[Foliage Migration] Migrated legacy layer '" + layer.name + "' to group '" +
+                           groupName + "' with " + std::to_string(group->instances.size()) + " instances");
+            migratedGroups++;
+        }
+
+        if (clearLegacy) {
+            terrain.foliageLayers.clear();
+        }
+    }
+
+    return migratedGroups;
 }
 
 // ===========================================================================

@@ -591,11 +591,11 @@ public:
         auto shader = std::make_shared<VolumeShader>();
         shader->name = "Smoke";
         
-        shader->density.multiplier = 2.0f;
+        shader->density.multiplier = 10.0f;
         shader->scattering.color = Vec3(0.9f, 0.9f, 0.92f);
-        shader->scattering.coefficient = 1.5f;
+        shader->scattering.coefficient = 2.0f;
         shader->scattering.anisotropy = 0.3f;
-        shader->absorption.coefficient = 0.05f;
+        shader->absorption.coefficient = 0.1f;
         shader->emission.mode = VolumeEmissionMode::None;
         
         return shader;

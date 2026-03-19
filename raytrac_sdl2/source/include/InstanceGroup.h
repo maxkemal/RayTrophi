@@ -63,6 +63,11 @@ struct ScatterSource {
         float y_offset_max = 0.0f;
         bool align_to_normal = true;
         float normal_influence = 0.8f;
+        float wind_strength_scale = 1.0f;
+        float wind_speed_scale = 1.0f;
+        float wind_turbulence_scale = 1.0f;
+        float wind_bend_limit_scale = 1.0f;
+        float wind_phase_offset = 0.0f;
     };
     SourceSettings settings;
 
@@ -155,6 +160,10 @@ struct InstanceGroup {
         Vec3 direction = Vec3(1,0,0);   // Primary wind direction
         float turbulence = 1.5f;        // Noise frequency/randomness
         float wave_size = 50.0f;        // Distance between wind waves
+        bool use_source_profiles = true;
+        bool allow_gpu_deform = true;
+        float gpu_deform_max_distance = 35.0f; // CUDA only if the whole group stays near camera
+        int gpu_deform_max_instances = 32;     // CUDA budget for hero foliage groups
     };
     WindSettings wind_settings;
 

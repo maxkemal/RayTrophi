@@ -17,6 +17,76 @@
 #include "GasVolume.h"  // For gas simulation gizmos
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
+
+void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta) {
+    if (objectName.empty()) return;
+    if (worldDelta.length_squared() < 1e-12f) return;
+    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+    auto cache_it = mesh_cache.find(objectName);
+    if (cache_it == mesh_cache.end() || cache_it->second.empty()) return;
+
+    auto transform = cache_it->second[0].second->getTransformHandle();
+    if (!transform) return;
+
+    const Vec3 newPivotWorld = transform->position + worldDelta;
+    const Vec3 newPivotLocal = transform->base.inverse().transform_point(newPivotWorld);
+    transform->setPivotOffset(newPivotLocal, true);
+
+    updateBBoxCache(objectName);
+    objects_needing_cpu_sync.erase(objectName);
+
+    if (ctx.selection.selected.type == SelectableType::Object &&
+        ctx.selection.selected.object &&
+        ctx.selection.selected.object->nodeName == objectName) {
+        Matrix4x4 pivotMat = transform->getPivotMatrix();
+        Vec3 p, r, s;
+        pivotMat.decompose(p, r, s);
+        ctx.selection.selected.position = p;
+        ctx.selection.selected.rotation = r;
+        ctx.selection.selected.scale = s;
+        ctx.selection.selected.has_cached_aabb = false;
+    }
+
+    const bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
+    if (using_gpu_tlas) {
+        ctx.backend_ptr->updateObjectTransform(objectName, transform->base);
+        ctx.backend_ptr->resetAccumulation();
+    } else {
+        for (auto& pair : cache_it->second) {
+            pair.second->updateTransformedVertices();
+        }
+        if (ctx.backend_ptr) {
+            ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
+            ctx.backend_ptr->resetAccumulation();
+        } else {
+            extern bool g_cpu_bvh_refit_pending;
+            g_cpu_bvh_refit_pending = true;
+        }
+    }
+    ctx.renderer.resetCPUAccumulation();
+}
+
+void SceneUI::recenterObjectPivotToBoundsCenter(UIContext& ctx, const std::string& objectName) {
+    if (objectName.empty()) return;
+    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+
+    auto bbox_it = bbox_cache.find(objectName);
+    if (bbox_it == bbox_cache.end()) return;
+
+    const Vec3 localCenter = (bbox_it->second.first + bbox_it->second.second) * 0.5f;
+    if (localCenter.length_squared() < 1e-12f) return;
+
+    auto cache_it = mesh_cache.find(objectName);
+    if (cache_it == mesh_cache.end() || cache_it->second.empty()) return;
+
+    auto transform = cache_it->second[0].second->getTransformHandle();
+    if (!transform) return;
+
+    const Vec3 targetPivotWorld = transform->base.transform_point(localCenter);
+    moveObjectPivot(ctx, objectName, targetPivotWorld - transform->position);
+}
+
 // =============================================================================
 // ===============================================================================
 // SELECTION BOUNDING BOX DRAWING (Multi-selection support)
@@ -36,7 +106,6 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
     // FOV calculations
     float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
     float tan_half_fov = tanf(fov_rad * 0.5f);
-
     // Helper lambda to draw a bounding box with granular occlusion
     auto DrawBoundingBox = [&](Vec3 bb_min, Vec3 bb_max, ImU32 color, float thickness) {
         Vec3 corners[8] = {
@@ -51,9 +120,65 @@ void SceneUI::drawSelectionBoundingBox(UIContext& ctx) {
         };
 
         ImDrawList* draw_list = ImGui::GetBackgroundDrawList();
+        auto ProjectPoint = [&](const Vec3& point, ImVec2& out) -> bool {
+            Vec3 to_pt = point - cam.lookfrom;
+            float depth = to_pt.dot(cam_forward);
+            if (depth <= 0.01f) return false;
+
+            float local_x = to_pt.dot(cam_right);
+            float local_y = to_pt.dot(cam_up);
+            float half_h = depth * tan_half_fov;
+            float half_w = half_h * aspect_ratio;
+            if (fabs(half_w) <= 1e-6f || fabs(half_h) <= 1e-6f) return false;
+
+            out.x = ((local_x / half_w) * 0.5f + 0.5f) * screen_w;
+            out.y = (0.5f - (local_y / half_h) * 0.5f) * screen_h;
+            return true;
+        };
+
+        float proj_min_x = screen_w;
+        float proj_min_y = screen_h;
+        float proj_max_x = 0.0f;
+        float proj_max_y = 0.0f;
+        bool has_projected_corner = false;
+        for (const Vec3& corner : corners) {
+            ImVec2 projected;
+            if (!ProjectPoint(corner, projected)) continue;
+            has_projected_corner = true;
+            proj_min_x = fminf(proj_min_x, projected.x);
+            proj_min_y = fminf(proj_min_y, projected.y);
+            proj_max_x = fmaxf(proj_max_x, projected.x);
+            proj_max_y = fmaxf(proj_max_y, projected.y);
+        }
+
+        const Vec3 bb_extent = bb_max - bb_min;
+        const float bbox_diagonal = bb_extent.length();
+        const Vec3 bb_center = (bb_min + bb_max) * 0.5f;
+        const float camera_distance = (bb_center - cam.lookfrom).length();
+        const float projected_width = has_projected_corner ? (proj_max_x - proj_min_x) : 0.0f;
+        const float projected_height = has_projected_corner ? (proj_max_y - proj_min_y) : 0.0f;
+        const float screen_area = (std::max)(1.0f, screen_w * screen_h);
+        const float projected_area_ratio = (projected_width * projected_height) / screen_area;
+        const float screen_diagonal = sqrtf(screen_w * screen_w + screen_h * screen_h);
+        const float projected_diagonal = sqrtf(projected_width * projected_width + projected_height * projected_height);
+        const float apparent_scale = camera_distance > 0.001f ? (bbox_diagonal / camera_distance) : bbox_diagonal;
+
+        const bool use_occlusion =
+            has_projected_corner &&
+            projected_area_ratio < 0.10f &&
+            projected_diagonal < screen_diagonal * 0.40f &&
+            apparent_scale < 1.2f;
         
         // Helper to draw a line with subdivision and occlusion check
         auto DrawSegmentedLine = [&](const Vec3& p_start, const Vec3& p_end) {
+            if (!use_occlusion) {
+                ImVec2 start_scr, end_scr;
+                if (ProjectPoint(p_start, start_scr) && ProjectPoint(p_end, end_scr)) {
+                    draw_list->AddLine(start_scr, end_scr, color, thickness);
+                }
+                return;
+            }
+
             const int segments = 8; // Subdivision level for accurate occlusion
             Vec3 prev_p = p_start;
             ImVec2 prev_scr;
@@ -880,7 +1005,7 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         // Single Object (or Homogeneous Group) - Lock to Object Transform
         auto transform = sel.selected.object->getTransformHandle();
         if (transform) {
-            Matrix4x4 mat = transform->base;
+            Matrix4x4 mat = transform->getPivotMatrix();
             objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
             objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
             objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
@@ -888,14 +1013,14 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         }
     }
     else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
-        Matrix4x4 mat = sel.selected.gas_volume->getTransform();
+        Matrix4x4 mat = sel.selected.gas_volume->getPivotMatrix();
         objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
         objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
         objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
         objectMatrix[12] = mat.m[0][3]; objectMatrix[13] = mat.m[1][3]; objectMatrix[14] = mat.m[2][3]; objectMatrix[15] = mat.m[3][3];
     }
     else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
-        Matrix4x4 mat = sel.selected.vdb_volume->getTransform();
+        Matrix4x4 mat = sel.selected.vdb_volume->getPivotMatrix();
         objectMatrix[0] = mat.m[0][0]; objectMatrix[1] = mat.m[1][0]; objectMatrix[2] = mat.m[2][0]; objectMatrix[3] = mat.m[3][0];
         objectMatrix[4] = mat.m[0][1]; objectMatrix[5] = mat.m[1][1]; objectMatrix[6] = mat.m[2][1]; objectMatrix[7] = mat.m[3][1];
         objectMatrix[8] = mat.m[0][2]; objectMatrix[9] = mat.m[1][2]; objectMatrix[10] = mat.m[2][2]; objectMatrix[11] = mat.m[3][2];
@@ -911,6 +1036,12 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     }
 
     // �������������������������������������������������������������������������
+    const bool can_edit_single_pivot =
+        sel.multi_selection.size() == 1 &&
+        ((sel.selected.type == SelectableType::Object && sel.selected.object) ||
+         (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+         (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
+
     // Keyboard Shortcuts for Transform Mode
     // �������������������������������������������������������������������������
     // Only process when viewport has focus (not UI panels)
@@ -932,6 +1063,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
             case TransformMode::Rotate: sel.transform_mode = TransformMode::Scale; break;
             case TransformMode::Scale: sel.transform_mode = TransformMode::Translate; break;
             }
+        }
+        else if (can_edit_single_pivot && ImGui::IsKeyPressed(ImGuiKey_P)) {
+            pivot_edit_mode = !pivot_edit_mode;
         }
 
         // Shift + D = Duplicate Object
@@ -1045,11 +1179,21 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     case TransformMode::Scale: operation = ImGuizmo::SCALE; break;
     }
 
+    if (!can_edit_single_pivot) {
+        pivot_edit_mode = false;
+    }
+    if (pivot_edit_mode) {
+        operation = ImGuizmo::TRANSLATE;
+    }
+
     // Restriction Removed: Fallback logic now handles Rot/Scale for mixed groups
 
 
     ImGuizmo::MODE mode = (sel.transform_space == TransformSpace::Local) ?
         ImGuizmo::LOCAL : ImGuizmo::WORLD;
+    if (pivot_edit_mode) {
+        mode = ImGuizmo::WORLD;
+    }
 
     // �������������������������������������������������������������������������
     // Shift + Drag Duplication Logic + IDLE PREVIEW
@@ -1130,10 +1274,12 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         }
         else if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             // START TRANSFORM RECORDING (Normal drag without Shift)
-            auto transform = sel.selected.object->getTransformHandle();
-            if (transform) {
-                drag_start_state.matrix = transform->base;
-                drag_object_name = sel.selected.object->nodeName;
+            if (!pivot_edit_mode) {
+                auto transform = sel.selected.object->getTransformHandle();
+                if (transform) {
+                    drag_start_state.matrix = transform->base;
+                    drag_object_name = sel.selected.object->nodeName;
+                }
             }
         }
     }
@@ -1142,23 +1288,32 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     if (!is_using && was_using_gizmo) {
         if (sel.selected.type == SelectableType::Object && sel.selected.object) {
             // END TRANSFORM RECORDING
-            auto t = sel.selected.object->getTransformHandle();
-            if (t) {
-                TransformState final_state;
-                final_state.matrix = t->base;
+            if (pivot_edit_mode) {
+                ProjectManager::getInstance().markModified();
+            } else {
+                auto t = sel.selected.object->getTransformHandle();
+                if (t) {
+                    TransformState final_state;
+                    final_state.matrix = t->base;
 
-                // Check delta
-                bool changed = false;
-                for (int i = 0; i < 4; ++i)
-                    for (int j = 0; j < 4; ++j)
-                        if (std::abs(final_state.matrix.m[i][j] - drag_start_state.matrix.m[i][j]) > 0.0001f)
-                            changed = true;
+                    // Check delta
+                    bool changed = false;
+                    for (int i = 0; i < 4; ++i)
+                        for (int j = 0; j < 4; ++j)
+                            if (std::abs(final_state.matrix.m[i][j] - drag_start_state.matrix.m[i][j]) > 0.0001f)
+                                changed = true;
 
-                if (changed) {
-                    history.record(std::make_unique<TransformCommand>(drag_object_name, drag_start_state, final_state));
-                    ProjectManager::getInstance().markModified();
+                    if (changed) {
+                        history.record(std::make_unique<TransformCommand>(drag_object_name, drag_start_state, final_state));
+                        ProjectManager::getInstance().markModified();
+                    }
                 }
             }
+        }
+        else if (pivot_edit_mode &&
+                 ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+                  (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume))) {
+            ProjectManager::getInstance().markModified();
         }
         else if (sel.selected.type == SelectableType::Light && drag_light) {
             LightState final_light_state = LightState::capture(*drag_light);
@@ -1313,9 +1468,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
         // CRITICAL FIX: Update rotation and scale from object's transform matrix
         // This ensures keyframes capture correct rotation/scale values
         if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-            auto transformHandle = sel.selected.object->getTransformHandle();
-            if (transformHandle) {
-                Matrix4x4 objTransform = transformHandle->getFinal();
+                auto transformHandle = sel.selected.object->getTransformHandle();
+                if (transformHandle) {
+                Matrix4x4 objTransform = transformHandle->getPivotMatrix();
 
                 // Extract rotation (Euler angles in degrees)
                 // Assuming rotation order: Z * Y * X
@@ -1382,36 +1537,27 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                             auto th = firstTri->getTransformHandle();
                             
                             if (th) {
+                                Matrix4x4 pivotMat = th->getPivotMatrix();
                                 // Apply transform to the shared handle (most objects share one)
                                 if (pivot_mode == 1) {
                                     // Individual Origins
-                                    Vec3 pos(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
-                                    th->base.m[0][3] = 0; th->base.m[1][3] = 0; th->base.m[2][3] = 0;
-                                    th->setBase(deltaRotScale * th->base);
-                                    th->base.m[0][3] = pos.x + deltaTranslation.x;
-                                    th->base.m[1][3] = pos.y + deltaTranslation.y;
-                                    th->base.m[2][3] = pos.z + deltaTranslation.z;
+                                    Vec3 pos(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
+                                    pivotMat.m[0][3] = 0; pivotMat.m[1][3] = 0; pivotMat.m[2][3] = 0;
+                                    Matrix4x4 updated = deltaRotScale * pivotMat;
+                                    updated.m[0][3] = pos.x + deltaTranslation.x;
+                                    updated.m[1][3] = pos.y + deltaTranslation.y;
+                                    updated.m[2][3] = pos.z + deltaTranslation.z;
+                                    th->setPivotMatrix(updated);
                                 }
                                 else {
                                     // Median Point
-                                    th->setBase(deltaMat * th->base);
+                                    th->setPivotMatrix(deltaMat * pivotMat);
                                 }
                                 
                                 // TLAS MODE: Update GPU instance transform (fast path)
                                 bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
                                 if (using_gpu_tlas) {
-                                    std::vector<int> inst_ids = ctx.backend_ptr->getInstancesByNodeName(targetName);
-                                    if (!inst_ids.empty()) {
-                                        float t[12];
-                                        Matrix4x4& m = th->base;
-                                        t[0] = m.m[0][0]; t[1] = m.m[0][1]; t[2] = m.m[0][2]; t[3] = m.m[0][3];
-                                        t[4] = m.m[1][0]; t[5] = m.m[1][1]; t[6] = m.m[1][2]; t[7] = m.m[1][3];
-                                        t[8] = m.m[2][0]; t[9] = m.m[2][1]; t[10] = m.m[2][2]; t[11] = m.m[2][3];
-                                        
-                                        for (int inst_id : inst_ids) {
-                                            ctx.backend_ptr->updateInstanceTransform(inst_id, t);
-                                        }
-                                    }
+                                    ctx.backend_ptr->updateObjectTransform(targetName, th->base);
                                     // NOTE: TLAS mode - NO CPU vertex update during drag! (saves millions of calls)
                                 }
                                 // CPU mode handled on release
@@ -1460,10 +1606,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                     }
                 } // End of multi_selection loop
 
-                // Trigger TLAS Update after processing all objects
+                // Trigger accumulation reset after processing all objects
                 if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                    // Use fast matrix-only update instead of full rebuild
-                    ctx.backend_ptr->updateInstanceTransforms(ctx.scene.world.objects);
                     ctx.backend_ptr->resetAccumulation();
                 }
 
@@ -1571,11 +1715,17 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
              newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
              newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
 
-             sel.selected.vdb_volume->setTransform(newMat);
-             
-             // Update Selection struct to match new transform
              Vec3 p, r, s;
-             newMat.decompose(p, r, s);
+             if (pivot_edit_mode) {
+                 Matrix4x4 renderMat = sel.selected.vdb_volume->getTransform();
+                 Vec3 newPivotLocal = renderMat.inverse().transform_point(newPos);
+                 sel.selected.vdb_volume->setPivotOffset(newPivotLocal);
+                 Matrix4x4 pivotMat = sel.selected.vdb_volume->getPivotMatrix();
+                 pivotMat.decompose(p, r, s);
+             } else {
+                 sel.selected.vdb_volume->setPivotMatrix(newMat);
+                 newMat.decompose(p, r, s);
+             }
              sel.selected.position = p;
              sel.selected.rotation = r;
              sel.selected.scale = s;
@@ -1600,10 +1750,16 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
              newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
 
              Vec3 p, r, s;
-             newMat.decompose(p, r, s);
-             sel.selected.gas_volume->setPosition(p);
-             sel.selected.gas_volume->setRotation(r);
-             sel.selected.gas_volume->setScale(s);
+             if (pivot_edit_mode) {
+                 Matrix4x4 renderMat = sel.selected.gas_volume->getTransform();
+                 Vec3 newPivotLocal = renderMat.inverse().transform_point(newPos);
+                 sel.selected.gas_volume->setPivotOffset(newPivotLocal);
+                 Matrix4x4 pivotMat = sel.selected.gas_volume->getPivotMatrix();
+                 pivotMat.decompose(p, r, s);
+             } else {
+                 sel.selected.gas_volume->setPivotMatrix(newMat);
+                 newMat.decompose(p, r, s);
+             }
              
              // Update selection struct to match new transform
              sel.selected.position = p;
@@ -1640,86 +1796,94 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 std::string targetName = sel.selected.object->nodeName;
                 if (targetName.empty()) targetName = "Unnamed";
 
-                auto it = mesh_cache.find(targetName);
-                if (it != mesh_cache.end() && !it->second.empty()) {
-                    auto& firstTri = it->second[0].second;
-                    auto t_handle = firstTri->getTransformHandle();
+                if (pivot_edit_mode) {
+                    moveObjectPivot(ctx, targetName, deltaPos);
+                    sel.selected.position = newPos;
+                    sel.selected.has_cached_aabb = false;
+                } else {
+                    auto it = mesh_cache.find(targetName);
+                    if (it != mesh_cache.end() && !it->second.empty()) {
+                        auto& firstTri = it->second[0].second;
+                        auto t_handle = firstTri->getTransformHandle();
 
-                    // Safety check for mixed transforms - OPTIMIZED: Only check first few triangles
-                    // Most objects either share one transform or have completely different ones
-                    bool all_same_transform = true;
-                    const size_t MAX_CHECK = std::min((size_t)100, it->second.size()); // Check up to 100, not 2M
-                    for (size_t i = 1; i < MAX_CHECK && all_same_transform; ++i) {
-                        auto h = it->second[i].second->getTransformHandle();
-                        if (h.get() != t_handle.get()) all_same_transform = false;
-                    }
+                        // Safety check for mixed transforms - OPTIMIZED: Only check first few triangles
+                        // Most objects either share one transform or have completely different ones
+                        bool all_same_transform = true;
+                        const size_t MAX_CHECK = std::min((size_t)100, it->second.size()); // Check up to 100, not 2M
+                        for (size_t i = 1; i < MAX_CHECK && all_same_transform; ++i) {
+                            auto h = it->second[i].second->getTransformHandle();
+                            if (h.get() != t_handle.get()) all_same_transform = false;
+                        }
 
-                    if (all_same_transform && t_handle) {
-                        // Apply full matrix from gizmo (supports translate, rotate, scale)
-                        t_handle->setBase(newMat);
+                        if (all_same_transform && t_handle) {
+                            // Apply full matrix from gizmo (supports translate, rotate, scale)
+                            t_handle->setPivotMatrix(newMat);
 
-                        // TLAS INSTANCING UPDATE (Fast GPU Path)
-                        // Use the GPU path when the active backend supports TLAS
-                        bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
-                        if (using_gpu_tlas) {
-                             // Use unified update method
-                             ctx.backend_ptr->updateObjectTransform(targetName, newMat);
+                            // TLAS INSTANCING UPDATE (Fast GPU Path)
+                            // Use the GPU path when the active backend supports TLAS
+                            bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
+                            if (using_gpu_tlas) {
+                                 // Use unified update method
+                                 ctx.backend_ptr->updateObjectTransform(targetName, t_handle->base);
+                            }
+                            else {
+                                // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
+                                for (auto& pair : it->second) {
+                                    pair.second->updateTransformedVertices();
+                                }
+                                
+                                is_bvh_dirty = true;
+                                
+                                // Trigger Fast Refit during interaction (CPU Mode only)
+                                extern bool g_cpu_bvh_refit_pending;
+                                g_cpu_bvh_refit_pending = true;
+                            }
                         }
                         else {
-                            // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
+                            // Fallback: Mixed transforms, apply delta MATRIX to each unique transform (Supports all ops)
+                            Matrix4x4 newMat;
+                            newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
+                            newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
+                            newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
+                            newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+
+                            Matrix4x4 deltaMat = newMat * oldMat.inverse();
+
+                            // Decompose for Individual Origins logic
+                            Vec3 deltaTranslation(deltaMat.m[0][3], deltaMat.m[1][3], deltaMat.m[2][3]);
+                            Matrix4x4 deltaRotScale = deltaMat;
+                            deltaRotScale.m[0][3] = 0; deltaRotScale.m[1][3] = 0; deltaRotScale.m[2][3] = 0;
+
+                            std::unordered_set<Transform*> processed_transforms;
                             for (auto& pair : it->second) {
-                                pair.second->updateTransformedVertices();
-                            }
-                            
-                            is_bvh_dirty = true;
-                            
-                            // Trigger Fast Refit during interaction (CPU Mode only)
-                            extern bool g_cpu_bvh_refit_pending;
-                            g_cpu_bvh_refit_pending = true;
-                        }
-                    }
-                    else {
-                        // Fallback: Mixed transforms, apply delta MATRIX to each unique transform (Supports all ops)
-                        Matrix4x4 newMat;
-                        newMat.m[0][0] = objectMatrix[0]; newMat.m[1][0] = objectMatrix[1]; newMat.m[2][0] = objectMatrix[2]; newMat.m[3][0] = objectMatrix[3];
-                        newMat.m[0][1] = objectMatrix[4]; newMat.m[1][1] = objectMatrix[5]; newMat.m[2][1] = objectMatrix[6]; newMat.m[3][1] = objectMatrix[7];
-                        newMat.m[0][2] = objectMatrix[8]; newMat.m[1][2] = objectMatrix[9]; newMat.m[2][2] = objectMatrix[10]; newMat.m[3][2] = objectMatrix[11];
-                        newMat.m[0][3] = objectMatrix[12]; newMat.m[1][3] = objectMatrix[13]; newMat.m[2][3] = objectMatrix[14]; newMat.m[3][3] = objectMatrix[15];
+                                auto tri = pair.second;
+                                auto th = tri->getTransformHandle();
+                                if (th && processed_transforms.find(th.get()) == processed_transforms.end()) {
+                                    Matrix4x4 pivotMat = th->getPivotMatrix();
+                                    if (pivot_mode == 1) {
+                                        // Individual Origins
+                                        Vec3 pos(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
+                                        pivotMat.m[0][3] = 0; pivotMat.m[1][3] = 0; pivotMat.m[2][3] = 0;
+                                        Matrix4x4 updated = deltaRotScale * pivotMat;
+                                        updated.m[0][3] = pos.x + deltaTranslation.x;
+                                        updated.m[1][3] = pos.y + deltaTranslation.y;
+                                        updated.m[2][3] = pos.z + deltaTranslation.z;
+                                        th->setPivotMatrix(updated);
+                                    }
+                                    else {
+                                        // Median Point
+                                        th->setPivotMatrix(deltaMat * pivotMat);
+                                    }
+                                    processed_transforms.insert(th.get());
 
-                        Matrix4x4 deltaMat = newMat * oldMat.inverse();
-
-                        // Decompose for Individual Origins logic
-                        Vec3 deltaTranslation(deltaMat.m[0][3], deltaMat.m[1][3], deltaMat.m[2][3]);
-                        Matrix4x4 deltaRotScale = deltaMat;
-                        deltaRotScale.m[0][3] = 0; deltaRotScale.m[1][3] = 0; deltaRotScale.m[2][3] = 0;
-
-                        std::unordered_set<Transform*> processed_transforms;
-                        for (auto& pair : it->second) {
-                            auto tri = pair.second;
-                            auto th = tri->getTransformHandle();
-                            if (th && processed_transforms.find(th.get()) == processed_transforms.end()) {
-                                if (pivot_mode == 1) {
-                                    // Individual Origins
-                                    Vec3 pos(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
-                                    th->base.m[0][3] = 0; th->base.m[1][3] = 0; th->base.m[2][3] = 0;
-                                    th->setBase(deltaRotScale * th->base);
-                                    th->base.m[0][3] = pos.x + deltaTranslation.x;
-                                    th->base.m[1][3] = pos.y + deltaTranslation.y;
-                                    th->base.m[2][3] = pos.z + deltaTranslation.z;
-                                }
-                                else {
-                                    // Median Point
-                                    th->setBase(deltaMat * th->base);
-                                }
-                                processed_transforms.insert(th.get());
-
-                                // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
-                                if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                                    // Use unified update method
-                                    ctx.backend_ptr->updateObjectTransform(targetName, th->base);
-                                } else {
-                                    // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
-                                    tri->updateTransformedVertices();
+                                    // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
+                                    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
+                                        // Use unified update method
+                                        ctx.backend_ptr->updateObjectTransform(targetName, th->base);
+                                    } else {
+                                        // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
+                                        tri->updateTransformedVertices();
+                                    }
                                 }
                             }
                         }

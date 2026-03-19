@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "../include/gas_kernels.cuh"
+#include "../include/gas_fft_solver.cuh"
 #include <algorithm>
 
 namespace FluidSim {
@@ -175,7 +176,26 @@ __global__ void combustion_kernel_v2(int nx, int ny, int nz, float dt,
 
     if (f > 0.0f && t > ignition_temp) {
         // Burn rate: throttled by density to prevent "density explosion"
-        float density_throttle = fmaxf(0.05f, 1.0f - (rho_val / max_density));
+        float ignition_band = fmaxf(60.0f, (max_temperature - ignition_temp) * 0.08f);
+        float pilot_factor = fmaxf(0.0f, fminf(1.0f, (t - ignition_temp) / fmaxf(ignition_band * 0.4f, 1.0f)));
+        float autoignite_start = ignition_temp + fmaxf(520.0f, ignition_band * 5.0f);
+        float autoignite_factor = fmaxf(0.0f, fminf(1.0f, (t - autoignite_start) / fmaxf(ignition_band * 5.5f, 220.0f)));
+        float burn_gate = fmaxf(0.01f, autoignite_factor * 0.2f);
+        if (pilot_factor < 0.25f && autoignite_factor < 0.75f) {
+            float cool_rate = 1.0f / (1.0f + 3.5f * dt);
+            temp[id] = ignition_temp + (t - ignition_temp) * cool_rate;
+            return;
+        }
+        float thermal_saturation = fmaxf(0.0f, fminf(1.0f, (t - ignition_temp) / fmaxf(max_temperature - ignition_temp, 1.0f)));
+        float oxygen_proxy = fmaxf(0.0f, fminf(1.0f,
+            1.0f - (rho_val / fmaxf(max_density * 0.55f, 0.001f)) - (f / 8.0f) - thermal_saturation * 0.25f));
+        float density_throttle = fmaxf(0.08f, fminf(1.0f, 1.0f - (rho_val / fmaxf(max_density * 0.65f, 0.001f))));
+        if (oxygen_proxy < 0.08f) {
+            float cool_rate = 1.0f / (1.0f + 5.0f * dt);
+            temp[id] = ignition_temp + (t - ignition_temp) * cool_rate;
+            fuel[id] *= 1.0f / (1.0f + 2.5f * dt);
+            return;
+        }
         
         float burned = f * burn_rate * dt * density_throttle;
         if (burned > f) burned = f;
@@ -184,7 +204,8 @@ __global__ void combustion_kernel_v2(int nx, int ny, int nz, float dt,
         float range = max_temperature - ignition_temp;
         float temp_factor = (max_temperature - t) / (range > 0 ? range : 1.0f);
         float temp_headroom = fmaxf(0.0f, fminf(1.0f, temp_factor));
-        burned *= temp_headroom; 
+        burned *= temp_headroom * pilot_factor * burn_gate * oxygen_proxy * oxygen_proxy * oxygen_proxy;
+        burned = fminf(burned, 0.035f * dt + f * 0.045f);
         
         if (burned < 0.00001f) return; 
 
@@ -209,7 +230,11 @@ __global__ void combustion_kernel_v2(int nx, int ny, int nz, float dt,
         // Expansion: Throttled much more heavily to prevent pressure solver explosion (NaNs)
         // High pressure divergence is the #1 cause of black-spot artifacts
         float expansion_throttle = density_throttle * temp_headroom;
-        div[id] += fminf(burned * expansion * expansion_throttle, 100.0f); // Hard limit on divergence per cell
+        div[id] += fminf(burned * expansion * expansion_throttle, 18.0f); // Hard limit on divergence per cell
+    } else if (t > ignition_temp) {
+        const float fuel_norm = fmaxf(0.0f, fminf(1.0f, f / 2.0f));
+        const float cool_rate = 1.0f / (1.0f + (2.5f + (1.0f - fuel_norm) * 4.0f) * dt);
+        temp[id] = ignition_temp + (t - ignition_temp) * cool_rate;
     }
 }
 
@@ -276,8 +301,11 @@ __global__ void dissipation_kernel(int nx, int ny, int nz, float dt,
     rho[id] *= k_rho;
     if (rho[id] < 0.001f) rho[id] = 0.0f;
     
-    // Temperature: decay towards ambient (like CPU)
-    temp[id] = ambient_temp + (temp[id] - ambient_temp) * k_temp;
+    // Temperature: decay towards ambient, but cool much faster when hot cells run out of fuel.
+    float hotness = fmaxf(0.0f, fminf(3.0f, (temp[id] - ambient_temp) / fmaxf(400.0f, ambient_temp * 0.25f)));
+    float fuel_norm = fmaxf(0.0f, fminf(1.0f, fuel[id] / 2.0f));
+    float cooling_boost = 1.0f / (1.0f + hotness * (1.0f - fuel_norm) * 2.5f * dt);
+    temp[id] = ambient_temp + (temp[id] - ambient_temp) * k_temp * cooling_boost;
     
     // Fuel: exponential decay with threshold
     fuel[id] *= k_fuel;
@@ -669,8 +697,9 @@ __device__ float3 curl3d_gpu(float x, float y, float z, float freq, int octaves,
 // Industry-standard curl noise turbulence kernel
 __global__ void apply_curl_noise_kernel(int nx, int ny, int nz, float dt,
                                         float* vx, float* vy, float* vz,
-                                        const float* density,
+                                        const float* density, const float* temperature,
                                         float strength, float scale, float time,
+                                        float ambient_temp, float ignition_temp,
                                         int octaves, float lacunarity, float persistence)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -681,14 +710,22 @@ __global__ void apply_curl_noise_kernel(int nx, int ny, int nz, float dt,
 
     int id = idx(i, j, k, nx, ny, nz);
     
-    // MOD: Apply where there's density OR temperature (explosion core)
     float d = density[id];
-    // Also consider temperature impact for turbulence in fire
-    // (We reuse the temperature data or just look at density)
-    if (d < 0.001f) return; 
-    
-    // Density-weighted strength with a minimum threshold to allow detail in thin smoke
-    float local_strength = strength * fmaxf(d, 0.2f);
+    float t = temperature ? temperature[id] : ambient_temp;
+    float heat = fmaxf(0.0f, (t - ambient_temp) / fmaxf(ignition_temp - ambient_temp, 1.0f));
+    if (d < 0.001f && heat < 0.05f) return;
+
+    // Edge-weight the turbulence so we get breakup near plume boundaries instead of only in the dense core.
+    float dx = 0.5f * (density[idx(i + 1, j, k, nx, ny, nz)] - density[idx(i - 1, j, k, nx, ny, nz)]);
+    float dy = 0.5f * (density[idx(i, j + 1, k, nx, ny, nz)] - density[idx(i, j - 1, k, nx, ny, nz)]);
+    float dz = 0.5f * (density[idx(i, j, k + 1, nx, ny, nz)] - density[idx(i, j, k - 1, nx, ny, nz)]);
+    float edge = sqrtf(dx * dx + dy * dy + dz * dz);
+
+    float local_strength = strength * fminf(2.5f,
+        0.18f +
+        0.45f * sqrtf(fmaxf(d, 0.0f)) +
+        0.45f * fminf(heat, 1.5f) +
+        0.35f * fminf(edge * 4.0f, 1.0f));
     
     // Multi-scale animated position
     float px = (float)i * scale + time * 0.4f;
@@ -786,6 +823,32 @@ __global__ void maccormack_correction_kernel(int nx, int ny, int nz, float dt,
     if (c_src >= 0.0f && corrected < 0.0f) corrected = 0.0f;
     
     dst[id] = corrected;
+}
+
+__global__ void bfecc_corrected_source_kernel(int nx, int ny, int nz,
+                                              const float* src, const float* fwd, const float* bwd,
+                                              float* dst)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int k = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (i >= nx || j >= ny || k >= nz) return;
+
+    int id = idx(i, j, k, nx, ny, nz);
+
+    float c_src = src[id];
+    float c_fwd = fwd[id];
+    float c_bwd = bwd[id];
+
+    float corrected = c_src + 0.5f * (c_src - c_bwd);
+    if (!isfinite(corrected)) {
+        corrected = isfinite(c_src) ? c_src : 0.0f;
+    }
+
+    float min_val = fminf(c_src, c_fwd);
+    float max_val = fmaxf(c_src, c_fwd);
+    dst[id] = fmaxf(min_val, fminf(max_val, corrected));
 }
 
 // ----------------------------------------------------------------------------
@@ -910,27 +973,43 @@ void cuda_step_simulation(
     // 4. Curl Noise Turbulence
     if (turbulence_str > 0.0f) {
         static float time = 0.0f; time += dt;
-        apply_curl_noise_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_vy, d_vz, d_rho,
+        apply_curl_noise_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_vy, d_vz, d_rho, d_temp,
                                                   turbulence_str, turbulence_scale, time,
+                                                  amb_temp, ign_temp,
                                                   3, 2.0f, 0.5f);
     }
 
     // 5. Advect Velocity
-    if (advection_mode == 1) { // MacCormack
+    if (advection_mode == 1 || advection_mode == 2) { // MacCormack / BFECC
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_vx, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vx, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vx, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_vy, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vy, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vy, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vy, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_vz, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vz, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vz, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vz, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
     } else {
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp2, d_vx, d_vy, d_vz);
@@ -948,21 +1027,36 @@ void cuda_step_simulation(
     }
     subtract_gradient_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_vy, d_vz, d_p);
 
-    if (advection_mode == 1) { // MacCormack
+    if (advection_mode == 1 || advection_mode == 2) { // MacCormack / BFECC
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_rho, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_rho, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_rho, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_rho, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_temp, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_temp, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_temp, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_temp, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_fuel, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_fuel, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_fuel, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_fuel, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
     } else {
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_vx, d_vy, d_vz);
         cudaMemcpy(d_rho, d_tmp1, sz, cudaMemcpyDeviceToDevice);
@@ -1032,29 +1126,45 @@ void cuda_step_simulation_v2(
     // 4. Curl Noise Turbulence (using UI parameters for octaves/lacunarity/persistence)
     if (p.turbulence_strength > 0.0f) {
         apply_curl_noise_kernel<<<grid, block>>>(
-            nx, ny, nz, dt, d_vx, d_vy, d_vz, d_rho,
+            nx, ny, nz, dt, d_vx, d_vy, d_vz, d_rho, d_temp,
             p.turbulence_strength, p.turbulence_scale, p.time,
+            p.ambient_temperature, p.ignition_temperature,
             p.turbulence_octaves, p.turbulence_lacunarity, p.turbulence_persistence
         );
     }
 
     // 5. Advect Velocity
-    if (p.advection_mode == 1) { // MacCormack
+    if (p.advection_mode == 1 || p.advection_mode == 2) { // MacCormack / BFECC
         // Forward advection
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_vx, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vx, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vx, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_vy, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vy, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vy, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vy, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_vz, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vz, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vz, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vz, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
     } else { // Semi-Lagrangian
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp2, d_vx, d_vy, d_vz);
@@ -1091,21 +1201,36 @@ void cuda_step_simulation_v2(
     subtract_gradient_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_vy, d_vz, d_p);
 
     // 7. Advect Scalars
-    if (p.advection_mode == 1) { // MacCormack
+    if (p.advection_mode == 1 || p.advection_mode == 2) { // MacCormack / BFECC
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_rho, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_rho, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_rho, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_rho, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_temp, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_temp, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_temp, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_temp, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
 
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_vx, d_vy, d_vz);
         advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
-        maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_tmp2, d_tmp3);
-        cudaMemcpy(d_fuel, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_fuel, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_fuel, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_fuel, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
     } else {
         advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_vx, d_vy, d_vz);
         cudaMemcpy(d_rho, d_tmp1, sz, cudaMemcpyDeviceToDevice);
@@ -1123,6 +1248,162 @@ void cuda_step_simulation_v2(
     );
 
     // 9. Sanitize / Stabilize (Final pass to scrub NaNs and enforce UI limits)
+    sanitize_simulation_kernel<<<grid, block>>>(
+        nx, ny, nz, d_rho, d_temp, d_fuel,
+        p.max_density, p.max_temperature, p.ambient_temperature
+    );
+}
+
+void cuda_step_simulation_v2_fft(
+    const GPUSimulationParams& p,
+    FFTPressureSolver* fft_solver,
+    float* d_rho, float* d_temp, float* d_fuel,
+    float* d_vx, float* d_vy, float* d_vz,
+    float* d_p, float* d_div,
+    float* d_vort_x, float* d_vort_y, float* d_vort_z,
+    float* d_tmp1, float* d_tmp2, float* d_tmp3)
+{
+    if (!fft_solver || !fft_solver->initialized) {
+        cuda_step_simulation_v2(
+            p,
+            d_rho, d_temp, d_fuel,
+            d_vx, d_vy, d_vz,
+            d_p, d_div,
+            d_vort_x, d_vort_y, d_vort_z,
+            d_tmp1, d_tmp2, d_tmp3
+        );
+        return;
+    }
+
+    const int nx = p.nx, ny = p.ny, nz = p.nz;
+    const float dt = p.dt;
+
+    dim3 block(BLOCK_SIZE, BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid((nx + block.x - 1)/block.x, (ny + block.y - 1)/block.y, (nz + block.z - 1)/block.z);
+    size_t sz = (size_t)nx * ny * nz * sizeof(float);
+
+    cudaMemset(d_div, 0, sz);
+
+    combustion_kernel_v2<<<grid, block>>>(
+        nx, ny, nz, dt, d_rho, d_temp, d_fuel, d_div,
+        p.ignition_temperature, p.burn_rate, p.heat_release,
+        p.smoke_generation, p.expansion_strength,
+        p.max_density, p.max_temperature
+    );
+
+    apply_forces_kernel_v2<<<grid, block>>>(
+        nx, ny, nz, dt, d_vx, d_vy, d_vz, d_rho, d_temp,
+        p.buoyancy_density, p.buoyancy_temperature, p.ambient_temperature,
+        p.gravity_x, p.gravity_y, p.gravity_z,
+        p.wind_x, p.wind_y, p.wind_z,
+        p.max_velocity
+    );
+
+    if (p.vorticity_strength > 0.001f) {
+        compute_vorticity_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_vy, d_vz, d_vort_x, d_vort_y, d_vort_z);
+        apply_vorticity_confinement_kernel<<<grid, block>>>(
+            nx, ny, nz, dt, d_vx, d_vy, d_vz, d_vort_x, d_vort_y, d_vort_z, p.vorticity_strength
+        );
+    }
+
+    if (p.turbulence_strength > 0.0f) {
+        apply_curl_noise_kernel<<<grid, block>>>(
+            nx, ny, nz, dt, d_vx, d_vy, d_vz, d_rho, d_temp,
+            p.turbulence_strength, p.turbulence_scale, p.time,
+            p.ambient_temperature, p.ignition_temperature,
+            p.turbulence_octaves, p.turbulence_lacunarity, p.turbulence_persistence
+        );
+    }
+
+    if (p.advection_mode == 1 || p.advection_mode == 2) {
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vx, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vx, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
+
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vy, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vy, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vy, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
+
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_vz, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_vz, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_vz, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
+    } else {
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vx, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vy, d_tmp2, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_vz, d_tmp3, d_vx, d_vy, d_vz);
+        cudaMemcpy(d_vx, d_tmp1, sz, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_vy, d_tmp2, sz, cudaMemcpyDeviceToDevice);
+        cudaMemcpy(d_vz, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+    }
+
+    divergence_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_vy, d_vz, d_div);
+    cudaMemset(d_p, 0, sz);
+    solvePressureFFT(*fft_solver, d_div, d_p);
+    subtract_gradient_kernel<<<grid, block>>>(nx, ny, nz, d_vx, d_vy, d_vz, d_p);
+
+    if (p.advection_mode == 1 || p.advection_mode == 2) {
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_rho, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_rho, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_rho, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
+
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_temp, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_temp, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_temp, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
+
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_vx, d_vy, d_vz);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, -dt, d_tmp1, d_tmp2, d_vx, d_vy, d_vz);
+        if (p.advection_mode == 2) {
+            bfecc_corrected_source_kernel<<<grid, block>>>(nx, ny, nz, d_fuel, d_tmp1, d_tmp2, d_tmp3);
+            advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_tmp3, d_fuel, d_vx, d_vy, d_vz);
+        } else {
+            maccormack_correction_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp1, d_tmp2, d_tmp3);
+            cudaMemcpy(d_fuel, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+        }
+    } else {
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_rho, d_tmp1, d_vx, d_vy, d_vz);
+        cudaMemcpy(d_rho, d_tmp1, sz, cudaMemcpyDeviceToDevice);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_temp, d_tmp2, d_vx, d_vy, d_vz);
+        cudaMemcpy(d_temp, d_tmp2, sz, cudaMemcpyDeviceToDevice);
+        advect_kernel<<<grid, block>>>(nx, ny, nz, dt, d_fuel, d_tmp3, d_vx, d_vy, d_vz);
+        cudaMemcpy(d_fuel, d_tmp3, sz, cudaMemcpyDeviceToDevice);
+    }
+
+    dissipation_kernel<<<grid, block>>>(
+        nx, ny, nz, dt, d_rho, d_temp, d_fuel, d_vx, d_vy, d_vz,
+        p.density_dissipation, p.temperature_dissipation, p.fuel_dissipation,
+        p.velocity_dissipation, p.ambient_temperature
+    );
+
     sanitize_simulation_kernel<<<grid, block>>>(
         nx, ny, nz, d_rho, d_temp, d_fuel,
         p.max_density, p.max_temperature, p.ambient_temperature

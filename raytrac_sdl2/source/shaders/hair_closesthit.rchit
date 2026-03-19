@@ -251,6 +251,8 @@ vec3 offset_ray(vec3 p, vec3 n) {
     );
 }
 
+const float HAIR_SHADOW_TMIN = 1e-3;
+
 // Simplified sky lookup for ambient matching
 vec3 get_ambient_sky(vec3 dir) {
     if (worldData.w.mode == 0) return worldData.w.sunColor * worldData.w.envIntensity;
@@ -573,7 +575,7 @@ void main()
             gl_RayFlagsOpaqueEXT,
             // mask 0x01 = triangles only, skip volume AABBs (mask 0x02)
             0x01, 0, 0, 1,
-            shadowOrig, 0.001, lightDir, lightDist - 0.002,
+            shadowOrig, HAIR_SHADOW_TMIN, lightDir, lightDist - 0.002,
             1
         );
         if (shadowOccluded) continue;

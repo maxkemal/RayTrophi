@@ -86,7 +86,7 @@ private:
     
     // Instance mapping: geometryID -> child BVH
     unsigned triangle_geom_id = 0xFFFFFFFF; // RTC_INVALID_GEOMETRY_ID
-    std::vector<const HittableInstance*> instance_objects;
+    std::vector<std::shared_ptr<HittableInstance>> instance_objects;
 
     // VDB Volume Support (User Geometry)
     unsigned vdb_geom_id = 0xFFFFFFFF;

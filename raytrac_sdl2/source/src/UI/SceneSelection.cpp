@@ -51,8 +51,7 @@ void SceneSelection::updatePositionFromSelection() {
                 // Get transform from TransformHandle if available
                 auto transform = selected.object->getTransformHandle();
                 if (transform) {
-                    Matrix4x4 mat = transform->base;
-                    // Use decompose to extract full transform (position, rotation, scale)
+                    Matrix4x4 mat = transform->getPivotMatrix();
                     mat.decompose(selected.position, selected.rotation, selected.scale);
                     
                     // Fallback: If decomposed position is near origin but mesh isn't,
@@ -81,9 +80,8 @@ void SceneSelection::updatePositionFromSelection() {
 
         case SelectableType::VDBVolume:
             if (selected.vdb_volume) {
-                selected.position = selected.vdb_volume->getPosition();
-                selected.rotation = selected.vdb_volume->getRotation();
-                selected.scale = selected.vdb_volume->getScale();
+                Matrix4x4 mat = selected.vdb_volume->getPivotMatrix();
+                mat.decompose(selected.position, selected.rotation, selected.scale);
             }
             break;
             
@@ -91,9 +89,8 @@ void SceneSelection::updatePositionFromSelection() {
             
         case SelectableType::GasVolume:
             if (selected.gas_volume) {
-                selected.position = selected.gas_volume->getPosition();
-                selected.rotation = selected.gas_volume->getRotation();
-                selected.scale = selected.gas_volume->getScale();
+                Matrix4x4 mat = selected.gas_volume->getPivotMatrix();
+                mat.decompose(selected.position, selected.rotation, selected.scale);
             }
             break;
             
@@ -147,53 +144,38 @@ static void ApplyTransformToItem(SelectableItem& item, const Matrix4x4& delta_tr
             if (item.object) {
                 auto transform = item.object->getTransformHandle();
                 if (transform) {
-                    // Apply Delta to current transform
-                    Matrix4x4 current = transform->base; 
+                    Matrix4x4 current = transform->getPivotMatrix();
                     // Note: This applies delta in World Space relative to object
                     // For proper multi-model rotation around a pivot, logic is complex.
                     // This creates "Individual Origins" behavior for rotation/scale usually.
                     // For translation, it is correct (all move same amount).
                     Matrix4x4 new_transform = delta_transform * current;
-                    transform->setBase(new_transform);
-                    item.object->updateTransformedVertices();
+                    transform->setPivotMatrix(new_transform);
                     
                     // Update item position cache
-                    Matrix4x4 mat = new_transform;
-                    item.position = Vec3(mat.m[0][3], mat.m[1][3], mat.m[2][3]);
+                    item.position = Vec3(new_transform.m[0][3], new_transform.m[1][3], new_transform.m[2][3]);
                 }
             }
             break;
 
         case SelectableType::VDBVolume:
             if (item.vdb_volume) {
-                Matrix4x4 current = item.vdb_volume->getTransform();
+                Matrix4x4 current = item.vdb_volume->getPivotMatrix();
                 Matrix4x4 new_transform = delta_transform * current;
-                
+                item.vdb_volume->setPivotMatrix(new_transform);
                 Vec3 p, r, s;
                 new_transform.decompose(p, r, s);
-                
-                item.vdb_volume->setPosition(p);
-                item.vdb_volume->setRotation(r);
-                item.vdb_volume->setScale(s);
-                
                 item.position = p;
             }
             break;
             
         case SelectableType::GasVolume:
             if (item.gas_volume) {
-                Matrix4x4 current = Matrix4x4::identity();
-                if (auto t = item.gas_volume->getTransformHandle()) current = t->base;
-
+                Matrix4x4 current = item.gas_volume->getPivotMatrix();
                 Matrix4x4 new_transform = delta_transform * current;
-                
+                item.gas_volume->setPivotMatrix(new_transform);
                 Vec3 p, r, s;
                 new_transform.decompose(p, r, s);
-                
-                item.gas_volume->setPosition(p);
-                item.gas_volume->setRotation(r);
-                item.gas_volume->setScale(s);
-                
                 item.position = p;
             }
             break;
@@ -269,22 +251,20 @@ Matrix4x4 SceneSelection::getSelectionMatrix() const {
             if (selected.object) {
                 auto transform = selected.object->getTransformHandle();
                 if (transform) {
-                    result = transform->base;
+                    result = transform->getPivotMatrix();
                 }
             }
             break;
 
         case SelectableType::VDBVolume:
             if (selected.vdb_volume) {
-                result = selected.vdb_volume->getTransform();
+                result = selected.vdb_volume->getPivotMatrix();
             }
             break;
             
         case SelectableType::GasVolume:
             if (selected.gas_volume) {
-                if (auto t = selected.gas_volume->getTransformHandle()) {
-                    result = t->base;
-                }
+                result = selected.gas_volume->getPivotMatrix();
             }
             break;
             

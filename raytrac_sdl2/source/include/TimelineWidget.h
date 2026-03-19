@@ -102,6 +102,7 @@ public:
 private:
     // ===== DRAWING FUNCTIONS =====
     void drawPlaybackControls(UIContext& ctx);
+    void drawSelectedAnimGraphInspector(UIContext& ctx);
     void drawTrackList(UIContext& ctx, float list_width, float canvas_height);
     void drawTimelineCanvas(UIContext& ctx, float canvas_width, float canvas_height);
     void drawFrameNumbers(ImDrawList* draw_list, ImVec2 canvas_pos, float canvas_width);

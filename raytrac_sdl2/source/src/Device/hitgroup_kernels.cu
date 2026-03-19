@@ -420,6 +420,7 @@ extern "C" __global__ void __closesthit__ch() {
     payload->hit = 1;
     payload->position = hitPoint;
     payload->normal = final_normal;
+    payload->geom_normal = world_geo_normal;
     payload->primary_albedo = primary_albedo;
     payload->primary_normal = final_normal;
     payload->primary_hit = hgd->is_volumetric ? 0 : 1;
@@ -463,6 +464,7 @@ extern "C" __global__ void __closesthit__ch() {
     payload->nanovdb_grid = hgd->nanovdb_grid;
     payload->has_nanovdb = hgd->has_nanovdb;
     payload->object_id = hgd->object_id;
+    payload->is_terrain = hgd->is_terrain;
     payload->t = t;
 }
 
@@ -742,6 +744,7 @@ extern "C" __global__ void __closesthit__hair() {
     payload->t = t;
     payload->position = hit_point;
     payload->normal = normal;
+    payload->geom_normal = normal;
     payload->primary_albedo = hair_color;
     payload->primary_normal = normal;
     payload->primary_hit = 1;
@@ -753,4 +756,5 @@ extern "C" __global__ void __closesthit__hair() {
     payload->is_volumetric = 0;
     payload->material_id = hgd->material_id;
     payload->object_id = hgd->object_id;
+    payload->is_terrain = 0;
 }

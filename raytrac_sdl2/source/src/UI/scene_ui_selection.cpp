@@ -149,36 +149,45 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
                 }
             }
 
-            Vec3 center = (bb_min + bb_max) * 0.5f;
-            ImVec2 screenPos = ProjectToScreen(center);
+            Vec3 corners[8] = {
+                Vec3(bb_min.x, bb_min.y, bb_min.z), Vec3(bb_max.x, bb_min.y, bb_min.z),
+                Vec3(bb_min.x, bb_max.y, bb_min.z), Vec3(bb_max.x, bb_max.y, bb_min.z),
+                Vec3(bb_min.x, bb_min.y, bb_max.z), Vec3(bb_max.x, bb_min.y, bb_max.z),
+                Vec3(bb_min.x, bb_max.y, bb_max.z), Vec3(bb_max.x, bb_max.y, bb_max.z)
+            };
 
-            // Check if center OR any corner is inside marquee (catches partially visible objects)
-            bool any_inside = false;
-            
-            // Check center first (quick test)
-            if (screenPos.x >= x1 && screenPos.x <= x2 && screenPos.y >= y1 && screenPos.y <= y2) {
-                any_inside = true;
+            float proj_min_x = 1e10f, proj_min_y = 1e10f;
+            float proj_max_x = -1e10f, proj_max_y = -1e10f;
+            bool has_projected_point = false;
+
+            for (const Vec3& corner : corners) {
+                ImVec2 sp = ProjectToScreen(corner);
+                if (sp.x <= -9999.0f || sp.y <= -9999.0f) {
+                    continue;
+                }
+
+                has_projected_point = true;
+                proj_min_x = fminf(proj_min_x, sp.x);
+                proj_min_y = fminf(proj_min_y, sp.y);
+                proj_max_x = fmaxf(proj_max_x, sp.x);
+                proj_max_y = fmaxf(proj_max_y, sp.y);
             }
-            
-            // Check all 8 corners if center missed
-            if (!any_inside) {
-                Vec3 corners[8] = {
-                    Vec3(bb_min.x, bb_min.y, bb_min.z), Vec3(bb_max.x, bb_min.y, bb_min.z),
-                    Vec3(bb_min.x, bb_max.y, bb_min.z), Vec3(bb_max.x, bb_max.y, bb_min.z),
-                    Vec3(bb_min.x, bb_min.y, bb_max.z), Vec3(bb_max.x, bb_min.y, bb_max.z),
-                    Vec3(bb_min.x, bb_max.y, bb_max.z), Vec3(bb_max.x, bb_max.y, bb_max.z)
-                };
-                
-                for (int c = 0; c < 8; ++c) {
-                    ImVec2 sp = ProjectToScreen(corners[c]);
-                    if (sp.x >= x1 && sp.x <= x2 && sp.y >= y1 && sp.y <= y2) {
-                        any_inside = true;
-                        break;
-                    }
+
+            if (!has_projected_point) {
+                Vec3 center = (bb_min + bb_max) * 0.5f;
+                ImVec2 center_screen = ProjectToScreen(center);
+                if (center_screen.x > -9999.0f && center_screen.y > -9999.0f) {
+                    has_projected_point = true;
+                    proj_min_x = proj_max_x = center_screen.x;
+                    proj_min_y = proj_max_y = center_screen.y;
                 }
             }
-            
-            if (any_inside) {
+
+            bool overlaps_marquee = has_projected_point &&
+                proj_max_x >= x1 && proj_min_x <= x2 &&
+                proj_max_y >= y1 && proj_min_y <= y2;
+
+            if (overlaps_marquee) {
                 SelectableItem item;
                 item.type = SelectableType::Object;
                 item.object = triangles[0].second;
@@ -434,12 +443,13 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             // GPU PICKING PATH: Use pick buffer for O(1) object selection
             // Skip GPU pick if rebuild is pending (pick buffer is stale after object delete/add)
             extern bool g_optix_rebuild_pending;
+            extern bool g_vulkan_rebuild_pending;
             bool gpu_pick_success = false;
             std::string gpu_picked_name;
             
             bool use_gpu = ctx.render_settings.use_optix;
             bool has_ptr = (ctx.backend_ptr != nullptr);
-            bool rebuild_pending = g_optix_rebuild_pending;
+            bool rebuild_pending = g_optix_rebuild_pending || g_vulkan_rebuild_pending;
             
             if (use_gpu && has_ptr && !rebuild_pending) {
                 // Pass viewport dimensions for coordinate scaling
@@ -1242,7 +1252,8 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
                 newItem.name = newName;
                 
                 if (auto th = firstNewTri->getTransformHandle()) {
-                    newItem.position = Vec3(th->base.m[0][3], th->base.m[1][3], th->base.m[2][3]);
+                    Matrix4x4 pivotMat = th->getPivotMatrix();
+                    newItem.position = Vec3(pivotMat.m[0][3], pivotMat.m[1][3], pivotMat.m[2][3]);
                 } else {
                     newItem.position = Vec3(0, 0, 0);
                 }

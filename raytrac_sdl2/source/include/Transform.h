@@ -31,6 +31,7 @@ public:
     Vec3 position = Vec3(0,0,0);
     Vec3 rotation = Vec3(0,0,0); // Euler angles in degrees
     Vec3 scale = Vec3(1,1,1);
+    Vec3 pivot_offset = Vec3(0,0,0); // Local-space pivot offset used by gizmo/rotation/scale
 
     Transform() 
         : base(Matrix4x4::identity())
@@ -42,6 +43,11 @@ public:
     
     // Reconstruct base matrix from components
     void updateMatrix() {
+        base = composeBaseMatrix();
+        dirty = true;
+    }
+
+    Matrix4x4 getPivotMatrix() const {
         const float deg2rad = 3.14159265358979f / 180.0f;
         Matrix4x4 T = Matrix4x4::translation(position);
         
@@ -52,9 +58,8 @@ public:
         Matrix4x4 R = Rz * Ry * Rx; 
         
         Matrix4x4 S = Matrix4x4::scaling(scale);
-        
-        base = T * R * S;
-        dirty = true;
+
+        return T * R * S;
     }
 
     Transform(const Matrix4x4& baseTransform)
@@ -67,8 +72,28 @@ public:
     }
 
     void setBase(const Matrix4x4& baseTransform) {
-        base = baseTransform;
-        base.decompose(position, rotation, scale); // Fix: Synchronize TRS components for serialization
+        Matrix4x4 adjusted = baseTransform * Matrix4x4::translation(pivot_offset);
+        adjusted.decompose(position, rotation, scale);
+        base = composeBaseMatrix();
+        dirty = true;
+    }
+
+    void setPivotMatrix(const Matrix4x4& pivotMatrix) {
+        pivotMatrix.decompose(position, rotation, scale);
+        base = composeBaseMatrix();
+        dirty = true;
+    }
+
+    void setPivotOffset(const Vec3& offset, bool preserve_world = true) {
+        if (preserve_world) {
+            Matrix4x4 existingBase = base;
+            pivot_offset = offset;
+            Matrix4x4 adjusted = existingBase * Matrix4x4::translation(pivot_offset);
+            adjusted.decompose(position, rotation, scale);
+        } else {
+            pivot_offset = offset;
+        }
+        base = composeBaseMatrix();
         dirty = true;
     }
 
@@ -103,6 +128,10 @@ public:
 
 private:
     mutable bool dirty;
+
+    Matrix4x4 composeBaseMatrix() const {
+        return getPivotMatrix() * Matrix4x4::translation(-pivot_offset);
+    }
 
     void updateNormalTransform() {
         normalTransform = final.inverse().transpose();

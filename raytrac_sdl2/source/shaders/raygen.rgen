@@ -188,6 +188,7 @@ layout(set = 0, binding = 8) uniform sampler2D atmosphereLUTs[4];
 layout(set = 0, binding = 13, rgba32f) uniform image2D denoiserColorImage;
 layout(set = 0, binding = 14, rgba32f) uniform image2D denoiserAlbedoImage;
 layout(set = 0, binding = 15, rgba32f) uniform image2D denoiserNormalImage;
+layout(set = 0, binding = 16, r32f) uniform image2D varianceImage;
 
 // ════════════════════════════════════════════════════════════════════════════════
 // Binding 9: Volume Instances SSBO (OptiX-compatible volumetric data)
@@ -370,6 +371,130 @@ vec3 softClipFireflies(vec3 c, float maxLuma) {
     return c * scale;
 }
 
+float godRaysAnisotropyFade(float sunDot, float g) {
+    float base = max(0.0, sunDot);
+    return pow(base, 1.0 + (1.0 - g) * 10.0);
+}
+
+float godRaysMiePhase(float sunDot, float g) {
+    float clampedG = clamp(g, 0.0, 0.999);
+    float g2 = clampedG * clampedG;
+    float denom = max(1.0 + g2 - 2.0 * clampedG * sunDot, 0.0001);
+    float phase = (1.0 - g2) / (4.0 * PI * pow(denom, 1.5));
+    return min(phase, 6.0);
+}
+
+float godRaysSolarCoreFade(float sunDot, float sunSizeDeg) {
+    float radius = max(radians(sunSizeDeg * 0.5), 1e-4);
+    float angle = acos(clamp(sunDot, -1.0, 1.0));
+    float inner = radius * 0.75;
+    float outer = radius * 2.5;
+    return mix(0.6, 1.0, smoothstep(inner, outer, angle));
+}
+
+float godRaysCloudTransmittance(vec3 origin, vec3 dir, float maxDist) {
+    if (worldData.w.cloudsEnabled == 0) return 1.0;
+    if (abs(dir.y) < 1e-6) return 1.0;
+
+    float minH = worldData.w.cloudHeightMin;
+    float maxH = worldData.w.cloudHeightMax;
+    float t0 = (minH - origin.y) / dir.y;
+    float t1 = (maxH - origin.y) / dir.y;
+    float tEnter = max(min(t0, t1), 0.0);
+    float tExit = min(max(t0, t1), maxDist);
+    if (tExit <= tEnter) return 1.0;
+
+    float midT = 0.5 * (tEnter + tExit);
+    vec3 p = origin + dir * midT;
+    float scale = 0.003 / max(0.1, worldData.w.cloudScale);
+    float coverage = worldData.w.cloudCoverage;
+    float val = (sin(p.x * scale * 0.5) + sin(p.z * scale * 0.5)) * 0.5 + 0.5;
+
+    if (val < coverage) {
+        float dist = tExit - tEnter;
+        return exp(-dist * worldData.w.cloudDensity * 0.5);
+    }
+    return 1.0;
+}
+
+float traceGodRaysSunOcclusion(vec3 origin, vec3 sunDir, float maxDist) {
+    shadowOccluded = true;
+    uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
+                     | gl_RayFlagsSkipClosestHitShaderEXT
+                     | gl_RayFlagsNoOpaqueEXT;
+    traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, origin, T_MIN, sunDir, maxDist, 1);
+    return shadowOccluded ? 0.0 : 1.0;
+}
+
+vec3 sampleGodRaysSunTransmittance(vec3 sunDir) {
+    bool hasAtmosLUTs = (worldData.w.transmittanceLUT.x | worldData.w.transmittanceLUT.y) != 0u;
+    if (!hasAtmosLUTs) return vec3(1.0);
+
+    float u = (max(0.01, sunDir.y) + 0.2) / 1.2;
+    float v = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
+    return texture(atmosphereLUTs[0], vec2(u, v)).rgb;
+}
+
+vec3 computePrimaryGodRays(vec3 rayOrigin, vec3 rayDir, float maxDistance, inout uint seed) {
+    if (worldData.w.mode != 2 || worldData.w.godRaysEnabled == 0 ||
+        worldData.w.godRaysIntensity <= 0.001 || worldData.w.godRaysDensity <= 0.0) {
+        return vec3(0.0);
+    }
+
+    vec3 sunDir = normalize(worldData.w.sunDir);
+    float sunDot = dot(rayDir, sunDir);
+    if (godRaysAnisotropyFade(sunDot, worldData.w.mieAnisotropy) < 1e-6) return vec3(0.0);
+    if (sunDir.y < -0.05) return vec3(0.0);
+
+    float marchDistance = min(min(maxDistance, worldData.w.fogDistance), 5000.0);
+    int numSteps = (sunDot > 0.98) ? worldData.w.godRaysSamples : (worldData.w.godRaysSamples / 2);
+    numSteps = clamp(numSteps, 8, 48);
+    if (marchDistance <= 1e-4 || numSteps <= 0) return vec3(0.0);
+
+    float stepSize = marchDistance / float(numSteps);
+    float phase = godRaysMiePhase(sunDot, worldData.w.mieAnisotropy);
+    float solarCoreFade = godRaysSolarCoreFade(sunDot, worldData.w.sunSize);
+    float mediaDensity = worldData.w.godRaysDensity * 0.02;
+    vec3 sunRadianceBase = vec3(1.0, 0.98, 0.95) * worldData.w.sunIntensity * 0.15;
+    sunRadianceBase *= sampleGodRaysSunTransmittance(sunDir);
+
+    vec3 godRayColor = vec3(0.0);
+    float transmittance = 1.0;
+    float t = rnd(seed) * stepSize;
+
+    for (int i = 0; i < numSteps; ++i) {
+        if (t > marchDistance) break;
+
+        float nearFade = clamp((t - 0.05) * 8.0, 0.0, 1.0);
+        if (nearFade > 0.001) {
+            vec3 samplePos = rayOrigin + rayDir * t;
+            float h = max(0.0, samplePos.y + worldData.w.altitude);
+            float heightFactor = exp(-h * 0.0002);
+            float sigmaS = mediaDensity * heightFactor;
+            float sigmaT = sigmaS;
+            float stepTrans = exp(-sigmaT * stepSize);
+
+            if (sigmaT > 1e-6) {
+                float occlusion = traceGodRaysSunOcclusion(samplePos + sunDir * 0.001, sunDir, 100000.0);
+                if (occlusion > 0.001) {
+                    occlusion *= godRaysCloudTransmittance(samplePos, sunDir, 10000.0);
+                }
+                if (occlusion > 0.001) {
+                    vec3 inscatter = sunRadianceBase * phase * occlusion * (sigmaS / sigmaT) * nearFade * solarCoreFade;
+                    godRayColor += transmittance * inscatter * (1.0 - stepTrans);
+                }
+            }
+
+            transmittance *= stepTrans;
+        }
+
+        if (transmittance < 0.01) break;
+        t += stepSize;
+    }
+
+    return godRayColor * worldData.w.godRaysIntensity;
+}
+
 // ============================================================
 // Main
 // ============================================================
@@ -379,14 +504,15 @@ void main() {
 
     // Adaptive Sampling Check
     if (cam.frameCount >= cam.minSamples && cam.varianceThreshold > 0.0) {
-        vec4 data = imageLoad(accumImage, ivec2(pixel));
-        float mean = dot(data.rgb, vec3(0.2126, 0.7152, 0.0722));
-        float mean2 = data.a;
-        float variance = max(0.0, mean2 - mean * mean);
-        float stdDev = sqrt(variance);
+        vec4 acc = imageLoad(accumImage, ivec2(pixel));
+        float prevSamples = acc.a;
+        float variance = imageLoad(varianceImage, ivec2(pixel)).r;
+        float mean = dot(acc.rgb, vec3(0.2126, 0.7152, 0.0722));
+        float cv = (mean > 1e-5) ? sqrt(max(variance, 0.0)) / mean : 1.0;
 
-        float denom = max(mean, 1e-3);
-        if ((stdDev / denom) < cam.varianceThreshold) {
+        if (prevSamples >= float(cam.minSamples) &&
+            variance > 0.0 &&
+            cv < cam.varianceThreshold) {
             return;
         }
     }
@@ -597,6 +723,11 @@ void main() {
     // ATMOSPHERIC FOG — Distance-based exponential fog (uses VkWorldDataExtended)
     // Matches OptiX fog integration in closesthit kernels
     // ══════════════════════════════════════════════════════════════════════════
+    if (worldData.w.godRaysEnabled != 0) {
+        float godRayMaxDist = firstHitValid ? length(firstHitPos - primaryRayOrigin) : 200000.0;
+        radiance += computePrimaryGodRays(primaryRayOrigin, normalize(primaryRayDir), godRayMaxDist, seed);
+    }
+
     if (worldData.w.fogEnabled != 0 && worldData.w.fogDensity > 0.0) {
         vec3 primaryOrigin = primaryRayOrigin;
         vec3 fogDir = firstHitValid ? normalize(firstHitPos - primaryOrigin) : normalize(primaryRayDir);
@@ -689,36 +820,43 @@ void main() {
     }
 
     // Welford running average
-    vec4 oldAcc = vec4(0.0);
-    if (cam.frameCount > 0u) {
-        oldAcc = imageLoad(accumImage, ivec2(pixel));
-    }
+    vec4 oldAcc = (cam.frameCount > 0u) ? imageLoad(accumImage, ivec2(pixel)) : vec4(0.0);
+    float prevSamples = oldAcc.a;
+    float newTotalSamples = prevSamples + 1.0;
+    vec3 newAcc = (prevSamples > 0.0)
+        ? ((oldAcc.rgb * prevSamples) + exposedRadiance) / newTotalSamples
+        : exposedRadiance;
 
-    float N      = float(cam.frameCount) + 1.0;
-    vec3  newAcc = oldAcc.rgb + (exposedRadiance - oldAcc.rgb) / N;
-    
-    // Variance accumulation (E[L^2])
-    float L = dot(exposedRadiance, vec3(0.2126, 0.7152, 0.0722));
-    float L2 = L * L;
-    float newL2 = oldAcc.a + (L2 - oldAcc.a) / N;
+    float newLum = dot(exposedRadiance, vec3(0.2126, 0.7152, 0.0722));
+    float meanLum = dot(newAcc, vec3(0.2126, 0.7152, 0.0722));
+    float diff = newLum - meanLum;
+    float prevVariance = (cam.frameCount > 0u) ? imageLoad(varianceImage, ivec2(pixel)).r : 0.0;
+    float alpha = 1.0 / max(newTotalSamples, 2.0);
+    float updatedVariance = clamp(prevVariance * (1.0 - alpha) + (diff * diff) * alpha, 0.0, 100.0);
 
-    // Exposed HDR accumulation
-    imageStore(accumImage, ivec2(pixel), vec4(newAcc, newL2));
+    imageStore(accumImage, ivec2(pixel), vec4(newAcc, newTotalSamples));
+    imageStore(varianceImage, ivec2(pixel), vec4(updatedVariance, 0.0, 0.0, 0.0));
 
     vec4 oldDenoiserColor = (cam.frameCount > 0u) ? imageLoad(denoiserColorImage, ivec2(pixel)) : vec4(0.0);
-    vec3 newDenoiserColor = oldDenoiserColor.rgb + (radiance - oldDenoiserColor.rgb) / N;
-    imageStore(denoiserColorImage, ivec2(pixel), vec4(newDenoiserColor, N));
+    vec3 newDenoiserColor = (oldDenoiserColor.a > 0.0)
+        ? ((oldDenoiserColor.rgb * oldDenoiserColor.a) + radiance) / newTotalSamples
+        : radiance;
+    imageStore(denoiserColorImage, ivec2(pixel), vec4(newDenoiserColor, newTotalSamples));
 
     if (primaryHitValid) {
         vec4 oldDenoiserAlbedo = (cam.frameCount > 0u) ? imageLoad(denoiserAlbedoImage, ivec2(pixel)) : vec4(0.0);
         vec4 oldDenoiserNormal = (cam.frameCount > 0u) ? imageLoad(denoiserNormalImage, ivec2(pixel)) : vec4(0.5, 0.5, 0.5, 0.0);
         vec3 encodedNormal = primaryNormal * 0.5 + vec3(0.5);
-        vec3 newDenoiserAlbedo = oldDenoiserAlbedo.rgb + (primaryAlbedo - oldDenoiserAlbedo.rgb) / N;
-        vec3 newDenoiserNormal = oldDenoiserNormal.rgb + (encodedNormal - oldDenoiserNormal.rgb) / N;
-        imageStore(denoiserAlbedoImage, ivec2(pixel), vec4(newDenoiserAlbedo, N));
-        imageStore(denoiserNormalImage, ivec2(pixel), vec4(newDenoiserNormal, N));
+        vec3 newDenoiserAlbedo = (oldDenoiserAlbedo.a > 0.0)
+            ? ((oldDenoiserAlbedo.rgb * oldDenoiserAlbedo.a) + primaryAlbedo) / newTotalSamples
+            : primaryAlbedo;
+        vec3 newDenoiserNormal = (oldDenoiserNormal.a > 0.0)
+            ? ((oldDenoiserNormal.rgb * oldDenoiserNormal.a) + encodedNormal) / newTotalSamples
+            : encodedNormal;
+        imageStore(denoiserAlbedoImage, ivec2(pixel), vec4(newDenoiserAlbedo, newTotalSamples));
+        imageStore(denoiserNormalImage, ivec2(pixel), vec4(newDenoiserNormal, newTotalSamples));
     } else if (cam.frameCount == 0u) {
-        imageStore(denoiserAlbedoImage, ivec2(pixel), vec4(0.0, 0.0, 0.0, N));
-        imageStore(denoiserNormalImage, ivec2(pixel), vec4(0.5, 0.5, 0.5, N));
+        imageStore(denoiserAlbedoImage, ivec2(pixel), vec4(0.0, 0.0, 0.0, newTotalSamples));
+        imageStore(denoiserNormalImage, ivec2(pixel), vec4(0.5, 0.5, 0.5, newTotalSamples));
     }
 }

@@ -82,6 +82,10 @@ struct GPUAdvancedEmitter {
     float density_rate;         // Density injection per second
     float temperature;          // Emission temperature (Kelvin)
     float fuel_rate;            // Fuel injection per second
+    int fuel_phase;             // 0=Gas, 1=Liquid, 2=Solid
+    float phase_change_temperature;
+    float fuel_release_rate;
+    float flame_contact_sensitivity;
     
     float vel_x, vel_y, vel_z;  // Base velocity direction
     float velocity_magnitude;   // Base speed

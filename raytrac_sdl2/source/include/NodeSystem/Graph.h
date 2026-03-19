@@ -159,10 +159,23 @@ namespace NodeSystem {
             if (!start->canConnectTo(*end)) {
                 return 0; // Type incompatible
             }
+
+            // Avoid duplicate links for the same pin pair.
+            for (const auto& existing : links) {
+                if (existing.startPinId == startPinId && existing.endPinId == endPinId) {
+                    return existing.id;
+                }
+            }
             
             // Remove existing link to this input (unless multi-input allowed)
             if (!end->allowMultipleConnections) {
                 removeLinkToInput(endPinId);
+            } else {
+                links.erase(std::remove_if(links.begin(), links.end(),
+                    [startPinId, endPinId](const Link& l) {
+                        return l.startPinId == startPinId && l.endPinId == endPinId;
+                    }),
+                    links.end());
             }
             
             // Create link

@@ -18,6 +18,7 @@
 #include "ForceField.h"
 #include "MeshModifiers.h"
 
+#include <functional>
 #include <string>
 
 namespace AnimationGraph {
@@ -143,21 +144,135 @@ struct SceneData {
     
     // Imported Model Contexts for Multi-Model Animation
     struct ImportedModelContext {
+        struct SkeletonNode {
+            std::string name;
+            std::string parentName;
+            Matrix4x4 localBindTransform = Matrix4x4::identity();
+            Matrix4x4 globalBindTransform = Matrix4x4::identity();
+            int boneIndex = -1;
+            bool weightedBone = false;
+            std::vector<int> children;
+        };
+
         std::shared_ptr<class AssimpLoader> loader; // Keep loader alive (owns aiScene)
         std::string importName;
         bool hasAnimation = false;                  // True if this model has animation data
         Matrix4x4 globalInverseTransform;           // Matrix to correct FBX axis/scale (from Root node)
+        bool animationOnlyImport = false;          // True when the import has animation/skeleton but no mesh members
+        bool hasSkeletonRepresentation = false;    // True when a runtime/editor skeleton view was built
+        size_t weightedBoneCount = 0;
         
         // --- Multi-Animator Logic ---
         std::shared_ptr<class AnimationController> animator;  // Per-model animator state
-        std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph; // Per-model AnimGraph
+        std::string animGraphAssetKey;                 // Editor asset key for this character
+        std::shared_ptr<AnimationGraph::AnimationNodeGraph> runtimeGraph; // Per-character runtime graph instance
+        std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph; // Legacy alias, keep in sync with runtimeGraph
         bool useAnimGraph = false;                  // Toggle between Controller and Node Graph
+        bool animGraphFollowTimeline = false;       // Timeline-driven when true, autonomous when false
         bool useRootMotion = false;                 // Move object transform with character
         bool visible = true;                        // Visibility toggle for the whole model
         
         // Link to scene world objects (Triangles/Meshes) belonging to this model
         // This allows applying root motion to the correct TransformHandle
         std::vector<std::shared_ptr<class Hittable>> members; 
+        std::vector<SkeletonNode> skeletonNodes;
+        std::vector<int> skeletonRootNodes;
+
+        void rebuildSkeletonRepresentation(const BoneData& allBoneData) {
+            skeletonNodes.clear();
+            skeletonRootNodes.clear();
+            weightedBoneCount = 0;
+            hasSkeletonRepresentation = false;
+
+            if (importName.empty()) {
+                animationOnlyImport = members.empty() && hasAnimation;
+                return;
+            }
+
+            const std::string prefix = importName + "_";
+            std::unordered_map<std::string, int> nodeLookup;
+
+            auto ensureNode = [&](const std::string& fullName) -> int {
+                if (fullName.find(prefix) != 0) {
+                    return -1;
+                }
+
+                auto existing = nodeLookup.find(fullName);
+                if (existing != nodeLookup.end()) {
+                    return existing->second;
+                }
+
+                SkeletonNode node;
+                node.name = fullName;
+
+                auto localIt = allBoneData.boneDefaultTransforms.find(fullName);
+                if (localIt != allBoneData.boneDefaultTransforms.end()) {
+                    node.localBindTransform = localIt->second;
+                }
+
+                auto boneIt = allBoneData.boneNameToIndex.find(fullName);
+                if (boneIt != allBoneData.boneNameToIndex.end()) {
+                    node.boneIndex = static_cast<int>(boneIt->second);
+                    node.weightedBone = allBoneData.weightedBoneNames.find(fullName) != allBoneData.weightedBoneNames.end();
+                    if (node.weightedBone) {
+                        ++weightedBoneCount;
+                    }
+                }
+
+                int index = static_cast<int>(skeletonNodes.size());
+                skeletonNodes.push_back(node);
+                nodeLookup[fullName] = index;
+                return index;
+            };
+
+            for (const auto& [name, local] : allBoneData.boneDefaultTransforms) {
+                (void)local;
+                ensureNode(name);
+            }
+
+            for (const auto& [name, boneIndex] : allBoneData.boneNameToIndex) {
+                (void)boneIndex;
+                ensureNode(name);
+            }
+
+            for (auto& node : skeletonNodes) {
+                auto parentIt = allBoneData.boneParents.find(node.name);
+                if (parentIt != allBoneData.boneParents.end() && parentIt->second.find(prefix) == 0) {
+                    node.parentName = parentIt->second;
+                }
+            }
+
+            for (int i = 0; i < static_cast<int>(skeletonNodes.size()); ++i) {
+                auto& node = skeletonNodes[i];
+                if (node.parentName.empty()) {
+                    skeletonRootNodes.push_back(i);
+                    continue;
+                }
+
+                auto parentIt = nodeLookup.find(node.parentName);
+                if (parentIt == nodeLookup.end()) {
+                    skeletonRootNodes.push_back(i);
+                    continue;
+                }
+
+                skeletonNodes[parentIt->second].children.push_back(i);
+            }
+
+            std::function<void(int, const Matrix4x4&)> computeGlobal = [&](int nodeIndex, const Matrix4x4& parentGlobal) {
+                auto& node = skeletonNodes[nodeIndex];
+                node.globalBindTransform = parentGlobal * node.localBindTransform;
+                for (int childIndex : node.children) {
+                    computeGlobal(childIndex, node.globalBindTransform);
+                }
+            };
+
+            for (int rootIndex : skeletonRootNodes) {
+                computeGlobal(rootIndex, Matrix4x4::identity());
+            }
+
+            hasSkeletonRepresentation = !skeletonNodes.empty();
+            animationOnlyImport = members.empty() && hasAnimation;
+        }
     };
     std::vector<ImportedModelContext> importedModelContexts;
 
@@ -217,6 +332,13 @@ struct SceneData {
             gas->getSimulator().setExternalForceFieldManager(&this->force_field_manager);
             
             gas_volumes.push_back(gas);
+
+            // Keep gas volumes in the shared hittable list so backend geometry/TLAS rebuilds
+            // and viewport picking see the same object set regardless of creation path.
+            auto it = std::find(world.objects.begin(), world.objects.end(), gas);
+            if (it == world.objects.end()) {
+                world.objects.push_back(gas);
+            }
         }
     }
     
@@ -225,6 +347,7 @@ struct SceneData {
         auto it = std::find(gas_volumes.begin(), gas_volumes.end(), gas);
         if (it != gas_volumes.end()) {
             gas_volumes.erase(it);
+            world.objects.erase(std::remove(world.objects.begin(), world.objects.end(), gas), world.objects.end());
             return true;
         }
         return false;
@@ -317,6 +440,9 @@ struct SceneData {
             }
             if (ctx.graph) {
                 ctx.graph.reset();
+            }
+            if (ctx.runtimeGraph) {
+                ctx.runtimeGraph.reset();
             }
             ctx.members.clear();
         }

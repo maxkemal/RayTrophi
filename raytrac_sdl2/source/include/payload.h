@@ -21,6 +21,7 @@
 struct OptixHitResult {
     float3 position;
     float3 normal;
+    float3 geom_normal;
     float3 primary_albedo;
     float3 primary_normal;
     float3 emission;
@@ -89,6 +90,7 @@ struct OptixHitResult {
     // GPU PICKING (Object identification for viewport selection)
     // ═══════════════════════════════════════════════════════════════════════════
     int object_id;                // Object ID from HitGroupData (-1 = no object ID)
+    int is_terrain;               // 1 = terrain hit, use geometric shadow normal to avoid large-scale terrain artifacts
     
     // ═══════════════════════════════════════════════════════════════════════════
     // HAIR RENDERING

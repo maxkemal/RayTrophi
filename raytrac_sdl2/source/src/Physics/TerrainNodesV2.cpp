@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file TerrainNodesV2.cpp
  * @brief Implementation of terrain nodes using V2 NodeSystem
  */
@@ -17,6 +17,8 @@
 #include <string>
 #include <cstring>
 #include "perlin.h" // For gradient noise
+#include <image_resample.h>
+#include <image_filters.h>
 
 namespace TerrainNodesV2 {
 
@@ -168,12 +170,42 @@ namespace TerrainNodesV2 {
                 loadedWidth = w / strideX;
                 loadedHeight = h / strideY;
                 rawHeightData.resize(loadedWidth * loadedHeight);
-                
-                for (int y = 0; y < loadedHeight; y++) {
-                    for (int x = 0; x < loadedWidth; x++) {
-                         int srcIdx = (y * strideY) * w + (x * strideX);
-                         rawHeightData[y * loadedWidth + x] = (float)img[srcIdx] / 255.0f; 
+
+                if (strideX == 1 && strideY == 1) {
+                    // Direct copy with sRGB->linear conversion. Apply light dithering
+                    // only on small/medium images to break banding; skip for very large inputs.
+                    std::mt19937 rng(1337);
+                    std::uniform_real_distribution<float> dither_dist(-0.5f / 255.0f, 0.5f / 255.0f);
+                    const float gamma = 2.2f;
+                    bool high_input = (w >= 3000 || h >= 3000);
+                    bool apply_dither = !high_input;
+                    for (int y = 0; y < loadedHeight; y++) {
+                        for (int x = 0; x < loadedWidth; x++) {
+                            int srcIdx = (y * strideY) * w + (x * strideX);
+                            float v = (float)img[srcIdx] / 255.0f;
+                            v = powf(v, gamma);
+                            if (apply_dither) v = v + dither_dist(rng);
+                            v = std::clamp(v, 0.0f, 1.0f);
+                            rawHeightData[y * loadedWidth + x] = v;
+                        }
                     }
+                } else {
+                    std::vector<uint8_t> dstBuf((size_t)loadedWidth * loadedHeight);
+                    int lanczos_a = 2;
+                    ImageResample::lanczos_resample_u8(img, w, h, dstBuf.data(), loadedWidth, loadedHeight, lanczos_a);
+                    for (int i = 0; i < loadedWidth * loadedHeight; ++i) rawHeightData[i] = dstBuf[i] / 255.0f;
+                }
+
+                // Apply frequency separation (high-quality) to loadedHeightData with adaptive params
+                try {
+                    std::vector<float> fs_out;
+                    const bool downsampled_local = !(strideX == 1 && strideY == 1);
+                    float fs_sigma = downsampled_local ? 1.4f : 0.6f;
+                    float fs_detail_strength = downsampled_local ? 0.8f : 0.97f;
+                    ImageFilters::frequency_separation(rawHeightData, loadedWidth, loadedHeight, fs_out, fs_sigma, fs_detail_strength);
+                    rawHeightData.swap(fs_out);
+                } catch (...) {
+                    // ignore failures
                 }
                 
                 stbi_image_free(img);
@@ -203,12 +235,18 @@ namespace TerrainNodesV2 {
                 loadedWidth = w / strideX;
                 loadedHeight = h / strideY;
                 rawHeightData.resize(loadedWidth * loadedHeight);
-                
-                for (int y = 0; y < loadedHeight; y++) {
-                    for (int x = 0; x < loadedWidth; x++) {
-                         int srcIdx = (y * strideY) * w + (x * strideX);
-                         rawHeightData[y * loadedWidth + x] = (float)img16[srcIdx] / 65535.0f;
+
+                if (strideX == 1 && strideY == 1) {
+                    for (int y = 0; y < loadedHeight; y++) {
+                        for (int x = 0; x < loadedWidth; x++) {
+                            int srcIdx = (y * strideY) * w + (x * strideX);
+                            rawHeightData[y * loadedWidth + x] = (float)img16[srcIdx] / 65535.0f;
+                        }
                     }
+                } else {
+                    std::vector<uint16_t> dstBuf((size_t)loadedWidth * loadedHeight);
+                    ImageResample::lanczos_resample_u16(img16, w, h, dstBuf.data(), loadedWidth, loadedHeight, 3);
+                    for (int i = 0; i < loadedWidth * loadedHeight; ++i) rawHeightData[i] = dstBuf[i] / 65535.0f;
                 }
             
             stbi_image_free(img16);
@@ -1985,6 +2023,51 @@ namespace TerrainNodesV2 {
         
         // Height scale for proper slope detection
         float heightScale = (tctx && tctx->terrain) ? tctx->terrain->heightmap.scale_y : 1.0f;
+        float cellSize = (tctx && tctx->terrain) ? (tctx->terrain->heightmap.scale_xz / (float)w) : 1.0f;
+
+        // 1. Organic Sink-Filling Accumulation
+        std::vector<float> height = *input.data;
+        std::vector<float> filledHeight = height;
+        std::vector<int> drainageParent(w * h, -1);
+        std::vector<bool> processed(w * h, false);
+        std::priority_queue<std::pair<float, int>, std::vector<std::pair<float, int>>, std::greater<std::pair<float, int>>> pq;
+        
+        const float eps = 0.0001f;
+        int dx8[] = { -1, 0, 1, -1, 1, -1, 0, 1 };
+        int dy8[] = { -1, -1, -1, 0, 0, 1, 1, 1 };
+
+        for (int x = 0; x < w; x++) {
+            pq.push({ filledHeight[x], x });
+            pq.push({ filledHeight[(h - 1) * w + x], (h - 1) * w + x });
+            processed[x] = processed[(h - 1) * w + x] = true;
+        }
+        for (int y = 1; y < h - 1; y++) {
+            pq.push({ filledHeight[y * w], y * w });
+            pq.push({ filledHeight[y * w + w - 1], y * w + w - 1 });
+            processed[y * w] = processed[y * w + w - 1] = true;
+        }
+
+        while (!pq.empty()) {
+            auto [priority, idx] = pq.top(); pq.pop();
+            float cH = filledHeight[idx];
+            int x = idx % w, y = idx / w;
+
+            for (int d = 0; d < 8; d++) {
+                int nx = x + dx8[d], ny = y + dy8[d];
+                if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                int nIdx = ny * w + nx;
+                if (processed[nIdx]) continue;
+                
+                float tieBreaker = height[nIdx] * 1e-6f;
+                float tH = fmaxf(filledHeight[nIdx], cH + eps);
+                
+                filledHeight[nIdx] = tH;
+                drainageParent[nIdx] = idx;
+                processed[nIdx] = true;
+                pq.push({ tH + tieBreaker, nIdx });
+            }
+        }
+
         
         // 1. Sort indices by height (Descending) to ensure flow travels from top to bottom
         std::vector<int> indices(w * h);

@@ -58,6 +58,7 @@ namespace NodeSystem {
         bool selected = false;      ///< Currently selected in UI
         bool collapsed = false;     ///< Minimized view
         bool enabled = true;        ///< Can be disabled to bypass
+        float uiWidth = 0.0f;       ///< Optional manual width in graph-space units
         
         // Metadata
         NodeMetadata metadata;

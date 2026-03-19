@@ -1,6 +1,6 @@
 ﻿/**
  * @file scene_ui_vdb.cpp
- * @brief VDB Volume UI Panel - EmberGen-style interface
+ * @brief VDB Volume UI Panel
  * 
  * This file contains the UI for:
  * - VDB Volume import (single file and sequences)
@@ -21,6 +21,7 @@
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
+#include <cctype>
 #include "scene_ui_gas.hpp"
 #include <VolumetricRenderer.h>
 
@@ -37,6 +38,83 @@ void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
     if (ctx.backend_ptr) {
         VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.backend_ptr);
     }
+}
+
+bool SceneUI::shouldApplySpecialVDBOrientation(const std::string& source_hint) {
+    std::string lowered = source_hint;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered.find("embergen") != std::string::npos;
+}
+
+void SceneUI::applyVDBImportOrientation(VDBVolume& vdb, int orientation_preset, const std::string& source_hint) {
+    bool apply_axis_conversion = false;
+    if (orientation_preset == 2) {
+        apply_axis_conversion = true;
+    } else if (orientation_preset == 0) {
+        apply_axis_conversion = shouldApplySpecialVDBOrientation(source_hint);
+    }
+
+    if (apply_axis_conversion) {
+        vdb.setRotation(Vec3(-90.0f, 0.0f, 0.0f));
+    } else if (orientation_preset == 1) {
+        vdb.setRotation(Vec3(0.0f, 0.0f, 0.0f));
+    }
+}
+
+SceneUI::VDBShaderDefaults SceneUI::estimateVDBShaderDefaults(const VDBVolume& vdb) {
+    VDBShaderDefaults out;
+
+    const VDBDensityStats density_stats = VDBVolumeManager::getInstance().analyzeDensityStats(vdb.getVDBVolumeID());
+    const Vec3 bmin = vdb.getLocalBoundsMin();
+    const Vec3 bmax = vdb.getLocalBoundsMax();
+    const Vec3 extent = bmax - bmin;
+    const float max_extent = (std::max)(extent.x, (std::max)(extent.y, extent.z));
+    const bool is_fire = vdb.hasGrid("temperature");
+
+    const float ref_density = density_stats.valid
+        ? (density_stats.p99_value > 1e-5f ? density_stats.p99_value :
+           (density_stats.p95_value > 1e-5f ? density_stats.p95_value : density_stats.max_value))
+        : 0.0f;
+
+    if (ref_density > 1e-6f) {
+        const float target = is_fire ? 0.18f : 0.35f;
+        const float min_mult = is_fire ? 0.75f : 2.0f;
+        const float max_mult = is_fire ? 16.0f : 35.0f;
+        out.density_multiplier = (std::max)(min_mult, (std::min)(max_mult, target / ref_density));
+    }
+
+    if (is_fire) {
+        out.scattering_coefficient = (std::max)(0.35f, (std::min)(0.9f, 0.35f + out.density_multiplier * 0.08f));
+        out.absorption_coefficient = (std::max)(0.12f, (std::min)(0.35f, 0.12f + out.density_multiplier * 0.03f));
+        out.max_steps = 96;
+        out.shadow_steps = 6;
+    } else {
+        out.scattering_coefficient = (std::max)(0.9f, (std::min)(1.8f, 0.9f + out.density_multiplier * 0.08f));
+        out.absorption_coefficient = (std::max)(0.03f, (std::min)(0.12f, 0.03f + out.density_multiplier * 0.005f));
+        out.max_steps = 72;
+        out.shadow_steps = 8;
+    }
+
+    const float voxel_size = vdb.getVoxelSize();
+    const float voxel_based_step = voxel_size > 1e-5f ? voxel_size * (is_fire ? 1.25f : 1.75f) : (is_fire ? 0.08f : 0.15f);
+    const float extent_based_step = max_extent > 1e-4f ? max_extent / (is_fire ? 160.0f : 192.0f) : 0.05f;
+    out.step_size = (std::max)(0.01f, (std::min)(0.35f, (std::max)(voxel_based_step, extent_based_step)));
+
+    return out;
+}
+
+void SceneUI::applyEstimatedVDBShaderDefaults(VDBVolume& vdb) {
+    auto shader = vdb.getShader();
+    if (!shader) return;
+
+    const VDBShaderDefaults defaults = estimateVDBShaderDefaults(vdb);
+    shader->density.multiplier = defaults.density_multiplier;
+    shader->scattering.coefficient = defaults.scattering_coefficient;
+    shader->absorption.coefficient = defaults.absorption_coefficient;
+    shader->quality.step_size = defaults.step_size;
+    shader->quality.max_steps = defaults.max_steps;
+    shader->quality.shadow_steps = defaults.shadow_steps;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +173,7 @@ void SceneUI::importVDBVolume(UIContext& ctx) {
     } else {
         vdb->setShader(VolumeShader::createSmokePreset());
     }
+    applyVDBImportOrientation(*vdb, vdb_import_orientation_preset, path);
     
     // Add to scene VDB list
     ctx.scene.addVDBVolume(vdb);
@@ -240,6 +319,7 @@ void SceneUI::importVDBSequence(UIContext& ctx) {
     } else {
         vdb->setShader(VolumeShader::createSmokePreset());
     }
+    applyVDBImportOrientation(*vdb, vdb_import_orientation_preset, path);
     
     // Add to scene
     ctx.scene.addVDBVolume(vdb);
@@ -309,6 +389,9 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     if (ImGui::Button("Import VDB Seq", ImVec2(120, 0))) {
         importVDBSequence(ctx);
     }
+    const char* vdb_orientation_labels[] = { "Auto", "Standard", "Axis Convert (-90 X)" };
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::Combo("VDB Orientation", &vdb_import_orientation_preset, vdb_orientation_labels, IM_ARRAYSIZE(vdb_orientation_labels));
     
     ImGui::Separator();
     
@@ -503,7 +586,7 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
 
         // Manual Rotation & Scale Overrides
         ImGui::SetNextItemWidth(200);
-        if (ImGui::Button("Rotate -90 X (Blender Fix)")) {
+        if (ImGui::Button("Apply Axis Convert -90 X")) {
             vdb->setRotation(Vec3(-90.0f, 0, 0));
             changed = true;
         }

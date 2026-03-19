@@ -572,7 +572,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                          // Apply Scale then Translation
                          Matrix4x4 new_transform = T * S;
                          
-                         transform_handle->setBase(new_transform);
+                         transform_handle->setPivotMatrix(new_transform);
                          
                          // CRITICAL: A mesh is composed of multiple triangles sharing the same TransformHandle.
                          // We must update the vertex cache for ALL of them, otherwise the CPU BVH and OptiX GAS

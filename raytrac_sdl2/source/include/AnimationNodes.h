@@ -179,6 +179,10 @@ namespace AnimationGraph {
             auto it = intParams.find(name);
             return (it != intParams.end()) ? it->second : defaultValue;
         }
+
+        bool hasTrigger(const std::string& name) const {
+            return triggerParams.find(name) != triggerParams.end();
+        }
         
         bool consumeTrigger(const std::string& name) {
             auto it = triggerParams.find(name);
@@ -187,6 +191,50 @@ namespace AnimationGraph {
                 return true;
             }
             return false;
+        }
+    };
+
+    struct GraphDebugTrace {
+        struct ClipSnapshot {
+            uint32_t nodeId = 0;
+            std::string clipName;
+            float normalizedTime = 0.0f;
+            float currentTime = 0.0f;
+            bool isPlaying = false;
+        };
+
+        struct StateMachineSnapshot {
+            uint32_t nodeId = 0;
+            std::string currentState;
+            std::string targetState;
+            bool isTransitioning = false;
+            float transitionProgress = 0.0f;
+            std::string lastTriggeredTransition;
+        };
+
+        std::vector<uint32_t> evaluatedNodeOrder;
+        std::unordered_map<uint32_t, int> nodeEvalCounts;
+        std::vector<uint32_t> activeLinkIds;
+        std::unordered_map<std::string, float> floatParamsSnapshot;
+        std::unordered_map<std::string, bool> boolParamsSnapshot;
+        std::unordered_map<std::string, int> intParamsSnapshot;
+        std::vector<std::string> triggerParamsSnapshot;
+        std::vector<ClipSnapshot> clips;
+        std::vector<StateMachineSnapshot> stateMachines;
+        std::vector<std::string> eventLog;
+        uint64_t evaluationSerial = 0;
+
+        void reset() {
+            evaluatedNodeOrder.clear();
+            nodeEvalCounts.clear();
+            activeLinkIds.clear();
+            floatParamsSnapshot.clear();
+            boolParamsSnapshot.clear();
+            intParamsSnapshot.clear();
+            triggerParamsSnapshot.clear();
+            clips.clear();
+            stateMachines.clear();
+            eventLog.clear();
         }
     };
     
@@ -248,6 +296,7 @@ namespace AnimationGraph {
     public:
         // Properties
         std::string clipName;
+        std::string playbackSpeedParamName;
         float playbackSpeed = 1.0f;
         bool loop = true;
         float startTime = 0.0f;
@@ -260,6 +309,7 @@ namespace AnimationGraph {
         void setupPins();
         
         PoseData computePose(AnimationEvalContext& ctx) override;
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         
         std::string getTypeId() const override { return "AnimClip"; }
@@ -271,12 +321,14 @@ namespace AnimationGraph {
         
         void onSave(nlohmann::json& j) const override {
             j["clipName"] = clipName;
+            j["speedParam"] = playbackSpeedParamName;
             j["speed"] = playbackSpeed;
             j["loop"] = loop;
         }
         
         void onLoad(const nlohmann::json& j) override {
             clipName = j.value("clipName", "");
+            playbackSpeedParamName = j.value("speedParam", "");
             playbackSpeed = j.value("speed", 1.0f);
             loop = j.value("loop", true);
         }
@@ -525,7 +577,7 @@ namespace AnimationGraph {
             ConditionType conditionType = ConditionType::Bool;
             float compareValue = 0.0f;
             
-            bool evaluate(const AnimationEvalContext& ctx) const;
+            bool evaluate(AnimationEvalContext& ctx) const;
         };
         
         std::vector<State> states;
@@ -634,6 +686,7 @@ namespace AnimationGraph {
         void setupPins();
         
         PoseData computePose(AnimationEvalContext& ctx) override;
+        NodeSystem::PinValue compute(int outputIndex, NodeSystem::EvaluationContext& ctx) override;
         void drawContent() override;
         
         std::string getTypeId() const override { return "PoseSwitch"; }
@@ -809,6 +862,7 @@ namespace AnimationGraph {
         // Evaluation
         AnimationEvalContext evalContext;
         bool needsRebuild = false;
+        GraphDebugTrace debugTrace;
         
         // ========================================================================
         // Graph Operations
@@ -863,6 +917,22 @@ namespace AnimationGraph {
          * @return Final pose output
          */
         PoseData evaluate(float deltaTime, const BoneData& boneData);
+        PoseData evaluateNodePose(AnimNodeBase* node, AnimationEvalContext& ctx);
+        void beginEvaluationFrame();
+        void captureClipSnapshot(const AnimClipNode& node, const PoseData& pose);
+        void captureStateMachineSnapshot(const StateMachineNode& node, const std::string& triggeredTransition = "");
+        void setPlaybackPaused(bool paused);
+        void stopPlayback();
+        void resetPlayback();
+
+        struct PlaybackStatus {
+            std::string clipName;
+            float normalizedTime = 0.0f;
+            bool isPlaying = false;
+            bool isPaused = false;
+        };
+
+        PlaybackStatus getPlaybackStatus() const;
         
         /**
          * @brief Set a float parameter
@@ -891,6 +961,7 @@ namespace AnimationGraph {
         
         void saveToJson(nlohmann::json& j) const;
         void loadFromJson(const nlohmann::json& j);
+        std::shared_ptr<AnimationNodeGraph> clone() const;
         
         // ========================================================================
         // Node Factory

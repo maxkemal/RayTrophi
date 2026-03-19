@@ -24,6 +24,7 @@
 #include "Hittable.h"
 #include "AABB.h"
 #include "json.hpp"
+#include <deque>
 #include <memory>
 #include <string>
 
@@ -78,6 +79,10 @@ public:
     // TRANSFORM
     // ═══════════════════════════════════════════════════════════════════════
     
+    void setTransform(const Matrix4x4& transform);
+    void setPivotMatrix(const Matrix4x4& transform);
+    Matrix4x4 getPivotMatrix() const { return transform ? transform->getPivotMatrix() : Matrix4x4::identity(); }
+
     Vec3 getPosition() const { return position; }
     void setPosition(const Vec3& pos);
     
@@ -89,12 +94,14 @@ public:
     
     bool isVisible() const { return visible; }
     void setVisible(bool v) { visible = v; }
+    Vec3 getPivotOffset() const { return transform ? transform->pivot_offset : Vec3(0, 0, 0); }
+    void setPivotOffset(const Vec3& offset, bool preserve_world = true);
     
     /// @brief Get transform handle for gizmo integration
     std::shared_ptr<Transform> getTransformHandle() const { return transform; }
 
     /// @brief Get the final transformation matrix
-    Matrix4x4 getTransform() const { return transform ? transform->getFinal() : Matrix4x4::identity(); }
+    Matrix4x4 getTransform() const { return transform ? transform->base : Matrix4x4::identity(); }
     
     /// @brief Apply transform to simulation grid
     void applyTransform();
@@ -301,6 +308,8 @@ public:
     
     VolumeRenderPath render_path = VolumeRenderPath::VDBUnified; // Default to high quality
     int live_vdb_id = -1;  // Handle to registered VDB volume
+    bool usesUnifiedRenderPath() const { return render_path == VolumeRenderPath::VDBUnified; }
+    bool usesLegacyRenderPath() const { return render_path == VolumeRenderPath::Legacy; }
     private:
     // Transform
     Vec3 position = Vec3(0, 0, 0);
@@ -333,6 +342,11 @@ public:
     // Timeline
   
     int frame_offset = 0;
+    int last_timeline_sim_frame = -1;
+    FluidSim::GasSimulator::StateSnapshot previous_timeline_snapshot;
+    int last_live_vdb_frame = -1;
+    int last_live_vdb_upload_frame = -1;
+    bool live_vdb_dirty = true;
     
     // Cached bounds
     mutable Vec3 cached_bounds_min;
@@ -340,5 +354,20 @@ public:
     mutable bool bounds_dirty = true;
     
     void updateBounds() const;
+    void syncTransformStateFromHandle();
+    void moveEmittersWithDomain(const Vec3& translation_delta);
+    void preserveVoxelDensityForGridResize(const Vec3& previous_grid_size);
+    void clearTimelineSnapshotCache();
+    void cacheTimelineSnapshot(int frame);
+    bool restoreTimelineSnapshot(int frame);
+    bool restoreNearestTimelineSnapshot(int frame, int& restored_frame);
+
+    struct TimelineSnapshotEntry {
+        int frame = -1;
+        FluidSim::GasSimulator::StateSnapshot snapshot;
+    };
+
+    static constexpr size_t kMaxTimelineSnapshots = 12;
+    std::deque<TimelineSnapshotEntry> timeline_snapshot_cache;
 };
 

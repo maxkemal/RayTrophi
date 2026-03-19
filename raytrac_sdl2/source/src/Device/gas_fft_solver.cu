@@ -358,8 +358,11 @@ __device__ bool isInsideShape_emitter(const GPUAdvancedEmitter& e, float3 local,
         case 4: // Cone
             if (local.y < 0 || local.y > e.height) return false;
             {
-                float ratio = local.y / e.height;
-                float allowed_r = tanf(e.cone_angle * 0.5f) * local.y;
+                float height = fmaxf(e.height, 0.001f);
+                float ratio = fmaxf(0.0f, fminf(1.0f, local.y / height));
+                float base_radius = fmaxf(e.radius, 0.001f);
+                float angle_scale = fmaxf(0.25f, fminf(2.5f, e.cone_angle / 0.78539816339f));
+                float allowed_r = fmaxf(0.001f, base_radius * (1.0f - ratio) * angle_scale);
                 radial_sq = local.x * local.x + local.z * local.z;
                 if (radial_sq > allowed_r * allowed_r) return false;
                 normalized_dist = fmaxf(sqrtf(radial_sq) / fmaxf(allowed_r, 0.01f), ratio);
@@ -397,6 +400,56 @@ __device__ float calculateFalloff_emitter(const GPUAdvancedEmitter& e, float nor
             return expf(-4.0f * t * t);
         default:
             return 1.0f - t;
+    }
+}
+
+__device__ float computeFuelPhaseStrength_emitter(const GPUAdvancedEmitter& e,
+                                                  float local_temperature,
+                                                  float flame_activity,
+                                                  float ambient_temperature) {
+    float release = fmaxf(0.0f, e.fuel_release_rate);
+    float contact = fmaxf(0.0f, fminf(1.0f, flame_activity * fmaxf(0.0f, e.flame_contact_sensitivity)));
+    float phase_temp = fmaxf(e.phase_change_temperature, ambient_temperature + 1.0f);
+    float thermal_norm = fmaxf(0.0f, fminf(2.5f, (local_temperature - ambient_temperature) / fmaxf(phase_temp - ambient_temperature, 1.0f)));
+
+    switch (e.fuel_phase) {
+        case 0:
+            return fmaxf(0.0f, fminf(4.0f, release));
+        case 1: {
+            float warm_vapor = fmaxf(0.0f, fminf(1.0f, (thermal_norm - 0.35f) / 0.85f));
+            float release_factor = fmaxf(contact * 0.55f, warm_vapor);
+            return fmaxf(0.0f, fminf(4.0f, release * (0.08f + 0.92f * release_factor)));
+        }
+        case 2: {
+            float pyrolysis = fmaxf(0.0f, fminf(1.0f, (thermal_norm - 0.8f) / 0.9f));
+            float release_factor = fmaxf(contact, pyrolysis);
+            return fmaxf(0.0f, fminf(4.0f, release * (0.02f + 0.45f * release_factor)));
+        }
+        default:
+            return 1.0f;
+    }
+}
+
+__device__ float computeHeatPhaseStrength_emitter(const GPUAdvancedEmitter& e,
+                                                  float local_temperature,
+                                                  float flame_activity,
+                                                  float ambient_temperature) {
+    float phase_temp = fmaxf(e.phase_change_temperature, ambient_temperature + 1.0f);
+    float thermal_norm = fmaxf(0.0f, fminf(2.5f, (local_temperature - ambient_temperature) / fmaxf(phase_temp - ambient_temperature, 1.0f)));
+
+    switch (e.fuel_phase) {
+        case 0:
+            return 1.0f;
+        case 1: {
+            float warmup = fmaxf(0.0f, fminf(1.0f, (thermal_norm - 0.25f) / 0.9f));
+            return 0.18f + 0.82f * fmaxf(flame_activity * 0.5f, warmup);
+        }
+        case 2: {
+            float pyrolysis = fmaxf(0.0f, fminf(1.0f, (thermal_norm - 0.75f) / 1.0f));
+            return 0.08f + 0.52f * fmaxf(flame_activity, pyrolysis);
+        }
+        default:
+            return 1.0f;
     }
 }
 
@@ -533,29 +586,48 @@ __global__ void advancedEmitter_kernel(
             noise_mult = fmaxf(0.0f, noise_mult);
         }
         
-        float strength = falloff * noise_mult;
-        
+        float density_strength = falloff;
+        float temperature_strength = falloff;
+        float velocity_strength = falloff;
+        if (e.noise_enabled) {
+            if (e.noise_modulate_density != 0) density_strength *= noise_mult;
+            if (e.noise_modulate_temperature != 0) temperature_strength *= noise_mult;
+            if (e.noise_modulate_velocity != 0) velocity_strength *= noise_mult;
+            if (e.noise_modulate_density == 0 && e.noise_modulate_temperature == 0 && e.noise_modulate_velocity == 0) {
+                density_strength *= noise_mult;
+                temperature_strength *= noise_mult;
+                velocity_strength *= noise_mult;
+            }
+        }
+
         // Accumulate density
-        if (e.noise_modulate_density || !e.noise_enabled) {
-            total_density += e.density_rate * strength;
+        total_density += e.density_rate * density_strength;
+        
+        // Temperature: inject relative to ambient instead of fading absolute Kelvin to zero at edges.
+        float thermal_flame_proxy = fmaxf(0.0f, fminf(1.0f, (d_temp[voxel_id] - fmaxf(e.phase_change_temperature, 450.0f)) / 600.0f));
+        float flame_activity = thermal_flame_proxy;
+        float hotness = fmaxf(0.0f, fminf(3.0f, (d_temp[voxel_id] - 293.0f) / fmaxf(e.phase_change_temperature - 293.0f, 1.0f)));
+        float oxygen_room = fmaxf(0.0f, fminf(1.0f, 1.0f - d_rho[voxel_id] / 35.0f - d_fuel[voxel_id] / 14.0f - flame_activity * 0.35f));
+        float heat_phase_strength = computeHeatPhaseStrength_emitter(e, d_temp[voxel_id], flame_activity, 293.0f);
+        float hot_headroom = fmaxf(0.15f, fminf(1.0f, 1.0f - hotness * 0.28f));
+        float temp_strength = fminf(1.0f, sqrtf(fmaxf(temperature_strength, 0.0f))) * heat_phase_strength * oxygen_room * hot_headroom;
+        float target_temp = 293.0f + fmaxf(e.temperature - 293.0f, 0.0f) * temp_strength;
+        if (d_temp[voxel_id] < target_temp) {
+            total_temperature = fmaxf(total_temperature, target_temp);
         }
         
-        // Temperature (set, not add)
-        if (d_temp[voxel_id] < e.temperature * strength) {
-            total_temperature = fmaxf(total_temperature, e.temperature * strength);
-        }
-        
-        // Fuel
-        total_fuel += e.fuel_rate * strength;
+        // Fuel phase behavior: gas injects directly, liquid needs heat to vaporize, solid needs flame/pyrolysis.
+        float phase_strength = computeFuelPhaseStrength_emitter(e, d_temp[voxel_id], flame_activity, 293.0f);
+        total_fuel += e.fuel_rate * density_strength * phase_strength * oxygen_room * (1.0f - 0.45f * thermal_flame_proxy);
         
         // Velocity with spray
         float3 base_vel = make_float3(e.vel_x, e.vel_y, e.vel_z);
         float3 emit_vel = randomVelocity_emitter(e, base_vel, voxel_hash + e_idx * 1000, time);
         
-        total_velocity.x += emit_vel.x * strength;
-        total_velocity.y += emit_vel.y * strength;
-        total_velocity.z += emit_vel.z * strength;
-        velocity_weight += strength;
+        total_velocity.x += emit_vel.x * velocity_strength;
+        total_velocity.y += emit_vel.y * velocity_strength;
+        total_velocity.z += emit_vel.z * velocity_strength;
+        velocity_weight += velocity_strength;
     }
     
     // Apply accumulated emission
@@ -565,7 +637,10 @@ __global__ void advancedEmitter_kernel(
     }
     
     if (total_temperature > d_temp[voxel_id]) {
-        d_temp[voxel_id] = fminf(total_temperature, 3000.0f);
+        float heat_strength = fminf(1.0f, fmaxf(0.0f, (total_temperature - 293.0f) / 1200.0f));
+        float dt_scale = fminf(1.0f, fmaxf(0.05f, dt / (1.0f / 60.0f)));
+        float heat_blend = fminf(0.48f, fmaxf(0.02f, (0.10f + 0.38f * heat_strength) * dt_scale));
+        d_temp[voxel_id] = d_temp[voxel_id] * (1.0f - heat_blend) + fminf(total_temperature, 3000.0f) * heat_blend;
     }
     
     if (total_fuel > 0.0f) {

@@ -9,6 +9,8 @@
 #include <set>
 #include <map>
 #include <cmath>
+#include <limits>
+#include <cstring>
 #include "SceneSelection.h"
 #include "renderer.h"
 #include "TerrainManager.h"
@@ -70,6 +72,131 @@ static std::pair<std::string, ChannelType> parseTrackName(const std::string& tra
     return { entity, channel };
 }
 
+static SceneData::ImportedModelContext* findImportedModelContextByName(SceneData& scene, const std::string& name) {
+    for (auto& mctx : scene.importedModelContexts) {
+        if (mctx.importName == name) return &mctx;
+    }
+    return nullptr;
+}
+
+static std::string resolveCharacterTrackName(SceneData& scene, const std::string& selectionName) {
+    if (selectionName.empty()) return selectionName;
+    for (auto& mctx : scene.importedModelContexts) {
+        if (mctx.importName == selectionName) return mctx.importName;
+        for (const auto& member : mctx.members) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(member);
+            if (tri && tri->getNodeName() == selectionName) {
+                return mctx.importName;
+            }
+        }
+    }
+    return selectionName;
+}
+
+static void addAnimGraphTrackTree(std::vector<TimelineTrack>& tracks,
+    const std::string& entityName,
+    const std::vector<Keyframe>& keyframes) {
+    std::vector<int> allFrames;
+    std::vector<int> stateFrames;
+    std::vector<int> clipFrames;
+    std::vector<int> paramFrames;
+    std::vector<int> triggerFrames;
+    std::set<std::string> stateLabels;
+    std::set<std::string> clipLabels;
+    std::set<std::string> paramLabels;
+
+    for (const auto& kf : keyframes) {
+        if (!kf.has_anim_graph) continue;
+        allFrames.push_back(kf.frame);
+
+        if (!kf.anim_graph.force_state.empty()) {
+            stateFrames.push_back(kf.frame);
+            stateLabels.insert(kf.anim_graph.force_state);
+        }
+        if (!kf.anim_graph.clip_overrides.empty() || !kf.anim_graph.clip_speed_overrides.empty()) {
+            clipFrames.push_back(kf.frame);
+            for (const auto& [_, clipName] : kf.anim_graph.clip_overrides) {
+                if (!clipName.empty()) clipLabels.insert(clipName);
+            }
+        }
+        if (!kf.anim_graph.float_params.empty() || !kf.anim_graph.bool_params.empty() || !kf.anim_graph.int_params.empty()) {
+            paramFrames.push_back(kf.frame);
+            for (const auto& [name, _] : kf.anim_graph.float_params) paramLabels.insert(name);
+            for (const auto& [name, _] : kf.anim_graph.bool_params) paramLabels.insert(name);
+            for (const auto& [name, _] : kf.anim_graph.int_params) paramLabels.insert(name);
+        }
+        if (!kf.anim_graph.triggers.empty()) {
+            triggerFrames.push_back(kf.frame);
+            for (const auto& trigger : kf.anim_graph.triggers) paramLabels.insert(trigger);
+        }
+    }
+
+    TimelineTrack main;
+    main.entity_name = entityName;
+    main.name = entityName;
+    main.group = TrackGroup::Objects;
+    main.color = IM_COL32(220, 120, 255, 255);
+    main.expanded = true;
+    main.keyframe_frames = allFrames;
+    tracks.push_back(main);
+
+    TimelineTrack animRoot;
+    animRoot.entity_name = entityName;
+    animRoot.parent_entity = entityName;
+    animRoot.name = "AnimGraph";
+    animRoot.group = TrackGroup::Objects;
+    animRoot.color = IM_COL32(220, 120, 255, 255);
+    animRoot.expanded = true;
+    animRoot.is_sub_track = true;
+    animRoot.depth = 1;
+    animRoot.keyframe_frames = allFrames;
+    tracks.push_back(animRoot);
+
+    TimelineTrack stateTrack;
+    stateTrack.entity_name = entityName;
+    stateTrack.parent_entity = entityName;
+    stateTrack.name = stateLabels.empty() ? "States" : ("States: " + *stateLabels.begin());
+    stateTrack.group = TrackGroup::Objects;
+    stateTrack.color = IM_COL32(255, 210, 120, 255);
+    stateTrack.is_sub_track = true;
+    stateTrack.depth = 2;
+    stateTrack.keyframe_frames = stateFrames;
+    tracks.push_back(stateTrack);
+
+    TimelineTrack clipTrack;
+    clipTrack.entity_name = entityName;
+    clipTrack.parent_entity = entityName;
+    clipTrack.name = clipLabels.empty() ? "Clips" : ("Clips: " + *clipLabels.begin());
+    clipTrack.group = TrackGroup::Objects;
+    clipTrack.color = IM_COL32(120, 220, 255, 255);
+    clipTrack.is_sub_track = true;
+    clipTrack.depth = 2;
+    clipTrack.keyframe_frames = clipFrames;
+    tracks.push_back(clipTrack);
+
+    TimelineTrack paramTrack;
+    paramTrack.entity_name = entityName;
+    paramTrack.parent_entity = entityName;
+    paramTrack.name = paramLabels.empty() ? "Parameters" : ("Parameters: " + *paramLabels.begin());
+    paramTrack.group = TrackGroup::Objects;
+    paramTrack.color = IM_COL32(120, 255, 170, 255);
+    paramTrack.is_sub_track = true;
+    paramTrack.depth = 2;
+    paramTrack.keyframe_frames = paramFrames;
+    tracks.push_back(paramTrack);
+
+    TimelineTrack triggerTrack;
+    triggerTrack.entity_name = entityName;
+    triggerTrack.parent_entity = entityName;
+    triggerTrack.name = "Triggers";
+    triggerTrack.group = TrackGroup::Objects;
+    triggerTrack.color = IM_COL32(255, 140, 160, 255);
+    triggerTrack.is_sub_track = true;
+    triggerTrack.depth = 2;
+    triggerTrack.keyframe_frames = triggerFrames;
+    tracks.push_back(triggerTrack);
+}
+
 // ============================================================================
 // MAIN DRAW FUNCTION
 // ============================================================================
@@ -93,6 +220,12 @@ void TimelineWidget::draw(UIContext& ctx) {
     
     // PERFORMANCE: Handle selection change with minimal overhead
     handleSelectionSync(ctx);
+
+    static size_t last_scene_track_count = std::numeric_limits<size_t>::max();
+    if (ctx.scene.timeline.tracks.size() != last_scene_track_count) {
+        tracks_dirty = true;
+        last_scene_track_count = ctx.scene.timeline.tracks.size();
+    }
     
     // Rebuild tracks if needed
     if (tracks_dirty) {
@@ -107,6 +240,7 @@ void TimelineWidget::draw(UIContext& ctx) {
     
     // --- PLAYBACK CONTROLS ---
     drawPlaybackControls(ctx);
+    drawSelectedAnimGraphInspector(ctx);
     
     ImGui::Separator();
     
@@ -326,7 +460,7 @@ void TimelineWidget::draw(UIContext& ctx) {
                             evaluated.transform.rotation,
                             evaluated.transform.scale
                         );
-                        th->setBase(new_transform);
+                        th->setPivotMatrix(new_transform);
                         
                         // Update each instance directly via backend sync at the end of the frame
                         // so both OptiX and Vulkan can correctly refit TLAS in one go
@@ -520,6 +654,50 @@ void TimelineWidget::draw(UIContext& ctx) {
             last_anim_update_frame = current_frame;
         }
     } // end if (!ctx.scene.timeline.tracks.empty())
+}
+
+void TimelineWidget::drawSelectedAnimGraphInspector(UIContext& ctx) {
+    if (selected_track.empty() || selected_keyframe_frame < 0) return;
+
+    auto it = ctx.scene.timeline.tracks.find(selected_track);
+    if (it == ctx.scene.timeline.tracks.end()) return;
+
+    Keyframe* selectedKey = nullptr;
+    for (auto& kf : it->second.keyframes) {
+        if (kf.frame == selected_keyframe_frame) {
+            selectedKey = &kf;
+            break;
+        }
+    }
+    if (!selectedKey || !selectedKey->has_anim_graph) return;
+
+    if (!ImGui::CollapsingHeader("AnimGraph Inspector", ImGuiTreeNodeFlags_DefaultOpen)) return;
+
+    ImGui::TextDisabled("Track: %s", selected_track.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("| Frame: %d", selected_keyframe_frame);
+
+    if (!selectedKey->anim_graph.force_state.empty()) {
+        ImGui::BulletText("Force State: %s", selectedKey->anim_graph.force_state.c_str());
+    }
+    for (const auto& [nodeId, clipName] : selectedKey->anim_graph.clip_overrides) {
+        ImGui::BulletText("Clip Node %u -> %s", nodeId, clipName.c_str());
+    }
+    for (const auto& [nodeId, clipSpeed] : selectedKey->anim_graph.clip_speed_overrides) {
+        ImGui::BulletText("Clip Speed %u = %.3f", nodeId, clipSpeed);
+    }
+    for (const auto& [name, value] : selectedKey->anim_graph.float_params) {
+        ImGui::BulletText("%s = %.3f", name.c_str(), value);
+    }
+    for (const auto& [name, value] : selectedKey->anim_graph.bool_params) {
+        ImGui::BulletText("%s = %s", name.c_str(), value ? "true" : "false");
+    }
+    for (const auto& [name, value] : selectedKey->anim_graph.int_params) {
+        ImGui::BulletText("%s = %d", name.c_str(), value);
+    }
+    for (const auto& trigger : selectedKey->anim_graph.triggers) {
+        ImGui::BulletText("%s [trigger]", trigger.c_str());
+    }
 }
 
 
@@ -1140,6 +1318,14 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                         else if (track.channel == ChannelType::ScaleZ) show_diamond = kf.transform.has_scl_z;
                     }
                     else if (kf.has_material && track.channel == ChannelType::Material) show_diamond = true;
+                    else if (kf.has_anim_graph && track.channel == ChannelType::None) show_diamond = true;
+                    else if (kf.has_anim_graph && track.is_sub_track) {
+                        if (track.name == "AnimGraph") show_diamond = true;
+                        else if (track.name.find("States") == 0) show_diamond = !kf.anim_graph.force_state.empty();
+                        else if (track.name.find("Clips") == 0) show_diamond = !kf.anim_graph.clip_overrides.empty() || !kf.anim_graph.clip_speed_overrides.empty();
+                        else if (track.name.find("Parameters") == 0) show_diamond = !kf.anim_graph.float_params.empty() || !kf.anim_graph.bool_params.empty() || !kf.anim_graph.int_params.empty();
+                        else if (track.name == "Triggers") show_diamond = !kf.anim_graph.triggers.empty();
+                    }
                     // Terrain keyframes (for morphing animation)
                     else if (kf.has_terrain && track.group == TrackGroup::Terrain) show_diamond = true;
                     // Water keyframes (for wave parameter animation)
@@ -1256,6 +1442,9 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
         ImGui::TextDisabled("Keyframe @ Frame %d", selected_keyframe_frame);
         ImGui::TextDisabled("Track: %s", selected_track.c_str());
         ImGui::Separator();
+        ImGui::TextWrapped("AnimGraph keys apply runtime graph parameters, triggers, and force-state data on this frame.");
+        ImGui::TextDisabled("Tip: Right click empty space on an imported character track to add an AnimGraph keyframe.");
+        ImGui::Separator();
         
         // Show keyframe info
         auto it = ctx.scene.timeline.tracks.find(selected_track);
@@ -1268,7 +1457,140 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
                     if (kf.has_light) ImGui::BulletText("Light");
                     if (kf.has_camera) ImGui::BulletText("Camera");
                     if (kf.has_world) ImGui::BulletText("World");
+                    if (kf.has_anim_graph) ImGui::BulletText("AnimGraph");
                     ImGui::Separator();
+
+                    if (kf.has_anim_graph) {
+                        ImGui::TextDisabled("AnimGraph Payload");
+                        for (const auto& [name, value] : kf.anim_graph.float_params) {
+                            ImGui::BulletText("%s = %.3f", name.c_str(), value);
+                        }
+                        for (const auto& [name, value] : kf.anim_graph.bool_params) {
+                            ImGui::BulletText("%s = %s", name.c_str(), value ? "true" : "false");
+                        }
+                        for (const auto& [name, value] : kf.anim_graph.int_params) {
+                            ImGui::BulletText("%s = %d", name.c_str(), value);
+                        }
+                        for (const auto& [nodeId, clipName] : kf.anim_graph.clip_overrides) {
+                            ImGui::BulletText("Clip Node %u -> %s", nodeId, clipName.c_str());
+                        }
+                        for (const auto& [nodeId, clipSpeed] : kf.anim_graph.clip_speed_overrides) {
+                            ImGui::BulletText("Clip Speed %u = %.3f", nodeId, clipSpeed);
+                        }
+                        for (const auto& trigger : kf.anim_graph.triggers) {
+                            ImGui::BulletText("%s [trigger]", trigger.c_str());
+                        }
+                        if (!kf.anim_graph.force_state.empty()) {
+                            ImGui::BulletText("Force State -> %s", kf.anim_graph.force_state.c_str());
+                        }
+                        ImGui::Separator();
+
+                        if (ImGui::TreeNodeEx("Edit AnimGraph", ImGuiTreeNodeFlags_DefaultOpen)) {
+                            ImGui::TextDisabled("This editor modifies Timeline payload only. It does not change the asset graph.");
+                            for (auto itFloat = kf.anim_graph.float_params.begin(); itFloat != kf.anim_graph.float_params.end(); ) {
+                                ImGui::PushID(itFloat->first.c_str());
+                                ImGui::DragFloat(itFloat->first.c_str(), &itFloat->second, 0.01f);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) itFloat = kf.anim_graph.float_params.erase(itFloat);
+                                else ++itFloat;
+                                ImGui::PopID();
+                            }
+
+                            for (auto itBool = kf.anim_graph.bool_params.begin(); itBool != kf.anim_graph.bool_params.end(); ) {
+                                ImGui::PushID(itBool->first.c_str());
+                                ImGui::Checkbox(itBool->first.c_str(), &itBool->second);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) itBool = kf.anim_graph.bool_params.erase(itBool);
+                                else ++itBool;
+                                ImGui::PopID();
+                            }
+
+                            for (auto itInt = kf.anim_graph.int_params.begin(); itInt != kf.anim_graph.int_params.end(); ) {
+                                ImGui::PushID(itInt->first.c_str());
+                                ImGui::InputInt(itInt->first.c_str(), &itInt->second);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) itInt = kf.anim_graph.int_params.erase(itInt);
+                                else ++itInt;
+                                ImGui::PopID();
+                            }
+
+                            for (auto itClip = kf.anim_graph.clip_overrides.begin(); itClip != kf.anim_graph.clip_overrides.end(); ) {
+                                ImGui::PushID(static_cast<int>(itClip->first));
+                                char clipBuf[128] = {};
+                                strncpy(clipBuf, itClip->second.c_str(), sizeof(clipBuf) - 1);
+                                std::string label = "Clip Node " + std::to_string(itClip->first);
+                                if (ImGui::InputText(label.c_str(), clipBuf, sizeof(clipBuf))) {
+                                    itClip->second = clipBuf;
+                                }
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) itClip = kf.anim_graph.clip_overrides.erase(itClip);
+                                else ++itClip;
+                                ImGui::PopID();
+                            }
+
+                            for (auto itSpeed = kf.anim_graph.clip_speed_overrides.begin(); itSpeed != kf.anim_graph.clip_speed_overrides.end(); ) {
+                                ImGui::PushID(static_cast<int>(itSpeed->first) + 100000);
+                                std::string label = "Clip Speed " + std::to_string(itSpeed->first);
+                                ImGui::DragFloat(label.c_str(), &itSpeed->second, 0.01f, -10.0f, 10.0f);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) itSpeed = kf.anim_graph.clip_speed_overrides.erase(itSpeed);
+                                else ++itSpeed;
+                                ImGui::PopID();
+                            }
+
+                            static char newAgName[64] = "";
+                            static float newAgFloat = 0.0f;
+                            static int newAgInt = 0;
+                            static bool newAgBool = false;
+                            static int newAgType = 0;
+                            static int newClipNodeId = 0;
+                            static char newClipName[128] = "";
+                            static float newClipSpeed = 1.0f;
+                            const char* agTypes[] = { "Float", "Bool", "Int", "Trigger", "Clip Override", "Clip Speed" };
+                            ImGui::InputText("Param Name", newAgName, sizeof(newAgName));
+                            ImGui::Combo("Param Type", &newAgType, agTypes, IM_ARRAYSIZE(agTypes));
+                            if (newAgType == 0) ImGui::DragFloat("Float Value", &newAgFloat, 0.01f);
+                            if (newAgType == 1) ImGui::Checkbox("Bool Value", &newAgBool);
+                            if (newAgType == 2) ImGui::InputInt("Int Value", &newAgInt);
+                            if (newAgType == 4 || newAgType == 5) ImGui::InputInt("Clip Node Id", &newClipNodeId);
+                            if (newAgType == 4) ImGui::InputText("Clip Name", newClipName, sizeof(newClipName));
+                            if (newAgType == 5) ImGui::DragFloat("Clip Speed", &newClipSpeed, 0.01f, -10.0f, 10.0f);
+                            bool canAddAnimPayload =
+                                (newAgType <= 3 && strlen(newAgName) > 0) ||
+                                (newAgType == 4 && newClipNodeId > 0 && strlen(newClipName) > 0) ||
+                                (newAgType == 5 && newClipNodeId > 0);
+                            if (ImGui::Button("Add Anim Param") && canAddAnimPayload) {
+                                if (newAgType == 0) kf.anim_graph.float_params[newAgName] = newAgFloat;
+                                else if (newAgType == 1) kf.anim_graph.bool_params[newAgName] = newAgBool;
+                                else if (newAgType == 2) kf.anim_graph.int_params[newAgName] = newAgInt;
+                                else if (newAgType == 3) kf.anim_graph.triggers.push_back(newAgName);
+                                else if (newAgType == 4 && newClipNodeId > 0 && strlen(newClipName) > 0) kf.anim_graph.clip_overrides[(uint32_t)newClipNodeId] = newClipName;
+                                else if (newAgType == 5 && newClipNodeId > 0) kf.anim_graph.clip_speed_overrides[(uint32_t)newClipNodeId] = newClipSpeed;
+                                newAgName[0] = '\0';
+                                newClipName[0] = '\0';
+                            }
+
+                            for (size_t trigIdx = 0; trigIdx < kf.anim_graph.triggers.size(); ) {
+                                ImGui::PushID(static_cast<int>(trigIdx));
+                                ImGui::Text("%s [trigger]", kf.anim_graph.triggers[trigIdx].c_str());
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) {
+                                    kf.anim_graph.triggers.erase(kf.anim_graph.triggers.begin() + trigIdx);
+                                } else {
+                                    ++trigIdx;
+                                }
+                                ImGui::PopID();
+                            }
+
+                            char forceStateBuf[64] = {};
+                            strncpy(forceStateBuf, kf.anim_graph.force_state.c_str(), sizeof(forceStateBuf) - 1);
+                            if (ImGui::InputText("Force State", forceStateBuf, sizeof(forceStateBuf))) {
+                                kf.anim_graph.force_state = forceStateBuf;
+                            }
+
+                            ImGui::TreePop();
+                        }
+                    }
                     break;
                 }
             }
@@ -1288,6 +1610,9 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
     
     // Timeline context menu (right-click on empty area)
     if (ImGui::BeginPopup("TimelineContextMenu")) {
+        ImGui::TextDisabled("Timeline Insert");
+        ImGui::TextWrapped("If an imported character is selected, you can add an AnimGraph key here. During playback it is applied to that character's runtime graph.");
+        ImGui::Separator();
         ImGui::TextDisabled("Frame %d", context_menu_frame);
         if (!selected_track.empty()) {
             ImGui::TextDisabled("Track: %s", selected_track.c_str());
@@ -1309,6 +1634,13 @@ void TimelineWidget::drawTimelineCanvas(UIContext& ctx, float canvas_width, floa
             if (ImGui::MenuItem("Scale (S)", "Shift+S")) {
                 current_frame = context_menu_frame;
                 insertKeyframeType(ctx, selected_track, context_menu_frame, KeyframeInsertType::Scale);
+                tracks_dirty = true;
+            }
+            if (findImportedModelContextByName(ctx.scene, selected_track) && ImGui::MenuItem("AnimGraph Keyframe")) {
+                current_frame = context_menu_frame;
+                Keyframe kf(context_menu_frame);
+                kf.has_anim_graph = true;
+                ctx.scene.timeline.insertKeyframe(selected_track, kf);
                 tracks_dirty = true;
             }
             ImGui::Separator();
@@ -1484,6 +1816,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
             if (selected_entity.empty()) {
                 selected_entity = "Object_" + std::to_string(ctx.selection.selected.object_index);
             }
+            selected_entity = resolveCharacterTrackName(ctx.scene, selected_entity);
             selected_group = TrackGroup::Objects;
         } else if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light) {
             selected_entity = ctx.selection.selected.light->nodeName;
@@ -1592,7 +1925,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
         // We don't check objects against valid_entities because that was the slow part
         
         // Determine group based on keyframe types
-        bool has_transform = false, has_material = false, has_light = false, has_camera = false, has_world = false, has_terrain = false, has_emitter = false;
+        bool has_transform = false, has_material = false, has_light = false, has_camera = false, has_world = false, has_terrain = false, has_emitter = false, has_anim_graph = false;
         std::vector<int> keyframes;
         
         for (auto& kf : track.keyframes) {
@@ -1603,6 +1936,7 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
             has_world |= kf.has_world;
             has_terrain |= kf.has_terrain;
             has_emitter |= kf.has_emitter;
+            has_anim_graph |= kf.has_anim_graph;
             keyframes.push_back(kf.frame);
         }
         
@@ -1795,6 +2129,8 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
                 bool is_selected = (entity_name == selected_entity);
                 ImU32 color = has_material ? COLOR_MATERIAL : COLOR_TRANSFORM;
                 addObjectWithChannels(entity_name, entity_name, color, is_selected, keyframes);
+            } else if (has_anim_graph) {
+                addAnimGraphTrackTree(tracks, entity_name, track.keyframes);
             }
         }
         
@@ -1805,8 +2141,12 @@ void TimelineWidget::rebuildTrackList(UIContext& ctx) {
     // NOTE: Skip World here - it's always added below to ensure it always exists
     if (!selected_entity.empty() && selected_entity != "World" && added_entities.find(selected_entity) == added_entities.end()) {
         if (selected_group == TrackGroup::Objects) {
-            // Object with L/R/S sub-tracks
-            addObjectWithChannels(selected_entity, selected_entity + " (selected)", COLOR_TRANSFORM, true, {});
+            if (findImportedModelContextByName(ctx.scene, selected_entity)) {
+                addAnimGraphTrackTree(tracks, selected_entity, {});
+            } else {
+                // Object with L/R/S sub-tracks
+                addObjectWithChannels(selected_entity, selected_entity + " (selected)", COLOR_TRANSFORM, true, {});
+            }
         } else if (selected_group == TrackGroup::Terrain) {
             // Terrain track (for keying)
             TimelineTrack t;
@@ -1857,6 +2197,7 @@ void TimelineWidget::handleSelectionSync(UIContext& ctx) {
             if (viewport_selection.empty()) {
                 viewport_selection = "Object_" + std::to_string(ctx.selection.selected.object_index);
             }
+            viewport_selection = resolveCharacterTrackName(ctx.scene, viewport_selection);
         } else if (ctx.selection.selected.type == SelectableType::Light && ctx.selection.selected.light) {
             viewport_selection = ctx.selection.selected.light->nodeName;
         } else if (ctx.selection.selected.type == SelectableType::Camera && ctx.selection.selected.camera) {
@@ -2023,11 +2364,18 @@ void TimelineWidget::syncFromAnimationData(UIContext& ctx) {
 // INSERT KEYFRAME FOR TRACK - Uses selection data like existing code
 // ============================================================================
 void TimelineWidget::insertKeyframeForTrack(UIContext& ctx, const std::string& track_name, int frame) {
-    if (!ctx.selection.hasSelection()) return;
-    
     // Parse the track name to get Entity and Channel
     // Uses the static parseTrackName helper we moved to the top
     auto [entity_name, channel] = parseTrackName(track_name);
+
+    if (findImportedModelContextByName(ctx.scene, entity_name)) {
+        Keyframe kf(frame);
+        kf.has_anim_graph = true;
+        ctx.scene.timeline.insertKeyframe(entity_name, kf);
+        return;
+    }
+
+    if (!ctx.selection.hasSelection()) return;
     
     // Validate entity name against selection (to ensure we are keying what is selected)
     // Actually, we should allow keying ANY entity if it matches the track?

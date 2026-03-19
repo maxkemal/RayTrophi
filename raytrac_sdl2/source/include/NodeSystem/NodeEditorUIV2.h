@@ -25,6 +25,7 @@
 #include "NodeCore.h"
 #include "EvaluationContext.h"
 #include "Node.h"
+#include "NodeEditorChrome.h"
 #include "Graph.h"
 #include "imgui.h"
 #include <unordered_map>
@@ -45,17 +46,17 @@ namespace NodeSystem {
         
         struct Config {
             // Grid
-            ImU32 gridColorMajor = IM_COL32(60, 60, 70, 255);
-            ImU32 gridColorMinor = IM_COL32(50, 50, 60, 120);
+            ImU32 gridColorMajor = IM_COL32(58, 64, 78, 180);
+            ImU32 gridColorMinor = IM_COL32(42, 46, 58, 120);
             float gridSizeMajor = 128.0f;
             float gridSizeMinor = 32.0f;
-            ImU32 bgColor = IM_COL32(30, 30, 35, 255);
+            ImU32 bgColor = IM_COL32(22, 24, 30, 255);
             
             // Node
-            ImU32 nodeBodyColor = IM_COL32(45, 45, 50, 240);
-            ImU32 nodeBorderColor = IM_COL32(25, 25, 30, 255);
-            ImU32 nodeSelectedColor = IM_COL32(100, 150, 255, 255);
-            float nodeRounding = 6.0f;
+            ImU32 nodeBodyColor = IM_COL32(34, 37, 45, 245);
+            ImU32 nodeBorderColor = IM_COL32(66, 74, 92, 210);
+            ImU32 nodeSelectedColor = IM_COL32(109, 180, 255, 255);
+            float nodeRounding = 10.0f;
             float nodeBorderWidth = 1.5f;
             
             // Link
@@ -84,6 +85,7 @@ namespace NodeSystem {
         uint32_t selectedLinkId = 0;
         uint32_t selectedGroupId = 0;
         uint32_t draggingNodeId = 0;
+        uint32_t resizingNodeId = 0;
         
         bool isCreatingLink = false;
         uint32_t linkStartPinId = 0;
@@ -107,6 +109,7 @@ namespace NodeSystem {
             selectedLinkId = 0;
             selectedGroupId = 0;
             draggingNodeId = 0;
+            resizingNodeId = 0;
             isCreatingLink = false;
             linkStartPinId = 0;
         }
@@ -115,6 +118,22 @@ namespace NodeSystem {
         std::unordered_map<uint32_t, ImVec2> pinPositions_;
         ImVec2 canvasPos_;
         ImVec2 canvasSize_;
+
+        std::string fitTextToWidth(const std::string& text, float maxWidth) const {
+            if (text.empty() || maxWidth <= 8.0f) return {};
+            if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) return text;
+
+            static const char* kEllipsis = "...";
+            std::string result = text;
+            while (!result.empty()) {
+                result.pop_back();
+                const std::string candidate = result + kEllipsis;
+                if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+                    return candidate;
+                }
+            }
+            return {};
+        }
         
     public:
         NodeEditorUIV2() = default;
@@ -294,7 +313,17 @@ namespace NodeSystem {
             }
             
             // Node dragging
-            if (draggingNodeId != 0) {
+            if (resizingNodeId != 0) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    NodeBase* node = graph.getNode(resizingNodeId);
+                    if (node) {
+                        node->uiWidth += ImGui::GetIO().MouseDelta.x / zoom;
+                        node->uiWidth = std::clamp(node->uiWidth, 110.0f, 360.0f);
+                    }
+                } else {
+                    resizingNodeId = 0;
+                }
+            } else if (draggingNodeId != 0) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
                         NodeBase* node = graph.getNode(draggingNodeId);
@@ -315,11 +344,7 @@ namespace NodeSystem {
         
         void drawNode(ImDrawList* dl, NodeBase& node, GraphBase& graph) {
             ImVec2 pos = nodeToScreen(node.x, node.y);
-            
-            float headerH = 26.0f * zoom;
-            float pinSpacing = 22.0f * zoom;
-            float padding = 10.0f * zoom;
-            float minWidth = 160.0f * zoom;
+            float padding = scaleNodeChromeMetric(zoom, 10.0f, 7.0f, 14.0f);
             
             // Estimate node size for culling (use max possible size)
             float estWidth = 500.0f * zoom;
@@ -329,8 +354,9 @@ namespace NodeSystem {
             if (pos.x + estWidth < canvasPos_.x || pos.x > canvasPos_.x + canvasSize_.x ||
                 pos.y + estHeight < canvasPos_.y || pos.y > canvasPos_.y + canvasSize_.y) {
                 // Still need to cache pin positions for link drawing
-                int maxPins = std::max((int)node.inputs.size(), (int)node.outputs.size());
-                float pinsH = maxPins * pinSpacing + (maxPins > 0 ? padding : 0);
+                const float headerH = scaleNodeChromeMetric(zoom, 26.0f, 22.0f, 38.0f);
+                const float pinSpacing = scaleNodeChromeMetric(zoom, 22.0f, 16.0f, 30.0f);
+                const float minWidth = scaleNodeChromeMetric(zoom, 160.0f, 110.0f, 240.0f);
                 float pinStartY = pos.y + headerH + padding;
                 
                 for (int i = 0; i < (int)node.inputs.size(); i++) {
@@ -342,67 +368,58 @@ namespace NodeSystem {
                 return; // Skip full rendering
             }
             
-            int maxPins = std::max((int)node.inputs.size(), (int)node.outputs.size());
-            float pinsH = maxPins * pinSpacing + (maxPins > 0 ? padding : 0);
-            
-            // Two-pass rendering
-            dl->ChannelsSplit(2);
-            dl->ChannelsSetCurrent(1);
-            
-            // Draw pins
-            float pinStartY = pos.y + headerH + padding;
-            
-            // Inputs
-            for (int i = 0; i < (int)node.inputs.size(); i++) {
-                Pin& pin = node.inputs[i];
-                ImVec2 pinPos(pos.x, pinStartY + i * pinSpacing + pinSpacing * 0.5f);
-                pinPositions_[pin.id] = pinPos;
-                drawPin(dl, pinPos, pin, true);
-            }
-            
-            // COMPACT NODE SIZE - no content inside node, only header + pins
-            
             float customW = node.getCustomWidth();
             
             // Calculate title width (capped)
             float titleW = ImGui::CalcTextSize(node.metadata.displayName.c_str()).x + padding * 2;
             if (titleW < 10) titleW = ImGui::CalcTextSize(node.name.c_str()).x + padding * 2;
-            titleW = std::min(titleW, 160.0f * zoom);
-            
-            // Determine final size
-            float finalWidth = (customW > 0) ? (customW * zoom) : std::max(minWidth, titleW);
-            float finalHeight;
-            
-            // Collapsed mode - only show header
-            if (node.collapsed) {
-                finalHeight = headerH;
-                pinsH = 0; // Don't show pins when collapsed
-            } else {
-                finalHeight = headerH + pinsH + padding;
+            NodeChromeLayout chrome = buildNodeChromeLayout(node, zoom, customW > 0.0f ? customW * zoom : 160.0f * zoom,
+                node.inputs.size(), node.outputs.size(), titleW);
+            chrome.cornerRadius = scaleNodeChromeMetric(zoom, config.nodeRounding, 8.0f, 16.0f);
+
+            float finalWidth = chrome.width;
+            float finalHeight = chrome.height;
+            float headerH = chrome.headerHeight;
+            float cornerRadius = chrome.cornerRadius;
+            float shadowOffset = chrome.shadowOffset;
+            bool showTitle = chrome.showTitle;
+            bool showPinLabels = chrome.showPinLabels;
+            bool isCollapsed = chrome.collapsed;
+
+            // Two-pass rendering
+            dl->ChannelsSplit(2);
+            dl->ChannelsSetCurrent(1);
+
+            float inputPinStartY = getNodePinStartY(chrome, pos.y, node.inputs.size());
+            float outputPinStartY = getNodePinStartY(chrome, pos.y, node.outputs.size());
+
+            for (int i = 0; i < (int)node.inputs.size(); i++) {
+                Pin& pin = node.inputs[i];
+                ImVec2 pinPos(pos.x, inputPinStartY + i * (isCollapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing));
+                pinPositions_[pin.id] = pinPos;
+                drawPin(dl, pinPos, pin, true, (!isCollapsed && showPinLabels) ? chrome.labelWidth : 0.0f);
             }
-            
-            // Clamp to reasonable bounds
-            finalWidth = std::min(finalWidth, 200.0f * zoom);
-            finalHeight = std::min(finalHeight, 200.0f * zoom);
-            
-            // Content will be drawn in properties panel - not inside node
-            // This prevents all ImGui layout issues with SetCursorScreenPos in child windows
-            
-            // Outputs (need finalWidth)
+
             for (int i = 0; i < (int)node.outputs.size(); i++) {
                 Pin& pin = node.outputs[i];
-                ImVec2 pinPos(pos.x + finalWidth, pinStartY + i * pinSpacing + pinSpacing * 0.5f);
+                ImVec2 pinPos(pos.x + finalWidth, outputPinStartY + i * (isCollapsed ? chrome.collapsedPinSpacing : chrome.pinSpacing));
                 pinPositions_[pin.id] = pinPos;
-                drawPin(dl, pinPos, pin, false);
+                drawPin(dl, pinPos, pin, false, (!isCollapsed && showPinLabels) ? chrome.labelWidth : 0.0f);
             }
-            
-            // Title
-            if (zoom > 0.3f) {
-                const char* title = node.metadata.displayName.empty() 
-                    ? node.name.c_str() 
-                    : node.metadata.displayName.c_str();
-                dl->AddText(ImVec2(pos.x + padding, pos.y + 5 * zoom), 
-                    IM_COL32(255, 255, 255, 255), title);
+
+            if (showTitle) {
+                const std::string fullTitle = node.metadata.displayName.empty()
+                    ? node.name
+                    : node.metadata.displayName;
+                const std::string title = fitTextToWidth(fullTitle, finalWidth - padding * 2.0f);
+                if (!title.empty()) {
+                    ImVec2 titleMin(pos.x + padding, pos.y + 4.0f);
+                    ImVec2 titleMax(pos.x + finalWidth - padding, pos.y + headerH - 4.0f);
+                    dl->PushClipRect(titleMin, titleMax, true);
+                    dl->AddText(ImVec2(pos.x + padding, pos.y + (headerH - ImGui::GetTextLineHeight()) * 0.5f - 1.0f),
+                        IM_COL32(245, 247, 250, 255), title.c_str());
+                    dl->PopClipRect();
+                }
             }
             
             // Background (Channel 0)
@@ -418,17 +435,28 @@ namespace NodeSystem {
             ImU32 borderCol = isSelected ? config.nodeSelectedColor : config.nodeBorderColor;
             float borderW = isSelected ? config.nodeBorderWidth * 2 : config.nodeBorderWidth;
             
+            dl->AddRectFilled(
+                ImVec2(pos.x + shadowOffset, pos.y + shadowOffset),
+                ImVec2(pos.x + finalWidth + shadowOffset, pos.y + finalHeight + shadowOffset),
+                IM_COL32(0, 0, 0, 55), cornerRadius);
+
             // Body
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + finalHeight),
-                config.nodeBodyColor, config.nodeRounding * zoom);
+                config.nodeBodyColor, cornerRadius);
             
             // Header
             dl->AddRectFilled(pos, ImVec2(pos.x + finalWidth, pos.y + headerH),
-                headerCol, config.nodeRounding * zoom, ImDrawFlags_RoundCornersTop);
+                headerCol, cornerRadius, ImDrawFlags_RoundCornersTop);
+
+            dl->AddLine(
+                ImVec2(pos.x + 1.0f, pos.y + headerH),
+                ImVec2(pos.x + finalWidth - 1.0f, pos.y + headerH),
+                IM_COL32(255, 255, 255, 22),
+                1.0f);
             
             // Border
             dl->AddRect(pos, ImVec2(pos.x + finalWidth, pos.y + finalHeight),
-                borderCol, config.nodeRounding * zoom, 0, borderW * zoom);
+                borderCol, cornerRadius, 0, std::max(1.0f, borderW * zoom));
             
             dl->ChannelsMerge();
             
@@ -438,9 +466,64 @@ namespace NodeSystem {
                                     pos.y < canvasPos_.y + canvasSize_.y && nodeEnd.y > canvasPos_.y);
             
             if (overlapsCanvas) {
+                float toggleSize = chrome.toggleSize;
+                ImVec2 toggleMin(
+                    pos.x + finalWidth - toggleSize - padding * 0.6f,
+                    pos.y + (headerH - toggleSize) * 0.5f);
+                ImVec2 toggleMax(toggleMin.x + toggleSize, toggleMin.y + toggleSize);
+
+                ImGui::SetCursorScreenPos(toggleMin);
+                ImGui::PushID(node.id);
+                ImGui::InvisibleButton("NodeCollapseToggle", ImVec2(toggleSize, toggleSize));
+                bool toggleHovered = ImGui::IsItemHovered();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                    node.collapsed = !node.collapsed;
+                }
+                if (toggleHovered) {
+                    ImGui::SetTooltip("%s", node.collapsed ? "Expand node" : "Collapse node");
+                }
+                ImGui::PopID();
+
+                dl->AddRectFilled(toggleMin, toggleMax,
+                    toggleHovered ? IM_COL32(255, 255, 255, 28) : IM_COL32(0, 0, 0, 26),
+                    toggleSize * 0.28f);
+                dl->AddLine(
+                    ImVec2(toggleMin.x + 4.0f, toggleMin.y + toggleSize * 0.5f),
+                    ImVec2(toggleMax.x - 4.0f, toggleMin.y + toggleSize * 0.5f),
+                    IM_COL32(245, 247, 250, 220), 1.4f);
+                if (node.collapsed) {
+                    dl->AddLine(
+                        ImVec2(toggleMin.x + toggleSize * 0.5f, toggleMin.y + 4.0f),
+                        ImVec2(toggleMin.x + toggleSize * 0.5f, toggleMax.y - 4.0f),
+                        IM_COL32(245, 247, 250, 220), 1.4f);
+                }
+
+                float resizeHandleWidth = chrome.resizeHandleWidth;
+                ImVec2 resizeMin(pos.x + finalWidth - resizeHandleWidth * 0.5f, pos.y + headerH);
+                ImVec2 resizeMax(pos.x + finalWidth + resizeHandleWidth * 0.5f, pos.y + finalHeight);
+                ImGui::SetCursorScreenPos(ImVec2(resizeMin.x, resizeMin.y));
+                ImGui::PushID(node.id + 600000u);
+                ImGui::InvisibleButton("NodeResizeHandle", ImVec2(resizeMax.x - resizeMin.x, resizeMax.y - resizeMin.y));
+                bool resizeHovered = ImGui::IsItemHovered();
+                if (resizeHovered || resizingNodeId == node.id) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                }
+                if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f)) {
+                    resizingNodeId = node.id;
+                }
+                if (resizeHovered) {
+                    ImGui::SetTooltip("Drag to resize node");
+                }
+                ImGui::PopID();
+                dl->AddLine(
+                    ImVec2(pos.x + finalWidth - 1.0f, pos.y + headerH + 4.0f),
+                    ImVec2(pos.x + finalWidth - 1.0f, pos.y + finalHeight - 4.0f),
+                    resizeHovered || resizingNodeId == node.id ? IM_COL32(255, 255, 255, 90) : IM_COL32(255, 255, 255, 34),
+                    1.0f);
+
                 // Clamp interaction rect to canvas
                 ImVec2 interactPos = pos;
-                ImVec2 interactSize(finalWidth, headerH);
+                ImVec2 interactSize(std::max(24.0f, finalWidth - toggleSize - padding * 1.4f), headerH);
                 
                 // Don't set cursor outside canvas bounds
                 interactPos.x = std::max(interactPos.x, canvasPos_.x);
@@ -449,7 +532,7 @@ namespace NodeSystem {
                 interactPos.y = std::min(interactPos.y, canvasPos_.y + canvasSize_.y - 10);
                 
                 ImGui::SetCursorScreenPos(interactPos);
-                ImGui::PushID(node.id);
+                ImGui::PushID(node.id + 1000000u);
                 ImGui::InvisibleButton("NodeHeader", ImVec2(std::min(interactSize.x, 200.0f * zoom), interactSize.y));
             
             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
@@ -482,8 +565,8 @@ namespace NodeSystem {
         // PIN (Color-coded by type)
         // ========================================================================
         
-        void drawPin(ImDrawList* dl, ImVec2 center, Pin& pin, bool isInput) {
-            float r = 6.0f * zoom;
+        void drawPin(ImDrawList* dl, ImVec2 center, Pin& pin, bool isInput, float maxLabelWidth = 0.0f) {
+            float r = scaleNodeChromeMetric(zoom, 6.0f, 4.5f, 9.0f);
             
             // Get color and shape from pin's cached values or compute
             ImU32 col = pin.cachedColor;
@@ -553,12 +636,23 @@ namespace NodeSystem {
             ImGui::PopID();
             
             // Label
-            if (zoom > 0.4f) {
-                ImVec2 txtSz = ImGui::CalcTextSize(pin.name.c_str());
-                ImVec2 txtPos = isInput 
-                    ? ImVec2(center.x + r + 5 * zoom, center.y - txtSz.y * 0.5f)
-                    : ImVec2(center.x - r - 5 * zoom - txtSz.x, center.y - txtSz.y * 0.5f);
-                dl->AddText(txtPos, IM_COL32(220, 220, 220, 255), pin.name.c_str());
+            if (zoom > 0.4f && maxLabelWidth > 6.0f) {
+                const std::string label = fitTextToWidth(pin.name, maxLabelWidth);
+                if (!label.empty()) {
+                    ImVec2 txtSz = ImGui::CalcTextSize(label.c_str());
+                    ImVec2 txtPos = isInput
+                        ? ImVec2(center.x + r + 5 * zoom, center.y - txtSz.y * 0.5f)
+                        : ImVec2(center.x - r - 5 * zoom - txtSz.x, center.y - txtSz.y * 0.5f);
+                    ImVec2 clipMin = isInput
+                        ? ImVec2(center.x + r + 3.0f * zoom, center.y - txtSz.y)
+                        : ImVec2(center.x - r - 5.0f * zoom - maxLabelWidth, center.y - txtSz.y);
+                    ImVec2 clipMax = isInput
+                        ? ImVec2(center.x + r + 5.0f * zoom + maxLabelWidth, center.y + txtSz.y)
+                        : ImVec2(center.x - r - 3.0f * zoom, center.y + txtSz.y);
+                    dl->PushClipRect(clipMin, clipMax, true);
+                    dl->AddText(txtPos, IM_COL32(220, 224, 230, 255), label.c_str());
+                    dl->PopClipRect();
+                }
             }
         }
 
@@ -586,7 +680,7 @@ namespace NodeSystem {
             
             bool isSelected = (selectedLinkId == link.id);
             float thickness = isSelected ? config.linkSelectedThickness : config.linkThickness;
-            thickness *= zoom;
+            thickness = std::max(1.5f, thickness * zoom);
             
             // Bezier control points
             float dist = std::abs(p1.x - p2.x);

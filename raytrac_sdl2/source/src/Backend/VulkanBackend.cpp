@@ -21,6 +21,7 @@
 #include "HittableList.h"
 #include "ParallelBVHNode.h"
 #include "Triangle.h"
+#include "TerrainSystem.h"
 #include "VDBVolume.h"
 #include "GasVolume.h"
 #include "VDBVolumeManager.h"
@@ -169,6 +170,26 @@ namespace {
         float out;
         std::memcpy(&out, &bits, sizeof(float));
         return out;
+    }
+
+    inline uint8_t linearToSRGB8Fast(float c) {
+        constexpr int kLutSize = 4096;
+        static bool initialized = false;
+        static uint8_t lut[kLutSize];
+        if (!initialized) {
+            for (int i = 0; i < kLutSize; ++i) {
+                const float x = (float)i / (float)(kLutSize - 1);
+                const float srgb = (x <= 0.0031308f)
+                    ? (12.92f * x)
+                    : (1.055f * std::pow(x, 1.0f / 2.4f) - 0.055f);
+                lut[i] = (uint8_t)std::clamp((int)std::lround(srgb * 255.0f), 0, 255);
+            }
+            initialized = true;
+        }
+
+        c = std::clamp(c, 0.0f, 1.0f);
+        const int idx = std::clamp((int)std::lround(c * (float)(kLutSize - 1)), 0, kLutSize - 1);
+        return lut[idx];
     }
 }
 namespace VulkanRT {
@@ -1283,8 +1304,9 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         blasHandle.materialIndexBuffer.deviceAddress = geometryBuffer.deviceAddress + vertSize + normSize + uvSize + idxSize;
     }
     
-    // Store skinning buffers
+    // Store dynamic update / skinning state.
     blasHandle.hasSkinning = info.hasSkinning;
+    blasHandle.allowUpdate = info.allowUpdate;
     blasHandle.vertexCount = info.vertexCount;
     if (info.hasSkinning) {
         blasHandle.baseVertexBuffer = baseVertBuf;
@@ -1303,15 +1325,18 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     return idx;
 }
 
-void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices) {
+void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals) {
     if (!hasHardwareRT() || !fpCmdBuildAccelerationStructuresKHR) return;
     if (blasIndex >= m_blasList.size()) return;
     
     AccelStructHandle& blasHandle = m_blasList[blasIndex];
-    if (blasHandle.accel == VK_NULL_HANDLE || !blasHandle.hasSkinning) return;
+    if (blasHandle.accel == VK_NULL_HANDLE || !blasHandle.allowUpdate || blasHandle.vertexCount == 0) return;
 
     if (newVertices) {
         uploadBuffer(blasHandle.vertexBuffer, newVertices, (uint64_t)blasHandle.vertexCount * 12);
+    }
+    if (newNormals && blasHandle.normalBuffer.buffer) {
+        uploadBuffer(blasHandle.normalBuffer, newNormals, (uint64_t)blasHandle.vertexCount * 12);
     }
 
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
@@ -2013,7 +2038,7 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     // Binding 13: Denoiser Beauty AOV
     // Binding 14: Denoiser Albedo AOV
     // Binding 15: Denoiser Normal AOV
-    VkDescriptorSetLayoutBinding bindings[16] = {};
+    VkDescriptorSetLayoutBinding bindings[17] = {};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
@@ -2097,9 +2122,14 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
     bindings[15].descriptorCount = 1;
     bindings[15].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
+    bindings[16].binding = 16;
+    bindings[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[16].descriptorCount = 1;
+    bindings[16].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo dslCI{};
     dslCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslCI.bindingCount = 16;
+    dslCI.bindingCount = 17;
     dslCI.pBindings = bindings;
     vkCreateDescriptorSetLayout(m_device, &dslCI, nullptr, &m_rtDescriptorSetLayout);
 
@@ -2286,7 +2316,8 @@ bool VulkanDevice::createRTPipeline(const std::vector<std::uint32_t>& raygenSPV,
 void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                                      const ImageHandle* denoiserColorImage,
                                      const ImageHandle* denoiserAlbedoImage,
-                                     const ImageHandle* denoiserNormalImage) {
+                                     const ImageHandle* denoiserNormalImage,
+                                     const ImageHandle* varianceImage) {
     if (!m_rtDescriptorSetLayout || !m_tlas.accel) {
         VK_ERROR() << "[VulkanDevice] Cannot bind RT descriptors: missing layout or TLAS" << std::endl;
         return;
@@ -2407,7 +2438,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     }
 
     std::vector<VkWriteDescriptorSet> writes;
-    writes.reserve(11);
+    writes.reserve(12);
 
     // Binding 0
     VkWriteDescriptorSet w0{};
@@ -2584,6 +2615,18 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
     w15.descriptorCount = 1;
     w15.pImageInfo = &denoiserNormalInfo;
     writes.push_back(w15);
+
+    VkDescriptorImageInfo varianceInfo{};
+    varianceInfo.imageView = (varianceImage && varianceImage->view) ? varianceImage->view : outputImage.view;
+    varianceInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet w16{};
+    w16.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    w16.dstSet = m_rtDescriptorSet;
+    w16.dstBinding = 16;
+    w16.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w16.descriptorCount = 1;
+    w16.pImageInfo = &varianceInfo;
+    writes.push_back(w16);
 
     // Update bindings immediately (safe local buffers)
     if (!writes.empty()) {
@@ -3984,6 +4027,9 @@ void VulkanBackendAdapter::shutdown() {
     if (m_outputImage.image) {
         m_device->destroyImage(m_outputImage);
     }
+    if (m_varianceImage.image) {
+        m_device->destroyImage(m_varianceImage);
+    }
     if (m_stagingBuffer.buffer) {
         m_device->destroyBuffer(m_stagingBuffer);
     }
@@ -4141,7 +4187,8 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     blasInfo.materialIndexCount = (uint32_t)materialIndices.size();
     
     blasInfo.hasSkinning = hasSkinning;
-    blasInfo.allowUpdate = hasSkinning;
+    const bool allowDynamicUpdate = hasSkinning || meshName.rfind("[World-Solo]-", 0) == 0;
+    blasInfo.allowUpdate = allowDynamicUpdate;
     blasInfo.boneIndicesData = hasSkinning ? boneIndices.data() : nullptr;
     blasInfo.boneWeightsData = hasSkinning ? boneWeights.data() : nullptr;
     
@@ -4162,14 +4209,76 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     return blasIndex;
 }
 
+bool VulkanBackendAdapter::updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain) {
+    if (!terrain || !m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return false;
+    if (terrain->mesh_triangles.empty() || m_vkInstances.empty() || m_instanceSources.empty()) return false;
+
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    uint32_t terrainBlasIndex = UINT32_MAX;
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i]);
+        if (!tri) continue;
+        if (tri->getNodeName() == nodeName) {
+            terrainBlasIndex = m_vkInstances[i].blasIndex;
+            break;
+        }
+    }
+
+    if (terrainBlasIndex == UINT32_MAX || terrainBlasIndex >= m_device->m_blasList.size()) {
+        return false;
+    }
+
+    const auto& blasHandle = m_device->m_blasList[terrainBlasIndex];
+    const size_t expectedVertexCount = terrain->mesh_triangles.size() * 3ull;
+    if (expectedVertexCount == 0 || expectedVertexCount != blasHandle.vertexCount) {
+        return false;
+    }
+
+    std::vector<float> positions;
+    std::vector<float> normals;
+    positions.reserve(expectedVertexCount * 3ull);
+    normals.reserve(expectedVertexCount * 3ull);
+
+    for (const auto& tri : terrain->mesh_triangles) {
+        if (!tri) continue;
+        for (int v = 0; v < 3; ++v) {
+            const Vec3& p = tri->getOriginalVertexPosition(v);
+            const Vec3& n = tri->getOriginalVertexNormal(v);
+            positions.push_back(p.x);
+            positions.push_back(p.y);
+            positions.push_back(p.z);
+            normals.push_back(n.x);
+            normals.push_back(n.y);
+            normals.push_back(n.z);
+        }
+    }
+
+    if (positions.size() != expectedVertexCount * 3ull || normals.size() != expectedVertexCount * 3ull) {
+        return false;
+    }
+
+    m_device->updateBLAS(terrainBlasIndex, positions.data(), normals.data());
+
+    auto merged = m_vkInstances;
+    for (const auto& h : m_hairVkInstances) merged.push_back(h);
+    if (!merged.empty()) {
+        m_device->updateTLAS(merged);
+    }
+    return true;
+}
+
 void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
     // Destroy all hair BLASes that were appended after the mesh BLASes.
     // Hair BLASes always live at m_blasList[m_meshBlasCount .. end).
-    if (m_device && m_device->isInitialized() && !m_hairVkInstances.empty()) {
+    if (m_device && m_device->isInitialized()) {
         // Wait for the GPU to finish any in-flight work that might be using these BLASes.
         vkDeviceWaitIdle(m_device->m_device);
 
-        for (uint32_t i = m_meshBlasCount; i < (uint32_t)m_device->m_blasList.size(); ++i) {
+        const uint32_t blasCount = (uint32_t)m_device->m_blasList.size();
+        const uint32_t firstHairBlas = (m_meshBlasCount <= blasCount) ? m_meshBlasCount : blasCount;
+
+        for (uint32_t i = firstHairBlas; i < blasCount; ++i) {
             auto& blas = m_device->m_blasList[i];
             if (blas.accel && m_device->fpDestroyAccelerationStructureKHR) {
                 m_device->fpDestroyAccelerationStructureKHR(m_device->m_device, blas.accel, nullptr);
@@ -4177,12 +4286,13 @@ void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
             m_device->destroyBuffer(blas.buffer);
             m_device->destroyBuffer(blas.vertexBuffer); // stores the AABB buffer for hair
         }
-        if ((uint32_t)m_device->m_blasList.size() > m_meshBlasCount) {
-            m_device->m_blasList.resize(m_meshBlasCount);
+        if (blasCount > firstHairBlas) {
+            m_device->m_blasList.resize(firstHairBlas);
         }
 
-        // Invalidate geometry data buffer so it gets rebuilt on the next
-        // bindRTDescriptors call with the updated (mesh-only + fresh hair) BLAS list.
+        // Always invalidate geometry data after a hair clear attempt. Hair can
+        // transition 0->N or N->0 between frames, and leaving a mesh-only buffer
+        // alive across a later hair re-upload can make BLAS indexing stale.
         if (m_device->m_geometryDataBuffer.buffer) {
             m_device->destroyBuffer(m_device->m_geometryDataBuffer);
         }
@@ -4217,14 +4327,22 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    // Deduplicate: if this groom was already uploaded, return cached handle
-    auto it = m_hairGroomRegistry.find(groomName);
-    if (it != m_hairGroomRegistry.end()) return it->second;
+    // Vulkan hair currently uses a single combined upload. If an older code path
+    // accidentally tries to append another groom without a prior clear, recover
+    // by clearing stale hair state instead of keeping multiple incompatible SSBO/BLAS layouts alive.
+    if (!m_hairVkInstances.empty() || !m_hairGroomRegistry.empty()) {
+        SCENE_LOG_WARN("[Vulkan] uploadHairStrands called while hair state already exists. Forcing hair clear before re-upload.");
+        clearHairGeometry(false);
+    }
+    if (groomName != "combined_hair") {
+        SCENE_LOG_WARN("[Vulkan] uploadHairStrands expected combined_hair but got \"" + groomName + "\". Proceeding in combined mode.");
+    }
 
     // Convert all strands into B-spline segments: N points → N-3 cubic segments
     std::vector<VulkanRT::HairSegmentGPU> segments;
     std::vector<VkAabbPositionsKHR>       aabbs;
     uint32_t strandIdx = 0;
+    uint32_t maxMaterialID = 0;
 
     for (const auto& strand : strands) {
         const auto& pts = strand.points;
@@ -4246,8 +4364,10 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
             seg.cp2[0] = pts[i + 2].x; seg.cp2[1] = pts[i + 2].y; seg.cp2[2] = pts[i + 2].z; seg.cp2[3] = getR(i + 2);
             seg.cp3[0] = pts[i + 3].x; seg.cp3[1] = pts[i + 3].y; seg.cp3[2] = pts[i + 3].z; seg.cp3[3] = getR(i + 3);
             seg.strandID   = strandIdx;
+            seg.groomID    = strand.materialID;
             seg.materialID = strand.materialID;
             seg.padding    = 0;
+            maxMaterialID  = (std::max)(maxMaterialID, static_cast<uint32_t>(strand.materialID));
 
             // Conservative AABB: bounding box of 4 control points ± max radius
             float maxR = std::max({seg.cp0[3], seg.cp1[3], seg.cp2[3], seg.cp3[3]});
@@ -4307,7 +4427,10 @@ uint32_t VulkanBackendAdapter::uploadHairStrands(const std::vector<HairStrandDat
     resetAccumulation();
 
     uint32_t groomHandle = (uint32_t)(m_hairVkInstances.size() - 1);
-    m_hairGroomRegistry[groomName] = groomHandle;
+    m_hairGroomRegistry.clear();
+    m_hairGroomRegistry["combined_hair"] = groomHandle;
+
+    SCENE_LOG_INFO("[Vulkan] Hair upload material range: 0.." + std::to_string(maxMaterialID));
 
     SCENE_LOG_INFO("[Vulkan] Hair groom \"" + groomName + "\" uploaded: "
         + std::to_string(strands.size()) + " strands, "
@@ -4693,6 +4816,42 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                           << " -> " << worldBounds.max.x << "," << worldBounds.max.y << "," << worldBounds.max.z << "]" << std::endl;
             }
         }
+        // 6. Handle Gas Volumes in unified VDB mode — same procedural volume path as VDBs
+        else if (auto gas = std::dynamic_pointer_cast<GasVolume>(obj)) {
+            if (!gas->visible || gas->render_path != GasVolume::VolumeRenderPath::VDBUnified || gas->live_vdb_id < 0) return;
+
+            float aabbMin[3] = { -0.5f, -0.5f, -0.5f };
+            float aabbMax[3] = {  0.5f,  0.5f,  0.5f };
+
+            uint32_t aabbBlasIdx = m_device->createAABB_BLAS(aabbMin, aabbMax);
+            if (aabbBlasIdx != UINT32_MAX) {
+                VulkanRT::TLASInstance vi;
+                vi.blasIndex = aabbBlasIdx;
+
+                Vec3 worldMin, worldMax;
+                gas->getWorldBounds(worldMin, worldMax);
+                Vec3 center = (worldMin + worldMax) * 0.5f;
+                Vec3 size = worldMax - worldMin;
+                if (size.x < 1e-4f) size.x = 1e-4f;
+                if (size.y < 1e-4f) size.y = 1e-4f;
+                if (size.z < 1e-4f) size.z = 1e-4f;
+
+                Matrix4x4 scale = Matrix4x4::scaling(size);
+                Matrix4x4 trans = Matrix4x4::translation(center);
+                vi.transform = trans * scale;
+
+                vi.customIndex = (uint32_t)m_orderedVDBInstances.size();
+                m_orderedVDBInstances.push_back(gas);
+                vi.mask = 0x02;
+                vi.frontFaceCCW = false;
+                vi.sbtRecordOffset = 1;
+                vkInstances.push_back(vi);
+                instanceSources.push_back(gas);
+                VK_INFO() << "[Vulkan] Unified gas volume added to TLAS: " << gas->name
+                          << " worldBounds=[" << worldMin.x << "," << worldMin.y << "," << worldMin.z
+                          << " -> " << worldMax.x << "," << worldMax.y << "," << worldMax.z << "]" << std::endl;
+            }
+        }
     };
 
     for (const auto& obj : objects) {
@@ -4932,12 +5091,13 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
 }
 
 void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialData>& materials) {
-    if (!m_device || materials.empty()) return;
+    if (!m_device || !m_device->isInitialized() || materials.empty()) return;
 
     std::vector<VulkanRT::HairGpuMaterial> gpuMats;
     gpuMats.reserve(materials.size());
 
-    for (const auto& m : materials) {
+    for (size_t i = 0; i < materials.size(); ++i) {
+        const auto& m = materials[i];
         VulkanRT::HairGpuMaterial gm{};
         // Block 1: Color & Roughness
         gm.baseColor[0]   = m.color.x;
@@ -4982,7 +5142,7 @@ void VulkanBackendAdapter::uploadHairMaterials(const std::vector<HairMaterialDat
         // Block 9: Random & ID
         gm.randomHue      = m.randomHue;
         gm.randomValue    = m.randomValue;
-        gm.groomID        = 0; // single-groom for now
+        gm.groomID        = (uint32_t)i;
         gm.pad            = 0.0f;
         gpuMats.push_back(gm);
     }
@@ -5387,12 +5547,14 @@ void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& 
 }
 void VulkanBackendAdapter::setRenderParams(const RenderParams& p) { 
     // Do NOT update m_imageWidth/Height here, otherwise renderProgressive detects no change
-    if (m_targetSamples != p.samplesPerPixel || m_useAdaptiveSampling != p.useAdaptiveSampling) {
+    const float clampedThreshold = std::clamp(p.adaptiveThreshold, 0.0f, 1.0f);
+    if (m_targetSamples != p.samplesPerPixel ||
+        m_useAdaptiveSampling != p.useAdaptiveSampling) {
         resetAccumulation();
     }
     m_targetSamples = p.samplesPerPixel; 
     m_useAdaptiveSampling = p.useAdaptiveSampling;
-    m_varianceThreshold = p.adaptiveThreshold;
+    m_varianceThreshold = clampedThreshold;
     m_maxBounces = (p.maxBounces > 0) ? p.maxBounces : m_maxBounces; // 0 = UI henüz set etmedi, mevcut değeri koru
 }
 void VulkanBackendAdapter::setCamera(const CameraParams& c) { 
@@ -5475,8 +5637,9 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
 
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    // Fast path: use instance->source mapping + cache to only update transforms
-    syncInstanceTransforms(objects, false);
+    // Wind and other runtime transform edits can replace/refresh instance objects.
+    // Rebuild the mapping here to avoid syncing TLAS against stale representatives.
+    syncInstanceTransforms(objects, true);
 
     if (m_instance_sync_cache.empty() || m_instanceSources.size() != m_vkInstances.size()) {
         // Fallback to a conservative rebuild of full TLAS if mapping missing
@@ -5685,7 +5848,7 @@ void VulkanBackendAdapter::updateInstanceTransform(int instance_id, const float 
 
     if (m_instanceSources.size() > instance_id && m_instanceSources[instance_id]) {
         if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[instance_id])) {
-            inst->transform = m_vkInstances[instance_id].transform; 
+            inst->setTransform(m_vkInstances[instance_id].transform);
         } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[instance_id])) {
             tri->setBaseTransform(m_vkInstances[instance_id].transform);
         }
@@ -5711,7 +5874,7 @@ void VulkanBackendAdapter::updateObjectTransform(const std::string& nodeName, co
                 // Also update the sync cache so updateInstanceTransforms doesn't revert it
                 if (m_instanceSources.size() > i) {
                      if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
-                          inst->transform = transform; 
+                          inst->setTransform(transform);
                      } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
                          tri->setBaseTransform(transform);
                      }
@@ -5747,6 +5910,93 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     if (!m_device->hasHardwareRT() || !fb || !tex) return;
     
     if (isAccumulationComplete()) return;
+
+    auto presentBackgroundOnly = [&]() {
+        std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
+        const size_t count = (size_t)width * (size_t)height;
+        if (framebuffer->size() != count) {
+            framebuffer->resize(count);
+        }
+
+        static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888);
+        static std::unique_ptr<World> fallbackWorld;
+        static uint64_t fallbackWorldHash = 0;
+        auto hashWorld = [](const WorldData& wd) -> uint64_t {
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&wd);
+            uint64_t h = 1469598103934665603ull;
+            for (size_t i = 0; i < sizeof(WorldData); ++i) {
+                h ^= bytes[i];
+                h *= 1099511628211ull;
+            }
+            return h;
+        };
+        uint64_t currentHash = hashWorld(m_cachedWorld);
+        if (!fallbackWorld || fallbackWorldHash != currentHash) {
+            fallbackWorld = std::make_unique<World>();
+            fallbackWorld->data = m_cachedWorld;
+            if (fallbackWorld->data.mode == WORLD_MODE_NISHITA) {
+                fallbackWorld->initializeLUT();
+            }
+            fallbackWorldHash = currentHash;
+        }
+
+        float aspect = (height > 0) ? ((float)width / (float)height) : 1.0f;
+        float fov = this->m_camera.fov > 1.0f ? this->m_camera.fov : 60.0f;
+        float h_half = tanf(fov * 0.5f * 3.14159f / 180.0f);
+        float viewport_h = 2.0f * h_half;
+        float viewport_w = aspect * viewport_h;
+
+        Vec3 lookFrom = this->m_camera.origin;
+        Vec3 lookAt = this->m_camera.lookAt;
+        if ((lookFrom - lookAt).length() < 0.0001f) {
+            lookAt = lookFrom + Vec3(0.0f, 0.0f, -1.0f);
+        }
+        Vec3 camW = (lookFrom - lookAt).normalize();
+        Vec3 camU = Vec3::cross(this->m_camera.up, camW).normalize();
+        if (camU.length() < 0.0001f) camU = Vec3(1.0f, 0.0f, 0.0f);
+        Vec3 camV = Vec3::cross(camW, camU);
+        float focus_dist = this->m_camera.focusDistance > 0.001f ? this->m_camera.focusDistance : 1.0f;
+        Vec3 horizontal = focus_dist * viewport_w * camU;
+        Vec3 vertical = focus_dist * viewport_h * camV;
+        Vec3 lowerLeft = lookFrom - horizontal * 0.5f - vertical * 0.5f - focus_dist * camW;
+
+        auto sanitize = [](float v) -> float {
+            if (std::isnan(v)) return 0.0f;
+            if (std::isinf(v)) return (v > 0.0f) ? 65504.0f : 0.0f;
+            return std::max(v, 0.0f);
+        };
+
+        for (int j = 0; j < height; ++j) {
+            for (int i = 0; i < width; ++i) {
+                float u = ((float)i + 0.5f) / (float)width;
+                float v = 1.0f - (((float)j + 0.5f) / (float)height);
+                Vec3 dir = (lowerLeft + u * horizontal + v * vertical - lookFrom).normalize();
+                Vec3 c = fallbackWorld->evaluate(dir, lookFrom) * m_cachedWorld.color_intensity;
+                float rr = sanitize(c.x);
+                float gg = sanitize(c.y);
+                float bb = sanitize(c.z);
+                rr = rr / (rr + 1.0f);
+                gg = gg / (gg + 1.0f);
+                bb = bb / (bb + 1.0f);
+                const uint8_t ri = linearToSRGB8Fast(rr);
+                const uint8_t gi = linearToSRGB8Fast(gg);
+                const uint8_t bi = linearToSRGB8Fast(bb);
+                size_t idx = (size_t)j * (size_t)width + (size_t)i;
+                (*framebuffer)[idx] = SDL_MapRGB(fmt, ri, gi, bi);
+                if (s) {
+                    SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+                    if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+                        Uint32* pixels_ptr = static_cast<Uint32*>(outSurf->pixels);
+                        pixels_ptr[idx] = SDL_MapRGB(outSurf->format, ri, gi, bi);
+                    }
+                }
+            }
+        }
+
+        if (tex) {
+            SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
+        }
+    };
 
     // If a reset requested immediate UI clear, wipe the provided framebuffer/texture now
     if (m_forceClearOnNextPresent) {
@@ -5791,6 +6041,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     // 1. Recreate output image if size changed
     if (m_imageWidth != width || m_imageHeight != height) {
         if (m_outputImage.image) m_device->destroyImage(m_outputImage);
+        if (m_varianceImage.image) m_device->destroyImage(m_varianceImage);
         if (m_stagingBuffer.buffer) m_device->destroyBuffer(m_stagingBuffer);
         if (m_denoiserColorImage.image) m_device->destroyImage(m_denoiserColorImage);
         if (m_denoiserAlbedoImage.image) m_device->destroyImage(m_denoiserAlbedoImage);
@@ -5812,6 +6063,9 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         m_outputImage = m_device->createImage2D(
             width, height, outFmt,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        m_varianceImage = m_device->createImage2D(
+            width, height, VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         m_denoiserColorImage = m_device->createImage2D(
             width, height, VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -5833,11 +6087,12 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         m_denoiserAlbedoStagingBuffer = m_device->createBuffer(stagingInfo);
         m_denoiserNormalStagingBuffer = m_device->createBuffer(stagingInfo);
 
-        if (!m_outputImage.image || !m_stagingBuffer.buffer ||
+        if (!m_outputImage.image || !m_varianceImage.image || !m_stagingBuffer.buffer ||
             !m_denoiserColorImage.image || !m_denoiserAlbedoImage.image || !m_denoiserNormalImage.image ||
             !m_denoiserColorStagingBuffer.buffer || !m_denoiserAlbedoStagingBuffer.buffer || !m_denoiserNormalStagingBuffer.buffer) {
             SCENE_LOG_ERROR("[Vulkan] Failed to allocate output/readback buffers for current resolution.");
             if (m_outputImage.image) m_device->destroyImage(m_outputImage);
+            if (m_varianceImage.image) m_device->destroyImage(m_varianceImage);
             if (m_stagingBuffer.buffer) m_device->destroyBuffer(m_stagingBuffer);
             if (m_denoiserColorImage.image) m_device->destroyImage(m_denoiserColorImage);
             if (m_denoiserAlbedoImage.image) m_device->destroyImage(m_denoiserAlbedoImage);
@@ -5846,6 +6101,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
             if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
             m_outputImage = {};
+            m_varianceImage = {};
             m_stagingBuffer = {};
             m_denoiserColorImage = {};
             m_denoiserAlbedoImage = {};
@@ -5959,7 +6215,10 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     }
 
     // Safety: ensure pipeline is actually built and TLAS exist before proceeding to trace.
-    if (!m_device->isRTReady() || !m_device->hasTLAS()) return;
+    if (!m_device->isRTReady() || !m_device->hasTLAS()) {
+        presentBackgroundOnly();
+        return;
+    }
 
     // Push Constants
     // Push Constants - MUST MATCH raygen.rgen. The GLSL shader will have:
@@ -6052,9 +6311,9 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     pushConst.vertical[0] = vertical.x; pushConst.vertical[1] = vertical.y; pushConst.vertical[2] = vertical.z; pushConst.vertical[3] = 0.0f;
     pushConst.lowerLeft[0] = lower_left_corner.x; pushConst.lowerLeft[1] = lower_left_corner.y; pushConst.lowerLeft[2] = lower_left_corner.z; pushConst.lowerLeft[3] = 0.0f;
     pushConst.frameCount = this->m_currentSamples;
-    pushConst.minSamples = 8; // safe default; UI-exposed minSamples not yet wired
+    pushConst.minSamples = m_useAdaptiveSampling ? 4u : 0u;
     pushConst.lightCount = (uint32_t)m_cachedLights.size();
-    pushConst.varianceThreshold = m_varianceThreshold;
+    pushConst.varianceThreshold = m_useAdaptiveSampling ? m_varianceThreshold : 0.0f;
     pushConst.maxSamples = m_targetSamples;
     pushConst.exposureFactor = this->m_camera.exposureFactor;
 
@@ -6184,6 +6443,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         // Explicitly clear image on frame 0 to prevent ghosting or stale adaptive data
         if (m_currentSamples == 0) {
             m_device->clearImage(m_outputImage, 0.0f, 0.0f, 0.0f, 0.0f);
+            m_device->clearImage(m_varianceImage, 0.0f, 0.0f, 0.0f, 0.0f);
             m_device->clearImage(m_denoiserColorImage, 0.0f, 0.0f, 0.0f, 0.0f);
             m_device->clearImage(m_denoiserAlbedoImage, 0.0f, 0.0f, 0.0f, 0.0f);
             m_device->clearImage(m_denoiserNormalImage, 0.5f, 0.5f, 0.5f, 0.0f);
@@ -6193,7 +6453,8 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             m_outputImage,
             &m_denoiserColorImage,
             &m_denoiserAlbedoImage,
-            &m_denoiserNormalImage);
+            &m_denoiserNormalImage,
+            &m_varianceImage);
         m_device->setPushConstants(&pushConst, sizeof(CameraPushConstants));
 
         // Single command buffer: trace + layout transition + buffer copy + transition back
@@ -6212,15 +6473,15 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             if (m_outputImage.format == VK_FORMAT_R32G32B32A32_SFLOAT) {
                 m_device->downloadBuffer(m_stagingBuffer, m_hdrPixels.data(), (uint64_t)width * height * 4 * sizeof(float));
             } else {
-                std::vector<uint16_t> halfPixels((size_t)width * (size_t)height * 4);
-                m_device->downloadBuffer(m_stagingBuffer, halfPixels.data(), (uint64_t)width * height * 4 * sizeof(uint16_t));
-                for (size_t i = 0; i < halfPixels.size(); ++i) {
-                    m_hdrPixels[i] = halfToFloat(halfPixels[i]);
+                m_halfPixels.resize((size_t)width * (size_t)height * 4);
+                m_device->downloadBuffer(m_stagingBuffer, m_halfPixels.data(), (uint64_t)width * height * 4 * sizeof(uint16_t));
+                for (size_t i = 0; i < m_halfPixels.size(); ++i) {
+                    m_hdrPixels[i] = halfToFloat(m_halfPixels[i]);
                 }
             }
 
             // Convert HDR floats -> 8-bit sRGB packed pixels
-            SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888);
+            static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888);
             for (int j = 0; j < height; ++j) {
                 for (int i = 0; i < width; ++i) {
                     size_t idx = (size_t)j * (size_t)width + (size_t)i;
@@ -6240,14 +6501,6 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
                         if (std::isinf(v)) return (v > 0.0f) ? 65504.0f : 0.0f;
                         return std::max(v, 0.0f); // clamp negatives only, preserve HDR range
                     };
-                    // Piecewise IEC 61966-2-1 sRGB transfer function
-                    auto toSRGB = [](float c) -> float {
-                        c = std::clamp(c, 0.0f, 1.0f);
-                        return (c <= 0.0031308f)
-                            ? 12.92f * c
-                            : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-                    };
-
                     float rr = sanitize(r);
                     float gg = sanitize(g);
                     float bb = sanitize(b);
@@ -6257,9 +6510,9 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
                     gg = gg / (gg + 1.0f);
                     bb = bb / (bb + 1.0f);
 
-                    int ri = static_cast<int>(255.0f * toSRGB(rr));
-                    int gi = static_cast<int>(255.0f * toSRGB(gg));
-                    int bi = static_cast<int>(255.0f * toSRGB(bb));
+                    uint8_t ri = linearToSRGB8Fast(rr);
+                    uint8_t gi = linearToSRGB8Fast(gg);
+                    uint8_t bi = linearToSRGB8Fast(bb);
 
                     uint32_t packed = SDL_MapRGB(fmt, ri, gi, bi);
                     (*framebuffer)[idx] = packed;
@@ -6275,7 +6528,6 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
                     }
                 }
             }
-            SDL_FreeFormat(fmt);
 
             if (tex) SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
         }
@@ -6690,15 +6942,21 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         }
     }
 
-    // ORDERING FIX: SSBO slot i must correspond to the VDB with TLAS customIndex==i.
+    // ORDERING FIX: SSBO slot i must correspond to the unified volume with TLAS customIndex==i.
     // After updateGeometry(), m_orderedVDBInstances records VDBs in TLAS traversal order.
     // If BVH reorders them vs. scene.vdb_volumes, this ensures shader lookups are correct.
     std::vector<const GpuVDBVolume*> orderedVols;
     if (!m_orderedVDBInstances.empty()) {
         for (const auto& hittable : m_orderedVDBInstances) {
             auto vdb = std::dynamic_pointer_cast<VDBVolume>(hittable);
-            if (!vdb) { orderedVols.push_back(nullptr); continue; }
-            auto it = volByID.find(vdb->getVDBVolumeID());
+            int volume_id = -1;
+            if (vdb) {
+                volume_id = vdb->getVDBVolumeID();
+            } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(hittable)) {
+                volume_id = gas->live_vdb_id;
+            }
+            if (volume_id < 0) { orderedVols.push_back(nullptr); continue; }
+            auto it = volByID.find(volume_id);
             orderedVols.push_back(it != volByID.end() ? it->second : nullptr);
         }
     } else {
@@ -6857,18 +7115,26 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                                   (uint32_t)instances.size());
 
     // ── TLAS transform refresh ──────────────────────────────────────────────
-    // When a VDB is moved with the gizmo, setTransform() updates the C++ object
+    // When a unified volume is moved with the gizmo, setTransform() updates the C++ object
     // but the TLAS AABB instance transform remains stale.  Fix: recompute the
     // scale+translate transform from the current worldBounds for every volume
     // instance found in m_instanceSources and push an updateTLAS call.
     {
         bool tlas_changed = false;
         for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
-            auto vdb = std::dynamic_pointer_cast<VDBVolume>(m_instanceSources[i]);
-            if (!vdb) continue;
-            AABB wb = vdb->getWorldBounds();
-            Vec3 center = (wb.min + wb.max) * 0.5f;
-            Vec3 sz(wb.max.x - wb.min.x, wb.max.y - wb.min.y, wb.max.z - wb.min.z);
+            Vec3 worldMin;
+            Vec3 worldMax;
+            if (auto vdb = std::dynamic_pointer_cast<VDBVolume>(m_instanceSources[i])) {
+                AABB wb = vdb->getWorldBounds();
+                worldMin = wb.min;
+                worldMax = wb.max;
+            } else if (auto gas = std::dynamic_pointer_cast<GasVolume>(m_instanceSources[i])) {
+                gas->getWorldBounds(worldMin, worldMax);
+            } else {
+                continue;
+            }
+            Vec3 center = (worldMin + worldMax) * 0.5f;
+            Vec3 sz(worldMax.x - worldMin.x, worldMax.y - worldMin.y, worldMax.z - worldMin.z);
             if (sz.x < 1e-4f) sz.x = 1e-4f;
             if (sz.y < 1e-4f) sz.y = 1e-4f;
             if (sz.z < 1e-4f) sz.z = 1e-4f;
@@ -6962,6 +7228,9 @@ void VulkanBackendAdapter::resetAccumulation() {
     // Also clear the output image to avoid ghosting when accumulation restarts
     if (m_outputImage.image && m_device) {
         m_device->clearImage(m_outputImage, 0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    if (m_varianceImage.image && m_device) {
+        m_device->clearImage(m_varianceImage, 0.0f, 0.0f, 0.0f, 0.0f);
     }
     if (m_denoiserColorImage.image && m_device) {
         m_device->clearImage(m_denoiserColorImage, 0.0f, 0.0f, 0.0f, 0.0f);

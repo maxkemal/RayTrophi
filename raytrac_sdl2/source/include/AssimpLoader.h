@@ -65,9 +65,11 @@
 #include "sbt_data.h"
 #include "MaterialManager.h"
 #include <set>
+#include <unordered_set>
 #include <future>
 #include <thread>
 #include <mutex>
+#include <limits>
 struct MeshInstance {
     int meshIndex; // aiMesh ID (aiMesh Kimliği)
     Matrix4x4 transform; // Global transform matrix (Global dönüşüm matrisi)
@@ -234,6 +236,7 @@ struct BoneData {
     std::unordered_map<std::string, Matrix4x4> boneDefaultTransforms; // NEW: Local bind pose (node->mTransformation)
     std::unordered_map<std::string, std::string> boneParents; // NEW: Child name -> Parent name for hierarchy reconstruction
     std::unordered_map<std::string, Matrix4x4> perModelInverses; // NEW: Model prefix -> globalInverseTransform
+    std::unordered_set<std::string> weightedBoneNames; // Only bones coming from skinned mesh weights
     Matrix4x4 globalInverseTransform;
     
     // =========================================================================
@@ -292,6 +295,7 @@ struct BoneData {
         boneDefaultTransforms.clear();
         boneParents.clear();
         perModelInverses.clear();
+        weightedBoneNames.clear();
         boneIndexToName.clear();
         globalInverseTransform = Matrix4x4::identity();
     }
@@ -362,6 +366,79 @@ public:
         sharedTransform->setBase(baseTransform);
         nodeNameToTransform[nodeName] = sharedTransform;
         return sharedTransform;
+    }
+
+    void recenterNodePivotIfOutsideBounds(
+        const std::string& nodeName,
+        std::vector<std::shared_ptr<Triangle>>& triangles,
+        size_t startIndex,
+        size_t endIndex)
+    {
+        if (startIndex >= endIndex || endIndex > triangles.size()) {
+            return;
+        }
+
+        auto transformIt = nodeNameToTransform.find(nodeName);
+        if (transformIt == nodeNameToTransform.end() || !transformIt->second) {
+            return;
+        }
+
+        Vec3 bbMin(
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::max());
+        Vec3 bbMax(
+            -std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max(),
+            -std::numeric_limits<float>::max());
+        bool hasVertices = false;
+
+        for (size_t i = startIndex; i < endIndex; ++i) {
+            const auto& tri = triangles[i];
+            if (!tri || tri->getNodeName() != nodeName) {
+                continue;
+            }
+
+            hasVertices = true;
+            for (int vi = 0; vi < 3; ++vi) {
+                const Vec3& v = tri->getOriginalVertexPosition(vi);
+                bbMin.x = std::min(bbMin.x, v.x);
+                bbMin.y = std::min(bbMin.y, v.y);
+                bbMin.z = std::min(bbMin.z, v.z);
+                bbMax.x = std::max(bbMax.x, v.x);
+                bbMax.y = std::max(bbMax.y, v.y);
+                bbMax.z = std::max(bbMax.z, v.z);
+            }
+        }
+
+        if (!hasVertices) {
+            return;
+        }
+
+        const Vec3 extents = bbMax - bbMin;
+        const Vec3 tolerance(
+            std::max(1e-4f, extents.x * 0.01f),
+            std::max(1e-4f, extents.y * 0.01f),
+            std::max(1e-4f, extents.z * 0.01f));
+
+        const bool pivotOutsideBounds =
+            (0.0f < bbMin.x - tolerance.x) || (0.0f > bbMax.x + tolerance.x) ||
+            (0.0f < bbMin.y - tolerance.y) || (0.0f > bbMax.y + tolerance.y) ||
+            (0.0f < bbMin.z - tolerance.z) || (0.0f > bbMax.z + tolerance.z);
+
+        if (!pivotOutsideBounds) {
+            return;
+        }
+
+        const Vec3 localCenter = (bbMin + bbMax) * 0.5f;
+        if (localCenter.length_squared() < 1e-8f) {
+            return;
+        }
+
+        auto& sharedTransform = transformIt->second;
+        sharedTransform->setPivotOffset(localCenter, true);
+
+        SCENE_LOG_INFO("Auto-centered out-of-bounds pivot for node: " + nodeName);
     }
 
     Assimp::Importer importer;
@@ -1230,6 +1307,7 @@ private:
         boneData.perModelInverses.clear();
         boneData.boneParents.clear();
         boneData.boneDefaultTransforms.clear();
+        boneData.weightedBoneNames.clear();
         
         boneData.globalInverseTransform = boneData.originalRootTransform.inverse();
         
@@ -1247,12 +1325,19 @@ private:
 
         // 1. Identify all nodes that are either bones OR parents of bones
         std::set<std::string> technicalBones; // Original names
+        std::set<std::string> indexedBones;   // Nodes that need runtime bone slots
+        std::unordered_map<std::string, Matrix4x4> weightedOffsets;
         
         for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
             aiMesh* mesh = scene->mMeshes[m];
             if (!mesh->HasBones()) continue;
             for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
-                aiNode* boneNode = sceneNodeMap[mesh->mBones[b]->mName.C_Str()];
+                const std::string boneName = mesh->mBones[b]->mName.C_Str();
+                indexedBones.insert(boneName);
+                boneData.weightedBoneNames.insert(getUniqueName(boneName));
+                weightedOffsets[boneName] = convert(mesh->mBones[b]->mOffsetMatrix);
+
+                aiNode* boneNode = sceneNodeMap[boneName];
                 while (boneNode) {
                     technicalBones.insert(boneNode->mName.C_Str());
                     boneNode = boneNode->mParent; // Include the whole chain up to root
@@ -1260,31 +1345,94 @@ private:
             }
         }
 
-        // 2. Add identified nodes to BoneData
-        for (const std::string& origName : technicalBones) {
-            aiNode* node = sceneNodeMap[origName];
+        // 2. Animation-only imports still need a skeleton representation even without weighted meshes.
+        for (unsigned int animIndex = 0; animIndex < scene->mNumAnimations; ++animIndex) {
+            const aiAnimation* animation = scene->mAnimations[animIndex];
+            if (!animation) continue;
+
+            for (unsigned int channelIndex = 0; channelIndex < animation->mNumChannels; ++channelIndex) {
+                const aiNodeAnim* channel = animation->mChannels[channelIndex];
+                if (!channel) continue;
+
+                const std::string channelNodeName = channel->mNodeName.C_Str();
+                indexedBones.insert(channelNodeName);
+
+                auto nodeIt = sceneNodeMap.find(channelNodeName);
+                if (nodeIt == sceneNodeMap.end()) {
+                    continue;
+                }
+
+                aiNode* channelNode = nodeIt->second;
+                while (channelNode) {
+                    technicalBones.insert(channelNode->mName.C_Str());
+                    channelNode = channelNode->mParent;
+                }
+            }
+        }
+
+        if (technicalBones.empty() && scene->mRootNode) {
+            technicalBones.insert(scene->mRootNode->mName.C_Str());
+        }
+
+        // 3. Add identified nodes to BoneData in hierarchy order
+        std::function<void(aiNode*)> addSkeletonNode = [&](aiNode* node) {
+            if (!node) return;
+
+            const std::string origName = node->mName.C_Str();
+            if (technicalBones.find(origName) != technicalBones.end()) {
+                std::string prefixedName = getUniqueName(origName);
+                boneData.boneNameToNode[prefixedName] = node;
+                boneData.boneDefaultTransforms[prefixedName] = convert(node->mTransformation);
+
+                if (node->mParent) {
+                    const std::string parentName = node->mParent->mName.C_Str();
+                    if (technicalBones.find(parentName) != technicalBones.end()) {
+                        boneData.boneParents[prefixedName] = getUniqueName(parentName);
+                    }
+                }
+
+                if (indexedBones.find(origName) != indexedBones.end() &&
+                    boneData.boneNameToIndex.find(prefixedName) == boneData.boneNameToIndex.end()) {
+                    unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
+                    boneData.boneNameToIndex[prefixedName] = id;
+
+                    auto offsetIt = weightedOffsets.find(origName);
+                    boneData.boneOffsetMatrices[prefixedName] =
+                        (offsetIt != weightedOffsets.end()) ? offsetIt->second : Matrix4x4::identity();
+                }
+            }
+
+            for (unsigned int i = 0; i < node->mNumChildren; ++i) {
+                addSkeletonNode(node->mChildren[i]);
+            }
+        };
+
+        addSkeletonNode(scene->mRootNode);
+
+        // Safety net for animated nodes that were not reachable in the hierarchy walk
+        for (const std::string& origName : indexedBones) {
+            auto nodeIt = sceneNodeMap.find(origName);
+            if (nodeIt == sceneNodeMap.end()) {
+                continue;
+            }
+
+            aiNode* node = nodeIt->second;
             std::string prefixedName = getUniqueName(origName);
-            
-            // Only actual bones with weights get an index for the final matrix array
-            // But ALL nodes in the chain need default transforms and parent links
-            boneData.boneDefaultTransforms[prefixedName] = convert(node->mTransformation);
+
+            boneData.boneNameToNode[prefixedName] = node;
+            if (boneData.boneDefaultTransforms.find(prefixedName) == boneData.boneDefaultTransforms.end()) {
+                boneData.boneDefaultTransforms[prefixedName] = convert(node->mTransformation);
+            }
             if (node->mParent) {
                 boneData.boneParents[prefixedName] = getUniqueName(node->mParent->mName.C_Str());
             }
+            if (boneData.boneNameToIndex.find(prefixedName) == boneData.boneNameToIndex.end()) {
+                unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
+                boneData.boneNameToIndex[prefixedName] = id;
 
-            // Check if this node is an actual weighted bone (from any mesh)
-            for (unsigned int m = 0; m < scene->mNumMeshes; ++m) {
-                aiMesh* mesh = scene->mMeshes[m];
-                for (unsigned int b = 0; b < mesh->mNumBones; ++b) {
-                    if (std::string(mesh->mBones[b]->mName.C_Str()) == origName) {
-                        if (boneData.boneNameToIndex.find(prefixedName) == boneData.boneNameToIndex.end()) {
-                            unsigned int id = static_cast<unsigned int>(boneData.boneNameToIndex.size());
-                            boneData.boneNameToIndex[prefixedName] = id;
-                            boneData.boneOffsetMatrices[prefixedName] = convert(mesh->mBones[b]->mOffsetMatrix);
-                        }
-                        break;
-                    }
-                }
+                auto offsetIt = weightedOffsets.find(origName);
+                boneData.boneOffsetMatrices[prefixedName] =
+                    (offsetIt != weightedOffsets.end()) ? offsetIt->second : Matrix4x4::identity();
             }
         }
 
@@ -1335,6 +1483,8 @@ private:
     // =========================================================================
     void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, const BoneData& boneData, OptixGeometryData* geometry_data = nullptr) {
         aiMatrix4x4 globalTransform = getGlobalTransform(node);
+        const std::string uniqueNodeName = getUniqueName(node->mName.C_Str());
+        const size_t nodeTriangleStart = triangles.size();
 
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
             aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
@@ -1353,7 +1503,7 @@ private:
 
             // Extract triangles from mesh
             // Mesh'teki üçgenleri çıkar
-            processTriangles(mesh, globalTransform, getUniqueName(node->mName.C_Str()), convertedMaterial, triangles, boneData);
+            processTriangles(mesh, globalTransform, uniqueNodeName, convertedMaterial, triangles, boneData);
 
             // Copy texture bundle to all newly added triangles
             // Yeni eklenen tüm üçgenlere texture paketini kopyala
@@ -1396,6 +1546,8 @@ private:
                 geometry_data->textures.push_back(tex_bundle);
             }
         }
+
+        recenterNodePivotIfOutsideBounds(uniqueNodeName, triangles, nodeTriangleStart, triangles.size());
 
         // Process child nodes recursively
         // Çocuk düğümleri özyinelemeli olarak işle

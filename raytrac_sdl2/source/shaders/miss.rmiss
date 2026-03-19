@@ -279,10 +279,16 @@ vec3 skyColor(vec3 dir) {
             float edge_t    = clamp((radialPos - 0.85) / 0.15, 0.0, 1.0);
             float edgeSoft  = 1.0 - edge_t * edge_t * (3.0 - 2.0 * edge_t);
 
-            // Brightness: OptiX uses * 1000.0f.
-            // LUT has sun_intensity baked in; disk is an additive on top.
-            sky += worldData.w.sunColor * worldData.w.sunIntensity * 1000.0
-                   * limbDarkening * edgeSoft;
+            vec3 transSun = vec3(1.0);
+            if (hasAtmosLUTs) {
+                float cosSun  = max(0.01, worldData.w.sunDir.y);
+                float u_trans = (cosSun + 0.2) / 1.2;
+                float v_trans = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
+                transSun = texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb;
+            }
+
+            sky += transSun * worldData.w.sunIntensity * 80000.0
+                 * limbDarkening * edgeSoft;
         }
 
         // ── Mie phase: full (uncapped) + excess glow ─────────────────────────
@@ -311,14 +317,22 @@ vec3 skyColor(vec3 dir) {
             // since it is not stored in VkWorldDataExtended.
             // mieScat = mie_scattering * mieDensity * 0.15  (matches CPU exactly)
             const float MIE_SCAT = 3.996e-6;
-            vec3 mieScat = vec3(MIE_SCAT) * worldData.w.mieDensity * 0.15;
-            sky += transSun * (mieScat * excessPhase * worldData.w.sunIntensity);
+            vec3 haloTintExcess = mix(vec3(1.0), transSun, 0.65);
+            vec3 mieScat = vec3(MIE_SCAT) * worldData.w.mieDensity * (0.15 * 2.5);
+            sky += haloTintExcess * (mieScat * excessPhase * worldData.w.sunIntensity);
         }
 
         // ── Broad Mie background halo (capped, contributes to horizon glow) ──
         // dustDensity UI range 0-10.  At dust=1 → 0.015, at dust=10 → 0.15
-        float mie_scale = clamp(worldData.w.dustDensity * 0.015, 0.0, 0.15);
-        sky += worldData.w.sunColor * worldData.w.sunIntensity * phaseM_cap * mie_scale;
+        float mie_scale = clamp(worldData.w.dustDensity * 0.0225, 0.0, 0.225);
+        vec3 haloTint = worldData.w.sunColor;
+        if (hasAtmosLUTs) {
+            float cosSun  = max(0.01, worldData.w.sunDir.y);
+            float u_trans = (cosSun + 0.2) / 1.2;
+            float v_trans = clamp(worldData.w.altitude / max(1.0, worldData.w.atmosphereHeight), 0.0, 1.0);
+            haloTint = mix(vec3(1.0), texture(atmosphereLUTs[0], vec2(u_trans, v_trans)).rgb, 0.65);
+        }
+        sky += haloTint * worldData.w.sunIntensity * phaseM_cap * mie_scale;
 
         // NOTE: No air/dust post-tint here when LUT is loaded — LUT already has
         // air_density baked in from AtmosphereLUT.cpp precompute.

@@ -113,7 +113,9 @@ public:
     
     void setTransform(const Matrix4x4& transform);
     Matrix4x4 getTransform() const { return world_transform; }
+    Matrix4x4 getPivotMatrix() const { return transform_handle ? transform_handle->getPivotMatrix() : world_transform; }
     Matrix4x4 getInverseTransform() const { return world_transform_inv; }
+    void setPivotMatrix(const Matrix4x4& transform);
     
     void setPosition(const Vec3& pos);
     void setRotation(const Vec3& euler_deg);
@@ -123,7 +125,7 @@ public:
     Vec3 getRotation() const { return rotation_euler; }
     Vec3 getScale() const { return scale_vec; }
     Vec3 getPivotOffset() const { return pivot_offset; }
-    void setPivotOffset(const Vec3& po) { pivot_offset = po; invalidateWorldBounds(); }
+    void setPivotOffset(const Vec3& po, bool preserve_world = true);
     
     /**
      * @brief Move pivot point to bottom center of bounding box
@@ -357,6 +359,7 @@ private:
     void updateTransformMatrix();
     void updateBoundsFromVDB();
     void invalidateWorldBounds() { world_bounds_dirty = true; }
+    void syncTransformStateFromHandle();
     
     /**
      * @brief Transform AABB to world space
