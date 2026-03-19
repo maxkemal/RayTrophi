@@ -219,6 +219,7 @@ private:
   
     Vec2 applyTiling(float u, float v) const;
     Vec3 importanceSampleGGX(float u1, float u2, float roughness, const Vec3& N) const;
+    Vec3 sampleGGXVNDF(const Vec3& N, const Vec3& V, float roughness, float u1, float u2) const;
 
   
 

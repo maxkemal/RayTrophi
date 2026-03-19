@@ -1456,8 +1456,56 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
             width, height, 1
         ));
     } else {
-        // Empty scene or invalid state - clear to black/background
-        // This prevents the OPTIX_ERROR_CUDA_ERROR (7900) on startup
+        // Empty scene or invalid state - evaluate world/atmosphere on CPU.
+        partial_framebuffer.resize(pixel_count);
+        static std::unique_ptr<World> fallbackWorld;
+        static uint64_t fallbackWorldHash = 0;
+        auto hashWorld = [](const WorldData& wd) -> uint64_t {
+            const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&wd);
+            uint64_t h = 1469598103934665603ull;
+            for (size_t i = 0; i < sizeof(WorldData); ++i) {
+                h ^= bytes[i];
+                h *= 1099511628211ull;
+            }
+            return h;
+        };
+        uint64_t currentHash = hashWorld(params.world);
+        if (!fallbackWorld || fallbackWorldHash != currentHash) {
+            fallbackWorld = std::make_unique<World>();
+            fallbackWorld->data = params.world;
+            if (fallbackWorld->data.mode == WORLD_MODE_NISHITA) {
+                fallbackWorld->initializeLUT();
+            }
+            fallbackWorldHash = currentHash;
+        }
+        const Vec3 origin = Vec3(params.camera.origin.x, params.camera.origin.y, params.camera.origin.z);
+        const Vec3 lowerLeft = Vec3(params.camera.lower_left_corner.x, params.camera.lower_left_corner.y, params.camera.lower_left_corner.z);
+        const Vec3 horizontal = Vec3(params.camera.horizontal.x, params.camera.horizontal.y, params.camera.horizontal.z);
+        const Vec3 vertical = Vec3(params.camera.vertical.x, params.camera.vertical.y, params.camera.vertical.z);
+
+        auto sanitize = [](float v) -> float {
+            if (!std::isfinite(v)) return 0.0f;
+            return (std::max)(v, 0.0f);
+        };
+
+        for (int j = 0; j < height; ++j) {
+            for (int i = 0; i < width; ++i) {
+                float u = ((float)i + 0.5f) / (float)width;
+                float v = ((float)j + 0.5f) / (float)height;
+                Vec3 dir = (lowerLeft + u * horizontal + v * vertical - origin).normalize();
+                Vec3 c = fallbackWorld->evaluate(dir, origin) * params.world.color_intensity;
+                float rr = sanitize(c.x);
+                float gg = sanitize(c.y);
+                float bb = sanitize(c.z);
+                rr = rr / (rr + 1.0f);
+                gg = gg / (gg + 1.0f);
+                bb = bb / (bb + 1.0f);
+                const Uint8 ri = (Uint8)std::clamp((int)std::lround(std::pow((std::min)(rr, 1.0f), 1.0f / 2.2f) * 255.0f), 0, 255);
+                const Uint8 gi = (Uint8)std::clamp((int)std::lround(std::pow((std::min)(gg, 1.0f), 1.0f / 2.2f) * 255.0f), 0, 255);
+                const Uint8 bi = (Uint8)std::clamp((int)std::lround(std::pow((std::min)(bb, 1.0f), 1.0f / 2.2f) * 255.0f), 0, 255);
+                partial_framebuffer[(size_t)j * (size_t)width + (size_t)i] = make_uchar4(ri, gi, bi, 255);
+            }
+        }
     }
 
     cudaStreamSynchronize(stream);
@@ -1486,15 +1534,17 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     }
 
     // ------------------ COPY BACK & DISPLAY -----------------------
-    partial_framebuffer.resize(pixel_count);
+    if (has_geometry && has_sbt) {
+        partial_framebuffer.resize(pixel_count);
 
-    cudaMemcpyAsync(partial_framebuffer.data(),
-        d_framebuffer,
-        pixel_count * sizeof(uchar4),
-        cudaMemcpyDeviceToHost,
-        stream);
+        cudaMemcpyAsync(partial_framebuffer.data(),
+            d_framebuffer,
+            pixel_count * sizeof(uchar4),
+            cudaMemcpyDeviceToHost,
+            stream);
 
-    cudaStreamSynchronize(stream);
+        cudaStreamSynchronize(stream);
+    }
 
     // Update SDL Surface
     Uint32* pixels = (Uint32*)surface->pixels;

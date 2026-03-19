@@ -27,6 +27,39 @@
 extern bool g_hasOptix;
 extern bool g_hasCUDA;
 
+static void drawSkeletonHierarchyTree(const SceneData::ImportedModelContext& modelCtx, int nodeIndex) {
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(modelCtx.skeletonNodes.size())) {
+        return;
+    }
+
+    const auto& node = modelCtx.skeletonNodes[nodeIndex];
+    const bool hasChildren = !node.children.empty();
+
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
+    if (!hasChildren) {
+        flags |= ImGuiTreeNodeFlags_Leaf;
+    }
+
+    std::string label = node.name;
+    if (node.weightedBone) {
+        label += " [skinned]";
+    } else if (node.boneIndex >= 0) {
+        label += " [anim]";
+    }
+
+    bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Bone Index: %d", node.boneIndex);
+    }
+
+    if (open) {
+        for (int childIndex : node.children) {
+            drawSkeletonHierarchyTree(modelCtx, childIndex);
+        }
+        ImGui::TreePop();
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE HIERARCHY PANEL (Outliner)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -146,6 +179,20 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     // Quick Settings
                     ImGui::Checkbox("Use Root Motion", &mctx.useRootMotion);
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Object pivot follows the character's root animation (walking, etc.)");
+
+                    if (mctx.hasSkeletonRepresentation) {
+                        ImGui::TextDisabled("Skeleton: %zu nodes, %zu weighted bones%s",
+                            mctx.skeletonNodes.size(),
+                            mctx.weightedBoneCount,
+                            mctx.animationOnlyImport ? ", animation-only import" : "");
+
+                        if (ImGui::TreeNodeEx("Skeleton", ImGuiTreeNodeFlags_SpanAvailWidth)) {
+                            for (int rootIndex : mctx.skeletonRootNodes) {
+                                drawSkeletonHierarchyTree(mctx, rootIndex);
+                            }
+                            ImGui::TreePop();
+                        }
+                    }
                     
                     if (ImGui::Button("Select for AnimGraph")) {
                         g_animGraphUI.activeCharacter = mctx.importName;
@@ -1135,68 +1182,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::SameLine(ImGui::GetWindowWidth() - 55);
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
                 if (ImGui::SmallButton("Del")) {
-                    bool deleted = false;
-                    if (sel.selected.type == SelectableType::Object && sel.selected.object) {
-                        std::string targetName = sel.selected.object->nodeName;
-                        auto& objs = ctx.scene.world.objects;
-                        auto new_end = std::remove_if(objs.begin(), objs.end(),
-                            [&](const std::shared_ptr<Hittable>& obj) {
-                                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                                return tri && tri->nodeName == targetName;
-                            });
-                        if (new_end != objs.end()) {
-                            objs.erase(new_end, objs.end());
-                            deleted = true;
-                        }
-                    }
-                    else if (sel.selected.type == SelectableType::Light && sel.selected.light) {
-                        auto light_to_delete = sel.selected.light;
-                        auto& lights = ctx.scene.lights;
-                        auto it = std::find(lights.begin(), lights.end(), light_to_delete);
-                        if (it != lights.end()) {
-                            history.record(std::make_unique<DeleteLightCommand>(light_to_delete));
-                            lights.erase(it);
-                            deleted = true;
-                        }
-                    }
-                    else if (sel.selected.type == SelectableType::Camera && sel.selected.camera) {
-                        // Camera deletion with safety checks
-                        if (ctx.scene.cameras.size() <= 1) {
-                            SCENE_LOG_WARN("Cannot delete the last camera in scene");
-                        }
-                        else if (sel.selected.camera == ctx.scene.camera) {
-                            SCENE_LOG_WARN("Cannot delete the active camera. Switch to another camera first.");
-                        }
-                        else {
-                            if (ctx.scene.removeCamera(sel.selected.camera)) {
-                                deleted = true;
-                                SCENE_LOG_INFO("Camera deleted successfully");
-                            }
-                        }
-                    }
-                    else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
-                        if (ctx.scene.removeGasVolume(sel.selected.gas_volume)) {
-                            deleted = true;
-                            SCENE_LOG_INFO("Gas Volume deleted successfully");
-                        }
-                    }
-                    if (deleted) {
-                        sel.clearSelection();
-                        invalidateCache();
-                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                        ctx.renderer.resetCPUAccumulation();
-                        if (ctx.backend_ptr) {
-                            ctx.renderer.rebuildBackendGeometry(ctx.scene);
-                            ctx.backend_ptr->setLights(ctx.scene.lights);
-                            if (ctx.scene.camera) ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
-                            ctx.backend_ptr->resetAccumulation();
-                        }
-                        is_bvh_dirty = false;
-                        ProjectManager::getInstance().markModified();
-                    }
-                    else {
-                        sel.clearSelection();
-                    }
+                    triggerDelete(ctx);
                 }
                 ImGui::PopStyleColor();
                 
@@ -1269,8 +1255,12 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             if (item.type == SelectableType::Object && item.object) {
                                 auto transform = item.object->getTransformHandle();
                                 if (transform) {
-                                    transform->setBase(Matrix4x4::fromTRS(item.position, item.rotation, item.scale));
-                                    item.object->updateTransformedVertices();
+                                    transform->setPivotMatrix(Matrix4x4::fromTRS(item.position, item.rotation, item.scale));
+                                    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
+                                        ctx.backend_ptr->updateObjectTransform(item.object->nodeName, transform->base);
+                                    } else {
+                                        item.object->updateTransformedVertices();
+                                    }
                                 }
                             } else if (item.type == SelectableType::Light && item.light) {
                                 item.light->position = item.position;
@@ -1316,6 +1306,112 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                         if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
                         ctx.renderer.resetCPUAccumulation();
                         ProjectManager::getInstance().markModified();
+                    }
+
+                    if (sel.selected.type == SelectableType::Object &&
+                        sel.selected.object &&
+                        sel.multi_selection.size() == 1) {
+                        ImGui::Separator();
+                        ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.35f, 1.0f), "Pivot");
+
+                        if (pivot_edit_mode) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
+                        }
+                        if (ImGui::Button("Edit Pivot")) {
+                            pivot_edit_mode = !pivot_edit_mode;
+                        }
+                        if (pivot_edit_mode) {
+                            ImGui::PopStyleColor();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move pivot with gizmo only");
+
+                        ImGui::SameLine();
+                        if (ImGui::Button("Center Pivot")) {
+                            std::string object_name = sel.selected.object->nodeName;
+                            if (object_name.empty()) object_name = "Unnamed";
+                            recenterObjectPivotToBoundsCenter(ctx, object_name);
+                            pivot_edit_mode = false;
+                            ProjectManager::getInstance().markModified();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Center pivot to geometry bounds");
+
+                        Vec3 pivot_world = sel.selected.position;
+                        if (ImGui::DragFloat3("Pivot Pos", &pivot_world.x, 0.1f)) {
+                            std::string object_name = sel.selected.object->nodeName;
+                            if (object_name.empty()) object_name = "Unnamed";
+                            moveObjectPivot(ctx, object_name, pivot_world - sel.selected.position);
+                            ProjectManager::getInstance().markModified();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Set pivot world position directly");
+                    }
+                    else if (sel.multi_selection.size() == 1 &&
+                             ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+                              (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume))) {
+                        ImGui::Separator();
+                        ImGui::TextColored(ImVec4(0.85f, 0.72f, 0.35f, 1.0f), "Pivot");
+
+                        if (pivot_edit_mode) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
+                        }
+                        if (ImGui::Button("Edit Pivot")) {
+                            pivot_edit_mode = !pivot_edit_mode;
+                        }
+                        if (pivot_edit_mode) {
+                            ImGui::PopStyleColor();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move pivot with gizmo only");
+
+                        ImGui::SameLine();
+                        if (ImGui::Button("Center Pivot")) {
+                            AABB bounds;
+                            bool has_bounds = false;
+                            if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+                                bounds = sel.selected.vdb_volume->getWorldBounds();
+                                has_bounds = true;
+                            } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
+                                Vec3 bmin, bmax;
+                                sel.selected.gas_volume->getWorldBounds(bmin, bmax);
+                                bounds = AABB(bmin, bmax);
+                                has_bounds = true;
+                            }
+
+                            if (has_bounds) {
+                                Vec3 target_pivot_world = (bounds.min + bounds.max) * 0.5f;
+                                if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+                                    Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point(target_pivot_world);
+                                    sel.selected.vdb_volume->setPivotOffset(local);
+                                    SceneUI::syncVDBVolumesToGPU(ctx);
+                                } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
+                                    Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point(target_pivot_world);
+                                    sel.selected.gas_volume->setPivotOffset(local);
+                                    ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                                }
+                                ctx.selection.updatePositionFromSelection();
+                                pivot_edit_mode = false;
+                                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                                ctx.renderer.resetCPUAccumulation();
+                                ProjectManager::getInstance().markModified();
+                            }
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Center pivot to bounds center");
+
+                        Vec3 pivot_world = sel.selected.position;
+                        if (ImGui::DragFloat3("Pivot Pos", &pivot_world.x, 0.1f)) {
+                            if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+                                Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point(pivot_world);
+                                sel.selected.vdb_volume->setPivotOffset(local);
+                                SceneUI::syncVDBVolumesToGPU(ctx);
+                            } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
+                                Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point(pivot_world);
+                                sel.selected.gas_volume->setPivotOffset(local);
+                                ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                            }
+                            ctx.selection.updatePositionFromSelection();
+                            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                            ctx.renderer.resetCPUAccumulation();
+                            ProjectManager::getInstance().markModified();
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Set pivot world position directly");
                     }
                 }
             } // End World check block

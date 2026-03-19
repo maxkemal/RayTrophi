@@ -74,6 +74,7 @@ struct StreamPowerParamsGPU {
     float sedimentCapacity;
     float minSlope;
     int erosionRadius;
+    float maxPassErosionFraction;
 };
 
 struct WindErosionParamsGPU {

@@ -227,7 +227,10 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             oj["name"] = tri->nodeName;
             oj["material_id"] = tri->getMaterialID();
             auto th = tri->getTransformHandle();
-            if (th) oj["transform"] = mat4ToJson(th->base);
+            if (th) {
+                oj["transform"] = mat4ToJson(th->getPivotMatrix());
+                oj["pivot_offset"] = vec3ToJson(th->pivot_offset);
+            }
             root["objects"].push_back(oj);
         }
     }
@@ -402,10 +405,17 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                      th = std::make_shared<Transform>();
                      tri->setTransformHandle(th);
                 }
+
+                simdjson::dom::element pivot_offset_el;
+                if (!o["pivot_offset"].get(pivot_offset_el)) {
+                    th->setPivotOffset(sjsonToVec3(pivot_offset_el), false);
+                } else {
+                    th->setPivotOffset(Vec3(0, 0, 0), false);
+                }
                 
                 simdjson::dom::element trans;
                 if (!o["transform"].get(trans)) {
-                    th->setBase(sjsonToMat4(trans));
+                    th->setPivotMatrix(sjsonToMat4(trans));
                 }
                 
                 std::string_view obj_name;

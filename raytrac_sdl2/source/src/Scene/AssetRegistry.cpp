@@ -263,6 +263,58 @@ SequenceScanInfo scanVolumeSequence(const std::filesystem::path& entry_path) {
     return info;
 }
 
+struct RecommendedVDBShaderDefaults {
+    float density_multiplier = 2.0f;
+    float scattering_coefficient = 1.5f;
+    float absorption_coefficient = 0.05f;
+    float step_size = 0.15f;
+    int max_steps = 64;
+    int shadow_steps = 8;
+};
+
+RecommendedVDBShaderDefaults recommendVDBShaderDefaults(bool is_fire,
+                                                        float voxel_size,
+                                                        double bounds_min_x,
+                                                        double bounds_min_y,
+                                                        double bounds_min_z,
+                                                        double bounds_max_x,
+                                                        double bounds_max_y,
+                                                        double bounds_max_z,
+                                                        const VDBDensityStats* density_stats) {
+    RecommendedVDBShaderDefaults out;
+
+    const double extent_x = bounds_max_x - bounds_min_x;
+    const double extent_y = bounds_max_y - bounds_min_y;
+    const double extent_z = bounds_max_z - bounds_min_z;
+    const float max_extent = static_cast<float>((std::max)({extent_x, extent_y, extent_z, 0.0}));
+    const float ref_density = density_stats && density_stats->valid
+        ? (density_stats->p99_value > 1e-5f ? density_stats->p99_value :
+           (density_stats->p95_value > 1e-5f ? density_stats->p95_value : density_stats->max_value))
+        : 0.0f;
+
+    if (ref_density > 1e-6f) {
+        const float target = is_fire ? 0.18f : 0.35f;
+        const float min_mult = is_fire ? 0.75f : 2.0f;
+        const float max_mult = is_fire ? 16.0f : 35.0f;
+        out.density_multiplier = (std::max)(min_mult, (std::min)(max_mult, target / ref_density));
+    }
+
+    if (is_fire) {
+        out.scattering_coefficient = (std::max)(0.35f, (std::min)(0.9f, 0.35f + out.density_multiplier * 0.08f));
+        out.absorption_coefficient = (std::max)(0.12f, (std::min)(0.35f, 0.12f + out.density_multiplier * 0.03f));
+    } else {
+        out.scattering_coefficient = (std::max)(0.9f, (std::min)(1.8f, 0.9f + out.density_multiplier * 0.08f));
+        out.absorption_coefficient = (std::max)(0.03f, (std::min)(0.12f, 0.03f + out.density_multiplier * 0.005f));
+    }
+
+    const float voxel_based_step = voxel_size > 1e-5f ? voxel_size * (is_fire ? 1.25f : 1.75f) : (is_fire ? 0.08f : 0.15f);
+    const float extent_based_step = max_extent > 1e-4f ? max_extent / (is_fire ? 160.0f : 192.0f) : 0.05f;
+    out.step_size = (std::max)(0.01f, (std::min)(0.35f, (std::max)(voxel_based_step, extent_based_step)));
+    out.max_steps = is_fire ? 96 : 72;
+    out.shadow_steps = is_fire ? 6 : 8;
+    return out;
+}
+
 } // namespace
 
 bool AssetRegistry::refresh(const std::filesystem::path& root_path) {
@@ -375,6 +427,7 @@ std::filesystem::path AssetRegistry::resolveDefaultRoot() {
 
 AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root_path, const std::filesystem::path& directory_path, const std::filesystem::path& entry_path) {
     AssetRecord record;
+    bool has_explicit_vdb_shader_defaults = false;
     record.directory_path = directory_path;
     record.relative_directory = std::filesystem::relative(directory_path, root_path);
     record.entry_path = entry_path;
@@ -535,11 +588,21 @@ AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root
             }
 
             if (j.contains("shaderDefaults") && j["shaderDefaults"].is_object()) {
-                const auto& shader = j["shaderDefaults"];
-                record.vdb_shader_preset = safeReadString(shader, "preset", record.vdb_shader_preset);
-                record.vdb_density_multiplier = shader.value("densityMultiplier", record.vdb_density_multiplier);
-                record.vdb_temperature_scale = shader.value("temperatureScale", record.vdb_temperature_scale);
-                record.vdb_emission_intensity = shader.value("emissionIntensity", record.vdb_emission_intensity);
+                const bool shader_defaults_explicit = j.value("shaderDefaultsExplicit", false);
+                if (shader_defaults_explicit) {
+                    has_explicit_vdb_shader_defaults = true;
+                    record.vdb_has_shader_defaults = true;
+                    const auto& shader = j["shaderDefaults"];
+                    record.vdb_shader_preset = safeReadString(shader, "preset", record.vdb_shader_preset);
+                    record.vdb_density_multiplier = shader.value("densityMultiplier", record.vdb_density_multiplier);
+                    record.vdb_scattering_coefficient = shader.value("scatteringCoefficient", record.vdb_scattering_coefficient);
+                    record.vdb_absorption_coefficient = shader.value("absorptionCoefficient", record.vdb_absorption_coefficient);
+                    record.vdb_step_size = shader.value("stepSize", record.vdb_step_size);
+                    record.vdb_max_steps = shader.value("maxSteps", record.vdb_max_steps);
+                    record.vdb_shadow_steps = shader.value("shadowSteps", record.vdb_shadow_steps);
+                    record.vdb_temperature_scale = shader.value("temperatureScale", record.vdb_temperature_scale);
+                    record.vdb_emission_intensity = shader.value("emissionIntensity", record.vdb_emission_intensity);
+                }
             }
         } catch (const std::exception& e) {
             SCENE_LOG_WARN("[AssetRegistry] Metadata parse failed: " + pathToUtf8(record.metadata_path) + " | " + e.what());
@@ -558,11 +621,12 @@ AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root
         record.animation_clip_count = 1;
     }
 
-    if ((record.asset_kind == "vdb" || record.asset_kind == "vdb_sequence") && record.vdb_grids.empty()) {
+    if ((record.asset_kind == "vdb" || record.asset_kind == "vdb_sequence") &&
+        (record.vdb_grids.empty() || !record.vdb_has_density_stats)) {
         const AssetAnalysisInfo analysis = analyzeAssetFile(record.entry_path);
-        record.vdb_grids = analysis.vdb_grids;
-        record.vdb_primary_grid = analysis.vdb_primary_grid;
-        record.vdb_voxel_size = analysis.vdb_voxel_size;
+        if (!analysis.vdb_grids.empty()) record.vdb_grids = analysis.vdb_grids;
+        if (!analysis.vdb_primary_grid.empty()) record.vdb_primary_grid = analysis.vdb_primary_grid;
+        if (analysis.vdb_voxel_size > 0.0f) record.vdb_voxel_size = analysis.vdb_voxel_size;
         record.vdb_has_bounds = analysis.vdb_has_bounds;
         record.vdb_bounds_min_x = analysis.vdb_bounds_min_x;
         record.vdb_bounds_min_y = analysis.vdb_bounds_min_y;
@@ -573,6 +637,10 @@ AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root
         record.vdb_is_fire = analysis.vdb_is_fire;
         record.vdb_is_smoke = analysis.vdb_is_smoke;
         record.vdb_has_velocity = analysis.vdb_has_velocity;
+        record.vdb_has_density_stats = analysis.vdb_has_density_stats;
+        record.vdb_density_p95 = analysis.vdb_density_p95;
+        record.vdb_density_p99 = analysis.vdb_density_p99;
+        (void)has_explicit_vdb_shader_defaults;
 
         if (record.vdb_shader_preset == "auto") {
             if (record.vdb_is_fire) {
@@ -582,6 +650,7 @@ AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root
                 record.vdb_shader_preset = "smoke";
             }
         }
+
     }
 
     return record;
@@ -834,12 +903,26 @@ nlohmann::json AssetRegistry::buildMetadataJson(const AssetRecord& asset) {
             { "isSmoke", asset.vdb_is_smoke },
             { "hasVelocity", asset.vdb_has_velocity }
         };
-        j["shaderDefaults"] = {
-            { "preset", asset.vdb_shader_preset.empty() ? "auto" : asset.vdb_shader_preset },
-            { "densityMultiplier", asset.vdb_density_multiplier },
-            { "temperatureScale", asset.vdb_temperature_scale },
-            { "emissionIntensity", asset.vdb_emission_intensity }
-        };
+        if (asset.vdb_has_density_stats) {
+            j["densityStats"] = {
+                { "p95", asset.vdb_density_p95 },
+                { "p99", asset.vdb_density_p99 }
+            };
+        }
+        if (asset.vdb_has_shader_defaults) {
+            j["shaderDefaultsExplicit"] = true;
+            j["shaderDefaults"] = {
+                { "preset", asset.vdb_shader_preset.empty() ? "auto" : asset.vdb_shader_preset },
+                { "densityMultiplier", asset.vdb_density_multiplier },
+                { "scatteringCoefficient", asset.vdb_scattering_coefficient },
+                { "absorptionCoefficient", asset.vdb_absorption_coefficient },
+                { "stepSize", asset.vdb_step_size },
+                { "maxSteps", asset.vdb_max_steps },
+                { "shadowSteps", asset.vdb_shadow_steps },
+                { "temperatureScale", asset.vdb_temperature_scale },
+                { "emissionIntensity", asset.vdb_emission_intensity }
+            };
+        }
         if (!asset.is_sequence) {
             j["fps"] = asset.sequence_fps;
         }
@@ -902,6 +985,25 @@ AssetAnalysisInfo AssetRegistry::analyzeAssetFile(const std::filesystem::path& e
         info.vdb_has_velocity = vdb.hasGrid("vel");
         info.vdb_is_fire = vdb.hasGrid("temperature");
         info.vdb_is_smoke = vdb.hasGrid("density");
+        VDBDensityStats density_stats = VDBVolumeManager::getInstance().analyzeDensityStats(vdb.getVDBVolumeID());
+        if (density_stats.valid) {
+            info.vdb_has_density_stats = true;
+            info.vdb_density_p95 = density_stats.p95_value;
+            info.vdb_density_p99 = density_stats.p99_value;
+            info.vdb_recommended_density_multiplier = density_stats.recommended_smoke_multiplier;
+        }
+        const RecommendedVDBShaderDefaults recommended = recommendVDBShaderDefaults(
+            info.vdb_is_fire,
+            info.vdb_voxel_size,
+            info.vdb_bounds_min_x, info.vdb_bounds_min_y, info.vdb_bounds_min_z,
+            info.vdb_bounds_max_x, info.vdb_bounds_max_y, info.vdb_bounds_max_z,
+            density_stats.valid ? &density_stats : nullptr);
+        info.vdb_recommended_density_multiplier = recommended.density_multiplier;
+        info.vdb_recommended_scattering_coefficient = recommended.scattering_coefficient;
+        info.vdb_recommended_absorption_coefficient = recommended.absorption_coefficient;
+        info.vdb_recommended_step_size = recommended.step_size;
+        info.vdb_recommended_max_steps = recommended.max_steps;
+        info.vdb_recommended_shadow_steps = recommended.shadow_steps;
         vdb.unload();
         return info;
     }

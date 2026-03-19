@@ -14,6 +14,8 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <cstddef>
+#include <cstdint>
 
 
 
@@ -63,6 +65,18 @@ struct VDBVolumeData {
     void* internal_nano_temperature_handle = nullptr; // nanovdb::GridHandle (Temperature)
 };
 
+struct VDBDensityStats {
+    bool valid = false;
+    std::uint64_t active_voxel_count = 0;
+    float min_value = 0.0f;
+    float max_value = 0.0f;
+    float mean_value = 0.0f;
+    float p50_value = 0.0f;
+    float p95_value = 0.0f;
+    float p99_value = 0.0f;
+    float recommended_smoke_multiplier = 10.0f;
+};
+
 /**
  * @brief Manager for VDB volumes with NanoVDB GPU support
  * 
@@ -110,6 +124,7 @@ public:
     float sampleDensityCPU(int volume_id, float x, float y, float z) const;
     float sampleTemperatureCPU(int volume_id, float x, float y, float z) const;
     bool hasTemperatureGrid(int volume_id) const;
+    VDBDensityStats analyzeDensityStats(int volume_id, std::size_t max_samples = 32768) const;
     
     // Utility
     bool isInitialized() const { return initialized; }

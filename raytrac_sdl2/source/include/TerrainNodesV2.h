@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -253,7 +253,7 @@ namespace TerrainNodesV2 {
         float heightScale = 1.0f; // Scale multiplier for loaded heightmap
         bool maintainAspectRatio = false; // Disable padding by default to stretch to terrain
         int maxResolution = 2048; // Limit import resolution
-        int smoothIterations = 0; // Smoothing pass count
+        int smoothIterations = 1; // Smoothing pass count (default 1 = mild blur)
         
         // Edge Falloff Settings
         float edgeFalloffWidth = 0.0f; // Width of the fade area in pixels

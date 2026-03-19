@@ -15,10 +15,12 @@
 #include "ColorProcessingParams.h"
 #include "SceneSelection.h"
 #include "scene_data.h"   // Explicit include
+#include "Triangle.h"
 #include "imgui.h"
 #include "ProjectManager.h"
 #include "CameraPresets.h"
 #include <cmath>
+#include <cstdio>
 #include "ProjectManager.h"
 
 // extern ProjectManager g_ProjectManager; - Removed to use Singleton access
@@ -180,6 +182,62 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGui::SetNextItemWidth(90);  // Compact
     ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pivot Point");
+
+    const bool can_edit_object_pivot =
+        sel.selected.type == SelectableType::Object &&
+        sel.selected.object &&
+        sel.multi_selection.size() == 1;
+    const bool can_edit_volume_pivot =
+        sel.multi_selection.size() == 1 &&
+        ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+         (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
+    const bool can_edit_any_pivot = can_edit_object_pivot || can_edit_volume_pivot;
+
+    ImGui::SameLine();
+    if (pivot_edit_mode) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
+    }
+    if (ImGui::Button("Pivot", ImVec2(42, btn_size))) {
+        if (can_edit_any_pivot) {
+            pivot_edit_mode = !pivot_edit_mode;
+        } else {
+            pivot_edit_mode = false;
+        }
+    }
+    if (pivot_edit_mode) {
+        ImGui::PopStyleColor();
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Move Pivot Only");
+    }
+
+    if (can_edit_any_pivot) {
+        ImGui::SameLine();
+        if (ImGui::Button("Center", ImVec2(48, btn_size))) {
+            if (can_edit_object_pivot) {
+                std::string object_name = sel.selected.object->nodeName;
+                if (object_name.empty()) object_name = "Unnamed";
+                recenterObjectPivotToBoundsCenter(ctx, object_name);
+            } else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+                AABB bounds = sel.selected.vdb_volume->getWorldBounds();
+                Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point((bounds.min + bounds.max) * 0.5f);
+                sel.selected.vdb_volume->setPivotOffset(local);
+                SceneUI::syncVDBVolumesToGPU(ctx);
+            } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
+                Vec3 bmin, bmax;
+                sel.selected.gas_volume->getWorldBounds(bmin, bmax);
+                Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point((bmin + bmax) * 0.5f);
+                sel.selected.gas_volume->setPivotOffset(local);
+                ctx.renderer.updateBackendGasVolumes(ctx.scene);
+            }
+            pivot_edit_mode = false;
+            addViewportMessage("Pivot centered to geometry", 1.6f, ImVec4(1.0f, 0.8f, 0.35f, 1.0f));
+            ProjectManager::getInstance().markModified();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Center pivot on geometry bounds");
+    } else {
+        pivot_edit_mode = false;
+    }
 
     // --- Mouse Sensitivity (Minimalist Overlay) ---
     ImGui::Spacing();
@@ -1255,6 +1313,59 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
     }
     ImGui::End();
     ImGui::PopStyleVar();
+
+    // Bottom-right transparent scene/selection info
+    const auto formatCompactCount = [](size_t value) -> std::string {
+        char buffer[32];
+        if (value >= 1000000ull) {
+            std::snprintf(buffer, sizeof(buffer), "%.1fM", static_cast<double>(value) / 1000000.0);
+        } else if (value >= 1000ull) {
+            std::snprintf(buffer, sizeof(buffer), "%.1fK", static_cast<double>(value) / 1000.0);
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "%zu", value);
+        }
+        return buffer;
+    };
+
+    std::vector<std::string> hud_lines;
+    const size_t scene_triangle_count = cached_scene_triangle_count;
+
+    hud_lines.push_back("Scene Tri  " + formatCompactCount(scene_triangle_count));
+
+    if (ctx.selection.hasSelection()) {
+        const SelectableItem& selected = ctx.selection.selected;
+        if (selected.type == SelectableType::Object && selected.object) {
+            const std::string node_name = selected.object->getNodeName();
+            size_t selected_triangle_count = 0;
+            auto selected_count_it = cached_triangle_count_by_object.find(node_name);
+            if (selected_count_it != cached_triangle_count_by_object.end()) {
+                selected_triangle_count = selected_count_it->second;
+            }
+
+            hud_lines.push_back("Selected Tri  " + formatCompactCount(selected_triangle_count));
+        }
+    }
+
+    if (!hud_lines.empty()) {
+        ImDrawList* draw_list = ImGui::GetForegroundDrawList();
+        float max_width = 0.0f;
+        float total_height = 0.0f;
+        for (const auto& line : hud_lines) {
+            const ImVec2 size = ImGui::CalcTextSize(line.c_str());
+            max_width = (std::max)(max_width, size.x);
+            total_height += size.y;
+        }
+        total_height += (hud_lines.size() > 1) ? 4.0f * static_cast<float>(hud_lines.size() - 1) : 0.0f;
+
+        const float x = io.DisplaySize.x - max_width - 24.0f;
+        float y = io.DisplaySize.y - total_height - 18.0f;
+        for (const auto& line : hud_lines) {
+            const ImVec2 pos(x, y);
+            draw_list->AddText(ImVec2(pos.x + 1.0f, pos.y + 1.0f), IM_COL32(0, 0, 0, 190), line.c_str());
+            draw_list->AddText(pos, IM_COL32(235, 235, 235, 225), line.c_str());
+            y += ImGui::CalcTextSize(line.c_str()).y + 4.0f;
+        }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

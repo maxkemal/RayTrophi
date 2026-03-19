@@ -1,4 +1,4 @@
-﻿/**
+/**
  * @file GasSimulator.cpp
  * @brief CPU implementation of gas/smoke simulation
  */
@@ -34,6 +34,176 @@
 
 namespace FluidSim {
 
+namespace {
+
+constexpr float kPi = 3.14159265359f;
+
+float degreesToRadians(float degrees) {
+    return degrees * (kPi / 180.0f);
+}
+
+int mapEmitterShapeToGPU(EmitterShape shape) {
+    switch (shape) {
+        case EmitterShape::Point: return 0;
+        case EmitterShape::Sphere: return 1;
+        case EmitterShape::Box: return 2;
+        case EmitterShape::Cylinder: return 3;
+        case EmitterShape::Cone: return 4;
+        case EmitterShape::Disc: return 5;
+        default: return 1;
+    }
+}
+
+float hashNoise3D(int x, int y, int z, int seed) {
+    unsigned int n = static_cast<unsigned int>(x + y * 57 + z * 131 + seed * 1373);
+    n = (n << 13U) ^ n;
+    unsigned int m = (n * (n * n * 15731U + 789221U) + 1376312589U) & 0x7fffffffU;
+    return static_cast<float>(m) / static_cast<float>(0x7fffffffU) * 2.0f - 1.0f;
+}
+
+float sampleEmitterNoise(const Vec3& p, float frequency, int seed, float time, float speed) {
+    const Vec3 q = p * frequency + Vec3(time * speed, 0.0f, 0.0f);
+    const int ix = static_cast<int>(std::floor(q.x));
+    const int iy = static_cast<int>(std::floor(q.y));
+    const int iz = static_cast<int>(std::floor(q.z));
+    return hashNoise3D(ix, iy, iz, seed);
+}
+
+float computeEmitterFuelPhaseStrength(const Emitter& emitter,
+                                      float local_temperature,
+                                      float ambient_temperature,
+                                      float flame_activity) {
+    const float release = std::max(0.0f, emitter.fuel_release_rate);
+    const float contact = std::clamp(flame_activity * std::max(0.0f, emitter.flame_contact_sensitivity), 0.0f, 1.0f);
+    const float phase_temp = std::max(emitter.phase_change_temperature, ambient_temperature + 1.0f);
+    const float thermal_norm = std::clamp((local_temperature - ambient_temperature) / std::max(phase_temp - ambient_temperature, 1.0f), 0.0f, 2.5f);
+
+    switch (emitter.fuel_phase) {
+        case FuelPhase::Gas:
+            return std::clamp(release, 0.0f, 4.0f);
+        case FuelPhase::Liquid: {
+            const float warm_vapor = std::clamp((thermal_norm - 0.35f) / 0.85f, 0.0f, 1.0f);
+            const float release_factor = std::max(contact * 0.55f, warm_vapor);
+            return std::clamp(release * (0.08f + 0.92f * release_factor), 0.0f, 4.0f);
+        }
+        case FuelPhase::Solid: {
+            const float pyrolysis = std::clamp((thermal_norm - 0.8f) / 0.9f, 0.0f, 1.0f);
+            const float release_factor = std::max(contact, pyrolysis);
+            return std::clamp(release * (0.02f + 0.45f * release_factor), 0.0f, 4.0f);
+        }
+        default:
+            return 1.0f;
+    }
+}
+
+float computeEmitterHeatPhaseStrength(const Emitter& emitter,
+                                      float local_temperature,
+                                      float ambient_temperature,
+                                      float flame_activity) {
+    const float phase_temp = std::max(emitter.phase_change_temperature, ambient_temperature + 1.0f);
+    const float thermal_norm = std::clamp((local_temperature - ambient_temperature) / std::max(phase_temp - ambient_temperature, 1.0f), 0.0f, 2.5f);
+
+    switch (emitter.fuel_phase) {
+        case FuelPhase::Gas:
+            return 1.0f;
+        case FuelPhase::Liquid: {
+            const float warmup = std::clamp((thermal_norm - 0.25f) / 0.9f, 0.0f, 1.0f);
+            return 0.18f + 0.82f * std::max(flame_activity * 0.5f, warmup);
+        }
+        case FuelPhase::Solid: {
+            const float pyrolysis = std::clamp((thermal_norm - 0.75f) / 1.0f, 0.0f, 1.0f);
+            return 0.08f + 0.52f * std::max(flame_activity, pyrolysis);
+        }
+        default:
+            return 1.0f;
+    }
+}
+
+bool isEmitterActiveAtFrame(const Emitter& emitter, float frame) {
+    if (!emitter.enabled) return false;
+    if (frame < emitter.start_frame) return false;
+    if (emitter.end_frame >= 0.0f && frame > emitter.end_frame) return false;
+    if (emitter.emission_mode == EmitterEmissionMode::Pulse) {
+        const float elapsed = frame - emitter.start_frame;
+        if (emitter.pulse_interval <= 0.0f) return true;
+        const float cycle_pos = std::fmod(std::max(0.0f, elapsed), emitter.pulse_interval);
+        return cycle_pos < emitter.pulse_duration;
+    }
+    if (emitter.emission_mode == EmitterEmissionMode::Burst) {
+        return frame <= emitter.start_frame + 1.0f;
+    }
+    return true;
+}
+
+bool isInsideEmitter(const Emitter& emitter, const Vec3& cell_pos, float& normalized_dist) {
+    const Vec3 local = cell_pos - emitter.position;
+    switch (emitter.shape) {
+        case EmitterShape::Sphere: {
+            const float r = std::max(emitter.radius, 0.001f);
+            normalized_dist = local.length() / r;
+            return normalized_dist <= 1.0f;
+        }
+        case EmitterShape::Box: {
+            if (std::abs(local.x) > emitter.size.x || std::abs(local.y) > emitter.size.y || std::abs(local.z) > emitter.size.z) {
+                return false;
+            }
+            normalized_dist = std::max({std::abs(local.x) / std::max(emitter.size.x, 0.001f),
+                                        std::abs(local.y) / std::max(emitter.size.y, 0.001f),
+                                        std::abs(local.z) / std::max(emitter.size.z, 0.001f)});
+            return true;
+        }
+        case EmitterShape::Point: {
+            const float r = std::max(emitter.radius, 0.001f);
+            normalized_dist = local.length() / r;
+            return local.length() <= r;
+        }
+        case EmitterShape::Cylinder: {
+            const float radial = std::sqrt(local.x * local.x + local.z * local.z);
+            if (radial > emitter.radius || local.y < 0.0f || local.y > emitter.height) return false;
+            normalized_dist = std::max(radial / std::max(emitter.radius, 0.001f),
+                                       std::abs(local.y / std::max(emitter.height, 0.001f) - 0.5f) * 2.0f);
+            return true;
+        }
+        case EmitterShape::Cone: {
+            if (local.y < 0.0f || local.y > emitter.height) return false;
+            const float height = std::max(emitter.height, 0.001f);
+            const float base_radius = std::max(emitter.radius, 0.001f);
+            const float vertical_ratio = std::clamp(local.y / height, 0.0f, 1.0f);
+            const float angle_scale = std::clamp(emitter.cone_angle / 45.0f, 0.25f, 2.5f);
+            const float allowed_r = std::max(0.001f, base_radius * (1.0f - vertical_ratio) * angle_scale);
+            const float radial = std::sqrt(local.x * local.x + local.z * local.z);
+            if (radial > allowed_r) return false;
+            normalized_dist = std::max(radial / std::max(allowed_r, 0.001f), vertical_ratio);
+            return true;
+        }
+        case EmitterShape::Disc: {
+            if (std::abs(local.y) > 0.5f * std::max(emitter.size.y, 0.1f)) return false;
+            const float radial = std::sqrt(local.x * local.x + local.z * local.z);
+            if (radial > emitter.radius || radial < emitter.inner_radius) return false;
+            normalized_dist = radial / std::max(emitter.radius, 0.001f);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+float computeEmitterFalloff(const Emitter& emitter, float normalized_dist) {
+    if (emitter.falloff_type == EmitterFalloffType::None) return 1.0f;
+    if (normalized_dist <= emitter.falloff_start) return 1.0f;
+    if (normalized_dist >= emitter.falloff_end) return 0.0f;
+    const float denom = std::max(emitter.falloff_end - emitter.falloff_start, 0.0001f);
+    const float t = (normalized_dist - emitter.falloff_start) / denom;
+    switch (emitter.falloff_type) {
+        case EmitterFalloffType::Linear: return 1.0f - t;
+        case EmitterFalloffType::Smooth: return 1.0f - t * t * (3.0f - 2.0f * t);
+        case EmitterFalloffType::Gaussian: return std::exp(-4.0f * t * t);
+        default: return 1.0f;
+    }
+}
+
+} // namespace
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EMITTER SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -44,10 +214,36 @@ nlohmann::json Emitter::toJson() const {
     j["position"] = {position.x, position.y, position.z};
     j["size"] = {size.x, size.y, size.z};
     j["radius"] = radius;
+    j["height"] = height;
+    j["inner_radius"] = inner_radius;
+    j["cone_angle"] = cone_angle;
     j["density_rate"] = density_rate;
     j["fuel_rate"] = fuel_rate;
     j["temperature"] = temperature;
     j["velocity"] = {velocity.x, velocity.y, velocity.z};
+    j["fuel_phase"] = static_cast<int>(fuel_phase);
+    j["phase_change_temperature"] = phase_change_temperature;
+    j["fuel_release_rate"] = fuel_release_rate;
+    j["flame_contact_sensitivity"] = flame_contact_sensitivity;
+    j["falloff_type"] = static_cast<int>(falloff_type);
+    j["falloff_start"] = falloff_start;
+    j["falloff_end"] = falloff_end;
+    j["noise_enabled"] = noise_enabled;
+    j["noise_frequency"] = noise_frequency;
+    j["noise_amplitude"] = noise_amplitude;
+    j["noise_speed"] = noise_speed;
+    j["noise_seed"] = noise_seed;
+    j["noise_modulate_density"] = noise_modulate_density;
+    j["noise_modulate_temperature"] = noise_modulate_temperature;
+    j["noise_modulate_velocity"] = noise_modulate_velocity;
+    j["spray_cone_angle"] = spray_cone_angle;
+    j["speed_min"] = speed_min;
+    j["speed_max"] = speed_max;
+    j["emission_mode"] = static_cast<int>(emission_mode);
+    j["start_frame"] = start_frame;
+    j["end_frame"] = end_frame;
+    j["pulse_interval"] = pulse_interval;
+    j["pulse_duration"] = pulse_duration;
     j["name"] = name;
     j["uid"] = uid;
     
@@ -71,13 +267,39 @@ void Emitter::fromJson(const nlohmann::json& j) {
         size = Vec3(s[0], s[1], s[2]);
     }
     if (j.contains("radius")) radius = j["radius"];
+    if (j.contains("height")) height = j["height"];
+    if (j.contains("inner_radius")) inner_radius = j["inner_radius"];
+    if (j.contains("cone_angle")) cone_angle = j["cone_angle"];
     if (j.contains("density_rate")) density_rate = j["density_rate"];
     if (j.contains("fuel_rate")) fuel_rate = j["fuel_rate"];
     if (j.contains("temperature")) temperature = j["temperature"];
+    if (j.contains("fuel_phase")) fuel_phase = static_cast<FuelPhase>(j["fuel_phase"].get<int>());
+    if (j.contains("phase_change_temperature")) phase_change_temperature = j["phase_change_temperature"];
+    if (j.contains("fuel_release_rate")) fuel_release_rate = j["fuel_release_rate"];
+    if (j.contains("flame_contact_sensitivity")) flame_contact_sensitivity = j["flame_contact_sensitivity"];
     if (j.contains("velocity")) {
         auto v = j["velocity"];
         velocity = Vec3(v[0], v[1], v[2]);
     }
+    if (j.contains("falloff_type")) falloff_type = static_cast<EmitterFalloffType>(j["falloff_type"].get<int>());
+    if (j.contains("falloff_start")) falloff_start = j["falloff_start"];
+    if (j.contains("falloff_end")) falloff_end = j["falloff_end"];
+    if (j.contains("noise_enabled")) noise_enabled = j["noise_enabled"];
+    if (j.contains("noise_frequency")) noise_frequency = j["noise_frequency"];
+    if (j.contains("noise_amplitude")) noise_amplitude = j["noise_amplitude"];
+    if (j.contains("noise_speed")) noise_speed = j["noise_speed"];
+    if (j.contains("noise_seed")) noise_seed = j["noise_seed"];
+    if (j.contains("noise_modulate_density")) noise_modulate_density = j["noise_modulate_density"];
+    if (j.contains("noise_modulate_temperature")) noise_modulate_temperature = j["noise_modulate_temperature"];
+    if (j.contains("noise_modulate_velocity")) noise_modulate_velocity = j["noise_modulate_velocity"];
+    if (j.contains("spray_cone_angle")) spray_cone_angle = j["spray_cone_angle"];
+    if (j.contains("speed_min")) speed_min = j["speed_min"];
+    if (j.contains("speed_max")) speed_max = j["speed_max"];
+    if (j.contains("emission_mode")) emission_mode = static_cast<EmitterEmissionMode>(j["emission_mode"].get<int>());
+    if (j.contains("start_frame")) start_frame = j["start_frame"];
+    if (j.contains("end_frame")) end_frame = j["end_frame"];
+    if (j.contains("pulse_interval")) pulse_interval = j["pulse_interval"];
+    if (j.contains("pulse_duration")) pulse_duration = j["pulse_duration"];
     if (j.contains("name")) name = j["name"];
     if (j.contains("uid")) uid = j["uid"];
     
@@ -150,6 +372,8 @@ nlohmann::json GasSimulationSettings::toJson() const {
     j["resolution"] = {resolution_x, resolution_y, resolution_z};
     j["grid_size"] = {grid_size.x, grid_size.y, grid_size.z};
     j["voxel_size"] = voxel_size;
+    j["preserve_voxel_size_on_resize"] = preserve_voxel_size_on_resize;
+    j["max_auto_resolution"] = max_auto_resolution;
     j["grid_offset"] = {grid_offset.x, grid_offset.y, grid_offset.z};
     j["timestep"] = timestep;
     j["substeps"] = substeps;
@@ -184,6 +408,7 @@ nlohmann::json GasSimulationSettings::toJson() const {
     j["turbulence_persistence"] = turbulence_persistence;
     j["advection_mode"] = static_cast<int>(advection_mode);
     j["pressure_solver"] = static_cast<int>(pressure_solver);
+    j["boundary_mode"] = static_cast<int>(boundary_mode);
     j["sor_omega"] = sor_omega;
     j["gravity"] = {gravity.x, gravity.y, gravity.z};
     j["wind"] = {wind.x, wind.y, wind.z};
@@ -211,6 +436,8 @@ void GasSimulationSettings::fromJson(const nlohmann::json& j) {
         grid_size = Vec3(s[0], s[1], s[2]);
     }
     if (j.contains("voxel_size")) voxel_size = j["voxel_size"];
+    if (j.contains("preserve_voxel_size_on_resize")) preserve_voxel_size_on_resize = j["preserve_voxel_size_on_resize"];
+    if (j.contains("max_auto_resolution")) max_auto_resolution = j["max_auto_resolution"];
     if (j.contains("grid_offset")) {
         auto o = j["grid_offset"];
         grid_offset = Vec3(o[0], o[1], o[2]);
@@ -248,6 +475,7 @@ void GasSimulationSettings::fromJson(const nlohmann::json& j) {
     if (j.contains("turbulence_persistence")) turbulence_persistence = j["turbulence_persistence"];
     if (j.contains("advection_mode")) advection_mode = static_cast<AdvectionMode>(j["advection_mode"].get<int>());
     if (j.contains("pressure_solver")) pressure_solver = static_cast<PressureSolverMode>(j["pressure_solver"].get<int>());
+    if (j.contains("boundary_mode")) boundary_mode = static_cast<BoundaryMode>(j["boundary_mode"].get<int>());
     if (j.contains("sor_omega")) sor_omega = j["sor_omega"];
     if (j.contains("gravity")) {
         auto g = j["gravity"];
@@ -303,6 +531,7 @@ void GasSimulator::initialize(const GasSimulationSettings& s) {
     settings.resolution_x = std::clamp(settings.resolution_x, 8, 512);
     settings.resolution_y = std::clamp(settings.resolution_y, 8, 512);
     settings.resolution_z = std::clamp(settings.resolution_z, 8, 512);
+    settings.max_auto_resolution = std::clamp(settings.max_auto_resolution, 32, 512);
     
     // Calculate voxel size based on grid dimensions and resolution
     // Use the maximum resolution to determine voxel size for uniform voxels
@@ -387,6 +616,7 @@ void GasSimulator::initialize(const GasSimulationSettings& s) {
     
     current_frame = 0;
     accumulated_time = 0.0f;
+    smoothed_adaptive_chunk_count = 1;
     gpu_data_valid = false;
     initialized = true;
 }
@@ -408,58 +638,86 @@ void GasSimulator::step(float dt, const Matrix4x4& world_matrix) {
     // Apply time scale for simulation speed control
     float scaled_dt = dt * settings.time_scale;
     
-    // CFL Adaptive Timestep: Calculate safe timestep based on max velocity
-    float effective_dt = scaled_dt;
-    if (settings.adaptive_timestep) {
-        effective_dt = computeCFLTimestep(scaled_dt);
-    }
-    
-    // Update active tiles for sparse processing (VDB-style optimization)
-    grid.sparse_mode_enabled = settings.sparse_mode;
-    grid.sparse_threshold = settings.sparse_threshold;
-    if (settings.sparse_mode) {
-        grid.updateActiveTiles(settings.ambient_temperature);
-    }
-    
-    // Use CUDA if enabled and available
-    if (settings.backend == SolverBackend::CUDA && cuda_initialized) {
-        stepCUDA(effective_dt, world_matrix);
-    } else {
-        // CPU solver (OpenMP disabled to prevent deadlock after resolution change)
-        float substep_dt = effective_dt / settings.substeps;
-        
-        for (int sub = 0; sub < settings.substeps; ++sub) {
-            // 1. Apply emitters (inject density/temperature/fuel)
-            applyEmitters(substep_dt);
-            
-            // 2. Process Combustion (Fuel + Heat -> Fire)
-            processCombustion(substep_dt);
-            
-            // 3. Apply all forces (Internal Buoyancy/Vorticity + External Force Fields)
-            applyForces(substep_dt, world_matrix);
-            
-            // 4. Advect velocity field
-            advectVelocity(substep_dt);
-            
-            // 5. Solve pressure and project to divergence-free
-            solvePressure();
-            project();
-            
-            // 6. Advect scalars (density, temperature, fuel)
-            advectScalars(substep_dt);
-            
-            // 7. Apply dissipation
-            applyDissipation(substep_dt);
-            
-            // 8. Enforce boundaries
-            enforceBoundaries();
+    // CFL Adaptive Timestep should preserve the requested physical time by subcycling,
+    // not by silently slowing the simulation as resolution increases.
+    float base_chunk_dt = scaled_dt;
+    int adaptive_chunk_count = 1;
+    if (settings.adaptive_timestep && scaled_dt > 0.0f) {
+        const float cfl_dt = computeCFLTimestep(scaled_dt);
+        if (cfl_dt > 0.0f) {
+            adaptive_chunk_count = std::max(1, static_cast<int>(std::ceil(scaled_dt / cfl_dt)));
         }
+    }
+
+    const bool combustion_active = settings.burn_rate > 0.0f;
+    const int max_adaptive_chunks = combustion_active ? 6 : 24;
+    adaptive_chunk_count = std::clamp(adaptive_chunk_count, 1, max_adaptive_chunks);
+    if (!settings.adaptive_timestep) {
+        smoothed_adaptive_chunk_count = 1;
+    } else {
+        const int previous_smoothed = std::clamp(smoothed_adaptive_chunk_count, 1, max_adaptive_chunks);
+        if (adaptive_chunk_count > previous_smoothed) {
+            smoothed_adaptive_chunk_count = std::min(adaptive_chunk_count, previous_smoothed + 1);
+        } else if (adaptive_chunk_count < previous_smoothed) {
+            smoothed_adaptive_chunk_count = std::max(adaptive_chunk_count, previous_smoothed - 1);
+        } else {
+            smoothed_adaptive_chunk_count = adaptive_chunk_count;
+        }
+        adaptive_chunk_count = std::clamp(smoothed_adaptive_chunk_count, 1, max_adaptive_chunks);
+    }
+    base_chunk_dt = scaled_dt / static_cast<float>(adaptive_chunk_count);
+
+    for (int chunk = 0; chunk < adaptive_chunk_count; ++chunk) {
+        const float chunk_dt = base_chunk_dt;
+
+        // Update active tiles for sparse processing (VDB-style optimization)
+        grid.sparse_mode_enabled = settings.sparse_mode;
+        grid.sparse_threshold = settings.sparse_threshold;
+        if (settings.sparse_mode) {
+            grid.updateActiveTiles(settings.ambient_temperature);
+        }
+
+        // Use CUDA if enabled and available
+        if (settings.backend == SolverBackend::CUDA && cuda_initialized) {
+            stepCUDA(chunk_dt, world_matrix);
+        } else {
+            // CPU solver (OpenMP disabled to prevent deadlock after resolution change)
+            float substep_dt = chunk_dt / std::max(1, settings.substeps);
+
+            for (int sub = 0; sub < settings.substeps; ++sub) {
+                // 1. Apply emitters (inject density/temperature/fuel)
+                applyEmitters(substep_dt);
+
+                // 2. Process Combustion (Fuel + Heat -> Fire)
+                processCombustion(substep_dt);
+
+                // 3. Apply all forces (Internal Buoyancy/Vorticity + External Force Fields)
+                applyForces(substep_dt, world_matrix);
+
+                // 4. Advect velocity field
+                advectVelocity(substep_dt);
+
+                // 5. Solve pressure and project to divergence-free
+                solvePressure();
+                project();
+
+                // 6. Advect scalars (density, temperature, fuel)
+                advectScalars(substep_dt);
+
+                // 7. Apply dissipation
+                applyDissipation(substep_dt);
+
+                // 8. Enforce boundaries
+                enforceBoundaries();
+            }
+        }
+
     }
     
     auto end = std::chrono::high_resolution_clock::now();
     last_step_time_ms = std::chrono::duration<float, std::milli>(end - start).count();
     
-    accumulated_time += dt;
+    accumulated_time += scaled_dt;
     current_frame++;
     gpu_data_valid = false;
 }
@@ -470,6 +728,7 @@ void GasSimulator::reset() {
     std::fill(grid.temperature.begin(), grid.temperature.end(), settings.ambient_temperature);
     current_frame = 0;
     accumulated_time = 0.0f;
+    smoothed_adaptive_chunk_count = 1;
     
     // Clear GPU buffers if CUDA is active
     if (cuda_initialized && settings.backend == SolverBackend::CUDA) {
@@ -505,7 +764,7 @@ void GasSimulator::removeEmitter(int index) {
 void GasSimulator::applyEmitters(float dt) {
     for (int e_idx = 0; e_idx < (int)emitters.size(); ++e_idx) {
         const auto& emitter = emitters[e_idx];
-        if (!emitter.enabled) continue;
+        if (!isEmitterActiveAtFrame(emitter, static_cast<float>(current_frame))) continue;
         
         // Calculate grid-space bounding box
         Vec3 min_pos, max_pos;
@@ -513,6 +772,15 @@ void GasSimulator::applyEmitters(float dt) {
             float r = (emitter.shape == EmitterShape::Point) ? grid.voxel_size : emitter.radius;
             min_pos = emitter.position - Vec3(r, r, r);
             max_pos = emitter.position + Vec3(r, r, r);
+        } else if (emitter.shape == EmitterShape::Cylinder || emitter.shape == EmitterShape::Cone) {
+            float r = std::max(emitter.radius, 0.001f);
+            min_pos = emitter.position + Vec3(-r, 0.0f, -r);
+            max_pos = emitter.position + Vec3(r, emitter.height, r);
+        } else if (emitter.shape == EmitterShape::Disc) {
+            float r = std::max(emitter.radius, 0.001f);
+            float h = std::max(emitter.size.y, grid.voxel_size);
+            min_pos = emitter.position + Vec3(-r, -0.5f * h, -r);
+            max_pos = emitter.position + Vec3(r, 0.5f * h, r);
         } else {
             min_pos = emitter.position - emitter.size;
             max_pos = emitter.position + emitter.size;
@@ -531,43 +799,78 @@ void GasSimulator::applyEmitters(float dt) {
             for (int j = j_start; j <= j_end; ++j) {
                 for (int i = i_start; i <= i_end; ++i) {
                     Vec3 cell_pos = grid.gridToWorld(i, j, k);
-                    bool inside = false;
-                    
-                    if (emitter.shape == EmitterShape::Sphere) {
-                        float dist = (cell_pos - emitter.position).length();
-                        inside = (dist < emitter.radius);
-                    } else if (emitter.shape == EmitterShape::Box) {
-                        Vec3 d = cell_pos - emitter.position;
-                        inside = (std::abs(d.x) <= emitter.size.x && 
-                                  std::abs(d.y) <= emitter.size.y && 
-                                  std::abs(d.z) <= emitter.size.z);
-                    } else if (emitter.shape == EmitterShape::Point) {
-                        float dist = (cell_pos - emitter.position).length();
-                        inside = (dist < grid.voxel_size * 2.0f);
-                    }
+                    float normalized_dist = 0.0f;
+                    const bool inside = isInsideEmitter(emitter, cell_pos, normalized_dist);
                     
                     if (inside) {
                         size_t idx = grid.cellIndex(i, j, k);
+                        const float falloff_strength = computeEmitterFalloff(emitter, normalized_dist);
+                        float density_strength = falloff_strength;
+                        float temperature_strength = falloff_strength;
+                        float velocity_strength = falloff_strength;
+                        if (emitter.noise_enabled) {
+                            const float noise = sampleEmitterNoise(cell_pos, emitter.noise_frequency, emitter.noise_seed, accumulated_time, emitter.noise_speed);
+                            const float noise_mult = std::max(0.0f, 1.0f + noise * emitter.noise_amplitude);
+                            if (emitter.noise_modulate_density) density_strength *= noise_mult;
+                            if (emitter.noise_modulate_temperature) temperature_strength *= noise_mult;
+                            if (emitter.noise_modulate_velocity) velocity_strength *= noise_mult;
+                            if (!emitter.noise_modulate_density && !emitter.noise_modulate_temperature && !emitter.noise_modulate_velocity) {
+                                density_strength *= noise_mult;
+                                temperature_strength *= noise_mult;
+                                velocity_strength *= noise_mult;
+                            }
+                        }
+                        const float strength = std::max({ density_strength, temperature_strength, velocity_strength });
+                        if (strength <= 0.0001f) continue;
                         
                         // Inject with limits to prevent overflow
-                        grid.density[idx] += emitter.density_rate * dt;
+                        grid.density[idx] += emitter.density_rate * dt * density_strength;
                         grid.density[idx] = std::min(grid.density[idx], settings.max_density);
                         
-                        grid.fuel[idx] += emitter.fuel_rate * dt;
-                        // Fuel limit: prevent infinite accumulation
-                        grid.fuel[idx] = std::min(grid.fuel[idx], 100.0f);
+                        const float flame_activity = std::clamp(grid.interaction[idx] * 0.15f, 0.0f, 1.0f);
+                        const float hotness = std::clamp((grid.temperature[idx] - settings.ambient_temperature) /
+                            std::max(settings.ignition_temperature - settings.ambient_temperature, 1.0f), 0.0f, 3.0f);
+                        const float oxygen_room = std::clamp(
+                            1.0f - (grid.density[idx] / std::max(settings.max_density * 0.7f, 0.001f)) -
+                            (grid.fuel[idx] / 14.0f) -
+                            flame_activity * 0.35f,
+                            0.0f, 1.0f);
+                        const float fuel_room = std::clamp(1.0f - (grid.fuel[idx] / 12.0f), 0.0f, 1.0f);
+                        const float phase_strength = computeEmitterFuelPhaseStrength(
+                            emitter,
+                            grid.temperature[idx],
+                            settings.ambient_temperature,
+                            flame_activity
+                        );
+                        const float moderated_fuel_strength =
+                            density_strength * fuel_room * oxygen_room * phase_strength * (1.0f - 0.55f * flame_activity);
+                        grid.fuel[idx] += emitter.fuel_rate * dt * moderated_fuel_strength;
+                        // Fuel limit: prevent runaway accumulation pockets
+                        grid.fuel[idx] = std::min(grid.fuel[idx], 12.0f);
                         
-                        // Temperature: blend towards emitter temp, don't exceed max
-                        float target_temp = std::min(emitter.temperature, settings.max_temperature * 0.9f);
+                        // Temperature: inject relative to ambient so emitter edges still stay physically warm.
+                        const float heat_phase_strength = computeEmitterHeatPhaseStrength(
+                            emitter,
+                            grid.temperature[idx],
+                            settings.ambient_temperature,
+                            flame_activity
+                        );
+                        const float hot_headroom = std::clamp(1.0f - hotness * 0.28f, 0.15f, 1.0f);
+                        const float usable_strength = std::clamp(std::sqrt(std::max(temperature_strength, 0.0f)), 0.0f, 1.0f) *
+                            heat_phase_strength * oxygen_room * hot_headroom;
+                        const float temp_delta = std::max(0.0f, emitter.temperature - settings.ambient_temperature);
+                        float target_temp = settings.ambient_temperature + temp_delta * usable_strength;
+                        target_temp = std::min(target_temp, settings.max_temperature * 0.92f);
                         if (grid.temperature[idx] < target_temp) {
-                            // Gradual heating instead of instant set
-                            grid.temperature[idx] = grid.temperature[idx] * 0.9f + target_temp * 0.1f;
+                            const float dt_scale = std::clamp(dt / (1.0f / 60.0f), 0.05f, 1.0f);
+                            const float heat_blend = std::clamp((0.10f + 0.38f * usable_strength) * dt_scale, 0.02f, 0.48f);
+                            grid.temperature[idx] = grid.temperature[idx] * (1.0f - heat_blend) + target_temp * heat_blend;
                         }
                         
                         if (emitter.velocity.length() > 0.001f) {
-                            if (i > 0) grid.vel_x[grid.velXIndex(i, j, k)] += emitter.velocity.x * dt;
-                            if (j > 0) grid.vel_y[grid.velYIndex(i, j, k)] += emitter.velocity.y * dt;
-                            if (k > 0) grid.vel_z[grid.velZIndex(i, j, k)] += emitter.velocity.z * dt;
+                            if (i > 0) grid.vel_x[grid.velXIndex(i, j, k)] += emitter.velocity.x * dt * velocity_strength;
+                            if (j > 0) grid.vel_y[grid.velYIndex(i, j, k)] += emitter.velocity.y * dt * velocity_strength;
+                            if (k > 0) grid.vel_z[grid.velZIndex(i, j, k)] += emitter.velocity.z * dt * velocity_strength;
                         }
                     }
                 }
@@ -765,12 +1068,26 @@ void GasSimulator::applyCurlNoiseTurbulence(float dt) {
                     (k + 0.5f) * grid.voxel_size
                 );
                 
-                // Only apply turbulence where there's density (smoke)
-                float density = grid.densityAt(i, j, k);
-                if (density < 0.01f) continue;
+                const float density = grid.densityAt(i, j, k);
+                const float temperature = grid.temperatureAt(i, j, k);
+                const float heat_norm = std::clamp((temperature - settings.ambient_temperature) /
+                    std::max(settings.ignition_temperature - settings.ambient_temperature, 1.0f), 0.0f, 3.0f);
+                const float flame_norm = std::clamp(grid.interaction[grid.cellIndex(i, j, k)] * 0.05f, 0.0f, 2.0f);
+
+                const float density_grad_x = (grid.densityAt(i + 1, j, k) - grid.densityAt(i - 1, j, k)) / (2.0f * grid.voxel_size);
+                const float density_grad_y = (grid.densityAt(i, j + 1, k) - grid.densityAt(i, j - 1, k)) / (2.0f * grid.voxel_size);
+                const float density_grad_z = (grid.densityAt(i, j, k + 1) - grid.densityAt(i, j, k - 1)) / (2.0f * grid.voxel_size);
+                const float edge_norm = std::clamp(std::sqrt(density_grad_x * density_grad_x + density_grad_y * density_grad_y + density_grad_z * density_grad_z) * 0.08f, 0.0f, 2.0f);
+                const float activity = std::max({ density, heat_norm * 0.35f, flame_norm * 0.5f, edge_norm * 0.25f });
+                if (activity < 0.01f) continue;
                 
-                // Density-weighted strength - more turbulence in denser smoke
-                float local_strength = strength * std::min(density, 1.0f);
+                // Push more breakup into hot cores and density edges instead of only dense bulk smoke.
+                float local_strength = strength * std::clamp(
+                    0.18f + 0.45f * std::sqrt(std::max(density, 0.0f)) +
+                    0.40f * std::min(heat_norm, 1.5f) +
+                    0.30f * std::min(flame_norm, 1.5f) +
+                    0.35f * std::min(edge_norm, 1.0f),
+                    0.0f, 2.5f);
                 
                 // Get animated curl noise (divergence-free!)
                 Vec3 curl = Physics::Noise::curlFBM_animated(
@@ -936,10 +1253,29 @@ void GasSimulator::applyExternalForceFields(float dt, const Matrix4x4& world_mat
 // ═══════════════════════════════════════════════════════════════════════════════
 
 void GasSimulator::advectVelocity(float dt) {
+    const bool use_maccormack = settings.advection_mode == GasSimulationSettings::AdvectionMode::MacCormack;
+    const bool use_bfecc = settings.advection_mode == GasSimulationSettings::AdvectionMode::BFECC;
+
     // Copy current velocity to temp
     grid_temp.vel_x = grid.vel_x;
     grid_temp.vel_y = grid.vel_y;
     grid_temp.vel_z = grid.vel_z;
+
+    std::vector<float> vel_x_forward;
+    std::vector<float> vel_y_forward;
+    std::vector<float> vel_z_forward;
+    std::vector<float> vel_x_backward;
+    std::vector<float> vel_y_backward;
+    std::vector<float> vel_z_backward;
+
+    if (use_maccormack || use_bfecc) {
+        vel_x_forward.resize(grid.vel_x.size(), 0.0f);
+        vel_y_forward.resize(grid.vel_y.size(), 0.0f);
+        vel_z_forward.resize(grid.vel_z.size(), 0.0f);
+        vel_x_backward.resize(grid.vel_x.size(), 0.0f);
+        vel_y_backward.resize(grid.vel_y.size(), 0.0f);
+        vel_z_backward.resize(grid.vel_z.size(), 0.0f);
+    }
     
     // Advect X-velocity
     #pragma omp parallel for collapse(2)
@@ -955,8 +1291,13 @@ void GasSimulator::advectVelocity(float dt) {
                 Vec3 vel = grid.sampleVelocity(pos);
                 Vec3 prev_pos = pos - vel * dt;
                 
-                // Sample velocity at previous position
-                grid.vel_x[grid.velXIndex(i, j, k)] = grid_temp.sampleVelocity(prev_pos).x;
+                const size_t idx = grid.velXIndex(i, j, k);
+                const float forward_value = grid_temp.sampleVelocity(prev_pos).x;
+                if (use_maccormack || use_bfecc) {
+                    vel_x_forward[idx] = forward_value;
+                } else {
+                    grid.vel_x[idx] = forward_value;
+                }
             }
         }
     }
@@ -971,7 +1312,13 @@ void GasSimulator::advectVelocity(float dt) {
                                               (k + 0.5f) * grid.voxel_size);
                 Vec3 vel = grid.sampleVelocity(pos);
                 Vec3 prev_pos = pos - vel * dt;
-                grid.vel_y[grid.velYIndex(i, j, k)] = grid_temp.sampleVelocity(prev_pos).y;
+                const size_t idx = grid.velYIndex(i, j, k);
+                const float forward_value = grid_temp.sampleVelocity(prev_pos).y;
+                if (use_maccormack || use_bfecc) {
+                    vel_y_forward[idx] = forward_value;
+                } else {
+                    grid.vel_y[idx] = forward_value;
+                }
             }
         }
     }
@@ -986,6 +1333,144 @@ void GasSimulator::advectVelocity(float dt) {
                                               k * grid.voxel_size);
                 Vec3 vel = grid.sampleVelocity(pos);
                 Vec3 prev_pos = pos - vel * dt;
+                const size_t idx = grid.velZIndex(i, j, k);
+                const float forward_value = grid_temp.sampleVelocity(prev_pos).z;
+                if (use_maccormack || use_bfecc) {
+                    vel_z_forward[idx] = forward_value;
+                } else {
+                    grid.vel_z[idx] = forward_value;
+                }
+            }
+        }
+    }
+
+    if (!use_maccormack && !use_bfecc) {
+        return;
+    }
+
+    grid_temp.vel_x = vel_x_forward;
+    grid_temp.vel_y = vel_y_forward;
+    grid_temp.vel_z = vel_z_forward;
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i <= grid.nx; ++i) {
+                Vec3 pos = grid.origin + Vec3(i * grid.voxel_size,
+                                              (j + 0.5f) * grid.voxel_size,
+                                              (k + 0.5f) * grid.voxel_size);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 forward_pos = pos + vel * dt;
+                vel_x_backward[grid.velXIndex(i, j, k)] = grid_temp.sampleVelocity(forward_pos).x;
+            }
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j <= grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                Vec3 pos = grid.origin + Vec3((i + 0.5f) * grid.voxel_size,
+                                              j * grid.voxel_size,
+                                              (k + 0.5f) * grid.voxel_size);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 forward_pos = pos + vel * dt;
+                vel_y_backward[grid.velYIndex(i, j, k)] = grid_temp.sampleVelocity(forward_pos).y;
+            }
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k <= grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                Vec3 pos = grid.origin + Vec3((i + 0.5f) * grid.voxel_size,
+                                              (j + 0.5f) * grid.voxel_size,
+                                              k * grid.voxel_size);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 forward_pos = pos + vel * dt;
+                vel_z_backward[grid.velZIndex(i, j, k)] = grid_temp.sampleVelocity(forward_pos).z;
+            }
+        }
+    }
+
+    grid_temp.vel_x = grid.vel_x;
+    grid_temp.vel_y = grid.vel_y;
+    grid_temp.vel_z = grid.vel_z;
+
+    #pragma omp parallel for
+    for (int idx = 0; idx < static_cast<int>(grid.vel_x.size()); ++idx) {
+        float corrected = use_bfecc
+            ? grid_temp.vel_x[idx] + 0.5f * (grid_temp.vel_x[idx] - vel_x_backward[idx])
+            : vel_x_forward[idx] + 0.5f * (grid_temp.vel_x[idx] - vel_x_backward[idx]);
+        if (!std::isfinite(corrected)) corrected = grid_temp.vel_x[idx];
+        vel_x_forward[idx] = corrected;
+    }
+    #pragma omp parallel for
+    for (int idx = 0; idx < static_cast<int>(grid.vel_y.size()); ++idx) {
+        float corrected = use_bfecc
+            ? grid_temp.vel_y[idx] + 0.5f * (grid_temp.vel_y[idx] - vel_y_backward[idx])
+            : vel_y_forward[idx] + 0.5f * (grid_temp.vel_y[idx] - vel_y_backward[idx]);
+        if (!std::isfinite(corrected)) corrected = grid_temp.vel_y[idx];
+        vel_y_forward[idx] = corrected;
+    }
+    #pragma omp parallel for
+    for (int idx = 0; idx < static_cast<int>(grid.vel_z.size()); ++idx) {
+        float corrected = use_bfecc
+            ? grid_temp.vel_z[idx] + 0.5f * (grid_temp.vel_z[idx] - vel_z_backward[idx])
+            : vel_z_forward[idx] + 0.5f * (grid_temp.vel_z[idx] - vel_z_backward[idx]);
+        if (!std::isfinite(corrected)) corrected = grid_temp.vel_z[idx];
+        vel_z_forward[idx] = corrected;
+    }
+
+    if (use_maccormack) {
+        grid.vel_x = vel_x_forward;
+        grid.vel_y = vel_y_forward;
+        grid.vel_z = vel_z_forward;
+        return;
+    }
+
+    grid_temp.vel_x = vel_x_forward;
+    grid_temp.vel_y = vel_y_forward;
+    grid_temp.vel_z = vel_z_forward;
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i <= grid.nx; ++i) {
+                Vec3 pos = grid.origin + Vec3(i * grid.voxel_size,
+                                              (j + 0.5f) * grid.voxel_size,
+                                              (k + 0.5f) * grid.voxel_size);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 prev_pos = pos - vel * dt;
+                grid.vel_x[grid.velXIndex(i, j, k)] = grid_temp.sampleVelocity(prev_pos).x;
+            }
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j <= grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                Vec3 pos = grid.origin + Vec3((i + 0.5f) * grid.voxel_size,
+                                              j * grid.voxel_size,
+                                              (k + 0.5f) * grid.voxel_size);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 prev_pos = pos - vel * dt;
+                grid.vel_y[grid.velYIndex(i, j, k)] = grid_temp.sampleVelocity(prev_pos).y;
+            }
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k <= grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                Vec3 pos = grid.origin + Vec3((i + 0.5f) * grid.voxel_size,
+                                              (j + 0.5f) * grid.voxel_size,
+                                              k * grid.voxel_size);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 prev_pos = pos - vel * dt;
                 grid.vel_z[grid.velZIndex(i, j, k)] = grid_temp.sampleVelocity(prev_pos).z;
             }
         }
@@ -993,9 +1478,35 @@ void GasSimulator::advectVelocity(float dt) {
 }
 
 void GasSimulator::advectScalars(float dt) {
+    const bool use_maccormack = settings.advection_mode == GasSimulationSettings::AdvectionMode::MacCormack;
+    const bool use_bfecc = settings.advection_mode == GasSimulationSettings::AdvectionMode::BFECC;
+    const std::vector<float> preserved_interaction = grid.interaction;
+
     // Copy to temp
     grid_temp.density = grid.density;
     grid_temp.temperature = grid.temperature;
+    grid_temp.fuel = grid.fuel;
+    grid_temp.interaction = grid.interaction;
+
+    std::vector<float> density_forward;
+    std::vector<float> temperature_forward;
+    std::vector<float> fuel_forward;
+    std::vector<float> interaction_forward;
+    std::vector<float> density_backward;
+    std::vector<float> temperature_backward;
+    std::vector<float> fuel_backward;
+    std::vector<float> interaction_backward;
+
+    if (use_maccormack || use_bfecc) {
+        density_forward.resize(grid.density.size(), 0.0f);
+        temperature_forward.resize(grid.temperature.size(), 0.0f);
+        fuel_forward.resize(grid.fuel.size(), 0.0f);
+        interaction_forward.resize(grid.interaction.size(), 0.0f);
+        density_backward.resize(grid.density.size(), 0.0f);
+        temperature_backward.resize(grid.temperature.size(), 0.0f);
+        fuel_backward.resize(grid.fuel.size(), 0.0f);
+        interaction_backward.resize(grid.interaction.size(), 0.0f);
+    }
     
     #pragma omp parallel for collapse(2)
     for (int k = 0; k < grid.nz; ++k) {
@@ -1006,16 +1517,96 @@ void GasSimulator::advectScalars(float dt) {
                 Vec3 prev_pos = pos - vel * dt;
                 
                 size_t idx = grid.cellIndex(i, j, k);
-                grid.density[idx] = grid_temp.sampleDensity(prev_pos);
-                grid.temperature[idx] = grid_temp.sampleTemperature(prev_pos);
-                
-                // FIX: Use trilinear interpolation for fuel and interaction fields
-                // to avoid staircase artifacts and flicker.
-                grid.fuel[idx] = grid_temp.sampleCellCentered(grid_temp.fuel, prev_pos);
-                grid.interaction[idx] = grid_temp.sampleCellCentered(grid_temp.interaction, prev_pos);
+                const float density_value = grid_temp.sampleDensity(prev_pos);
+                const float temperature_value = grid_temp.sampleTemperature(prev_pos);
+                const float fuel_value = grid_temp.sampleCellCentered(grid_temp.fuel, prev_pos);
+                const float interaction_value = grid_temp.sampleCellCentered(grid_temp.interaction, prev_pos);
+
+                if (use_maccormack || use_bfecc) {
+                    density_forward[idx] = density_value;
+                    temperature_forward[idx] = temperature_value;
+                    fuel_forward[idx] = fuel_value;
+                    interaction_forward[idx] = interaction_value;
+                } else {
+                    grid.density[idx] = density_value;
+                    grid.temperature[idx] = temperature_value;
+                    grid.fuel[idx] = fuel_value;
+                    grid.interaction[idx] = interaction_value;
+                }
             }
         }
     }
+
+    if (!use_maccormack && !use_bfecc) {
+        // Flame interaction is a local reaction memory, not a transported scalar.
+        grid.interaction = preserved_interaction;
+        return;
+    }
+
+    grid_temp.density = density_forward;
+    grid_temp.temperature = temperature_forward;
+    grid_temp.fuel = fuel_forward;
+    grid_temp.interaction = interaction_forward;
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                Vec3 pos = grid.gridToWorld(i, j, k);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 forward_pos = pos + vel * dt;
+                size_t idx = grid.cellIndex(i, j, k);
+                density_backward[idx] = grid_temp.sampleDensity(forward_pos);
+                temperature_backward[idx] = grid_temp.sampleTemperature(forward_pos);
+                fuel_backward[idx] = grid_temp.sampleCellCentered(grid_temp.fuel, forward_pos);
+                interaction_backward[idx] = grid_temp.sampleCellCentered(grid_temp.interaction, forward_pos);
+            }
+        }
+    }
+
+    grid_temp.density = grid.density;
+    grid_temp.temperature = grid.temperature;
+    grid_temp.fuel = grid.fuel;
+    grid_temp.interaction = grid.interaction;
+
+    #pragma omp parallel for
+    for (int idx = 0; idx < static_cast<int>(grid.density.size()); ++idx) {
+        density_forward[idx] = std::max(0.0f, (use_bfecc ? grid_temp.density[idx] : density_forward[idx]) + 0.5f * (grid_temp.density[idx] - density_backward[idx]));
+        temperature_forward[idx] = std::max(0.0f, (use_bfecc ? grid_temp.temperature[idx] : temperature_forward[idx]) + 0.5f * (grid_temp.temperature[idx] - temperature_backward[idx]));
+        fuel_forward[idx] = std::max(0.0f, (use_bfecc ? grid_temp.fuel[idx] : fuel_forward[idx]) + 0.5f * (grid_temp.fuel[idx] - fuel_backward[idx]));
+        interaction_forward[idx] = std::max(0.0f, (use_bfecc ? grid_temp.interaction[idx] : interaction_forward[idx]) + 0.5f * (grid_temp.interaction[idx] - interaction_backward[idx]));
+    }
+
+    if (use_maccormack) {
+        grid.density = density_forward;
+        grid.temperature = temperature_forward;
+        grid.fuel = fuel_forward;
+        grid.interaction = preserved_interaction;
+        return;
+    }
+
+    grid_temp.density = density_forward;
+    grid_temp.temperature = temperature_forward;
+    grid_temp.fuel = fuel_forward;
+    grid_temp.interaction = interaction_forward;
+
+    #pragma omp parallel for collapse(2)
+    for (int k = 0; k < grid.nz; ++k) {
+        for (int j = 0; j < grid.ny; ++j) {
+            for (int i = 0; i < grid.nx; ++i) {
+                Vec3 pos = grid.gridToWorld(i, j, k);
+                Vec3 vel = grid.sampleVelocity(pos);
+                Vec3 prev_pos = pos - vel * dt;
+
+                size_t idx = grid.cellIndex(i, j, k);
+                grid.density[idx] = grid_temp.sampleDensity(prev_pos);
+                grid.temperature[idx] = grid_temp.sampleTemperature(prev_pos);
+                grid.fuel[idx] = grid_temp.sampleCellCentered(grid_temp.fuel, prev_pos);
+            }
+        }
+    }
+
+    grid.interaction = preserved_interaction;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1025,6 +1616,11 @@ void GasSimulator::advectScalars(float dt) {
 void GasSimulator::solvePressure() {
     float scale = 1.0f / grid.voxel_size;
     
+    // Pressure buffer is also used as a transient combustion expansion source.
+    // Consume it here so pressure does not accumulate across frames and blow the sim apart.
+    std::vector<float> expansion_source = grid.pressure;
+    std::fill(grid.pressure.begin(), grid.pressure.end(), 0.0f);
+
     // Compute divergence of the velocity field
     #pragma omp parallel for collapse(2)
     for (int k = 0; k < grid.nz; ++k) {
@@ -1033,7 +1629,7 @@ void GasSimulator::solvePressure() {
                 float div = (grid.velXAt(i + 1, j, k) - grid.velXAt(i, j, k) +
                              grid.velYAt(i, j + 1, k) - grid.velYAt(i, j, k) +
                              grid.velZAt(i, j, k + 1) - grid.velZAt(i, j, k)) * scale;
-                grid.divergence[grid.cellIndex(i, j, k)] = div;
+                grid.divergence[grid.cellIndex(i, j, k)] = div + expansion_source[grid.cellIndex(i, j, k)];
             }
         }
     }
@@ -1157,11 +1753,19 @@ void GasSimulator::applyDissipation(float dt) {
     }
     
     for (int i = 0; i < (int)grid.temperature.size(); ++i) {
-        grid.temperature[i] = settings.ambient_temperature + (grid.temperature[i] - settings.ambient_temperature) * temp_factor;
+        const float hotness = std::clamp((grid.temperature[i] - settings.ambient_temperature) /
+            std::max(settings.ignition_temperature - settings.ambient_temperature, 1.0f), 0.0f, 3.0f);
+        const float active_flame = std::clamp(grid.interaction[i] * 0.04f, 0.0f, 1.0f);
+        const float hot_temp_cooling = 1.0f / (1.0f + std::max(0.0f, hotness - active_flame) * 1.8f * dt);
+        grid.temperature[i] = settings.ambient_temperature +
+            (grid.temperature[i] - settings.ambient_temperature) * temp_factor * hot_temp_cooling;
     }
     
     for (int i = 0; i < (int)grid.fuel.size(); ++i) {
-        grid.fuel[i] *= fuel_factor;
+        const float hotness = std::clamp((grid.temperature[i] - settings.ambient_temperature) /
+            std::max(settings.ignition_temperature - settings.ambient_temperature, 1.0f), 0.0f, 3.0f);
+        const float hot_fuel_decay = 1.0f / (1.0f + 1.4f * hotness * dt);
+        grid.fuel[i] *= fuel_factor * hot_fuel_decay;
         if (grid.fuel[i] < 0.001f) grid.fuel[i] = 0.0f;
     }
 
@@ -1187,6 +1791,29 @@ void GasSimulator::processCombustion(float dt) {
     
     long long cell_count = (long long)grid.getCellCount(); 
     
+    auto neighbor_flame_activity = [&](long long idx) -> float {
+        const int plane = grid.nx * grid.ny;
+        const int k = static_cast<int>(idx / plane);
+        const int rem = static_cast<int>(idx - static_cast<long long>(k) * plane);
+        const int j = rem / grid.nx;
+        const int i = rem - j * grid.nx;
+
+        float max_neighbor = 0.0f;
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue;
+                    const int ni = i + dx;
+                    const int nj = j + dy;
+                    const int nk = k + dz;
+                    if (ni < 0 || nj < 0 || nk < 0 || ni >= grid.nx || nj >= grid.ny || nk >= grid.nz) continue;
+                    max_neighbor = std::max(max_neighbor, grid.interaction[grid.cellIndex(ni, nj, nk)]);
+                }
+            }
+        }
+        return std::clamp(max_neighbor * 0.10f, 0.0f, 1.0f);
+    };
+
     #pragma omp parallel for
     for (long long i = 0; i < cell_count; ++i) {
         // Defensive check: reset NaNs if any
@@ -1197,13 +1824,36 @@ void GasSimulator::processCombustion(float dt) {
         float f = grid.fuel[i];
         float t = grid.temperature[i];
         
+        const float previous_interaction = grid.interaction[i];
+
         // Reset reaction each frame
         grid.interaction[i] = 0.0f;
         
         if (f > 0.001f && t > settings.ignition_temperature) {
             // Yanma gerçekleşir!
             float den = grid.density[i];
-            float density_throttle = std::max(0.05f, 1.0f - (den / max_dens));
+            const float ignition_band = std::max(60.0f, (max_temp - settings.ignition_temperature) * 0.08f);
+            const float pilot_factor = std::clamp((t - settings.ignition_temperature) / std::max(ignition_band * 0.4f, 1.0f), 0.0f, 1.0f);
+            const float autoignite_start = settings.ignition_temperature + std::max(520.0f, ignition_band * 5.0f);
+            const float autoignite_factor = std::clamp((t - autoignite_start) / std::max(ignition_band * 5.5f, 220.0f), 0.0f, 1.0f);
+            const float flame_memory = std::clamp(previous_interaction * 0.12f, 0.0f, 1.0f);
+            const float neighbor_flame = neighbor_flame_activity(i);
+            const float guided_flame = std::max(flame_memory, neighbor_flame);
+            const float burn_gate = std::max(guided_flame, autoignite_factor * 0.2f);
+            if (guided_flame < 0.04f && autoignite_factor < 0.35f) {
+                continue;
+            }
+            const float thermal_saturation = std::clamp((t - settings.ignition_temperature) /
+                std::max(max_temp - settings.ignition_temperature, 1.0f), 0.0f, 1.0f);
+            const float oxygen_proxy = std::clamp(
+                1.0f -
+                (den / std::max(max_dens * 0.55f, 0.001f)) -
+                (f / 8.0f) -
+                thermal_saturation * 0.25f -
+                flame_memory * 0.2f +
+                neighbor_flame * 0.15f,
+                0.0f, 1.0f);
+            float density_throttle = std::clamp(1.0f - (den / std::max(max_dens * 0.65f, 0.001f)), 0.08f, 1.0f);
             
             float burned = f * settings.burn_rate * dt * density_throttle;
             if (burned > f) burned = f;
@@ -1212,7 +1862,8 @@ void GasSimulator::processCombustion(float dt) {
             float range = max_temp - settings.ignition_temperature;
             float temp_factor = (max_temp - t) / (range > 0 ? range : 1.0f);
             float temp_headroom = std::max(0.0f, std::min(1.0f, temp_factor));
-            burned *= temp_headroom; 
+            burned *= temp_headroom * pilot_factor * std::max(0.02f, burn_gate) * oxygen_proxy * oxygen_proxy * oxygen_proxy;
+            burned = std::min(burned, 0.035f * dt + f * 0.045f);
             
             if (burned < 0.00001f) continue; 
             
@@ -1242,6 +1893,12 @@ void GasSimulator::processCombustion(float dt) {
 }
 
 void GasSimulator::enforceBoundaries() {
+    // OPEN boundaries are best for rising plumes. Periodic keeps velocity continuous
+    // across the domain and is the only mode compatible with the current spectral FFT solve.
+    if (settings.boundary_mode == GasSimulationSettings::BoundaryMode::Periodic) {
+        return;
+    }
+
     // OPEN BOUNDARIES: We no longer zero the velocities at the domain borders.
     // This allows smoke to flow out freely instead of bouncing or pooling.
     // The pressure solver with Dirichlet p=0 handles the flux.
@@ -1257,12 +1914,55 @@ void GasSimulator::enforceBoundaries() {
 }
 
 void GasSimulator::applyPreset(const std::string& name) {
+    const float domain_width = std::max(grid.nx * grid.voxel_size, grid.voxel_size);
+    const float domain_height = std::max(grid.ny * grid.voxel_size, grid.voxel_size);
+    const float domain_depth = std::max(grid.nz * grid.voxel_size, grid.voxel_size);
+    const float domain_xz = std::max(std::min(domain_width, domain_depth), grid.voxel_size);
+
+    auto ensurePrimaryEmitter = [&]() -> Emitter& {
+        if (emitters.empty()) {
+            Emitter e;
+            e.name = "Primary Emitter";
+            e.shape = EmitterShape::Sphere;
+            e.position = grid.origin + Vec3(domain_width * 0.5f,
+                                            std::max(grid.voxel_size * 2.0f, domain_height * 0.08f),
+                                            domain_depth * 0.5f);
+            e.radius = std::max(grid.voxel_size * 3.0f, domain_xz * 0.08f);
+            emitters.push_back(e);
+        }
+        return emitters[0];
+    };
+
+    auto resetEmitterAdvancedControls = [&](Emitter& e) {
+        e.fuel_phase = FuelPhase::Gas;
+        e.phase_change_temperature = 420.0f;
+        e.fuel_release_rate = 1.0f;
+        e.flame_contact_sensitivity = 0.35f;
+        e.falloff_type = EmitterFalloffType::Smooth;
+        e.falloff_start = 0.15f;
+        e.falloff_end = 1.0f;
+        e.noise_enabled = true;
+        e.noise_modulate_density = true;
+        e.noise_modulate_temperature = false;
+        e.noise_modulate_velocity = true;
+        e.noise_speed = 0.45f;
+        e.spray_cone_angle = 0.0f;
+        e.speed_min = 1.0f;
+        e.speed_max = 1.0f;
+        e.emission_mode = EmitterEmissionMode::Continuous;
+        e.start_frame = 0.0f;
+        e.end_frame = -1.0f;
+        e.pulse_interval = 10.0f;
+        e.pulse_duration = 3.0f;
+        e.enabled = true;
+    };
+
     if (name == "Fire") {
         // ═══════════════════════════════════════════════════════════════════
         // FIRE PRESET - Houdini/EmberGen style realistic fire
         // Key: Strong buoyancy, fast fuel burn, moderate vorticity
         // ═══════════════════════════════════════════════════════════════════
-        settings.time_scale = 1.0f;               // Normal speed
+        settings.time_scale = 0.45f;              // Slower default so fire growth stays controllable
         settings.substeps = 2;                    // More substeps for stability
         
         // Dissipation - keep values high (close to 1.0) for persistence
@@ -1273,7 +1973,7 @@ void GasSimulator::applyPreset(const std::string& name) {
         
         // Buoyancy - STRONG upward force
         settings.buoyancy_density = -0.3f;        // Slight downward from density
-        settings.buoyancy_temperature = 5.0f;     // Strong upward force from heat (was 8, too explosive)
+        settings.buoyancy_temperature = 3.8f;     // Strong upward force from heat without instant runaway
         settings.ambient_temperature = 293.0f;    // Room temp (20°C)
         
         // Turbulence & Detail
@@ -1283,43 +1983,51 @@ void GasSimulator::applyPreset(const std::string& name) {
         
         // Combustion
         settings.ignition_temperature = 350.0f;   // Lower ignition for easy start
-        settings.burn_rate = 2.0f;                // Moderate combustion (was 3)
-        settings.heat_release = 100.0f;            // Increased for warmer fire
-        settings.expansion_strength = 3.0f;       // Fire expands outward
-        settings.smoke_generation = 0.8f;         // Moderate smoke from fire
+        settings.burn_rate = 1.35f;               // More controlled combustion
+        settings.heat_release = 72.0f;            // Warm but less explosive default
+        settings.expansion_strength = 2.0f;       // Fire expands outward without blowing up the whole domain
+        settings.smoke_generation = 0.65f;        // Moderate smoke from fire
         settings.soot_generation = 0.1f;
+        settings.boundary_mode = GasSimulationSettings::BoundaryMode::Open;
         
         // Solver
         settings.pressure_solver = GasSimulationSettings::PressureSolverMode::SOR;
         settings.advection_mode = GasSimulationSettings::AdvectionMode::MacCormack;
         settings.adaptive_timestep = true;
-        settings.cfl_number = 0.5f;
+        settings.cfl_number = 0.45f;
         
-        // Emitter - continuous flame source
-        if (emitters.empty()) {
-            // Create default emitter at grid center-bottom
-            Emitter e;
-            e.name = "Fire Emitter";
-            e.shape = EmitterShape::Sphere;
-            e.position = grid.origin + Vec3(grid.nx * grid.voxel_size * 0.5f, 
-                                            grid.voxel_size * 2.0f,
-                                            grid.nz * grid.voxel_size * 0.5f);
-            e.radius = grid.voxel_size * 3.0f;
-            emitters.push_back(e);
-        }
-        // Configure first emitter for fire (balanced values)
-        emitters[0].fuel_rate = 30.0f;        
-        emitters[0].density_rate = 3.0f;      
-        emitters[0].temperature = 800.0f;     // Increased emitter temp
-        emitters[0].velocity = Vec3(0, 3, 0); // Upward initial velocity (was 4)
-        emitters[0].enabled = true;
+        Emitter& e = ensurePrimaryEmitter();
+        resetEmitterAdvancedControls(e);
+        e.name = "Fire Emitter";
+        e.shape = EmitterShape::Cone;
+        e.position = grid.origin + Vec3(domain_width * 0.5f,
+                                        std::max(grid.voxel_size * 1.2f, domain_height * 0.04f),
+                                        domain_depth * 0.5f);
+        e.radius = std::max(grid.voxel_size * 2.5f, domain_xz * 0.09f);
+        e.height = std::max(grid.voxel_size * 7.0f, domain_height * 0.18f);
+        e.cone_angle = 28.0f;
+        e.fuel_rate = 16.0f;
+        e.density_rate = 1.6f;
+        e.temperature = 920.0f;
+        e.fuel_phase = FuelPhase::Gas;
+        e.velocity = Vec3(0, 3.4f, 0);
+        e.falloff_start = 0.0f;
+        e.falloff_end = 0.85f;
+        e.noise_frequency = 1.35f;
+        e.noise_amplitude = 0.55f;
+        e.noise_speed = 1.25f;
+        e.noise_modulate_temperature = true;
+        e.noise_modulate_velocity = true;
+        e.spray_cone_angle = 12.0f;
+        e.speed_min = 0.9f;
+        e.speed_max = 1.35f;
     }
     else if (name == "Smoke") {
         // ═══════════════════════════════════════════════════════════════════
         // SMOKE PRESET - Dense, slow-rising smoke plume
         // Key: Moderate buoyancy, no combustion, slow dissipation
         // ═══════════════════════════════════════════════════════════════════
-        settings.time_scale = 1.0f;
+        settings.time_scale = 0.55f;
         settings.substeps = 1;
         
         // Dissipation - smoke lingers (values close to 1.0)
@@ -1330,7 +2038,7 @@ void GasSimulator::applyPreset(const std::string& name) {
         
         // Buoyancy - warm smoke rises
         settings.buoyancy_density = -0.3f;        // Slight downward from mass
-        settings.buoyancy_temperature = 6.0f;     // Strong thermal lift!
+        settings.buoyancy_temperature = 3.8f;     // Lift, but less rocket-like at low resolutions
         settings.ambient_temperature = 293.0f;
         
         // Turbulence - subtle detail
@@ -1343,28 +2051,38 @@ void GasSimulator::applyPreset(const std::string& name) {
         settings.heat_release = 0.0f;
         settings.expansion_strength = 0.0f;
         settings.smoke_generation = 0.0f;
+        settings.boundary_mode = GasSimulationSettings::BoundaryMode::Open;
         
         // Solver
         settings.pressure_solver = GasSimulationSettings::PressureSolverMode::SOR;
         settings.advection_mode = GasSimulationSettings::AdvectionMode::MacCormack;
         settings.adaptive_timestep = true;
         
-        // Emitter - continuous smoke source
-        if (emitters.empty()) {
-            Emitter e;
-            e.name = "Smoke Emitter";
-            e.shape = EmitterShape::Sphere;
-            e.position = grid.origin + Vec3(grid.nx * grid.voxel_size * 0.5f, 
-                                            grid.voxel_size * 2.0f,
-                                            grid.nz * grid.voxel_size * 0.5f);
-            e.radius = grid.voxel_size * 4.0f;
-            emitters.push_back(e);
-        }
-        emitters[0].fuel_rate = 0.0f;         // No fuel
-        emitters[0].density_rate = 40.0f;     // Heavy smoke injection
-        emitters[0].temperature = 400.0f;     // Warm smoke
-        emitters[0].velocity = Vec3(0, 2, 0); // Gentle upward push
-        emitters[0].enabled = true;
+        Emitter& e = ensurePrimaryEmitter();
+        resetEmitterAdvancedControls(e);
+        e.name = "Smoke Emitter";
+        e.shape = EmitterShape::Cylinder;
+        e.position = grid.origin + Vec3(domain_width * 0.5f,
+                                        std::max(grid.voxel_size * 1.0f, domain_height * 0.035f),
+                                        domain_depth * 0.5f);
+        e.radius = std::max(grid.voxel_size * 3.5f, domain_xz * 0.12f);
+        e.height = std::max(grid.voxel_size * 3.0f, domain_height * 0.10f);
+        e.fuel_rate = 0.0f;
+        e.density_rate = 18.0f;
+        e.temperature = 375.0f;
+        e.fuel_phase = FuelPhase::Gas;
+        e.velocity = Vec3(0, 1.8f, 0);
+        e.falloff_type = EmitterFalloffType::Gaussian;
+        e.falloff_start = 0.0f;
+        e.falloff_end = 1.0f;
+        e.noise_frequency = 0.95f;
+        e.noise_amplitude = 0.42f;
+        e.noise_speed = 0.42f;
+        e.noise_modulate_temperature = true;
+        e.noise_modulate_velocity = true;
+        e.spray_cone_angle = 8.0f;
+        e.speed_min = 0.85f;
+        e.speed_max = 1.15f;
     }
     else if (name == "Explosion") {
         // ═══════════════════════════════════════════════════════════════════
@@ -1402,12 +2120,44 @@ void GasSimulator::applyPreset(const std::string& name) {
         settings.max_temperature = 6000.0f;       // Full range for explosion
         settings.max_velocity = 400.0f;
         settings.max_density = 50.0f;
+        settings.boundary_mode = GasSimulationSettings::BoundaryMode::Open;
         
         // Solver
         settings.pressure_solver = GasSimulationSettings::PressureSolverMode::SOR;
         settings.advection_mode = GasSimulationSettings::AdvectionMode::MacCormack; // High detail
         settings.adaptive_timestep = true;
         settings.cfl_number = 0.4f;               // More conservative for stability
+
+        Emitter& e = ensurePrimaryEmitter();
+        resetEmitterAdvancedControls(e);
+        e.name = "Explosion Emitter";
+        e.shape = EmitterShape::Sphere;
+        e.position = grid.origin + Vec3(grid.nx * grid.voxel_size * 0.5f,
+                                        grid.ny * grid.voxel_size * 0.22f,
+                                        grid.nz * grid.voxel_size * 0.5f);
+        e.radius = grid.voxel_size * std::max(3.0f, grid.nx * 0.06f);
+        e.fuel_rate = 120.0f;
+        e.density_rate = 10.0f;
+        e.temperature = 1800.0f;
+        e.fuel_phase = FuelPhase::Liquid;
+        e.phase_change_temperature = 520.0f;
+        e.fuel_release_rate = 1.35f;
+        e.flame_contact_sensitivity = 0.55f;
+        e.velocity = Vec3(0, 8.0f, 0);
+        e.falloff_type = EmitterFalloffType::Gaussian;
+        e.falloff_start = 0.0f;
+        e.falloff_end = 0.75f;
+        e.noise_frequency = 2.2f;
+        e.noise_amplitude = 0.85f;
+        e.noise_speed = 2.0f;
+        e.noise_modulate_temperature = true;
+        e.noise_modulate_velocity = true;
+        e.spray_cone_angle = 35.0f;
+        e.speed_min = 1.0f;
+        e.speed_max = 1.8f;
+        e.emission_mode = EmitterEmissionMode::Burst;
+        e.start_frame = 0.0f;
+        e.end_frame = 2.0f;
         
         // Clear grid and set initial 'fireball'
         grid.clear();
@@ -1718,6 +2468,12 @@ void GasSimulator::initCUDA() {
         std::to_string(settings.resolution_y) + "x" +
         std::to_string(settings.resolution_z));
 
+    if (!g_hasCUDA) {
+        SCENE_LOG_WARN("[GasSimulator::initCUDA] CUDA unavailable. Keeping CPU backend.");
+        cuda_initialized = false;
+        return;
+    }
+
     // Clear any previous sticky CUDA errors before allocation
     cudaGetLastError();
 
@@ -1743,7 +2499,23 @@ void GasSimulator::initCUDA() {
     cudaError_t allocErr = cudaGetLastError();
     if (allocErr != cudaSuccess) {
         SCENE_LOG_ERROR("[GasSimulator::initCUDA] CUDA allocation error: " + std::string(cudaGetErrorString(allocErr)));
-        // Don't return - continue and mark as initialized, the buffers may still be valid
+        FluidSim::cuda_free_simulation(
+            (float*)d_density, (float*)d_temperature, (float*)d_fuel,
+            (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
+            (float*)d_pressure, (float*)d_divergence,
+            (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z
+        );
+        if (d_tmp1) cudaFree(d_tmp1);
+        if (d_tmp2) cudaFree(d_tmp2);
+        if (d_tmp3) cudaFree(d_tmp3);
+        d_density = d_temperature = d_fuel = nullptr;
+        d_vel_x = d_vel_y = d_vel_z = nullptr;
+        d_pressure = d_divergence = nullptr;
+        d_vort_x = d_vort_y = d_vort_z = nullptr;
+        d_tmp1 = d_tmp2 = d_tmp3 = nullptr;
+        cuda_initialized = false;
+        gpu_data_valid = false;
+        return;
     }
 
     // Initial upload of CPU state
@@ -1851,6 +2623,14 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
         SCENE_LOG_WARN("[GasSimulator::stepCUDA] Called but cuda_initialized=false!");
         return;
     }
+
+    if (settings.pressure_solver == GasSimulationSettings::PressureSolverMode::FFT && canUseFFTPressureSolver()) {
+        if (!use_fft_solver || !fft_solver || fft_solver->nx != grid.nx || fft_solver->ny != grid.ny || fft_solver->nz != grid.nz) {
+            initFFTSolver();
+        }
+    } else if (use_fft_solver) {
+        cleanupFFTSolver();
+    }
     
     // SAFETY CHECK: Resolution mismatch should be handled in step(), but double-check here
     // This is a fallback safety check in case auto-reinit in step() fails
@@ -1878,40 +2658,33 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
     // Errors will be caught by individual kernel launches or at end of step
     cudaGetLastError(); // Just clear sticky error without sync
 
+    uploadAdvancedEmittersToGPU();
+
+    float world_mat[16];
+    for (int c = 0; c < 4; ++c) {
+        for (int r = 0; r < 4; ++r) {
+            world_mat[c * 4 + r] = world_matrix.m[r][c];
+        }
+    }
+
     float substep_dt = dt / settings.substeps;
     float inv_voxel_size = 1.0f / (settings.voxel_size > 0.0001f ? settings.voxel_size : 0.1f);
     
+    const float step_time_base = accumulated_time;
     for (int sub = 0; sub < settings.substeps; ++sub) {
+        const float substep_time = step_time_base + static_cast<float>(sub) * substep_dt;
         // 1. Apply Emitters
-        for (const auto& emitter : emitters) {
-             if (!emitter.enabled) continue;
-             
-             // Convert World Position -> Grid Index Space
-             // IMPORTANT: Position must be relative to grid origin
-             Vec3 pos_idx = (emitter.position - grid.origin) * inv_voxel_size;
-             
-             // Convert velocity from world space (m/s) to grid space (cells/s)
-             // This is CRITICAL for advection to work correctly!
-             Vec3 vel_grid = emitter.velocity * inv_voxel_size;
-             
-             // Size in voxels
-             float radius_idx = emitter.radius * inv_voxel_size;
-             Vec3 size_idx = emitter.size * inv_voxel_size;
-             
-             float sx = (emitter.shape == EmitterShape::Sphere) ? radius_idx : size_idx.x;
-             
-             // CRITICAL: Use grid dimensions (actual buffer size), not settings
-             FluidSim::cuda_apply_emitter(
-                grid.nx, grid.ny, grid.nz,
-                substep_dt,
+        if (d_advanced_emitters && gpu_advanced_emitter_count > 0) {
+            FluidSim::cuda_apply_advanced_emitters(
+                grid.nx, grid.ny, grid.nz, substep_dt,
                 (float*)d_density, (float*)d_temperature, (float*)d_fuel,
                 (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
-                (int)emitter.shape,
-                pos_idx.x, pos_idx.y, pos_idx.z,
-                sx, size_idx.y, size_idx.z,
-                emitter.density_rate, emitter.temperature, emitter.fuel_rate,
-                vel_grid.x, vel_grid.y, vel_grid.z
-             );
+                d_advanced_emitters,
+                gpu_advanced_emitter_count,
+                world_mat,
+                static_cast<float>(current_frame) + static_cast<float>(sub) / std::max(1, settings.substeps),
+                substep_time
+            );
         }
         
         // 2. Apply External Force Fields (GPU)
@@ -1919,14 +2692,6 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
             uploadForceFieldsToGPU();
             
             if (d_force_fields && gpu_force_field_count > 0) {
-                // Convert world_matrix to column-major float array
-                float world_mat[16];
-                for (int c = 0; c < 4; ++c) {
-                    for (int r = 0; r < 4; ++r) {
-                        world_mat[c * 4 + r] = world_matrix.m[r][c];
-                    }
-                }
-                
                 // NOTE: Force field returns force in m/s², but GPU velocity is in grid units.
                 // We need to scale the force by inv_voxel_size to convert to grid units.
                 // This is done inside the kernel by passing inv_voxel_size as a parameter.
@@ -1939,7 +2704,7 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
                     world_mat,
                     (FluidSim::GPUForceField*)d_force_fields,
                     gpu_force_field_count,
-                    accumulated_time
+                    substep_time
                 );
             }
         }
@@ -1957,7 +2722,7 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
         
         // Timestep
         params.dt = substep_dt;
-        params.time = accumulated_time;
+        params.time = substep_time;
         
         // Advection
         params.advection_mode = static_cast<int>(settings.advection_mode);
@@ -2012,15 +2777,30 @@ void GasSimulator::stepCUDA(float dt, const Matrix4x4& world_matrix) {
         params.sparse_mode = settings.sparse_mode ? 1 : 0;
         params.sparse_threshold = settings.sparse_threshold;
         
-        // Call new unified simulation step
-        FluidSim::cuda_step_simulation_v2(
-            params,
-            (float*)d_density, (float*)d_temperature, (float*)d_fuel,
-            (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
-            (float*)d_pressure, (float*)d_divergence,
-            (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z,
-            (float*)d_tmp1, (float*)d_tmp2, (float*)d_tmp3
-        );
+        const bool use_fft_projection =
+            settings.pressure_solver == GasSimulationSettings::PressureSolverMode::FFT &&
+            use_fft_solver && fft_solver != nullptr;
+
+        if (use_fft_projection) {
+            FluidSim::cuda_step_simulation_v2_fft(
+                params,
+                fft_solver,
+                (float*)d_density, (float*)d_temperature, (float*)d_fuel,
+                (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
+                (float*)d_pressure, (float*)d_divergence,
+                (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z,
+                (float*)d_tmp1, (float*)d_tmp2, (float*)d_tmp3
+            );
+        } else {
+            FluidSim::cuda_step_simulation_v2(
+                params,
+                (float*)d_density, (float*)d_temperature, (float*)d_fuel,
+                (float*)d_vel_x, (float*)d_vel_y, (float*)d_vel_z,
+                (float*)d_pressure, (float*)d_divergence,
+                (float*)d_vort_x, (float*)d_vort_y, (float*)d_vort_z,
+                (float*)d_tmp1, (float*)d_tmp2, (float*)d_tmp3
+            );
+        }
     }
     
     // NOTE: Removed post-step cudaDeviceSynchronize - was causing UI freezes
@@ -2056,6 +2836,58 @@ void GasSimulator::downloadFromGPU() {
         grid.density.data(), grid.temperature.data(), grid.fuel.data(),
         grid.vel_x.data(), grid.vel_y.data(), grid.vel_z.data()
     );
+}
+
+GasSimulator::StateSnapshot GasSimulator::captureState() const {
+    StateSnapshot snapshot;
+    snapshot.grid = grid;
+    snapshot.grid_temp = grid_temp;
+    snapshot.persistent_vorticity = persistent_vorticity;
+    snapshot.current_frame = current_frame;
+    snapshot.accumulated_time = accumulated_time;
+    snapshot.valid = true;
+    return snapshot;
+}
+
+bool GasSimulator::canUseFFTPressureSolver() const {
+    if (!g_hasCUDA) {
+        return false;
+    }
+
+    if (settings.backend != SolverBackend::CUDA) {
+        return false;
+    }
+
+    if (settings.boundary_mode != GasSimulationSettings::BoundaryMode::Periodic) {
+        return false;
+    }
+
+    const int min_dim = std::min({ grid.nx, grid.ny, grid.nz });
+    const long long total_cells = (long long)grid.nx * grid.ny * grid.nz;
+    if (min_dim < 8 || total_cells <= 0) {
+        return false;
+    }
+
+    for (const auto& emitter : emitters) {
+        if (emitter.enabled && emitter.fuel_rate > 0.0001f) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void GasSimulator::restoreState(const StateSnapshot& snapshot) {
+    if (!snapshot.valid) return;
+    grid = snapshot.grid;
+    grid_temp = snapshot.grid_temp;
+    persistent_vorticity = snapshot.persistent_vorticity;
+    current_frame = snapshot.current_frame;
+    accumulated_time = snapshot.accumulated_time;
+    gpu_data_valid = false;
+    if (cuda_initialized && settings.backend == SolverBackend::CUDA) {
+        uploadToGPU();
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2204,7 +3036,7 @@ void GasSimulator::uploadAdvancedEmittersToGPU() {
         GPUAdvancedEmitter ge = {};
         
         // Shape & Transform
-        ge.shape = static_cast<int>(e.shape);
+        ge.shape = mapEmitterShapeToGPU(e.shape);
         ge.enabled = e.enabled ? 1 : 0;
         ge.pos_x = e.position.x;
         ge.pos_y = e.position.y;
@@ -2221,45 +3053,49 @@ void GasSimulator::uploadAdvancedEmittersToGPU() {
         ge.size_x = e.size.x;
         ge.size_y = e.size.y;
         ge.size_z = e.size.z;
-        ge.height = e.size.y;  // Use Y size as height for cylinder/cone
-        ge.inner_radius = 0.0f;
-        ge.cone_angle = 0.5f;  // Default cone angle (radians)
+        ge.height = e.height;
+        ge.inner_radius = e.inner_radius;
+        ge.cone_angle = degreesToRadians(e.cone_angle);
         
         // Emission
         ge.density_rate = e.density_rate;
         ge.temperature = e.temperature;
         ge.fuel_rate = e.fuel_rate;
+        ge.fuel_phase = static_cast<int>(e.fuel_phase);
+        ge.phase_change_temperature = e.phase_change_temperature;
+        ge.fuel_release_rate = e.fuel_release_rate;
+        ge.flame_contact_sensitivity = e.flame_contact_sensitivity;
         ge.vel_x = e.velocity.x;
         ge.vel_y = e.velocity.y;
         ge.vel_z = e.velocity.z;
         ge.velocity_magnitude = e.velocity.length();
         
-        // Falloff (default smooth falloff)
-        ge.falloff_type = 2;  // Smooth
-        ge.falloff_start = 0.7f;
-        ge.falloff_end = 1.0f;
+        // Falloff
+        ge.falloff_type = static_cast<int>(e.falloff_type);
+        ge.falloff_start = e.falloff_start;
+        ge.falloff_end = e.falloff_end;
         
-        // Noise modulation (disabled by default for basic emitters)
-        ge.noise_enabled = 0;
-        ge.noise_frequency = 1.0f;
-        ge.noise_amplitude = 0.3f;
-        ge.noise_speed = 0.5f;
-        ge.noise_seed = 42;
-        ge.noise_modulate_density = 1;
-        ge.noise_modulate_temperature = 0;
-        ge.noise_modulate_velocity = 0;
+        // Noise modulation
+        ge.noise_enabled = e.noise_enabled ? 1 : 0;
+        ge.noise_frequency = e.noise_frequency;
+        ge.noise_amplitude = e.noise_amplitude;
+        ge.noise_speed = e.noise_speed;
+        ge.noise_seed = e.noise_seed;
+        ge.noise_modulate_density = e.noise_modulate_density ? 1 : 0;
+        ge.noise_modulate_temperature = e.noise_modulate_temperature ? 1 : 0;
+        ge.noise_modulate_velocity = e.noise_modulate_velocity ? 1 : 0;
         
-        // Velocity variance (default no spray)
-        ge.spray_cone_angle = 0.0f;
-        ge.speed_min = 1.0f;
-        ge.speed_max = 1.0f;
+        // Velocity variance
+        ge.spray_cone_angle = degreesToRadians(e.spray_cone_angle);
+        ge.speed_min = e.speed_min;
+        ge.speed_max = e.speed_max;
         
-        // Emission profile (continuous)
-        ge.emission_mode = 0;  // Continuous
-        ge.start_frame = 0.0f;
-        ge.end_frame = -1.0f;  // Never ends
-        ge.pulse_interval = 10.0f;
-        ge.pulse_duration = 5.0f;
+        // Emission profile
+        ge.emission_mode = static_cast<int>(e.emission_mode);
+        ge.start_frame = e.start_frame;
+        ge.end_frame = e.end_frame;
+        ge.pulse_interval = e.pulse_interval;
+        ge.pulse_duration = e.pulse_duration;
         
         gpu_emitters.push_back(ge);
     }

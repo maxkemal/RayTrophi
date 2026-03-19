@@ -109,6 +109,7 @@ public:
     ~SceneUI();
     // UI State
     int pivot_mode = 0; // 0=Median Point (Group), 1=Individual Origins
+    bool pivot_edit_mode = false; // When true, gizmo moves object pivot without moving geometry
     int active_properties_tab = 0; // NEW: Vertical side tab index
     bool show_animation_panel = true; // Default open
     bool show_foliage_tab = false;    // Default closed (User preference)
@@ -122,6 +123,7 @@ public:
     bool show_world_tab = true;        // World & Sky tab (Default open)
     bool show_hair_tab = true;         // Hair & Fur tab (Default open)
     bool show_modifiers_tab = true;    // Modifiers & Sculpt tab (Default open)
+    int vdb_import_orientation_preset = 0; // 0=Auto, 1=Standard, 2=Y-up to Z-forward (-90 X)
     std::string tab_to_focus = "";    // For auto-focusing tabs upon activation
 
     // Hair/Fur System
@@ -134,6 +136,18 @@ public:
     
     // Shared Volumetric UI
     static bool drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<class VolumeShader> shader, class VDBVolume* vdb = nullptr, class GasVolume* gas = nullptr);
+    struct VDBShaderDefaults {
+        float density_multiplier = 2.0f;
+        float scattering_coefficient = 1.5f;
+        float absorption_coefficient = 0.05f;
+        float step_size = 0.15f;
+        int max_steps = 64;
+        int shadow_steps = 8;
+    };
+    static VDBShaderDefaults estimateVDBShaderDefaults(const class VDBVolume& vdb);
+    static void applyEstimatedVDBShaderDefaults(class VDBVolume& vdb);
+    static bool shouldApplySpecialVDBOrientation(const std::string& source_hint);
+    static void applyVDBImportOrientation(class VDBVolume& vdb, int orientation_preset, const std::string& source_hint = "");
 
     static void syncInstancesToScene(UIContext& ctx, InstanceGroup& group, bool clear_only);
     static void syncVDBVolumesToGPU(UIContext& ctx);
@@ -198,6 +212,8 @@ public:
      void invalidateCache();
      void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
      void updateBBoxCache(const std::string& objectName);  // Update bounding box for specific object after transform
+     void moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta);
+     void recenterObjectPivotToBoundsCenter(UIContext& ctx, const std::string& objectName);
      
      // Viewport Messages (HUD)
      struct ViewportMessage {
@@ -512,6 +528,8 @@ private:
     std::map<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>> mesh_cache;
     // Fast lookup from Triangle pointer to its index in world.objects (for BVH Picking)
     std::unordered_map<const class Triangle*, int> tri_to_index;
+    size_t cached_scene_triangle_count = 0;
+    std::unordered_map<std::string, size_t> cached_triangle_count_by_object;
     // Sequential cache for ImGui Clipper (Visualization)
     std::vector<std::pair<std::string, std::vector<std::pair<int, std::shared_ptr<class Triangle>>>>> mesh_ui_cache;
     

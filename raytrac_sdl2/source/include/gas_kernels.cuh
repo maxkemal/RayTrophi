@@ -3,6 +3,8 @@
 
 namespace FluidSim {
 
+struct FFTPressureSolver;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // GPU SIMULATION PARAMETERS - All settings passed from UI to GPU
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -71,7 +73,7 @@ struct GPUSimulationParams {
     // Pressure Solver
     // ─────────────────────────────────────────────────────────────────────────
     int pressure_iterations;
-    int pressure_solver_mode;       // 0=GaussSeidel, 1=SOR, 2=FFT
+    int pressure_solver_mode;       // 0=GaussSeidel, 1=SOR, 2=Multigrid, 3=FFT
     float sor_omega;                // SOR relaxation factor (1.0-2.0, optimal ~1.7)
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -118,6 +120,16 @@ void cuda_download_data(int nx, int ny, int nz,
  */
 void cuda_step_simulation_v2(
     const GPUSimulationParams& params,
+    float* d_rho, float* d_temp, float* d_fuel,
+    float* d_vx, float* d_vy, float* d_vz,
+    float* d_p, float* d_div,
+    float* d_vort_x, float* d_vort_y, float* d_vort_z,
+    float* d_tmp1, float* d_tmp2, float* d_tmp3
+);
+
+void cuda_step_simulation_v2_fft(
+    const GPUSimulationParams& params,
+    FFTPressureSolver* fft_solver,
     float* d_rho, float* d_temp, float* d_fuel,
     float* d_vx, float* d_vy, float* d_vz,
     float* d_p, float* d_div,

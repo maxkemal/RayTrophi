@@ -677,6 +677,12 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
                 j_defaults[name] = mat4ToJson(matrix);
             }
             j_bones["boneDefaultTransforms"] = j_defaults;
+
+            json j_weighted = json::array();
+            for (const auto& name : scene.boneData.weightedBoneNames) {
+                j_weighted.push_back(name);
+            }
+            j_bones["weightedBoneNames"] = j_weighted;
             
             // Save bone hierarchy
             json j_parents = json::object();
@@ -854,10 +860,12 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         for (const auto& ctx : scene.importedModelContexts) {
             json c;
             c["importName"] = ctx.importName;
+            c["animGraphAssetKey"] = ctx.animGraphAssetKey;
             c["hasAnimation"] = ctx.hasAnimation;
             c["globalInverseTransform"] = mat4ToJson(ctx.globalInverseTransform);
             c["useRootMotion"] = ctx.useRootMotion;
             c["useAnimGraph"] = ctx.useAnimGraph;
+            c["animGraphFollowTimeline"] = ctx.animGraphFollowTimeline;
             c["visible"] = ctx.visible;
             j_contexts.push_back(c);
         }
@@ -1089,6 +1097,17 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             if (!root["instances"].get(inst_el)) {
                 if (progress_callback) progress_callback(77, "Loading foliage system...");
                 InstanceManager::getInstance().deserialize(sjsonToNlohmann(inst_el), scene);
+            }
+
+            if (InstanceManager::getInstance().getGroups().empty() &&
+                TerrainManager::getInstance().hasLegacyFoliage()) {
+                int migrated_legacy_groups = TerrainManager::getInstance().migrateLegacyFoliageToInstanceGroups(scene, true);
+                if (migrated_legacy_groups > 0 && progress_callback) {
+                    progress_callback(77, "Migrating legacy foliage...");
+                }
+            }
+
+            if (!InstanceManager::getInstance().getGroups().empty()) {
                 InstanceManager::getInstance().rebuildSceneObjects(scene);
             }
 
@@ -1198,6 +1217,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         scene.boneData.boneDefaultTransforms[name] = jsonToMat4(mat);
                     }
                 }
+                if (j_bones.contains("weightedBoneNames")) {
+                    for (const auto& name : j_bones["weightedBoneNames"]) {
+                        scene.boneData.weightedBoneNames.insert(name.get<std::string>());
+                    }
+                }
                 if (j_bones.contains("boneParents")) {
                     for (auto& [child, parent] : j_bones["boneParents"].items()) {
                         scene.boneData.boneParents[child] = parent.get<std::string>();
@@ -1229,6 +1253,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     auto j_ctx = sjsonToNlohmann(j_ctx_el);
                     SceneData::ImportedModelContext ctx;
                     ctx.importName = j_ctx.value("importName", "");
+                    ctx.animGraphAssetKey = j_ctx.value("animGraphAssetKey", ctx.importName);
                     ctx.hasAnimation = j_ctx.value("hasAnimation", false);
                     if (j_ctx.contains("globalInverseTransform")) {
                         ctx.globalInverseTransform = jsonToMat4(j_ctx["globalInverseTransform"]);
@@ -1237,7 +1262,15 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                     }
                     ctx.useRootMotion = j_ctx.value("useRootMotion", false);
                     ctx.useAnimGraph = j_ctx.value("useAnimGraph", false);
+                    ctx.animGraphFollowTimeline = j_ctx.value("animGraphFollowTimeline", false);
                     ctx.visible = j_ctx.value("visible", true);
+                    if (!ctx.animGraphAssetKey.empty()) {
+                        auto itGraph = g_animGraphUI.graphs.find(ctx.animGraphAssetKey);
+                        if (itGraph != g_animGraphUI.graphs.end() && itGraph->second) {
+                            ctx.runtimeGraph = itGraph->second->clone();
+                            ctx.graph = ctx.runtimeGraph;
+                        }
+                    }
                     scene.importedModelContexts.push_back(ctx);
                 }
             }
@@ -1344,6 +1377,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 ctx.members.push_back(tri);
             }
         }
+        ctx.rebuildSkeletonRepresentation(scene.boneData);
     }
 
     if (!scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty()) {
@@ -1378,9 +1412,9 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
 // ============================================================================
 
 bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
-                                  Renderer& renderer, Backend::IBackend* backend,
-                                  std::function<void(int, const std::string&)> progress_callback,
-                                  bool rebuild) {
+    Renderer& renderer, Backend::IBackend* backend,
+    std::function<void(int, const std::string&)> progress_callback,
+    bool rebuild) {
     if (!fs::exists(filepath)) {
         SCENE_LOG_ERROR("File not found: " + filepath);
         return false;
@@ -2372,7 +2406,7 @@ json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVo
         j["id"] = i;
         j["name"] = vdb->name;
         j["filepath"] = vdb->getFilePath();
-        j["transform"] = mat4ToJson(vdb->getTransform());
+        j["transform"] = mat4ToJson(vdb->getPivotMatrix());
         j["density_scale"] = vdb->density_scale;
         j["pivot_offset"] = {vdb->getPivotOffset().x, vdb->getPivotOffset().y, vdb->getPivotOffset().z};
         
@@ -2440,12 +2474,12 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
         }
         
         vdb->name = j.value("name", "VDB Volume");
-        if (j.contains("transform")) vdb->setTransform(jsonToMat4(j["transform"]));
-        vdb->density_scale = j.value("density_scale", 1.0f);
         if (j.contains("pivot_offset")) {
             auto po = j["pivot_offset"];
-            vdb->setPivotOffset(Vec3(po[0], po[1], po[2]));
+            vdb->setPivotOffset(Vec3(po[0], po[1], po[2]), false);
         }
+        if (j.contains("transform")) vdb->setPivotMatrix(jsonToMat4(j["transform"]));
+        vdb->density_scale = j.value("density_scale", 1.0f);
         
         vdb->setCurrentFrame(j.value("current_frame", 0));
         vdb->setLinkedToTimeline(j.value("timeline_linked", true));

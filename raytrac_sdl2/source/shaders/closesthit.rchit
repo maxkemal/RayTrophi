@@ -472,7 +472,7 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
         float stepScale = clamp(sqrt(tauHint), 0.25, 1.0);
         int steps = int(ceil(float(reqSteps) * stepScale));
         steps = clamp(steps, 3, min(reqSteps, 16));
-        float stepW = segLen / (float(steps) * 2.0);
+        float stepW = segLen / float(steps) ;
         stepW = max(stepW, 1e-5);
         float jitter = fract(sin(dot(shadowOrigin + lightDir * float(vi + 1), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
         float opticalDepth = 0.0;
@@ -544,6 +544,55 @@ void buildONB(in vec3 n, out vec3 tangent, out vec3 bitangent) {
     bitangent = vec3(b, sign_ + n.y * n.y * a, -n.y);
 }
 
+vec3 safeNormalize(vec3 v, vec3 fallback);
+
+bool buildSurfaceTBN(
+    vec3 objV0, vec3 objV1, vec3 objV2,
+    vec2 uv0, vec2 uv1, vec2 uv2,
+    vec3 shadingNormal,
+    out vec3 tangent,
+    out vec3 bitangent
+) {
+    vec2 dUV1 = uv1 - uv0;
+    vec2 dUV2 = uv2 - uv0;
+    float detUV = dUV1.x * dUV2.y - dUV2.x * dUV1.y;
+
+    if (abs(detUV) <= 1e-8) {
+        buildONB(shadingNormal, tangent, bitangent);
+        return false;
+    }
+
+    vec3 worldV0 = vec3(gl_ObjectToWorldEXT * vec4(objV0, 1.0));
+    vec3 worldV1 = vec3(gl_ObjectToWorldEXT * vec4(objV1, 1.0));
+    vec3 worldV2 = vec3(gl_ObjectToWorldEXT * vec4(objV2, 1.0));
+    vec3 worldEdge1 = worldV1 - worldV0;
+    vec3 worldEdge2 = worldV2 - worldV0;
+
+    float invDet = 1.0 / detUV;
+    tangent = vec3(
+        invDet * (dUV2.y * worldEdge1.x - dUV1.y * worldEdge2.x),
+        invDet * (dUV2.y * worldEdge1.y - dUV1.y * worldEdge2.y),
+        invDet * (dUV2.y * worldEdge1.z - dUV1.y * worldEdge2.z)
+    );
+
+    tangent = safeNormalize(tangent - shadingNormal * dot(shadingNormal, tangent), vec3(0.0));
+    if (dot(tangent, tangent) <= 1e-8) {
+        buildONB(shadingNormal, tangent, bitangent);
+        return false;
+    }
+
+    float sigmaInst = (determinant(mat3(gl_ObjectToWorldEXT)) < 0.0) ? -1.0 : 1.0;
+    float sigmaUV = (detUV < 0.0) ? -1.0 : 1.0;
+    bitangent = safeNormalize(cross(shadingNormal, tangent), vec3(0.0));
+    bitangent *= (sigmaUV * sigmaInst);
+    if (dot(bitangent, bitangent) <= 1e-8) {
+        buildONB(shadingNormal, tangent, bitangent);
+        return false;
+    }
+
+    return true;
+}
+
 // Robust ray origin offset — Wächter & Binder, Ray Tracing Gems Ch. 6.
 // Uses ULP-based integer offsetting: scales with the magnitude of p so it
 // works correctly at any distance from the world origin. Unlike a fixed
@@ -562,6 +611,28 @@ vec3 offset_ray(vec3 p, vec3 n) {
         abs(p.x) < origin ? p.x + float_scale * n.x : p_i.x,
         abs(p.y) < origin ? p.y + float_scale * n.y : p_i.y,
         abs(p.z) < origin ? p.z + float_scale * n.z : p_i.z);
+}
+
+vec3 safeNormalize(vec3 v, vec3 fallback) {
+    float len2 = dot(v, v);
+    bool invalid = isnan(v.x) || isnan(v.y) || isnan(v.z)
+                || isinf(v.x) || isinf(v.y) || isinf(v.z);
+    if (len2 <= 1e-20 || invalid) return fallback;
+    return v * inversesqrt(len2);
+}
+
+vec3 computeShadowNormal(vec3 geomNormal, vec3 shadingNormal, vec3 rayDir) {
+    vec3 ng = safeNormalize(geomNormal, vec3(0.0, 1.0, 0.0));
+    vec3 ns = safeNormalize(shadingNormal, ng);
+
+    if (dot(ng, rayDir) > 0.0) ng = -ng;
+    if (dot(ns, rayDir) > 0.0) ns = -ns;
+
+    vec3 blended = safeNormalize(ng + ns, ng);
+    if (dot(blended, ng) < 0.0) {
+        blended = ng;
+    }
+    return blended;
 }
 
 // -----------------------------
@@ -1035,7 +1106,8 @@ void scatterSSS(vec3 hitPos, vec3 normal, vec3 albedo,
         float randCh = rnd(seed);
         float sigmaSample = (randCh < 0.333) ? sigma_t.x : (randCh < 0.666) ? sigma_t.y : sigma_t.z;
         float scatterDist = -log(max(rnd(seed), 1e-6)) / max(sigmaSample, 1e-6);
-        scatterDist = min(scatterDist, safeScale * 10.0);
+        float maxRadius = max(max(scaledRadius.x, scaledRadius.y), scaledRadius.z);
+        scatterDist = min(scatterDist, maxRadius * 3.0);
 
         pos += dir * scatterDist;
 
@@ -1302,17 +1374,24 @@ void main() {
     }
 
     vec3 worldNormal;
-    vec3 geomNormal; // The physical flat non-interpolated triangle normal
+    vec3 geomNormalRaw;
+    vec3 geomNormal;
+    vec3 objV0 = vec3(0.0);
+    vec3 objV1 = vec3(0.0);
+    vec3 objV2 = vec3(0.0);
+    vec2 uv0 = vec2(0.0);
+    vec2 uv1 = vec2(0.0);
+    vec2 uv2 = vec2(0.0);
 
     if (geo.vertexAddr != 0) {
         VertexBuffer vBuf = VertexBuffer(geo.vertexAddr);
-        vec3 v0 = vBuf.v[i0];
-        vec3 v1 = vBuf.v[i1];
-        vec3 v2 = vBuf.v[i2];
-        vec3 localFaceNormal = normalize(cross(v1 - v0, v2 - v0));
-        geomNormal = normalize(vec3(localFaceNormal * mat3(gl_WorldToObjectEXT)));
+        objV0 = vBuf.v[i0];
+        objV1 = vBuf.v[i1];
+        objV2 = vBuf.v[i2];
+        vec3 localFaceNormal = normalize(cross(objV1 - objV0, objV2 - objV0));
+        geomNormalRaw = normalize(vec3(localFaceNormal * mat3(gl_WorldToObjectEXT)));
     } else {
-        geomNormal = normalize(vec3(0, 1, 0));  // Fallback
+        geomNormalRaw = normalize(vec3(0, 1, 0));  // Fallback
     }
 
     vec3 bary = vec3(1.0 - baryCoord.x - baryCoord.y, baryCoord.x, baryCoord.y);
@@ -1327,7 +1406,7 @@ void main() {
         worldNormal = normalize(vec3(localNormal * mat3(gl_WorldToObjectEXT)));
     } else {
         // Normal buffer yoksa ham üçgen normalini kullan
-        worldNormal = geomNormal;
+        worldNormal = geomNormalRaw;
     }
 
     vec3 hitPos = gl_WorldRayOriginEXT + gl_WorldRayDirectionEXT * gl_HitTEXT;
@@ -1337,20 +1416,34 @@ void main() {
     vec2 hitUV = vec2(0.0);
     if (geo.uvAddr != 0) {
         UVBuffer uvBuf = UVBuffer(geo.uvAddr);
-        hitUV = uvBuf.u[i0] * bary.x + uvBuf.u[i1] * bary.y + uvBuf.u[i2] * bary.z;
+        uv0 = uvBuf.u[i0];
+        uv1 = uvBuf.u[i1];
+        uv2 = uvBuf.u[i2];
+        hitUV = uv0 * bary.x + uv1 * bary.y + uv2 * bary.z;
     }
 
     // Vulkan shader coordinate origin differs; flip V to match OptiX (and texture upload)
     hitUV.y = 1.0 - hitUV.y;
 
     // Double-sided: Normaller her zaman ray'e karşı baksın
-    if (dot(worldNormal, rayDir) > 0.0) {
+    // FIX NOTE:
+    // Front/back orientation must follow the geometric triangle normal first.
+    // Flipping the interpolated shading normal independently caused Vulkan-only
+    // discontinuities on smooth surfaces near grazing angles. Match OptiX by
+    // using geomNormalRaw as the authority for both normals.
+    geomNormal = geomNormalRaw;
+
+    if (dot(geomNormalRaw, rayDir) > 0.0) {
         worldNormal = -worldNormal;
     }
     // Geometrik normali de kamera/ışın yönüne çeviriyoruz (kendi kendine çarpışmayı önlemek için)
     if (dot(geomNormal, rayDir) > 0.0) {
-        geomNormal = -geomNormal;
+        geomNormal = -geomNormalRaw;
     }
+
+    vec3 surfaceTangent;
+    vec3 surfaceBitangent;
+    buildSurfaceTBN(objV0, objV1, objV2, uv0, uv1, uv2, worldNormal, surfaceTangent, surfaceBitangent);
 
     // ----------------------------------------------------------
     // 2b. Terrain Splat-Layer Blending (FLAG_TERRAIN = bit 16)
@@ -1424,9 +1517,6 @@ void main() {
                 if (int(lm.normal_tex) > 0) {
                     vec3 ns = texture(materialTextures[nonuniformEXT(int(lm.normal_tex))], layerUV).rgb;
                     ns = ns * 2.0 - vec3(1.0); // [0,1] -> [-1,1]
-                    // hitUV V is flipped globally; compensate tangent-space Y (green) for normal maps.
-                    ns.y = -ns.y;
-                    ns.z = abs(ns.z);           // ensure outward-pointing Z
                     blendNormal_ts += weights[k] * ns;
                     anyNormalTex = true;
                 } else {
@@ -1452,9 +1542,11 @@ void main() {
             // Set mat.normal_tex = 0 so the standard normal-map section below does nothing.
             if (anyNormalTex) {
                 vec3 nts = normalize(blendNormal_ts);
-                vec3 tgt, btgt;
-                buildONB(worldNormal, tgt, btgt);
-                vec3 perturbed = normalize(tgt * nts.x + btgt * nts.y + worldNormal * nts.z);
+                vec3 perturbed = normalize(
+                    surfaceTangent * nts.x +
+                    surfaceBitangent * nts.y +
+                    worldNormal * nts.z
+                );
                 // Only use perturbed normal if it faces the ray (sanity check)
                 if (dot(perturbed, -rayDir) > 0.0) worldNormal = perturbed;
                 mat.normal_tex = 0u; // prevent double-application in section 4
@@ -1592,23 +1684,15 @@ if (emissionTexID > 0) {
         if (mapLength > 0.1) {  // Non-zero check
             // Convert from [0, 1] to [-1, 1] range
             vec3 normalMapDir = normalMapSample * 2.0 - vec3(1.0);
-            // hitUV V is flipped globally; compensate tangent-space Y (green) for normal maps.
-            normalMapDir.y = -normalMapDir.y;
-
-            // Ensure Z is positive (pointing outward in tangent space)
-            normalMapDir.z = abs(normalMapDir.z);
             
             // Normalize to ensure unit vector
             vec3 tangentSpaceNormal = normalize(normalMapDir);
             
             // Build orthonormal basis from geometry normal
-            vec3 tangent, bitangent;
-            buildONB(worldNormal, tangent, bitangent);
-            
             // Transform from tangent space to world space
             vec3 worldNormalPerturbed = normalize(
-                tangent * tangentSpaceNormal.x +
-                bitangent * tangentSpaceNormal.y +
+                surfaceTangent * tangentSpaceNormal.x +
+                surfaceBitangent * tangentSpaceNormal.y +
                 worldNormal * tangentSpaceNormal.z
             );
             
@@ -1856,11 +1940,9 @@ if (emissionTexID > 0) {
 
         // Schlick Fresnel, attenuated by roughness (rough surfaces scatter less)
         float fresnelBase   = F0_DIELECTRIC + (1.0 - F0_DIELECTRIC)
-                              * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-        float fresnelWeight = fresnelBase * (1.0 - roughness * roughness);
-        fresnelWeight = clamp(fresnelWeight, 0.001, 0.999);
+                              * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);       
 
-        if (rnd(payload.seed) < fresnelWeight) {
+        if (rnd(payload.seed) < fresnelBase) {
             // Specular lob: GGX reflection (roughness=0 → mirror)
             scatterMetal(hitPos, worldNormal, rayDir, vec3(1.0), roughness, payload.seed);
         } else {

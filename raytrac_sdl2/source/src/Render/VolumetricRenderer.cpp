@@ -16,6 +16,7 @@
 #include <cmath>
 #include <algorithm> // For std::min, std::max
 #include "AtmosphereLUT.h"
+#include "GodRaysModel.h"
 // Helper for cloud transmittance (placeholder implementation based on original code)
 static float determine_cloud_transmittance(const WorldData& world, const Vec3& origin, const Vec3& dir, float maxDist) {
     if (!world.nishita.clouds_enabled && !world.nishita.cloud_layer2_enabled) return 1.0f;
@@ -86,8 +87,12 @@ static Vec3 to_vec3(const float3& v) { return Vec3(v.x, v.y, v.z); }
 // GOD RAYS (CPU) — OptiX GPU calculate_volumetric_god_rays ile birebir eşleşme
 // ============================================================================
 Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldData& world_data, const Ray& ray, float maxDistance, const Hittable* bvh, class AtmosphereLUT* lut) {
-    if (world_data.mode != WORLD_MODE_NISHITA || !world_data.nishita.godrays_enabled
-        || world_data.nishita.godrays_intensity <= 0.001f || world_data.nishita.godrays_density <= 0.0f) {
+    // Allow god rays even when the world mode is not Nishita; use Nishita fields
+    // for parameters but fall back gracefully when LUTs aren't present.
+    if (!GodRaysModel::isEnabled(
+            world_data.nishita.godrays_enabled,
+            world_data.nishita.godrays_intensity,
+            world_data.nishita.godrays_density)) {
         return Vec3(0.0f);
     }
 
@@ -97,33 +102,27 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
 
     // === MATCH GPU: anisotropy-based early exit ===
     float g = nishita.mie_anisotropy;
-    float anisotropyFade = std::pow(std::max(0.0f, sunDot), 1.0f + (1.0f - g) * 10.0f);
+    float anisotropyFade = GodRaysModel::anisotropyFade(sunDot, g);
     if (anisotropyFade < 0.001f) return Vec3(0.0f);
 
     // === MATCH GPU: sun below horizon early exit ===
-    if (sunDir.y < -0.05f) return Vec3(0.0f);
+    if (GodRaysModel::isSunBelowHorizon(sunDir.y)) return Vec3(0.0f);
 
     // === MATCH GPU: march distance cap (5000m) ===
-    float marchDistance = std::min({ maxDistance, nishita.fog_distance, 5000.0f });
+    float marchDistance = GodRaysModel::computeMarchDistance(maxDistance, nishita.fog_distance);
 
-    // === MATCH GPU: adaptive step count (8-24) ===
-    int numSteps = (sunDot > 0.98f) ? nishita.godrays_samples : (nishita.godrays_samples / 2);
-    numSteps = std::max(8, std::min(numSteps, 24));
+    int numSteps = GodRaysModel::computeStepCount(sunDot, nishita.godrays_samples);
 
-    float stepSize = marchDistance / (float)numSteps;
+    float stepSize = GodRaysModel::computeStepSize(marchDistance, numSteps);
 
     // === MATCH GPU: Mie phase ===
-    float g2 = g * g;
-    float phase = (1.0f - g2) / (4.0f * 3.14159265f * std::pow(std::max(1.0f + g2 - 2.0f * g * sunDot, 0.0001f), 1.5f));
-    phase = std::min(phase, 6.0f);        // GPU: toned down peak
+    float phase = GodRaysModel::computeMiePhase(sunDot, g);
 
-    // === MATCH GPU: mediaDensity scale 0.002 ===
-    float mediaDensity = nishita.godrays_density * 0.002f;
+    float mediaDensity = GodRaysModel::computeMediaDensity(nishita.godrays_density);
 
-    // === MATCH GPU: sunRadianceBase = {1, 0.98, 0.95} * sun_intensity * 0.15 ===
-    Vec3 sunRadianceBase(1.0f, 0.98f, 0.95f);
-    sunRadianceBase = sunRadianceBase * nishita.sun_intensity * 0.15f;
-    // Physical sun color from transmittance LUT
+    // Use a sun color guess based on elevation as a sensible fallback when no LUT
+    // is available, but still modulate with the LUT if present for physical reddening.
+    Vec3 sunRadianceBase = get_sun_color(sunDir.y) * nishita.sun_intensity * GodRaysModel::kSunRadianceScale;
     if (lut) {
         float3 st = lut->sampleTransmittance(std::max(0.01f, sunDir.y), nishita.altitude, nishita.atmosphere_height);
         sunRadianceBase = sunRadianceBase * Vec3(st.x, st.y, st.z);
@@ -139,18 +138,15 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
     for (int i = 0; i < numSteps; ++i) {
         if (t > marchDistance) break;
 
-        // === MATCH GPU: nearFade (avoid near-camera halo, same formula) ===
-        float nearFade = std::min(1.0f, std::max(0.0f, (t - 0.2f) * 4.0f));
+        float nearFade = GodRaysModel::computeNearFade(t);
         if (nearFade > 0.001f) {
             Vec3 samplePos = ray.at(t);
 
-            // === MATCH GPU: height attenuation (0.0002 falloff, +altitude offset) ===
-            float h = std::max(0.0f, samplePos.y + nishita.altitude);
-            float heightFactor = std::exp(-h * 0.0002f);
+            float heightFactor = GodRaysModel::computeHeightFactor(samplePos.y, nishita.altitude);
 
             float sigma_s = mediaDensity * heightFactor;
             float sigma_t = sigma_s;
-            float stepTrans = std::exp(-sigma_t * stepSize);
+            float stepTrans = GodRaysModel::computeStepTransmittance(sigma_t, stepSize);
 
             if (sigma_t > 1e-6f) {
                 // Solid shadow test
@@ -171,7 +167,7 @@ Vec3 VolumetricRenderer::calculateGodRays(const SceneData& scene, const WorldDat
             transmittance *= stepTrans;
         }
 
-        if (transmittance < 0.01f) break;
+        if (transmittance < GodRaysModel::kTransmittanceCutoff) break;
         t += stepSize;
     }
 
@@ -253,8 +249,9 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.world_bbox_max = make_float3(wb.max.x, wb.max.y, wb.max.z);
 
         // Pivot offset
-        Vec3 po = vdb->getPivotOffset();
-        gv.pivot_offset[0] = po.x; gv.pivot_offset[1] = po.y; gv.pivot_offset[2] = po.z;
+        gv.pivot_offset[0] = 0.0f;
+        gv.pivot_offset[1] = 0.0f;
+        gv.pivot_offset[2] = 0.0f;
 
         // Shader
         auto shader = vdb->volume_shader; 
@@ -468,8 +465,9 @@ static float calculate_height_fog_factor_cpu(Vec3 rayOrigin, Vec3 rayDir, float 
 }
 
 Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const WorldData& world_data, const Vec3& origin, const Vec3& dir, float dist, const Vec3& color, AtmosphereLUT* lut) {
-    if (world_data.mode != WORLD_MODE_NISHITA || !lut || !lut->is_initialized() || dist > 1e6f) return color;
+    if (world_data.mode != WORLD_MODE_NISHITA || !lut || !lut->is_initialized()) return color;
     if (!world_data.advanced.aerial_perspective) return color;
+    if (!(dist > 0.0f) || !std::isfinite(dist)) return color;
 
     float Rg = world_data.nishita.planet_radius;
     if (Rg < 1000.0f) Rg = 6360000.0f; 
@@ -485,11 +483,12 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
     
     // Matched to GPU density scaling
     float densityFactor = 1.0f + world_data.nishita.fog_density * 300.0f;
-    float effectiveDist = dist * densityFactor;
+    float clampedDist = std::min(dist, 1000000.0f);
+    float effectiveDist = clampedDist * densityFactor;
     
     const float min_dist = world_data.advanced.aerial_min_distance;
     const float max_dist = world_data.advanced.aerial_max_distance;
-    float ramp = (dist < min_dist) ? 0.0f : std::min(1.0f, (dist - min_dist) / std::max(1.0f, max_dist - min_dist));
+    float ramp = (clampedDist < min_dist) ? 0.0f : std::min(1.0f, (clampedDist - min_dist) / std::max(1.0f, max_dist - min_dist));
     
     // 20km -> 10km scale matched to GPU
     float distFactor = std::min(1.0f, effectiveDist / 10000.0f);
@@ -511,7 +510,7 @@ Vec3 VolumetricRenderer::applyAerialPerspective(const SceneData& scene, const Wo
     // DYNAMIC HEIGHT FOG OVERLAY (Nishita active)
     if (world_data.nishita.fog_enabled && world_data.nishita.fog_density > 0.01f) {
         float fAmount = calculate_height_fog_factor_cpu(
-            origin, dir, dist,
+            origin, dir, clampedDist,
             world_data.nishita.fog_density * 0.5f,
             world_data.nishita.fog_height,
             world_data.nishita.fog_falloff

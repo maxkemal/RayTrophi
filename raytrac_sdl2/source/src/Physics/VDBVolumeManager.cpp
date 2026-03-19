@@ -36,6 +36,8 @@
 // CUDA
 #include <cuda_runtime.h>
 
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 
@@ -641,11 +643,7 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     if (!g_hasCUDA) return false;
 
     cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
-    
-    // CRITICAL FIX: Synchronize and clear any prior CUDA errors at the very start
-    // This prevents error accumulation from previous frames/operations
-    cudaDeviceSynchronize();
-    cudaGetLastError(); // Clear sticky error flag
+    cudaGetLastError(); // Clear sticky error flag without forcing a global stall
     
     int idx = findVolumeIndex(volume_id);
     if (idx < 0) {
@@ -654,9 +652,6 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     }
     
     VDBVolumeData& vol = volumes[idx];
-    
-    // Check if we already have the memory but need a RE-UPLOAD (for sequences/live sim)
-    bool needs_malloc = (vol.d_nano_grid == nullptr);
     
     // SEAMLESS SYNC: Even if gpu_uploaded is true, we proceed if we have a handle
     // to ensure live simulation frames are copied.
@@ -675,7 +670,12 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     }
     
     // Ensure correct CUDA context
-    cudaSetDevice(0);
+    cudaError_t setDeviceErr = cudaSetDevice(0);
+    if (setDeviceErr != cudaSuccess) {
+        last_error = std::string("cudaSetDevice failed: ") + cudaGetErrorString(setDeviceErr);
+        if (!silent) SCENE_LOG_ERROR(last_error);
+        return false;
+    }
     
     // SMART REALLOC: Allocate GPU memory only if needed or if existing buffer is too small
     cudaError_t err = cudaSuccess;
@@ -694,7 +694,7 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
             vol.d_nano_grid = nullptr;
             vol.gpu_buffer_size = 0;
             last_error = std::string("CUDA malloc failed: ") + cudaGetErrorString(err);
-            SCENE_LOG_ERROR(last_error);
+            if (!silent) SCENE_LOG_ERROR(last_error);
             return false;
         }
         vol.gpu_buffer_size = required_size;
@@ -702,7 +702,7 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     
     if (!vol.d_nano_grid) {
          last_error = "Destination GPU pointer is NULL after malloc";
-         SCENE_LOG_ERROR(last_error);
+         if (!silent) SCENE_LOG_ERROR(last_error);
          return false;
     }
     
@@ -710,27 +710,27 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
     void* host_ptr = handle->data();
     if (!host_ptr) {
         last_error = "NanoVDB handle.data() is NULL";
-        SCENE_LOG_ERROR(last_error);
+        if (!silent) SCENE_LOG_ERROR(last_error);
         return false;
     }
 
     // Sanity checks and logging to help diagnose illegal memory accesses.
     if (required_size == 0 || required_size > (size_t)1024 * 1024 * 1024) { // >1GB suspicious
         last_error = "Suspicious NanoVDB buffer size: " + std::to_string(required_size);
-        SCENE_LOG_WARN(last_error);
+        if (!silent) SCENE_LOG_WARN(last_error);
     }
 
-    // NOTE: Diagnostic logging removed to improve performance
-    // The cudaDeviceSynchronize and pointer attribute checks were causing frame drops
-
-    err = cudaMemcpy(vol.d_nano_grid, host_ptr, required_size, cudaMemcpyHostToDevice);
+    // NOTE: Use async upload when a stream is provided to avoid stalling the frame.
+    err = stream
+        ? cudaMemcpyAsync(vol.d_nano_grid, host_ptr, required_size, cudaMemcpyHostToDevice, stream)
+        : cudaMemcpy(vol.d_nano_grid, host_ptr, required_size, cudaMemcpyHostToDevice);
     
     if (err != cudaSuccess) {
         last_error = std::string("CUDA memcpy failed: ") + cudaGetErrorString(err) + 
                      " (Size: " + std::to_string(required_size) + 
                      ", Dst: " + std::to_string((unsigned long long)vol.d_nano_grid) + 
                      ", Src: " + std::to_string((unsigned long long)host_ptr) + ")";
-        SCENE_LOG_ERROR(last_error);
+        if (!silent) SCENE_LOG_ERROR(last_error);
         return false;
     }
     
@@ -745,35 +745,34 @@ bool VDBVolumeManager::uploadToGPU(int volume_id, bool silent, void* stream_ptr)
             if (vol.d_nano_temperature == nullptr || vol.gpu_temp_buffer_size < temp_required_size) {
                 if (stream) cudaStreamSynchronize((cudaStream_t)stream);
                 if (vol.d_nano_temperature) cudaFree(vol.d_nano_temperature);
-                cudaMalloc(&vol.d_nano_temperature, temp_required_size);
+                cudaError_t tempAllocErr = cudaMalloc(&vol.d_nano_temperature, temp_required_size);
+                if (tempAllocErr != cudaSuccess) {
+                    vol.d_nano_temperature = nullptr;
+                    vol.gpu_temp_buffer_size = 0;
+                    last_error = std::string("CUDA temp malloc failed: ") + cudaGetErrorString(tempAllocErr);
+                    if (!silent) SCENE_LOG_ERROR(last_error);
+                    return false;
+                }
                 vol.gpu_temp_buffer_size = temp_required_size;
             }
             
             if (vol.d_nano_temperature != nullptr) {
                 void* t_host_ptr = temp_handle->data();
                 if (t_host_ptr) {
-                    // Log and perform synchronous copy for safety
                     if (temp_required_size == 0 || temp_required_size > (size_t)1024 * 1024 * 1024) {
-                        SCENE_LOG_WARN("Suspicious NanoVDB temperature buffer size: " + std::to_string(temp_required_size));
+                        if (!silent) SCENE_LOG_WARN("Suspicious NanoVDB temperature buffer size: " + std::to_string(temp_required_size));
                     }
-                    SCENE_LOG_INFO("VDB temp upload: Dst=" + std::to_string((unsigned long long)vol.d_nano_temperature) +
-                                   ", Src=" + std::to_string((unsigned long long)t_host_ptr) +
-                                   ", Size=" + std::to_string(temp_required_size));
-
-                    cudaMemcpy(vol.d_nano_temperature, t_host_ptr, temp_required_size, cudaMemcpyHostToDevice);
+                    cudaError_t tempCopyErr = stream
+                        ? cudaMemcpyAsync(vol.d_nano_temperature, t_host_ptr, temp_required_size, cudaMemcpyHostToDevice, stream)
+                        : cudaMemcpy(vol.d_nano_temperature, t_host_ptr, temp_required_size, cudaMemcpyHostToDevice);
+                    if (tempCopyErr != cudaSuccess) {
+                        last_error = std::string("CUDA memcpy temp failed: ") + cudaGetErrorString(tempCopyErr);
+                        if (!silent) SCENE_LOG_ERROR(last_error);
+                        return false;
+                    }
                 }
             }
         }
-    }
-    
-    // CRITICAL: If using asynchonous transfer, we MUST wait for completion 
-    // before the CPU continues and potentially deletes the HostBuffer 
-    // in the next simulation frame / update call.
-    // (Optimization: In a future update, we can use a pinned deferred release queue)
-    // Synchronous copy already completed at this point. If a stream was provided
-    // the caller may still want to synchronize for ordering with other GPU ops.
-    if (stream) {
-        cudaStreamSynchronize((cudaStream_t)stream);
     }
     
     vol.gpu_uploaded = true;
@@ -928,4 +927,80 @@ float VDBVolumeManager::sampleTemperatureCPU(int volume_id, float x, float y, fl
 bool VDBVolumeManager::hasTemperatureGrid(int volume_id) const {
     const VDBVolumeData* vol = getVolume(volume_id);
     return vol && vol->has_temperature && vol->internal_openvdb_temperature;
+}
+
+VDBDensityStats VDBVolumeManager::analyzeDensityStats(int volume_id, std::size_t max_samples) const {
+    VDBDensityStats stats;
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_openvdb_grid) return stats;
+
+    auto* grid_ptr = static_cast<openvdb::FloatGrid::Ptr*>(vol->internal_openvdb_grid);
+    if (!grid_ptr || !*grid_ptr) return stats;
+
+    const openvdb::FloatGrid::Ptr& grid = *grid_ptr;
+    if (!grid) return stats;
+
+    std::vector<float> samples;
+    samples.reserve(max_samples);
+
+    double sum = 0.0;
+    bool first_value = true;
+    std::uint64_t seen = 0;
+
+    for (auto it = grid->cbeginValueOn(); it.test(); ++it) {
+        const float value = *it;
+        if (!std::isfinite(value) || value <= 0.0f) {
+            continue;
+        }
+
+        ++seen;
+        sum += value;
+
+        if (first_value) {
+            stats.min_value = value;
+            stats.max_value = value;
+            first_value = false;
+        } else {
+            stats.min_value = (std::min)(stats.min_value, value);
+            stats.max_value = (std::max)(stats.max_value, value);
+        }
+
+        if (samples.size() < max_samples) {
+            samples.push_back(value);
+        } else {
+            const std::uint64_t hashed = (seen * 2654435761ull) ^ (seen >> 11);
+            const std::size_t slot = static_cast<std::size_t>(hashed % seen);
+            if (slot < max_samples) {
+                samples[slot] = value;
+            }
+        }
+    }
+
+    if (seen == 0 || samples.empty()) {
+        return stats;
+    }
+
+    std::sort(samples.begin(), samples.end());
+    auto percentile = [&samples](float t) -> float {
+        const float clamped = (std::max)(0.0f, (std::min)(1.0f, t));
+        const std::size_t idx = static_cast<std::size_t>(clamped * static_cast<float>(samples.size() - 1));
+        return samples[idx];
+    };
+
+    stats.valid = true;
+    stats.active_voxel_count = seen;
+    stats.mean_value = static_cast<float>(sum / static_cast<double>(seen));
+    stats.p50_value = percentile(0.50f);
+    stats.p95_value = percentile(0.95f);
+    stats.p99_value = percentile(0.99f);
+
+    const float reference_density = stats.p99_value > 1e-5f
+        ? stats.p99_value
+        : (stats.p95_value > 1e-5f ? stats.p95_value : stats.max_value);
+    if (reference_density > 1e-6f) {
+        // Bias towards visibly readable defaults for sparse caches.
+        stats.recommended_smoke_multiplier = (std::max)(2.0f, (std::min)(35.0f, 0.35f / reference_density));
+    }
+
+    return stats;
 }

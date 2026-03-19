@@ -13,6 +13,7 @@
 #include <map>
 #include <string>
 #include <memory>
+#include <unordered_map>
 #include "Vec3.h"
 #include "material_gpu.h"  // For GpuMaterial
 #include "json.hpp"
@@ -1050,6 +1051,61 @@ struct EmitterKeyframe {
 };
 
 // ============================================================================
+// ANIM GRAPH KEYFRAME - Character animation parameters and state overrides
+// ============================================================================
+struct AnimGraphKeyframe {
+    std::unordered_map<std::string, float> float_params;
+    std::unordered_map<std::string, bool> bool_params;
+    std::unordered_map<std::string, int> int_params;
+    std::unordered_map<uint32_t, std::string> clip_overrides;
+    std::unordered_map<uint32_t, float> clip_speed_overrides;
+    std::vector<std::string> triggers;
+    std::string force_state;
+
+    static AnimGraphKeyframe blend(const AnimGraphKeyframe& a, const AnimGraphKeyframe& b, float t) {
+        AnimGraphKeyframe result;
+
+        for (const auto& [name, value] : a.float_params) {
+            auto it = b.float_params.find(name);
+            result.float_params[name] = (it != b.float_params.end())
+                ? value + (it->second - value) * t
+                : value;
+        }
+        for (const auto& [name, value] : b.float_params) {
+            if (result.float_params.find(name) == result.float_params.end()) {
+                result.float_params[name] = value;
+            }
+        }
+
+        for (const auto& [name, value] : a.bool_params) {
+            auto it = b.bool_params.find(name);
+            result.bool_params[name] = (it != b.bool_params.end()) ? ((t < 0.5f) ? value : it->second) : value;
+        }
+        for (const auto& [name, value] : b.bool_params) {
+            if (result.bool_params.find(name) == result.bool_params.end()) {
+                result.bool_params[name] = value;
+            }
+        }
+
+        for (const auto& [name, value] : a.int_params) {
+            auto it = b.int_params.find(name);
+            result.int_params[name] = (it != b.int_params.end()) ? ((t < 0.5f) ? value : it->second) : value;
+        }
+        for (const auto& [name, value] : b.int_params) {
+            if (result.int_params.find(name) == result.int_params.end()) {
+                result.int_params[name] = value;
+            }
+        }
+
+        result.clip_overrides = (t < 0.5f) ? a.clip_overrides : b.clip_overrides;
+        result.clip_speed_overrides = (t < 0.5f) ? a.clip_speed_overrides : b.clip_speed_overrides;
+
+        result.force_state = (t < 0.5f) ? a.force_state : b.force_state;
+        return result;
+    }
+};
+
+// ============================================================================
 // TRANSFORM KEYFRAME - Position, rotation (Euler), scale
 // ============================================================================
 
@@ -1399,11 +1455,13 @@ struct Keyframe {
     bool has_world = false;
     bool has_terrain = false;
     bool has_water = false;     // NEW: Water animation support
+    bool has_anim_graph = false;
     
     TerrainKeyframe terrain;
     WaterKeyframe water;        // NEW
     bool has_emitter = false;   // NEW: Gas Emitter support
     EmitterKeyframe emitter;    // NEW
+    AnimGraphKeyframe anim_graph;
     
     Keyframe() = default;
     Keyframe(int f) : frame(f) {}
@@ -1451,6 +1509,10 @@ struct ObjectAnimationTrack {
                 it->water = kf.water;
                 it->has_water = true;
             }
+            if (kf.has_anim_graph) {
+                it->anim_graph = kf.anim_graph;
+                it->has_anim_graph = true;
+            }
             if (kf.has_emitter) {
                 it->emitter = kf.emitter;
                 it->has_emitter = true;
@@ -1471,6 +1533,12 @@ struct ObjectAnimationTrack {
     
     // Get keyframe at exact frame (returns nullptr if not found)
     Keyframe* getKeyframeAt(int frame) {
+        auto it = std::find_if(keyframes.begin(), keyframes.end(),
+            [frame](const Keyframe& kf) { return kf.frame == frame; });
+        return (it != keyframes.end()) ? &(*it) : nullptr;
+    }
+
+    const Keyframe* getKeyframeAt(int frame) const {
         auto it = std::find_if(keyframes.begin(), keyframes.end(),
             [frame](const Keyframe& kf) { return kf.frame == frame; });
         return (it != keyframes.end()) ? &(*it) : nullptr;
@@ -1725,6 +1793,40 @@ struct ObjectAnimationTrack {
         } else if (n_water) {
             result.water = n_water->water;
             result.has_water = true;
+        }
+
+        // --- ANIM GRAPH ---
+        const Keyframe* exact_anim = getKeyframeAt(current_frame);
+        if (exact_anim && exact_anim->has_anim_graph && !exact_anim->anim_graph.triggers.empty()) {
+            result.anim_graph.triggers = exact_anim->anim_graph.triggers;
+        }
+
+        const Keyframe* p_anim = findPrev([](const auto& k){ return k.has_anim_graph; });
+        const Keyframe* n_anim = findNext([](const auto& k){ return k.has_anim_graph; });
+        if (p_anim && n_anim) {
+            float range = (float)(n_anim->frame - p_anim->frame);
+            float t = (range > 0) ? (float)(current_frame - p_anim->frame) / range : 0.0f;
+            result.anim_graph = AnimGraphKeyframe::blend(p_anim->anim_graph, n_anim->anim_graph, t);
+            if (exact_anim && exact_anim->has_anim_graph && !exact_anim->anim_graph.triggers.empty()) {
+                result.anim_graph.triggers = exact_anim->anim_graph.triggers;
+            }
+            result.has_anim_graph = true;
+        } else if (p_anim) {
+            result.anim_graph = p_anim->anim_graph;
+            if (exact_anim && exact_anim->has_anim_graph && !exact_anim->anim_graph.triggers.empty()) {
+                result.anim_graph.triggers = exact_anim->anim_graph.triggers;
+            } else {
+                result.anim_graph.triggers.clear();
+            }
+            result.has_anim_graph = true;
+        } else if (n_anim) {
+            result.anim_graph = n_anim->anim_graph;
+            if (exact_anim && exact_anim->has_anim_graph && !exact_anim->anim_graph.triggers.empty()) {
+                result.anim_graph.triggers = exact_anim->anim_graph.triggers;
+            } else {
+                result.anim_graph.triggers.clear();
+            }
+            result.has_anim_graph = true;
         }
         
         // --- EMITTER ---
@@ -2091,12 +2193,36 @@ inline void from_json(const json& j, TransformKeyframe& tk) {
 }
 
 // Keyframe
+inline void to_json(json& j, const AnimGraphKeyframe& k) {
+    j = json{
+        {"fp", k.float_params},
+        {"bp", k.bool_params},
+        {"ip", k.int_params},
+        {"co", k.clip_overrides},
+        {"cso", k.clip_speed_overrides},
+        {"trg", k.triggers},
+        {"state", k.force_state}
+    };
+}
+
+inline void from_json(const json& j, AnimGraphKeyframe& k) {
+    k.float_params = j.value("fp", decltype(k.float_params){});
+    k.bool_params = j.value("bp", decltype(k.bool_params){});
+    k.int_params = j.value("ip", decltype(k.int_params){});
+    k.clip_overrides = j.value("co", decltype(k.clip_overrides){});
+    k.clip_speed_overrides = j.value("cso", decltype(k.clip_speed_overrides){});
+    k.triggers = j.value("trg", decltype(k.triggers){});
+    k.force_state = j.value("state", std::string{});
+}
+
+// Keyframe
 inline void to_json(json& j, const Keyframe& k) {
     j = json{
         {"fr", k.frame},
         {"ftr", k.has_transform}, {"fmat", k.has_material},
         {"fli", k.has_light}, {"fcam", k.has_camera},
-        {"fwor", k.has_world}, {"fter", k.has_terrain}, {"femi", k.has_emitter}
+        {"fwor", k.has_world}, {"fter", k.has_terrain}, {"femi", k.has_emitter},
+        {"fagr", k.has_anim_graph}
     };
     if(k.has_transform) j["tr"] = k.transform;
     if(k.has_material) j["mat"] = k.material;
@@ -2105,6 +2231,7 @@ inline void to_json(json& j, const Keyframe& k) {
     if(k.has_world) j["wor"] = k.world;
     if(k.has_terrain) j["ter"] = k.terrain;
     if(k.has_emitter) j["emi"] = k.emitter;
+    if(k.has_anim_graph) j["agr"] = k.anim_graph;
 }
 
 inline void from_json(const json& j, Keyframe& k) {
@@ -2118,6 +2245,7 @@ inline void from_json(const json& j, Keyframe& k) {
     k.has_world = j.value("fwor", j.contains("wor"));
     k.has_terrain = j.value("fter", j.contains("ter"));
     k.has_emitter = j.value("femi", j.contains("emi"));
+    k.has_anim_graph = j.value("fagr", j.contains("agr"));
     
     if(k.has_transform && j.contains("tr")) j.at("tr").get_to(k.transform);
     if(k.has_material && j.contains("mat")) j.at("mat").get_to(k.material);
@@ -2126,6 +2254,7 @@ inline void from_json(const json& j, Keyframe& k) {
     if(k.has_world && j.contains("wor")) j.at("wor").get_to(k.world);
     if(k.has_terrain && j.contains("ter")) j.at("ter").get_to(k.terrain);
     if(k.has_emitter && j.contains("emi")) j.at("emi").get_to(k.emitter);
+    if(k.has_anim_graph && j.contains("agr")) j.at("agr").get_to(k.anim_graph);
 }
 
 // ObjectAnimationTrack

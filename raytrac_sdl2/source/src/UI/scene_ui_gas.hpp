@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -26,6 +26,8 @@
 #include "scene_ui.h"
 #include "GasVolume.h"
 #include "VolumeShader.h"
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 
@@ -124,14 +126,34 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Physical Dimensions (Bounding Box)");
         float grid_size[3] = { settings.grid_size.x, settings.grid_size.y, settings.grid_size.z };
         if (ImGui::DragFloat3("Grid Size", grid_size, 0.1f, 0.1f, 100.0f, "%.1f m")) {
+            const Vec3 previous_grid_size = settings.grid_size;
             settings.grid_size = Vec3(grid_size[0], grid_size[1], grid_size[2]);
+            if (settings.preserve_voxel_size_on_resize) {
+                const float old_max_dim = std::max({ previous_grid_size.x, previous_grid_size.y, previous_grid_size.z, 0.0001f });
+                const int old_max_res = std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 });
+                float target_voxel = old_max_dim / static_cast<float>(old_max_res);
+                if (target_voxel <= 0.0001f) {
+                    target_voxel = settings.voxel_size > 0.0001f ? settings.voxel_size : 0.1f;
+                }
+                const int res_cap = std::clamp(settings.max_auto_resolution, 32, 512);
+                settings.resolution_x = std::clamp((int)std::round(settings.grid_size.x / target_voxel), 8, res_cap);
+                settings.resolution_y = std::clamp((int)std::round(settings.grid_size.y / target_voxel), 8, res_cap);
+                settings.resolution_z = std::clamp((int)std::round(settings.grid_size.z / target_voxel), 8, res_cap);
+            }
+            settings.voxel_size = std::max({ settings.grid_size.x, settings.grid_size.y, settings.grid_size.z, 0.0001f }) /
+                static_cast<float>(std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 }));
             
             // Auto-pause when grid size changes (affects voxel calculations)
             if (gas->isPlaying()) {
                 gas->pause();
             }
         }
-        
+
+        ImGui::Checkbox("Preserve Voxel Size", &settings.preserve_voxel_size_on_resize);
+        UIWidgets::HelpMarker("When the domain grows, resolution grows with it to keep smoke detail from getting mushy.");
+        ImGui::DragInt("Auto Resolution Cap", &settings.max_auto_resolution, 1.0f, 32, 512);
+        settings.max_auto_resolution = std::clamp(settings.max_auto_resolution, 32, 512);
+
         ImGui::Separator();
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.6f, 1.0f), "Resolution (Detail)");
         
@@ -200,7 +222,8 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         ImGui::BeginChild("GridStats", ImVec2(0, 65), true);
         ImGui::Columns(2, "gridcols", false);
         ImGui::Text("Voxel Size:"); ImGui::NextColumn();
-        float calc_voxel = settings.grid_size.x / (float)settings.resolution_x;
+        float calc_voxel = std::max({ settings.grid_size.x, settings.grid_size.y, settings.grid_size.z, 0.0001f }) /
+            static_cast<float>(std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 }));
         ImGui::Text("%.4f m (%s)", calc_voxel, (calc_voxel < 0.05f) ? "High Detail" : "Low Detail"); ImGui::NextColumn();
         
         size_t cells = (size_t)settings.resolution_x * settings.resolution_y * settings.resolution_z;
@@ -215,9 +238,19 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         
         // Check mismatch between settings and allocated grid (use fresh grid reference)
         const auto& current_grid = gas->getSimulator().getGrid();
+        const float current_domain_x = current_grid.nx * current_grid.voxel_size;
+        const float current_domain_y = current_grid.ny * current_grid.voxel_size;
+        const float current_domain_z = current_grid.nz * current_grid.voxel_size;
+        const bool grid_size_changed =
+            std::fabs(current_domain_x - settings.grid_size.x) > 0.0005f ||
+            std::fabs(current_domain_y - settings.grid_size.y) > 0.0005f ||
+            std::fabs(current_domain_z - settings.grid_size.z) > 0.0005f;
+        const bool voxel_size_changed = std::fabs(current_grid.voxel_size - calc_voxel) > 0.0005f;
         bool needs_restart = (settings.resolution_x != current_grid.nx || 
                               settings.resolution_y != current_grid.ny || 
-                              settings.resolution_z != current_grid.nz);
+                              settings.resolution_z != current_grid.nz ||
+                              grid_size_changed ||
+                              voxel_size_changed);
         
         // Show restart button only when there's a real resolution mismatch
         if (needs_restart) {
@@ -226,12 +259,16 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
                 "Current grid: %dx%dx%d | New settings: %dx%dx%d",
                 current_grid.nx, current_grid.ny, current_grid.nz,
                 settings.resolution_x, settings.resolution_y, settings.resolution_z);
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                "Current domain: %.2f x %.2f x %.2f m | New domain: %.2f x %.2f x %.2f m",
+                current_domain_x, current_domain_y, current_domain_z,
+                settings.grid_size.x, settings.grid_size.y, settings.grid_size.z);
             
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.9f, 0.1f, 0.1f, 1.0f));
             ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.2f, 0.2f, 1.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
             
-            if (ImGui::Button("Apply New Resolution (Restart Simulation)", ImVec2(UIWidgets::GetInspectorActionWidth(), 35))) {
+            if (ImGui::Button("Apply Domain / Resolution (Restart Simulation)", ImVec2(UIWidgets::GetInspectorActionWidth(), 35))) {
                 gas->stop();
                 gas->initialize();
                 // Don't auto-play - let user start manually
@@ -281,7 +318,7 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         const char* pressure_solvers[] = { "Gauss-Seidel", "SOR (Faster)", "Multigrid", "FFT (Fastest)" };
         int current_solver = static_cast<int>(settings.pressure_solver);
         
-        bool can_use_fft = ::g_hasCUDA;
+        bool can_use_fft = gas->getSimulator().canUseFFTPressureSolver();
         if (!can_use_fft && settings.pressure_solver == FluidSim::GasSimulationSettings::PressureSolverMode::FFT) {
             settings.pressure_solver = FluidSim::GasSimulationSettings::PressureSolverMode::GaussSeidel;
             current_solver = 0;
@@ -295,6 +332,9 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             }
         }
         UIWidgets::HelpMarker("FFT solver is 10-50x faster than iterative methods for grids > 64^3. Requires CUDA. SOR converges 2-3x faster than Gauss-Seidel.");
+        if (!can_use_fft) {
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "FFT unavailable: requires CUDA backend, valid grid, and non-combustion smoke setup.");
+        }
         
         if (settings.pressure_solver == FluidSim::GasSimulationSettings::PressureSolverMode::SOR) {
             ImGui::Indent();
@@ -383,6 +423,15 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
             ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.5f, 1.0f), "  [GPU Found: CUDA Supported]");
         } else {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "  [No CUDA GPU detected]");
+        }
+        const bool gas_cuda_active = gas->getSimulator().isUsingCUDA();
+        const bool gas_cuda_ready = gas->getSimulator().isCUDAInitialized();
+        if (gas_cuda_active) {
+            ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "Active Gas Backend: CUDA");
+        } else if (static_cast<int>(settings.backend) == static_cast<int>(FluidSim::SolverBackend::CUDA) && !gas_cuda_ready) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Active Gas Backend: CPU (CUDA init failed/fallback)");
+        } else {
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Active Gas Backend: CPU");
         }
         UIWidgets::HelpMarker("Developers can switch between CPU/GPU for debugging. CUDA is highly recommended for performance.");
         
@@ -688,9 +737,9 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
                 ImGui::Checkbox("Enabled", &e.enabled);
                 
                 // Shape
-                const char* shapes[] = { "Sphere", "Box", "Point" };
+                const char* shapes[] = { "Sphere", "Box", "Point", "Cylinder", "Cone", "Disc" };
                 int shape = static_cast<int>(e.shape);
-                if (ImGui::Combo("Shape", &shape, shapes, 3)) {
+                if (ImGui::Combo("Shape", &shape, shapes, IM_ARRAYSIZE(shapes))) {
                     e.shape = static_cast<FluidSim::EmitterShape>(shape);
                 }
                 
@@ -717,6 +766,26 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
                     if (ImGui::DragFloat3("Size", size, 0.1f, 0.1f, 10.0f)) {
                         e.size = Vec3(size[0], size[1], size[2]);
                     }
+                } else if (e.shape == FluidSim::EmitterShape::Cylinder) {
+                    bool radKeyed = isEmitterPropertyKeyed(track_name, false, false, false, false, false, false, false, true);
+                    if (KeyframeButton("##KCRad", radKeyed)) { insertEmitterKey(track_name, e, false, false, false, false, false, false, false, true); }
+                    ImGui::SameLine();
+                    ImGui::DragFloat("Radius", &e.radius, 0.05f, 0.05f, 10.0f);
+                    ImGui::DragFloat("Height", &e.height, 0.05f, 0.05f, 20.0f);
+                } else if (e.shape == FluidSim::EmitterShape::Cone) {
+                    bool radKeyed = isEmitterPropertyKeyed(track_name, false, false, false, false, false, false, false, true);
+                    if (KeyframeButton("##KCoRad", radKeyed)) { insertEmitterKey(track_name, e, false, false, false, false, false, false, false, true); }
+                    ImGui::SameLine();
+                    ImGui::DragFloat("Base Radius", &e.radius, 0.05f, 0.05f, 10.0f);
+                    ImGui::DragFloat("Height", &e.height, 0.05f, 0.05f, 20.0f);
+                    ImGui::DragFloat("Cone Angle", &e.cone_angle, 1.0f, 5.0f, 85.0f, "%.0f deg");
+                } else if (e.shape == FluidSim::EmitterShape::Disc) {
+                    bool radKeyed = isEmitterPropertyKeyed(track_name, false, false, false, false, false, false, false, true);
+                    if (KeyframeButton("##KDRad", radKeyed)) { insertEmitterKey(track_name, e, false, false, false, false, false, false, false, true); }
+                    ImGui::SameLine();
+                    ImGui::DragFloat("Outer Radius", &e.radius, 0.05f, 0.05f, 10.0f);
+                    ImGui::DragFloat("Inner Radius", &e.inner_radius, 0.05f, 0.0f, e.radius, "%.2f");
+                    ImGui::DragFloat("Thickness", &e.size.y, 0.01f, 0.01f, 2.0f, "%.2f");
                 }
                 
                 // Emission: Density
@@ -745,6 +814,56 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
                 float v[3] = { e.velocity.x, e.velocity.y, e.velocity.z };
                 if (ImGui::DragFloat3("Velocity", v, 0.1f, -100.0f, 100.0f)) {
                     e.velocity = Vec3(v[0], v[1], v[2]);
+                }
+
+                const char* falloff_items[] = { "None", "Linear", "Smooth", "Gaussian" };
+                int falloff_idx = static_cast<int>(e.falloff_type);
+                if (ImGui::Combo("Falloff", &falloff_idx, falloff_items, IM_ARRAYSIZE(falloff_items))) {
+                    e.falloff_type = static_cast<FluidSim::EmitterFalloffType>(falloff_idx);
+                }
+                if (e.falloff_type != FluidSim::EmitterFalloffType::None) {
+                    ImGui::DragFloat("Falloff Start", &e.falloff_start, 0.01f, 0.0f, 1.0f);
+                    ImGui::DragFloat("Falloff End", &e.falloff_end, 0.01f, 0.0f, 1.0f);
+                    if (e.falloff_end < e.falloff_start) e.falloff_end = e.falloff_start;
+                }
+
+                if (ImGui::TreeNode("Noise Modulation")) {
+                    ImGui::Checkbox("Enable Noise", &e.noise_enabled);
+                    if (e.noise_enabled) {
+                        ImGui::DragFloat("Noise Frequency", &e.noise_frequency, 0.05f, 0.01f, 10.0f);
+                        ImGui::DragFloat("Noise Amplitude", &e.noise_amplitude, 0.01f, 0.0f, 1.0f);
+                        ImGui::DragFloat("Noise Speed", &e.noise_speed, 0.01f, 0.0f, 5.0f);
+                        ImGui::DragInt("Noise Seed", &e.noise_seed, 1.0f, 0, 9999);
+                        ImGui::Checkbox("Mod Density", &e.noise_modulate_density);
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Mod Temp", &e.noise_modulate_temperature);
+                        ImGui::SameLine();
+                        ImGui::Checkbox("Mod Vel", &e.noise_modulate_velocity);
+                    }
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::TreeNode("Velocity Variance")) {
+                    ImGui::DragFloat("Spray Cone", &e.spray_cone_angle, 1.0f, 0.0f, 90.0f, "%.0f deg");
+                    ImGui::DragFloat("Speed Min", &e.speed_min, 0.01f, 0.0f, 4.0f);
+                    ImGui::DragFloat("Speed Max", &e.speed_max, 0.01f, 0.0f, 4.0f);
+                    if (e.speed_max < e.speed_min) e.speed_max = e.speed_min;
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::TreeNode("Emission Profile")) {
+                    const char* emission_items[] = { "Continuous", "Burst", "Pulse" };
+                    int emission_idx = static_cast<int>(e.emission_mode);
+                    if (ImGui::Combo("Mode", &emission_idx, emission_items, IM_ARRAYSIZE(emission_items))) {
+                        e.emission_mode = static_cast<FluidSim::EmitterEmissionMode>(emission_idx);
+                    }
+                    ImGui::DragFloat("Start Frame", &e.start_frame, 1.0f, 0.0f, 10000.0f);
+                    ImGui::DragFloat("End Frame", &e.end_frame, 1.0f, -1.0f, 10000.0f);
+                    if (e.emission_mode == FluidSim::EmitterEmissionMode::Pulse) {
+                        ImGui::DragFloat("Pulse Interval", &e.pulse_interval, 1.0f, 1.0f, 1000.0f);
+                        ImGui::DragFloat("Pulse Duration", &e.pulse_duration, 1.0f, 1.0f, 1000.0f);
+                    }
+                    ImGui::TreePop();
                 }
                 
                 ImGui::TreePop();

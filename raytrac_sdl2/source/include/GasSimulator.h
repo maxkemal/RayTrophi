@@ -66,7 +66,29 @@ enum class SolverBackend {
 enum class EmitterShape {
     Sphere,
     Box,
-    Point
+    Point,
+    Cylinder,
+    Cone,
+    Disc
+};
+
+enum class EmitterFalloffType {
+    None,
+    Linear,
+    Smooth,
+    Gaussian
+};
+
+enum class EmitterEmissionMode {
+    Continuous,
+    Burst,
+    Pulse
+};
+
+enum class FuelPhase {
+    Gas,
+    Liquid,
+    Solid
 };
 
 /**
@@ -77,11 +99,41 @@ struct Emitter {
     Vec3 position = Vec3(0, 0, 0);
     Vec3 size = Vec3(1, 1, 1);      // Radius for sphere, half-extents for box
     float radius = 1.0f;            // For sphere
+    float height = 1.0f;            // For cylinder / cone
+    float inner_radius = 0.0f;      // For disc
+    float cone_angle = 45.0f;       // Degrees
     
-    float density_rate = 5.0f;       // Density injection per second (was 10)
+    float density_rate = 2.5f;       // Density injection per second
     float fuel_rate = 0.0f;          // Fuel injection per second
-    float temperature = 400.0f;      // Temperature in Kelvin (was 500, lower for stability)
-    Vec3 velocity = Vec3(0, 2, 0);  // Initial velocity of emitted smoke
+    float temperature = 340.0f;      // Temperature in Kelvin
+    Vec3 velocity = Vec3(0, 1.1f, 0);  // Initial velocity of emitted smoke
+    FuelPhase fuel_phase = FuelPhase::Gas;
+    float phase_change_temperature = 420.0f; // Liquid boiling / solid pyrolysis threshold
+    float fuel_release_rate = 1.0f;          // Multiplier for vaporization / pyrolysis response
+    float flame_contact_sensitivity = 0.35f; // How strongly nearby flame unlocks fuel release
+
+    EmitterFalloffType falloff_type = EmitterFalloffType::Smooth;
+    float falloff_start = 0.7f;
+    float falloff_end = 1.0f;
+
+    bool noise_enabled = false;
+    float noise_frequency = 0.65f;
+    float noise_amplitude = 0.22f;
+    float noise_speed = 0.25f;
+    int noise_seed = 42;
+    bool noise_modulate_density = true;
+    bool noise_modulate_temperature = false;
+    bool noise_modulate_velocity = false;
+
+    float spray_cone_angle = 0.0f;  // Degrees
+    float speed_min = 1.0f;
+    float speed_max = 1.0f;
+
+    EmitterEmissionMode emission_mode = EmitterEmissionMode::Continuous;
+    float start_frame = 0.0f;
+    float end_frame = -1.0f;
+    float pulse_interval = 10.0f;
+    float pulse_duration = 3.0f;
     
     bool enabled = true;
     std::string name = "Emitter";
@@ -115,6 +167,8 @@ struct GasSimulationSettings {
     int resolution_z = 64;
     Vec3 grid_size = Vec3(5, 5, 5); // Total world size of the grid (Fixed Bounding Box)
     float voxel_size = 0.1f;        // Calculated automatically: grid_size / resolution
+    bool preserve_voxel_size_on_resize = true;
+    int max_auto_resolution = 256;
     Vec3 grid_offset = Vec3(0, 0, 0); // Grid origin in world space
     
     // ─────────────────────────────────────────────────────────────────────────
@@ -122,40 +176,40 @@ struct GasSimulationSettings {
     // ─────────────────────────────────────────────────────────────────────────
     float timestep = 0.016f;         // Simulation timestep (default ~60 FPS)
     int substeps = 1;                // Substeps per frame for stability
-    float time_scale = 1.0f;         // Simulation speed multiplier (1.0 = realtime, 2.0 = 2x faster)
+    float time_scale = 0.45f;        // Simulation speed multiplier
     int pressure_iterations = 40;    // Jacobi iterations (more = more accurate)
     
     // CFL Adaptive Timestep (Industry Standard)
     bool adaptive_timestep = true;   // Enable automatic timestep adjustment
-    float cfl_number = 0.5f;         // CFL condition (0.5-1.0, lower = more stable)
+    float cfl_number = 0.4f;         // CFL condition (0.5-1.0, lower = more stable)
     float min_timestep = 0.001f;     // Minimum timestep (prevents simulation halt)
     float max_timestep = 0.05f;      // Maximum timestep (prevents too large steps)
     
-    float density_dissipation = 0.99f;     // Density decay per second (0.9 = fast, 0.99 = slow)
-    float velocity_dissipation = 0.98f;    // Velocity damping (lower = more drag)
-    float temperature_dissipation = 0.98f; // Temperature cooling (slower = smoke rises longer)
-    float fuel_dissipation = 0.98f;        // Fuel decay per second
+    float density_dissipation = 0.994f;    // Density decay per second
+    float velocity_dissipation = 0.985f;   // Velocity damping (lower = more drag)
+    float temperature_dissipation = 0.985f; // Temperature cooling
+    float fuel_dissipation = 0.985f;       // Fuel decay per second
 
     // ─────────────────────────────────────────────────────────────────────────
     // Combustion parameters
     // ─────────────────────────────────────────────────────────────────────────
-    float ignition_temperature = 400.0f;   // Temp at which fuel starts burning
-    float burn_rate = 1.0f;                // Speed of fuel consumption
-    float heat_release = 30.0f;            // Temperature added per unit fuel burned (was 100, too hot!)
-    float expansion_strength = 2.0f;       // Expansion (pressure) from fire
-    float smoke_generation = 0.5f;         // Smoke generated per unit fuel burned
-    float soot_generation = 0.1f;          // Density generated from burning
+    float ignition_temperature = 420.0f;   // Temp at which fuel starts burning
+    float burn_rate = 0.55f;               // Speed of fuel consumption
+    float heat_release = 18.0f;            // Temperature added per unit fuel burned
+    float expansion_strength = 0.8f;       // Expansion (pressure) from fire
+    float smoke_generation = 0.25f;        // Smoke generated per unit fuel burned
+    float soot_generation = 0.04f;         // Density generated from burning
     
     // ─────────────────────────────────────────────────────────────────────────
     // Physical forces
     // ─────────────────────────────────────────────────────────────────────────
-    float buoyancy_density = -0.5f;       // Density buoyancy (negative = sink)
-    float buoyancy_temperature = 5.0f;    // Temperature buoyancy (hot rises) - STRONG default
+    float buoyancy_density = -0.18f;      // Density buoyancy (negative = sink)
+    float buoyancy_temperature = 2.2f;    // Temperature buoyancy (hot rises)
     float ambient_temperature = 293.0f;   // Ambient temp in Kelvin (~20°C)
     
-    float vorticity_strength = 0.5f;      // Vorticity confinement (detail)
-    float turbulence_strength = 0.2f;     // Added turbulence noise strength
-    float turbulence_scale = 1.0f;        // Turbulence noise scale
+    float vorticity_strength = 0.32f;     // Vorticity confinement (detail)
+    float turbulence_strength = 0.08f;    // Added turbulence noise strength
+    float turbulence_scale = 1.2f;        // Turbulence noise scale
     int   turbulence_octaves = 3;         // FBM octaves (1-8, more = more detail)
     float turbulence_lacunarity = 2.0f;   // Frequency multiplier per octave
     float turbulence_persistence = 0.5f;  // Amplitude decay per octave
@@ -174,7 +228,12 @@ struct GasSimulationSettings {
         Multigrid,        // Multigrid V-cycle (future implementation)
         FFT               // Spectral solver using cuFFT (10-50x faster!)
     };
+    enum class BoundaryMode {
+        Open,             // Best for plume / smoke escaping the domain
+        Periodic          // Looping domain; matches the current FFT spectral solver
+    };
     PressureSolverMode pressure_solver = PressureSolverMode::SOR;
+    BoundaryMode boundary_mode = BoundaryMode::Open;
     float sor_omega = 1.7f;  // SOR relaxation factor (optimal ~1.7 for 3D Poisson)
 
     Vec3 gravity = Vec3(0, -9.81f, 0);
@@ -228,6 +287,15 @@ struct GasSimulationSettings {
  */
 class GasSimulator {
 public:
+    struct StateSnapshot {
+        FluidGrid grid;
+        FluidGrid grid_temp;
+        std::vector<Vec3> persistent_vorticity;
+        int current_frame = 0;
+        float accumulated_time = 0.0f;
+        bool valid = false;
+    };
+
     GasSimulator();
     ~GasSimulator();
     
@@ -354,6 +422,9 @@ public:
     
     /// @brief Is GPU data valid/up-to-date?
     bool isGPUDataValid() const { return gpu_data_valid; }
+    bool isUsingCUDA() const { return settings.backend == SolverBackend::CUDA && cuda_initialized; }
+    bool isCUDAInitialized() const { return cuda_initialized; }
+    bool canUseFFTPressureSolver() const;
 
     /// @brief Setup a preset (Fire, Smoke, Explosion)
     void applyPreset(const std::string& presetName);
@@ -363,6 +434,8 @@ public:
     
     /// @brief Download from GPU to CPU grid
     void downloadFromGPU();
+    StateSnapshot captureState() const;
+    void restoreState(const StateSnapshot& snapshot);
 
 private:
     // ═══════════════════════════════════════════════════════════════════════
@@ -409,6 +482,7 @@ private:
     int current_frame = 0;
     float accumulated_time = 0.0f;
     float last_step_time_ms = 0.0f;
+    int smoothed_adaptive_chunk_count = 1;
     bool initialized = false;
     
     // Baking

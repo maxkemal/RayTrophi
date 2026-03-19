@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "json.hpp"
 #include <cstdint>
@@ -53,10 +53,19 @@ struct AssetRecord {
     bool vdb_is_fire = false;
     bool vdb_is_smoke = false;
     bool vdb_has_velocity = false;
+    bool vdb_has_shader_defaults = false;
     std::string vdb_shader_preset = "auto";
-    float vdb_density_multiplier = 1.0f;
+    float vdb_density_multiplier = 10.0f;
+    float vdb_scattering_coefficient = 2.0f;
+    float vdb_absorption_coefficient = 10.0f;
+    float vdb_step_size = 0.15f;
+    int vdb_max_steps = 64;
+    int vdb_shadow_steps = 8;
     float vdb_temperature_scale = 1.0f;
     float vdb_emission_intensity = 0.0f;
+    bool vdb_has_density_stats = false;
+    double vdb_density_p95 = 0.0;
+    double vdb_density_p99 = 0.0;
 };
 
 struct AssetAnalysisInfo {
@@ -78,6 +87,15 @@ struct AssetAnalysisInfo {
     bool vdb_is_fire = false;
     bool vdb_is_smoke = false;
     bool vdb_has_velocity = false;
+    bool vdb_has_density_stats = false;
+    double vdb_density_p95 = 0.0;
+    double vdb_density_p99 = 0.0;
+    float vdb_recommended_density_multiplier = 10.0f;
+    float vdb_recommended_scattering_coefficient = 2.0f;
+    float vdb_recommended_absorption_coefficient = 10.0f;
+    float vdb_recommended_step_size = 0.15f;
+    int vdb_recommended_max_steps = 64;
+    int vdb_recommended_shadow_steps = 8;
     bool has_dimensions = false;
     double width = 0.0;
     double height = 0.0;

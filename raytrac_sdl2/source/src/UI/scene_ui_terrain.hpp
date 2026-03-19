@@ -16,6 +16,7 @@
 #include "MaterialManager.h" // Added for material selection
 #include "OptixWrapper.h"
 #include "OptixAccelManager.h"
+#include "Backend/VulkanBackend.h"
 #include <TerrainManager.h>
 #include "PrincipledBSDF.h" // For layer texture editing
 #include <set>
@@ -965,6 +966,10 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             changed |= ImGui::DragFloat("Strength", &group.wind_settings.strength, 0.1f, 0.0f, 45.0f, "%.1f deg");
                             changed |= ImGui::DragFloat("Turbulence", &group.wind_settings.turbulence, 0.05f, 0.0f, 5.0f);
                             changed |= ImGui::DragFloat("Wave Size", &group.wind_settings.wave_size, 1.0f, 1.0f, 500.0f);
+                            changed |= ImGui::Checkbox("Use Source Profiles", &group.wind_settings.use_source_profiles);
+                            changed |= ImGui::Checkbox("Allow CUDA Deform", &group.wind_settings.allow_gpu_deform);
+                            changed |= ImGui::DragFloat("CUDA Max Distance", &group.wind_settings.gpu_deform_max_distance, 0.5f, 1.0f, 500.0f, "%.1f m");
+                            changed |= ImGui::DragInt("CUDA Max Instances", &group.wind_settings.gpu_deform_max_instances, 1.0f, 1, 10000);
                             
                             // Direction Logic
                             float current_angle = atan2(group.wind_settings.direction.z, group.wind_settings.direction.x) * 57.2958f;
@@ -974,13 +979,27 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 changed = true;
                             }
                             
+                            if (group.wind_settings.use_source_profiles && !group.sources.empty()) {
+                                ImGui::SeparatorText("Source Wind Profiles");
+                                for (int s_i = 0; s_i < group.sources.size(); ++s_i) {
+                                    auto& src = group.sources[s_i];
+                                    ImGui::PushID(("windsrc" + std::to_string(s_i)).c_str());
+                                    if (ImGui::TreeNode(src.name.c_str())) {
+                                        changed |= ImGui::DragFloat("Strength Scale", &src.settings.wind_strength_scale, 0.05f, 0.0f, 3.0f, "%.2f");
+                                        changed |= ImGui::DragFloat("Speed Scale", &src.settings.wind_speed_scale, 0.05f, 0.1f, 3.0f, "%.2f");
+                                        changed |= ImGui::DragFloat("Turbulence Scale", &src.settings.wind_turbulence_scale, 0.05f, 0.0f, 3.0f, "%.2f");
+                                        changed |= ImGui::DragFloat("Bend Limit Scale", &src.settings.wind_bend_limit_scale, 0.05f, 0.1f, 3.0f, "%.2f");
+                                        changed |= ImGui::DragFloat("Phase Offset", &src.settings.wind_phase_offset, 0.05f, -10.0f, 10.0f, "%.2f");
+                                        ImGui::TreePop();
+                                    }
+                                    ImGui::PopID();
+                                }
+                            }
+
                             if (changed) {
                                 // Real-time preview requires reset
                                 ctx.renderer.resetCPUAccumulation();
                                 if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
-                                
-                                // Since logic is time-based, just setting dirty might not be enough if time is paused.
-                                // But Renderer::updateWind reads these values every frame.
                             }
                         }
                         ImGui::TreePop(); 
@@ -1224,6 +1243,8 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                                 }
                                 if (terrain_brush.stamp_texture) {
                                     ImGui::TextDisabled("Stamp: %s", std::filesystem::path(terrain_brush.stamp_texture->name).filename().string().c_str());
+                                } else {
+                                    ImGui::TextDisabled("Stamp preview uses the brush bounds until a texture is loaded.");
                                 }
                                 ImGui::Unindent();
                             }
@@ -1240,6 +1261,7 @@ void SceneUI::drawTerrainPanel(UIContext& ctx) {
                             ImGui::PushItemWidth(160.0f);
                             ImGui::SliderFloat("Radius", &terrain_brush.radius, 1.0f, 200.0f, "%.1f m");
                             ImGui::SliderFloat("Strength", &terrain_brush.strength, 0.01f, 10.0f, "%.2f");
+                            ImGui::SliderFloat("Curve", &terrain_brush.curve, 0.25f, 4.0f, "%.2f");
                             ImGui::PopItemWidth();
 
                             ImGui::Checkbox("Show Viewport Circle", &terrain_brush.show_preview);
@@ -1271,6 +1293,43 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
     int x, y;
     Uint32 buttons = SDL_GetMouseState(&x, &y);
     bool is_left_down = (buttons & SDL_BUTTON(SDL_BUTTON_LEFT));
+    auto* terrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
+    if (!terrain) return;
+    static bool was_left_down = false;
+    static bool pending_geometry_commit = false;
+    static bool pending_vulkan_material_sync = false;
+    static float last_vulkan_paint_sync_time = -1000.0f;
+    static float last_live_geometry_sync_time = -1000.0f;
+
+    auto commitTerrainStroke = [&]() {
+        if (pending_vulkan_material_sync && ctx.render_settings.use_vulkan && ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
+        }
+
+        if (pending_geometry_commit) {
+            bool handled = false;
+            if (ctx.render_settings.use_vulkan && g_hasVulkan && ctx.backend_ptr) {
+                if (auto vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr)) {
+                    handled = vkBackend->updateTerrainBLASPartial(terrain->name, terrain);
+                }
+                if (!handled) {
+                    g_vulkan_rebuild_pending = true;
+                }
+            } else if (!ctx.render_settings.use_optix) {
+                g_bvh_rebuild_pending = true;
+            }
+            ctx.renderer.resetCPUAccumulation();
+        }
+
+        pending_geometry_commit = false;
+        pending_vulkan_material_sync = false;
+    };
+
+    if (!is_left_down && was_left_down) {
+        commitTerrainStroke();
+    }
+    was_left_down = is_left_down;
     
     float win_w = io.DisplaySize.x;
     float win_h = io.DisplaySize.y;
@@ -1281,8 +1340,6 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
     Ray r = ctx.scene.camera->get_ray(u, v);
     
     HitRecord rec;
-    auto* terrain = TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id);
-    if (!terrain) return;
     
     // Check intersection with terrain mesh
     // USE TERRAIN-ONLY RAYCAST (Prevents hitting foliage/instances)
@@ -1305,6 +1362,29 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                 int segments = 32;
                 ImVec4 color = (terrain_brush.mode == 5) ? ImVec4(1,1,0,0.8f) : ImVec4(1, 0.4f, 0.2f, 0.8f); // Yellow for paint, Orange for sculpt
                 ImU32 col = ImGui::ColorConvertFloat4ToU32(color);
+                ImU32 innerCol = ImGui::ColorConvertFloat4ToU32(ImVec4(color.x, color.y, color.z, 0.35f));
+
+                auto Project = [&](Vec3 p) -> ImVec2 {
+                    Camera& cam = *ctx.scene.camera;
+                    Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+                    Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+                    Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+                    float fov_rad = cam.vfov * 3.14159f / 180.0f;
+                    
+                    Vec3 to_p = p - cam.lookfrom;
+                    float depth = to_p.dot(cam_forward);
+                    if (depth <= 0.1f) return ImVec2(-100,-100);
+                    
+                    float h_dim = depth * tan(fov_rad/2);
+                    float w_dim = h_dim * (win_w/win_h);
+                    
+                    float lx = to_p.dot(cam_right);
+                    float ly = to_p.dot(cam_up);
+                    
+                    float ndc_x = lx / w_dim;
+                    float ndc_y = ly / h_dim;
+                    return ImVec2((ndc_x * 0.5f + 0.5f) * win_w, (0.5f - ndc_y * 0.5f) * win_h);
+                };
                 
                 for (int i = 0; i < segments; i++) {
                     float theta = (float)i / segments * 6.28318f;
@@ -1312,35 +1392,53 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                     
                     Vec3 p1 = hitPoint + Vec3(cos(theta) * terrain_brush.radius, 0.1f, sin(theta) * terrain_brush.radius);
                     Vec3 p2 = hitPoint + Vec3(cos(theta2) * terrain_brush.radius, 0.1f, sin(theta2) * terrain_brush.radius);
-
-                    auto Project = [&](Vec3 p) -> ImVec2 {
-                        Camera& cam = *ctx.scene.camera;
-                        Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
-                        Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
-                        Vec3 cam_up = cam_right.cross(cam_forward).normalize();
-                        float fov_rad = cam.vfov * 3.14159f / 180.0f;
-                         
-                        Vec3 to_p = p - cam.lookfrom;
-                        float depth = to_p.dot(cam_forward);
-                        if (depth <= 0.1f) return ImVec2(-100,-100);
-                        
-                        float h_dim = depth * tan(fov_rad/2);
-                        float w_dim = h_dim * (win_w/win_h);
-                        
-                        float lx = to_p.dot(cam_right);
-                        float ly = to_p.dot(cam_up);
-                        
-                        float ndc_x = lx / w_dim;
-                        float ndc_y = ly / h_dim; // Corrected sign for Y
-                        
-                        return ImVec2((ndc_x * 0.5f + 0.5f) * win_w, (0.5f - ndc_y * 0.5f) * win_h);
-                    };
                     
                     ImVec2 s1 = Project(p1);
                     ImVec2 s2 = Project(p2);
                     
                     if (s1.x > -50 && s1.x < win_w + 50) {
                          dl->AddLine(s1, s2, col, 2.0f);
+                    }
+                }
+
+                for (int ring = 0; ring < 2; ++ring) {
+                    float ringScale = (ring == 0) ? 0.5f : std::pow(0.5f, 1.0f / std::max(terrain_brush.curve, 0.25f));
+                    float ringRadius = terrain_brush.radius * ringScale;
+                    for (int i = 0; i < segments; i++) {
+                        float theta = (float)i / segments * 6.28318f;
+                        float theta2 = (float)(i + 1) / segments * 6.28318f;
+                        Vec3 p1 = hitPoint + Vec3(cos(theta) * ringRadius, 0.12f, sin(theta) * ringRadius);
+                        Vec3 p2 = hitPoint + Vec3(cos(theta2) * ringRadius, 0.12f, sin(theta2) * ringRadius);
+                        ImVec2 s1 = Project(p1);
+                        ImVec2 s2 = Project(p2);
+                        if (s1.x > -50 && s1.x < win_w + 50) {
+                            dl->AddLine(s1, s2, innerCol, 1.0f);
+                        }
+                    }
+                }
+
+                if (terrain_brush.mode == 4) {
+                    float rad = terrain_brush.stamp_rotation * 3.14159f / 180.0f;
+                    float c = cosf(rad);
+                    float s = sinf(rad);
+                    Vec3 corners[4] = {
+                        Vec3(-terrain_brush.radius, 0.15f, -terrain_brush.radius),
+                        Vec3( terrain_brush.radius, 0.15f, -terrain_brush.radius),
+                        Vec3( terrain_brush.radius, 0.15f,  terrain_brush.radius),
+                        Vec3(-terrain_brush.radius, 0.15f,  terrain_brush.radius)
+                    };
+                    ImVec2 screenCorners[4];
+                    for (int i = 0; i < 4; ++i) {
+                        Vec3 local = corners[i];
+                        Vec3 rotated(local.x * c - local.z * s, local.y, local.x * s + local.z * c);
+                        screenCorners[i] = Project(hitPoint + rotated);
+                    }
+                    for (int i = 0; i < 4; ++i) {
+                        ImVec2 a = screenCorners[i];
+                        ImVec2 b = screenCorners[(i + 1) % 4];
+                        if (a.x > -100 && a.x < win_w + 100) {
+                            dl->AddLine(a, b, innerCol, 1.5f);
+                        }
                     }
                 }
             }
@@ -1359,10 +1457,18 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                      TerrainManager::getInstance().paintSplatMap(
                          terrain, hitPoint, terrain_brush.paint_channel, terrain_brush.radius, terrain_brush.strength, dt
                      );
-                     // Paint updates CPU texture, updateSplatMapTexture() already syncs to GPU
                      if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                     if (ctx.render_settings.use_vulkan && ctx.backend_ptr) {
+                         pending_vulkan_material_sync = true;
+                         float now = (float)ImGui::GetTime();
+                         if (now - last_vulkan_paint_sync_time > 0.08f) {
+                             ctx.renderer.updateBackendMaterials(ctx.scene);
+                             ctx.backend_ptr->resetAccumulation();
+                             last_vulkan_paint_sync_time = now;
+                             pending_vulkan_material_sync = false;
+                         }
+                     }
                      ctx.renderer.resetCPUAccumulation();
-                     // NOTE: No g_optix_rebuild_pending needed - texture is already updated via updateGPU()
                  } 
                  else if (terrain_brush.mode == 6 || terrain_brush.mode == 7) {
                      // PAINT HARDNESS (6=increase, 7=decrease)
@@ -1384,9 +1490,11 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                          terrain_brush.radius, 
                          terrain_brush.strength, 
                          dt,
+                         terrain_brush.curve,
                          targetH,
                          terrain_brush.stamp_texture,
-                         terrain_brush.stamp_rotation
+                         terrain_brush.stamp_rotation,
+                         false
                      );
                      
                      if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
@@ -1396,9 +1504,28 @@ void SceneUI::handleTerrainBrush(UIContext& ctx) {
                          // OPTIMIZATION: Only update the terrain mesh BLAS
                          // Does NOT trigger full scene rebuild, just BLAS upload + TLAS refit
                          ctx.optix_gpu_ptr->updateTerrainBLASPartial(terrain->name, terrain);
+                    } else {
+                         float now = (float)ImGui::GetTime();
+                         if (now - last_live_geometry_sync_time > 0.08f) {
+                             if (ctx.render_settings.use_vulkan && g_hasVulkan) {
+                                 bool updated = false;
+                                 if (ctx.backend_ptr) {
+                                     if (auto vkBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr)) {
+                                         updated = vkBackend->updateTerrainBLASPartial(terrain->name, terrain);
+                                     }
+                                     ctx.backend_ptr->resetAccumulation();
+                                 }
+                                 if (!updated) {
+                                     g_vulkan_rebuild_pending = true;
+                                 }
+                             } else {
+                                 g_cpu_bvh_refit_pending = true;
+                             }
+                             last_live_geometry_sync_time = now;
+                         }
                      }
                      terrain->dirty_region.clear();
-                     g_bvh_rebuild_pending = true;
+                     pending_geometry_commit = true;
                  }
             }
         }

@@ -293,12 +293,14 @@
     <ClInclude Include="source\include\AABB.h" />
     <ClInclude Include="source\include\AnimatedObject.h" />
     <ClInclude Include="source\include\AreaLight.h" />
+    <ClInclude Include="source\include\AssetRegistry.h" />
     <ClInclude Include="source\include\AssimpLoader.h" />
     <ClInclude Include="source\include\Camera.h" />
     <ClInclude Include="source\include\Dielectric.h" />
     <ClInclude Include="source\include\DiffuseLight.h" />
     <ClInclude Include="source\include\DirectionalLight.h" />
     <ClInclude Include="source\include\EmbreeBVH.h" />
+    <ClInclude Include="source\include\FoliageWindSystem.h" />
     <ClInclude Include="source\include\globals.h" />
     <ClInclude Include="source\include\Hittable.h" />
     <ClInclude Include="source\include\HittableList.h" />
@@ -357,6 +359,7 @@
     <ClCompile Include="source\external\miniz_zip.c" />
     <ClCompile Include="source\src\Backend\OptixBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
+    <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
     <ClCompile Include="source\src\simdjson.cpp" />
     <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
     <ClCompile Include="source\src\Hair\HairStrand.cpp" />
@@ -366,6 +369,7 @@
     <ClCompile Include="source\src\Animation\AnimationController.cpp" />
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
     <ClCompile Include="source\src\Scene\AreaLight.cpp" />
+    <ClCompile Include="source\src\Scene\AssetRegistry.cpp" />
     <ClCompile Include="source\src\Utils\AssimpLoader.cpp" />
     <ClCompile Include="source\src\Render\AtmosphereLUT.cpp" />
     <ClCompile Include="source\src\Render\Camera.cpp" />
@@ -373,6 +377,7 @@
     <ClCompile Include="source\src\Scene\Dielectric.cpp" />
     <ClCompile Include="source\src\Scene\DirectionalLight.cpp" />
     <ClCompile Include="source\src\Render\EmbreeBVH.cpp" />
+    <ClCompile Include="source\src\Render\FoliageWindSystem.cpp" />
     <ClCompile Include="source\src\Physics\EmitterSystem.cpp" />
     <ClCompile Include="source\src\Physics\ForceField.cpp" />
     <ClCompile Include="source\src\Physics\GasSimulator.cpp" />
@@ -395,6 +400,8 @@
     <ClCompile Include="source\src\Core\ProjectManager.cpp" />
     <ClCompile Include="source\src\Render\Renderer.cpp" />
     <ClCompile Include="source\src\Physics\RiverManager.cpp" />
+    <ClCompile Include="source\src\Utils\image_filters.cpp" />
+    <ClCompile Include="source\src\Utils\image_resample.cpp" />
     <ClCompile Include="source\src\Utils\SceneCommand.cpp" />
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp" />
     <ClCompile Include="source\src\Utils\SceneExporter.cpp" />

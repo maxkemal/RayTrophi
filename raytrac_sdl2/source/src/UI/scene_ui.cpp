@@ -2530,7 +2530,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     // static float bottom_height = 280.0f; <-- REMOVED
     const float min_height = 100.0f;
     const float max_height = screen_y * 0.6f;  // Max 60% of screen
-    const float resize_handle_height = 6.0f;
+    const float resize_handle_height = 14.0f;
     
     // Clamp height to valid range
     bottom_panel_height = std::clamp(bottom_panel_height, min_height, max_height);
@@ -2556,7 +2556,12 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
         ImVec2 p1(0, panel_top);
         ImVec2 p2(screen_x, panel_top);
-        draw_list->AddLine(p1, p2, IM_COL32(100, 100, 100, 180), 2.0f);
+        const bool resize_hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        draw_list->AddLine(
+            p1,
+            p2,
+            resize_hovered ? IM_COL32(140, 140, 140, 220) : IM_COL32(100, 100, 100, 180),
+            resize_hovered ? 3.0f : 2.0f);
         
         // Handle resize dragging
         ImGui::InvisibleButton("##ResizeHandle", ImVec2(screen_x, resize_handle_height));
@@ -2736,7 +2741,8 @@ bool SceneUI::drawOverlays(UIContext& ctx)
     drawAFPointsOverlay(ctx);
 
     // Asset Browser -> Viewport drag & drop target
-    if (ImGui::IsDragDropActive()) {
+    // Keep this path fully dormant unless the asset browser is actually visible.
+    if (show_asset_browser && ImGui::IsDragDropActive()) {
         if (const ImGuiPayload* drag_payload = ImGui::GetDragDropPayload()) {
             if (drag_payload->IsDataType("ASSET_BROWSER_ENTRY") && drag_payload->Data) {
                 const char* payload_text = static_cast<const char*>(drag_payload->Data);
@@ -3151,22 +3157,7 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
         } else {
             vdb->setShader(VolumeShader::createSmokePreset());
         }
-
-        if (asset_record->vdb_shader_preset == "fire") {
-            vdb->setShader(VolumeShader::createFirePreset());
-        } else if (asset_record->vdb_shader_preset == "smoke") {
-            vdb->setShader(VolumeShader::createSmokePreset());
-        }
-
-        if (auto shader = vdb->getShader()) {
-            shader->density.multiplier = asset_record->vdb_density_multiplier;
-            shader->emission.temperature_scale = asset_record->vdb_temperature_scale;
-            if (shader->emission.mode == VolumeEmissionMode::Constant) {
-                shader->emission.intensity = asset_record->vdb_emission_intensity;
-            } else if (shader->emission.mode == VolumeEmissionMode::Blackbody) {
-                shader->emission.blackbody_intensity = (std::max)(0.0f, asset_record->vdb_emission_intensity);
-            }
-        }
+        applyVDBImportOrientation(*vdb, vdb_import_orientation_preset, asset_record->source + " " + asset_record->entry_path.string());
 
         if (!display_name.empty()) {
             vdb->name = display_name;
@@ -4483,6 +4474,8 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     mesh_cache.clear();
     mesh_ui_cache.clear();
     this->tri_to_index.clear(); // Clear the lookup map
+    cached_triangle_count_by_object.clear();
+    cached_scene_triangle_count = 0;
     bbox_cache.clear();  
     material_slots_cache.clear();
     
@@ -4502,6 +4495,8 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     mesh_ui_cache.reserve(mesh_cache.size());
     for (auto& kv : mesh_cache) {
         mesh_ui_cache.push_back(kv);
+        cached_triangle_count_by_object[kv.first] = kv.second.size();
+        cached_scene_triangle_count += kv.second.size();
         
         // Calculate LOCAL bounding box from ORIGINAL vertices (not transformed!)
         // This allows us to properly apply the transform matrix when drawing
@@ -4546,6 +4541,8 @@ void SceneUI::invalidateCache() {
     mesh_cache_valid = false; 
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    cached_triangle_count_by_object.clear();
+    cached_scene_triangle_count = 0;
     bbox_cache.clear();
     material_slots_cache.clear();
     SCENE_LOG_INFO("Selection cache fully cleared and invalidated");
@@ -6032,6 +6029,7 @@ std::string SceneUI::serialize() {
     j["show_world_tab"] = show_world_tab;
     j["show_hair_tab"] = show_hair_tab;
     j["show_modifiers_tab"] = show_modifiers_tab;
+    j["vdb_import_orientation_preset"] = vdb_import_orientation_preset;
     j["pivot_mode"] = pivot_mode;
     j["active_properties_tab"] = active_properties_tab;
     j["showSidePanel"] = showSidePanel;
@@ -6101,6 +6099,7 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_world_tab")) show_world_tab = j["show_world_tab"];
         if (j.contains("show_hair_tab")) show_hair_tab = j["show_hair_tab"];
         if (j.contains("show_modifiers_tab")) show_modifiers_tab = j["show_modifiers_tab"];
+        if (j.contains("vdb_import_orientation_preset")) vdb_import_orientation_preset = j["vdb_import_orientation_preset"];
         
         if (j.contains("pivot_mode")) pivot_mode = j["pivot_mode"];
         if (j.contains("active_properties_tab")) active_properties_tab = j["active_properties_tab"];
@@ -6147,9 +6146,25 @@ void SceneUI::deserialize(const std::string& data) {
         }
         ensureDefaultAssetLibrary(asset_library_paths);
         active_asset_library_index = j.value("active_asset_library_index", 0);
+        asset_library_refresh_in_progress = false;
+        asset_library_refresh_status.clear();
+        pending_asset_library_root.clear();
+
         if (!asset_library_paths.empty()) {
             active_asset_library_index = (std::max)(0, (std::min)(active_asset_library_index, static_cast<int>(asset_library_paths.size()) - 1));
-            refreshAssetLibrarySafely(asset_registry, normalizeAbsolutePath(asset_library_paths[active_asset_library_index]));
+
+            // Asset library scan is expensive (filesystem walk + optional metadata/VDB inspection).
+            // Do not block project/UI restore for a panel that may stay closed; defer loading until
+            // the asset browser is actually opened, where we already use the async refresh path.
+            if (show_asset_browser) {
+                startAsyncAssetLibraryRefresh(
+                    normalizeAbsolutePath(asset_library_paths[active_asset_library_index]),
+                    "Restoring asset library...");
+            } else {
+                asset_registry = AssetRegistry();
+            }
+        } else {
+            asset_registry = AssetRegistry();
         }
         
         if (j.contains("show_scene_log")) show_scene_log = j["show_scene_log"];

@@ -1,0 +1,9 @@
+{
+  "id": "default_scene",
+  "name": "Default Scene",
+  "type": "scene",
+  "format": "glb",
+  "entry": "scene.glb",
+  "tags": ["default", "startup", "scene"],
+  "version": 1
+}

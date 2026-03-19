@@ -310,6 +310,7 @@ struct AccelStructHandle {
     
     // Skinning
     bool hasSkinning = false;
+    bool allowUpdate = false;
     uint32_t vertexCount = 0;
     BufferHandle baseVertexBuffer;
     BufferHandle baseNormalBuffer;
@@ -455,7 +456,7 @@ public:
     /**
      * @brief Update existing BLAS (for animation)
      */
-    void updateBLAS(uint32_t blasIndex, const float* newVertices);
+    void updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals = nullptr);
     
     /**
      * @brief Rebuild TLAS with new transforms
@@ -492,7 +493,8 @@ public:
     void bindRTDescriptors(const ImageHandle& outputImage,
                            const ImageHandle* denoiserColorImage = nullptr,
                            const ImageHandle* denoiserAlbedoImage = nullptr,
-                           const ImageHandle* denoiserNormalImage = nullptr);
+                           const ImageHandle* denoiserNormalImage = nullptr,
+                           const ImageHandle* varianceImage = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
     
@@ -732,6 +734,8 @@ std::unique_ptr<VulkanDevice> createVulkanDevice(bool preferHardwareRT = true, b
 
 } // namespace VulkanRT
 
+struct TerrainObject;
+
 
 // ============================================================================
 // IBackend Adapter
@@ -774,6 +778,7 @@ public:
     void updateInstanceMaterialBinding(const std::string& nodeName, int oldMatID, int newMatID) override;
     void setVisibilityByNodeName(const std::string& nodeName, bool visible) override;
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
+    bool updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain);
 
     // ========================================================================
     // IBackend - Materials & Textures
@@ -855,6 +860,7 @@ private:
     float m_varianceThreshold = 0.05f;
     int m_maxBounces = 12;
     std::vector<float> m_hdrPixels;   // Float32 HDR readback buffer — her frame realloc önler
+    std::vector<uint16_t> m_halfPixels;
     std::vector<float> m_denoiserColorPixels;
     std::vector<float> m_denoiserAlbedoPixels;
     std::vector<float> m_denoiserNormalPixels;
@@ -864,6 +870,7 @@ private:
     VulkanRT::ImageHandle m_denoiserColorImage;
     VulkanRT::ImageHandle m_denoiserAlbedoImage;
     VulkanRT::ImageHandle m_denoiserNormalImage;
+    VulkanRT::ImageHandle m_varianceImage;
     VulkanRT::BufferHandle m_denoiserColorStagingBuffer;
     VulkanRT::BufferHandle m_denoiserAlbedoStagingBuffer;
     VulkanRT::BufferHandle m_denoiserNormalStagingBuffer;

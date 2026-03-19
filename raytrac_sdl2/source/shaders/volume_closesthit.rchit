@@ -697,27 +697,29 @@ void main() {
             const uint PROBE_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
                                    | gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsOpaqueEXT;
-            const uint PROBE_MASK  = 0x01; // triangles only
+            const uint PROBE_MASK  = 0xFD; // ~0x02: check all solid geometry, ignore other volume AABBs
 
             // Initial check: any solid in [tNear, tFar]?
             shadowOccluded = true;
             traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
-                        rayOrigin, tNear + 0.002, rayDir, tFar - 0.001, 1);
+                        rayOrigin, max(1e-4, tNear - 0.002), rayDir, tFar + 0.002, 1);
             if (shadowOccluded) {
                 // Binary search to find approximate t of first solid hit
                 float lo = tNear, hi = tFar;
-                int probeIters = cameraInsideVolume ? 2 : 4;
+                int probeIters = cameraInsideVolume ? 2 : 5;
                 for (int it = 0; it < probeIters; it++) {
                     float mid = (lo + hi) * 0.5;
                     shadowOccluded = true;
+                    // Provide a small overlap in the search window to prevent near-misses
                     traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
-                                rayOrigin, lo + 0.001, rayDir, mid, 1);
+                                rayOrigin, max(1e-4, lo - 0.002), rayDir, mid + 0.002, 1);
                     if (shadowOccluded) hi = mid;  // solid is in [lo, mid]
                     else                lo = mid;  // solid is in (mid, hi]
                 }
                 solidT = lo;
                 // Clamp march to just before the solid
                 tFar = solidT - 0.01;
+                // If the solid is essentially at or before the entry point, skip AABBs on next bounce
                 if (tFar <= tNear) {
                     payload.radiance = vec3(0.0);
                     payload.scatterOrigin = rayOrigin + rayDir * max(solidT - 0.01, tNear);

@@ -25,9 +25,9 @@ __device__ __forceinline__ float3 clamp3f(const float3& v, float lo, float hi) {
 }
 
 __device__ float G_SchlickGGX(float NdotV, float roughness) {
-    // IBL/Path Tracing variant: k = alpha / 2 = (roughness^2) / 2
-    float alpha = roughness * roughness;
-    float k = alpha / 2.0f;
+    // Match Vulkan/CPU direct-lighting parity: k = (roughness + 1)^2 / 8
+    float r = roughness + 1.0f;
+    float k = (r * r) / 8.0f;
     return NdotV / (NdotV * (1.0f - k) + k);
 }
 
@@ -424,7 +424,11 @@ __device__ bool clearcoat_scatter(
     // Clear coat uses fixed IOR ~1.5 (like lacquer/varnish)
     const float CC_F0 = 0.04f;
 
-    float cc_roughness = fmaxf(material.clearcoat_roughness, 0.001f);
+    float cc_roughness = material.clearcoat_roughness;
+    if (payload.use_blended_data) cc_roughness = payload.blended_clearcoat_roughness;
+    float clearcoat_strength = material.clearcoat;
+    if (payload.use_blended_data) clearcoat_strength = payload.blended_clearcoat;
+    cc_roughness = fmaxf(cc_roughness, 0.001f);
     float alpha = fmaxf(cc_roughness * cc_roughness, 1e-4f);
 
     // Sample outgoing direction using GGX VNDF (matches Vulkan GLSL implementation)
@@ -451,7 +455,7 @@ __device__ bool clearcoat_scatter(
     float G1L = NdotL / (NdotL * (1.0f - k) + k);
 
     // Return white specular scaled by Fresnel*G1L (caller will compensate selection probability)
-    *attenuation = make_float3(fresnel * G1L, fresnel * G1L, fresnel * G1L);
+    *attenuation = make_float3(fresnel * G1L, fresnel * G1L, fresnel * G1L) * fmaxf(clearcoat_strength, 0.0f);
     *scattered = Ray(offset_ray(payload.position, N), L);
 
     // PDF approximation using microfacet half-vector formulation
@@ -617,9 +621,9 @@ __device__ bool transmission_scatter(
     float transmission_factor = 1.0f - fresnel * (1.0f - transmission);
     
     // Şeffaf camlar için tint yerine transmission_color kullan
-    float3 result = lerp(tint, transmission_color, material.transmission) * transmission_factor;
+    float3 result = lerp(tint, transmission_color, transmission) * transmission_factor;
     
-    if (material.transmission > 0.9f) {
+    if (transmission > 0.9f) {
         result = make_float3(
             fmaxf(result.x, 0.9f),
             fmaxf(result.y, 0.9f),
@@ -710,7 +714,10 @@ __device__ bool scatter_material(
         metallic = tex2D<float4>(payload.metallic_tex, uv.x, uv.y).z;
 
     float transmission = material.transmission;
-    if (payload.has_transmission_tex)
+    if (payload.use_blended_data) {
+        transmission = payload.blended_transmission;
+    }
+    else if (payload.has_transmission_tex)
         transmission = tex2D<float4>(payload.transmission_tex, uv.x, uv.y).x;
 
     roughness = fminf(fmaxf(roughness, 0.02f), 1.0f);
@@ -719,19 +726,7 @@ __device__ bool scatter_material(
 
    
    
-    //  Fresnel-Schlick + GGX ile metalik / difüz karışımı
-    float3 H = importance_sample_ggx(random_float(rng), random_float(rng), roughness, N);
-    float3 L = normalize(reflect(-V, H));
-    if (dot(N, L) <= 0.0f) {
-        L = normalize(reflect(-V, N));
-        if (dot(N, L) <= 0.0f) {
-            L = N;
-        }
-    }
-
-    float cos_theta = fmaxf(dot(V, H), 1e-4f);
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);   
-    float3 F = fresnel_schlick_roughness(cos_theta, F0, roughness);
     
     // ═══════════════════════════════════════════════════════════════════════════
     // LOBE SELECTION (Energy-conserving order)
@@ -739,6 +734,7 @@ __device__ bool scatter_material(
     
     // 1. CLEAR COAT (Top layer - evaluated first)
     float clearcoat = material.clearcoat;
+    if (payload.use_blended_data) clearcoat = payload.blended_clearcoat;
     if (clearcoat > 0.01f) {
         // Fresnel for clear coat decides reflection probability
         float cc_ior = 1.5f;
@@ -747,8 +743,11 @@ __device__ bool scatter_material(
         float cc_fresnel = cc_f0 + (1.0f - cc_f0) * powf(1.0f - fmaxf(dot(V, N), 0.0f), 5.0f);
         float cc_prob = clearcoat * cc_fresnel;
 
+        float clearcoat_roughness = material.clearcoat_roughness;
+        if (payload.use_blended_data) clearcoat_roughness = payload.blended_clearcoat_roughness;
+
         if (random_float(rng) < cc_prob) {
-            *is_specular = (material.clearcoat_roughness < 0.02f);
+            *is_specular = (clearcoat_roughness < 0.02f);
             bool got = clearcoat_scatter(material, payload, ray_in, rng, scattered, attenuation, pdf);
             if (got) {
                 // Compensate selection probability (match Vulkan behavior)
@@ -762,12 +761,13 @@ __device__ bool scatter_material(
     
     // 2. TRANSMISSION (Glass/Water)
     if (transmission > 0.01f && random_float(rng) < transmission) {
-        *is_specular = (material.roughness < 0.02f);
+        *is_specular = (roughness < 0.02f);
         return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
     }
     
     // 3. SUBSURFACE SCATTERING (Random Walk)
     float sss = material.subsurface;
+    if (payload.use_blended_data) sss = payload.blended_subsurface;
     if (sss > 0.01f && random_float(rng) < sss) {
         *is_specular = false;
         *pdf = 1.0f;
@@ -776,6 +776,7 @@ __device__ bool scatter_material(
     
     // 4. TRANSLUCENT (Thin surface transmission: leaves, paper, fabric)
     float translucent = material.translucent;
+    if (payload.use_blended_data) translucent = payload.blended_translucent;
     if (translucent > 0.01f && random_float(rng) < translucent) {
         *is_specular = false;
         *pdf = 1.0f / M_PIf;  // Cosine-weighted PDF
@@ -792,22 +793,25 @@ __device__ bool scatter_material(
     float3 F_avg = F0 + (make_float3(1.0f, 1.0f, 1.0f) - F0) / 21.0f;
     float3 k_d = (make_float3(1.0f, 1.0f, 1.0f) - F_avg) * (1.0f - metallic);
 
-    // Schlick Fresnel at surface normal angle (not half-vector) for lobe probability,
-    // then dampen by roughness^2 to suppress specular at high roughness (dielectric only).
+    // Match Vulkan/CPU visual lobe selection more closely:
+    // use Schlick Fresnel at the macro normal angle without extra roughness damping.
     float fresnelAtN = F0.x + (1.0f - F0.x) * powf(1.0f - cosTheta_N, 5.0f);
-    float roughnessDampen = 1.0f - roughness * roughness;   // 0 when roughness=1, 1 when roughness=0
-    // For metals: keep full specular probability regardless of roughness (metallic=1 → metal GGX)
-    float p_spec = fresnelAtN * roughnessDampen * (1.0f - metallic) + metallic;
+    float p_spec = fresnelAtN * (1.0f - metallic) + metallic;
     p_spec = fminf(fmaxf(p_spec, 0.001f), 0.999f);
 
     if (random_float(rng) < p_spec) {
         // --- Specular / Metal lobe ---
+        float alpha = fmaxf(roughness * roughness, GPU_MIN_ALPHA);
+        float3 L = ggxSampleVNDF(N, V, alpha, random_float(rng), random_float(rng));
         if (dot(N, L) <= 0.0f) {
             L = reflect(-V, N);
         }
+        float3 H = normalize(V + L);
+        float cos_theta = fmaxf(dot(V, H), 1e-4f);
+        float3 F = fresnel_schlick_roughness(cos_theta, F0, roughness);
         *scattered = Ray(offset_ray(payload.position, N), L);
         float3 spec_tint = lerp(make_float3(1.0f, 1.0f, 1.0f), albedo, metallic);
-        *attenuation = clamp3f(F * spec_tint / p_spec, 0.0f, 1e4f);
+        *attenuation = clamp3f(F * spec_tint, 0.0f, 1e4f);
         *pdf = pdf_brdf(material, wo, L, N) * p_spec;
         
         // --- VULKAN PARITY: Enable NEE for glossy surfaces ---
@@ -825,7 +829,7 @@ __device__ bool scatter_material(
         float3 diffuse = k_d * albedo; 
 
         *scattered = Ray(offset_ray(payload.position, N), world_diff);
-        *attenuation = clamp3f(diffuse / (1.0f - p_spec), 0.0f, 1e4f);
+        *attenuation = clamp3f(diffuse, 0.0f, 1e4f);
         *pdf = NdotD / M_PIf * (1.0f - p_spec);
         *is_specular = false;
     }
