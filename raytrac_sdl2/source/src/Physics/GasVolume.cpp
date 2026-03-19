@@ -30,6 +30,90 @@ GasVolume::~GasVolume() {
     simulator.shutdown();
 }
 
+void GasVolume::clearTimelineSnapshotCache() {
+    timeline_snapshot_cache.clear();
+}
+
+void GasVolume::cacheTimelineSnapshot(int frame) {
+    if (frame < 0) {
+        return;
+    }
+
+    if (!timeline_snapshot_cache.empty() && timeline_snapshot_cache.back().frame == frame) {
+        timeline_snapshot_cache.back().snapshot = simulator.captureState();
+        return;
+    }
+
+    for (auto& entry : timeline_snapshot_cache) {
+        if (entry.frame == frame) {
+            entry.snapshot = simulator.captureState();
+            return;
+        }
+    }
+
+    TimelineSnapshotEntry entry;
+    entry.frame = frame;
+    entry.snapshot = simulator.captureState();
+    timeline_snapshot_cache.push_back(std::move(entry));
+
+    while (timeline_snapshot_cache.size() > kMaxTimelineSnapshots) {
+        timeline_snapshot_cache.pop_front();
+    }
+}
+
+bool GasVolume::restoreTimelineSnapshot(int frame) {
+    for (auto it = timeline_snapshot_cache.rbegin(); it != timeline_snapshot_cache.rend(); ++it) {
+        if (it->frame == frame && it->snapshot.valid) {
+            simulator.restoreState(it->snapshot);
+            last_timeline_sim_frame = simulator.getCurrentFrame();
+            previous_timeline_snapshot = it->snapshot;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GasVolume::restoreNearestTimelineSnapshot(int frame, int& restored_frame) {
+    restored_frame = -1;
+    for (auto it = timeline_snapshot_cache.rbegin(); it != timeline_snapshot_cache.rend(); ++it) {
+        if (it->frame <= frame && it->snapshot.valid) {
+            simulator.restoreState(it->snapshot);
+            restored_frame = it->frame;
+            last_timeline_sim_frame = simulator.getCurrentFrame();
+            previous_timeline_snapshot = it->snapshot;
+            return true;
+        }
+    }
+    return false;
+}
+
+void GasVolume::preserveVoxelDensityForGridResize(const Vec3& previous_grid_size) {
+    auto& settings = getSettings();
+    if (!settings.preserve_voxel_size_on_resize) {
+        return;
+    }
+
+    const float old_max_dim = std::max({ previous_grid_size.x, previous_grid_size.y, previous_grid_size.z, 0.0001f });
+    const int old_max_res = std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 });
+    float target_voxel_size = old_max_dim / static_cast<float>(old_max_res);
+
+    if (target_voxel_size <= 0.0001f) {
+        target_voxel_size = settings.voxel_size > 0.0001f ? settings.voxel_size : 0.1f;
+    }
+
+    const int res_cap = std::clamp(settings.max_auto_resolution, 32, 512);
+    auto compute_axis_resolution = [&](float axis_size) {
+        const float safe_axis = std::max(axis_size, 0.0001f);
+        return std::clamp(static_cast<int>(std::round(safe_axis / target_voxel_size)), 8, res_cap);
+    };
+
+    settings.resolution_x = compute_axis_resolution(settings.grid_size.x);
+    settings.resolution_y = compute_axis_resolution(settings.grid_size.y);
+    settings.resolution_z = compute_axis_resolution(settings.grid_size.z);
+    settings.voxel_size = std::max({ settings.grid_size.x, settings.grid_size.y, settings.grid_size.z, 0.0001f }) /
+        static_cast<float>(std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 }));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HITTABLE INTERFACE
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -61,7 +145,7 @@ bool GasVolume::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool
     rec.t = tmin;
     rec.point = r.at(tmin);
     rec.set_face_normal(r, Vec3(0, 1, 0)); // Arbitrary normal
-    rec.material = nullptr; // Will use VolumeShader separately
+    rec.materialPtr = nullptr; // Will use VolumeShader separately
     rec.gas_volume = this; // Set pointer to this GasVolume
     
     return true;
@@ -78,46 +162,113 @@ bool GasVolume::bounding_box(float time0, float time1, AABB& output_box) const {
 // TRANSFORM
 // ═══════════════════════════════════════════════════════════════════════════════
 
+void GasVolume::syncTransformStateFromHandle() {
+    if (!transform) return;
+    position = transform->position;
+    rotation = transform->rotation;
+    scale = transform->scale;
+    bounds_dirty = true;
+}
+
+void GasVolume::moveEmittersWithDomain(const Vec3& translation_delta) {
+    if (translation_delta.length_squared() <= 1e-10f) {
+        return;
+    }
+
+    auto& emitters = simulator.getEmitters();
+    for (auto& emitter : emitters) {
+        emitter.position += translation_delta;
+        for (auto& [frame, keyframe] : emitter.keyframes) {
+            (void)frame;
+            if (keyframe.has_position) {
+                keyframe.position += translation_delta;
+            }
+        }
+    }
+}
+
+void GasVolume::setTransform(const Matrix4x4& transformMatrix) {
+    if (transform) {
+        transform->setBase(transformMatrix);
+        syncTransformStateFromHandle();
+    } else {
+        transform = std::make_shared<Transform>();
+        transform->setBase(transformMatrix);
+        syncTransformStateFromHandle();
+    }
+    applyTransform();
+}
+
+void GasVolume::setPivotMatrix(const Matrix4x4& pivotMatrix) {
+    if (!transform) {
+        transform = std::make_shared<Transform>();
+    }
+    transform->setPivotMatrix(pivotMatrix);
+    syncTransformStateFromHandle();
+    applyTransform();
+}
+
+void GasVolume::setPivotOffset(const Vec3& offset, bool preserve_world) {
+    if (!transform) {
+        transform = std::make_shared<Transform>();
+    }
+    transform->setPivotOffset(offset, preserve_world);
+    syncTransformStateFromHandle();
+    applyTransform();
+}
+
 void GasVolume::setPosition(const Vec3& pos) {
-    position = pos;
+    const Vec3 previous_position = transform ? transform->position : position;
     if (transform) {
         transform->position = pos;
         transform->updateMatrix();
+        syncTransformStateFromHandle();
+    } else {
+        position = pos;
+        bounds_dirty = true;
     }
-    bounds_dirty = true;
+    moveEmittersWithDomain(pos - previous_position);
     applyTransform();
 }
 
 void GasVolume::setRotation(const Vec3& rot) {
-    rotation = rot;
     if (transform) {
         transform->rotation = rot;
         transform->updateMatrix();
+        syncTransformStateFromHandle();
+    } else {
+        rotation = rot;
+        bounds_dirty = true;
     }
-    bounds_dirty = true;
     applyTransform();
 }
 
 void GasVolume::setScale(const Vec3& s) {
-    scale = s;
+    auto& settings = getSettings();
+    const Vec3 previous_grid_size = settings.grid_size;
+
     if (transform) {
         transform->scale = s;
         transform->updateMatrix();
+        syncTransformStateFromHandle();
+    } else {
+        scale = s;
+        bounds_dirty = true;
     }
     
     // Sync physical domain size with object scale
-    auto& settings = getSettings();
     settings.grid_size = s;
+    preserveVoxelDensityForGridResize(previous_grid_size);
     
     // Update voxel_size metrics based on new scale
-    if (settings.resolution_x > 0) {
-        settings.voxel_size = settings.grid_size.x / (float)settings.resolution_x;
+    if (settings.resolution_x > 0 && settings.resolution_y > 0 && settings.resolution_z > 0) {
+        settings.voxel_size = std::max({ settings.grid_size.x, settings.grid_size.y, settings.grid_size.z, 0.0001f }) /
+            static_cast<float>(std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 }));
         if (initialized) {
             simulator.getGrid().voxel_size = settings.voxel_size;
         }
     }
     
-    bounds_dirty = true;
     applyTransform();
     
     if (!is_playing && initialized) {
@@ -130,6 +281,7 @@ void GasVolume::applyTransform() {
     // the simulation internal grid should remain at local (0,0,0).
     // The world position is handled by the object transform matrix.
     getSettings().grid_offset = Vec3(0, 0, 0); 
+    bounds_dirty = true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -143,89 +295,85 @@ void GasVolume::applyTransform() {
 #include <cuda_runtime.h>
 
 void GasVolume::uploadToGPU(void* stream_ptr) {
-    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
     if (!initialized) return;
+    const bool use_cuda_textures = g_hasCUDA && simulator.isUsingCUDA();
+    cudaStream_t stream = use_cuda_textures ? static_cast<cudaStream_t>(stream_ptr) : nullptr;
     
     const auto& grid = simulator.getGrid();
     int width = grid.nx;
     int height = grid.ny;
     int depth = grid.nz;
 
-    // Detect resolution change and free old textures
-    if (width != gpu_res_x || height != gpu_res_y || depth != gpu_res_z) {
-        freeGPUResources();
-        gpu_res_x = width;
-        gpu_res_y = height;
-        gpu_res_z = depth;
-    }
-    
-    auto uploadTexture = [&](void* d_sim_ptr, const float* h_ptr, void** d_array, unsigned long long& tex_obj) {
-        // 1. Allocate CUDA Array if needed
-        if (!*d_array) {
-            cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float>();
-            cudaExtent extent = make_cudaExtent(width, height, depth);
-            cudaError_t err = cudaMalloc3DArray((cudaArray**)d_array, &channelDesc, extent);
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to allocate 3D array - " + std::string(cudaGetErrorString(err)));
+    if (use_cuda_textures) {
+        // Detect resolution change and free old textures
+        if (width != gpu_res_x || height != gpu_res_y || depth != gpu_res_z) {
+            freeGPUResources();
+            gpu_res_x = width;
+            gpu_res_y = height;
+            gpu_res_z = depth;
+        }
+        
+        auto uploadTexture = [&](void* d_sim_ptr, const float* h_ptr, void** d_array, unsigned long long& tex_obj) {
+            if (!*d_array) {
+                cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float>();
+                cudaExtent extent = make_cudaExtent(width, height, depth);
+                cudaError_t err = cudaMalloc3DArray((cudaArray**)d_array, &channelDesc, extent);
+                if (err != cudaSuccess) {
+                    SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to allocate 3D array - " + std::string(cudaGetErrorString(err)));
+                    return;
+                }
+            }
+            
+            cudaMemcpy3DParms copyParams = {0};
+            if (d_sim_ptr) {
+                copyParams.srcPtr = make_cudaPitchedPtr(d_sim_ptr, width * sizeof(float), width, height);
+                copyParams.kind = cudaMemcpyDeviceToDevice;
+            } else {
+                copyParams.srcPtr = make_cudaPitchedPtr((void*)h_ptr, width * sizeof(float), width, height);
+                copyParams.kind = cudaMemcpyHostToDevice;
+            }
+            
+            copyParams.dstArray = (cudaArray*)*d_array;
+            copyParams.extent = make_cudaExtent(width, height, depth);
+            
+            cudaError_t copyErr = stream ? cudaMemcpy3DAsync(&copyParams, stream) : cudaMemcpy3D(&copyParams);
+            if (copyErr != cudaSuccess) {
+                SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to copy data - " + std::string(cudaGetErrorString(copyErr)));
                 return;
             }
+            
+            if (tex_obj == 0) {
+                cudaResourceDesc resDesc;
+                memset(&resDesc, 0, sizeof(resDesc));
+                resDesc.resType = cudaResourceTypeArray;
+                resDesc.res.array.array = (cudaArray*)*d_array;
+                
+                cudaTextureDesc texDesc;
+                memset(&texDesc, 0, sizeof(texDesc));
+                texDesc.addressMode[0] = cudaAddressModeClamp;
+                texDesc.addressMode[1] = cudaAddressModeClamp;
+                texDesc.addressMode[2] = cudaAddressModeClamp;
+                texDesc.filterMode = cudaFilterModeLinear;
+                texDesc.readMode = cudaReadModeElementType;
+                texDesc.normalizedCoords = 1;
+                
+                cudaError_t texErr = cudaCreateTextureObject((cudaTextureObject_t*)&tex_obj, &resDesc, &texDesc, nullptr);
+                if (texErr != cudaSuccess) {
+                    SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to create texture object - " + std::string(cudaGetErrorString(texErr)));
+                }
+            }
+        };
+
+        uploadTexture(simulator.getGPUDensityPtr(), grid.density.data(), &density_array, density_texture);
+        if (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) {
+            uploadTexture(simulator.getGPUTemperaturePtr(), grid.temperature.data(), &temperature_array, temperature_texture);
         }
-        
-        // 2. Copy Data (CPU/GPU -> Array) (Using Stream for Flicker-Free)
-        cudaMemcpy3DParms copyParams = {0};
-        if (d_sim_ptr) {
-            copyParams.srcPtr = make_cudaPitchedPtr(d_sim_ptr, width * sizeof(float), width, height);
-            copyParams.kind = cudaMemcpyDeviceToDevice;
-        } else {
-            copyParams.srcPtr = make_cudaPitchedPtr((void*)h_ptr, width * sizeof(float), width, height);
-            copyParams.kind = cudaMemcpyHostToDevice;
-        }
-        
-        copyParams.dstArray = (cudaArray*)*d_array;
-        copyParams.extent = make_cudaExtent(width, height, depth);
-        
-        cudaError_t copyErr;
+
         if (stream) {
-            copyErr = cudaMemcpy3DAsync(&copyParams, stream);
-        } else {
-            copyErr = cudaMemcpy3D(&copyParams);
+            cudaStreamSynchronize(stream);
         }
-        
-        if (copyErr != cudaSuccess) {
-            SCENE_LOG_ERROR("GasVolume::uploadToGPU Error: Failed to copy data - " + std::string(cudaGetErrorString(copyErr)));
-        }
-        
-        // 3. Create Texture Object (if not exists)
-        if (tex_obj == 0) {
-            cudaResourceDesc resDesc;
-            memset(&resDesc, 0, sizeof(resDesc));
-            resDesc.resType = cudaResourceTypeArray;
-            resDesc.res.array.array = (cudaArray*)*d_array;
-            
-            cudaTextureDesc texDesc;
-            memset(&texDesc, 0, sizeof(texDesc));
-            texDesc.addressMode[0] = cudaAddressModeClamp; 
-            texDesc.addressMode[1] = cudaAddressModeClamp;
-            texDesc.addressMode[2] = cudaAddressModeClamp;
-            texDesc.filterMode = cudaFilterModeLinear;     
-            texDesc.readMode = cudaReadModeElementType;   
-            texDesc.normalizedCoords = 1;                  
-            
-            cudaCreateTextureObject((cudaTextureObject_t*)&tex_obj, &resDesc, &texDesc, nullptr);
-        }
-    };
-
-    // Upload Density
-    uploadTexture(simulator.getGPUDensityPtr(), grid.density.data(), &density_array, density_texture);
-    
-    // Upload Temperature (if blackbody is likely used)
-    if (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) {
-        uploadTexture(simulator.getGPUTemperaturePtr(), grid.temperature.data(), &temperature_array, temperature_texture);
-    }
-
-    // Only sync stream if explicitly provided (async operation)
-    if (stream) {
-        cudaStreamSynchronize((cudaStream_t)stream);
+    } else if (density_texture != 0 || density_array != nullptr || temperature_texture != 0 || temperature_array != nullptr) {
+        freeGPUResources();
     }
     
     // Upload Velocity (if motion blur is likely used)
@@ -237,21 +385,51 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
     // VDB UNIFIED PIPELINE SYNC
     // -------------------------------------------------------------------------
     if (render_path == VolumeRenderPath::VDBUnified) {
-        // Download from GPU if using CUDA backend
-        if (getSettings().backend == FluidSim::SolverBackend::CUDA) {
-             simulator.downloadFromGPU();
+        const int sim_frame = simulator.getCurrentFrame();
+        const int total_cells = grid.nx * grid.ny * grid.nz;
+        int upload_stride = 1;
+        if (is_playing) {
+            if (total_cells >= 160 * 160 * 160) {
+                upload_stride = 3;
+            } else if (total_cells >= 104 * 104 * 104) {
+                upload_stride = 2;
+            }
+        }
+        const bool due_for_periodic_upload =
+            !is_playing || last_live_vdb_upload_frame < 0 || (sim_frame - last_live_vdb_upload_frame) >= upload_stride;
+        const bool needs_live_vdb_upload =
+            (live_vdb_id < 0) || live_vdb_dirty || ((last_live_vdb_frame != sim_frame) && due_for_periodic_upload);
+        const int previous_live_vdb_id = live_vdb_id;
+
+        if (needs_live_vdb_upload && simulator.isUsingCUDA()) {
+            simulator.downloadFromGPU();
         }
 
-        // Sync simulation arrays to VDB Volume Manager
-        live_vdb_id = VDBVolumeManager::getInstance().registerOrUpdateLiveVolume(
-            live_vdb_id,
-            name + " [VDB Path]",
-            grid.nx, grid.ny, grid.nz, 
-            grid.voxel_size,
-            grid.density.data(),
-            (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) ? grid.temperature.data() : nullptr,
-            nullptr // Use synchronous host copy on default stream to avoid racing OptiX stream
-        );
+        if (needs_live_vdb_upload) {
+            live_vdb_id = VDBVolumeManager::getInstance().registerOrUpdateLiveVolume(
+                live_vdb_id,
+                name + " [VDB Path]",
+                grid.nx, grid.ny, grid.nz,
+                grid.voxel_size,
+                grid.density.data(),
+                (shader && shader->emission.mode == VolumeEmissionMode::Blackbody) ? grid.temperature.data() : nullptr,
+                nullptr // Use synchronous host copy on default stream to avoid racing OptiX stream
+            );
+            last_live_vdb_frame = sim_frame;
+            last_live_vdb_upload_frame = sim_frame;
+            live_vdb_dirty = false;
+        }
+
+        // Unified gas only becomes ray-traceable after it has a registered live VDB id.
+        // Without this rebuild request, Vulkan/OptiX can still read the volume buffer for
+        // soft shadows while the TLAS lacks the procedural volume instance for primary hits.
+        const bool needs_unified_volume_rebuild =
+            live_vdb_id >= 0 &&
+            ((previous_live_vdb_id < 0) || (sim_frame <= 0 && needs_live_vdb_upload));
+        if (needs_unified_volume_rebuild) {
+            g_vulkan_rebuild_pending = true;
+            g_optix_rebuild_pending = true;
+        }
         
         // Also ensure individual volume data has the correct transform
         auto* vdb_data = VDBVolumeManager::getInstance().getVolume(live_vdb_id);
@@ -330,6 +508,8 @@ void GasVolume::initialize() {
         transform->scale = scale;
         transform->position = position;
         transform->rotation = rotation;
+        transform->updateMatrix();
+        syncTransformStateFromHandle();
     }
     
     // NOTE: Do NOT free GPU resources here - it can cause CUDA driver deadlock
@@ -346,19 +526,42 @@ void GasVolume::initialize() {
     
     initialized = true;
     bounds_dirty = true;
-    
-    // Skip initial GPU upload - it will happen on first stepFrame/update
-    // This prevents potential race conditions during initialization
+    clearTimelineSnapshotCache();
+    last_timeline_sim_frame = 0;
+    previous_timeline_snapshot = simulator.captureState();
+    cacheTimelineSnapshot(0);
+    last_live_vdb_frame = simulator.getCurrentFrame();
+    last_live_vdb_upload_frame = -1;
+    live_vdb_dirty = true;
+
+    // Publish the freshly cleared grid immediately so viewport/VDB preview
+    // reflects new resolution and ambient state before the first sim step.
+    uploadToGPU(nullptr);
 }
 
 void GasVolume::stop() {
     is_playing = false;
-    // Don't free GPU resources on stop, only on destruction
+    if (initialized) {
+        simulator.reset();
+        clearTimelineSnapshotCache();
+        last_timeline_sim_frame = 0;
+        previous_timeline_snapshot = simulator.captureState();
+        cacheTimelineSnapshot(0);
+        last_live_vdb_frame = simulator.getCurrentFrame();
+        last_live_vdb_upload_frame = -1;
+        live_vdb_dirty = true;
+        uploadToGPU(nullptr);
+    }
 }
 
 void GasVolume::stepFrame(float dt, void* stream) {
     if (initialized) {
+        const int previous_frame = simulator.getCurrentFrame();
+        cacheTimelineSnapshot(previous_frame);
         simulator.step(dt, transform ? transform->base : Matrix4x4::identity());
+        cacheTimelineSnapshot(simulator.getCurrentFrame());
+        live_vdb_dirty = true;
+        last_live_vdb_upload_frame = -1;
         uploadToGPU(stream); // Upload new frame data to GPU
     }
 }
@@ -367,25 +570,29 @@ void GasVolume::update(float dt, void* stream) {
     // -------------------------------------------------------------------------
     // TRANSFORM SYNC (Gizmo & Manual movement)
     // -------------------------------------------------------------------------
+    auto& settings = getSettings();
     if (transform) {
         // Force update if transform changed externally (e.g. via Gizmo)
         if (transform->isDirty() || 
             position != transform->position || 
             rotation != transform->rotation || 
             scale != transform->scale) {
-            
+            const Vec3 previous_position = position;
             position = transform->position;
             rotation = transform->rotation;
+            moveEmittersWithDomain(position - previous_position);
             
             // If scale changed, we must also update physical grid size
             if (scale != transform->scale) {
+                const Vec3 previous_grid_size = settings.grid_size;
                 scale = transform->scale;
-                auto& settings = getSettings();
                 settings.grid_size = scale;
+                preserveVoxelDensityForGridResize(previous_grid_size);
                 
                 // CRITICAL: Update voxel_size metrics so rendering follows scale
-                if (settings.resolution_x > 0) {
-                    settings.voxel_size = settings.grid_size.x / (float)settings.resolution_x;
+                if (settings.resolution_x > 0 && settings.resolution_y > 0 && settings.resolution_z > 0) {
+                    settings.voxel_size = std::max({ settings.grid_size.x, settings.grid_size.y, settings.grid_size.z, 0.0001f }) /
+                        static_cast<float>(std::max({ settings.resolution_x, settings.resolution_y, settings.resolution_z, 1 }));
                     if (initialized) {
                         simulator.getGrid().voxel_size = settings.voxel_size;
                     }
@@ -398,7 +605,12 @@ void GasVolume::update(float dt, void* stream) {
 
     if (is_playing && initialized && !simulator.isBaking()) {
         // No longer need manual sync - getSettings() now returns simulator's settings directly
+        const int previous_frame = simulator.getCurrentFrame();
+        cacheTimelineSnapshot(previous_frame);
         simulator.step(dt, transform ? transform->base : Matrix4x4::identity());
+        cacheTimelineSnapshot(simulator.getCurrentFrame());
+        live_vdb_dirty = true;
+        last_live_vdb_upload_frame = -1;
         
         // Note: Removed diagnostic cudaDeviceSynchronize - was causing freezes
         // Errors will be caught at next CUDA operation if any
@@ -414,6 +626,14 @@ void GasVolume::update(float dt, void* stream) {
 void GasVolume::reset() {
     if (initialized) {
         simulator.reset();
+        clearTimelineSnapshotCache();
+        last_timeline_sim_frame = 0;
+        previous_timeline_snapshot = simulator.captureState();
+        cacheTimelineSnapshot(0);
+        last_live_vdb_frame = simulator.getCurrentFrame();
+        last_live_vdb_upload_frame = -1;
+        live_vdb_dirty = true;
+        uploadToGPU(nullptr);
     }
 }
 
@@ -423,41 +643,92 @@ void GasVolume::updateFromTimeline(int timeline_frame, void* stream) {
     int target_frame = timeline_frame + frame_offset;
     if (target_frame < 0) target_frame = 0;
     
-    // Apply keyframe animation to all emitters
     auto& emitters = simulator.getEmitters();
-    for (auto& emitter : emitters) {
-        // Check if emitter has keyframes
-        if (!emitter.keyframes.empty()) {
-            // Get interpolated keyframe for current frame
-            auto kf = emitter.getInterpolatedKeyframe((float)timeline_frame);
-            
-            // Apply keyframe to emitter
-            emitter.applyKeyframe(kf);
+    auto applyEmitterKeyframesForTimelineFrame = [&](float eval_timeline_frame) {
+        for (auto& emitter : emitters) {
+            if (!emitter.keyframes.empty()) {
+                auto kf = emitter.getInterpolatedKeyframe(eval_timeline_frame);
+                emitter.applyKeyframe(kf);
+            }
         }
-    }
+    };
+
+    applyEmitterKeyframesForTimelineFrame((float)timeline_frame);
     
     const auto& settings = getSettings();
     if (settings.mode == FluidSim::SimulationMode::Baked) {
         if (target_frame != simulator.getCurrentFrame()) {
             simulator.loadBakedFrame(target_frame);
+            clearTimelineSnapshotCache();
+            last_timeline_sim_frame = target_frame;
+            last_live_vdb_frame = simulator.getCurrentFrame();
+            live_vdb_dirty = true;
             uploadToGPU(stream);
         }
     } else {
-        // Real-time sequential sim
+        // Real-time timeline path must be deterministic. If the timeline moves
+        // backward or jumps after a resolution/apply reset, rebuild from frame 0.
         int current = simulator.getCurrentFrame();
-        if (target_frame > current) {
-            // Catch up if within reasonable range (e.g. 5 frames)
-            // Otherwise it might hitch too much. Usually 1-2 frames.
-            int delta = target_frame - current;
-            if (delta > 0 && delta <= 10) {
-                for (int i = 0; i < delta; ++i) {
-                    simulator.step(settings.timestep, transform ? transform->base : Matrix4x4::identity());
-                }
-                uploadToGPU(stream);
+        if (restoreTimelineSnapshot(target_frame)) {
+            last_timeline_sim_frame = simulator.getCurrentFrame();
+            last_live_vdb_frame = simulator.getCurrentFrame();
+            live_vdb_dirty = true;
+            applyEmitterKeyframesForTimelineFrame((float)timeline_frame);
+            uploadToGPU(stream);
+            return;
+        }
+
+        if (target_frame < current) {
+            int restored_frame = -1;
+            if (restoreNearestTimelineSnapshot(target_frame, restored_frame)) {
+                current = restored_frame;
+                last_timeline_sim_frame = restored_frame;
+                last_live_vdb_frame = simulator.getCurrentFrame();
+                live_vdb_dirty = true;
+            } else {
+                simulator.reset();
+                clearTimelineSnapshotCache();
+                cacheTimelineSnapshot(0);
+                current = 0;
+                last_timeline_sim_frame = 0;
+                previous_timeline_snapshot = simulator.captureState();
+                last_live_vdb_frame = simulator.getCurrentFrame();
+                live_vdb_dirty = true;
             }
-        } else if (target_frame < current && target_frame == 0) {
-            // Auto-reset at frame 0
-            simulator.reset();
+        }
+
+        if (target_frame == 0) {
+            if (current != 0) {
+                simulator.reset();
+                clearTimelineSnapshotCache();
+                previous_timeline_snapshot = simulator.captureState();
+                cacheTimelineSnapshot(0);
+                last_live_vdb_frame = simulator.getCurrentFrame();
+                live_vdb_dirty = true;
+            }
+            last_timeline_sim_frame = 0;
+            uploadToGPU(stream);
+            return;
+        }
+
+        if (target_frame > current) {
+            const Matrix4x4 sim_transform = transform ? transform->base : Matrix4x4::identity();
+            const float timeline_fps = static_cast<float>(std::max(render_settings.animation_fps, 1));
+            const float timeline_dt = 1.0f / timeline_fps;
+            for (int sim_frame = current; sim_frame < target_frame; ++sim_frame) {
+                const float sim_timeline_frame = static_cast<float>(sim_frame - frame_offset);
+                applyEmitterKeyframesForTimelineFrame(sim_timeline_frame);
+                cacheTimelineSnapshot(sim_frame);
+                if (sim_frame == target_frame - 1) {
+                    previous_timeline_snapshot = simulator.captureState();
+                }
+                simulator.step(timeline_dt, sim_transform);
+                cacheTimelineSnapshot(simulator.getCurrentFrame());
+            }
+            last_timeline_sim_frame = target_frame;
+            last_live_vdb_frame = simulator.getCurrentFrame();
+            live_vdb_dirty = true;
+            applyEmitterKeyframesForTimelineFrame((float)timeline_frame);
             uploadToGPU(stream);
         }
     }
@@ -675,9 +946,11 @@ nlohmann::json GasVolume::toJson() const {
     j["visible"] = visible;
     
     // Transform
-    j["position"] = {position.x, position.y, position.z};
-    j["rotation"] = {rotation.x, rotation.y, rotation.z};
-    j["scale"] = {scale.x, scale.y, scale.z};
+      j["position"] = {position.x, position.y, position.z};
+      j["rotation"] = {rotation.x, rotation.y, rotation.z};
+      j["scale"] = {scale.x, scale.y, scale.z};
+      Vec3 pivot_offset = getPivotOffset();
+      j["pivot_offset"] = {pivot_offset.x, pivot_offset.y, pivot_offset.z};
     
     // Settings
     j["settings"] = getSettings().toJson();
@@ -718,10 +991,15 @@ void GasVolume::fromJson(const nlohmann::json& j) {
         auto r = j["rotation"];
         rotation = Vec3(r[0], r[1], r[2]);
     }
-    if (j.contains("scale")) {
-        auto s = j["scale"];
-        scale = Vec3(s[0], s[1], s[2]);
-    }
+      if (j.contains("scale")) {
+          auto s = j["scale"];
+          scale = Vec3(s[0], s[1], s[2]);
+      }
+      Vec3 pivot_offset(0, 0, 0);
+      if (j.contains("pivot_offset")) {
+          auto po = j["pivot_offset"];
+          pivot_offset = Vec3(po[0], po[1], po[2]);
+      }
 
     if (j.contains("render_path")) {
         render_path = static_cast<VolumeRenderPath>(j["render_path"]);
@@ -758,14 +1036,15 @@ void GasVolume::fromJson(const nlohmann::json& j) {
     if (j.contains("frame_offset")) frame_offset = j["frame_offset"];
     if (j.contains("is_playing")) is_playing = j["is_playing"];
     
-    // Update transform
-    if (transform) {
-        transform->position = position;
-        transform->rotation = rotation;
-        transform->scale = scale;
-    }
-    
-    bounds_dirty = true;
-}
+      // Update transform
+      if (transform) {
+          transform->setPivotOffset(pivot_offset, false);
+          transform->position = position;
+          transform->rotation = rotation;
+          transform->scale = scale;
+          transform->updateMatrix();
+          syncTransformStateFromHandle();
+      }
+  }
 
 

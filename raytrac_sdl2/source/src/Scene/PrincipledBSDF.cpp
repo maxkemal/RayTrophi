@@ -174,11 +174,11 @@ bool PrincipledBSDF::scatter(
     float metallic;
     float transmissionValue;
 
-    if (rec.use_custom_data) {
-        albedo = rec.custom_albedo;
-        roughness = rec.custom_roughness;
-        metallic = rec.custom_metallic;
-        transmissionValue = rec.custom_transmission;
+    if (rec.surface_override.valid) {
+        albedo = rec.surface_override.albedo;
+        roughness = rec.surface_override.roughness;
+        metallic = rec.surface_override.metallic;
+        transmissionValue = rec.surface_override.transmission;
     } else {
         albedo = getPropertyValue(albedoProperty, uv);
         roughness = getPropertyValue(roughnessProperty, uv).y;
@@ -194,13 +194,13 @@ bool PrincipledBSDF::scatter(
     float sssValue = subsurface; 
     float clearcoatValue = clearcoat;
 
-    if (rec.use_custom_data) {
-        translucentValue = rec.custom_translucent;
-        sssValue = rec.custom_subsurface;
-        clearcoatValue = rec.custom_clearcoat;
+    if (rec.surface_override.valid) {
+        translucentValue = rec.surface_override.translucent;
+        sssValue = rec.surface_override.subsurface;
+        clearcoatValue = rec.surface_override.clearcoat;
     }
     
-    float ior = (rec.use_custom_data) ? rec.custom_ior : getIOR();
+    float ior = rec.surface_override.valid ? rec.surface_override.ior : getIOR();
 
     Vec3 N = rec.normal;                  // Oriented normal (points against ray)
     Vec3 V = -r_in.direction.normalize(); // View vector
@@ -245,11 +245,11 @@ bool PrincipledBSDF::scatter(
 
     // 5. STANDARD DIFFUSE + SPECULAR (Base layer)
     Vec3 F0 = Vec3::lerp(Vec3(0.04f), albedo, metallic);
-    float F_avg_scalar = std::clamp(F0.length() * 0.577f, 0.04f, 0.95f);
-    float fresnel_factor = F_avg_scalar + (1.0f - F_avg_scalar) * std::pow(1.0f - std::max(Vec3::dot(V, N), 0.0f), 5.0f);
-    
-    // Decide between Diffuse and Specular stochasticly
-    float specular_prob = std::clamp(fresnel_factor + metallic, 0.1f, 0.9f);
+    float cosThetaN = std::max(Vec3::dot(V, N), 0.0f);
+    float fresnelAtN = F0.x + (1.0f - F0.x) * std::pow(1.0f - cosThetaN, 5.0f);
+
+    // Match GPU base-layer lobe selection more closely.
+    float specular_prob = std::clamp(fresnelAtN * (1.0f - metallic) + metallic, 0.001f, 0.999f);
     
     if (Vec3::random_float() > specular_prob) {
         // DIFFUSE LOBE (Lambertian)
@@ -261,22 +261,27 @@ bool PrincipledBSDF::scatter(
         attenuation = albedo * (1.0f - metallic) / (1.0f - specular_prob);
     } else {
         // SPECULAR LOBE (GGX)
-        Vec3 H = importanceSampleGGX(Vec3::random_float(), Vec3::random_float(), roughness, N);
-        Vec3 L = Vec3::reflect(-V, H).normalize();
+        Vec3 L = sampleGGXVNDF(N, V, roughness, Vec3::random_float(), Vec3::random_float());
         if (Vec3::dot(N, L) < 0.0f) L = (L - 2.0f * Vec3::dot(N, L) * N).normalize(); // Reflect back if below horizon
+        Vec3 H = (V + L).normalize();
 
         float VdotH = std::max(Vec3::dot(V, H), 0.001f);
         float NdotL = std::max(Vec3::dot(N, L), 0.001f);
         float NdotV = std::max(Vec3::dot(N, V), 0.001f);
-        
-        Vec3 F_spec = fresnelSchlickRoughness(VdotH, F0, roughness);
-        float G = GeometrySmith(N, V, L, roughness);
-        
-        // PDF = (D * NdotH) / (4 * VdotH). 
-        // Weight = (F * D * G / (4 * NdotL * NdotV)) * NdotL / PDF 
-        //        = (F * G * VdotH) / (NdotV * NdotH)
-        float NdotH = std::max(Vec3::dot(N, H), 0.001f);
-        Vec3 weight = F_spec * G * VdotH / (NdotV * NdotH + 0.0001f);
+        Vec3 weight;
+        if (metallic > 0.001f) {
+            // Match GPU metallic scatter more closely: VNDF + Fresnel * G1(L)
+            Vec3 F_spec = fresnelSchlick(VdotH, F0);
+            float alpha = std::max(roughness * roughness, 0.001f);
+            float k = alpha * 0.5f;
+            float G1L = NdotL / std::max(NdotL * (1.0f - k) + k, 0.0001f);
+            weight = F_spec * G1L;
+        } else {
+            Vec3 F_spec = fresnelSchlickRoughness(VdotH, F0, roughness);
+            float G = GeometrySmith(N, V, L, roughness);
+            float NdotH = std::max(Vec3::dot(N, H), 0.001f);
+            weight = F_spec * G * VdotH / (NdotV * NdotH + 0.0001f);
+        }
         
         // Account for lobe selection probability
         attenuation = weight / specular_prob;
@@ -291,9 +296,9 @@ bool PrincipledBSDF::scatter(
 float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3& outgoing) const  {
     float metallic;
     float roughness;
-    if (rec.use_custom_data) {
-        metallic = rec.custom_metallic;
-        roughness = rec.custom_roughness;
+    if (rec.surface_override.valid) {
+        metallic = rec.surface_override.metallic;
+        roughness = rec.surface_override.roughness;
     } else {
         metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
         roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
@@ -323,20 +328,9 @@ float PrincipledBSDF::pdf(const HitRecord& rec, const Vec3& incoming, const Vec3
 }
 
 float PrincipledBSDF::GeometrySchlickGGX(float NdotV, float roughness) const {
-    // GPU ile uyumlu: k = (r+1)^2 / 8 (Direct Lighting) vs k = r^2 / 2 (IBL)
-    // We stick to the IBL/PathTracing convention: k = alpha^2 / 2 = roughness^4 / 2 ??
-    // The previous code used k = max(r^2, 0.01) / 2.0. Let's optimize and stabilize.
-    
-    // Optimization: Precomputed k passed? No, local calculation.
     float r = roughness + 1.0f;
-    float k = (r*r) / 8.0f; // Standard Schlick-GGX for direct lighting (often used in PT too for consistency)
-    // Or previous: float k = alpha / 2.0f; 
-    
-    // Let's stick to the simpler one used before but optimized
-    float alpha = roughness * roughness;
-    float k_ibl = std::max(alpha, 0.001f) * 0.5f; 
-    
-    float denom = NdotV * (1.0f - k_ibl) + k_ibl;
+    float k = (r * r) / 8.0f;
+    float denom = NdotV * (1.0f - k) + k;
     return NdotV / std::max(denom, 0.0001f);
 }
 
@@ -390,6 +384,39 @@ Vec3 PrincipledBSDF::importanceSampleGGX(float u1, float u2, float roughness, co
     Vec3 tangentY = Vec3::cross(N, tangentX);
     
     return (tangentX * x + tangentY * y + N * z).normalize();
+}
+
+Vec3 PrincipledBSDF::sampleGGXVNDF(const Vec3& N, const Vec3& V, float roughness, float u1, float u2) const {
+    float safeRoughness = std::clamp(roughness, 0.02f, 1.0f);
+    float alpha = safeRoughness * safeRoughness;
+
+    Vec3 Vh(alpha * V.x, alpha * V.y, V.z);
+    Vh = Vh.normalize();
+
+    float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    Vec3 T1;
+    if (lensq > 1e-7f) {
+        T1 = Vec3(-Vh.y, Vh.x, 0.0f) * (1.0f / std::sqrt(lensq));
+    } else {
+        T1 = Vec3(1.0f, 0.0f, 0.0f);
+    }
+    Vec3 T2 = Vec3::cross(Vh, T1);
+
+    float r = std::sqrt(u1);
+    float phi = 2.0f * M_PI * u2;
+    float t1 = r * std::cos(phi);
+    float t2 = r * std::sin(phi);
+    float z = std::sqrt(std::max(0.0f, 1.0f - t1 * t1 - t2 * t2));
+
+    Vec3 sample = T1 * t1 + T2 * t2 + Vh * z;
+    Vec3 H(alpha * sample.x, alpha * sample.y, std::max(0.0f, sample.z));
+    H = H.normalize();
+
+    Vec3 L = Vec3::reflect(-V, H).normalize();
+    if (Vec3::dot(N, L) <= 0.0f) {
+        L = Vec3::reflect(-V, N).normalize();
+    }
+    return L;
 }
 
 Vec3 PrincipledBSDF::evalSpecular(const Vec3& N, const Vec3& V, const Vec3& L, const Vec3& F0, float roughness) const {
@@ -710,7 +737,9 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
     cc_f0 *= cc_f0;
     
     // Use VNDF sampling to match Vulkan closesthit.rchit behavior
-    float cc_rough = (rec.use_custom_data) ? std::max(rec.custom_clearcoat_roughness, 0.001f) : std::max(this->clearcoatRoughness, 0.001f);
+    float cc_rough = rec.surface_override.valid
+        ? std::max(rec.surface_override.clearcoat_roughness, 0.001f)
+        : std::max(this->clearcoatRoughness, 0.001f);
     float alpha = std::max(cc_rough * cc_rough, 1e-4f);
 
     // Sample VNDF using Heitz method
@@ -755,7 +784,7 @@ bool PrincipledBSDF::clearcoat_scatter(const Ray& r_in, const HitRecord& rec, Ve
 
 bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     Vec3 N = rec.normal;
-    Vec3 sss_color = (rec.use_custom_data) ? rec.custom_subsurface_color : this->subsurfaceColor;
+    Vec3 sss_color = rec.surface_override.valid ? rec.surface_override.subsurface_color : this->subsurfaceColor;
     Vec3 sss_radius = this->subsurfaceRadius;
     float sss_scale = std::max(this->subsurfaceScale, 0.001f);
     float sss_anisotropy = this->subsurfaceAnisotropy;
@@ -845,8 +874,8 @@ bool PrincipledBSDF::translucent_scatter(const Ray& r_in, const HitRecord& rec, 
     Vec3 N = rec.normal;
     Vec2 uv = applyTextureTransform(rec.u, rec.v);
     Vec3 albedo;
-    if (rec.use_custom_data) {
-        albedo = rec.custom_albedo;
+    if (rec.surface_override.valid) {
+        albedo = rec.surface_override.albedo;
     } else {
         albedo = getPropertyValue(albedoProperty, uv);
     }

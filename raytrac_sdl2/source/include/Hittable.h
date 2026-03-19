@@ -26,48 +26,39 @@ class VDBVolume;
 class GasVolume;
 
 struct HitRecord {
+    struct SurfaceOverrideData {
+        Vec3 albedo;
+        Vec3 subsurface_color;
+        float roughness = 0.5f;
+        float metallic = 0.0f;
+        float transmission = 0.0f;
+        float clearcoat = 0.0f;
+        float clearcoat_roughness = 0.0f;
+        float subsurface = 0.0f;
+        float translucent = 0.0f;
+        float ior = 1.45f;
+        bool valid = false;
+    };
+
     Vec3 point;
     Vec3 normal;
-    Vec3 neighbor_normal;
-    bool has_neighbor_normal = false;
     Vec3 interpolated_normal;
-    Vec3 face_normal;
+    Vec2 uv;
+
+    SurfaceOverrideData surface_override;
   
-    std::shared_ptr<Material> material;
+    const Triangle* triangle = nullptr;
     Material* materialPtr = nullptr; // FAST ACCESS
-    uint16_t materialID = 0xFFFF;
-    
+    const VDBVolume* vdb_volume = nullptr; // Pointer to VDB Volume if hit
+    const GasVolume* gas_volume = nullptr; // Pointer to Gas Volume if hit
+
     float t = 0.0f;
     float u = 0.0f;
     float v = 0.0f;
-    bool front_face = false;
-  
-    // Add reference to the hit object itself (for accessing AABB etc.)
-    // const Hittable* obj = nullptr; // REMOVED: potentially circular and redundant (we use triangle ptr)
-    
-    const Triangle* triangle = nullptr;
-   
-    const VDBVolume* vdb_volume = nullptr; // Pointer to VDB Volume if hit
-    const GasVolume* gas_volume = nullptr; // Pointer to Gas Volume if hit
     int terrain_id = -1; // Terrain ID if hit
-    Vec3 tangent;
-    Vec3 bitangent;
-    bool has_tangent = false;
-    Vec2 uv;
+    uint16_t materialID = 0xFFFF;
+    bool front_face = false;
     bool is_instance_hit = false; // Track if the hit came from an instance (for brush filters)
-    
-    // Custom Blended Data (for Terrain System)
-    bool use_custom_data = false;
-    Vec3 custom_albedo;
-    float custom_roughness = 0.5f;
-    float custom_metallic = 0.0f;
-    float custom_transmission = 0.0f;
-    float custom_clearcoat = 0.0f;
-    float custom_clearcoat_roughness = 0.0f;
-    float custom_subsurface = 0.0f;
-    Vec3 custom_subsurface_color;
-    float custom_translucent = 0.0f;
-    float custom_ior = 1.45f;
  
     inline void set_face_normal(const Ray& r, const Vec3& outward_normal) {
         front_face = Vec3::dot(r.direction, outward_normal) < 0;

@@ -697,6 +697,58 @@ public:
         return pixels[y * width + x].to_linear_rgb(is_srgb, is_aces);
     }
 
+    Vec3 get_color_bilinear(float u, float v) const {
+        if (!m_is_loaded) return Vec3(0);
+
+        u = u - floorf(u);
+        v = v - floorf(v);
+
+        if (is_hdr && !float_pixels.empty()) {
+            float fx = u * (width - 1);
+            float fy = (1.0f - v) * (height - 1);
+            int x0 = std::clamp((int)std::floor(fx), 0, width - 1);
+            int y0 = std::clamp((int)std::floor(fy), 0, height - 1);
+            int x1 = std::clamp(x0 + 1, 0, width - 1);
+            int y1 = std::clamp(y0 + 1, 0, height - 1);
+            float tx = fx - x0;
+            float ty = fy - y0;
+
+            const float4& p00 = float_pixels[y0 * width + x0];
+            const float4& p10 = float_pixels[y0 * width + x1];
+            const float4& p01 = float_pixels[y1 * width + x0];
+            const float4& p11 = float_pixels[y1 * width + x1];
+
+            Vec3 c00(p00.x, p00.y, p00.z);
+            Vec3 c10(p10.x, p10.y, p10.z);
+            Vec3 c01(p01.x, p01.y, p01.z);
+            Vec3 c11(p11.x, p11.y, p11.z);
+
+            Vec3 c0 = c00 * (1.0f - tx) + c10 * tx;
+            Vec3 c1 = c01 * (1.0f - tx) + c11 * tx;
+            return c0 * (1.0f - ty) + c1 * ty;
+        }
+
+        if (pixels.empty()) return Vec3(0);
+
+        float fx = u * (width - 1);
+        float fy = (1.0f - v) * (height - 1);
+        int x0 = std::clamp((int)std::floor(fx), 0, width - 1);
+        int y0 = std::clamp((int)std::floor(fy), 0, height - 1);
+        int x1 = std::clamp(x0 + 1, 0, width - 1);
+        int y1 = std::clamp(y0 + 1, 0, height - 1);
+        float tx = fx - x0;
+        float ty = fy - y0;
+
+        Vec3 c00 = pixels[y0 * width + x0].to_linear_rgb(is_srgb, is_aces);
+        Vec3 c10 = pixels[y0 * width + x1].to_linear_rgb(is_srgb, is_aces);
+        Vec3 c01 = pixels[y1 * width + x0].to_linear_rgb(is_srgb, is_aces);
+        Vec3 c11 = pixels[y1 * width + x1].to_linear_rgb(is_srgb, is_aces);
+
+        Vec3 c0 = c00 * (1.0f - tx) + c10 * tx;
+        Vec3 c1 = c01 * (1.0f - tx) + c11 * tx;
+        return c0 * (1.0f - ty) + c1 * ty;
+    }
+
     float get_alpha(float u, float v) const {
         if (!m_is_loaded || pixels.empty()) return 1.0f;
         // Wrap coordinates
@@ -707,6 +759,31 @@ public:
         x = std::clamp(x, 0, width - 1);
         y = std::clamp(y, 0, height - 1);
         return pixels[y * width + x].alpha();
+    }
+
+    float get_alpha_bilinear(float u, float v) const {
+        if (!m_is_loaded || pixels.empty()) return 1.0f;
+
+        u = u - floorf(u);
+        v = v - floorf(v);
+
+        float fx = u * (width - 1);
+        float fy = (1.0f - v) * (height - 1);
+        int x0 = std::clamp((int)std::floor(fx), 0, width - 1);
+        int y0 = std::clamp((int)std::floor(fy), 0, height - 1);
+        int x1 = std::clamp(x0 + 1, 0, width - 1);
+        int y1 = std::clamp(y0 + 1, 0, height - 1);
+        float tx = fx - x0;
+        float ty = fy - y0;
+
+        float a00 = pixels[y0 * width + x0].alpha();
+        float a10 = pixels[y0 * width + x1].alpha();
+        float a01 = pixels[y1 * width + x0].alpha();
+        float a11 = pixels[y1 * width + x1].alpha();
+
+        float a0 = a00 * (1.0f - tx) + a10 * tx;
+        float a1 = a01 * (1.0f - tx) + a11 * tx;
+        return a0 * (1.0f - ty) + a1 * ty;
     }
 
     // sRGB -> Linear conversion fonksiyonu

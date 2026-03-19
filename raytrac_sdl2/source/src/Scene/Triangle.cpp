@@ -3,8 +3,6 @@
 #include "AABB.h"
 #include "globals.h"
 #include <cmath>
-#include "TerrainManager.h"
-#include "PrincipledBSDF.h"
 
 // ============================================================================
 // Constructors
@@ -428,73 +426,16 @@ bool Triangle::hit(const Ray& r, float t_min, float t_max, HitRecord& rec, bool 
     // --- ALPHA TESTING ---
     if (currentMat && currentMat->isTransparent()) {
         float opacity = currentMat->get_opacity(rec.uv);
-        if (Vec3::random_float() > opacity) {
+        // Opacity textures on foliage/cutouts need deterministic masking on CPU.
+        // Stochastic rejection here causes hit popping and broken aerial blending.
+        if (opacity <= 0.5f) {
             return false; // Transparent hit, ignore and let BVH continue
         }
     }
 
     rec.materialPtr = currentMat;
-    rec.material = MaterialManager::getInstance().getMaterialShared(materialID);
     rec.materialID = materialID;
     rec.terrain_id = terrain_id;
-
-    // --- TERRAIN BLENDING (CPU) ---
-    if (terrain_id != -1) {
-        TerrainObject* terrain = TerrainManager::getInstance().getTerrain(terrain_id);
-        if (terrain && terrain->splatMap && terrain->layers.size() > 0) {
-            Vec3 rgb = terrain->splatMap->get_color(rec.u, rec.v);
-            float a = terrain->splatMap->get_alpha(rec.u, rec.v);
-            float weights[4] = { rgb.x, rgb.y, rgb.z, a };
-            
-            Vec3 blended_albedo(0.0f);
-            float blended_roughness = 0.0f;
-            float blended_metallic = 0.0f;
-            float blended_clearcoat = 0.0f;
-            float blended_clearcoat_roughness = 0.0f;
-            float blended_subsurface = 0.0f;
-            Vec3 blended_subsurface_color(0.0f);
-            float blended_transmission = 0.0f;
-            float blended_ior = 0.0f;
-            float total_weight = 0.0f;
-
-            for (size_t i = 0; i < 4 && i < terrain->layers.size(); ++i) {
-                float w = weights[i];
-                if (w > 0.001f) {
-                    auto mat = std::dynamic_pointer_cast<PrincipledBSDF>(terrain->layers[i]);
-                    if (mat) {
-                        float scale = (i < terrain->layer_uv_scales.size()) ? terrain->layer_uv_scales[i] : 1.0f;
-                        Vec2 layerUV = rec.uv * scale;
-                        
-                        blended_albedo = blended_albedo + mat->getPropertyValue(mat->albedoProperty, layerUV) * w;
-                        blended_roughness += mat->getPropertyValue(mat->roughnessProperty, layerUV).y * w;
-                        blended_metallic += mat->getPropertyValue(mat->metallicProperty, layerUV).z * w;
-                        blended_clearcoat += mat->clearcoat * w;
-                        blended_clearcoat_roughness += mat->clearcoatRoughness * w;
-                        blended_subsurface += mat->subsurface * w;
-                        blended_subsurface_color = blended_subsurface_color + mat->subsurfaceColor * w;
-                        blended_transmission += mat->transmission * w;
-                        blended_ior += mat->getIndexOfRefraction() * w;
-                        
-                        total_weight += w;
-                    }
-                }
-            }
-
-            if (total_weight > 0.001f) {
-                float inv_w = 1.0f / total_weight;
-                rec.use_custom_data = true;
-                rec.custom_albedo = blended_albedo * inv_w;
-                rec.custom_roughness = blended_roughness * inv_w;
-                rec.custom_metallic = blended_metallic * inv_w;
-                rec.custom_clearcoat = blended_clearcoat * inv_w;
-                rec.custom_clearcoat_roughness = blended_clearcoat_roughness * inv_w;
-                rec.custom_subsurface = blended_subsurface * inv_w;
-                rec.custom_subsurface_color = blended_subsurface_color * inv_w;
-                rec.custom_transmission = blended_transmission * inv_w;
-                rec.custom_ior = blended_ior * inv_w;
-            }
-        }
-    }
 
     return true;
 }
@@ -555,11 +496,49 @@ bool Triangle::bounding_box(float time0, float time1, AABB& output_box) const {
 
 
 bool Triangle::occluded(const Ray& ray, float t_min, float t_max) const {
-    HitRecord dummy;
-    // We already updated Triangle::hit to handle alpha test.
-    // So current base implementation (which calls hit) is actually correct.
-    // But for clarity and potentially skipping some HitRecord work:
-    return hit(ray, t_min, t_max, dummy);
+    if (!visible) return false;
+
+    const Vec3& v0 = vertices[0].position;
+    const Vec3& v1 = vertices[1].position;
+    const Vec3& v2 = vertices[2].position;
+
+    const Vec3 edge1 = v1 - v0;
+    const Vec3 edge2 = v2 - v0;
+
+    Vec3 h = Vec3::cross(ray.direction, edge2);
+    float a = Vec3::dot(edge1, h);
+
+    if (fabs(a) < EPSILON)
+        return false;
+
+    float f = 1.0f / a;
+    Vec3 s = ray.origin - v0;
+    float u = f * Vec3::dot(s, h);
+
+    if (u < -EPSILON || u > 1.0f + EPSILON)
+        return false;
+
+    Vec3 q = Vec3::cross(s, edge1);
+    float v = f * Vec3::dot(ray.direction, q);
+
+    if (v < -EPSILON || (u + v) > 1.0f + EPSILON)
+        return false;
+
+    float t = f * Vec3::dot(edge2, q);
+    if (t < t_min || t > t_max)
+        return false;
+
+    Material* currentMat = MaterialManager::getInstance().getMaterial(materialID);
+    if (currentMat && currentMat->isTransparent()) {
+        float w = 1.0f - u - v;
+        Vec2 uv = w * t0 + u * t1 + v * t2;
+        float opacity = currentMat->get_opacity(uv);
+        if (opacity <= 0.5f) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 
