@@ -6,6 +6,23 @@
 // Static member initialization
 const std::string AnimationController::emptyString = "";
 
+namespace {
+bool matchesRootMotionBoneName(const std::string& sceneBoneName, const std::string& rootMotionBone) {
+    if (rootMotionBone.empty()) {
+        return false;
+    }
+    if (sceneBoneName == rootMotionBone) {
+        return true;
+    }
+    if (sceneBoneName.size() <= rootMotionBone.size()) {
+        return false;
+    }
+    const size_t offset = sceneBoneName.size() - rootMotionBone.size();
+    return (sceneBoneName[offset - 1] == '_' || sceneBoneName[offset - 1] == ':') &&
+        sceneBoneName.compare(offset, rootMotionBone.size(), rootMotionBone) == 0;
+}
+}
+
 // ============================================================================
 // ANIMATION CLIP Implementation
 // ============================================================================
@@ -288,22 +305,35 @@ std::string AnimationController::findBestRootMotionBone(const std::string& clipN
     // 1. Check direct RootNode
     if (posKeys.count("RootNode")) return "RootNode";
     
-    // 2. Search for common names exactly
-    static const std::vector<std::string> common = {"Hips", "Pelvis", "base_link", "root", "Armature"};
+    // 2. Search for common names exactly. Prefer true root carriers over hips/pelvis.
+    static const std::vector<std::string> common = {"root", "Root", "Armature", "armature", "base_link", "RootMotion", "root_motion", "Hips", "Pelvis"};
     for (const auto& name : common) {
         if (posKeys.count(name)) return name;
     }
     
-    // 3. Search for names containing root-like strings (handles prefixes like "mixamorig:Hips")
-    for (auto& pair : posKeys) {
+    // 3. Score prefixed/variant names. Root-like names win over hips/pelvis.
+    int bestScore = -1;
+    std::string bestName;
+    for (const auto& pair : posKeys) {
         std::string nameLower = pair.first;
         for (char& c : nameLower) c = (char)tolower(c);
-        
-        if (nameLower.find("hips") != std::string::npos || 
-            nameLower.find("pelvis") != std::string::npos ||
-            nameLower.find("root") != std::string::npos) {
-            return pair.first;
+
+        int score = -1;
+        if (nameLower == "rootnode") score = 100;
+        else if (nameLower.find("rootmotion") != std::string::npos || nameLower.find("root_motion") != std::string::npos) score = 95;
+        else if (nameLower == "root" || nameLower.find(":root") != std::string::npos || nameLower.find("_root") != std::string::npos) score = 90;
+        else if (nameLower.find("armature") != std::string::npos || nameLower.find("base_link") != std::string::npos) score = 80;
+        else if (nameLower.find("hips") != std::string::npos) score = 40;
+        else if (nameLower.find("pelvis") != std::string::npos) score = 35;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestName = pair.first;
         }
+    }
+
+    if (!bestName.empty()) {
+        return bestName;
     }
 
     return "RootNode";
@@ -699,7 +729,7 @@ Matrix4x4 AnimationController::getAnimatedGlobalTransform(
     
     // ROOT MOTION ISOLATION: If this is the root bone and RM is enabled, we remove translation
     // to prevent the character from moving twice (double transformation).
-    if (rootMotionEnabled && boneName == rootMotionBone) {
+    if (rootMotionEnabled && matchesRootMotionBoneName(boneName, rootMotionBone)) {
         localA.m[0][3] = 0; localA.m[1][3] = 0; localA.m[2][3] = 0;
     }
 
@@ -708,7 +738,7 @@ Matrix4x4 AnimationController::getAnimatedGlobalTransform(
         float ticksPerSecB = animB ? (float)animB->ticksPerSecond : 24.0f;
         Matrix4x4 localB = calculateNodeTransform(animB, timeB * ticksPerSecB, boneName, localDefault);
         
-        if (rootMotionEnabled && boneName == rootMotionBone) {
+        if (rootMotionEnabled && matchesRootMotionBoneName(boneName, rootMotionBone)) {
             localB.m[0][3] = 0; localB.m[1][3] = 0; localB.m[2][3] = 0;
         }
 

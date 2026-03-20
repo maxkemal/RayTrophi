@@ -1499,7 +1499,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         if (ctx.render_settings.use_optix) engine_type = 1;
                         if (ctx.render_settings.use_vulkan) engine_type = 2;
                         
-                        const char* engines[] = { "CPU (Embree)", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
+                        const char* engines[] = { "CPU", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
                         
                         if (ImGui::BeginCombo("Engine", engines[engine_type])) {
                             for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {

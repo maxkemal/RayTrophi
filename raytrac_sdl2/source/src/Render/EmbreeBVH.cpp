@@ -2,13 +2,86 @@
 #include "HittableInstance.h"
 #include "VDBVolume.h" // Add VDB support
 #include "VDBVolumeManager.h"
+#include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <limits>
 #include <Volumetric.h>
 
 // Static member initialization
 RTCDevice EmbreeBVH::device = nullptr;
+
+namespace {
+constexpr int kMaxCpuVolumeMarchSteps = 4096;
+
+float compute_safe_volume_step(float requested_step, float t_enter, float t_exit) {
+    const float distance = std::max(0.0f, t_exit - t_enter);
+    const float min_step = 0.01f;
+    const float base_step = std::max(requested_step, min_step);
+    if (distance <= 0.0f) {
+        return base_step;
+    }
+
+    // Prevent pathological hangs on very large scenes by keeping march count bounded.
+    return std::max(base_step, distance / float(kMaxCpuVolumeMarchSteps));
+}
+
+bool advance_embree_tmin(float hit_tfar, float& t_min, float t_max, const char* context) {
+    const float next_t_min = hit_tfar + 0.001f;
+    if (!std::isfinite(next_t_min) || next_t_min <= t_min) {
+        SCENE_LOG_WARN(std::string(context) + " Abort: non-progressing transparent/volume skip.");
+        return false;
+    }
+
+    t_min = next_t_min;
+    return t_min < t_max;
+}
+
+bool resolve_embree_surface_hit(const EmbreeBVH& bvh,
+                                const RTCRayHit& rayhit,
+                                const TriangleData*& out_tri,
+                                Material*& out_mat,
+                                Vec2& out_uv,
+                                bool& out_hit_instance) {
+    out_tri = nullptr;
+    out_mat = nullptr;
+    out_uv = Vec2(0.0f, 0.0f);
+
+    const unsigned top_inst_id = rayhit.hit.instID[0];
+    out_hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
+                        top_inst_id < bvh.instance_objects.size() &&
+                        bvh.instance_objects[top_inst_id] != nullptr);
+
+    if (!out_hit_instance) {
+        if (rayhit.hit.geomID != bvh.triangle_geom_id ||
+            rayhit.hit.primID >= bvh.triangle_data.size()) {
+            return false;
+        }
+
+        out_tri = &bvh.triangle_data[rayhit.hit.primID];
+    } else {
+        const auto& inst = bvh.instance_objects[top_inst_id];
+        if (!inst) {
+            return false;
+        }
+
+        auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
+        if (!child_bvh || rayhit.hit.primID >= child_bvh->triangle_data.size()) {
+            return false;
+        }
+
+        out_tri = &child_bvh->triangle_data[rayhit.hit.primID];
+    }
+
+    const float u = rayhit.hit.u;
+    const float v = rayhit.hit.v;
+    const float w = 1.0f - u - v;
+    out_uv = out_tri->t0 * w + out_tri->t1 * u + out_tri->t2 * v;
+    out_mat = out_tri->getMaterial();
+    return true;
+}
+}
 
 EmbreeBVH::EmbreeBVH() {
     // Lazily create device once
@@ -333,6 +406,7 @@ void EmbreeBVH::userOccludedFunc(const RTCOccludedFunctionNArguments* args) {
             // Stochastic Ray Marching for Shadow
             float step_size = 0.5f; 
             if (vdb->volume_shader) step_size = vdb->volume_shader->quality.step_size * 2.0f;
+            step_size = compute_safe_volume_step(step_size, t_enter, t_exit);
             
             const auto& mgr = VDBVolumeManager::getInstance();
             int vid = vdb->getVDBVolumeID();
@@ -340,10 +414,11 @@ void EmbreeBVH::userOccludedFunc(const RTCOccludedFunctionNArguments* args) {
 
             float t = t_enter + ((float)rand() / RAND_MAX) * step_size;
             float transmittance = 1.0f;
+            int steps = 0;
             // Use local temporary ray for marching to avoid modifying original r
             // Note: r is already world space
             
-            while (t < t_exit) {
+            while (t < t_exit && steps < kMaxCpuVolumeMarchSteps) {
                 Vec3 pos = r.at(t);
                 Vec3 local_pos = vdb->getInverseTransform().transform_point(pos);
                 
@@ -356,6 +431,7 @@ void EmbreeBVH::userOccludedFunc(const RTCOccludedFunctionNArguments* args) {
                 
                 if (transmittance < 0.01f) break; // Fully blocked
                 t += step_size;
+                ++steps;
             }
 
             // Stochastic Test
@@ -541,8 +617,14 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
     RTCIntersectArguments args;
     rtcInitIntersectArguments(&args);
     args.flags = RTC_RAY_QUERY_FLAG_NONE;
+    int skip_guard = 0;
 
     while (true) {
+        if (++skip_guard > 1024) {
+            SCENE_LOG_WARN("[EmbreeBVH::occluded] Abort: transparency/volume skip guard exceeded.");
+            return false;
+        }
+
         rayhit.ray.org_x = ray.origin.x;
         rayhit.ray.org_y = ray.origin.y;
         rayhit.ray.org_z = ray.origin.z;
@@ -554,55 +636,38 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
         rayhit.ray.mask = -1;
         rayhit.ray.flags = 0;
         rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+        rayhit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
 
         rtcIntersect1(scene, &rayhit, &args);
 
         if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
 
-        const unsigned top_inst_id = rayhit.hit.instID[0];
-        const bool hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
-                                   top_inst_id < instance_objects.size() &&
-                                   instance_objects[top_inst_id] != nullptr);
+        const TriangleData* tri = nullptr;
+        Material* mat = nullptr;
+        Vec2 uv(0, 0);
+        bool hit_instance = false;
+        const bool resolved_surface = resolve_embree_surface_hit(*this, rayhit, tri, mat, uv, hit_instance);
 
         // 1. Triangle Alpha Test
-        if (!hit_instance && rayhit.hit.geomID == triangle_geom_id) {
-            Material* mat = nullptr;
-            Vec2 uv(0,0);
-            
-            const TriangleData& tri = triangle_data[rayhit.hit.primID];
-            float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
-            uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-            mat = tri.getMaterial();
-
+        if (resolved_surface && !hit_instance) {
             if (mat && mat->isTransparent()) {
                 float opacity = mat->get_opacity(uv);
                 if (opacity <= 0.5f) {
-                    t_min = rayhit.ray.tfar + 0.001f;
-                    if (t_min >= t_max) return false;
+                    if (!advance_embree_tmin(rayhit.ray.tfar, t_min, t_max, "[EmbreeBVH::occluded]")) {
+                        return false;
+                    }
                     continue; // Skip and check behind
                 }
             }
             return true; // Opaque hit
         }
-        else if (hit_instance) {
-            Material* mat = nullptr;
-            Vec2 uv(0,0);
-            const auto& inst = instance_objects[top_inst_id];
-            if (inst) {
-                auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
-                if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
-                    const TriangleData& tri = child_bvh->triangle_data[rayhit.hit.primID];
-                    float u = rayhit.hit.u, v = rayhit.hit.v, w = 1.0f - u - v;
-                    uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-                    mat = tri.getMaterial();
-                }
-            }
-
+        else if (resolved_surface && hit_instance) {
             if (mat && mat->isTransparent()) {
                 float opacity = mat->get_opacity(uv);
                 if (opacity <= 0.5f) {
-                    t_min = rayhit.ray.tfar + 0.001f;
-                    if (t_min >= t_max) return false;
+                    if (!advance_embree_tmin(rayhit.ray.tfar, t_min, t_max, "[EmbreeBVH::occluded]")) {
+                        return false;
+                    }
                     continue; // Skip and check behind
                 }
             }
@@ -617,6 +682,7 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
                 if (vdb->intersectTransformedAABB(ray, t_min, t_max, t_enter, t_exit)) {
                     float step_size = 0.5f; 
                     if (vdb->volume_shader) step_size = vdb->volume_shader->quality.step_size * 2.0f;
+                    step_size = compute_safe_volume_step(step_size, t_enter, t_exit);
                     auto& mgr = VDBVolumeManager::getInstance();
                     int vid = vdb->getVDBVolumeID();
                     Matrix4x4 inv = vdb->getInverseTransform();
@@ -624,18 +690,21 @@ bool EmbreeBVH::occluded(const Ray& ray, float t_min, float t_max) const {
                     
                     float t = t_enter + Vec3::random_float() * step_size;
                     float transmittance = 1.0f;
-                    while (t < t_exit) {
+                    int steps = 0;
+                    while (t < t_exit && steps < kMaxCpuVolumeMarchSteps) {
                         Vec3 local_pos = inv.transform_point(ray.at(t));
                         float d = mgr.sampleDensityCPU(vid, local_pos.x, local_pos.y, local_pos.z);
                         if (d > 0.001f) transmittance *= exp(-d * density_mult * step_size);
                         if (transmittance < 0.01f) break;
                         t += step_size;
+                        ++steps;
                     }
 
                     if (Vec3::random_float() > transmittance) return true; // Blocked
                     else {
-                        t_min = t_exit + 0.001f;
-                        if (t_min >= t_max) return false;
+                        if (!advance_embree_tmin(t_exit, t_min, t_max, "[EmbreeBVH::occluded]")) {
+                            return false;
+                        }
                         continue; // Pass through volume
                     }
                 }
@@ -693,7 +762,15 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
     // STOCHASTIC ALPHA TEST LOOP
     Material* mat = nullptr;
     Vec2 uv(0,0);
+    const TriangleData* resolved_tri = nullptr;
+    bool resolved_hit_instance = false;
+    int skip_guard = 0;
     while (true) {
+        if (++skip_guard > 1024) {
+            SCENE_LOG_WARN("[EmbreeBVH::hit] Abort: transparency skip guard exceeded.");
+            return false;
+        }
+
         rayhit.ray.org_x = ray.origin.x;
         rayhit.ray.org_y = ray.origin.y;
         rayhit.ray.org_z = ray.origin.z;
@@ -711,41 +788,18 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
 
         if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
 
-        const unsigned top_inst_id = rayhit.hit.instID[0];
-        const bool hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
-                                   top_inst_id < instance_objects.size() &&
-                                   instance_objects[top_inst_id] != nullptr);
-
-        // Check Alpha if it's a triangle
         mat = nullptr;
-        if (!hit_instance && rayhit.hit.geomID == triangle_geom_id) {
-            const TriangleData& tri = triangle_data[rayhit.hit.primID];
-            float u = rayhit.hit.u;
-            float v = rayhit.hit.v;
-            float w = 1.0f - u - v;
-            uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-            mat = tri.getMaterial();
-        } else if (hit_instance) {
-            const auto& inst = instance_objects[top_inst_id];
-            if (inst) {
-                auto child_bvh = std::dynamic_pointer_cast<EmbreeBVH>(inst->mesh);
-                if (child_bvh && rayhit.hit.primID < child_bvh->triangle_data.size()) {
-                    const TriangleData& tri = child_bvh->triangle_data[rayhit.hit.primID];
-                    float u = rayhit.hit.u;
-                    float v = rayhit.hit.v;
-                    float w = 1.0f - u - v;
-                    uv = tri.t0 * w + tri.t1 * u + tri.t2 * v;
-                    mat = tri.getMaterial();
-                }
-            }
-        }
+        resolved_tri = nullptr;
+        resolved_hit_instance = false;
+        resolve_embree_surface_hit(*this, rayhit, resolved_tri, mat, uv, resolved_hit_instance);
 
         if (mat && mat->isTransparent()) {
             float opacity = mat->get_opacity(uv);
             if (opacity <= 0.5f) {
                 // Transparent: continue ray from this point
-                t_min = rayhit.ray.tfar + 0.001f;
-                if (t_min >= t_max) return false;
+                if (!advance_embree_tmin(rayhit.ray.tfar, t_min, t_max, "[EmbreeBVH::hit]")) {
+                    return false;
+                }
                 continue;
             }
         }
@@ -755,9 +809,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
 
     if (rayhit.hit.geomID != RTC_INVALID_GEOMETRY_ID) {
         const unsigned top_inst_id = rayhit.hit.instID[0];
-        const bool hit_instance = (top_inst_id != RTC_INVALID_GEOMETRY_ID &&
-                                   top_inst_id < instance_objects.size() &&
-                                   instance_objects[top_inst_id] != nullptr);
+        const bool hit_instance = resolved_hit_instance;
         
         // [New Logic]
         if (rayhit.hit.geomID == vdb_geom_id) {
@@ -776,7 +828,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
         else if (!hit_instance && rayhit.hit.geomID == triangle_geom_id) {
             // Hit Local Triangle
             int prim_id = rayhit.hit.primID;
-            const TriangleData& tri = triangle_data[prim_id];
+            const TriangleData& tri = resolved_tri ? *resolved_tri : triangle_data[prim_id];
 
             float u = rayhit.hit.u;
             float v = rayhit.hit.v;
@@ -806,7 +858,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                 if (child_bvh) {
                      int prim_id = rayhit.hit.primID;
                      if (prim_id < child_bvh->triangle_data.size()) {
-                         const TriangleData& tri = child_bvh->triangle_data[prim_id];
+                         const TriangleData& tri = resolved_tri ? *resolved_tri : child_bvh->triangle_data[prim_id];
 
                          float u = rayhit.hit.u;
                          float v = rayhit.hit.v;

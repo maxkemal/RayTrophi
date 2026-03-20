@@ -7,6 +7,20 @@
 #include <limits>
 #include "RayPacket.h"
 
+namespace {
+constexpr int kMaxCpuVdbShadowSteps = 4096;
+
+float compute_safe_vdb_step(float requested_step, float t_enter, float t_exit) {
+    const float distance = std::max(0.0f, t_exit - t_enter);
+    const float min_step = 0.01f;
+    const float base_step = std::max(requested_step, min_step);
+    if (distance <= 0.0f) {
+        return base_step;
+    }
+    return std::max(base_step, distance / float(kMaxCpuVdbShadowSteps));
+}
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTRUCTION
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -335,6 +349,7 @@ bool VDBVolume::occluded(const Ray& r, float t_min, float t_max) const {
     // Ray Marching Logic (Same as EmbreeBVH)
     float step_size = 0.5f; 
     if (this->volume_shader) step_size = this->volume_shader->quality.step_size * 2.0f; 
+    step_size = compute_safe_vdb_step(step_size, t_enter, t_exit);
     
     const auto& mgr = VDBVolumeManager::getInstance();
     int vid = this->getVDBVolumeID();
@@ -345,8 +360,9 @@ bool VDBVolume::occluded(const Ray& r, float t_min, float t_max) const {
     // Stochastic Start
     float t = t_enter + ((float)rand() / RAND_MAX) * step_size;
     float transmittance = 1.0f;
+    int steps = 0;
     
-    while (t < t_exit) {
+    while (t < t_exit && steps < kMaxCpuVdbShadowSteps) {
         Vec3 pos = r.at(t);
         Vec3 local_pos = world_transform_inv.transform_point(pos);
         
@@ -362,6 +378,7 @@ bool VDBVolume::occluded(const Ray& r, float t_min, float t_max) const {
         if (transmittance < 0.01f) return true;
         
         t += step_size;
+        ++steps;
     }
     
     // Stochastic Shadow Test
@@ -608,7 +625,15 @@ bool VDBVolume::intersectTransformedAABB(const Ray& r, float t_min, float t_max,
     float t1 = t_max;
     
     for (int i = 0; i < 3; i++) {
-        float invD = 1.0f / r.direction[i];
+        const float dir = r.direction[i];
+        if (std::fabs(dir) < 1e-8f) {
+            if (r.origin[i] < world_box.min[i] || r.origin[i] > world_box.max[i]) {
+                return false;
+            }
+            continue;
+        }
+
+        float invD = 1.0f / dir;
         float t_near = (world_box.min[i] - r.origin[i]) * invD;
         float t_far = (world_box.max[i] - r.origin[i]) * invD;
         

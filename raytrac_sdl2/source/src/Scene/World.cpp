@@ -292,23 +292,21 @@ World::World() {
 }
 
 void World::initializeLUT() {
-    // GPU SAFETY CHECK: Skip LUT initialization if no CUDA device available
-    // Transmittance/SkyView LUTs require CUDA for precomputation, but not necessarily OptiX.
-    if (!g_hasCUDA) {
-        SCENE_LOG_WARN("No CUDA device available - skipping LUT initialization (CPU fallback mode)");
-        // Set LUT handles to 0 so GPU code knows to use fallback
+    if (!atmosphere_lut) {
+        atmosphere_lut = new AtmosphereLUT();
+    }
+
+    atmosphere_lut->initialize();
+    atmosphere_lut->precompute(data.nishita);
+
+    if (g_hasCUDA) {
+        data.lut = atmosphere_lut->getGPUData();
+    } else {
+        // CPU rendering still needs the host LUTs even when no GPU textures exist.
         data.lut.transmittance_lut = 0;
         data.lut.skyview_lut = 0;
         data.lut.multi_scattering_lut = 0;
         data.lut.aerial_perspective_lut = 0;
-        return;
-    }
-    
-    if (!atmosphere_lut) {
-        atmosphere_lut = new AtmosphereLUT();
-        atmosphere_lut->initialize();
-        atmosphere_lut->precompute(data.nishita);
-        data.lut = atmosphere_lut->getGPUData();
     }
 }
 
@@ -373,7 +371,14 @@ void World::setNishitaParams(const NishitaSkyParams& params) {
 }
 
 void World::flushLUT() {
-    if (!lut_dirty || !atmosphere_lut) return;
+    if (!atmosphere_lut) {
+        initializeLUT();
+        lut_dirty = false;
+        return;
+    }
+
+    if (!lut_dirty) return;
+
     atmosphere_lut->precompute(data.nishita);
     lut_dirty = false;
 }

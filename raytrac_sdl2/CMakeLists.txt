@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
 project(RayTrophi VERSION 1.0 LANGUAGES CXX CUDA)
 
+option(RAYTROPHI_ENABLE_OZZ "Enable future Ozz animation integration hooks" ON)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 50)  # SM 5.0 for broad GPU support
@@ -74,14 +76,14 @@ list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 list(APPEND SOURCES_CPP "source/src/Render/FoliageWindSystem.cpp")
 list(APPEND SOURCES_CPP "source/src/Scene/AssetRegistry.cpp")
 
-file(GLOB SOURCES_IMGUI "source/external/imgui/*.cpp")
-file(GLOB_RECURSE HEADERS "source/include/*.h" "source/external/imgui/*.h") # Recursive header search
+file(GLOB SOURCES_IMGUI "external/imgui/*.cpp")
+file(GLOB_RECURSE HEADERS "source/include/*.h" "external/imgui/*.h") # Recursive header search
 list(APPEND HEADERS "source/include/FoliageWindSystem.h")
 list(APPEND HEADERS "source/include/AssetRegistry.h")
 
 # miniz compression library
 set(MINIZ_SOURCES
-    "source/external/miniz.c"
+    "external/miniz.c"
 )
 
 # Host-callable CUDA files (compiled to .obj)
@@ -93,8 +95,46 @@ set(CUDA_SOURCES_OBJ
     "source/src/Device/gas_fft_solver.cu"
 )
 
+set(OZZ_RUNTIME_SOURCES
+    "external/ozz-animation/src/base/log.cc"
+    "external/ozz-animation/src/base/platform.cc"
+    "external/ozz-animation/src/base/containers/string_archive.cc"
+    "external/ozz-animation/src/base/encode/group_varint.cc"
+    "external/ozz-animation/src/base/io/archive.cc"
+    "external/ozz-animation/src/base/io/stream.cc"
+    "external/ozz-animation/src/base/maths/box.cc"
+    "external/ozz-animation/src/base/maths/math_archive.cc"
+    "external/ozz-animation/src/base/maths/simd_math.cc"
+    "external/ozz-animation/src/base/maths/simd_math_archive.cc"
+    "external/ozz-animation/src/base/maths/soa_math_archive.cc"
+    "external/ozz-animation/src/base/memory/allocator.cc"
+    "external/ozz-animation/src/animation/runtime/animation.cc"
+    "external/ozz-animation/src/animation/runtime/animation_utils.cc"
+    "external/ozz-animation/src/animation/runtime/blending_job.cc"
+    "external/ozz-animation/src/animation/runtime/ik_aim_job.cc"
+    "external/ozz-animation/src/animation/runtime/ik_two_bone_job.cc"
+    "external/ozz-animation/src/animation/runtime/local_to_model_job.cc"
+    "external/ozz-animation/src/animation/runtime/motion_blending_job.cc"
+    "external/ozz-animation/src/animation/runtime/sampling_job.cc"
+    "external/ozz-animation/src/animation/runtime/skeleton.cc"
+    "external/ozz-animation/src/animation/runtime/skeleton_utils.cc"
+    "external/ozz-animation/src/animation/runtime/track.cc"
+    "external/ozz-animation/src/animation/runtime/track_sampling_job.cc"
+    "external/ozz-animation/src/animation/runtime/track_triggering_job.cc"
+    "external/ozz-animation/src/animation/offline/raw_animation.cc"
+    "external/ozz-animation/src/animation/offline/raw_animation_archive.cc"
+    "external/ozz-animation/src/animation/offline/raw_animation_utils.cc"
+    "external/ozz-animation/src/animation/offline/animation_builder.cc"
+    "external/ozz-animation/src/animation/offline/raw_skeleton.cc"
+    "external/ozz-animation/src/animation/offline/raw_skeleton_archive.cc"
+    "external/ozz-animation/src/animation/offline/skeleton_builder.cc"
+)
+
 # Gather all sources
 set(ALL_SOURCES ${SOURCES_CPP} ${SOURCES_IMGUI} ${MINIZ_SOURCES} ${CUDA_SOURCES_OBJ} ${HEADERS})
+if(RAYTROPHI_ENABLE_OZZ)
+    list(APPEND ALL_SOURCES ${OZZ_RUNTIME_SOURCES})
+endif()
 
 # --- CUDA / OPTIX ---
 find_package(CUDAToolkit REQUIRED)
@@ -142,7 +182,7 @@ add_custom_command(
     -o "${PTX_OUTPUT}"
     -I"${OPTIX_ROOT}/include"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/include"
-    -I"${CMAKE_CURRENT_SOURCE_DIR}/source/libs"
+    -I"${CMAKE_CURRENT_SOURCE_DIR}/libs"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src"
     -I"${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     --use_fast_math
@@ -157,6 +197,10 @@ add_custom_command(
 # Add only raygen.ptx to executable (others are likely loaded dynamically or need separate rules)
 add_executable(${PROJECT_NAME} ${ALL_SOURCES} ${PTX_OUTPUT})
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "RayTrophi Studio")
+
+if(RAYTROPHI_ENABLE_OZZ)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE RAYTROPHI_ENABLE_OZZ=1)
+endif()
 
 # --- INCLUDE DIRECTORIES ---
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -175,9 +219,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Animation"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Hair"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
-    "${CMAKE_CURRENT_SOURCE_DIR}/source/external"
-    "${CMAKE_CURRENT_SOURCE_DIR}/source/external/imgui"
-    "${CMAKE_CURRENT_SOURCE_DIR}/source/libs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/ozz-animation/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/libs"
     "${CMAKE_CURRENT_SOURCE_DIR}/../vcpkg/installed/x64-windows/include"
     "${OPTIX_ROOT}/include"
     "${SDL2_ROOT}/include"

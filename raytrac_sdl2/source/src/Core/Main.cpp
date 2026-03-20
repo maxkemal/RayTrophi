@@ -421,6 +421,8 @@ std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
 bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
 bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
+uint64_t g_cpu_bvh_requested_generation = 0;
+uint64_t g_cpu_bvh_future_generation = 0;
 bool g_viewport_hovered = false;         // True when mouse is over the main RenderView
 int g_backend_switch_cooldown_frames = 0; // Skip a few GPU animation/render ticks right after backend switch
 
@@ -2436,9 +2438,8 @@ int main(int argc, char* argv[]) try {
                             // SKINNING FIX: File-based animations may include skinning which deforms vertices.
                             // updateGeometry() in TLAS mode only updates matrices (transforms).
                             // For skinning, we need updateTLASGeometry() which rebuilds BLAS with new vertex data.
-                            
-                            // Pass Calculated Bone Matrices for GPU Skinning
                             if (g_backend) {
+                                // Pass Calculated Bone Matrices for GPU Skinning
                                 g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
                             }
 
@@ -3219,6 +3220,8 @@ int main(int argc, char* argv[]) try {
         static std::future<std::shared_ptr<Hittable>> g_bvh_future;
         
         if (g_bvh_rebuild_pending) {
+            ++g_cpu_bvh_requested_generation;
+
             // OPTIMIZATION: In GPU mode, skip CPU BVH rebuild entirely!
             // - GPU raytracing uses OptiX, not CPU BVH
             // - Picking (mouse selection) uses linear search, not BVH
@@ -3240,6 +3243,7 @@ int main(int argc, char* argv[]) try {
                 bool use_embree = ui_ctx.render_settings.UI_use_embree;
                 
                 ui.addViewportMessage("Rebuilding BVH...", 10.0f); // Show status
+                g_cpu_bvh_future_generation = g_cpu_bvh_requested_generation;
                 
                 // Capture by MOVE to avoid second copy (Save 1x copy of millions of shared_ptrs)
                 g_bvh_future = std::async(std::launch::async, [objs = std::move(objects_copy), use_embree]() -> std::shared_ptr<Hittable> {
@@ -3266,8 +3270,16 @@ int main(int argc, char* argv[]) try {
         if (g_bvh_future.valid()) {
             if (g_bvh_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 try {
+                    const uint64_t completed_generation = g_cpu_bvh_future_generation;
                     auto new_bvh = g_bvh_future.get();
-                    if (new_bvh) {
+                    g_cpu_bvh_future_generation = 0;
+
+                    if (completed_generation != g_cpu_bvh_requested_generation) {
+                        // A newer topology request arrived while this async build was in flight.
+                        // Discard the stale result and queue a fresh rebuild from current scene state.
+                        g_bvh_rebuild_pending = true;
+                    }
+                    else {
                         // CRITICAL OPTIMIZATION: Destroy OLD BVH on a background thread!
                         // Replacing 'scene.bvh' triggers the destructor of the old BVH.
                         // For large scenes, recursively destroying millions of nodes on the Main Thread 
@@ -3275,13 +3287,21 @@ int main(int argc, char* argv[]) try {
                         auto old_bvh = scene.bvh;
                         scene.bvh = new_bvh;
                         
-                        std::thread([old_bvh]() {
-                            // old_bvh goes out of scope here and is destroyed in background
-                        }).detach();
+                        if (old_bvh) {
+                            std::thread([old_bvh]() {
+                                // old_bvh goes out of scope here and is destroyed in background
+                            }).detach();
+                        }
                         
                         ray_renderer.resetCPUAccumulation();
+                        start_render = true;
+                        render_settings.is_rendering_active = true;
                         ui.clearViewportMessages(); 
-                        ui.addViewportMessage("Async BVH Rebuild Complete", 2.0f);
+                        if (new_bvh) {
+                            ui.addViewportMessage("Async BVH Rebuild Complete", 2.0f);
+                        } else {
+                            ui.addViewportMessage("BVH cleared for empty scene", 2.0f);
+                        }
                     }
                 } catch (const std::exception& e) {
                    SCENE_LOG_WARN(std::string("BVH Rebuild Failed: ") + e.what());

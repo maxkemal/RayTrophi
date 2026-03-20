@@ -580,65 +580,89 @@ public:
         }
         
         auto perf_start = std::chrono::high_resolution_clock::now();
-        
-        // SDL_image kullanarak bellekten yükle
-        SDL_RWops* rw = SDL_RWFromConstMem(buffer.data(), static_cast<int>(buffer.size()));
-        if (!rw) {
-            SCENE_LOG_ERROR("[MEMORY LOAD] Failed SDL_RWFromConstMem for: " + textureName);
-            return;
-        }
-        
-        SDL_Surface* surface = IMG_Load_RW(rw, 1); // 1 = auto-free RWops
-        if (!surface) {
-            SCENE_LOG_ERROR("[MEMORY LOAD] IMG_Load_RW failed for: " + textureName + " | " + std::string(IMG_GetError()));
-            return;
-        }
-        
-        width = surface->w;
-        height = surface->h;
-        pixels.resize(width * height);
-        
-        // RGBA32'ye dönüştür
-        SDL_Surface* converted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
-        SDL_FreeSurface(surface);
-        
-        if (!converted) {
-            SCENE_LOG_ERROR("[MEMORY LOAD] Convert failed for: " + textureName);
-            return;
-        }
-        
-        surface = converted;
-        width = surface->w;
-        height = surface->h;
-        
-        if (SDL_LockSurface(surface) != 0) {
+
+        int w = 0;
+        int h = 0;
+        int channels = 0;
+        stbi_uc* decoded = stbi_load_from_memory(
+            reinterpret_cast<const stbi_uc*>(buffer.data()),
+            static_cast<int>(buffer.size()),
+            &w, &h, &channels, 4);
+
+        if (decoded) {
+            width = w;
+            height = h;
+            pixels.resize(width * height);
+
+            bool alpha_detected = false;
+            bool gray_detected = true;
+            fast_copy_rgba32_pixels(decoded, width * 4, pixels, width, height, alpha_detected, gray_detected);
+            has_alpha = alpha_detected;
+            is_gray_scale = gray_detected;
+            m_is_loaded = true;
+            stbi_image_free(decoded);
+        } else {
+            // Fallback for formats that stb_image cannot decode in this path.
+            SDL_RWops* rw = SDL_RWFromConstMem(buffer.data(), static_cast<int>(buffer.size()));
+            if (!rw) {
+                SCENE_LOG_ERROR("[MEMORY LOAD] Failed SDL_RWFromConstMem for: " + textureName);
+                return;
+            }
+
+            SDL_Surface* surface = IMG_Load_RW(rw, 1); // 1 = auto-free RWops
+            if (!surface) {
+                SCENE_LOG_ERROR("[MEMORY LOAD] IMG_Load_RW failed for: " + textureName + " | " + std::string(IMG_GetError()));
+                return;
+            }
+
+            width = surface->w;
+            height = surface->h;
+            pixels.resize(width * height);
+
+            SDL_Surface* converted = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
             SDL_FreeSurface(surface);
-            return;
-        }
-        
-        if (surface->format->BytesPerPixel != 4) {
+
+            if (!converted) {
+                SCENE_LOG_ERROR("[MEMORY LOAD] Convert failed for: " + textureName);
+                return;
+            }
+
+            surface = converted;
+            width = surface->w;
+            height = surface->h;
+
+            if (SDL_LockSurface(surface) != 0) {
+                SDL_FreeSurface(surface);
+                return;
+            }
+
+            if (surface->format->BytesPerPixel != 4) {
+                SDL_UnlockSurface(surface);
+                SDL_FreeSurface(surface);
+                SCENE_LOG_ERROR("[MEMORY LOAD] BPP != 4 for: " + textureName);
+                return;
+            }
+
+            bool alpha_detected = false;
+            bool gray_detected = true;
+            fast_copy_rgba32_pixels(
+                static_cast<uint8_t*>(surface->pixels),
+                surface->pitch, pixels, width, height, alpha_detected, gray_detected
+            );
+            has_alpha = alpha_detected;
+            is_gray_scale = gray_detected;
+            m_is_loaded = true;
+
             SDL_UnlockSurface(surface);
             SDL_FreeSurface(surface);
-            SCENE_LOG_ERROR("[MEMORY LOAD] BPP != 4 for: " + textureName);
-            return;
         }
         
-        // Hızlı pixel kopyalama
-        bool alpha_detected = false;
-        bool gray_detected = true;
-        fast_copy_rgba32_pixels(
-            static_cast<uint8_t*>(surface->pixels),
-            surface->pitch, pixels, width, height, alpha_detected, gray_detected
-        );
-        has_alpha = alpha_detected;
-        is_gray_scale = gray_detected;
-        m_is_loaded = true;
-        
-        SDL_UnlockSurface(surface);
-        SDL_FreeSurface(surface);
-        
-        auto perf_end = std::chrono::high_resolution_clock::now();
+       /* auto perf_end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(perf_end - perf_start);
+        SCENE_LOG_INFO("[Perf] Texture::Texture(memory) " + textureName +
+                       " | " + std::to_string(width) + "x" + std::to_string(height) +
+                       " | " + std::to_string(buffer.size()) + " bytes" +
+                       " | " + std::to_string(duration.count()) + " ms");*/
         
         // SCENE_LOG_INFO("[MEMORY LOAD] Texture loaded from buffer: " + textureName + 
         //                " | " + std::to_string(width) + "x" + std::to_string(height) +

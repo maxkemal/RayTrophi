@@ -23,6 +23,9 @@
 #include "AnimationController.h"
 #include "AnimatedObject.h"
 #include "NodeSystem/NodeEditorChrome.h"
+
+#include <cstdio>
+#include <set>
 #include "Triangle.h" // Added for dynamic_pointer_cast<Triangle>
 #include "imgui.h"
 #include <string>
@@ -1664,6 +1667,54 @@ inline void drawAnimationGraphPanel(UIContext& ctx) {
             if (mctx.importName == g_animGraphUI.activeCharacter) {
                 ImGui::Checkbox("Use Root Motion", &mctx.useRootMotion);
                 UIWidgets::HelpMarker("Apply motion from the animation to the character transform. For cinematic testing you may prefer to keep this disabled.");
+                if (mctx.useRootMotion) {
+                    std::vector<std::string> rootMotionCandidates;
+                    rootMotionCandidates.emplace_back("");
+                    if (mctx.animator) {
+                        std::set<std::string> uniqueNames;
+                        for (const auto& clip : mctx.animator->getAllClips()) {
+                            if (!clip.sourceData) {
+                                continue;
+                            }
+                            for (const auto& [name, _] : clip.sourceData->positionKeys) {
+                                uniqueNames.insert(name);
+                            }
+                        }
+                        rootMotionCandidates.insert(rootMotionCandidates.end(), uniqueNames.begin(), uniqueNames.end());
+                    }
+
+                    int selectedRootMotionIndex = 0;
+                    for (int i = 1; i < static_cast<int>(rootMotionCandidates.size()); ++i) {
+                        if (rootMotionCandidates[i] == mctx.rootMotionBone) {
+                            selectedRootMotionIndex = i;
+                            break;
+                        }
+                    }
+
+                    auto comboGetter = [](void* data, int idx, const char** out_text) -> bool {
+                        auto* items = static_cast<std::vector<std::string>*>(data);
+                        if (!items || idx < 0 || idx >= static_cast<int>(items->size())) {
+                            return false;
+                        }
+                        *out_text = (*items)[idx].empty() ? "Auto Detect" : (*items)[idx].c_str();
+                        return true;
+                    };
+
+                    ImGui::SetNextItemWidth(180.0f);
+                    if (ImGui::Combo("Root Motion Bone", &selectedRootMotionIndex, comboGetter, &rootMotionCandidates, static_cast<int>(rootMotionCandidates.size()))) {
+                        mctx.rootMotionBone = rootMotionCandidates[selectedRootMotionIndex];
+                    }
+                    UIWidgets::HelpMarker("Auto Detect uses the built-in heuristic. The list is populated from animated position channels in the imported clips, so renamed scene bone prefixes do not break it.");
+                }
+                ImGui::SameLine();
+                const char* runtimeItems[] = { "Legacy", "Ozz" };
+                int runtimeMode = mctx.preferOzzRuntime ? 1 : 0;
+                ImGui::SetNextItemWidth(92.0f);
+                if (ImGui::Combo("Animation Runtime", &runtimeMode, runtimeItems, IM_ARRAYSIZE(runtimeItems))) {
+                    mctx.preferOzzRuntime = (runtimeMode == 1);
+                    mctx.loggedOzzRuntimeUsage = false;
+                }
+                UIWidgets::HelpMarker("Legacy uses the existing controller sampling path. Ozz uses Ozz runtime sampling while keeping the same playback state.");
                 ImGui::SameLine();
                 ImGui::Checkbox("Use Anim Graph", &mctx.useAnimGraph);
                 UIWidgets::HelpMarker("When enabled, the runtime graph is evaluated. When disabled, the legacy AnimationController drives playback.");

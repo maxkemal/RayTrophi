@@ -1407,6 +1407,96 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
     if (hitgroup_records.empty()) return;
 
     bool modified = false;
+    auto& materialManager = MaterialManager::getInstance();
+
+    struct MaterialTextureSyncState {
+        bool valid = false;
+        cudaTextureObject_t albedo_tex = 0;
+        cudaTextureObject_t roughness_tex = 0;
+        cudaTextureObject_t normal_tex = 0;
+        cudaTextureObject_t metallic_tex = 0;
+        cudaTextureObject_t transmission_tex = 0;
+        cudaTextureObject_t opacity_tex = 0;
+        cudaTextureObject_t emission_tex = 0;
+        int has_albedo_tex = 0;
+        int has_roughness_tex = 0;
+        int has_normal_tex = 0;
+        int has_metallic_tex = 0;
+        int has_transmission_tex = 0;
+        int has_opacity_tex = 0;
+        int has_emission_tex = 0;
+        int opacity_has_alpha = 0;
+    };
+
+    auto uploadTextureIfNeeded = [](const std::shared_ptr<Texture>& tex) -> cudaTextureObject_t {
+        if (!tex) return 0;
+        if (!tex->is_gpu_uploaded) tex->upload_to_gpu();
+        return tex->get_cuda_texture();
+    };
+
+    std::vector<MaterialTextureSyncState> materialTextureStates(materials.size());
+    for (size_t mat_id = 0; mat_id < materials.size(); ++mat_id) {
+        Material* base_mat = materialManager.getMaterial(static_cast<uint16_t>(mat_id));
+        PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(base_mat);
+        if (!pbsdf) continue;
+
+        MaterialTextureSyncState state{};
+        state.valid = true;
+
+        if (pbsdf->albedoProperty.texture) {
+            state.albedo_tex = uploadTextureIfNeeded(pbsdf->albedoProperty.texture);
+            state.has_albedo_tex = state.albedo_tex ? 1 : 0;
+        }
+        if (pbsdf->roughnessProperty.texture) {
+            state.roughness_tex = uploadTextureIfNeeded(pbsdf->roughnessProperty.texture);
+            state.has_roughness_tex = state.roughness_tex ? 1 : 0;
+        }
+        if (pbsdf->normalProperty.texture) {
+            state.normal_tex = uploadTextureIfNeeded(pbsdf->normalProperty.texture);
+            state.has_normal_tex = state.normal_tex ? 1 : 0;
+        }
+        if (pbsdf->metallicProperty.texture) {
+            state.metallic_tex = uploadTextureIfNeeded(pbsdf->metallicProperty.texture);
+            state.has_metallic_tex = state.metallic_tex ? 1 : 0;
+        }
+        if (pbsdf->transmissionProperty.texture) {
+            state.transmission_tex = uploadTextureIfNeeded(pbsdf->transmissionProperty.texture);
+            state.has_transmission_tex = state.transmission_tex ? 1 : 0;
+        }
+        if (pbsdf->opacityProperty.texture) {
+            state.opacity_tex = uploadTextureIfNeeded(pbsdf->opacityProperty.texture);
+            state.has_opacity_tex = state.opacity_tex ? 1 : 0;
+            state.opacity_has_alpha = pbsdf->opacityProperty.texture->has_alpha ? 1 : 0;
+        }
+        if (pbsdf->emissionProperty.texture) {
+            state.emission_tex = uploadTextureIfNeeded(pbsdf->emissionProperty.texture);
+            state.has_emission_tex = state.emission_tex ? 1 : 0;
+        }
+
+        materialTextureStates[mat_id] = state;
+    }
+
+    auto applyMaterialTextureState = [&](HitGroupData& data, int mat_id) {
+        if (mat_id < 0 || mat_id >= static_cast<int>(materialTextureStates.size())) return;
+        const auto& state = materialTextureStates[mat_id];
+        if (!state.valid) return;
+
+        data.albedo_tex = state.albedo_tex;
+        data.has_albedo_tex = state.has_albedo_tex;
+        data.roughness_tex = state.roughness_tex;
+        data.has_roughness_tex = state.has_roughness_tex;
+        data.normal_tex = state.normal_tex;
+        data.has_normal_tex = state.has_normal_tex;
+        data.metallic_tex = state.metallic_tex;
+        data.has_metallic_tex = state.has_metallic_tex;
+        data.transmission_tex = state.transmission_tex;
+        data.has_transmission_tex = state.has_transmission_tex;
+        data.opacity_tex = state.opacity_tex;
+        data.has_opacity_tex = state.has_opacity_tex;
+        data.opacity_has_alpha = state.opacity_has_alpha;
+        data.emission_tex = state.emission_tex;
+        data.has_emission_tex = state.has_emission_tex;
+    };
 
     // Update each hitgroup record
     for (auto& rec : hitgroup_records) {
@@ -1419,81 +1509,9 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
             
             // 1b. Regular Material Texture Sync (if not terrain)
             if (!rec.data.is_terrain) {
-                Material* base_mat = MaterialManager::getInstance().getMaterial(mat_id);
-                PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(base_mat);
-                if (pbsdf) {
-                    // Albedo
-                    if (pbsdf->albedoProperty.texture) {
-                        if (!pbsdf->albedoProperty.texture->is_gpu_uploaded) pbsdf->albedoProperty.texture->upload_to_gpu();
-                        rec.data.albedo_tex = pbsdf->albedoProperty.texture->get_cuda_texture();
-                        rec.data.has_albedo_tex = 1;
-                    } else {
-                        rec.data.albedo_tex = 0;
-                        rec.data.has_albedo_tex = 0;
-                    }
-
-                    // Normal
-                    if (pbsdf->normalProperty.texture) {
-                        if (!pbsdf->normalProperty.texture->is_gpu_uploaded) pbsdf->normalProperty.texture->upload_to_gpu();
-                        rec.data.normal_tex = pbsdf->normalProperty.texture->get_cuda_texture();
-                        rec.data.has_normal_tex = 1;
-                    } else {
-                        rec.data.normal_tex = 0;
-                        rec.data.has_normal_tex = 0;
-                    }
-
-                    // Roughness
-                    if (pbsdf->roughnessProperty.texture) {
-                        if (!pbsdf->roughnessProperty.texture->is_gpu_uploaded) pbsdf->roughnessProperty.texture->upload_to_gpu();
-                        rec.data.roughness_tex = pbsdf->roughnessProperty.texture->get_cuda_texture();
-                        rec.data.has_roughness_tex = 1;
-                    } else {
-                        rec.data.roughness_tex = 0;
-                        rec.data.has_roughness_tex = 0;
-                    }
-                    
-                    // Metallic
-                    if (pbsdf->metallicProperty.texture) {
-                        if (!pbsdf->metallicProperty.texture->is_gpu_uploaded) pbsdf->metallicProperty.texture->upload_to_gpu();
-                        rec.data.metallic_tex = pbsdf->metallicProperty.texture->get_cuda_texture();
-                        rec.data.has_metallic_tex = 1;
-                    } else {
-                        rec.data.metallic_tex = 0;
-                        rec.data.has_metallic_tex = 0;
-                    }
-                // Emission
-                if (pbsdf->emissionProperty.texture) {
-                    if (!pbsdf->emissionProperty.texture->is_gpu_uploaded) pbsdf->emissionProperty.texture->upload_to_gpu();
-                    rec.data.emission_tex = pbsdf->emissionProperty.texture->get_cuda_texture();
-                    rec.data.has_emission_tex = 1;
-                } else {
-                    rec.data.emission_tex = 0;
-                    rec.data.has_emission_tex = 0;
-                }
-
-                // Opacity
-                if (pbsdf->opacityProperty.texture) {
-                    if (!pbsdf->opacityProperty.texture->is_gpu_uploaded) pbsdf->opacityProperty.texture->upload_to_gpu();
-                    rec.data.opacity_tex = pbsdf->opacityProperty.texture->get_cuda_texture();
-                    rec.data.has_opacity_tex = 1;
-                    rec.data.opacity_has_alpha = (pbsdf->opacityProperty.texture->has_alpha);
-                } else {
-                    rec.data.opacity_tex = 0;
-                    rec.data.has_opacity_tex = 0;
-                }
-
-                // Transmission
-                if (pbsdf->transmissionProperty.texture) {
-                    if (!pbsdf->transmissionProperty.texture->is_gpu_uploaded) pbsdf->transmissionProperty.texture->upload_to_gpu();
-                    rec.data.transmission_tex = pbsdf->transmissionProperty.texture->get_cuda_texture();
-                    rec.data.has_transmission_tex = 1;
-                } else {
-                    rec.data.transmission_tex = 0;
-                    rec.data.has_transmission_tex = 0;
-                }
+                applyMaterialTextureState(rec.data, mat_id);
             }
         }
-    }
 
     // 2. Terrain System Sync (Textures & SplatMap)
         if (sync_terrain && rec.data.is_terrain) {
@@ -1516,7 +1534,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                         if (i < terrain.layers.size() && terrain.layers[i]) {
                              // Get Material ID from Manager
                              std::string matName = terrain.layers[i]->materialName;
-                             int layerID = MaterialManager::getInstance().getMaterialID(matName);
+                             int layerID = materialManager.getMaterialID(matName);
                              rec.data.layer_material_ids[i] = layerID;
 
                              // Ensure textures are uploaded (SBT sync is usually for runtime changes)
@@ -1552,7 +1570,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                 // If ROOT_UV_MAP is active, check if we should use scalp textures
                 if (blas.hair_material.colorMode == 3 && blas.mesh_material_id >= 0) {
                     bool hairHasAlbedo = false;
-                    Material* hair_mat = MaterialManager::getInstance().getMaterial(blas.material_id);
+                    Material* hair_mat = materialManager.getMaterial(blas.material_id);
                     PrincipledBSDF* p_hair = dynamic_cast<PrincipledBSDF*>(hair_mat);
                     if (p_hair && p_hair->albedoProperty.texture) {
                         hairHasAlbedo = true;
@@ -1564,49 +1582,7 @@ void OptixAccelManager::syncSBTMaterialData(const std::vector<GpuMaterial>& mate
                 }
                 
                 // Update textures in SBT from the chosen material
-                Material* target_mat = MaterialManager::getInstance().getMaterial(texture_mat_id);
-                PrincipledBSDF* p_target = dynamic_cast<PrincipledBSDF*>(target_mat);
-                if (p_target) {
-                    // Albedo
-                    if (p_target->albedoProperty.texture) {
-                        if (!p_target->albedoProperty.texture->is_gpu_uploaded) p_target->albedoProperty.texture->upload_to_gpu();
-                        rec.data.albedo_tex = p_target->albedoProperty.texture->get_cuda_texture();
-                        rec.data.has_albedo_tex = 1;
-                    } else {
-                        rec.data.albedo_tex = 0;
-                        rec.data.has_albedo_tex = 0;
-                    }
-                    
-                    // Roughness
-                    if (p_target->roughnessProperty.texture) {
-                        if (!p_target->roughnessProperty.texture->is_gpu_uploaded) p_target->roughnessProperty.texture->upload_to_gpu();
-                        rec.data.roughness_tex = p_target->roughnessProperty.texture->get_cuda_texture();
-                        rec.data.has_roughness_tex = 1;
-                    } else {
-                        rec.data.roughness_tex = 0;
-                        rec.data.has_roughness_tex = 0;
-                    }
-
-                    // Normal
-                    if (p_target->normalProperty.texture) {
-                        if (!p_target->normalProperty.texture->is_gpu_uploaded) p_target->normalProperty.texture->upload_to_gpu();
-                        rec.data.normal_tex = p_target->normalProperty.texture->get_cuda_texture();
-                        rec.data.has_normal_tex = 1;
-                    } else {
-                        rec.data.normal_tex = 0;
-                        rec.data.has_normal_tex = 0;
-                    }
-
-                    // Metallic
-                    if (p_target->metallicProperty.texture) {
-                        if (!p_target->metallicProperty.texture->is_gpu_uploaded) p_target->metallicProperty.texture->upload_to_gpu();
-                        rec.data.metallic_tex = p_target->metallicProperty.texture->get_cuda_texture();
-                        rec.data.has_metallic_tex = 1;
-                    } else {
-                        rec.data.metallic_tex = 0;
-                        rec.data.has_metallic_tex = 0;
-                    }
-                }
+                applyMaterialTextureState(rec.data, texture_mat_id);
                 
                 modified = true;
             }

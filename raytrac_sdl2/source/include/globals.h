@@ -250,8 +250,7 @@ extern UILogger g_sceneLog;
 // Yalnızca bildirim:
 extern RenderSettings render_settings;
 extern std::atomic<int> completed_pixels;
-extern const float min_distance;
-extern const float max_distance;
+
 extern  float aspect_ratio; // Sabit olarak double türünde tanımlıyoruz
 extern  int image_width;
 extern  int image_height;
@@ -259,9 +258,6 @@ extern const float EPSILON;
 extern std::atomic<int> next_row;
 extern const float infinity;
 extern  std::string baseDirectory;
-extern bool atmosferic_effect_enabled;
-extern const float max_normal_distance;
-extern const float max_normal_strength;
 extern const float aperture;
 extern const float focusdistance;
 extern const float gamma;

@@ -1661,14 +1661,14 @@ if (emissionTexID > 0) {
     // Sample roughness texture
     int roughTexID = int(mat.roughness_tex);
     if (roughTexID > 0) {
-        float r = texture(materialTextures[nonuniformEXT(roughTexID)], hitUV).g;
+        float r = texture(materialTextures[nonuniformEXT(roughTexID)], hitUV).r;
         roughness = clamp(r, 0.0, 1.0);
     }
     
     // Sample metallic texture
     int metallicTexID = int(mat.metallic_tex);
     if (metallicTexID > 0) {
-        float m = texture(materialTextures[nonuniformEXT(metallicTexID)], hitUV).b;
+        float m = texture(materialTextures[nonuniformEXT(metallicTexID)], hitUV).r;
         metallic = clamp(m, 0.0, 1.0);
     }
     

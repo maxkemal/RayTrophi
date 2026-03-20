@@ -85,7 +85,6 @@ enum class BVHType {
 };
 
 class OptixWrapper;
-namespace Backend { class IBackend; }
 struct UIContext;
 
 

@@ -53,7 +53,7 @@ class EmbreeBVH : public Hittable {
 public:
     EmbreeBVH();
     ~EmbreeBVH();
-
+    std::vector<TriangleData> triangle_data;
     void build(const std::vector<std::shared_ptr<Hittable>>& objects);
     void clearGeometry();
     void updateGeometryFromTriangles();
@@ -82,15 +82,10 @@ public:
 private:
     static RTCDevice device; // Shared device across all BVH instances (persistent)
     RTCScene scene;
-    std::vector<TriangleData> triangle_data;
+  
     
     // Instance mapping: geometryID -> child BVH
-    unsigned triangle_geom_id = 0xFFFFFFFF; // RTC_INVALID_GEOMETRY_ID
-    std::vector<std::shared_ptr<HittableInstance>> instance_objects;
-
-    // VDB Volume Support (User Geometry)
-    unsigned vdb_geom_id = 0xFFFFFFFF;
-    std::vector<const class VDBVolume*> vdb_objects;
+   
 
     // Static callbacks for Embree User Geometry
     static void userBoundsFunc(const struct RTCBoundsFunctionArguments* args);
@@ -98,6 +93,13 @@ private:
     static void userOccludedFunc(const struct RTCOccludedFunctionNArguments* args);
 
 public:
+   
+    unsigned triangle_geom_id = 0xFFFFFFFF; // RTC_INVALID_GEOMETRY_ID
+    std::vector<std::shared_ptr<HittableInstance>> instance_objects;
+
+    // VDB Volume Support (User Geometry)
+    unsigned vdb_geom_id = 0xFFFFFFFF;
+    std::vector<const class VDBVolume*> vdb_objects;
     RTCScene getRTCScene() const { return scene; }
     static void shutdown(); // Call on app exit to release device
 };

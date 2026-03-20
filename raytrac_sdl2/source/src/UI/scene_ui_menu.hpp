@@ -19,8 +19,11 @@
 #include "renderer.h"
 #include "SceneSelection.h"
 #include "OptixWrapper.h"
+#include "MaterialManager.h"
 #include "TerrainManager.h"
+#include "TextureCompressionCache.h"
 #include "scene_ui_animgraph.hpp"  // For AnimGraphUIState
+#include "scene_ui_forcefield.hpp"
 #include "SceneExporter.h" // For GLTF Export
 #include "GasVolume.h"     // For Gas Volume creation
 #include <filesystem>
@@ -31,6 +34,15 @@
 #include <scene_ui_gas.hpp>
 // extern bool show_controls_window; // Assume defined elsewhere
 
+namespace {
+    void openFolderInExplorer(const std::filesystem::path& folder) {
+#ifdef _WIN32
+        ShellExecuteW(nullptr, L"open", folder.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+        (void)folder;
+#endif
+    }
+}
 
 
 
@@ -54,6 +66,66 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             // ================================================================
             if (ImGui::MenuItem("Open Project...", "Ctrl+O")) {
                 tryOpen(ctx);
+            }
+
+            if (ImGui::BeginMenu("Project Save Options")) {
+                auto& saveSettings = g_ProjectManager.save_settings;
+                int textureMode = static_cast<int>(saveSettings.texture_storage_mode);
+
+                ImGui::TextDisabled("Texture Storage");
+                if (ImGui::RadioButton("Embedded In Project", textureMode == static_cast<int>(ProjectManager::TextureStorageMode::Embedded))) {
+                    saveSettings.texture_storage_mode = ProjectManager::TextureStorageMode::Embedded;
+                }
+                if (ImGui::RadioButton("Project-local Copies", textureMode == static_cast<int>(ProjectManager::TextureStorageMode::ProjectLocal))) {
+                    saveSettings.texture_storage_mode = ProjectManager::TextureStorageMode::ProjectLocal;
+                }
+                if (ImGui::RadioButton("Keep Original Paths", textureMode == static_cast<int>(ProjectManager::TextureStorageMode::KeepOriginalPaths))) {
+                    saveSettings.texture_storage_mode = ProjectManager::TextureStorageMode::KeepOriginalPaths;
+                }
+
+                ImGui::Separator();
+                ImGui::Checkbox("Embed Missing Only", &saveSettings.embed_missing_only);
+                ImGui::Checkbox("Save Geometry To Project", &saveSettings.save_geometry);
+
+                ImGui::Separator();
+                ImGui::TextWrapped("Embedded keeps a self-contained project. Project-local copies writes textures next to the .rtp. Keep original paths stores external paths only.");
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Vulkan Texture Cache")) {
+                const bool hasSavedProjectPath = !g_ProjectManager.getCurrentFilePath().empty();
+
+                if (!hasSavedProjectPath) {
+                    ImGui::TextDisabled("Save the project first to enable project-scoped cache.");
+                    ImGui::Separator();
+                }
+
+                if (ImGui::MenuItem("Open Cache Folder", nullptr, false, hasSavedProjectPath)) {
+                    const auto cacheDir = getProjectTextureCacheDirectory();
+                    if (cacheDir) {
+                        try {
+                            std::filesystem::create_directories(*cacheDir);
+                            openFolderInExplorer(*cacheDir);
+                        } catch (const std::exception& e) {
+                            SCENE_LOG_WARN(std::string("[VulkanTextureCache] Failed to open cache folder: ") + e.what());
+                        }
+                    } else {
+                        SCENE_LOG_WARN("[VulkanTextureCache] No active saved project path is available.");
+                    }
+                }
+
+                if (ImGui::MenuItem("Clear Project Cache", nullptr, false, hasSavedProjectPath)) {
+                    std::string clearReason;
+                    if (clearProjectTextureCache(&clearReason)) {
+                        SCENE_LOG_INFO("[VulkanTextureCache] Project cache cleared.");
+                    } else {
+                        SCENE_LOG_WARN("[VulkanTextureCache] " + clearReason);
+                    }
+                }
+
+                ImGui::Separator();
+                ImGui::TextWrapped("Project open only uses existing cache. Cache generation is disabled in the UI for now.");
+                ImGui::EndMenu();
             }
             
             // ================================================================

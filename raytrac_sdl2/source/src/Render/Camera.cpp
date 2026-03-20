@@ -9,13 +9,13 @@ Camera::Camera(Vec3 lookfrom, Vec3 lookat, Vec3 vup, float vfov, float aspect, f
 {
     lens_radius = aperture * 0.5f;
     near_dist = 0.1; // Yakın mesafe, genellikle 0.1 olarak ayarlanır
-    far_dist = 20000.0f; // Uzak mesafe artırıldı (10km) - CPU volume rendering sorunu için
+    far_dist = 20000.0f; // Uzak mesafe artırıldı (20km) - CPU volume rendering sorunu için
     // far_dist = focus_dist * 2.0; // REMOVED: Broken logic that clips rendering at 20m if focus is 10m
     update_camera_vectors();
 }
 
 Camera::Camera()
-    : aperture(0.0), aspect(1.77f), aspect_ratio(1.77f), blade_count(6), far_dist(1000.0f),
+    : aperture(0.0), aspect(1.77f), aspect_ratio(1.77f), blade_count(6), far_dist(20000.0f),
     focus_dist(10.0f), fov(45.0f), lens_radius(0.0), near_dist(0.1f), vfov(45.0f),
     iso_preset_index(1), shutter_preset_index(5), fstop_preset_index(4),
     auto_exposure(true), use_physical_exposure(false), enable_motion_blur(false),
@@ -46,7 +46,17 @@ Ray Camera::get_ray(float s, float t) const {
 
     Vec3 rd = lens_radius * random_in_unit_polygon(blade_count);
     Vec3 offset = u * rd.x + v * rd.y;
-    return Ray(origin + offset, lower_left_corner + use_s * horizontal + use_t * vertical - origin - offset);
+    // IMPORTANT: CPU renderer assumes ray/HitRecord t values are world-space distances.
+    // Keep primary camera rays normalized, or small camera angle changes will skew
+    // aerial perspective, volume marching, and shadow/opacity traversal thresholds.
+    Vec3 direction = lower_left_corner + use_s * horizontal + use_t * vertical - origin - offset;
+    const float dir_len_sq = direction.length_squared();
+    if (dir_len_sq > 1e-12f) {
+        direction = direction / std::sqrt(dir_len_sq);
+    } else {
+        direction = Vec3(0.0f, 0.0f, -1.0f);
+    }
+    return Ray(origin + offset, direction);
 }
 
 int Camera::random_int(int min, int max) const {
@@ -62,7 +72,12 @@ void Camera::update_camera_vectors() {
         view = Vec3(0, 0, -1);
 
     w = (-view).normalize();
-    u = Vec3::cross(vup, w).normalize();
+    u = Vec3::cross(vup, w);
+    if (u.length_squared() < 1e-10f) {
+        Vec3 fallback_up = std::abs(w.y) > 0.999f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(0.0f, 1.0f, 0.0f);
+        u = Vec3::cross(fallback_up, w);
+    }
+    u = u.normalize();
     v = Vec3::cross(w, u).normalize();
 
     float theta = vfov * static_cast<float>(M_PI) / 180.0;
