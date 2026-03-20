@@ -15,7 +15,7 @@ echo Compiling raygen_kernels.cu...
 -o "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\raygen.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
--I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
+-I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\libs" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device" ^
 --ptxas-options=-v ^
 --maxrregcount=64 ^
@@ -29,7 +29,7 @@ echo Compiling miss_kernels.cu...
 -o "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\miss_kernels.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
--I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
+-I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\libs" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device" ^
 --ptxas-options=-v ^
 --maxrregcount=64 ^
@@ -43,7 +43,7 @@ echo Compiling hitgroup_kernels.cu...
 -o "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\hitgroup_kernels.ptx" ^
 -I"C:\ProgramData\NVIDIA Corporation\OptiX SDK 9.0.0\include" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
--I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
+-I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\libs" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device" ^
 --ptxas-options=-v ^
 --maxrregcount=64 ^
@@ -56,7 +56,7 @@ echo Compiling erosion_kernels.cu...
 -ptx "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device\erosion_kernels.cu" ^
 -o "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\erosion_kernels.ptx" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
--I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
+-I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\libs" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device" ^
 --ptxas-options=-v ^
 --use_fast_math ^
@@ -69,7 +69,7 @@ echo Compiling foliage_deform.cu...
 -ptx "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device\foliage_deform.cu" ^
 -o "e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\foliage_deform.ptx" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\include" ^
--I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\libs" ^
+-I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\libs" ^
 -I"e:\RayTrophi_projesi\raytracing_Proje_Moduler\raytrac_sdl2\source\src\Device" ^
 --ptxas-options=-v ^
 --use_fast_math ^

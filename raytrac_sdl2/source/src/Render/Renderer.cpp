@@ -41,6 +41,7 @@
 #include "ParallelBVHNode.h"
 #include "AnimatedObject.h"
 #include "AnimationController.h"
+#include "OzzRuntime.h"
 #include "AnimationNodes.h"
 #include "scene_data.h"
 
@@ -62,6 +63,7 @@
 #include "Hair/HairBSDF.h"       // Hair BSDF for shading
 #include "FoliageWindSystem.h"
 #include <Backend/VulkanBackend.h>
+
 bool Renderer::isCudaAvailable() {
     try {
         oidn::DeviceRef testDevice = oidn::newDevice(oidn::DeviceType::CUDA);
@@ -430,24 +432,48 @@ static int directional_pick_count = 0;
 void Renderer::initializeAnimationSystem(SceneData& scene) {
     // Initialize per-model animators
     for (auto& ctx : scene.importedModelContexts) {
-        if (ctx.hasAnimation && !ctx.animator) {
+        if (!ctx.hasAnimation) {
+            continue;
+        }
+
+        if (!ctx.animator) {
             ctx.animator = std::make_shared<AnimationController>();
+        }
 
-            // Filter clips for this model
-            std::vector<std::shared_ptr<AnimationData>> modelClips;
-            for (auto& anim : scene.animationDataList) {
-                if (anim && (anim->modelName == ctx.importName || (anim->modelName.empty() && scene.importedModelContexts.size() == 1))) {
-                    modelClips.push_back(anim);
-                }
+        // Filter clips for this model
+        std::vector<std::shared_ptr<AnimationData>> modelClips;
+        for (auto& anim : scene.animationDataList) {
+            if (anim && (anim->modelName == ctx.importName || (anim->modelName.empty() && scene.importedModelContexts.size() == 1))) {
+                modelClips.push_back(anim);
             }
+        }
 
-            ctx.animator->registerClips(modelClips);
+        ctx.animator->registerClips(modelClips);
+        ctx.ozzAnimationSet = OzzRuntime::buildStubAnimationSet(ctx.importName, scene.boneData, modelClips);
 
-            if (!modelClips.empty()) {
-                // [FIX] Do NOT auto-play on import. 
-                // Keep character in Bind Pose (T-Pose) until an animation node is added to AnimGraph.
-                // ctx.animator->play(modelClips[0]->name, 0.0f);
-                SCENE_LOG_INFO("[Renderer] Created animator for model: " + ctx.importName + " (Clips: " + std::to_string(modelClips.size()) + ")");
+        if (!modelClips.empty()) {
+            // [FIX] Do NOT auto-play on import.
+            // Keep character in Bind Pose (T-Pose) until an animation node is added to AnimGraph.
+            // ctx.animator->play(modelClips[0]->name, 0.0f);
+            SCENE_LOG_INFO("[Renderer] Created animator for model: " + ctx.importName + " (Clips: " + std::to_string(modelClips.size()) + ")");
+            if (ctx.ozzAnimationSet && ctx.ozzAnimationSet->hasScaffoldData()) {
+                size_t trackCount = 0;
+                if (!ctx.ozzAnimationSet->clipRuntimes.empty()) {
+                    trackCount = ctx.ozzAnimationSet->clipRuntimes.front().jointTracks.size();
+                }
+                SCENE_LOG_INFO("[Renderer] Prepared " + std::string(OzzRuntime::backendLabel()) +
+                    " animation scaffold for model: " + ctx.importName +
+                    " (joints: " + std::to_string(ctx.ozzAnimationSet->skeleton.jointCount) +
+                    ", clips: " + std::to_string(ctx.ozzAnimationSet->clips.size()) +
+                    ", track-joints: " + std::to_string(trackCount) + ")");
+
+                if (ctx.ozzAnimationSet->isUsable() && !ctx.ozzAnimationSet->runtimeAnimations.empty()) {
+                    std::vector<Matrix4x4> sampledMatrices;
+                    if (OzzRuntime::sampleAnimationToModelMatrices(*ctx.ozzAnimationSet, 0, 0.0f, &sampledMatrices)) {
+                        SCENE_LOG_INFO("[Renderer] Ozz runtime sampling ready for model: " + ctx.importName +
+                            " (sampled matrices: " + std::to_string(sampledMatrices.size()) + ")");
+                    }
+                }
             }
         }
     }
@@ -474,6 +500,22 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
         // Per-model bone matrices for isolated skinning
         std::vector<Matrix4x4> modelBoneMatrices;
         bool modelChanged = false;
+        auto applyModelRestPose = [&]() {
+            bool applied = false;
+            for (const auto& [boneName, boneIndex] : scene.boneData.boneNameToIndex) {
+                if (boneName.find(ctx.importName + "_") != 0) {
+                    continue;
+                }
+
+                const size_t globalIdx = static_cast<size_t>(boneIndex);
+                if (globalIdx >= this->finalBoneMatrices.size()) {
+                    continue;
+                }
+                this->finalBoneMatrices[globalIdx] = Matrix4x4::identity();
+                applied = true;
+            }
+            return applied;
+        };
 
         auto activeGraph = ctx.runtimeGraph ? ctx.runtimeGraph : ctx.graph;
         if (ctx.useAnimGraph && activeGraph) {
@@ -552,7 +594,9 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             if (ctx.useRootMotion && ctx.animator) {
                 auto clips = ctx.animator->getAllClips();
                 if (!clips.empty() && clips[0].sourceData) {
-                    activeGraph->evalContext.rootMotionBone = ctx.animator->findBestRootMotionBone(clips[0].name);
+                    activeGraph->evalContext.rootMotionBone = !ctx.rootMotionBone.empty()
+                        ? ctx.rootMotionBone
+                        : ctx.animator->findBestRootMotionBone(clips[0].name);
                 }
             }
             activeGraph->evalContext.rootMotion = RootMotionDelta(); // reset
@@ -566,12 +610,14 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     
                     // --- APPLY ROOT MOTION FOR ANIM GRAPH ---
                     if (ctx.useRootMotion && pose.rootMotion.hasPosition && !ctx.members.empty()) {
+                        Vec3 horizontalDelta = pose.rootMotion.positionDelta;
+                        horizontalDelta.y = 0.0f;
                         std::vector<Transform*> processed;
                         for (auto& member : ctx.members) {
                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
                                 auto h = tri->getTransformHandle();
                                 if (h && std::find(processed.begin(), processed.end(), h.get()) == processed.end()) {
-                                    h->position = h->position + pose.rootMotion.positionDelta;
+                                    h->position = h->position + horizontalDelta;
                                     h->updateMatrix();
                                     h->markDirty();
                                     processed.push_back(h.get());
@@ -609,61 +655,189 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             }
         }
         else if (ctx.animator) {
+            const std::string activeClipName = ctx.animator->getCurrentClipName();
+            const bool hasActiveClip = !activeClipName.empty();
+
             // Sync UI toggle to animator state
             if (ctx.useRootMotion) {
-                std::string activeClip = ctx.animator->getCurrentClipName();
-                std::string bestRoot = ctx.animator->findBestRootMotionBone(activeClip);
+                std::string bestRoot = !ctx.rootMotionBone.empty()
+                    ? ctx.rootMotionBone
+                    : ctx.animator->findBestRootMotionBone(activeClipName);
                 ctx.animator->setRootMotionEnabled(true, bestRoot);
             }
             else {
                 ctx.animator->setRootMotionEnabled(false);
             }
 
-            bool changed = ctx.animator->update(deltaTime, scene.boneData);
-
-            // Get this model's bone matrices (current state)
-            modelBoneMatrices = ctx.animator->getFinalBoneMatrices();
-
-            // ===========================================================================
-            // CRITICAL FIX: Map Animator Local Indices to Global Indices
-            // The animator's matrices are per-model. We must map them to global slots.
-            // ===========================================================================
+            bool usedOzzRuntime = false;
             const auto& allClips = ctx.animator->getAllClips();
-            if (!allClips.empty()) {
-                // We can use the bone mapping from the first clip as a reference for node names
-                const auto& source = allClips[0].sourceData;
-                if (source) {
-                    // This is more complex because Animator doesn't easily expose local-to-global mapping
-                    // But we can iterate over ALL bones in the scene and see which ones belong to this model
-            // MODEL ISOLATION FIX: 
-            // In the AnimationController, cachedFinalBoneMatrices is already sized for the global bone count.
-            // However, it only contains valid data for bones that belong to the model it's controlling.
-            // We need to copy ONLY the bones that this model 'owns' to avoid overwriting 
-            // other models' poses with the fallback Identity pose from this animator's cache.
-            for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
-                if (boneName.find(ctx.importName + "_") == 0) {
-                    if (globalIdx < this->finalBoneMatrices.size() && globalIdx < modelBoneMatrices.size()) {
-                        this->finalBoneMatrices[globalIdx] = modelBoneMatrices[globalIdx];
+            if (!hasActiveClip) {
+                if (applyModelRestPose()) {
+                    modelChanged = true;
+                    if (!ctx.loggedOzzRuntimeUsage) {
+                        SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Rest Pose");
+                        ctx.loggedOzzRuntimeUsage = true;
                     }
                 }
             }
+            else if (!ctx.useRootMotion && ctx.preferOzzRuntime && ctx.ozzAnimationSet && ctx.ozzAnimationSet->isUsable() && !allClips.empty()) {
+                auto findOzzClipIndex = [&](const std::string& clipName) -> int {
+                    for (size_t i = 0; i < allClips.size(); ++i) {
+                        if (allClips[i].name == clipName) {
+                            return static_cast<int>(i);
+                        }
+                    }
+                    return -1;
+                };
+
+                bool supportsOzzBlendPath = true;
+                std::vector<OzzRuntime::BlendLayerInput> ozzBlendLayers;
+                for (const auto& layer : ctx.animator->getLayers()) {
+                    if (layer.weight <= 0.0f || !layer.blendState.clipA) {
+                        continue;
+                    }
+                    if (layer.blendMode != BlendMode::Replace || !layer.affectedBones.empty()) {
+                        supportsOzzBlendPath = false;
+                        break;
+                    }
+
+                    OzzRuntime::BlendLayerInput input;
+                    input.clipIndexA = findOzzClipIndex(layer.blendState.clipA->name);
+                    input.timeA = layer.blendState.timeA;
+                    input.layerWeight = layer.weight;
+                    input.blendMode = layer.blendMode;
+
+                    if (layer.blendState.clipB) {
+                        input.clipIndexB = findOzzClipIndex(layer.blendState.clipB->name);
+                        input.timeB = layer.blendState.timeB;
+                        input.blendWeight = layer.blendState.blendWeight;
+                    }
+
+                    if (input.clipIndexA < 0) {
+                        supportsOzzBlendPath = false;
+                        break;
+                    }
+                    if (layer.blendState.clipB && input.blendWeight > 0.0f && input.clipIndexB < 0) {
+                        supportsOzzBlendPath = false;
+                        break;
+                    }
+                    ozzBlendLayers.push_back(input);
+                }
+
+                if (supportsOzzBlendPath && !ozzBlendLayers.empty()) {
+                    if (OzzRuntime::sampleBlendedAnimationToModelMatrices(*ctx.ozzAnimationSet, ozzBlendLayers, &modelBoneMatrices)) {
+                        usedOzzRuntime = true;
+                        if (!ctx.loggedOzzRuntimeUsage) {
+                            SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Ozz");
+                            ctx.loggedOzzRuntimeUsage = true;
+                        }
+                        for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
+                            if (boneName.find(ctx.importName + "_") != 0) {
+                                continue;
+                            }
+                            if (globalIdx >= this->finalBoneMatrices.size() ||
+                                globalIdx >= ctx.ozzAnimationSet->sceneBoneToRuntimeJoint.size()) {
+                                continue;
+                            }
+
+                            const int runtimeJointIndex = ctx.ozzAnimationSet->sceneBoneToRuntimeJoint[globalIdx];
+                            if (runtimeJointIndex < 0 || static_cast<size_t>(runtimeJointIndex) >= modelBoneMatrices.size()) {
+                                continue;
+                            }
+                            this->finalBoneMatrices[globalIdx] = modelBoneMatrices[runtimeJointIndex];
+                        }
+                    }
+                } else {
+                    size_t ozzClipIndex = 0;
+                    bool foundClip = false;
+                    for (size_t i = 0; i < allClips.size(); ++i) {
+                        if (allClips[i].name == activeClipName) {
+                            ozzClipIndex = i;
+                            foundClip = true;
+                            break;
+                        }
+                    }
+
+                    if (foundClip) {
+                        const float sampleTime = ctx.animator->getCurrentTime();
+                        if (OzzRuntime::sampleAnimationToModelMatrices(*ctx.ozzAnimationSet, ozzClipIndex, sampleTime, &modelBoneMatrices)) {
+                            usedOzzRuntime = true;
+                            if (!ctx.loggedOzzRuntimeUsage) {
+                                SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Ozz");
+                                ctx.loggedOzzRuntimeUsage = true;
+                            }
+                            for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
+                                if (boneName.find(ctx.importName + "_") != 0) {
+                                    continue;
+                                }
+                                if (globalIdx >= this->finalBoneMatrices.size() ||
+                                    globalIdx >= ctx.ozzAnimationSet->sceneBoneToRuntimeJoint.size()) {
+                                    continue;
+                                }
+
+                                const int runtimeJointIndex = ctx.ozzAnimationSet->sceneBoneToRuntimeJoint[globalIdx];
+                                if (runtimeJointIndex < 0 || static_cast<size_t>(runtimeJointIndex) >= modelBoneMatrices.size()) {
+                                    continue;
+                                }
+                                this->finalBoneMatrices[globalIdx] = modelBoneMatrices[runtimeJointIndex];
+                            }
+                        }
+                    }
                 }
             }
 
-            if (changed) {
+            bool changed = ctx.animator->update(deltaTime, scene.boneData);
+
+            if (!usedOzzRuntime) {
+                if (!ctx.loggedOzzRuntimeUsage) {
+                    SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Legacy");
+                    ctx.loggedOzzRuntimeUsage = true;
+                }
+                // Get this model's bone matrices (current state)
+                modelBoneMatrices = ctx.animator->getFinalBoneMatrices();
+
+                // ===========================================================================
+                // CRITICAL FIX: Map Animator Local Indices to Global Indices
+                // The animator's matrices are per-model. We must map them to global slots.
+                // ===========================================================================
+                if (!allClips.empty()) {
+                    // We can use the bone mapping from the first clip as a reference for node names
+                    const auto& source = allClips[0].sourceData;
+                    if (source) {
+                        // This is more complex because Animator doesn't easily expose local-to-global mapping
+                        // But we can iterate over ALL bones in the scene and see which ones belong to this model
+                        // MODEL ISOLATION FIX:
+                        // In the AnimationController, cachedFinalBoneMatrices is already sized for the global bone count.
+                        // However, it only contains valid data for bones that belong to the model it's controlling.
+                        // We need to copy ONLY the bones that this model 'owns' to avoid overwriting
+                        // other models' poses with the fallback Identity pose from this animator's cache.
+                        for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
+                            if (boneName.find(ctx.importName + "_") == 0) {
+                                if (globalIdx < this->finalBoneMatrices.size() && globalIdx < modelBoneMatrices.size()) {
+                                    this->finalBoneMatrices[globalIdx] = modelBoneMatrices[globalIdx];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (changed || usedOzzRuntime) {
                 modelChanged = true;
 
 
                 // --- ROOT MOTION (Pivot movement) ---
-                if (ctx.useRootMotion) {
+                if (ctx.useRootMotion && !usedOzzRuntime) {
                     RootMotionDelta delta = ctx.animator->consumeRootMotion();
                     if (delta.hasPosition && !ctx.members.empty()) {
+                        Vec3 horizontalDelta = delta.positionDelta;
+                        horizontalDelta.y = 0.0f;
                         std::vector<Transform*> processed;
                         for (auto& member : ctx.members) {
                             if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) {
                                 auto h = tri->getTransformHandle();
                                 if (h && std::find(processed.begin(), processed.end(), h.get()) == processed.end()) {
-                                    h->position = h->position + delta.positionDelta;
+                                    h->position = h->position + horizontalDelta;
                                     h->updateMatrix(); h->markDirty();
                                     processed.push_back(h.get());
                                 }
@@ -2877,6 +3051,14 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     if (primary_hit) *primary_hit = false;
     if (primary_albedo) *primary_albedo = Vec3(0.0f);
     if (primary_normal) *primary_normal = Vec3(0.0f);
+
+    if (world.data.mode == WORLD_MODE_NISHITA) {
+        if (!world.getLUT()) {
+            world.initializeLUT();
+        } else if (world.needsLUTUpdate()) {
+            world.flushLUT();
+        }
+    }
 
     int light_count = static_cast<int>(lights.size());
 

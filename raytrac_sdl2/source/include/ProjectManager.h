@@ -203,8 +203,14 @@ public:
     // ========================================================================
     // Project Save Settings
     // ========================================================================
+    enum class TextureStorageMode {
+        Embedded = 0,
+        ProjectLocal = 1,
+        KeepOriginalPaths = 2
+    };
+
     struct SaveSettings {
-        bool embed_textures = true;        // Pack textures into binary (true = self-contained project)
+        TextureStorageMode texture_storage_mode = TextureStorageMode::Embedded;
         bool embed_missing_only = false;   // Embed all textures, not just missing ones
         bool save_geometry = true;         // Save scene geometry (for self-contained)
     };

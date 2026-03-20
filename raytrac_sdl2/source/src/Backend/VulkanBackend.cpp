@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <array>
 #include <filesystem>
 #include <functional>
 #include "HittableInstance.h"
@@ -29,6 +30,8 @@
 #include <SDL.h>
 #include "stb_image_write.h"
 #include "Texture.h"
+#include "TextureCompression.h"
+#include "TextureCompressionCache.h"
 #include "World.h"
 #include "AtmosphereLUT.h"
 #include "CameraPresets.h"
@@ -191,6 +194,180 @@ namespace {
         const int idx = std::clamp((int)std::lround(c * (float)(kLutSize - 1)), 0, kLutSize - 1);
         return lut[idx];
     }
+
+    inline uint32_t bytesPerPixelForFormat(VkFormat format) {
+        switch (format) {
+            case VK_FORMAT_R8_UNORM:
+            case VK_FORMAT_R8_SRGB:
+                return 1;
+            case VK_FORMAT_R8G8_UNORM:
+            case VK_FORMAT_R8G8_SRGB:
+                return 2;
+            case VK_FORMAT_R8G8B8A8_UNORM:
+            case VK_FORMAT_R8G8B8A8_SRGB:
+                return 4;
+            case VK_FORMAT_R16G16B16A16_SFLOAT:
+                return 8;
+            case VK_FORMAT_R32_SFLOAT:
+                return 4;
+            case VK_FORMAT_R32G32B32A32_SFLOAT:
+                return 16;
+            default:
+                return 4;
+        }
+    }
+
+    inline uint64_t estimateImageStorageBytes(uint32_t width, uint32_t height, VkFormat format) {
+        const uint64_t w = std::max<uint32_t>(width, 1u);
+        const uint64_t h = std::max<uint32_t>(height, 1u);
+        switch (format) {
+            case VK_FORMAT_BC4_UNORM_BLOCK:
+                return ((w + 3ull) / 4ull) * ((h + 3ull) / 4ull) * 8ull;
+            case VK_FORMAT_BC5_UNORM_BLOCK:
+            case VK_FORMAT_BC7_UNORM_BLOCK:
+            case VK_FORMAT_BC7_SRGB_BLOCK:
+                return ((w + 3ull) / 4ull) * ((h + 3ull) / 4ull) * 16ull;
+            default:
+                return w * h * bytesPerPixelForFormat(format);
+        }
+    }
+
+    #pragma pack(push, 1)
+    struct DDS_PIXELFORMAT {
+        uint32_t size;
+        uint32_t flags;
+        uint32_t fourCC;
+        uint32_t rgbBitCount;
+        uint32_t rBitMask;
+        uint32_t gBitMask;
+        uint32_t bBitMask;
+        uint32_t aBitMask;
+    };
+
+    struct DDS_HEADER {
+        uint32_t size;
+        uint32_t flags;
+        uint32_t height;
+        uint32_t width;
+        uint32_t pitchOrLinearSize;
+        uint32_t depth;
+        uint32_t mipMapCount;
+        uint32_t reserved1[11];
+        DDS_PIXELFORMAT ddspf;
+        uint32_t caps;
+        uint32_t caps2;
+        uint32_t caps3;
+        uint32_t caps4;
+        uint32_t reserved2;
+    };
+
+    struct DDS_HEADER_DXT10 {
+        uint32_t dxgiFormat;
+        uint32_t resourceDimension;
+        uint32_t miscFlag;
+        uint32_t arraySize;
+        uint32_t miscFlags2;
+    };
+    #pragma pack(pop)
+
+    constexpr uint32_t makeFourCC(char a, char b, char c, char d) {
+        return (uint32_t)(uint8_t)a |
+               ((uint32_t)(uint8_t)b << 8) |
+               ((uint32_t)(uint8_t)c << 16) |
+               ((uint32_t)(uint8_t)d << 24);
+    }
+
+    enum class DDSCompressedSemantic : uint8_t {
+        Unsupported = 0,
+        BC4,
+        BC5,
+        BC7
+    };
+
+    struct DDSCompressedPayload {
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::vector<uint8_t> bytes;
+    };
+
+    bool loadCompressedDDSFile(
+        const std::filesystem::path& ddsPath,
+        TextureCompressionTarget desiredTarget,
+        bool srgb,
+        DDSCompressedPayload& outPayload)
+    {
+        namespace fs = std::filesystem;
+        if (!fs::exists(ddsPath)) return false;
+
+        std::ifstream in(ddsPath, std::ios::binary);
+        if (!in) return false;
+
+        uint32_t magic = 0;
+        in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        if (!in || magic != makeFourCC('D', 'D', 'S', ' ')) return false;
+
+        DDS_HEADER header{};
+        in.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!in || header.size != 124 || header.ddspf.size != 32) return false;
+
+        DDSCompressedSemantic semantic = DDSCompressedSemantic::Unsupported;
+        VkFormat vkFormat = VK_FORMAT_UNDEFINED;
+
+        if (header.ddspf.fourCC == makeFourCC('D', 'X', '1', '0')) {
+            DDS_HEADER_DXT10 dx10{};
+            in.read(reinterpret_cast<char*>(&dx10), sizeof(dx10));
+            if (!in) return false;
+
+            switch (dx10.dxgiFormat) {
+                case 80: semantic = DDSCompressedSemantic::BC4; vkFormat = VK_FORMAT_BC4_UNORM_BLOCK; break;
+                case 83: semantic = DDSCompressedSemantic::BC5; vkFormat = VK_FORMAT_BC5_UNORM_BLOCK; break;
+                case 98: semantic = DDSCompressedSemantic::BC7; vkFormat = VK_FORMAT_BC7_UNORM_BLOCK; break;
+                case 99: semantic = DDSCompressedSemantic::BC7; vkFormat = VK_FORMAT_BC7_SRGB_BLOCK; break;
+                default: return false;
+            }
+        } else {
+            switch (header.ddspf.fourCC) {
+                case makeFourCC('A', 'T', 'I', '1'):
+                case makeFourCC('B', 'C', '4', 'U'):
+                    semantic = DDSCompressedSemantic::BC4;
+                    vkFormat = VK_FORMAT_BC4_UNORM_BLOCK;
+                    break;
+                case makeFourCC('A', 'T', 'I', '2'):
+                case makeFourCC('B', 'C', '5', 'U'):
+                    semantic = DDSCompressedSemantic::BC5;
+                    vkFormat = VK_FORMAT_BC5_UNORM_BLOCK;
+                    break;
+                default:
+                    return false;
+            }
+        }
+
+        if ((desiredTarget == TextureCompressionTarget::BC4 && semantic != DDSCompressedSemantic::BC4) ||
+            (desiredTarget == TextureCompressionTarget::BC5 && semantic != DDSCompressedSemantic::BC5) ||
+            (desiredTarget == TextureCompressionTarget::BC7 && semantic != DDSCompressedSemantic::BC7)) {
+            return false;
+        }
+
+        if (semantic == DDSCompressedSemantic::BC7) {
+            vkFormat = srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+        }
+
+        const uint64_t expectedBytes = estimateImageStorageBytes(header.width, header.height, vkFormat);
+        if (expectedBytes == 0) return false;
+
+        outPayload.format = vkFormat;
+        outPayload.width = header.width;
+        outPayload.height = header.height;
+        outPayload.bytes.resize((size_t)expectedBytes);
+        in.read(reinterpret_cast<char*>(outPayload.bytes.data()), static_cast<std::streamsize>(expectedBytes));
+        if (!in) {
+            outPayload = {};
+            return false;
+        }
+
+        return true;
+    }
 }
 namespace VulkanRT {
 
@@ -234,6 +411,10 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
 
     VK_INFO() << "[VulkanDevice] Ready: " << m_capabilities.deviceName
               << " | VRAM: " << (m_capabilities.dedicatedVRAM / (1024*1024)) << " MB" << std::endl;
+    VK_INFO() << "[VulkanDevice] Texture compression support"
+              << " | BC4: " << (m_capabilities.supportsBC4 ? "yes" : "no")
+              << " | BC5: " << (m_capabilities.supportsBC5 ? "yes" : "no")
+              << " | BC7: " << (m_capabilities.supportsBC7 ? "yes" : "no") << std::endl;
     return true;
 }
 
@@ -792,6 +973,15 @@ void VulkanDevice::detectCapabilities() {
         vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2as);
         m_capabilities.minScratchAlignment = asProps.minAccelerationStructureScratchOffsetAlignment;
     }
+
+    auto queryCompressedSupport = [this](VkFormat format) -> bool {
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(m_physicalDevice, format, &props);
+        return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    };
+    m_capabilities.supportsBC4 = queryCompressedSupport(VK_FORMAT_BC4_UNORM_BLOCK);
+    m_capabilities.supportsBC5 = queryCompressedSupport(VK_FORMAT_BC5_UNORM_BLOCK);
+    m_capabilities.supportsBC7 = queryCompressedSupport(VK_FORMAT_BC7_UNORM_BLOCK);
 }
 
 GPUVendor VulkanDevice::vendorFromID(uint32_t vendorID) {
@@ -4982,6 +5172,16 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         purgeUploadedTextureCacheLocked();
     }
 
+    m_textureUploadBytes = 0;
+    m_textureUploadCount = 0;
+    m_textureUploadBC4Count = 0;
+    m_textureUploadBC5Count = 0;
+    m_textureUploadBC7Count = 0;
+    m_textureUploadR8Count = 0;
+    m_textureUploadRGBA8Count = 0;
+    m_textureUploadFloatCount = 0;
+    m_textureUploadSummaryDirty = false;
+
     std::vector<VulkanRT::VkGpuMaterial> gpuMats;
     gpuMats.reserve(materials.size());
 
@@ -5024,9 +5224,11 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.fft_choppiness        = m.fft_choppiness;
         gm.fft_wind_speed        = m.fft_wind_speed;
         // ... getTexID mapping (cast to uint32_t for GLSL compatibility)
-        auto getTexID = [this](int64_t key, bool forceLinear = false) -> uint32_t {
+        auto getTexID = [this](int64_t key, TextureType textureType, bool forceLinear = false, bool preferSingleChannel = false) -> uint32_t {
             if (!key) return 0;
-            uint64_t cacheKey = (static_cast<uint64_t>(key) << 1) | (forceLinear ? 1ull : 0ull);
+            uint64_t cacheKey = (static_cast<uint64_t>(key) << 2) |
+                                (forceLinear ? 1ull : 0ull) |
+                                (preferSingleChannel ? 2ull : 0ull);
             // [FIX] If the texture content was updated in-place (e.g. autoMask / paintSplatMap),
             // updateGPU() sets vulkan_dirty=true. Evict the stale cache entry so we re-upload.
             Texture* texCheck = reinterpret_cast<Texture*>(key);
@@ -5047,24 +5249,55 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             }
             const std::vector<CompactVec4>& px = tex->pixels;
             if (px.empty()) return 0;
-            std::vector<uint8_t> tmp;
-            tmp.resize(tex->width * tex->height * 4);
-            for (size_t i = 0; i < px.size(); ++i) {
-                tmp[i*4 + 0] = px[i].r; tmp[i*4 + 1] = px[i].g; tmp[i*4 + 2] = px[i].b; tmp[i*4 + 3] = px[i].a;
-            }
             const bool useSrgb = forceLinear ? false : tex->is_srgb;
-            int64_t id = this->uploadTexture2D(tmp.data(), tex->width, tex->height, 4, useSrgb, false);
+            const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
+            const bool supportsPreferredCompression =
+                (compressionPlan.preferredTarget == TextureCompressionTarget::BC4 && m_device->getCapabilities().supportsBC4) ||
+                (compressionPlan.preferredTarget == TextureCompressionTarget::BC5 && m_device->getCapabilities().supportsBC5) ||
+                (compressionPlan.preferredTarget == TextureCompressionTarget::BC7 && m_device->getCapabilities().supportsBC7);
+            if (supportsPreferredCompression && !tex->name.empty()) {
+                DDSCompressedPayload payload{};
+                if (auto cacheCandidate = findCompressedTextureCacheCandidate(*tex, textureType, useSrgb)) {
+                    if (loadCompressedDDSFile(cacheCandidate->ddsPath, cacheCandidate->target, useSrgb, payload) &&
+                        payload.width == static_cast<uint32_t>(tex->width) &&
+                        payload.height == static_cast<uint32_t>(tex->height)) {
+                        int64_t id = this->uploadCompressedTexture2D(
+                            payload.bytes.data(),
+                            payload.bytes.size(),
+                            payload.width,
+                            payload.height,
+                            payload.format);
+                        if (id) { m_uploadedImageIDs[cacheKey] = id; return (uint32_t)id; }
+                    }
+                }
+            }
+            const bool canUseSingleChannel =
+                (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
+                !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+            std::vector<uint8_t> tmp;
+            const uint32_t uploadChannels = canUseSingleChannel ? 1u : 4u;
+            tmp.resize((size_t)tex->width * tex->height * uploadChannels);
+            if (canUseSingleChannel) {
+                for (size_t i = 0; i < px.size(); ++i) {
+                    tmp[i] = px[i].r;
+                }
+            } else {
+                for (size_t i = 0; i < px.size(); ++i) {
+                    tmp[i*4 + 0] = px[i].r; tmp[i*4 + 1] = px[i].g; tmp[i*4 + 2] = px[i].b; tmp[i*4 + 3] = px[i].a;
+                }
+            }
+            int64_t id = this->uploadTexture2D(tmp.data(), tex->width, tex->height, uploadChannels, useSrgb, false);
             if (id) { m_uploadedImageIDs[cacheKey] = id; return (uint32_t)id; }
             return 0;
         };
 
-        gm.albedo_tex = getTexID(m.albedoTexture, false);
-        gm.normal_tex = getTexID(m.normalTexture, true);
-        gm.roughness_tex = getTexID(m.roughnessTexture, true);
-        gm.metallic_tex = getTexID(m.metallicTexture, true);
-        gm.emission_tex = getTexID(m.emissionTexture, false);
-        gm.transmission_tex = getTexID(m.transmissionTexture, true);
-        gm.opacity_tex = getTexID(m.opacityTexture, true);
+        gm.albedo_tex = getTexID(m.albedoTexture, TextureType::Albedo, false);
+        gm.normal_tex = getTexID(m.normalTexture, TextureType::Normal, true);
+        gm.roughness_tex = getTexID(m.roughnessTexture, TextureType::Roughness, true, true);
+        gm.metallic_tex = getTexID(m.metallicTexture, TextureType::Metallic, true, true);
+        gm.emission_tex = getTexID(m.emissionTexture, TextureType::Emission, false);
+        gm.transmission_tex = getTexID(m.transmissionTexture, TextureType::Transmission, true, true);
+        gm.opacity_tex = getTexID(m.opacityTexture, TextureType::Opacity, true, true);
         // Set bit 8 in flags if opacity texture uses the alpha channel (RGBA texture)
         // vs. bit 8 clear = grayscale mask (R channel)
         if (m.opacityTexture) {
@@ -5073,7 +5306,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                 gm.flags |= (1u << 8); // Bit 8: opacity is in .a channel
             }
         }
-        gm.height_tex = getTexID(m.heightTexture, true);
+        gm.height_tex = getTexID(m.heightTexture, TextureType::Unknown, true);
 
         gpuMats.push_back(gm);
     }
@@ -5087,6 +5320,17 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     }
 
     m_device->updateMaterialBuffer(gpuMats.data(), gpuMats.size() * sizeof(::VulkanRT::VkGpuMaterial), (uint32_t)gpuMats.size());
+    if (m_textureUploadSummaryDirty) {
+        SCENE_LOG_INFO("[Perf] [Vulkan] textures | count=" + std::to_string(m_textureUploadCount) +
+                       " | est_vram=" + std::to_string(m_textureUploadBytes) +
+                       " bytes | bc4=" + std::to_string(m_textureUploadBC4Count) +
+                       " | bc5=" + std::to_string(m_textureUploadBC5Count) +
+                       " | bc7=" + std::to_string(m_textureUploadBC7Count) +
+                       " | r8=" + std::to_string(m_textureUploadR8Count) +
+                       " | rgba8=" + std::to_string(m_textureUploadRGBA8Count) +
+                       " | float=" + std::to_string(m_textureUploadFloatCount));
+        m_textureUploadSummaryDirty = false;
+    }
     resetAccumulation();
 }
 
@@ -5225,8 +5469,16 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     uint32_t bpp = 4; // bytes per pixel
 
     if (isFloat) {
-        fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
-        bpp = 16;
+        if (channels == 1) {
+            fmt = VK_FORMAT_R32_SFLOAT;
+            bpp = 4;
+        } else {
+            fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
+            bpp = 16;
+        }
+    } else if (channels == 1) {
+        fmt = srgb ? VK_FORMAT_R8_SRGB : VK_FORMAT_R8_UNORM;
+        bpp = 1;
     } else if (srgb) {
         fmt = VK_FORMAT_R8G8B8A8_SRGB;
     }
@@ -5284,6 +5536,17 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     // Register image with an ID
     int64_t id = m_nextTextureID++;
     m_uploadedImages[id] = img;
+    const uint64_t estimated_vram_bytes = estimateImageStorageBytes(width, height, fmt);
+    m_textureUploadBytes += estimated_vram_bytes;
+    ++m_textureUploadCount;
+    if (fmt == VK_FORMAT_R8_UNORM || fmt == VK_FORMAT_R8_SRGB) {
+        ++m_textureUploadR8Count;
+    } else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT || fmt == VK_FORMAT_R32_SFLOAT) {
+        ++m_textureUploadFloatCount;
+    } else {
+        ++m_textureUploadRGBA8Count;
+    }
+    m_textureUploadSummaryDirty = true;
     // Immediately update the RT descriptor array (binding 6) so shaders can sample this texture.
     if (m_device) {
         uint32_t slot = (uint32_t)id;
@@ -5291,6 +5554,88 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
     }
     // CRITICAL: release temporary upload staging buffer.
     // Missing destroy here caused per-texture memory growth across Vulkan sessions.
+    m_device->destroyBuffer(staging);
+    return id;
+}
+
+int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
+    const void* data,
+    uint64_t dataSize,
+    uint32_t width,
+    uint32_t height,
+    VkFormat format)
+{
+    if (!m_device || !m_device->isInitialized() || !data || dataSize == 0) return 0;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_device->waitIdle();
+
+    const uint64_t expectedBytes = estimateImageStorageBytes(width, height, format);
+    if (expectedBytes == 0 || expectedBytes != dataSize) return 0;
+
+    VulkanRT::BufferCreateInfo ci;
+    ci.size = dataSize;
+    ci.usage = VulkanRT::BufferUsage::STORAGE | VulkanRT::BufferUsage::TRANSFER_SRC;
+    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+
+    VulkanRT::BufferHandle staging = m_device->createBuffer(ci);
+    if (!staging.buffer) return 0;
+
+    m_device->uploadBuffer(staging, data, dataSize);
+
+    VulkanRT::ImageHandle img = m_device->createImage2D(
+        width, height, format,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    if (!img.image) {
+        m_device->destroyBuffer(staging);
+        return 0;
+    }
+
+    m_device->copyBufferToImage(staging, img);
+
+    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) {
+        m_device->destroyImage(img);
+        m_device->destroyBuffer(staging);
+        return 0;
+    }
+    m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_device->endSingleTimeCommands(cmd);
+
+    VkSamplerCreateInfo sci{};
+    sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sci.magFilter = VK_FILTER_LINEAR;
+    sci.minFilter = VK_FILTER_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.anisotropyEnable = VK_FALSE;
+    sci.maxAnisotropy = 1.0f;
+    sci.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    sci.unnormalizedCoordinates = VK_FALSE;
+    sci.compareEnable = VK_FALSE;
+    sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    vkCreateSampler(m_device->getDevice(), &sci, nullptr, &sampler);
+    if (sampler) img.sampler = sampler;
+
+    int64_t id = m_nextTextureID++;
+    m_uploadedImages[id] = img;
+    m_textureUploadBytes += expectedBytes;
+    ++m_textureUploadCount;
+    switch (format) {
+        case VK_FORMAT_BC4_UNORM_BLOCK: ++m_textureUploadBC4Count; break;
+        case VK_FORMAT_BC5_UNORM_BLOCK: ++m_textureUploadBC5Count; break;
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK: ++m_textureUploadBC7Count; break;
+        default: break;
+    }
+    m_textureUploadSummaryDirty = true;
+    if (m_device) {
+        const uint32_t slot = (uint32_t)id;
+        m_device->updateRTTextureDescriptor(slot, img);
+    }
+
     m_device->destroyBuffer(staging);
     return id;
 }
@@ -6086,6 +6431,13 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         m_denoiserColorStagingBuffer = m_device->createBuffer(stagingInfo);
         m_denoiserAlbedoStagingBuffer = m_device->createBuffer(stagingInfo);
         m_denoiserNormalStagingBuffer = m_device->createBuffer(stagingInfo);
+
+        const uint64_t output_bytes = (uint64_t)width * height * bytesPerPixelForFormat(outFmt);
+        const uint64_t variance_bytes = (uint64_t)width * height * bytesPerPixelForFormat(VK_FORMAT_R32_SFLOAT);
+        const uint64_t denoiser_bytes = (uint64_t)width * height * bytesPerPixelForFormat(VK_FORMAT_R32G32B32A32_SFLOAT) * 3ull;
+        SCENE_LOG_INFO("[Perf] [Vulkan] render targets | output=" + std::to_string(output_bytes) +
+                       " bytes | variance=" + std::to_string(variance_bytes) +
+                       " bytes | denoiser=" + std::to_string(denoiser_bytes) + " bytes");
 
         if (!m_outputImage.image || !m_varianceImage.image || !m_stagingBuffer.buffer ||
             !m_denoiserColorImage.image || !m_denoiserAlbedoImage.image || !m_denoiserNormalImage.image ||

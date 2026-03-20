@@ -53,6 +53,54 @@ namespace {
         const char* d = static_cast<const char*>(data);
         vec->insert(vec->end(), d, d + size);
     }
+
+    class ScopedPerfTimer {
+    public:
+        explicit ScopedPerfTimer(std::string label)
+            : label_(std::move(label)), start_(std::chrono::steady_clock::now()) {}
+
+        ~ScopedPerfTimer() {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start_).count();
+            SCENE_LOG_INFO("[Perf] " + label_ + ": " + std::to_string(elapsed) + " ms");
+        }
+
+    private:
+        std::string label_;
+        std::chrono::steady_clock::time_point start_;
+    };
+
+    size_t streamFileToOutput(std::ifstream& in, std::ofstream& out, std::vector<char>& buffer) {
+        size_t total_written = 0;
+        while (in) {
+            in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize read_count = in.gcount();
+            if (read_count <= 0) {
+                break;
+            }
+
+            out.write(buffer.data(), read_count);
+            total_written += static_cast<size_t>(read_count);
+        }
+        return total_written;
+    }
+
+    std::string sanitizeFilenameComponent(const std::string& input) {
+        std::string out;
+        out.reserve(input.size());
+        for (unsigned char c : input) {
+            if ((c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '.' || c == '_' || c == '-') {
+                out.push_back(static_cast<char>(c));
+            } else {
+                out.push_back('_');
+            }
+        }
+        if (out.empty()) out = "texture";
+        return out;
+    }
 }
 
 using json = nlohmann::json;
@@ -551,6 +599,8 @@ bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings, Ren
 
 bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings, Renderer& renderer,
                                   std::function<void(int, const std::string&)> progress_callback) {
+    ScopedPerfTimer total_timer("ProjectManager::saveProject total");
+
     if (progress_callback) progress_callback(0, "Preparing to save...");
 
     // Update Project Name from File Path if it's "Untitled" or empty
@@ -564,7 +614,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     g_project.current_file_path = filepath;
 
     // Sync project data with current scene state
-    syncProjectToScene(scene);
+    {
+        ScopedPerfTimer timer("saveProject syncProjectToScene");
+        syncProjectToScene(scene);
+    }
 
     // 1. Prepare Safe Save paths
     fs::path final_json_path(filepath);
@@ -590,6 +643,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         
         // Write geometry to binary file FIRST
         if (save_settings.save_geometry) {
+            ScopedPerfTimer timer("saveProject writeGeometryBinary");
             writeGeometryBinary(out_bin, scene);
         }
         
@@ -602,9 +656,14 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         root["author"] = g_project.author;
         root["description"] = g_project.description;
         root["next_model_id"] = g_project.next_model_id;
-        root["next_object_id"] = g_project.next_object_id;
+       root["next_object_id"] = g_project.next_object_id;
         root["next_texture_id"] = g_project.next_texture_id;
         root["has_geometry"] = save_settings.save_geometry;
+        root["save_settings"] = {
+            {"texture_storage_mode", static_cast<int>(save_settings.texture_storage_mode)},
+            {"embed_missing_only", save_settings.embed_missing_only},
+            {"save_geometry", save_settings.save_geometry}
+        };
         
         // Procedural objects (still saved for non-geometry mode)
         json procedurals_arr = json::array();
@@ -624,7 +683,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         
         // Materials
         auto& mat_mgr = MaterialManager::getInstance();
-        root["materials"] = mat_mgr.serialize(fs::path(filepath).parent_path().string());
+        {
+            ScopedPerfTimer timer("saveProject serialize materials");
+            root["materials"] = mat_mgr.serialize(fs::path(filepath).parent_path().string());
+        }
         
         if (progress_callback) progress_callback(60, "Saving lights...");
         
@@ -849,7 +911,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         // Hair System
         if (progress_callback) progress_callback(84, "Saving hair system...");
         // Use binary stream for faster saving
-        root["hair"] = renderer.getHairSystem().serialize(&out_bin);
+        {
+            ScopedPerfTimer timer("saveProject serialize hair");
+            root["hair"] = renderer.getHairSystem().serialize(&out_bin);
+        }
         root["hair_material"] = renderer.getHairMaterial();
         SCENE_LOG_INFO("[ProjectManager] Saved hair system with " + std::to_string(renderer.getHairSystem().getGroomCount()) + " grooms.");
 
@@ -864,8 +929,10 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             c["hasAnimation"] = ctx.hasAnimation;
             c["globalInverseTransform"] = mat4ToJson(ctx.globalInverseTransform);
             c["useRootMotion"] = ctx.useRootMotion;
+            c["rootMotionBone"] = ctx.rootMotionBone;
             c["useAnimGraph"] = ctx.useAnimGraph;
             c["animGraphFollowTimeline"] = ctx.animGraphFollowTimeline;
+            c["preferOzzRuntime"] = ctx.preferOzzRuntime;
             c["visible"] = ctx.visible;
             j_contexts.push_back(c);
         }
@@ -873,14 +940,24 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
 
         // Textures (with embed option)
         if (progress_callback) progress_callback(85, "Processing textures...");
-        root["textures"] = serializeTextures(out_bin, save_settings.embed_textures);
+        {
+            ScopedPerfTimer timer("saveProject serialize textures");
+            const bool embed_textures = (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::Embedded);
+            root["textures"] = serializeTextures(out_bin, embed_textures);
+        }
         
         // Write JSON - Use error handler to replace invalid UTF-8 characters
         // Write JSON - Use minified output (-1) for maximum performance and smallest size
-        out_json << root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        {
+            ScopedPerfTimer timer("saveProject dump json");
+            out_json << root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        }
         
-        out_json.flush();
-        out_bin.flush();
+        {
+            ScopedPerfTimer timer("saveProject flush streams");
+            out_json.flush();
+            out_bin.flush();
+        }
         out_json.close();
         out_bin.close();
         
@@ -888,6 +965,7 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
 
         // Atomic Commit
         try {
+            ScopedPerfTimer timer("saveProject atomic commit");
             if (fs::exists(final_json_path)) fs::remove(final_json_path);
             if (fs::exists(final_bin_path)) fs::remove(final_bin_path);
             fs::rename(temp_json_path, final_json_path);
@@ -918,6 +996,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                                   RenderSettings& settings, Renderer& renderer, 
                                   Backend::IBackend* backend,
                                   std::function<void(int, const std::string&)> progress_callback) {
+    ScopedPerfTimer total_timer("ProjectManager::openProject total");
+
     const bool prev_use_optix = settings.use_optix;
     const bool prev_use_vulkan = settings.use_vulkan;
     const ProjectBackendMode prev_backend_mode = modeFromBackendPtr(backend);
@@ -929,7 +1009,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     simdjson::dom::element root;
 
     std::string read_error;
-    auto error = loadJsonRootFromFile(parser, filepath, root, &read_error);
+    simdjson::error_code error;
+    {
+        ScopedPerfTimer timer("openProject parse json");
+        error = loadJsonRootFromFile(parser, filepath, root, &read_error);
+    }
     if (error) {
         SCENE_LOG_ERROR("Failed to parse project file with simdjson: " + std::string(simdjson::error_message(error)) +
                         " | path=" + filepath +
@@ -952,7 +1036,10 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     
-    newProject(scene, renderer);
+    {
+        ScopedPerfTimer timer("openProject reset scene");
+        newProject(scene, renderer);
+    }
     TerrainManager::getInstance().removeAllTerrains(scene);
     scene.clear();
     
@@ -995,6 +1082,29 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             g_project.description = std::string(desc_sv);
         }
 
+        if (auto save_settings_el = root["save_settings"]; !save_settings_el.error()) {
+            simdjson::dom::object save_settings_obj;
+            if (!save_settings_el.get(save_settings_obj)) {
+                int64_t texture_storage_mode = static_cast<int>(ProjectManager::TextureStorageMode::Embedded);
+                bool embed_missing_only = false;
+                bool save_geometry = true;
+
+                if (auto mode_el = save_settings_obj["texture_storage_mode"]; !mode_el.error()) {
+                    mode_el.get(texture_storage_mode);
+                }
+                if (auto embed_missing_el = save_settings_obj["embed_missing_only"]; !embed_missing_el.error()) {
+                    embed_missing_el.get(embed_missing_only);
+                }
+                if (auto save_geometry_el = save_settings_obj["save_geometry"]; !save_geometry_el.error()) {
+                    save_geometry_el.get(save_geometry);
+                }
+
+                save_settings.texture_storage_mode = static_cast<ProjectManager::TextureStorageMode>(texture_storage_mode);
+                save_settings.embed_missing_only = embed_missing_only;
+                save_settings.save_geometry = save_geometry;
+            }
+        }
+
         int64_t next_model = 1, next_obj = 1, next_tex = 1;
         root["next_model_id"].get(next_model);
         root["next_object_id"].get(next_obj);
@@ -1011,15 +1121,19 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         
         if (is_v3 && has_geometry && has_binary) {
             if (progress_callback) progress_callback(10, "Loading geometry...");
-            if (!readGeometryBinary(in_bin, scene)) {
-                SCENE_LOG_ERROR("Failed to read geometry from binary file.");
-                return false;
+            {
+                ScopedPerfTimer timer("openProject readGeometryBinary");
+                if (!readGeometryBinary(in_bin, scene)) {
+                    SCENE_LOG_ERROR("Failed to read geometry from binary file.");
+                    return false;
+                }
             }
 
             // Textures
             simdjson::dom::element tex_el;
             if (!root["textures"].get(tex_el)) {
                 if (progress_callback) progress_callback(35, "Restoring textures...");
+                ScopedPerfTimer timer("openProject deserializeTextures");
                 deserializeTextures(sjsonToNlohmann(tex_el), in_bin, project_folder.string());
             }
 
@@ -1027,6 +1141,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             simdjson::dom::element mat_el;
             if (!root["materials"].get(mat_el)) {
                 if (progress_callback) progress_callback(40, "Loading materials...");
+                ScopedPerfTimer timer("openProject deserialize materials");
                 MaterialManager::getInstance().deserialize(sjsonToNlohmann(mat_el), project_folder.string());
             }
 
@@ -1066,6 +1181,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             // World Settings
             simdjson::dom::element world_el;
             if (!root["world"].get(world_el)) {
+                ScopedPerfTimer timer("openProject deserialize world");
                 renderer.world.deserialize(sjsonToNlohmann(world_el));
             }
 
@@ -1081,6 +1197,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 if (progress_callback) progress_callback(75, "Loading terrain system...");
                 auto abs_path = std::filesystem::absolute(filepath);
                 std::string terrainDir = abs_path.parent_path().string();
+                ScopedPerfTimer timer("openProject deserialize terrain");
                 TerrainManager::getInstance().deserialize(sjsonToNlohmann(ts_el), terrainDir, scene);
             }
 
@@ -1096,6 +1213,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             simdjson::dom::element inst_el;
             if (!root["instances"].get(inst_el)) {
                 if (progress_callback) progress_callback(77, "Loading foliage system...");
+                ScopedPerfTimer timer("openProject deserialize foliage");
                 InstanceManager::getInstance().deserialize(sjsonToNlohmann(inst_el), scene);
             }
 
@@ -1261,8 +1379,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         ctx.globalInverseTransform = Matrix4x4::identity();
                     }
                     ctx.useRootMotion = j_ctx.value("useRootMotion", false);
+                    ctx.rootMotionBone = j_ctx.value("rootMotionBone", "");
                     ctx.useAnimGraph = j_ctx.value("useAnimGraph", false);
                     ctx.animGraphFollowTimeline = j_ctx.value("animGraphFollowTimeline", false);
+                    ctx.preferOzzRuntime = j_ctx.value("preferOzzRuntime", true);
+                    ctx.loggedOzzRuntimeUsage = false;
                     ctx.visible = j_ctx.value("visible", true);
                     if (!ctx.animGraphAssetKey.empty()) {
                         auto itGraph = g_animGraphUI.graphs.find(ctx.animGraphAssetKey);
@@ -2207,12 +2328,27 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
 // ============================================================================
 
 json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textures) {
+    ScopedPerfTimer total_timer("serializeTextures total");
     json arr = json::array();
     
     // Get all textures from MaterialManager
     auto& mgr = MaterialManager::getInstance();
     std::unordered_map<std::string, uint32_t> texture_map; // path -> id
+    texture_map.reserve(mgr.getMaterialCount() * 4);
     uint32_t texture_id = 0;
+    size_t embedded_count = 0;
+    size_t referenced_count = 0;
+    size_t png_reencoded_count = 0;
+    size_t file_copied_count = 0;
+    size_t cache_passthrough_count = 0;
+    uint64_t texture_bin_bytes_written = 0;
+    uint64_t project_local_bytes_written = 0;
+    std::vector<char> file_copy_buffer(1024 * 1024);
+    const fs::path current_project_path = g_project.current_file_path.empty() ? fs::path() : fs::path(g_project.current_file_path);
+    const fs::path project_dir = current_project_path.empty() ? fs::path() : current_project_path.parent_path();
+    const fs::path project_local_texture_dir = current_project_path.empty()
+        ? fs::path()
+        : (project_dir / (current_project_path.stem().string() + "_textures"));
     
     SCENE_LOG_INFO("Starting texture serialization for " + std::to_string(mgr.getMaterialCount()) + " materials.");
 
@@ -2226,11 +2362,6 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
         
         PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
         if (!pbsdf) continue;
-
-        if (pbsdf->albedoProperty.texture) 
-            SCENE_LOG_INFO("DEBUG: Mat " + mat->materialName + " HAS Albedo Tex: " + pbsdf->albedoProperty.texture->name);
-        else 
-            SCENE_LOG_INFO("DEBUG: Mat " + mat->materialName + " has NO Albedo Tex");
         
         // Check all texture properties - use PrincipledBSDF pointer for correct member access
         auto checkTexture = [&](MaterialProperty& prop, const std::string& usage) {
@@ -2256,30 +2387,52 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                 if (save_settings.embed_missing_only && !fs::exists(path)) {
                     should_embed = true;
                 }
+                if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::ProjectLocal ||
+                    save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::KeepOriginalPaths) {
+                    should_embed = false;
+                }
                 
                 // Name fallback override for embedding
                 if (prop.texture->name.empty() || prop.texture->name.find("embedded_") == 0) {
-                     should_embed = true; // Must embed if no file exists or it's an internal embedded texture
+                     should_embed = (save_settings.texture_storage_mode != ProjectManager::TextureStorageMode::ProjectLocal);
                 }
 
                 tex_entry["original_name"] = path; // Save Original Name for restoration
 
                 if (should_embed) {
+                    ++embedded_count;
                     // Embed texture data
                     tex_entry["mode"] = "embed";
                     tex_entry["offset"] = static_cast<long long>(bin_out.tellp());
-                    
-                    // DEBUG: Log state for embedded texture serialization
-                    SCENE_LOG_INFO("Embedding texture: " + path + 
-                        " | pixels.empty()=" + std::to_string(prop.texture->pixels.empty()) +
-                        " | float_pixels.empty()=" + std::to_string(prop.texture->float_pixels.empty()) +
-                        " | width=" + std::to_string(prop.texture->width) +
-                        " | height=" + std::to_string(prop.texture->height) +
-                        " | is_loaded=" + std::to_string(prop.texture->is_loaded()));
-                    
-                    // IF texture has pixels in memory, write them (handle generated/unnamed textures)
-                    if (!prop.texture->pixels.empty()) {
-                         // Convert CompactVec4 to raw RGBA bytes for stbi_write_png
+
+                    if (fs::exists(path)) {
+                        // Prefer passthrough from the original source file to avoid costly re-encoding.
+                        std::ifstream tex_file(path, std::ios::binary);
+                        if (tex_file) {
+                            tex_file.seekg(0, std::ios::end);
+                            const std::streamoff size_pos = tex_file.tellg();
+                            tex_file.seekg(0, std::ios::beg);
+
+                            const size_t size = size_pos > 0
+                                ? streamFileToOutput(tex_file, bin_out, file_copy_buffer)
+                                : 0;
+                            ++file_copied_count;
+                            texture_bin_bytes_written += static_cast<uint64_t>(size);
+                            
+                            tex_entry["size"] = size;
+                            tex_entry["format"] = fs::path(path).extension().string();
+                        }
+                    } else if (const auto* cached = getEmbeddedTexture(path)) {
+                        bin_out.write(cached->data.data(), static_cast<std::streamsize>(cached->data.size()));
+                        tex_entry["size"] = cached->data.size();
+                        tex_entry["format"] = fs::path(path).extension().string();
+                        ++cache_passthrough_count;
+                        texture_bin_bytes_written += static_cast<uint64_t>(cached->data.size());
+                        texture_map[path] = texture_id++;
+                        arr.push_back(tex_entry);
+                        return;
+                    } else if (!prop.texture->pixels.empty()) {
+                         // Last resort: encode from decoded pixels when no original bytes are available.
                          std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
                          for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
                              const auto& px = prop.texture->pixels[pi];
@@ -2288,18 +2441,18 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                              raw_pixels[pi * 4 + 2] = px.b;
                              raw_pixels[pi * 4 + 3] = px.a;
                          }
-                         
-                         // Encode to PNG in memory
+
                          std::vector<char> png_data;
-                         stbi_write_png_to_func(write_to_vector_func, &png_data, 
-                             prop.texture->width, prop.texture->height, 4, 
+                         stbi_write_png_to_func(write_to_vector_func, &png_data,
+                             prop.texture->width, prop.texture->height, 4,
                              raw_pixels.data(), prop.texture->width * 4);
-                         
+
                          if (!png_data.empty()) {
+                            ++png_reencoded_count;
                             bin_out.write(png_data.data(), png_data.size());
                             tex_entry["size"] = png_data.size();
                             tex_entry["format"] = ".png";
-                            SCENE_LOG_INFO("Embedded memory texture: " + path + " Size: " + std::to_string(png_data.size()));
+                            texture_bin_bytes_written += static_cast<uint64_t>(png_data.size());
                          } else {
                              SCENE_LOG_ERROR("Failed to encode memory texture to PNG: " + path);
                          }
@@ -2308,27 +2461,117 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                         // Handle Float textures (EXR/HDR) - TODO: Need stbi_write_hdr or similar
                         // For now, skip or implement later.
                         SCENE_LOG_WARN("Float texture embedding not fully implemented (skipping encode): " + path);
-
-                    } else if (fs::exists(path)) {
-                        // Read from file
-                        std::ifstream tex_file(path, std::ios::binary);
-                        if (tex_file) {
-                            tex_file.seekg(0, std::ios::end);
-                            size_t size = tex_file.tellg();
-                            tex_file.seekg(0, std::ios::beg);
-                            
-                            std::vector<char> data(size);
-                            tex_file.read(data.data(), size);
-                            bin_out.write(data.data(), size);
-                            
-                            tex_entry["size"] = size;
-                            tex_entry["format"] = fs::path(path).extension().string();
-                        }
                     } 
                 } else {
-                    // Path reference
+                    bool wrote_project_local = false;
+                    if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::ProjectLocal &&
+                        !project_local_texture_dir.empty()) {
+                        try {
+                            fs::create_directories(project_local_texture_dir);
+                            const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string());
+                            const std::string source_ext = !fs::path(path).extension().string().empty()
+                                ? fs::path(path).extension().string()
+                                : std::string(".png");
+
+                            auto finalize_project_local_path = [&](const fs::path& local_target) {
+                                tex_entry["mode"] = "path";
+                                tex_entry["path"] = fs::relative(local_target, project_dir).generic_string();
+                                wrote_project_local = true;
+                            };
+
+                            auto target_matches_source_file = [&](const fs::path& local_target, const fs::path& source_path) -> bool {
+                                std::error_code ec;
+                                if (!fs::exists(local_target, ec) || !fs::exists(source_path, ec)) return false;
+                                const auto target_size = fs::file_size(local_target, ec);
+                                if (ec) return false;
+                                const auto source_size = fs::file_size(source_path, ec);
+                                if (ec || target_size != source_size) return false;
+                                const auto target_time = fs::last_write_time(local_target, ec);
+                                if (ec) return false;
+                                const auto source_time = fs::last_write_time(source_path, ec);
+                                if (ec) return false;
+                                return target_time >= source_time;
+                            };
+
+                            auto target_matches_cached_bytes = [&](const fs::path& local_target, size_t expected_size) -> bool {
+                                std::error_code ec;
+                                if (!fs::exists(local_target, ec)) return false;
+                                return fs::file_size(local_target, ec) == expected_size;
+                            };
+
+                            if (fs::exists(path)) {
+                                const fs::path source_path(path);
+                                const std::string ext = !source_path.extension().string().empty()
+                                    ? source_path.extension().string()
+                                    : std::string(".bin");
+                                const fs::path local_target = project_local_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name + ext);
+                                if (!target_matches_source_file(local_target, source_path)) {
+                                    fs::copy_file(source_path, local_target, fs::copy_options::overwrite_existing);
+                                    ++file_copied_count;
+                                    std::error_code size_ec;
+                                    project_local_bytes_written += static_cast<uint64_t>(fs::file_size(local_target, size_ec));
+                                }
+                                finalize_project_local_path(local_target);
+                            } else if (const auto* cached = getEmbeddedTexture(path)) {
+                                const std::string ext = !fs::path(path).extension().string().empty()
+                                    ? fs::path(path).extension().string()
+                                    : std::string(".bin");
+                                const fs::path local_target = project_local_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name + ext);
+                                if (!target_matches_cached_bytes(local_target, cached->data.size())) {
+                                    std::ofstream local_out(local_target, std::ios::binary);
+                                    if (local_out.is_open()) {
+                                        local_out.write(cached->data.data(), static_cast<std::streamsize>(cached->data.size()));
+                                        ++cache_passthrough_count;
+                                        project_local_bytes_written += static_cast<uint64_t>(cached->data.size());
+                                    }
+                                }
+                                if (fs::exists(local_target)) {
+                                    finalize_project_local_path(local_target);
+                                }
+                            } else if (!prop.texture->pixels.empty()) {
+                                const fs::path local_target = project_local_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name + source_ext);
+                                if (!fs::exists(local_target)) {
+                                    std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
+                                    for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
+                                        const auto& px = prop.texture->pixels[pi];
+                                        raw_pixels[pi * 4 + 0] = px.r;
+                                        raw_pixels[pi * 4 + 1] = px.g;
+                                        raw_pixels[pi * 4 + 2] = px.b;
+                                        raw_pixels[pi * 4 + 3] = px.a;
+                                    }
+
+                                    std::vector<char> png_data;
+                                    stbi_write_png_to_func(
+                                        write_to_vector_func, &png_data,
+                                        prop.texture->width, prop.texture->height, 4,
+                                        raw_pixels.data(), prop.texture->width * 4);
+                                    if (!png_data.empty()) {
+                                        std::ofstream local_out(local_target, std::ios::binary);
+                                        if (local_out.is_open()) {
+                                            local_out.write(png_data.data(), static_cast<std::streamsize>(png_data.size()));
+                                            ++png_reencoded_count;
+                                            project_local_bytes_written += static_cast<uint64_t>(png_data.size());
+                                        }
+                                    }
+                                }
+                                if (fs::exists(local_target)) {
+                                    finalize_project_local_path(local_target);
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            SCENE_LOG_WARN("[ProjectManager] Failed to create project-local texture copy for " + path +
+                                           " | " + e.what());
+                        }
+                    }
+
+                    ++referenced_count;
                     tex_entry["mode"] = "path";
-                    tex_entry["path"] = path;
+                    if (!wrote_project_local) {
+                        tex_entry["path"] = path;
+                    }
                 }
                 
                 texture_map[path] = texture_id++;
@@ -2347,6 +2590,13 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
     }
     
     SCENE_LOG_INFO("[ProjectManager] Serialized " + std::to_string(arr.size()) + " textures.");
+    SCENE_LOG_INFO("[ProjectManager] Texture modes - embedded: " + std::to_string(embedded_count) +
+                   ", path refs: " + std::to_string(referenced_count) +
+                   ", png re-encoded: " + std::to_string(png_reencoded_count) +
+                   ", file-copied-bytesources: " + std::to_string(file_copied_count) +
+                   ", cache-passthrough: " + std::to_string(cache_passthrough_count) +
+                   ", bin-bytes: " + std::to_string(texture_bin_bytes_written) +
+                   ", project-local-bytes: " + std::to_string(project_local_bytes_written));
     return arr;
 }
 

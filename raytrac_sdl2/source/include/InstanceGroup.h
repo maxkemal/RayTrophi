@@ -12,6 +12,7 @@
 
 #include "Vec3.h"
 #include "Matrix4x4.h"
+#include "AABB.h"
 #include <vector>
 #include <string>
 #include <memory>
@@ -52,6 +53,8 @@ struct ScatterSource {
     // Runtime Instancing Data
     std::shared_ptr<Hittable> bvh; 
     std::shared_ptr<std::vector<std::shared_ptr<Triangle>>> centered_triangles_ptr;
+    AABB local_bbox;
+    bool has_local_bbox = false;
     
     // Per-Source Appearance Settings
     struct SourceSettings {

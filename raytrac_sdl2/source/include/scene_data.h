@@ -25,6 +25,10 @@ namespace AnimationGraph {
     class AnimationNodeGraph;
 }
 
+namespace OzzRuntime {
+    struct AnimationSet;
+}
+
 /**
  * @brief Central container for all scene data.
  * 
@@ -164,12 +168,16 @@ struct SceneData {
         
         // --- Multi-Animator Logic ---
         std::shared_ptr<class AnimationController> animator;  // Per-model animator state
+        std::shared_ptr<OzzRuntime::AnimationSet> ozzAnimationSet; // Optional future runtime bridge
         std::string animGraphAssetKey;                 // Editor asset key for this character
         std::shared_ptr<AnimationGraph::AnimationNodeGraph> runtimeGraph; // Per-character runtime graph instance
         std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph; // Legacy alias, keep in sync with runtimeGraph
         bool useAnimGraph = false;                  // Toggle between Controller and Node Graph
+        bool preferOzzRuntime = true;              // Future opt-in path for Ozz sampling
+        bool loggedOzzRuntimeUsage = false;        // Avoid per-frame runtime path logs
         bool animGraphFollowTimeline = false;       // Timeline-driven when true, autonomous when false
         bool useRootMotion = false;                 // Move object transform with character
+        std::string rootMotionBone;                 // Optional override. Empty = auto detect.
         bool visible = true;                        // Visibility toggle for the whole model
         
         // Link to scene world objects (Triangles/Meshes) belonging to this model

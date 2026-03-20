@@ -56,7 +56,7 @@ public:
     Vec3 vup;
     float aspect = 1.7777f;
     float near_dist = 0.01f;
-    float far_dist = 1000.0f;
+    float far_dist = 20000.0f;
     float fov = 45.0f;
     float aspect_ratio = 1.7777f;
     float vfov = 45.0f;

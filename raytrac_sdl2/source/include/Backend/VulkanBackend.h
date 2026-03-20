@@ -91,6 +91,9 @@ struct GPUCapabilities {
     bool supportsInt64Atomics = false;
     bool supportsBufferDeviceAddress = false;
     bool supportsDescriptorIndexing = false;
+    bool supportsBC4 = false;
+    bool supportsBC5 = false;
+    bool supportsBC7 = false;
 };
 
 // ============================================================================
@@ -845,6 +848,7 @@ public:
 
 private:
     void purgeUploadedTextureCacheLocked();
+    int64_t uploadCompressedTexture2D(const void* data, uint64_t dataSize, uint32_t width, uint32_t height, VkFormat format);
 
     std::unique_ptr<VulkanRT::VulkanDevice> m_device;
     
@@ -896,6 +900,15 @@ private:
     std::unordered_map<int64_t, VulkanRT::ImageHandle> m_uploadedImages;
     std::unordered_map<uint64_t, int64_t> m_uploadedImageIDs; // maps pointer/key + color space mode -> texture ID
     int64_t m_nextTextureID = 1;
+    uint64_t m_textureUploadBytes = 0;
+    uint32_t m_textureUploadCount = 0;
+    uint32_t m_textureUploadBC4Count = 0;
+    uint32_t m_textureUploadBC5Count = 0;
+    uint32_t m_textureUploadBC7Count = 0;
+    uint32_t m_textureUploadR8Count = 0;
+    uint32_t m_textureUploadRGBA8Count = 0;
+    uint32_t m_textureUploadFloatCount = 0;
+    bool m_textureUploadSummaryDirty = false;
     
     // NanoVDB grid device buffers mapped by vdb_id
     std::unordered_map<int, VulkanRT::BufferHandle> m_vdbBuffers;

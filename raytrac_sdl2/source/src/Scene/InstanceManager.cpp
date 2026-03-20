@@ -10,6 +10,7 @@
 #include <random>
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // GROUP MANAGEMENT
@@ -491,10 +492,17 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
 
 void InstanceManager::rebuildSceneObjects(SceneData& scene) {
     if (groups.empty()) return;
+
+    const auto total_start = std::chrono::steady_clock::now();
+    size_t total_bvh_build_ms = 0;
+    size_t total_spawn_ms = 0;
+    size_t total_cleanup_ms = 0;
+    size_t total_instances_requested = 0;
     
     std::string instance_prefix = "_inst_"; // Prefix to identify instances
     
     for (auto& group : groups) {
+        const auto group_bvh_start = std::chrono::steady_clock::now();
         // 1. Ensure BVHs are built for all sources
         for (auto& source : group.sources) {
             if (source.triangles.empty()) continue;
@@ -571,12 +579,20 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
                 auto embree = std::make_shared<EmbreeBVH>();
                 embree->build(source_hittables);
                 source.bvh = embree;
+                source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
                 SCENE_LOG_INFO("[InstanceManager] Built Centered BVH (Baked Transform) for restored source: " + source.name);
             }
+            else if (!source.has_local_bbox) {
+                source.has_local_bbox = source.bvh->bounding_box(0, 0, source.local_bbox);
+            }
         }
+        total_bvh_build_ms += static_cast<size_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - group_bvh_start).count());
         
         // 2. Spawn Instances (Multi-threaded)
         size_t num_instances = group.instances.size();
+        total_instances_requested += num_instances;
         
         // Clear old links
         group.active_hittables.clear();
@@ -593,6 +609,7 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
         
         std::vector<std::future<void>> futures;
         futures.reserve(num_threads);
+        const auto spawn_start = std::chrono::steady_clock::now();
         
         for (size_t t = 0; t < num_threads; ++t) {
             size_t start = t * chunk_size;
@@ -614,13 +631,24 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
                         Matrix4x4 mat = inst.toMatrix();
                         // USE ID-BASED PREFIX for robust identification and to avoid collision with other layers of same name
                         std::string name = "_inst_gid" + std::to_string(group.id) + "_" + std::to_string(i);
-                        
-                        auto hit_inst = std::make_shared<HittableInstance>(
-                            source.bvh, 
-                            source.centered_triangles_ptr, 
-                            mat, 
-                            name
-                        );
+
+                        std::shared_ptr<HittableInstance> hit_inst;
+                        if (source.has_local_bbox) {
+                            hit_inst = std::make_shared<HittableInstance>(
+                                source.bvh,
+                                source.centered_triangles_ptr,
+                                mat,
+                                name,
+                                source.local_bbox
+                            );
+                        } else {
+                            hit_inst = std::make_shared<HittableInstance>(
+                                source.bvh,
+                                source.centered_triangles_ptr,
+                                mat,
+                                name
+                            );
+                        }
                         
                         scene.world.objects[start_offset + i] = hit_inst;
                         group.active_hittables[i] = hit_inst;
@@ -630,10 +658,24 @@ void InstanceManager::rebuildSceneObjects(SceneData& scene) {
         
         // Wait for all threads to complete
         for (auto& f : futures) f.get();
+        total_spawn_ms += static_cast<size_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - spawn_start).count());
         
         // Remove any failed instances (nullptrs)
+        const auto cleanup_start = std::chrono::steady_clock::now();
         auto& objs = scene.world.objects;
         objs.erase(std::remove(objs.begin(), objs.end(), nullptr), objs.end());
+        total_cleanup_ms += static_cast<size_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - cleanup_start).count());
     }
     SCENE_LOG_INFO("[InstanceManager] Rebuilt " + std::to_string(scene.world.objects.size()) + " scene objects from foliage data.");
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - total_start).count();
+    SCENE_LOG_INFO("[Perf] InstanceManager::rebuildSceneObjects total: " + std::to_string(total_ms) +
+                   " ms | requested instances: " + std::to_string(total_instances_requested) +
+                   " | source BVH build: " + std::to_string(total_bvh_build_ms) +
+                   " ms | instance spawn: " + std::to_string(total_spawn_ms) +
+                   " ms | cleanup: " + std::to_string(total_cleanup_ms) + " ms");
 }

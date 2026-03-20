@@ -155,6 +155,7 @@ public:
     float getCurrentTime(int layer = 0) const;
     float getNormalizedTime(int layer = 0) const;
     const std::string& getCurrentClipName(int layer = 0) const;
+    const std::vector<AnimationLayer>& getLayers() const { return layers; }
     
     using AnimationEventCallback = std::function<void(const std::string& clipName, const std::string& event)>;
     void setEventCallback(AnimationEventCallback callback) { eventCallback = callback; }

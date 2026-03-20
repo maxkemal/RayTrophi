@@ -4,10 +4,175 @@
 #include "globals.h"
 #include "ProjectManager.h"
 #include <iostream>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <deque>
+#include <thread>
+#include <algorithm>
+#include <unordered_map>
 
 using json = nlohmann::json;
+
+namespace {
+struct DeserializeTextureStats {
+    size_t embedded_hits = 0;
+    size_t disk_hits = 0;
+    size_t cache_hits = 0;
+    size_t embedded_construct_ms = 0;
+    size_t disk_construct_ms = 0;
+};
+
+static std::string makeTextureCacheKey(const std::string& texPath, TextureType texType) {
+    return texPath + "#" + std::to_string(static_cast<int>(texType));
+}
+
+struct TextureLoadRequest {
+    std::string cache_key;
+    std::string texture_path;
+    std::string full_path;
+    TextureType type = TextureType::Albedo;
+    bool is_embedded = false;
+    size_t estimated_cost = 0;
+};
+
+struct TextureLoadResult {
+    TextureLoadRequest request;
+    std::shared_ptr<Texture> texture;
+    size_t elapsed_ms = 0;
+};
+
+static void collectTextureRequest(const json& propertyJson,
+                                  const std::string& sceneDir,
+                                  TextureType texType,
+                                  std::unordered_map<std::string, TextureLoadRequest>& requests) {
+    if (!propertyJson.is_object() || !propertyJson.contains("texture")) {
+        return;
+    }
+
+    const std::string texPath = propertyJson["texture"].get<std::string>();
+    if (texPath.empty()) {
+        return;
+    }
+
+    const std::string cacheKey = makeTextureCacheKey(texPath, texType);
+    if (requests.find(cacheKey) != requests.end()) {
+        return;
+    }
+
+    TextureLoadRequest req;
+    req.cache_key = cacheKey;
+    req.texture_path = texPath;
+    req.type = texType;
+
+    auto& pm = ProjectManager::getInstance();
+    if (const auto* embedded = pm.getEmbeddedTexture(texPath)) {
+        req.is_embedded = true;
+        req.estimated_cost = embedded->data.size();
+    }
+
+    std::string fullPath = texPath;
+    if (!req.is_embedded && !std::filesystem::exists(fullPath) && !sceneDir.empty()) {
+        fullPath = sceneDir + "/" + texPath;
+    }
+    req.full_path = fullPath;
+    if (!req.is_embedded) {
+        std::error_code ec;
+        const auto file_size = std::filesystem::file_size(req.full_path, ec);
+        req.estimated_cost = ec ? 0 : static_cast<size_t>(file_size);
+    }
+
+    if (req.is_embedded || std::filesystem::exists(req.full_path)) {
+        requests.emplace(cacheKey, std::move(req));
+    }
+}
+
+static void finalizeTextureFuture(std::future<TextureLoadResult>& future,
+                                  std::unordered_map<std::string, std::shared_ptr<Texture>>& textureCache,
+                                  DeserializeTextureStats& stats) {
+    TextureLoadResult result = future.get();
+    if (result.texture) {
+        textureCache.emplace(result.request.cache_key, result.texture);
+    }
+
+    if (result.request.is_embedded) {
+        ++stats.embedded_hits;
+        stats.embedded_construct_ms += result.elapsed_ms;
+    } else {
+        ++stats.disk_hits;
+        stats.disk_construct_ms += result.elapsed_ms;
+    }
+}
+
+static void preloadTexturesParallel(const std::unordered_map<std::string, TextureLoadRequest>& requests,
+                                    std::unordered_map<std::string, std::shared_ptr<Texture>>& textureCache,
+                                    DeserializeTextureStats& stats) {
+    if (requests.empty()) {
+        return;
+    }
+
+    std::vector<TextureLoadRequest> ordered_requests;
+    ordered_requests.reserve(requests.size());
+    size_t total_estimated_cost = 0;
+    size_t large_texture_count = 0;
+    for (const auto& [_, request] : requests) {
+        ordered_requests.push_back(request);
+        total_estimated_cost += request.estimated_cost;
+        if (request.estimated_cost >= (8u * 1024u * 1024u)) {
+            ++large_texture_count;
+        }
+    }
+    std::sort(ordered_requests.begin(), ordered_requests.end(),
+              [](const TextureLoadRequest& a, const TextureLoadRequest& b) {
+                  return a.estimated_cost > b.estimated_cost;
+              });
+
+    const unsigned hw_threads = std::max(1u, std::thread::hardware_concurrency());
+    const size_t worker_cap = std::max<size_t>(1, hw_threads / 2);
+    size_t max_parallel = 2;
+    if (total_estimated_cost >= (64u * 1024u * 1024u) || large_texture_count >= 4) {
+        max_parallel = 4;
+    } else if (total_estimated_cost >= (24u * 1024u * 1024u) || large_texture_count >= 2 || ordered_requests.size() >= 16) {
+        max_parallel = 3;
+    }
+    max_parallel = std::min(worker_cap, max_parallel);
+    max_parallel = std::max<size_t>(1, max_parallel);
+
+    std::deque<std::future<TextureLoadResult>> active_jobs;
+
+    for (const auto& request : ordered_requests) {
+        active_jobs.emplace_back(std::async(std::launch::async, [request]() -> TextureLoadResult {
+            TextureLoadResult result;
+            result.request = request;
+
+            const auto start = std::chrono::steady_clock::now();
+            if (request.is_embedded) {
+                auto& pm = ProjectManager::getInstance();
+                if (const auto* embedded = pm.getEmbeddedTexture(request.texture_path)) {
+                    result.texture = std::make_shared<Texture>(embedded->data, request.type, request.texture_path);
+                }
+            } else if (!request.full_path.empty() && std::filesystem::exists(request.full_path)) {
+                result.texture = std::make_shared<Texture>(request.full_path, request.type);
+            }
+            result.elapsed_ms = static_cast<size_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - start).count());
+            return result;
+        }));
+
+        if (active_jobs.size() >= max_parallel) {
+            finalizeTextureFuture(active_jobs.front(), textureCache, stats);
+            active_jobs.pop_front();
+        }
+    }
+
+    while (!active_jobs.empty()) {
+        finalizeTextureFuture(active_jobs.front(), textureCache, stats);
+        active_jobs.pop_front();
+    }
+}
+}
 
 // Helper: Vec3 to JSON
 static json vec3ToJson(const Vec3& v) {
@@ -58,7 +223,9 @@ static json serializeProperty(const MaterialProperty& prop, const std::string& s
 // CRITICAL: TextureType must match the property type to ensure correct texture processing
 // Normal maps require TextureType::Normal to avoid sRGB conversion and enable proper normal decoding
 static void deserializeProperty(MaterialProperty& prop, const json& j, const std::string& sceneDir, 
-                                 TextureType texType = TextureType::Albedo) {
+                                 TextureType texType = TextureType::Albedo,
+                                 std::unordered_map<std::string, std::shared_ptr<Texture>>* textureCache = nullptr,
+                                 DeserializeTextureStats* stats = nullptr) {
     prop.color = jsonToVec3(j.value("color", json::array({1,1,1})), Vec3(1,1,1));
     prop.intensity = j.value("intensity", 1.0f);
     prop.alpha = j.value("alpha", 1.0f);
@@ -66,13 +233,35 @@ static void deserializeProperty(MaterialProperty& prop, const json& j, const std
     // Load texture if specified
     if (j.contains("texture") && !j["texture"].get<std::string>().empty()) {
         std::string texPath = j["texture"].get<std::string>();
+        const std::string cacheKey = makeTextureCacheKey(texPath, texType);
+
+        if (textureCache) {
+            auto cacheIt = textureCache->find(cacheKey);
+            if (cacheIt != textureCache->end()) {
+                prop.texture = cacheIt->second;
+                if (stats) {
+                    ++stats->cache_hits;
+                }
+                return;
+            }
+        }
         
         // FIRST: Check embedded texture cache (memory-based, no disk I/O)
         auto& pm = ProjectManager::getInstance();
         auto* embedded = pm.getEmbeddedTexture(texPath);
         if (embedded) {
             // Load directly from memory buffer - fast and no temp files!
+            const auto start = std::chrono::steady_clock::now();
             prop.texture = std::make_shared<Texture>(embedded->data, texType, texPath);
+            if (stats) {
+                ++stats->embedded_hits;
+                stats->embedded_construct_ms += static_cast<size_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count());
+            }
+            if (textureCache && prop.texture) {
+                textureCache->emplace(cacheKey, prop.texture);
+            }
             // SCENE_LOG_INFO("[MATERIAL] Loaded embedded texture from memory: " + texPath);
             return;
         }
@@ -83,7 +272,17 @@ static void deserializeProperty(MaterialProperty& prop, const json& j, const std
             fullPath = sceneDir + "/" + texPath;
         }
         if (std::filesystem::exists(fullPath)) {
+            const auto start = std::chrono::steady_clock::now();
             prop.texture = std::make_shared<Texture>(fullPath, texType);
+            if (stats) {
+                ++stats->disk_hits;
+                stats->disk_construct_ms += static_cast<size_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count());
+            }
+            if (textureCache && prop.texture) {
+                textureCache->emplace(cacheKey, prop.texture);
+            }
         }
     }
 }
@@ -307,10 +506,14 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
 }
 
 void MaterialManager::deserialize(const json& data, const std::string& sceneDir) {
+    const auto total_start = std::chrono::steady_clock::now();
+
     // Clear existing materials first
     clear();
     
     std::lock_guard<std::mutex> lock(mutex);
+    std::unordered_map<std::string, std::shared_ptr<Texture>> textureCache;
+    DeserializeTextureStats textureStats;
     
     // Version check
     int version = data.value("version", 1);
@@ -323,8 +526,32 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
         SCENE_LOG_WARN("[MaterialManager] No materials found in scene data");
         return;
     }
+
+    const auto& materialsJson = data["materials"];
+    materials.reserve(materialsJson.size());
+    nameToID.reserve(materialsJson.size());
+
+    std::unordered_map<std::string, TextureLoadRequest> preloadRequests;
+    preloadRequests.reserve(materialsJson.size() * 4);
+    for (const auto& matJson : materialsJson) {
+        if (matJson.contains("albedoProperty"))
+            collectTextureRequest(matJson["albedoProperty"], sceneDir, TextureType::Albedo, preloadRequests);
+        if (matJson.contains("roughnessProperty"))
+            collectTextureRequest(matJson["roughnessProperty"], sceneDir, TextureType::Roughness, preloadRequests);
+        if (matJson.contains("metallicProperty"))
+            collectTextureRequest(matJson["metallicProperty"], sceneDir, TextureType::Metallic, preloadRequests);
+        if (matJson.contains("normalProperty"))
+            collectTextureRequest(matJson["normalProperty"], sceneDir, TextureType::Normal, preloadRequests);
+        if (matJson.contains("opacityProperty"))
+            collectTextureRequest(matJson["opacityProperty"], sceneDir, TextureType::Opacity, preloadRequests);
+        if (matJson.contains("emissionProperty"))
+            collectTextureRequest(matJson["emissionProperty"], sceneDir, TextureType::Emission, preloadRequests);
+        if (matJson.contains("transmissionProperty"))
+            collectTextureRequest(matJson["transmissionProperty"], sceneDir, TextureType::Transmission, preloadRequests);
+    }
+    preloadTexturesParallel(preloadRequests, textureCache, textureStats);
     
-    for (const auto& matJson : data["materials"]) {
+    for (const auto& matJson : materialsJson) {
         std::string name = matJson.value("name", "Unnamed_" + std::to_string(materials.size()));
         int typeInt = matJson.value("type", 0);
         MaterialType type = static_cast<MaterialType>(typeInt);
@@ -341,19 +568,19 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             // Load properties (with backward compatibility - use value() with defaults)
             // Load properties with correct texture types for proper GPU processing
             if (matJson.contains("albedoProperty"))
-                deserializeProperty(pbsdf->albedoProperty, matJson["albedoProperty"], sceneDir, TextureType::Albedo);
+                deserializeProperty(pbsdf->albedoProperty, matJson["albedoProperty"], sceneDir, TextureType::Albedo, &textureCache, &textureStats);
             if (matJson.contains("roughnessProperty"))
-                deserializeProperty(pbsdf->roughnessProperty, matJson["roughnessProperty"], sceneDir, TextureType::Roughness);
+                deserializeProperty(pbsdf->roughnessProperty, matJson["roughnessProperty"], sceneDir, TextureType::Roughness, &textureCache, &textureStats);
             if (matJson.contains("metallicProperty"))
-                deserializeProperty(pbsdf->metallicProperty, matJson["metallicProperty"], sceneDir, TextureType::Metallic);
+                deserializeProperty(pbsdf->metallicProperty, matJson["metallicProperty"], sceneDir, TextureType::Metallic, &textureCache, &textureStats);
             if (matJson.contains("normalProperty"))
-                deserializeProperty(pbsdf->normalProperty, matJson["normalProperty"], sceneDir, TextureType::Normal);
+                deserializeProperty(pbsdf->normalProperty, matJson["normalProperty"], sceneDir, TextureType::Normal, &textureCache, &textureStats);
             if (matJson.contains("opacityProperty"))
-                deserializeProperty(pbsdf->opacityProperty, matJson["opacityProperty"], sceneDir, TextureType::Opacity);
+                deserializeProperty(pbsdf->opacityProperty, matJson["opacityProperty"], sceneDir, TextureType::Opacity, &textureCache, &textureStats);
             if (matJson.contains("emissionProperty"))
-                deserializeProperty(pbsdf->emissionProperty, matJson["emissionProperty"], sceneDir, TextureType::Emission);
+                deserializeProperty(pbsdf->emissionProperty, matJson["emissionProperty"], sceneDir, TextureType::Emission, &textureCache, &textureStats);
             if (matJson.contains("transmissionProperty"))
-                deserializeProperty(pbsdf->transmissionProperty, matJson["transmissionProperty"], sceneDir, TextureType::Transmission);
+                deserializeProperty(pbsdf->transmissionProperty, matJson["transmissionProperty"], sceneDir, TextureType::Transmission, &textureCache, &textureStats);
             
             // Scalar values (with defaults for backward compatibility)
             pbsdf->transmission = matJson.value("transmission", 0.0f);
@@ -403,6 +630,15 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
     // This ensures GPU rendering works correctly without manual UI trigger
     // NOTE: Call internal version since we already hold the mutex
     syncAllGpuMaterials_internal();
+
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - total_start).count();
+    SCENE_LOG_INFO("[Perf] MaterialManager::deserialize textures - cache hits: " + std::to_string(textureStats.cache_hits) +
+                   ", embedded loads: " + std::to_string(textureStats.embedded_hits) +
+                   " (" + std::to_string(textureStats.embedded_construct_ms) + " ms), disk loads: " +
+                   std::to_string(textureStats.disk_hits) + " (" + std::to_string(textureStats.disk_construct_ms) +
+                   " ms), unique textures: " + std::to_string(textureCache.size()) +
+                   ", total: " + std::to_string(total_ms) + " ms");
 }
 
 // Internal version - does NOT acquire lock (caller must hold mutex)

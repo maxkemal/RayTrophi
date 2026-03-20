@@ -103,7 +103,7 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)source\external;$(ProjectDir)source\external\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
@@ -111,7 +111,7 @@
     <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)source\external;$(ProjectDir)source\external\imgui;$(IncludePath)</IncludePath>
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\imgui;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
@@ -150,7 +150,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
-      <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_CONSOLE;RAYTROPHI_ENABLE_OZZ=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>Default</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
@@ -161,12 +161,12 @@
       <SupportJustMyCode>false</SupportJustMyCode>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\debug\lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
@@ -192,7 +192,7 @@
       <FunctionLevelLinking>false</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;RAYTROPHI_ENABLE_OZZ=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>Default</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
@@ -207,7 +207,7 @@
       <WholeProgramOptimization>true</WholeProgramOptimization>
       <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
       <OpenMPSupport>true</OpenMPSupport>
-      <AdditionalIncludeDirectories>$(ProjectDir)source\libs;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)libs;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
       <AdditionalOptions>/Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -215,7 +215,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;assimp-vc143-mt.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
       <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cudart64_11.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
@@ -242,11 +242,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="resource.h" />
-    <ClInclude Include="source\external\miniz.h" />
+    <ClInclude Include="external\miniz.h" />
     <None Include="source\include\gas_kernels.cuh" />
     <None Include="source\include\gas_fft_solver.cuh" />
     <ClInclude Include="source\include\ImGuizmo.h" />
     <ClInclude Include="source\include\OptixAccelManager.h" />
+    <ClInclude Include="source\include\OzzRuntime.h" />
     <ClInclude Include="source\include\SceneCommand.h" />
     <ClInclude Include="source\include\SceneHistory.h" />
     <ClInclude Include="source\include\SceneSelection.h" />
@@ -273,11 +274,11 @@
     <ClInclude Include="source\include\scene_ui.h" />
     <ClInclude Include="source\include\stb_image_write.h" />
     <ClInclude Include="source\include\ui_modern.h" />
-    <ClInclude Include="source\external\imgui\imconfig.h" />
-    <ClInclude Include="source\external\imgui\imgui.h" />
-    <ClInclude Include="source\external\imgui\imgui_impl_sdl2.h" />
-    <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h" />
-    <ClInclude Include="source\external\imgui\imgui_internal.h" />
+    <ClInclude Include="external\imgui\imconfig.h" />
+    <ClInclude Include="external\imgui\imgui.h" />
+    <ClInclude Include="external\imgui\imgui_impl_sdl2.h" />
+    <ClInclude Include="external\imgui\imgui_impl_sdlrenderer2.h" />
+    <ClInclude Include="external\imgui\imgui_internal.h" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_river.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_terrain.hpp" />
@@ -325,6 +326,8 @@
     <ClInclude Include="source\include\sbt_record.h" />
     <ClInclude Include="source\include\SpotLight.h" />
     <ClInclude Include="source\include\Texture.h" />
+    <ClInclude Include="source\include\TextureCompression.h" />
+    <ClInclude Include="source\include\TextureCompressionCache.h" />
     <ClInclude Include="source\include\ThreadLocalRNG.h" />
     <ClInclude Include="source\include\Triangle.h" />
     <ClInclude Include="source\include\Vec2.h" />
@@ -353,10 +356,43 @@
     <ResourceCompile Include="raytracing_render_code.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="source\external\miniz.c" />
-    <ClCompile Include="source\external\miniz_tdef.c" />
-    <ClCompile Include="source\external\miniz_tinfl.c" />
-    <ClCompile Include="source\external\miniz_zip.c" />
+    <ClCompile Include="external\miniz.c" />
+    <ClCompile Include="external\miniz_tdef.c" />
+    <ClCompile Include="external\miniz_tinfl.c" />
+    <ClCompile Include="external\miniz_zip.c" />
+    <ClCompile Include="external\ozz-animation\src\base\log.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\platform.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\containers\string_archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\encode\group_varint.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\io\archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\io\stream.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\maths\box.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\maths\math_archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\maths\simd_math.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\maths\simd_math_archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\maths\soa_math_archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\memory\allocator.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\animation.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\animation_utils.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\blending_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\ik_aim_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\ik_two_bone_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\local_to_model_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\motion_blending_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\sampling_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\skeleton.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\skeleton_utils.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track_sampling_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track_triggering_job.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_utils.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\animation_builder.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton_archive.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\skeleton_builder.cc" />
+    <ClCompile Include="source\src\Animation\OzzRuntime.cpp" />
     <ClCompile Include="source\src\Backend\OptixBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
@@ -429,6 +465,7 @@
     <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp" />
     <ClCompile Include="source\src\Physics\TerrainFFT.cpp" />
     <ClCompile Include="source\src\Render\Texture.cpp" />
+    <ClCompile Include="source\src\Utils\TextureCompressionCache.cpp" />
     <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\src\UI\TimelineWidget.cpp" />
     <ClCompile Include="source\src\Scene\Triangle.cpp" />
@@ -443,12 +480,12 @@
     <ClCompile Include="source\src\Physics\WaterManager.cpp" />
     <ClCompile Include="source\src\Scene\World.cpp" />
     <ClCompile Include="source\src\Scene\MaterialManager.cpp" />
-    <ClCompile Include="source\external\imgui\imgui.cpp" />
-    <ClCompile Include="source\external\imgui\imgui_draw.cpp" />
-    <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp" />
-    <ClCompile Include="source\external\imgui\imgui_impl_sdlrenderer2.cpp" />
-    <ClCompile Include="source\external\imgui\imgui_tables.cpp" />
-    <ClCompile Include="source\external\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="external\imgui\imgui.cpp" />
+    <ClCompile Include="external\imgui\imgui_draw.cpp" />
+    <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp" />
+    <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp" />
+    <ClCompile Include="external\imgui\imgui_tables.cpp" />
+    <ClCompile Include="external\imgui\imgui_widgets.cpp" />
     <!-- Unified Rendering System -->
     <ClCompile Include="source\src\Render\unified_converters.cpp" />
   </ItemGroup>

@@ -183,16 +183,16 @@
     <ClInclude Include="source\include\sbt_record.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\external\imgui\imgui.h">
+    <ClInclude Include="external\imgui\imgui.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
-    <ClInclude Include="source\external\imgui\imgui_impl_sdl2.h">
+    <ClInclude Include="external\imgui\imgui_impl_sdl2.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
-    <ClInclude Include="source\external\imgui\imgui_internal.h">
+    <ClInclude Include="external\imgui\imgui_internal.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
-    <ClInclude Include="source\external\imgui\imconfig.h">
+    <ClInclude Include="external\imgui\imconfig.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
     <ClInclude Include="source\include\scene_ui.h">
@@ -201,7 +201,7 @@
     <ClInclude Include="source\include\scene_data.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\external\imgui\imgui_impl_sdlrenderer2.h">
+    <ClInclude Include="external\imgui\imgui_impl_sdlrenderer2.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
     <ClInclude Include="source\include\stb_image_write.h">
@@ -258,7 +258,7 @@
     <ClInclude Include="source\include\SceneSerializer.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-    <ClInclude Include="source\external\miniz.h">
+    <ClInclude Include="external\miniz.h">
       <Filter>Kaynak Dosyalar</Filter>
     </ClInclude>
     <ClInclude Include="source\include\TimelineWidget.h">
@@ -316,6 +316,12 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\FoliageWindSystem.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TextureCompression.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\TextureCompressionCache.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
   </ItemGroup>
@@ -630,34 +636,34 @@
     <ClCompile Include="source\src\Math\Matrix4x4.cpp">
       <Filter>Kaynak Dosyalar\Math</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\miniz.c">
+    <ClCompile Include="external\miniz.c">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\miniz_tdef.c">
+    <ClCompile Include="external\miniz_tdef.c">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\miniz_tinfl.c">
+    <ClCompile Include="external\miniz_tinfl.c">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\miniz_zip.c">
+    <ClCompile Include="external\miniz_zip.c">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui.cpp">
+    <ClCompile Include="external\imgui\imgui.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_draw.cpp">
+    <ClCompile Include="external\imgui\imgui_draw.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_impl_sdl2.cpp">
+    <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_impl_sdlrenderer2.cpp">
+    <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_tables.cpp">
+    <ClCompile Include="external\imgui\imgui_tables.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
-    <ClCompile Include="source\external\imgui\imgui_widgets.cpp">
+    <ClCompile Include="external\imgui\imgui_widgets.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Hair\HairBSDF.cpp">
@@ -695,6 +701,12 @@
     </ClCompile>
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp">
       <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\TextureCompressionCache.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\OzzRuntime.cpp">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
