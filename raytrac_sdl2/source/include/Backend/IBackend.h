@@ -38,6 +38,13 @@ enum class BackendType : uint8_t {
     CPU_CUSTOM      // Custom CPU BVH
 };
 
+enum class ViewportMode : uint8_t {
+    Rendered = 0,
+    Solid,
+    MaterialPreview,
+    Matcap
+};
+
 struct BackendInfo {
     BackendType type;
     std::string name;
@@ -73,47 +80,47 @@ struct DenoiserFrameData {
 struct CameraParams {
     Vec3 origin;
     Vec3 lookAt;
-    Vec3 up;
-    float fov;
-    float aperture;
-    float focusDistance;
-    float aspectRatio;
-    float exposureFactor;
-    float ev_compensation;
-    int isoPresetIndex;
-    int shutterPresetIndex;
-    int fstopPresetIndex;
-    bool autoAE;
-    bool usePhysicalExposure;
-    bool motionBlurEnabled;
-    bool vignettingEnabled;
-    bool chromaticAberrationEnabled;
+    Vec3 up = Vec3(0, 1, 0);
+    float fov = 60.0f;
+    float aperture = 0.0f;
+    float focusDistance = 1.0f;
+    float aspectRatio = 1.777f;
+    float exposureFactor = 1.0f;
+    float ev_compensation = 0.0f;
+    int isoPresetIndex = -1;
+    int shutterPresetIndex = -1;
+    int fstopPresetIndex = -1;
+    bool autoAE = false;
+    bool usePhysicalExposure = false;
+    bool motionBlurEnabled = false;
+    bool vignettingEnabled = false;
+    bool chromaticAberrationEnabled = false;
     
     // Pro Features
-    float distortion;
-    float lens_quality;
-    float vignetting_amount;
-    float vignetting_falloff;
-    float chromatic_aberration;
-    float chromatic_aberration_r;
-    float chromatic_aberration_b;
-    int camera_mode;
-    int blade_count;
+    float distortion = 0.0f;
+    float lens_quality = 1.0f;
+    float vignetting_amount = 0.0f;
+    float vignetting_falloff = 1.0f;
+    float chromatic_aberration = 0.0f;
+    float chromatic_aberration_r = 1.0f;
+    float chromatic_aberration_b = 1.0f;
+    int camera_mode = 0;
+    int blade_count = 6;
     
     // Shake / Handheld
-    bool shake_enabled;
-    float shake_intensity;
-    float shake_frequency;
-    float handheld_sway_amplitude;
-    float handheld_sway_frequency;
-    float breathing_amplitude;
-    float breathing_frequency;
-    bool enable_focus_drift;
-    float focus_drift_amount;
-    int operator_skill;
-    bool ibis_enabled;
-    float ibis_effectiveness;
-    int rig_mode;
+    bool shake_enabled = false;
+    float shake_intensity = 0.0f;
+    float shake_frequency = 1.0f;
+    float handheld_sway_amplitude = 0.0f;
+    float handheld_sway_frequency = 1.0f;
+    float breathing_amplitude = 0.0f;
+    float breathing_frequency = 1.0f;
+    bool enable_focus_drift = false;
+    float focus_drift_amount = 0.0f;
+    int operator_skill = 0;
+    bool ibis_enabled = false;
+    float ibis_effectiveness = 0.0f;
+    int rig_mode = 0;
 };
 
 // Triangle data for upload
@@ -304,6 +311,7 @@ public:
         float clearcoatRoughness = 0.0f;
         float translucent = 0.0f;
         float anisotropic = 0.0f;
+        float normalStrength = 1.0f;
         float sheen = 0.0f;
         float sheenTint = 0.0f;
 
@@ -328,8 +336,19 @@ public:
         float fft_ocean_size        = 0.0f;
         float fft_choppiness        = 0.0f;
         float fft_wind_speed        = 0.0f;
+        float fft_wind_direction    = 0.0f;
         float fft_amplitude         = 0.0f;
         float fft_time_scale        = 0.0f;
+        float micro_anim_speed      = 0.0f;
+        float micro_morph_speed     = 0.0f;
+        float foam_noise_scale      = 0.0f;
+
+        // Material-space UV transform
+        Vec2 uvScale = Vec2(1.0f, 1.0f);
+        Vec2 uvOffset = Vec2(0.0f, 0.0f);
+        Vec2 uvTiling = Vec2(1.0f, 1.0f);
+        float uvRotationDegrees = 0.0f;
+        uint32_t uvWrapMode = 0;
     };
 
     // Flag bits for MaterialData::flags
@@ -427,6 +446,18 @@ public:
     }
 
     virtual void destroyTexture(int64_t textureHandle) = 0;
+
+    /**
+     * @brief Set the interactive viewport matcap by uploaded texture ID (backend-specific)
+     * @param textureID Opaque texture handle returned by uploadTexture2D
+     */
+    virtual void setInteractiveViewportMatcap(int64_t textureID) { (void)textureID; }
+    /**
+     * @brief Select a built-in matcap preset for the interactive viewport (0..9)
+     * Preset mapping: 0=Solid clay, 1=User texture (unused here), 2..9=procedural presets
+     */
+    virtual void setInteractiveViewportMatcapPreset(int preset) { (void)preset; }
+    /* custom matcap support removed */
     
     // ========================================================================
     // Rendering
@@ -485,6 +516,22 @@ public:
      */
     virtual void renderProgressive(void* outSurface, void* outWindow, void* outRenderer, 
                                   int width, int height, void* outFramebuffer, void* outTexture) = 0;
+
+    /**
+     * @brief Select the viewport shading path used for interactive display.
+     *        Backends may fall back to Rendered until a lighter path is implemented.
+     */
+    virtual void setViewportMode(ViewportMode mode) { (void)mode; }
+    virtual ViewportMode getViewportMode() const { return ViewportMode::Rendered; }
+    virtual bool supportsViewportMode(ViewportMode mode) const {
+        return mode == ViewportMode::Rendered;
+    }
+    virtual bool updateInteractiveMesh(const std::string& nodeName,
+                                       const std::vector<std::shared_ptr<class Triangle>>& triangles) {
+        (void)nodeName;
+        (void)triangles;
+        return false;
+    }
     
     /**
      * @brief Download rendered image to CPU

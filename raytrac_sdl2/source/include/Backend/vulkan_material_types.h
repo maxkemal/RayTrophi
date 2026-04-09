@@ -20,7 +20,7 @@ typedef uint32_t VkGpuTextureHandle;
 
 /**
  * @brief Vulkan-Specific GPU Material struct.
- * Matches the layout in closesthit.rchit exactly (12 blocks of 16 bytes).
+ * Matches the layout in closesthit.rchit exactly.
  * Texture handles are uint32_t indices for GLSL compatibility.
  */
 struct VK_GPU_ALIGN(16) VkGpuMaterial {
@@ -52,24 +52,35 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     // Block 9: Extra water params (16 bytes) 
     float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
 
-    // Block 10: Standard Textures (first 4) (16 bytes)
+    // Block 10: Extra water animation params (16 bytes)
+    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
+
+    // Block 11: UV transform core (16 bytes)
+    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
+
+    // Block 12: UV transform extra (16 bytes)
+    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
+    uint32_t uv_wrap_mode;
+
+    // Block 13: Standard Textures (first 4) (16 bytes)
     VkGpuTextureHandle albedo_tex;
     VkGpuTextureHandle normal_tex;
     VkGpuTextureHandle roughness_tex;
     VkGpuTextureHandle metallic_tex;
 
-    // Block 11: Standard Textures (second 4) (16 bytes)
+    // Block 14: Standard Textures (second 4) (16 bytes)
     VkGpuTextureHandle emission_tex;
     VkGpuTextureHandle height_tex; 
     VkGpuTextureHandle opacity_tex;
     VkGpuTextureHandle transmission_tex;
 
-    // Block 12: Terrain layer index + subsurface IOR (16 bytes)
+    // Block 15: Terrain layer index + subsurface IOR (16 bytes)
     // When FLAG_TERRAIN (bit 16) is set in flags, _terrain_layer_idx is the index
     // into the TerrainLayerBuffer (binding 12) for splat-based layer blending.
     float subsurface_ior;
     uint32_t _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
-    uint32_t _reserved[2];
+    float normal_strength;
+    uint32_t _reserved[1];
 };
 
 // Flag bits for VkGpuMaterial::flags

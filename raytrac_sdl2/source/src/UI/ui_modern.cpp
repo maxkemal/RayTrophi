@@ -7,6 +7,8 @@
 #include "ui_modern.h"
 #include <fstream>
 #include <algorithm>
+#include <imgui_internal.h>
+#include <unordered_map>
 
 // ============================================================================
 // THEME MANAGER IMPLEMENTATION
@@ -669,10 +671,408 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddTriangleFilled(ImVec2(p.x, p.y + is), ImVec2(p.x + is*0.5f, p.y), ImVec2(p.x + is, p.y + is), col);
             break;
         case IconType::Sculpt:
-            // Draw a basic sculpting tool/brush icon (stylized brush/chisel)
-            dl->AddLine(ImVec2(p.x + is*0.2f, p.y + is*0.8f), ImVec2(p.x + is*0.8f, p.y + is*0.2f), col, thickness * 1.5f);
-            dl->AddCircleFilled(ImVec2(p.x + is*0.2f, p.y + is*0.8f), thickness * 1.5f, col); // Brush tip
-            dl->AddRectFilled(ImVec2(p.x + is*0.6f, p.y + is*0.1f), ImVec2(p.x + is*0.9f, p.y + is*0.4f), col); // Handle
+            // Layer stack + accent stroke reads better than another generic brush at 20 px.
+            dl->AddRect(ImVec2(p.x + is*0.14f, p.y + is*0.22f), ImVec2(p.x + is*0.62f, p.y + is*0.46f), col, 2.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is*0.28f, p.y + is*0.50f), ImVec2(p.x + is*0.76f, p.y + is*0.74f), col, 2.0f, 0, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.22f), ImVec2(p.x + is*0.90f, p.y + is*0.12f), col, thickness * 1.5f);
+            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.22f), ImVec2(p.x + is*0.88f, p.y + is*0.34f), col, thickness * 1.5f);
+            break;
+        case IconType::Hair:
+            dl->AddBezierQuadratic(ImVec2(p.x + is*0.24f, p.y + is*0.86f),
+                                   ImVec2(p.x + is*0.12f, p.y + is*0.44f),
+                                   ImVec2(p.x + is*0.34f, p.y + is*0.14f),
+                                   col, thickness);
+            dl->AddBezierQuadratic(ImVec2(p.x + is*0.48f, p.y + is*0.88f),
+                                   ImVec2(p.x + is*0.34f, p.y + is*0.48f),
+                                   ImVec2(p.x + is*0.54f, p.y + is*0.12f),
+                                   col, thickness * 1.15f);
+            dl->AddBezierQuadratic(ImVec2(p.x + is*0.74f, p.y + is*0.84f),
+                                   ImVec2(p.x + is*0.88f, p.y + is*0.46f),
+                                   ImVec2(p.x + is*0.66f, p.y + is*0.18f),
+                                   col, thickness);
+            break;
+        case IconType::Brush:
+        {
+            const ImVec2 ferrule_min(p.x + is * 0.54f, p.y + is * 0.16f);
+            const ImVec2 ferrule_max(p.x + is * 0.84f, p.y + is * 0.38f);
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.82f),
+                        ImVec2(p.x + is * 0.66f, p.y + is * 0.34f),
+                        col, thickness * 1.8f);
+            dl->AddRect(ferrule_min, ferrule_max, col, 2.0f, 0, thickness * 1.2f);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.10f, p.y + is * 0.90f),
+                                  ImVec2(p.x + is * 0.30f, p.y + is * 0.70f),
+                                  ImVec2(p.x + is * 0.36f, p.y + is * 0.98f),
+                                  col);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.76f, p.y + is * 0.24f), thickness * 1.1f, col);
+            break;
+        }
+        case IconType::Move:
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.14f), ImVec2(cp.x, p.y + is * 0.86f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.14f, cp.y), ImVec2(p.x + is * 0.86f, cp.y), col, thickness);
+            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.08f), ImVec2(cp.x - is * 0.08f, p.y + is * 0.24f), ImVec2(cp.x + is * 0.08f, p.y + is * 0.24f), col);
+            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.92f), ImVec2(cp.x - is * 0.08f, p.y + is * 0.76f), ImVec2(cp.x + is * 0.08f, p.y + is * 0.76f), col);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.08f, cp.y), ImVec2(p.x + is * 0.24f, cp.y - is * 0.08f), ImVec2(p.x + is * 0.24f, cp.y + is * 0.08f), col);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.92f, cp.y), ImVec2(p.x + is * 0.76f, cp.y - is * 0.08f), ImVec2(p.x + is * 0.76f, cp.y + is * 0.08f), col);
+            break;
+        case IconType::Rotate:
+            dl->PathArcTo(cp, is * 0.28f, 0.35f, 5.5f, 24);
+            dl->PathStroke(col, 0, thickness * 1.1f);
+            dl->AddLine(ImVec2(cp.x + is * 0.18f, p.y + is * 0.20f), ImVec2(cp.x + is * 0.34f, p.y + is * 0.28f), col, thickness);
+            dl->AddLine(ImVec2(cp.x + is * 0.18f, p.y + is * 0.20f), ImVec2(cp.x + is * 0.28f, p.y + is * 0.08f), col, thickness);
+            break;
+        case IconType::ScaleAxis:
+            dl->AddRect(ImVec2(p.x + is * 0.24f, p.y + is * 0.24f), ImVec2(p.x + is * 0.72f, p.y + is * 0.72f), col, 2.0f, 0, thickness);
+            dl->AddRectFilled(ImVec2(p.x + is * 0.12f, p.y + is * 0.68f), ImVec2(p.x + is * 0.26f, p.y + is * 0.82f), col, 1.5f);
+            dl->AddRectFilled(ImVec2(p.x + is * 0.70f, p.y + is * 0.10f), ImVec2(p.x + is * 0.84f, p.y + is * 0.24f), col, 1.5f);
+            break;
+        case IconType::Gizmo:
+            dl->AddCircle(cp, is * 0.12f, col, 18, thickness);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.16f), ImVec2(cp.x, p.y + is * 0.84f), col, thickness * 0.9f);
+            dl->AddLine(ImVec2(p.x + is * 0.16f, cp.y), ImVec2(p.x + is * 0.84f, cp.y), col, thickness * 0.9f);
+            break;
+        case IconType::ViewSolid:
+            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(126, 132, 142, 190), 32);
+            dl->AddCircleFilled(ImVec2(cp.x - is * 0.12f, cp.y - is * 0.12f), is * 0.14f, IM_COL32(255, 255, 255, 68), 18);
+            dl->AddCircleFilled(ImVec2(cp.x + is * 0.10f, cp.y + is * 0.11f), is * 0.24f, IM_COL32(36, 40, 48, 96), 20);
+            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
+            dl->AddLine(ImVec2(cp.x - is * 0.24f, cp.y), ImVec2(cp.x + is * 0.24f, cp.y), IM_COL32(220, 224, 230, 120), thickness * 0.75f);
+            dl->AddLine(ImVec2(cp.x - is * 0.08f, cp.y - is * 0.24f), ImVec2(cp.x - is * 0.08f, cp.y + is * 0.24f), IM_COL32(220, 224, 230, 105), thickness * 0.75f);
+            dl->AddLine(ImVec2(cp.x + is * 0.08f, cp.y - is * 0.24f), ImVec2(cp.x + is * 0.08f, cp.y + is * 0.24f), IM_COL32(220, 224, 230, 105), thickness * 0.75f);
+            break;
+        case IconType::ViewMatcap:
+            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(152, 156, 168, 210), 32);
+            dl->AddCircleFilled(ImVec2(cp.x - is * 0.13f, cp.y - is * 0.13f), is * 0.15f, IM_COL32(255, 255, 255, 86), 18);
+            dl->AddCircleFilled(ImVec2(cp.x + is * 0.11f, cp.y + is * 0.12f), is * 0.24f, IM_COL32(52, 54, 62, 102), 20);
+            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
+            dl->AddBezierQuadratic(ImVec2(cp.x - is * 0.22f, cp.y + is * 0.10f), ImVec2(cp.x, cp.y + is * 0.25f), ImVec2(cp.x + is * 0.22f, cp.y + is * 0.10f), IM_COL32(235, 238, 244, 118), thickness * 0.8f);
+            break;
+        case IconType::ViewPreview:
+            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(118, 126, 136, 182), 32);
+            dl->AddCircleFilled(ImVec2(cp.x + is * 0.08f, cp.y), is * 0.32f, IM_COL32(84, 168, 150, 138), 26);
+            dl->AddCircleFilled(ImVec2(cp.x - is * 0.11f, cp.y - is * 0.11f), is * 0.13f, IM_COL32(255, 255, 255, 68), 16);
+            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
+            dl->AddLine(ImVec2(cp.x, cp.y - is * 0.26f), ImVec2(cp.x, cp.y + is * 0.26f), IM_COL32(236, 240, 246, 112), thickness * 0.8f);
+            break;
+        case IconType::ViewRendered:
+            dl->AddCircleFilled(cp, is * 0.40f, IM_COL32(72, 138, 255, 200), 32);
+            dl->AddCircleFilled(ImVec2(cp.x + is * 0.08f, cp.y + is * 0.06f), is * 0.28f, IM_COL32(242, 144, 72, 144), 22);
+            dl->AddCircleFilled(ImVec2(cp.x - is * 0.13f, cp.y - is * 0.13f), is * 0.14f, IM_COL32(255, 255, 255, 96), 18);
+            dl->AddCircle(cp, is * 0.40f, col, 28, thickness);
+            dl->AddBezierQuadratic(ImVec2(cp.x - is * 0.22f, cp.y + is * 0.12f), ImVec2(cp.x + is * 0.02f, cp.y + is * 0.26f), ImVec2(cp.x + is * 0.24f, cp.y + is * 0.04f), IM_COL32(255, 244, 210, 120), thickness * 0.78f);
+            break;
+        case IconType::CameraHud:
+            dl->AddRect(ImVec2(p.x + is * 0.18f, p.y + is * 0.24f), ImVec2(p.x + is * 0.82f, p.y + is * 0.76f), col, 2.0f, 0, thickness);
+            dl->AddCircle(ImVec2(p.x + is * 0.34f, p.y + is * 0.40f), is * 0.04f, col, 10, thickness * 0.8f);
+            dl->AddLine(ImVec2(p.x + is * 0.24f, p.y + is * 0.62f), ImVec2(p.x + is * 0.76f, p.y + is * 0.62f), col, thickness * 0.85f);
+            break;
+        case IconType::ViewOverlays:
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), ImVec2(p.x + is * 0.18f, p.y + is * 0.28f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.40f, p.y + is * 0.78f), ImVec2(p.x + is * 0.40f, p.y + is * 0.18f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.62f, p.y + is * 0.78f), ImVec2(p.x + is * 0.62f, p.y + is * 0.44f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.84f, p.y + is * 0.78f), ImVec2(p.x + is * 0.84f, p.y + is * 0.12f), col, thickness);
+            break;
+        case IconType::PivotEdit:
+            dl->AddCircle(cp, is * 0.08f, col, 12, thickness);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.16f), ImVec2(cp.x, p.y + is * 0.84f), col, thickness * 0.85f);
+            dl->AddLine(ImVec2(p.x + is * 0.16f, cp.y), ImVec2(p.x + is * 0.84f, cp.y), col, thickness * 0.85f);
+            break;
+        case IconType::PivotCenter:
+            dl->AddCircle(cp, is * 0.08f, col, 12, thickness);
+            dl->AddCircle(cp, is * 0.24f, col, 18, thickness * 0.85f);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.08f), ImVec2(cp.x, p.y + is * 0.18f), col, thickness * 0.8f);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.92f), ImVec2(cp.x, p.y + is * 0.82f), col, thickness * 0.8f);
+            dl->AddLine(ImVec2(p.x + is * 0.08f, cp.y), ImVec2(p.x + is * 0.18f, cp.y), col, thickness * 0.8f);
+            dl->AddLine(ImVec2(p.x + is * 0.92f, cp.y), ImVec2(p.x + is * 0.82f, cp.y), col, thickness * 0.8f);
+            break;
+        case IconType::Sensitivity:
+            dl->AddCircle(cp, is * 0.24f, col, 24, thickness);
+            dl->AddLine(cp, ImVec2(cp.x + is * 0.16f, cp.y - is * 0.08f), col, thickness * 1.1f);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.16f), ImVec2(cp.x, p.y + is * 0.22f), col, thickness * 0.8f);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.84f), ImVec2(cp.x, p.y + is * 0.78f), col, thickness * 0.8f);
+            break;
+        case IconType::Settings:
+            dl->AddLine(ImVec2(p.x + is * 0.22f, p.y + is * 0.34f), ImVec2(p.x + is * 0.78f, p.y + is * 0.34f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.22f, p.y + is * 0.50f), ImVec2(p.x + is * 0.78f, p.y + is * 0.50f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.22f, p.y + is * 0.66f), ImVec2(p.x + is * 0.78f, p.y + is * 0.66f), col, thickness);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.38f, p.y + is * 0.34f), is * 0.07f, col, 12);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.62f, p.y + is * 0.50f), is * 0.07f, col, 12);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.46f, p.y + is * 0.66f), is * 0.07f, col, 12);
+            break;
+        case IconType::Play:
+            dl->AddTriangleFilled(ImVec2(p.x + is*0.34f, p.y + is*0.22f),
+                                  ImVec2(p.x + is*0.34f, p.y + is*0.78f),
+                                  ImVec2(p.x + is*0.78f, p.y + is*0.50f),
+                                  col);
+            break;
+        case IconType::Pause:
+            dl->AddRectFilled(ImVec2(p.x + is*0.28f, p.y + is*0.20f), ImVec2(p.x + is*0.44f, p.y + is*0.80f), col, 2.0f);
+            dl->AddRectFilled(ImVec2(p.x + is*0.56f, p.y + is*0.20f), ImVec2(p.x + is*0.72f, p.y + is*0.80f), col, 2.0f);
+            break;
+        case IconType::Stop:
+            dl->AddRectFilled(ImVec2(p.x + is*0.26f, p.y + is*0.26f), ImVec2(p.x + is*0.74f, p.y + is*0.74f), col, 3.0f);
+            break;
+        case IconType::Duplicate:
+            dl->AddRect(ImVec2(p.x + is*0.18f, p.y + is*0.24f), ImVec2(p.x + is*0.58f, p.y + is*0.64f), col, 2.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is*0.38f, p.y + is*0.38f), ImVec2(p.x + is*0.78f, p.y + is*0.78f), col, 2.0f, 0, thickness);
+            break;
+        case IconType::Help:
+            dl->AddCircle(cp, is*0.34f, col, 20, thickness);
+            dl->AddBezierQuadratic(ImVec2(cp.x - is*0.10f, p.y + is*0.34f),
+                                   ImVec2(cp.x - is*0.02f, p.y + is*0.16f),
+                                   ImVec2(cp.x + is*0.14f, p.y + is*0.28f),
+                                   col, thickness);
+            dl->AddLine(ImVec2(cp.x + is*0.10f, p.y + is*0.44f), ImVec2(cp.x + is*0.02f, p.y + is*0.58f), col, thickness);
+            dl->AddCircleFilled(ImVec2(cp.x, p.y + is*0.74f), thickness * 1.15f, col);
+            break;
+        case IconType::AddKey:
+            dl->AddRect(ImVec2(p.x + is*0.16f, p.y + is*0.42f), ImVec2(p.x + is*0.44f, p.y + is*0.58f), col, 2.0f, 0, thickness);
+            dl->AddCircle(cp, is*0.14f, col, 16, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.28f), ImVec2(p.x + is*0.70f, p.y + is*0.72f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.48f, cp.y), ImVec2(p.x + is*0.92f, cp.y), col, thickness);
+            break;
+        case IconType::RemoveKey:
+            dl->AddRect(ImVec2(p.x + is*0.16f, p.y + is*0.42f), ImVec2(p.x + is*0.44f, p.y + is*0.58f), col, 2.0f, 0, thickness);
+            dl->AddCircle(cp, is*0.14f, col, 16, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.48f, cp.y), ImVec2(p.x + is*0.92f, cp.y), col, thickness);
+            break;
+        case IconType::PaintTool:
+            dl->AddLine(ImVec2(p.x + is*0.22f, p.y + is*0.80f), ImVec2(p.x + is*0.64f, p.y + is*0.38f), col, thickness * 1.8f);
+            dl->AddRect(ImVec2(p.x + is*0.58f, p.y + is*0.20f), ImVec2(p.x + is*0.82f, p.y + is*0.42f), col, 2.0f, 0, thickness);
+            dl->AddQuadFilled(ImVec2(p.x + is*0.12f, p.y + is*0.90f),
+                              ImVec2(p.x + is*0.24f, p.y + is*0.70f),
+                              ImVec2(p.x + is*0.34f, p.y + is*0.80f),
+                              ImVec2(p.x + is*0.24f, p.y + is*0.98f), col);
+            break;
+        case IconType::EraseTool:
+            dl->AddQuadFilled(ImVec2(p.x + is*0.18f, p.y + is*0.68f),
+                              ImVec2(p.x + is*0.38f, p.y + is*0.34f),
+                              ImVec2(p.x + is*0.74f, p.y + is*0.52f),
+                              ImVec2(p.x + is*0.54f, p.y + is*0.86f), col);
+            dl->AddLine(ImVec2(p.x + is*0.54f, p.y + is*0.86f), ImVec2(p.x + is*0.76f, p.y + is*0.86f), col, thickness);
+            break;
+        case IconType::SoftenTool:
+            dl->AddBezierQuadratic(ImVec2(p.x + is*0.14f, p.y + is*0.62f),
+                                   ImVec2(cp.x, p.y + is*0.24f),
+                                   ImVec2(p.x + is*0.86f, p.y + is*0.62f),
+                                   col, thickness);
+            dl->AddBezierQuadratic(ImVec2(p.x + is*0.18f, p.y + is*0.76f),
+                                   ImVec2(cp.x, p.y + is*0.42f),
+                                   ImVec2(p.x + is*0.82f, p.y + is*0.76f),
+                                   col, thickness * 0.9f);
+            break;
+        case IconType::StampTool:
+            dl->AddRect(ImVec2(p.x + is*0.24f, p.y + is*0.40f), ImVec2(p.x + is*0.74f, p.y + is*0.78f), col, 2.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is*0.38f, p.y + is*0.18f), ImVec2(p.x + is*0.60f, p.y + is*0.38f), col, 2.0f, 0, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.49f, p.y + is*0.38f), ImVec2(p.x + is*0.49f, p.y + is*0.24f), col, thickness);
+            break;
+        case IconType::FillTool:
+            dl->AddRect(ImVec2(p.x + is*0.22f, p.y + is*0.20f), ImVec2(p.x + is*0.70f, p.y + is*0.50f), col, 2.0f, 0, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.70f, p.y + is*0.50f), ImVec2(p.x + is*0.82f, p.y + is*0.62f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.82f, p.y + is*0.62f), ImVec2(p.x + is*0.54f, p.y + is*0.88f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.54f, p.y + is*0.88f), ImVec2(p.x + is*0.42f, p.y + is*0.76f), col, thickness);
+            break;
+        case IconType::CloneTool:
+            dl->AddCircle(ImVec2(p.x + is*0.38f, p.y + is*0.42f), is*0.16f, col, 18, thickness);
+            dl->AddCircle(ImVec2(p.x + is*0.62f, p.y + is*0.58f), is*0.16f, col, 18, thickness);
+            dl->AddLine(ImVec2(p.x + is*0.52f, p.y + is*0.48f), ImVec2(p.x + is*0.48f, p.y + is*0.52f), col, thickness);
+            break;
+        case IconType::SprayTool:
+            dl->AddLine(ImVec2(p.x + is*0.24f, p.y + is*0.74f), ImVec2(p.x + is*0.50f, p.y + is*0.52f), col, thickness * 1.5f);
+            dl->AddLine(ImVec2(p.x + is*0.50f, p.y + is*0.52f), ImVec2(p.x + is*0.72f, p.y + is*0.30f), col, thickness * 1.5f);
+            dl->AddCircleFilled(ImVec2(p.x + is*0.66f, p.y + is*0.22f), thickness * 1.15f, col);
+            dl->AddCircleFilled(ImVec2(p.x + is*0.82f, p.y + is*0.28f), thickness * 1.05f, col);
+            dl->AddCircleFilled(ImVec2(p.x + is*0.76f, p.y + is*0.42f), thickness * 1.00f, col);
+            dl->AddCircleFilled(ImVec2(p.x + is*0.88f, p.y + is*0.46f), thickness * 1.15f, col);
+            break;
+        case IconType::GrabTool:
+            dl->AddCircle(cp, is * 0.22f, col, 20, thickness);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.06f), ImVec2(cp.x, p.y + is * 0.30f), col, thickness);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.70f), ImVec2(cp.x, p.y + is * 0.94f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.06f, cp.y), ImVec2(p.x + is * 0.30f, cp.y), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.70f, cp.y), ImVec2(p.x + is * 0.94f, cp.y), col, thickness);
+            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.02f), ImVec2(cp.x - is*0.05f, p.y + is * 0.12f), ImVec2(cp.x + is*0.05f, p.y + is * 0.12f), col);
+            break;
+        case IconType::InflateTool:
+            dl->AddCircle(cp, is * 0.30f, col, 24, thickness);
+            dl->AddLine(ImVec2(cp.x, cp.y - is * 0.16f), ImVec2(cp.x, cp.y + is * 0.16f), col, thickness);
+            dl->AddLine(ImVec2(cp.x - is * 0.16f, cp.y), ImVec2(cp.x + is * 0.16f, cp.y), col, thickness);
+            break;
+        case IconType::SmoothTool:
+            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.14f, p.y + is * 0.60f),
+                                   ImVec2(cp.x, p.y + is * 0.22f),
+                                   ImVec2(p.x + is * 0.86f, p.y + is * 0.60f),
+                                   col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.16f, p.y + is * 0.74f),
+                        ImVec2(p.x + is * 0.84f, p.y + is * 0.74f),
+                        col, thickness);
+            break;
+        case IconType::FlattenTool:
+            dl->AddLine(ImVec2(p.x + is * 0.14f, p.y + is * 0.70f),
+                        ImVec2(p.x + is * 0.86f, p.y + is * 0.70f),
+                        col, thickness * 1.3f);
+            dl->AddTriangle(ImVec2(p.x + is * 0.24f, p.y + is * 0.56f),
+                            ImVec2(cp.x, p.y + is * 0.22f),
+                            ImVec2(p.x + is * 0.76f, p.y + is * 0.56f),
+                            col, thickness);
+            break;
+        case IconType::DrawTool:
+            dl->AddLine(ImVec2(p.x + is * 0.24f, p.y + is * 0.82f),
+                        ImVec2(p.x + is * 0.66f, p.y + is * 0.40f),
+                        col, thickness * 1.5f);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.68f, p.y + is * 0.18f),
+                                  ImVec2(p.x + is * 0.84f, p.y + is * 0.42f),
+                                  ImVec2(p.x + is * 0.56f, p.y + is * 0.34f),
+                                  col);
+            break;
+        case IconType::LayerTool:
+            dl->AddRect(ImVec2(p.x + is * 0.18f, p.y + is * 0.28f),
+                        ImVec2(p.x + is * 0.72f, p.y + is * 0.46f),
+                        col, 2.0f, 0, thickness);
+            dl->AddRect(ImVec2(p.x + is * 0.28f, p.y + is * 0.50f),
+                        ImVec2(p.x + is * 0.82f, p.y + is * 0.68f),
+                        col, 2.0f, 0, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.78f, p.y + is * 0.18f),
+                        ImVec2(p.x + is * 0.92f, p.y + is * 0.32f),
+                        col, thickness * 1.2f);
+            dl->AddLine(ImVec2(p.x + is * 0.78f, p.y + is * 0.18f),
+                        ImVec2(p.x + is * 0.86f, p.y + is * 0.08f),
+                        col, thickness * 1.2f);
+            break;
+        case IconType::PinchTool:
+            dl->AddLine(ImVec2(p.x + is * 0.18f, cp.y), ImVec2(p.x + is * 0.82f, cp.y), col, thickness);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.18f, cp.y),
+                                  ImVec2(p.x + is * 0.34f, cp.y - is * 0.12f),
+                                  ImVec2(p.x + is * 0.34f, cp.y + is * 0.12f),
+                                  col);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.82f, cp.y),
+                                  ImVec2(p.x + is * 0.66f, cp.y - is * 0.12f),
+                                  ImVec2(p.x + is * 0.66f, cp.y + is * 0.12f),
+                                  col);
+            break;
+        case IconType::ClayTool:
+            dl->AddRect(ImVec2(p.x + is * 0.16f, p.y + is * 0.56f),
+                        ImVec2(p.x + is * 0.84f, p.y + is * 0.78f),
+                        col, 3.0f, 0, thickness);
+            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.18f, p.y + is * 0.56f),
+                                   ImVec2(cp.x, p.y + is * 0.18f),
+                                   ImVec2(p.x + is * 0.82f, p.y + is * 0.56f),
+                                   col, thickness);
+            break;
+        case IconType::ClayStripsTool:
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.34f), ImVec2(p.x + is * 0.82f, p.y + is * 0.34f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.52f), ImVec2(p.x + is * 0.82f, p.y + is * 0.52f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.70f), ImVec2(p.x + is * 0.82f, p.y + is * 0.70f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.28f, p.y + is * 0.24f), ImVec2(p.x + is * 0.28f, p.y + is * 0.80f), col, thickness * 0.7f);
+            dl->AddLine(ImVec2(p.x + is * 0.54f, p.y + is * 0.24f), ImVec2(p.x + is * 0.54f, p.y + is * 0.80f), col, thickness * 0.7f);
+            break;
+        case IconType::CreaseTool:
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.30f), ImVec2(cp.x, p.y + is * 0.76f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.82f, p.y + is * 0.30f), ImVec2(cp.x, p.y + is * 0.76f), col, thickness);
+            dl->AddLine(ImVec2(cp.x, p.y + is * 0.20f), ImVec2(cp.x, p.y + is * 0.88f), col, thickness);
+            break;
+        case IconType::ScrapeTool:
+            dl->AddLine(ImVec2(p.x + is * 0.16f, p.y + is * 0.72f), ImVec2(p.x + is * 0.84f, p.y + is * 0.52f), col, thickness * 1.5f);
+            dl->AddRect(ImVec2(p.x + is * 0.30f, p.y + is * 0.22f), ImVec2(p.x + is * 0.62f, p.y + is * 0.36f), col, 2.0f, 0, thickness);
+            break;
+        case IconType::VertexMode:
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.22f, p.y + is * 0.72f), is * 0.10f, col, 14);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.50f, p.y + is * 0.24f), is * 0.10f, col, 14);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.78f, p.y + is * 0.72f), is * 0.10f, col, 14);
+            dl->AddLine(ImVec2(p.x + is * 0.22f, p.y + is * 0.72f), ImVec2(p.x + is * 0.50f, p.y + is * 0.24f), col, thickness * 0.8f);
+            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.24f), ImVec2(p.x + is * 0.78f, p.y + is * 0.72f), col, thickness * 0.8f);
+            break;
+        case IconType::EdgeMode:
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), ImVec2(p.x + is * 0.50f, p.y + is * 0.22f), col, thickness * 1.3f);
+            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.22f), ImVec2(p.x + is * 0.82f, p.y + is * 0.78f), col, thickness * 1.3f);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), thickness * 0.9f, col, 10);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.82f, p.y + is * 0.78f), thickness * 0.9f, col, 10);
+            break;
+        case IconType::FaceMode:
+            dl->AddQuad(ImVec2(p.x + is * 0.24f, p.y + is * 0.26f),
+                        ImVec2(p.x + is * 0.76f, p.y + is * 0.20f),
+                        ImVec2(p.x + is * 0.82f, p.y + is * 0.74f),
+                        ImVec2(p.x + is * 0.18f, p.y + is * 0.80f),
+                        col, thickness);
+            break;
+        case IconType::AddFace:
+            dl->AddQuad(ImVec2(p.x + is * 0.18f, p.y + is * 0.30f),
+                        ImVec2(p.x + is * 0.62f, p.y + is * 0.24f),
+                        ImVec2(p.x + is * 0.68f, p.y + is * 0.68f),
+                        ImVec2(p.x + is * 0.14f, p.y + is * 0.74f),
+                        col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.74f, cp.y), ImVec2(p.x + is * 0.94f, cp.y), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.84f, p.y + is * 0.30f), ImVec2(p.x + is * 0.84f, p.y + is * 0.70f), col, thickness);
+            break;
+        case IconType::MergeVertices:
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.24f, cp.y), is * 0.09f, col, 12);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.76f, cp.y), is * 0.09f, col, 12);
+            dl->AddLine(ImVec2(p.x + is * 0.34f, cp.y), ImVec2(p.x + is * 0.66f, cp.y), col, thickness);
+            dl->AddTriangleFilled(ImVec2(cp.x, p.y + is * 0.34f),
+                                  ImVec2(cp.x - is * 0.08f, p.y + is * 0.52f),
+                                  ImVec2(cp.x + is * 0.08f, p.y + is * 0.52f),
+                                  col);
+            break;
+        case IconType::WeldVertices:
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.28f, p.y + is * 0.68f), is * 0.08f, col, 12);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.50f, p.y + is * 0.34f), is * 0.08f, col, 12);
+            dl->AddCircleFilled(ImVec2(p.x + is * 0.74f, p.y + is * 0.68f), is * 0.08f, col, 12);
+            dl->AddLine(ImVec2(p.x + is * 0.28f, p.y + is * 0.68f), ImVec2(p.x + is * 0.50f, p.y + is * 0.34f), col, thickness * 0.8f);
+            dl->AddLine(ImVec2(p.x + is * 0.74f, p.y + is * 0.68f), ImVec2(p.x + is * 0.50f, p.y + is * 0.34f), col, thickness * 0.8f);
+            dl->AddCircle(cp, is * 0.30f, col, 20, thickness * 0.8f);
+            break;
+        case IconType::DissolveTopology:
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.24f), ImVec2(p.x + is * 0.82f, p.y + is * 0.78f), col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.18f, p.y + is * 0.78f), ImVec2(p.x + is * 0.82f, p.y + is * 0.24f), col, thickness);
+            dl->AddCircle(cp, is * 0.12f, col, 14, thickness);
+            break;
+        case IconType::LoopCutTool:
+            dl->AddLine(ImVec2(p.x + is * 0.20f, p.y + is * 0.26f), ImVec2(p.x + is * 0.20f, p.y + is * 0.78f), col, thickness * 0.9f);
+            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.20f), ImVec2(p.x + is * 0.50f, p.y + is * 0.84f), col, thickness * 1.5f);
+            dl->AddLine(ImVec2(p.x + is * 0.80f, p.y + is * 0.26f), ImVec2(p.x + is * 0.80f, p.y + is * 0.78f), col, thickness * 0.9f);
+            dl->AddTriangleFilled(ImVec2(p.x + is * 0.50f, p.y + is * 0.08f),
+                                  ImVec2(p.x + is * 0.42f, p.y + is * 0.24f),
+                                  ImVec2(p.x + is * 0.58f, p.y + is * 0.24f),
+                                  col);
+            break;
+        case IconType::ExtrudeFaceTool:
+            dl->AddQuad(ImVec2(p.x + is * 0.18f, p.y + is * 0.58f),
+                        ImVec2(p.x + is * 0.54f, p.y + is * 0.52f),
+                        ImVec2(p.x + is * 0.58f, p.y + is * 0.84f),
+                        ImVec2(p.x + is * 0.12f, p.y + is * 0.88f),
+                        col, thickness);
+            dl->AddQuad(ImVec2(p.x + is * 0.34f, p.y + is * 0.22f),
+                        ImVec2(p.x + is * 0.70f, p.y + is * 0.16f),
+                        ImVec2(p.x + is * 0.74f, p.y + is * 0.48f),
+                        ImVec2(p.x + is * 0.28f, p.y + is * 0.54f),
+                        col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.20f, p.y + is * 0.58f), ImVec2(p.x + is * 0.36f, p.y + is * 0.22f), col, thickness * 0.9f);
+            dl->AddLine(ImVec2(p.x + is * 0.54f, p.y + is * 0.52f), ImVec2(p.x + is * 0.70f, p.y + is * 0.16f), col, thickness * 0.9f);
+            break;
+        case IconType::DeleteFaceTool:
+            dl->AddQuad(ImVec2(p.x + is * 0.20f, p.y + is * 0.26f),
+                        ImVec2(p.x + is * 0.78f, p.y + is * 0.22f),
+                        ImVec2(p.x + is * 0.82f, p.y + is * 0.78f),
+                        ImVec2(p.x + is * 0.16f, p.y + is * 0.82f),
+                        col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.28f, p.y + is * 0.34f), ImVec2(p.x + is * 0.72f, p.y + is * 0.68f), col, thickness * 1.2f);
+            dl->AddLine(ImVec2(p.x + is * 0.72f, p.y + is * 0.34f), ImVec2(p.x + is * 0.28f, p.y + is * 0.68f), col, thickness * 1.2f);
+            break;
+        case IconType::ShadeFlatTool:
+            dl->AddTriangle(ImVec2(p.x + is * 0.18f, p.y + is * 0.76f),
+                            ImVec2(p.x + is * 0.50f, p.y + is * 0.22f),
+                            ImVec2(p.x + is * 0.82f, p.y + is * 0.76f),
+                            col, thickness);
+            dl->AddLine(ImVec2(p.x + is * 0.50f, p.y + is * 0.22f), ImVec2(p.x + is * 0.50f, p.y + is * 0.76f), col, thickness);
+            break;
+        case IconType::ShadeSmoothTool:
+            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.16f, p.y + is * 0.72f),
+                                   ImVec2(cp.x, p.y + is * 0.22f),
+                                   ImVec2(p.x + is * 0.84f, p.y + is * 0.72f),
+                                   col, thickness * 1.1f);
+            dl->AddBezierQuadratic(ImVec2(p.x + is * 0.20f, p.y + is * 0.56f),
+                                   ImVec2(cp.x, p.y + is * 0.38f),
+                                   ImVec2(p.x + is * 0.80f, p.y + is * 0.56f),
+                                   col, thickness * 0.9f);
             break;
         case IconType::Water:
             for(int i=0; i<3; i++) {
@@ -760,6 +1160,19 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
             dl->AddRect(ImVec2(p.x+is*0.6f, p.y+is*0.6f), ImVec2(p.x+is, p.y+is*0.9f), col, 1.0f, 0, thickness);
             dl->AddLine(ImVec2(p.x+is*0.4f, p.y+is*0.25f), ImVec2(p.x+is*0.6f, p.y+is*0.75f), col, thickness);
             break;
+        case UIWidgets::IconType::Assets:
+            dl->AddRect(ImVec2(p.x + is*0.10f, p.y + is*0.28f), ImVec2(p.x + is*0.90f, p.y + is*0.82f), col, 2.0f, 0, thickness);
+            {
+                ImVec2 folderTab[5] = {
+                    ImVec2(p.x + is*0.10f, p.y + is*0.34f),
+                    ImVec2(p.x + is*0.22f, p.y + is*0.16f),
+                    ImVec2(p.x + is*0.46f, p.y + is*0.16f),
+                    ImVec2(p.x + is*0.56f, p.y + is*0.28f),
+                    ImVec2(p.x + is*0.90f, p.y + is*0.28f)
+                };
+                dl->AddPolyline(folderTab, 5, col, false, thickness);
+            }
+            break;
         case UIWidgets::IconType::LightPoint:
             dl->AddCircleFilled(cp, is*0.15f, col);
             for(int i=0; i<8; i++) {
@@ -788,31 +1201,154 @@ void DrawIcon(IconType type, ImVec2 p, float s, ImU32 col, float thickness) {
     }
 }
 
+bool IconActionButton(const char* id,
+                      UIWidgets::IconType icon,
+                      const char* label,
+                      bool active,
+                      const ImVec4& accent,
+                      const ImVec2& requested_size,
+                      const char* tooltip,
+                      bool enabled) {
+    const ImVec2 text_size = (label && label[0] != '\0') ? ImGui::CalcTextSize(label) : ImVec2(0.0f, 0.0f);
+    const ImVec2 size(
+        requested_size.x > 0.0f ? requested_size.x : (56.0f + text_size.x),
+        requested_size.y > 0.0f ? requested_size.y : 34.0f);
+
+    if (!enabled) ImGui::BeginDisabled();
+    ImGui::PushID(id);
+
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("##iconAction", size);
+    const bool hovered = ImGui::IsItemHovered();
+    const float blend = active ? 1.0f : (hovered ? 0.72f : 0.0f);
+
+    const ImVec4 base(0.12f, 0.135f, 0.16f, enabled ? 0.94f : 0.50f);
+    const ImVec4 bg(
+        base.x + (accent.x - base.x) * (0.14f + 0.12f * blend),
+        base.y + (accent.y - base.y) * (0.12f + 0.10f * blend),
+        base.z + (accent.z - base.z) * (0.10f + 0.08f * blend),
+        active ? 0.98f : (enabled ? 0.92f : 0.50f));
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), ImGui::ColorConvertFloat4ToU32(bg), 10.0f);
+    dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+                ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, active ? 0.58f : (hovered ? 0.32f : 0.14f))),
+                10.0f, 0, active ? 1.4f : 1.0f);
+    dl->AddRectFilled(ImVec2(pos.x + 1.0f, pos.y + 1.0f),
+                      ImVec2(pos.x + size.x - 1.0f, pos.y + size.y * 0.50f),
+                      ImGui::ColorConvertFloat4ToU32(ImVec4(1.0f, 1.0f, 1.0f, hovered ? 0.028f : 0.016f)),
+                      9.0f, ImDrawFlags_RoundCornersTop);
+
+    const bool has_label = label && label[0] != '\0';
+    const float icon_size = has_label
+        ? ((std::min)(size.y - 12.0f, 24.0f))
+        : ((std::min)(size.x, size.y) - 10.0f);
+    const ImVec2 icon_pos = has_label
+        ? ImVec2(pos.x + 8.0f, pos.y + (size.y - icon_size) * 0.5f)
+        : ImVec2(pos.x + (size.x - icon_size) * 0.5f, pos.y + (size.y - icon_size) * 0.5f);
+    const ImVec4 icon_color = active
+        ? ImVec4((std::min)(1.0f, accent.x + 0.12f), (std::min)(1.0f, accent.y + 0.12f), (std::min)(1.0f, accent.z + 0.12f), enabled ? 1.0f : 0.50f)
+        : ImLerp(ImVec4(0.60f, 0.64f, 0.70f, enabled ? 1.0f : 0.45f), accent, hovered ? 0.72f : 0.0f);
+    DrawIcon(icon, icon_pos, icon_size, ImGui::ColorConvertFloat4ToU32(icon_color), 1.7f);
+
+    if (has_label) {
+        dl->AddText(ImVec2(icon_pos.x + icon_size + 8.0f, pos.y + (size.y - text_size.y) * 0.5f),
+                    ImGui::ColorConvertFloat4ToU32(active ? ImVec4(0.96f, 0.98f, 1.0f, enabled ? 1.0f : 0.50f)
+                                                          : ImVec4(0.80f, 0.84f, 0.90f, enabled ? 0.96f : 0.45f)),
+                    label);
+    }
+
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        if (tooltip && tooltip[0] != '\0') {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
+            ImGui::TextUnformatted(tooltip);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
+
+    ImGui::PopID();
+    if (!enabled) ImGui::EndDisabled();
+    return clicked && enabled;
+}
+
+void PushControlSurfaceStyle(const ImVec4& accent) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 8.0f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.135f, 0.16f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.22f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.18f, 0.21f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(accent.x, accent.y, accent.z, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4((std::min)(1.0f, accent.x + 0.10f), (std::min)(1.0f, accent.y + 0.10f), (std::min)(1.0f, accent.z + 0.10f), 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4((std::min)(1.0f, accent.x + 0.10f), (std::min)(1.0f, accent.y + 0.10f), (std::min)(1.0f, accent.z + 0.10f), 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.155f, 0.18f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.20f, 0.24f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.22f, 0.24f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.18f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.16f, 0.19f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.20f, 0.24f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+}
+
+void PopControlSurfaceStyle() {
+    ImGui::PopStyleColor(13);
+    ImGui::PopStyleVar(5);
+}
+
 bool HorizontalTab(const char* label, UIWidgets::IconType icon, bool active, float width) {
     ImGuiIO& io = ImGui::GetIO();
     ImGuiStyle& style = ImGui::GetStyle();
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    static std::unordered_map<ImGuiID, float> hover_anim;
 
     ImVec2 size = ImVec2(width > 0 ? width : ImGui::CalcTextSize(label).x + 44.0f, 22.0f);
     ImVec2 p = ImGui::GetCursorScreenPos();
     
     ImGui::PushID(label);
+    const ImGuiID tab_id = ImGui::GetID("##htab");
     bool clicked = ImGui::InvisibleButton("##htab", size);
     bool hovered = ImGui::IsItemHovered();
     ImGui::PopID();
 
+    float& anim = hover_anim[tab_id];
+    const float target_hover = (hovered || active) ? 1.0f : 0.0f;
+    const float anim_speed = 12.0f * io.DeltaTime;
+    anim += (target_hover - anim) * ImClamp(anim_speed, 0.0f, 1.0f);
+
+    auto getHoverTint = [&](UIWidgets::IconType iconType) -> ImVec4 {
+        switch (iconType) {
+            case UIWidgets::IconType::Timeline:  return ImVec4(0.98f, 0.78f, 0.36f, 1.0f);
+            case UIWidgets::IconType::Console:   return ImVec4(0.52f, 0.90f, 0.62f, 1.0f);
+            case UIWidgets::IconType::Graph:     return ImVec4(0.56f, 0.84f, 1.00f, 1.0f);
+            case UIWidgets::IconType::AnimGraph: return ImVec4(0.98f, 0.58f, 0.82f, 1.0f);
+            case UIWidgets::IconType::Assets:    return ImVec4(1.00f, 0.72f, 0.42f, 1.0f);
+            default:                             return ImVec4(0.50f, 0.92f, 0.72f, 1.0f);
+        }
+    };
+
     if (active) {
         dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.08f)), 3.0f);
         dl->AddRectFilled(ImVec2(p.x + 4, p.y + size.y - 2), ImVec2(p.x + size.x - 4, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)), 1.0f);
-    } else if (hovered) {
-        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.04f)), 3.0f);
+    } else if (anim > 0.01f) {
+        dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,0.04f * anim)), 3.0f);
     }
 
-    ImU32 iconCol = active ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.6f, 0.65f, 1.0f));
-    DrawIcon(icon, ImVec2(p.x + 8, p.y + 3), 16.0f, iconCol);
+    ImVec4 idleIcon(0.6f, 0.6f, 0.65f, 1.0f);
+    ImVec4 activeIcon(0.1f, 0.9f, 0.8f, 1.0f);
+    ImVec4 hoverIcon = getHoverTint(icon);
+    ImVec4 iconTint = active ? activeIcon : ImLerp(idleIcon, hoverIcon, anim);
+    const float iconSize = 16.0f + 2.0f * anim;
+    DrawIcon(icon, ImVec2(p.x + 8.0f - (iconSize - 16.0f) * 0.5f, p.y + 3.0f - (iconSize - 16.0f) * 0.5f), iconSize, ImGui::ColorConvertFloat4ToU32(iconTint), 1.5f + 0.25f * anim);
     
-    ImU32 textCol = active ? ImGui::ColorConvertFloat4ToU32(ImVec4(1,1,1,1)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.6f, 0.6f, 0.65f, 1.0f));
-    dl->AddText(ImVec2(p.x + 30, p.y + 3), textCol, label);
+    ImVec4 idleText(0.6f, 0.6f, 0.65f, 1.0f);
+    ImVec4 hoverText = getHoverTint(icon);
+    ImVec4 textTint = active ? ImVec4(1,1,1,1) : ImLerp(idleText, hoverText, anim * 0.85f);
+    dl->AddText(ImVec2(p.x + 30, p.y + 3), ImGui::ColorConvertFloat4ToU32(textTint), label);
 
     if (active) {
         // Vertical Bridge Indicator (Alignment with sidebar language)

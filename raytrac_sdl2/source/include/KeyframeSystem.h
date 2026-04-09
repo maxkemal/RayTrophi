@@ -106,7 +106,7 @@ struct MaterialKeyframe {
         specular = 0.5f;
         specular_tint = 0.0f;
         clearcoat_roughness = 0.1f;
-        normal_strength = 1.0f;
+        normal_strength = gpu.normal_strength;
         emission_strength = 1.0f;
     }
     
@@ -124,6 +124,7 @@ struct MaterialKeyframe {
         gpu.anisotropic = anisotropic;
         gpu.sheen = sheen;
         gpu.sheen_tint = sheen_tint;
+        gpu.normal_strength = normal_strength;
     }
     
     static MaterialKeyframe lerp(const MaterialKeyframe& a, const MaterialKeyframe& b, float t) {
@@ -407,6 +408,7 @@ struct WorldKeyframe {
     bool has_sun_size = false;
     
     // Atmosphere properties
+    bool has_atmosphere_intensity = false;
     bool has_air_density = false;
     bool has_dust_density = false;
     bool has_ozone_density = false;
@@ -457,6 +459,7 @@ struct WorldKeyframe {
     float sun_size = 0.545f;
     
     float air_density = 1.0f;
+    float atmosphere_intensity = 10.0f;
     float dust_density = 1.0f;
     float ozone_density = 1.0f;
     float humidity = 0.1f;
@@ -603,6 +606,16 @@ struct WorldKeyframe {
         }
         
         // ===== ATMOSPHERE PROPERTIES =====
+        // Atmosphere Intensity
+        result.has_atmosphere_intensity = a.has_atmosphere_intensity || b.has_atmosphere_intensity;
+        if (a.has_atmosphere_intensity && b.has_atmosphere_intensity) {
+            result.atmosphere_intensity = a.atmosphere_intensity + (b.atmosphere_intensity - a.atmosphere_intensity) * t;
+        } else if (a.has_atmosphere_intensity) {
+            result.atmosphere_intensity = a.atmosphere_intensity;
+        } else if (b.has_atmosphere_intensity) {
+            result.atmosphere_intensity = b.atmosphere_intensity;
+        }
+        
         // Air Density
         result.has_air_density = a.has_air_density || b.has_air_density;
         if (a.has_air_density && b.has_air_density) {

@@ -21,7 +21,9 @@
 
 // Serialization version - increment when format changes
 // v1: Initial material serialization
-static constexpr int MATERIAL_SERIALIZATION_VERSION = 1;
+// v2: PrincipledBSDF selected UV set
+// v3: PrincipledBSDF UV transform block (scale/offset/rotation/tiling/wrap)
+static constexpr int MATERIAL_SERIALIZATION_VERSION = 3;
 
 /**
  * @brief Centralized material management for memory optimization.

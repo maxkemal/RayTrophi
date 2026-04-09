@@ -255,35 +255,6 @@ __host__ __device__ inline float3 safe_normalize(const float3& v, const float3& 
     return v / sqrtf(len2);
 }
 
-__host__ __device__ inline float3 compute_shadow_normal(
-    const float3& geom_normal,
-    const float3& shading_normal,
-    const float3& ray_dir
-) {
-    float3 ng = safe_normalize(geom_normal, make_float3(0.0f, 1.0f, 0.0f));
-    float3 ns = safe_normalize(shading_normal, ng);
-
-    if (dot(ng, ray_dir) > 0.0f) ng = -ng;
-    if (dot(ns, ray_dir) > 0.0f) ns = -ns;
-
-    float3 blended = safe_normalize(ng + ns, ng);
-    if (dot(blended, ng) < 0.0f) {
-        blended = ng;
-    }
-    return blended;
-}
-
-__host__ __device__ inline float3 compute_cpu_like_shadow_normal(
-    const float3& geom_normal,
-    const float3& shading_normal,
-    const float3& ray_dir
-) {
-    float3 ng = safe_normalize(geom_normal, make_float3(0.0f, 1.0f, 0.0f));
-    float3 ns = safe_normalize(shading_normal, ng);
-    if (dot(ns, ray_dir) > 0.0f) ns = -ns;
-    return ns;
-}
-
 __host__ __device__ inline float compute_shadow_terminator_scale(
     const float3& geom_normal,
     const float3& shading_normal,
@@ -297,28 +268,6 @@ __host__ __device__ inline float compute_shadow_terminator_scale(
 
     float mismatch = (1.0f - geom_to_shade) * shade_light * (1.0f - geom_light);
     return 1.0f + 3.0f * mismatch;
-}
-
-__host__ __device__ inline float compute_shadow_terminator_visibility(
-    const float3& geom_normal,
-    const float3& shading_normal,
-    const float3& light_dir
-) {
-    float3 ng = safe_normalize(geom_normal, make_float3(0.0f, 1.0f, 0.0f));
-    float3 ns = safe_normalize(shading_normal, ng);
-    float geom_light = dot(ng, light_dir);
-    float shade_light = fmaxf(dot(ns, light_dir), 0.0f);
-    if (shade_light <= 1e-6f) return 0.0f;
-
-    float normal_agreement = clamp(dot(ng, ns), 0.0f, 1.0f);
-    if (normal_agreement > 0.995f) return 0.0f;
-    if (geom_light > 0.25f) return 0.0f;
-
-    float light_gap = clamp(shade_light - fmaxf(geom_light, 0.0f), 0.0f, 1.0f);
-    float t = clamp((geom_light + 0.05f) / 0.30f, 0.0f, 1.0f);
-    float terminator_band = 1.0f - (t * t * (3.0f - 2.0f * t));
-    float reopen = light_gap * terminator_band * (1.0f - normal_agreement) * 8.0f;
-    return clamp(reopen, 0.0f, 0.35f);
 }
 
 __host__ __device__ inline float compute_adaptive_shadow_tmin(

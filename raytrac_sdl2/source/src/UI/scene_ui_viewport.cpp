@@ -17,122 +17,313 @@
 #include "scene_data.h"   // Explicit include
 #include "Triangle.h"
 #include "imgui.h"
-#include "ProjectManager.h"
 #include "CameraPresets.h"
+#include "Backend/IViewportBackend.h"
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include "ProjectManager.h"
+
+extern bool g_hasVulkan;
+extern bool g_vulkan_rebuild_pending;
+extern bool g_viewport_raster_rebuild_pending;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
 // extern ProjectManager g_ProjectManager; - Removed to use Singleton access
 
 
 
 // ═════════════════════════════════════════════════════════════════════════════
-// VIEWPORT CONTROLS OVERLAY
+// VIEWPORT CONTROLS OVERLAY  (compact top-center header bar)
 // ═════════════════════════════════════════════════════════════════════════════
 void SceneUI::drawViewportControls(UIContext& ctx) {
     ImGuiIO& io = ImGui::GetIO();
+    SceneSelection& sel = ctx.selection;
 
-    // Positioning - right side, top aligned (with proper margin for visibility)
-    float margin_right = 8.0f;  // Proper margin from right edge
-    float menu_height = 19.0f;
-    float controls_width = 280.0f;  // Increased width to fit all controls including Median/Individual combo
-    ImVec2 window_pos(io.DisplaySize.x - controls_width - margin_right, menu_height); // Align to top of viewport
+    // ── Layout constants ──
+    const float menu_height = 19.0f;
+    const float btn_h = 24.0f;
+    const float pad_x = 6.0f;
 
-    ImGui::SetNextWindowPos(window_pos, ImGuiCond_Always);
-    ImGui::SetNextWindowBgAlpha(0.0f); // Fully transparent
+    const float right_margin = 18.0f + getPaintBrushDockWidth();
+    const float top_margin = menu_height + 10.0f;
 
-    // Push transparent style
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 0.2f));
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - right_margin, top_margin), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::SetNextWindowSize(ImVec2(0, 0)); // auto-size
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.09f, 0.11f, 0.14f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.72f, 0.78f, 0.88f, 0.14f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad_x, 3.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(2.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
-        ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_AlwaysAutoResize |
-        ImGuiWindowFlags_NoMove;
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-    if (!ImGui::Begin("##ViewportControls", nullptr, flags)) {
-        ImGui::PopStyleColor(); // Window background
+    if (!ImGui::Begin("##ViewportBar", nullptr, flags)) {
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
         ImGui::End();
         return;
     }
 
-    SceneSelection& sel = ctx.selection;
+    auto iconToggleBtn = [&](const char* id, bool active, ImVec2 size, ImVec4 accent, auto&& drawIcon) -> bool {
+        const ImVec2 pos = ImGui::GetCursorScreenPos();
+        const bool hovered_pre = ImGui::IsMouseHoveringRect(pos, ImVec2(pos.x + size.x, pos.y + size.y));
+        const float mix = active ? 0.78f : (hovered_pre ? 0.42f : 0.20f);
+        const ImVec4 base(0.18f, 0.19f, 0.22f, 0.90f);
+        const ImVec4 bg(
+            base.x + (accent.x - base.x) * mix,
+            base.y + (accent.y - base.y) * mix,
+            base.z + (accent.z - base.z) * mix,
+            active ? 0.98f : 0.90f);
 
-    // Transform mode buttons (compact, inline)
-    bool is_translate = (sel.transform_mode == TransformMode::Translate);
-    bool is_rotate = (sel.transform_mode == TransformMode::Rotate);
-    bool is_scale = (sel.transform_mode == TransformMode::Scale);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Button, bg);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(
+            std::min(1.0f, bg.x + 0.10f),
+            std::min(1.0f, bg.y + 0.10f),
+            std::min(1.0f, bg.z + 0.10f),
+            1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(
+            std::min(1.0f, bg.x + 0.05f),
+            std::min(1.0f, bg.y + 0.05f),
+            std::min(1.0f, bg.z + 0.05f),
+            1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, active ? 0.75f : 0.25f));
 
-    float btn_size = 20.0f;  // Smaller, more compact
+        const bool clicked = ImGui::Button(id, size);
+        const ImVec2 min = ImGui::GetItemRectMin();
+        const ImVec2 max = ImGui::GetItemRectMax();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        drawIcon(dl, min, max, ImGui::ColorConvertFloat4ToU32(ImVec4(0.92f, 0.94f, 0.98f, active ? 1.0f : 0.92f)));
+        dl->AddRect(min, max, ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, active ? 0.45f : 0.18f)), 8.0f, 0, 1.0f);
 
-    if (is_translate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
-    if (ImGui::Button("G", ImVec2(btn_size, btn_size))) {
-        sel.transform_mode = TransformMode::Translate;
-    }
-    if (is_translate) ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move (W)");
+        ImGui::PopStyleColor(4);
+        ImGui::PopStyleVar(2);
+        return clicked;
+    };
+    auto iconButton = [&](const char* id, ImVec2 size, ImVec4 accent, auto&& drawIcon) -> bool {
+        return iconToggleBtn(id, false, size, accent, drawIcon);
+    };
+    auto iconToggleTypeBtn = [&](const char* id, bool active, ImVec2 size, ImVec4 accent, UIWidgets::IconType type, float iconSize = 22.0f) -> bool {
+        return iconToggleBtn(id, active, size, accent,
+            [&](ImDrawList*, ImVec2 min, ImVec2 max, ImU32 col) {
+                const ImVec2 pos((min.x + max.x - iconSize) * 0.5f, (min.y + max.y - iconSize) * 0.5f);
+                UIWidgets::DrawIcon(type, pos, iconSize, col, 1.45f);
+            });
+    };
+    auto iconTypeButton = [&](const char* id, ImVec2 size, ImVec4 accent, UIWidgets::IconType type, float iconSize = 22.0f) -> bool {
+        return iconToggleTypeBtn(id, false, size, accent, type, iconSize);
+    };
+    auto viewportTooltip = [&](const char* title, const char* body, const ImVec4& accent) {
+        if (!ImGui::IsItemHovered()) return;
+        ImGui::SetNextWindowBgAlpha(0.78f);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(260.0f, 0.0f), ImVec2(360.0f, 1000.0f));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.82f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.22f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+        ImGui::BeginTooltip();
+        ImGui::PushStyleColor(ImGuiCol_Text, accent);
+        ImGui::TextUnformatted(title);
+        ImGui::PopStyleColor();
+        if (body && body[0]) {
+            ImGui::Separator();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 24.0f);
+            ImGui::TextWrapped("%s", body);
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndTooltip();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+    };
 
+    // ── Transform gizmo mode buttons ──
+    bool is_t = (sel.transform_mode == TransformMode::Translate);
+    bool is_r = (sel.transform_mode == TransformMode::Rotate);
+    bool is_s = (sel.transform_mode == TransformMode::Scale);
+    const ImVec4 tCol(0.3f, 0.7f, 1.0f, 1.0f);
+
+    if (iconToggleTypeBtn("##transform_translate", is_t, ImVec2(btn_h + 8.0f, btn_h), tCol, UIWidgets::IconType::Move, 22.0f)) sel.transform_mode = TransformMode::Translate;
+    viewportTooltip("Move", "Translate the current selection.", tCol);
     ImGui::SameLine();
-    if (is_rotate) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
-    if (ImGui::Button("R", ImVec2(btn_size, btn_size))) {
-        sel.transform_mode = TransformMode::Rotate;
-    }
-    if (is_rotate) ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rotate (E)");
-
+    if (iconToggleTypeBtn("##transform_rotate", is_r, ImVec2(btn_h + 8.0f, btn_h), tCol, UIWidgets::IconType::Rotate, 22.0f)) sel.transform_mode = TransformMode::Rotate;
+    viewportTooltip("Rotate", "Rotate the current selection.", tCol);
     ImGui::SameLine();
-    if (is_scale) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.7f, 1.0f, 1.0f));
-    if (ImGui::Button("S", ImVec2(btn_size, btn_size))) {
-        sel.transform_mode = TransformMode::Scale;
-    }
-    if (is_scale) ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Scale (R)");
+    if (iconToggleTypeBtn("##transform_scale", is_s, ImVec2(btn_h + 8.0f, btn_h), tCol, UIWidgets::IconType::ScaleAxis, 22.0f)) sel.transform_mode = TransformMode::Scale;
+    viewportTooltip("Scale", "Scale the current selection.", tCol);
 
-    // Gizmo toggle checkbox (inline)
+    // Gizmo toggle
     ImGui::SameLine();
-    if (ImGui::Checkbox("##Gizmo", &viewport_settings.show_gizmos)) {
+    if (iconToggleTypeBtn("##toggle_gizmo", viewport_settings.show_gizmos, ImVec2(btn_h + 8.0f, btn_h), ImVec4(0.57f, 0.71f, 1.0f, 1.0f), UIWidgets::IconType::Gizmo, 22.0f))
+    {
+        viewport_settings.show_gizmos = !viewport_settings.show_gizmos;
         ProjectManager::getInstance().markModified();
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Gizmos");
+    viewportTooltip("Gizmos", "Show or hide transform gizmos in the viewport.", ImVec4(0.57f, 0.71f, 1.0f, 1.0f));
 
-    // Camera HUD toggle button
-    ImGui::SameLine();
-    if (viewport_settings.show_camera_hud) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.4f, 1.0f));
+    // ── Separator ──
+    ImGui::SameLine(0, 6.0f);
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+    ImGui::SameLine(0, 6.0f);
+
+    // ── Viewport Shading Buttons ──
+    {
+        struct ShadingBtn {
+            int mode;
+            const char* id;
+            const char* title;
+            const char* tooltip;
+            ImVec4 accent;
+            bool enabled;
+        };
+        const bool hasRasterViewport = (g_viewport_backend != nullptr) ||
+            (ctx.backend_ptr && ctx.backend_ptr->supportsViewportMode(Backend::ViewportMode::Solid));
+        const ShadingBtn btns[] = {
+            { 0, "##shade_solid",   "Solid",   hasRasterViewport ? "Fast raster preview for layout work." : "Requires Vulkan — not available on this machine.",              ImVec4(0.94f, 0.64f, 0.24f, 1.0f), hasRasterViewport  },
+            { 3, "##shade_matcap",  "Matcap",  hasRasterViewport ? "Studio-style shaded preview with matcap lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.88f, 0.42f, 0.34f, 1.0f), hasRasterViewport  },
+            { 1, "##shade_preview", "Preview", hasRasterViewport ? "PBR material preview with 3-point lighting." : "Requires Vulkan — not available on this machine.", ImVec4(0.34f, 0.72f, 0.62f, 1.0f), hasRasterViewport },
+            { 2, "##shade_render",  "Render",  "Full rendered viewport using the selected device.",  ImVec4(0.32f, 0.60f, 0.96f, 1.0f), true  },
+        };
+        static float hover_anim[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        const float dt = ImGui::GetIO().DeltaTime;
+        const float shade_btn_w = 50.0f;
+        const float shade_btn_h = btn_h + 4.0f;
+        const float shade_icon_base = 28.0f;
+        const float shade_icon_hover_boost = 2.5f;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
+        for (int i = 0; i < 4; ++i) {
+            if (i > 0) ImGui::SameLine();
+            const bool is_active = (viewport_settings.shading_mode == btns[i].mode);
+            const ImVec4 accent = btns[i].accent;
+            const bool is_enabled = btns[i].enabled;
+
+            const ImVec2 shade_btn_pos = ImGui::GetCursorScreenPos();
+            const bool hovered_pre = ImGui::IsMouseHoveringRect(
+                shade_btn_pos,
+                ImVec2(shade_btn_pos.x + shade_btn_w, shade_btn_pos.y + shade_btn_h));
+            const float hover_target = ((hovered_pre && is_enabled) || is_active) ? 1.0f : 0.0f;
+            hover_anim[i] += (hover_target - hover_anim[i]) * std::min(1.0f, dt * 12.0f);
+
+            bool clicked = false;
+            if (!is_enabled) ImGui::BeginDisabled();
+            UIWidgets::IconType icon_type = UIWidgets::IconType::ViewRendered;
+            if (btns[i].mode == 0) icon_type = UIWidgets::IconType::ViewSolid;
+            else if (btns[i].mode == 3) icon_type = UIWidgets::IconType::ViewMatcap;
+            else if (btns[i].mode == 1) icon_type = UIWidgets::IconType::ViewPreview;
+            else if (btns[i].mode == 2) icon_type = UIWidgets::IconType::ViewRendered;
+            clicked = iconToggleTypeBtn(
+                btns[i].id,
+                is_active,
+                ImVec2(shade_btn_w, shade_btn_h),
+                is_enabled ? accent : ImVec4(0.34f, 0.38f, 0.42f, 1.0f),
+                icon_type,
+                shade_icon_base + hover_anim[i] * shade_icon_hover_boost);
+            if (!is_enabled) ImGui::EndDisabled();
+
+            if (clicked && is_enabled) {
+                Backend::ViewportMode requestedMode = Backend::ViewportMode::Rendered;
+                switch (btns[i].mode) {
+                    case 0: requestedMode = Backend::ViewportMode::Solid; break;
+                    case 1: requestedMode = Backend::ViewportMode::MaterialPreview; break;
+                    case 3: requestedMode = Backend::ViewportMode::Matcap; break;
+                    case 2:
+                    default: requestedMode = Backend::ViewportMode::Rendered; break;
+                }
+                const bool supported =
+                    (btns[i].mode == 2) ||
+                    (g_viewport_backend != nullptr) ||
+                    (ctx.backend_ptr && ctx.backend_ptr->supportsViewportMode(requestedMode));
+
+                if (!supported) {
+                    viewport_settings.shading_mode = 2;
+                    addViewportMessage("Interactive viewport is not available right now. Switched to Rendered mode.",
+                        3.0f, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+                } else {
+                    viewport_settings.shading_mode = btns[i].mode;
+                    if (viewport_settings.shading_mode != 2 && g_viewport_backend != nullptr) {
+                        g_viewport_raster_rebuild_pending = true;
+                    }
+                }
+                ctx.start_render = true;
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            }
+            const bool hovered = ImGui::IsItemHovered();
+
+            if (hovered) {
+                std::string tooltip_text = btns[i].tooltip;
+                if (!is_enabled) {
+                    tooltip_text += " Coming soon.";
+                } else if (btns[i].mode == 0 || btns[i].mode == 3) {
+                    tooltip_text += " Early viewport mode.";
+                }
+                viewportTooltip(btns[i].title, tooltip_text.c_str(), accent);
+            }
+        }
+        ImGui::PopStyleVar();
+
+        // Matcap gear popup
+        if (viewport_settings.shading_mode == 3) {
+            ImGui::SameLine(0, 3.0f);
+            if (iconTypeButton("##mcap_preset", ImVec2(btn_h + 4.0f, btn_h), ImVec4(0.94f, 0.58f, 0.38f, 1.0f), UIWidgets::IconType::Settings, 18.0f))
+                ImGui::OpenPopup("MatcapPresetPopup");
+            viewportTooltip("Matcap Preset", "Choose the active matcap surface preset.", ImVec4(0.94f, 0.58f, 0.38f, 1.0f));
+            if (ImGui::BeginPopup("MatcapPresetPopup")) {
+                static const int pv[] = { 0, 2, 3, 4, 5, 6, 7, 8, 9 };
+                static const char* pl[] = { "Solid Clay","Default","Clay","Silver","Pearl","Jade","Copper","Obsidian","Skin" };
+                for (int i = 0; i < IM_ARRAYSIZE(pv); ++i) {
+                    bool s = (viewport_settings.matcap_preset == pv[i]);
+                    if (ImGui::Selectable(pl[i], s)) {
+                        viewport_settings.matcap_preset = pv[i];
+                        Backend::IBackend* matcapBackend = ctx.backend_ptr;
+                        if (viewport_settings.shading_mode != 2 &&
+                            g_viewport_backend &&
+                            g_viewport_backend.get() != ctx.backend_ptr) {
+                            matcapBackend = g_viewport_backend.get();
+                        }
+                        if (matcapBackend) {
+                            matcapBackend->setInteractiveViewportMatcapPreset(pv[i]);
+                        }
+                        ctx.start_render = true;
+                        ctx.renderer.resetCPUAccumulation();
+                    }
+                    if (s) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndPopup();
+            }
+        }
     }
-    if (ImGui::Button("HUD", ImVec2(32, btn_size))) {
+
+    // ── Separator ──
+    ImGui::SameLine(0, 6.0f);
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+    ImGui::SameLine(0, 6.0f);
+
+    // ── HUD / PRO ──
+    const ImVec4 hudCol(0.2f, 0.6f, 0.4f, 1.0f);
+    if (iconToggleTypeBtn("##toggle_hud", viewport_settings.show_camera_hud, ImVec2(btn_h + 8.0f, btn_h), hudCol, UIWidgets::IconType::CameraHud, 22.0f)) {
         viewport_settings.show_camera_hud = !viewport_settings.show_camera_hud;
         ProjectManager::getInstance().markModified();
     }
-    if (viewport_settings.show_camera_hud) {
-        ImGui::PopStyleColor();
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Camera HUD (Focus/Zoom rings)");
+    viewportTooltip("Camera HUD", "Show lens and framing info in the viewport.", hudCol);
 
-    // Pro Camera features toggle button
     ImGui::SameLine();
-    bool any_pro_active = viewport_settings.show_histogram || 
-                          viewport_settings.show_focus_peaking || 
-                          viewport_settings.show_zebra || 
-                          viewport_settings.show_af_points;
-    if (any_pro_active) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.3f, 0.5f, 1.0f));
-    }
-    if (ImGui::Button("PRO", ImVec2(32, btn_size))) {
-        // Open Pro Camera settings panel
+    bool any_pro = viewport_settings.show_histogram || viewport_settings.show_focus_peaking ||
+                   viewport_settings.show_zebra || viewport_settings.show_af_points;
+    if (iconToggleTypeBtn("##toggle_pro", any_pro, ImVec2(btn_h + 8.0f, btn_h), ImVec4(0.6f, 0.3f, 0.5f, 1.0f), UIWidgets::IconType::ViewOverlays, 22.0f))
         ImGui::OpenPopup("ProCameraPopup");
-    }
-    if (any_pro_active) {
-        ImGui::PopStyleColor();
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pro Camera Features (Histogram, Focus Peaking, Zebra, AF Points)");
+    viewportTooltip("Overlays", "Histogram, focus peaking, zebra and AF tools.", ImVec4(0.6f, 0.3f, 0.5f, 1.0f));
 
-    // Pro Camera Popup Panel
     if (ImGui::BeginPopup("ProCameraPopup")) {
         ImGui::Text("Pro Camera Features");
         ImGui::Separator();
-        
-        // Histogram
         ImGui::Checkbox("Histogram", &viewport_settings.show_histogram);
         if (viewport_settings.show_histogram) {
             ImGui::Indent();
@@ -140,10 +331,7 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             ImGui::SliderFloat("Opacity", &viewport_settings.histogram_opacity, 0.3f, 1.0f);
             ImGui::Unindent();
         }
-        
         ImGui::Separator();
-        
-        // Focus Peaking
         ImGui::Checkbox("Focus Peaking", &viewport_settings.show_focus_peaking);
         if (viewport_settings.show_focus_peaking) {
             ImGui::Indent();
@@ -151,20 +339,14 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             ImGui::SliderFloat("Threshold##Peak", &viewport_settings.focus_peaking_threshold, 0.05f, 0.5f);
             ImGui::Unindent();
         }
-        
         ImGui::Separator();
-        
-        // Zebra
         ImGui::Checkbox("Zebra Stripes", &viewport_settings.show_zebra);
         if (viewport_settings.show_zebra) {
             ImGui::Indent();
             ImGui::SliderFloat("Threshold##Zebra", &viewport_settings.zebra_threshold, 0.8f, 1.0f, "%.2f");
             ImGui::Unindent();
         }
-        
         ImGui::Separator();
-        
-        // AF Points
         ImGui::Checkbox("AF Points", &viewport_settings.show_af_points);
         if (viewport_settings.show_af_points) {
             ImGui::Indent();
@@ -172,94 +354,113 @@ void SceneUI::drawViewportControls(UIContext& ctx) {
             ImGui::Combo("Focus Mode", &viewport_settings.focus_mode, "MF (Manual)\0AF-S (Single)\0AF-C (Continuous)\0");
             ImGui::Unindent();
         }
-        
         ImGui::EndPopup();
     }
 
-    // Pivot mode (same row)
-    ImGui::SameLine();
-    const char* pivot_opts[] = { "Median", "Individual" };
-    ImGui::SetNextItemWidth(90);  // Compact
-    ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pivot Point");
+    // ── Separator ──
+    ImGui::SameLine(0, 6.0f);
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+    ImGui::SameLine(0, 6.0f);
 
-    const bool can_edit_object_pivot =
-        sel.selected.type == SelectableType::Object &&
-        sel.selected.object &&
-        sel.multi_selection.size() == 1;
-    const bool can_edit_volume_pivot =
-        sel.multi_selection.size() == 1 &&
-        ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
-         (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
-    const bool can_edit_any_pivot = can_edit_object_pivot || can_edit_volume_pivot;
+    // ── Pivot ──
+    {
+        const bool can_edit_object_pivot =
+            sel.selected.type == SelectableType::Object &&
+            sel.selected.object && sel.multi_selection.size() == 1;
+        const bool can_edit_volume_pivot =
+            sel.multi_selection.size() == 1 &&
+            ((sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) ||
+             (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume));
+        const bool can_edit_any_pivot = can_edit_object_pivot || can_edit_volume_pivot;
 
-    ImGui::SameLine();
-    if (pivot_edit_mode) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
-    }
-    if (ImGui::Button("Pivot", ImVec2(42, btn_size))) {
+        ImGui::SetNextItemWidth(76);
+        const char* pivot_opts[] = { "Median", "Individual" };
+        ImGui::Combo("##Pivot", &pivot_mode, pivot_opts, 2);
+        viewportTooltip("Pivot Mode", "Choose how transforms use pivots.", ImVec4(0.78f, 0.68f, 0.32f, 1.0f));
+
+        ImGui::SameLine();
+        if (iconToggleTypeBtn("##toggle_pivot_edit", pivot_edit_mode, ImVec2(btn_h, btn_h), ImVec4(0.85f, 0.55f, 0.18f, 1.0f), UIWidgets::IconType::PivotEdit, 20.0f)) {
+            pivot_edit_mode = can_edit_any_pivot ? !pivot_edit_mode : false;
+        }
+        viewportTooltip("Edit Pivot", "Move the pivot without moving the object.", ImVec4(0.85f, 0.55f, 0.18f, 1.0f));
+
         if (can_edit_any_pivot) {
-            pivot_edit_mode = !pivot_edit_mode;
+            ImGui::SameLine();
+            if (iconTypeButton("##center_pivot", ImVec2(btn_h, btn_h), ImVec4(0.95f, 0.72f, 0.28f, 1.0f), UIWidgets::IconType::PivotCenter, 20.0f)) {
+                if (can_edit_object_pivot) {
+                    std::string nm = sel.selected.object->nodeName;
+                    if (nm.empty()) nm = "Unnamed";
+                    recenterObjectPivotToBoundsCenter(ctx, nm);
+                } else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
+                    AABB bounds = sel.selected.vdb_volume->getWorldBounds();
+                    Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point((bounds.min + bounds.max) * 0.5f);
+                    sel.selected.vdb_volume->setPivotOffset(local);
+                    SceneUI::syncVDBVolumesToGPU(ctx);
+                } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
+                    Vec3 bmin, bmax;
+                    sel.selected.gas_volume->getWorldBounds(bmin, bmax);
+                    Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point((bmin + bmax) * 0.5f);
+                    sel.selected.gas_volume->setPivotOffset(local);
+                    ctx.renderer.updateBackendGasVolumes(ctx.scene);
+                }
+                pivot_edit_mode = false;
+                addViewportMessage("Pivot centered", 1.6f, ImVec4(1.0f, 0.8f, 0.35f, 1.0f));
+                ProjectManager::getInstance().markModified();
+            }
+            viewportTooltip("Center Pivot", "Place the pivot at the selection center.", ImVec4(0.95f, 0.72f, 0.28f, 1.0f));
         } else {
             pivot_edit_mode = false;
         }
     }
-    if (pivot_edit_mode) {
-        ImGui::PopStyleColor();
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Move Pivot Only");
-    }
 
-    if (can_edit_any_pivot) {
-        ImGui::SameLine();
-        if (ImGui::Button("Center", ImVec2(48, btn_size))) {
-            if (can_edit_object_pivot) {
-                std::string object_name = sel.selected.object->nodeName;
-                if (object_name.empty()) object_name = "Unnamed";
-                recenterObjectPivotToBoundsCenter(ctx, object_name);
-            } else if (sel.selected.type == SelectableType::VDBVolume && sel.selected.vdb_volume) {
-                AABB bounds = sel.selected.vdb_volume->getWorldBounds();
-                Vec3 local = sel.selected.vdb_volume->getTransform().inverse().transform_point((bounds.min + bounds.max) * 0.5f);
-                sel.selected.vdb_volume->setPivotOffset(local);
-                SceneUI::syncVDBVolumesToGPU(ctx);
-            } else if (sel.selected.type == SelectableType::GasVolume && sel.selected.gas_volume) {
-                Vec3 bmin, bmax;
-                sel.selected.gas_volume->getWorldBounds(bmin, bmax);
-                Vec3 local = sel.selected.gas_volume->getTransform().inverse().transform_point((bmin + bmax) * 0.5f);
-                sel.selected.gas_volume->setPivotOffset(local);
-                ctx.renderer.updateBackendGasVolumes(ctx.scene);
-            }
-            pivot_edit_mode = false;
-            addViewportMessage("Pivot centered to geometry", 1.6f, ImVec4(1.0f, 0.8f, 0.35f, 1.0f));
-            ProjectManager::getInstance().markModified();
+    // ── Separator ──
+    ImGui::SameLine(0, 6.0f);
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "|");
+    ImGui::SameLine(0, 6.0f);
+
+    // ── Mouse Sensitivity (popup slider) ──
+    {
+        static bool sens_open = false;
+        if (iconToggleTypeBtn("##toggle_sens", sens_open, ImVec2(btn_h + 2.0f, btn_h), ImVec4(0.62f, 0.58f, 0.24f, 1.0f), UIWidgets::IconType::Sensitivity, 21.0f)) {
+            sens_open = !sens_open;
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Center pivot on geometry bounds");
-    } else {
-        pivot_edit_mode = false;
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.84f, 0.30f, 1.0f));
+            ImGui::TextUnformatted("Sensitivity");
+            ImGui::PopStyleColor();
+            ImGui::Separator();
+            ImGui::Text("Current: %.3f", ctx.render_settings.mouse_sensitivity);
+            ImGui::EndTooltip();
+        }
+
+        if (sens_open) {
+            const float popup_w = 190.0f;
+            float popup_x = ImGui::GetItemRectMax().x - popup_w;
+            popup_x = (std::max)(8.0f, (std::min)(popup_x, io.DisplaySize.x - popup_w - 8.0f));
+            const float popup_y = (std::min)(ImGui::GetItemRectMax().y + 6.0f, io.DisplaySize.y - 90.0f);
+            ImGui::SetNextWindowPos(ImVec2(popup_x, popup_y), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(popup_w, 0));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.11f, 0.13f, 0.92f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+            if (ImGui::Begin("##SensPopup", &sens_open,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoFocusOnAppearing)) {
+                ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Sensitivity");
+                ImGui::SetNextItemWidth(-1);
+                ImGui::SliderFloat("##sens", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f");
+            }
+            ImGui::End();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        }
     }
 
-    // --- Mouse Sensitivity (Minimalist Overlay) ---
-    ImGui::Spacing();
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 0.9f), "Sens:"); 
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 8.0f);
-    
-    // Transparent slider background for glassmorphism look
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.2f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.1f, 0.1f, 0.1f, 0.3f));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.15f, 0.15f, 0.15f, 0.4f));
-
-    if (ImGui::SliderFloat("##MouseSensOverlay", &ctx.render_settings.mouse_sensitivity, 0.001f, 5.0f, "%.3f")) {
-        // Updated
-    }
-    ImGui::PopStyleColor(3);
-
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Adjust Mouse Sensitivity");
-
-    ImGui::PopStyleColor(); // Window background
+    ImGui::PopStyleVar(4);  // WindowBorderSize, ItemSpacing, WindowRounding, WindowPadding
+    ImGui::PopStyleColor(2); // Border, WindowBg
     ImGui::End();
+    // overlay handled by raster grid (depth-tested) in the Vulkan backend
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1168,6 +1369,23 @@ void SceneUI::addViewportMessage(const std::string& text, float duration, ImVec4
         }
     }
 
+    // Coalesce similar messages (e.g. per-frame "Render pass ..." or Vulkan warnings)
+    // Compare prefixes to avoid HUD spam when only numeric/frame counters change.
+    const size_t coalescePrefix = 24;
+    for (auto& msg : active_messages) {
+        size_t a = std::min(coalescePrefix, msg.text.size());
+        size_t b = std::min(coalescePrefix, text.size());
+        if (a > 0 && b > 0) {
+            size_t n = std::min(a, b);
+            if (msg.text.compare(0, n, text, 0, n) == 0) {
+                // Considered similar; refresh and merge
+                msg.time_remaining = std::max(msg.time_remaining, duration);
+                msg.color = color;
+                return;
+            }
+        }
+    }
+
     ViewportMessage msg;
     msg.text = text;
     msg.time_remaining = duration;
@@ -1207,61 +1425,63 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
         
         // 1. Persistent HUD: Render Status (ALWAYS AT TOP)
         if (ctx.scene.initialized) {
-            int current = ctx.render_settings.render_current_samples;
-            int target = ctx.render_settings.render_target_samples;
-            bool use_optix = ctx.render_settings.use_optix;
-            bool is_paused = ctx.render_settings.is_render_paused;
-            
+            const bool in_rendered_mode = (viewport_settings.shading_mode == 2);
+
             std::string status_text;
-            std::string mode_tag = "[CPU]";
-            if (ctx.render_settings.use_optix) mode_tag = "[OptiX]";
-            else if (ctx.render_settings.use_vulkan) mode_tag = "[Vulkan]";
-            
-            if (current >= target && target > 0) {
-                 status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Done)";
-            } else if (is_paused) {
-                 status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Paused)";
-            } else {
-                 status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples";
-            }
-            
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            
-            // Shadow
-            ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), status_text.c_str());
-            
-            // Text Color (Green if done, Orange if paused, White otherwise)
             ImU32 text_col = IM_COL32(220, 220, 220, 255);
-            if (current >= target && target > 0) text_col = IM_COL32(100, 255, 100, 255);
-            else if (is_paused) text_col = IM_COL32(255, 180, 80, 255);
-            
-            ImGui::GetWindowDrawList()->AddText(pos, text_col, status_text.c_str());
-            
-            // Advance cursor with DYNAMIC width to prevent clipping
-            ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
-            ImGui::Dummy(text_size);                 
-            
-            // Draw HUD overlays inside the RenderView window so they appear on top of render
-            // but behind other floating windows. They use GetWindowDrawList() now.
-            // This section is likely intended to be in the RenderView scope, not here.
-            // The instruction seems to be a bit mixed up.
-            // Assuming the user wants to move these calls from somewhere else *to* the RenderView scope,
-            // and this snippet is showing what should be *in* that scope.
-            // I will not insert the Image/drawFocusIndicator/etc. calls here as it would be syntactically incorrect
-            // and out of context for drawViewportMessages.
-            // The instruction's provided snippet for this part is:
-            // ImGui::Dummy(text_size);                 ImGui::Image((ImTextureID)display_tex, ImVec2(w, h));
-            //      // Draw HUD overlays inside the RenderView window so they appear on top of render
-            //      // but behind other floating windows. They use GetWindowDrawList() now.
-            //      if (!show_exit_confirmation) {
-            //          drawFocusIndicator(ctx);
-            //          drawZoomRing(ctx);
-            //          drawExposureInfo(ctx);
-            //          drawDollyArc(ctx); // Added dolly arc too
-            //      } // Small spacing
-            // This looks like a fragment from the RenderView loop itself, not a modification to drawViewportMessages.
-            // I will only apply the `ImGui::Dummy(ImVec2(0, 2));` part which is syntactically correct here.
-            ImGui::Dummy(ImVec2(0, 2)); // Small spacing
+
+            if (in_rendered_mode) {
+                // Path trace mode: show sample progress
+                int current = ctx.render_settings.render_current_samples;
+                int target = ctx.render_settings.render_target_samples;
+                bool is_paused = ctx.render_settings.is_render_paused;
+
+                std::string mode_tag = "[CPU]";
+                if (ctx.render_settings.use_optix) mode_tag = "[OptiX]";
+                else if (ctx.render_settings.use_vulkan) mode_tag = "[Vulkan]";
+
+                if (current >= target && target > 0) {
+                     status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Done)";
+                     text_col = IM_COL32(100, 255, 100, 255);
+                } else if (is_paused) {
+                     status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples (Paused)";
+                     text_col = IM_COL32(255, 180, 80, 255);
+                } else {
+                     status_text = mode_tag + " " + std::to_string(current) + "/" + std::to_string(target) + " Samples";
+                }
+            } else {
+                // Solid/Matcap/MaterialPreview: show viewport mode name
+                switch (viewport_settings.shading_mode) {
+                    case 0: status_text = "Solid Mode"; break;
+                    case 1: status_text = "Material Preview"; break;
+                    case 3: status_text = "Matcap Mode"; break;
+                    default: status_text = "Viewport Mode"; break;
+                }
+                text_col = IM_COL32(180, 210, 255, 255);
+            }
+
+            // Suppress only the Vulkan progressive sample counter ("Samples") in HUD
+            bool show_render_status = true;
+            if (in_rendered_mode && ctx.render_settings.use_vulkan) {
+                if (status_text.find("Samples") != std::string::npos) {
+                    // hide progressive sample counter for Vulkan progressive renderer
+                    show_render_status = false;
+                }
+            }
+
+            if (show_render_status) {
+                ImVec2 pos = ImGui::GetCursorScreenPos();
+
+                // Shadow
+                ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x+1, pos.y+1), IM_COL32(0,0,0,200), status_text.c_str());
+                ImGui::GetWindowDrawList()->AddText(pos, text_col, status_text.c_str());
+
+                // Advance cursor with DYNAMIC width to prevent clipping
+                ImVec2 text_size = ImGui::CalcTextSize(status_text.c_str());
+                ImGui::Dummy(text_size);
+
+                ImGui::Dummy(ImVec2(0, 2)); // Small spacing
+            }
         }
 
         // 2. Persistent HUD: Selected Object (BELOW RENDER STATUS)
@@ -1357,7 +1577,7 @@ void SceneUI::drawViewportMessages(UIContext& ctx, float left_offset) {
         }
         total_height += (hud_lines.size() > 1) ? 4.0f * static_cast<float>(hud_lines.size() - 1) : 0.0f;
 
-        const float x = io.DisplaySize.x - max_width - 24.0f;
+        const float x = io.DisplaySize.x - max_width - 24.0f - getPaintBrushDockWidth();
         float y = io.DisplaySize.y - total_height - 18.0f;
         for (const auto& line : hud_lines) {
             const ImVec2 pos(x, y);

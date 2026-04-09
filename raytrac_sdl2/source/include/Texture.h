@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <mutex>
 #include <SDL_image.h>
 #include "stb_image.h"
 #include "tinyexr.h"
@@ -91,6 +92,10 @@ struct CompactVec4 {
 
     float alpha() const { return a / 255.0f; }
     bool is_gray() const { return r == g && r == b; }
+    bool operator==(const CompactVec4& o) const noexcept {
+        return r == o.r && g == o.g && b == o.b && a == o.a;
+    }
+    bool operator!=(const CompactVec4& o) const noexcept { return !(*this == o); }
 };
 
 // ===== Hızlı pixel kopyalama helper =====
@@ -162,6 +167,7 @@ public:
     }
 
     bool get(const std::string& filepath, FileTextureInfo& info) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = cache_map.find(filepath);
         if (it != cache_map.end()) {
             // Dosya değiştirildi mi kontrol et
@@ -177,19 +183,23 @@ public:
     }
 
     void put(const std::string& filepath, const FileTextureInfo& info) {
+        std::lock_guard<std::mutex> lock(mutex_);
         cache_map[filepath] = info;
     }
 
     void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
         cache_map.clear();
     }
 
     size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return cache_map.size();
     }
 
 private:
     FileTextureCache() = default;
+    mutable std::mutex mutex_;
     mutable std::unordered_map<std::string, FileTextureInfo> cache_map;
 
     std::time_t get_file_modification_time(const std::string& filepath) const {
@@ -217,6 +227,7 @@ public:
     }
 
     bool get(const std::string& name, TextureInfo& info) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = cache_map.find(name);
         if (it != cache_map.end()) {
             info = it->second;
@@ -226,19 +237,23 @@ public:
     }
 
     void put(const std::string& name, const TextureInfo& info) {
+        std::lock_guard<std::mutex> lock(mutex_);
         cache_map[name] = info;
     }
 
     void clear() {
+        std::lock_guard<std::mutex> lock(mutex_);
         cache_map.clear();
     }
 
     size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return cache_map.size();
     }
 
 private:
     TextureCache() = default;
+    mutable std::mutex mutex_;
     std::unordered_map<std::string, TextureInfo> cache_map;
 };
 class Texture {
@@ -983,6 +998,11 @@ public:
         if (err != cudaSuccess) {
             SCENE_LOG_ERROR("Texture update failed: " + std::string(cudaGetErrorString(err)));
         }
+    }
+
+    // Convenience wrapper matching updateGPU naming for partial region upload.
+    void updateGPURegion(int x, int y, int w, int h) {
+        upload_region_to_gpu(x, y, w, h);
     }
 
     // Upload a specific region to GPU (useful for partial splatmap updates)

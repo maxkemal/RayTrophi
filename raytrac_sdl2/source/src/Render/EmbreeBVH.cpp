@@ -835,6 +835,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
             float w = 1.0f - u - v;
 
             rec.normal = (tri.n0 * w + tri.n1 * u + tri.n2 * v).normalize();
+            rec.interpolated_normal = rec.normal;
             rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
             rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
             rec.uv = Vec2(rec.u, rec.v); 
@@ -872,7 +873,7 @@ bool EmbreeBVH::hit(const Ray& ray, float t_min, float t_max, HitRecord& rec, bo
                          // For non-uniform, use inverse transpose (not easily available without computing it)
                          // But we can key off inv_transform if available or just use transform_vector
                          rec.normal = inst->transform.transform_vector(local_normal).normalize();
-
+                         rec.interpolated_normal = rec.normal;
                          rec.u = tri.t0.u * w + tri.t1.u * u + tri.t2.u * v;
                          rec.v = tri.t0.v * w + tri.t1.v * u + tri.t2.v * v;
                          rec.uv = Vec2(rec.u, rec.v); 

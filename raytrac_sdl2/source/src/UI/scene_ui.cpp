@@ -28,6 +28,8 @@
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "Backend/IBackend.h"
+#include "Backend/IViewportBackend.h"
+#include "Backend/VulkanBackend.h"
 #include "ColorProcessingParams.h"
 #include "SceneSelection.h"
 #include "scene_data.h"    // Added explicit include
@@ -51,6 +53,8 @@
 #include "scene_ui_forcefield.hpp" // Force Field panel
 #include "ParallelBVHNode.h"
 #include "Triangle.h"  // For object hierarchy
+#include "HittableInstance.h"
+#include "InstanceManager.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
 #include "SpotLight.h"
@@ -61,6 +65,7 @@
 #include "VolumetricRenderer.h"
 #include "AssimpLoader.h"  // For scene rebuild after object changes
 #include "SceneCommand.h"  // For undo/redo
+#include "Paint/MeshPaintAdapter.h"
 #include "default_scene_creator.hpp"
 #include "SceneSerializer.h"
 #include "ProjectManager.h"  // Project system
@@ -77,9 +82,45 @@
 #include <vector>
 #include <sstream>
 
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
 bool show_documentation_window = false; // Global toggle (unused now, kept for linkage if needed or remove)
 
 namespace {
+float g_main_menu_reserved_height = 30.0f;
+Backend::IBackend* getSceneUiRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+Backend::IViewportBackend* getSceneUiViewportBackend(UIContext& ctx) {
+    if (g_viewport_backend) {
+        return g_viewport_backend.get();
+    }
+    return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+}
+
+bool sceneUiRenderBackendIsVulkan(UIContext& ctx) {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(getSceneUiRenderBackend(ctx)) != nullptr;
+}
+
+void applySceneUiPendingDeleteVisibility(UIContext& ctx, Backend::IBackend* backend) {
+    if (!backend || ctx.scene.editor_pending_delete_object_names.empty()) {
+        return;
+    }
+
+    for (const auto& nodeName : ctx.scene.editor_pending_delete_object_names) {
+        if (!nodeName.empty()) {
+            backend->setVisibilityByNodeName(nodeName, false);
+        }
+    }
+}
+
 bool readBinaryFileBytes(const std::filesystem::path& path, std::vector<unsigned char>& out_bytes) {
     out_bytes.clear();
 
@@ -413,6 +454,10 @@ std::string trimCopy(const std::string& value) {
     return value.substr(start, end - start);
 }
 
+float getMainMenuReservedHeight() {
+    return (std::max)(28.0f, g_main_menu_reserved_height);
+}
+
 std::vector<std::string> splitTagString(const std::string& text) {
     std::vector<std::string> tags;
     std::unordered_set<std::string> seen;
@@ -446,6 +491,27 @@ std::string joinTags(const std::vector<std::string>& tags) {
         joined += tags[i];
     }
     return joined;
+}
+
+bool selectionContainsLight(const SceneData& scene, const std::shared_ptr<Light>& light) {
+    return light && std::find(scene.lights.begin(), scene.lights.end(), light) != scene.lights.end();
+}
+
+bool selectionContainsCamera(const SceneData& scene, const std::shared_ptr<Camera>& camera) {
+    return camera && std::find(scene.cameras.begin(), scene.cameras.end(), camera) != scene.cameras.end();
+}
+
+bool selectionContainsVDB(const SceneData& scene, const std::shared_ptr<VDBVolume>& vdb) {
+    return vdb && std::find(scene.vdb_volumes.begin(), scene.vdb_volumes.end(), vdb) != scene.vdb_volumes.end();
+}
+
+bool selectionContainsGas(const SceneData& scene, const std::shared_ptr<GasVolume>& gas) {
+    return gas && std::find(scene.gas_volumes.begin(), scene.gas_volumes.end(), gas) != scene.gas_volumes.end();
+}
+
+bool selectionContainsForceField(const SceneData& scene, const std::shared_ptr<Physics::ForceField>& field) {
+    const auto& fields = scene.force_field_manager.force_fields;
+    return field && std::find(fields.begin(), fields.end(), field) != fields.end();
 }
 
 std::string makeSmartFolderDefaultName(const std::string& folder_relative_dir,
@@ -1309,18 +1375,420 @@ static void DrawRenderWindowToneMapControls(UIContext& ctx) {
         ctx.reset_tonemap = true;
 }
 
+void SceneUI::drawRenderInspectorContent(UIContext& ctx)
+{
+    extern bool g_hasOptix;
+    extern bool g_hasVulkan;
+    extern bool g_viewport_raster_rebuild_pending;
+    static int deferred_engine_type = -1; // 0=CPU,1=OptiX,2=Vulkan
+
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.68f, 0.78f, 1.0f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.115f, 0.14f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.13f, 0.145f, 0.17f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.215f, 0.99f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.19f, 0.215f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.14f, 0.17f, 0.21f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.18f, 0.21f, 0.26f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.22f, 0.25f, 0.30f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.72f, 0.82f, 1.0f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.86f, 0.91f, 1.0f, 1.0f));
+
+    const bool rendered_viewport_active = (viewport_settings.shading_mode == 2);
+    const bool raster_quality_active = (viewport_settings.shading_mode == 0 || viewport_settings.shading_mode == 3);
+
+    if (ctx.render_settings.use_optix && !g_hasOptix) {
+        ctx.render_settings.use_optix = false;
+    }
+    if (ctx.render_settings.use_vulkan && !g_hasVulkan) {
+        ctx.render_settings.use_vulkan = false;
+    }
+
+    int engine_type = 0;
+    if (ctx.render_settings.use_optix) engine_type = 1;
+    if (ctx.render_settings.use_vulkan) engine_type = 2;
+
+    if (rendered_viewport_active && deferred_engine_type >= 0) {
+        const int clamped_deferred = std::clamp(deferred_engine_type, 0, 2);
+        const bool next_use_optix = (clamped_deferred == 1);
+        const bool next_use_vulkan = (clamped_deferred == 2);
+        if (ctx.render_settings.use_optix != next_use_optix ||
+            ctx.render_settings.use_vulkan != next_use_vulkan) {
+            ctx.render_settings.use_optix = next_use_optix;
+            ctx.render_settings.use_vulkan = next_use_vulkan;
+            extern bool g_cpu_sync_pending;
+            g_cpu_sync_pending = true;
+            ctx.render_settings.backend_changed = true;
+            ctx.start_render = true;
+        }
+        deferred_engine_type = -1;
+    }
+    if (!rendered_viewport_active && deferred_engine_type >= 0) {
+        engine_type = std::clamp(deferred_engine_type, 0, 2);
+    }
+
+    if (UIWidgets::BeginSection("Render Engine & Backend", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+        UIWidgets::ColoredHeader("Execution", ImVec4(0.82f, 0.88f, 1.0f, 1.0f));
+        const char* engines[] = { "CPU", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
+        if (ImGui::BeginCombo("Engine", engines[engine_type])) {
+            for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {
+                bool is_disabled = false;
+                if (i == 1 && !g_hasOptix) is_disabled = true;
+                // Disable Vulkan engine selection when Vulkan isn't present OR when
+                // Vulkan is available but hardware ray-tracing is not supported.
+                if (i == 2 && (!g_hasVulkan || !g_hasVulkanRT)) is_disabled = true;
+
+                bool is_selected = (engine_type == i);
+                ImGuiSelectableFlags combo_flags = is_disabled ? ImGuiSelectableFlags_Disabled : 0;
+                std::string label = engines[i];
+                if (is_disabled) {
+                    if (i == 2 && g_hasVulkan && !g_hasVulkanRT) {
+                        label += " [Raster Only]";
+                    } else {
+                        label += " [Not Supported]";
+                    }
+                }
+
+                if (ImGui::Selectable(label.c_str(), is_selected, combo_flags)) {
+                    engine_type = i;
+                    if (rendered_viewport_active) {
+                        ctx.render_settings.use_optix = (engine_type == 1);
+                        ctx.render_settings.use_vulkan = (engine_type == 2);
+                        extern bool g_cpu_sync_pending;
+                        g_cpu_sync_pending = true;
+                        ctx.render_settings.backend_changed = true;
+                        ctx.start_render = true;
+                    } else {
+                        deferred_engine_type = engine_type;
+                        addViewportMessage("Engine preference saved. It will apply in Rendered mode.",
+                            2.0f, ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+                    }
+                }
+
+                if (is_selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (!g_hasOptix && !g_hasVulkan) {
+            UIWidgets::StatusIndicator("No compatible GPU backend detected", UIWidgets::StatusType::Error);
+        } else if (!g_hasOptix && engine_type == 1) {
+            UIWidgets::StatusIndicator("Selected OptiX backend is not supported on this machine", UIWidgets::StatusType::Error);
+        } else if (!g_hasVulkan && engine_type == 2) {
+            UIWidgets::StatusIndicator("Selected Vulkan backend is not supported on this machine", UIWidgets::StatusType::Error);
+        }
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("CPU Fallback", ImVec4(0.72f, 0.90f, 0.84f, 1.0f));
+        if (!ctx.render_settings.use_optix && !ctx.render_settings.use_vulkan) {
+            const char* bvh_items[] = { "Custom RayTrophi BVH", "Intel Embree (Recommended)" };
+            int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
+            if (ImGui::Combo("CPU BVH Type", &current_bvh, bvh_items, 2)) {
+                ctx.render_settings.UI_use_embree = (current_bvh == 1);
+                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                ctx.start_render = true;
+            }
+        } else {
+            ImGui::TextDisabled("CPU BVH selection is only used when the CPU render backend is active.");
+        }
+        UIWidgets::EndSection();
+    }
+
+    if (UIWidgets::BeginSection("Sampling & Quality", ImVec4(0.5f, 0.9f, 0.6f, 1.0f))) {
+        UIWidgets::ColoredHeader("Viewport Sampling", ImVec4(0.84f, 0.94f, 0.86f, 1.0f));
+        ImGui::Checkbox("Use Adaptive Sampling##view", &ctx.render_settings.use_adaptive_sampling);
+        if (ctx.render_settings.use_adaptive_sampling) {
+            ImGui::DragFloat("Noise Threshold", &ctx.render_settings.variance_threshold, 0.001f, 0.001f, 0.8f, "%.3f");
+            ImGui::DragInt("Min Samples##view", &ctx.render_settings.min_samples, 1, 1, 512);
+        }
+        ImGui::DragInt("Max Samples##view", &ctx.render_settings.max_samples, 1, 1, 10000);
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Raster Viewport Quality", ImVec4(0.96f, 0.84f, 0.58f, 1.0f));
+        const char* raster_quality_items[] = { "Auto", "Performance", "Balanced", "Quality" };
+        int raster_quality = static_cast<int>(ctx.render_settings.raster_viewport_quality_preset);
+        if (!raster_quality_active) ImGui::BeginDisabled();
+        if (ImGui::Combo("Solid / Matcap Quality", &raster_quality, raster_quality_items, IM_ARRAYSIZE(raster_quality_items))) {
+            ctx.render_settings.raster_viewport_quality_preset = static_cast<RasterViewportQualityPreset>(raster_quality);
+            if (raster_quality_active) {
+                g_viewport_raster_rebuild_pending = true;
+            }
+            ctx.start_render = true;
+        }
+        if (!raster_quality_active) ImGui::EndDisabled();
+        if (raster_quality_active) {
+            ImGui::TextDisabled("Controls how aggressively Solid/Matcap shifts foliage from full meshes to viewport proxies.");
+        } else {
+            ImGui::TextDisabled("Active only in Solid or Matcap viewport mode.");
+        }
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Final Render Output", ImVec4(0.86f, 0.92f, 1.0f, 1.0f));
+        ImGui::DragInt("Samples##final", &ctx.render_settings.final_render_samples, 1, 1, 100000);
+        ImGui::Checkbox("Apply Denoiser##final", &ctx.render_settings.render_use_denoiser);
+        if (ctx.render_settings.render_use_denoiser) {
+            const char* denoiser_mode_items[] = {
+                "Fast: beauty only",
+                "Quality: beauty + albedo + normal"
+            };
+            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
+            if (ImGui::Combo("Denoiser Mode##final", &denoiser_mode, denoiser_mode_items,
+                IM_ARRAYSIZE(denoiser_mode_items))) {
+                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+            }
+        }
+        UIWidgets::EndSection();
+    }
+
+    if (UIWidgets::BeginSection("Light Transport & Denoise", ImVec4(0.95f, 0.68f, 0.34f, 1.0f))) {
+        UIWidgets::ColoredHeader("Light Paths", ImVec4(1.0f, 0.88f, 0.54f, 1.0f));
+        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 0, 64);
+        UIWidgets::HelpMarker("Higher bounces increase realism for glass and interiors but slow down rendering.");
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Viewport Denoise", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
+        ImGui::Checkbox("Enable Viewport Denoising", &ctx.render_settings.use_denoiser);
+        if (ctx.render_settings.use_denoiser) {
+            const char* denoiser_mode_items[] = {
+                "Fast: beauty only",
+                "Quality: beauty + albedo + normal"
+            };
+            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
+            if (ImGui::Combo("Denoiser Mode", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
+                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+            }
+            ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
+        } else {
+            ImGui::TextDisabled("Viewport denoising is disabled.");
+        }
+        UIWidgets::EndSection();
+    }
+
+    if (UIWidgets::BeginSection("Resolution & Output", ImVec4(0.9f, 0.4f, 0.5f, 1.0f))) {
+        UIWidgets::ColoredHeader("Frame Size", ImVec4(1.0f, 0.82f, 0.86f, 1.0f));
+        if (ImGui::Combo("Resolution Preset", &preset_index,
+            [](void* data, int idx, const char** out_text) {
+                *out_text = ((ResolutionPreset*)data)[idx].name;
+                return true;
+            }, presets, IM_ARRAYSIZE(presets)))
+        {
+            if (preset_index != 0) {
+                new_width = presets[preset_index].w;
+                new_height = presets[preset_index].h;
+                aspect_w = presets[preset_index].bw;
+                aspect_h = presets[preset_index].bh;
+            }
+        }
+
+        ImGui::DragInt("Width", &new_width, 1, 1, 8192);
+        ImGui::DragInt("Height", &new_height, 1, 1, 8192);
+        ImGui::PushItemWidth(80.0f);
+        ImGui::DragInt("Aspect W", &aspect_w, 1, 1, 100);
+        ImGui::SameLine();
+        ImGui::DragInt("Aspect H", &aspect_h, 1, 1, 100);
+        ImGui::PopItemWidth();
+
+        const bool resolution_changed =
+            (new_width != last_applied_width) ||
+            (new_height != last_applied_height) ||
+            (aspect_w != last_applied_aspect_w) ||
+            (aspect_h != last_applied_aspect_h);
+
+        ImGui::TextDisabled("Current target aspect: %.3f", aspect_h ? float(aspect_w) / float(aspect_h) : 1.0f);
+        if (UIWidgets::PrimaryButton("Apply Output Settings", ImVec2(UIWidgets::GetInspectorActionWidth(), 30), resolution_changed)) {
+            const float ar = aspect_h ? float(aspect_w) / float(aspect_h) : 1.0f;
+            pending_aspect_ratio = ar;
+            pending_width = new_width;
+            pending_height = new_height;
+            aspect_ratio = ar;
+            pending_resolution_change = true;
+            last_applied_width = new_width;
+            last_applied_height = new_height;
+            last_applied_aspect_w = aspect_w;
+            last_applied_aspect_h = aspect_h;
+        }
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Quick Actions", ImVec4(0.98f, 0.75f, 0.80f, 1.0f));
+        UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.58f, 0.50f, 1.0f));
+        if (UIWidgets::IconActionButton("OpenDedicatedRenderWindow", UIWidgets::IconType::Render, "",
+            false, ImVec4(1.0f, 0.58f, 0.50f, 1.0f), ImVec2(44.0f, 42.0f),
+            "Open the dedicated render preview window.")) {
+            extern bool show_render_window;
+            show_render_window = true;
+        }
+        ImGui::SameLine();
+        UIWidgets::IconActionButton("ResolutionHelp", UIWidgets::IconType::Help, "",
+            false, ImVec4(0.92f, 0.72f, 0.48f, 1.0f), ImVec2(44.0f, 42.0f),
+            "Choose a preset or custom size, then apply the output settings to update the render target.");
+        UIWidgets::PopControlSurfaceStyle();
+        UIWidgets::EndSection();
+    }
+
+    DrawRenderWindowToneMapControls(ctx);
+
+    if (UIWidgets::BeginSection("Animation Render & Export", ImVec4(1.0f, 0.4f, 0.7f, 1.0f))) {
+        if (rendering_in_progress && ctx.is_animation_mode) {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.2f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+            ImGui::BeginChild("AnimRenderStatus", ImVec2(0, 126), true);
+
+            const int cur = ctx.render_settings.animation_current_frame;
+            const int start = ctx.render_settings.animation_start_frame;
+            const int end = ctx.render_settings.animation_end_frame;
+            const int total = end - start + 1;
+            const int done = cur - start;
+            const float progress = (total > 0) ? (float)done / (float)total : 0.0f;
+
+            UIWidgets::StatusIndicator("Animation sequence rendering in progress", UIWidgets::StatusType::Warning);
+            ImGui::Spacing();
+            char prog_text[64];
+            std::snprintf(prog_text, sizeof(prog_text), "Frame %d / %d  (%.0f%%)", cur, end, progress * 100.0f);
+            UIWidgets::ProgressBarEx(progress, ImVec2(-1, 24), prog_text, ImVec4(1.0f, 0.65f, 0.20f, 1.0f));
+            ImGui::Spacing();
+            ImGui::Text("Samples per frame: %d", ctx.render_settings.animation_samples_per_frame);
+            ImGui::Text("Playback FPS: %d", ctx.render_settings.animation_fps);
+            ImGui::TextWrapped("Output Folder: %s", ctx.render_settings.animation_output_folder.c_str());
+            UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.42f, 0.38f, 1.0f));
+            if (UIWidgets::IconActionButton("StopAnimationRender", UIWidgets::IconType::Stop, "Stop Rendering",
+                false, ImVec4(1.0f, 0.42f, 0.38f, 1.0f), ImVec2(148.0f, 42.0f),
+                "Stop the active animation sequence render.")) {
+                rendering_stopped_cpu = true;
+                rendering_stopped_gpu = true;
+                SCENE_LOG_WARN("Animation render stop requested by user.");
+            }
+            UIWidgets::PopControlSurfaceStyle();
+
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+        } else {
+            UIWidgets::ColoredHeader("Sequence Range", ImVec4(1.0f, 0.80f, 0.92f, 1.0f));
+            ImGui::PushItemWidth(80.0f);
+            ImGui::DragInt("Start", &ctx.render_settings.animation_start_frame, 1, 0, ctx.render_settings.animation_end_frame);
+            ImGui::SameLine();
+            ImGui::DragInt("End", &ctx.render_settings.animation_end_frame, 1, ctx.render_settings.animation_start_frame, 10000);
+            ImGui::SameLine();
+            ImGui::DragInt("FPS", &ctx.render_settings.animation_fps, 1, 1, 120);
+            ImGui::PopItemWidth();
+            if (!ctx.scene.animationDataList.empty() && ctx.scene.animationDataList[0]) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Auto")) {
+                    ctx.render_settings.animation_start_frame = ctx.scene.animationDataList[0]->startFrame;
+                    ctx.render_settings.animation_end_frame = ctx.scene.animationDataList[0]->endFrame;
+                    SCENE_LOG_INFO("Frame range auto-set from animation file.");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Auto-detect frame range from loaded animation");
+                }
+            }
+
+            UIWidgets::Divider();
+            UIWidgets::ColoredHeader("Sequence Quality", ImVec4(1.0f, 0.74f, 0.86f, 1.0f));
+            ImGui::DragInt("Samples Per Frame", &ctx.render_settings.animation_samples_per_frame, 1, 1, 10000);
+            UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.46f, 0.70f, 1.0f));
+            if (UIWidgets::IconActionButton("AnimPresetDraft", UIWidgets::IconType::Play, "Draft",
+                false, ImVec4(1.0f, 0.46f, 0.70f, 1.0f), ImVec2(82.0f, 38.0f),
+                "Set samples per frame to 16 for quick previews.")) {
+                ctx.render_settings.animation_samples_per_frame = 16;
+            }
+            ImGui::SameLine();
+            if (UIWidgets::IconActionButton("AnimPresetMedium", UIWidgets::IconType::Play, "Medium",
+                false, ImVec4(1.0f, 0.46f, 0.70f, 1.0f), ImVec2(86.0f, 38.0f),
+                "Set samples per frame to 64 for balanced previews.")) {
+                ctx.render_settings.animation_samples_per_frame = 64;
+            }
+            ImGui::SameLine();
+            if (UIWidgets::IconActionButton("AnimPresetHigh", UIWidgets::IconType::Play, "High",
+                false, ImVec4(1.0f, 0.46f, 0.70f, 1.0f), ImVec2(82.0f, 38.0f),
+                "Set samples per frame to 256 for higher quality output.")) {
+                ctx.render_settings.animation_samples_per_frame = 256;
+            }
+            UIWidgets::PopControlSurfaceStyle();
+
+            UIWidgets::Divider();
+            UIWidgets::ColoredHeader("Sequence Output", ImVec4(1.0f, 0.78f, 0.82f, 1.0f));
+            char folder_buf[512] = {};
+            std::snprintf(folder_buf, sizeof(folder_buf), "%s", ctx.render_settings.animation_output_folder.c_str());
+            ImGui::PushItemWidth(-56.0f);
+            if (ImGui::InputText("##outdir", folder_buf, sizeof(folder_buf))) {
+                ctx.render_settings.animation_output_folder = folder_buf;
+            }
+            ImGui::PopItemWidth();
+            UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.60f, 0.56f, 1.0f));
+            if (UIWidgets::IconActionButton("BrowseAnimOutput", UIWidgets::IconType::Assets, "Browse",
+                false, ImVec4(1.0f, 0.60f, 0.56f, 1.0f), ImVec2(104.0f, 38.0f),
+                "Choose the output folder for PNG sequence export.")) {
+                std::string path = selectFolderDialogW(L"Select Animation Output Folder");
+                if (!path.empty()) {
+                    ctx.render_settings.animation_output_folder = path;
+                }
+            }
+            UIWidgets::PopControlSurfaceStyle();
+
+            const int total_frames = ctx.render_settings.animation_end_frame - ctx.render_settings.animation_start_frame + 1;
+            const int samples = ctx.render_settings.animation_samples_per_frame;
+            const float est_time_per_frame = (samples / 64.0f) * 2.0f;
+            const float est_total_minutes = (est_time_per_frame * total_frames) / 60.0f;
+            const bool can_render = !ctx.render_settings.animation_output_folder.empty();
+            const bool valid_range = (ctx.render_settings.animation_end_frame >= ctx.render_settings.animation_start_frame);
+
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.11f, 0.15f, 0.95f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
+            ImGui::BeginChild("AnimRenderSummary", ImVec2(0, 72), true);
+            UIWidgets::StatusIndicator(
+                can_render && valid_range ? "Sequence is ready to render" : "Sequence needs attention before rendering",
+                can_render && valid_range ? UIWidgets::StatusType::Success : UIWidgets::StatusType::Warning);
+            ImGui::Text("%d frames x %d spp  |  est. %.1f min", total_frames, samples, est_total_minutes);
+            ImGui::Text("Resolution: %dx%d", ctx.render_settings.final_render_width, ctx.render_settings.final_render_height);
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor();
+
+            if (!can_render) {
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "Set an output folder before starting the sequence render.");
+            }
+            if (!valid_range) {
+                ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.45f, 1.0f), "Frame range is invalid. End frame must be greater than or equal to start frame.");
+            }
+
+            UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.40f, 0.66f, 1.0f));
+            if (UIWidgets::IconActionButton("RenderAnimationSequence", UIWidgets::IconType::Render, "Render Sequence",
+                false, ImVec4(1.0f, 0.40f, 0.66f, 1.0f), ImVec2(164.0f, 44.0f),
+                "Start rendering the animation as a PNG image sequence.", can_render && valid_range)) {
+                ctx.render_settings.start_animation_render = true;
+                ctx.render_settings.animation_total_frames = total_frames;
+                SCENE_LOG_INFO("Animation render triggered: " + std::to_string(total_frames) + " frames @ " + std::to_string(samples) + " samples");
+            }
+            UIWidgets::PopControlSurfaceStyle();
+        }
+
+        UIWidgets::EndSection();
+    }
+
+    ImGui::PopStyleColor(9);
+    ImGui::PopStyleVar(7);
+    UIWidgets::PopControlSurfaceStyle();
+}
+
 
 
 // drawWorldContent moved to scene_ui_world.cpp
 
 void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 {
-    // Dinamik yükseklik hesabı
-    bool bottom_visible = show_animation_panel || show_scene_log;
-    float bottom_margin = bottom_visible ? (bottom_panel_height + 24.0f) : 24.0f; // Panel + StatusBar
-
-    float menu_height = 19.0f; 
-    float target_height = screen_y - menu_height - bottom_margin;
+    const float menu_height = getMainMenuReservedHeight();
+    float status_bar_height = 24.0f;
+    // Keep the properties panel full-height so it can overlap the bottom panel when focused.
+    float target_height = screen_y - menu_height - status_bar_height;
 
     // Panel ayarları
     // Lock Height to target_height (MinY = MaxY), allow Width resize (300-800)
@@ -1335,16 +1803,26 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
     // Position at (0, menu_height) -> TOP LEFT
     ImGui::SetNextWindowPos(ImVec2(0, menu_height), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(side_panel_width, target_height), ImGuiCond_FirstUseEver);
+    if (focus_properties_panel_next_frame) {
+        ImGui::SetNextWindowFocus();
+    }
 
     // Remove TitleBar and Resize for a seamless docked look
-    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse;
 
-    // Add frame styling
+    // Panel shell styling
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.35f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.085f, 0.09f, 0.105f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.46f, 0.54f, 0.64f, 0.18f));
 
     if (ImGui::Begin("Properties", nullptr, flags))
     {
+        if (focus_properties_panel_next_frame) {
+            ImGui::SetWindowFocus();
+            focus_properties_panel_next_frame = false;
+        }
         ImDrawList* parent_dl = ImGui::GetWindowDrawList();
         ImVec2 win_pos = ImGui::GetWindowPos();
         ImVec2 win_size = ImGui::GetWindowSize();
@@ -1359,25 +1837,45 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "Scene Edit") { active_properties_tab = 0; tab_to_focus = ""; }
         if (tab_to_focus == "Render")     { active_properties_tab = 1; tab_to_focus = ""; }
         if (tab_to_focus == "Terrain")    { active_properties_tab = 2; tab_to_focus = ""; }
+        if (tab_to_focus == "Scatter")    { active_properties_tab = 11; tab_to_focus = ""; }
         if (tab_to_focus == "Water")      { active_properties_tab = 3; tab_to_focus = ""; }
         if (tab_to_focus == "Volumetric" || tab_to_focus == "VDB" || tab_to_focus == "Gas") { active_properties_tab = 4; tab_to_focus = ""; }
         if (tab_to_focus == "Force Field"){ active_properties_tab = 5; tab_to_focus = ""; }
         if (tab_to_focus == "World")      { active_properties_tab = 6; tab_to_focus = ""; }
-        if (tab_to_focus == "Modifiers")  { active_properties_tab = 7; tab_to_focus = ""; }
-        if (tab_to_focus == "System")     { active_properties_tab = 8; tab_to_focus = ""; }
+        if (tab_to_focus == "Modifiers" || tab_to_focus == "Modeling")  { active_properties_tab = 7; tab_to_focus = ""; }
+        if (tab_to_focus == "Paint")      { active_properties_tab = 10; tab_to_focus = ""; }
+        if (tab_to_focus == "System")     { active_properties_tab = 9; tab_to_focus = ""; }
 
-        float sidebar_width = 46.0f;
+        float sidebar_width = 62.0f;
         
         // --- 1. SIDEBAR (Fixed Width) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 8));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 4));
         
-        // Sidebar background: slightly darker than main window for contrast
-        ImVec4 sidebarBg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
-        sidebarBg.x *= 0.85f; sidebarBg.y *= 0.85f; sidebarBg.z *= 0.85f;
+        // Sidebar background
+        ImVec4 sidebarBg(0.070f, 0.075f, 0.090f, 0.98f);
         ImGui::PushStyleColor(ImGuiCol_ChildBg, sidebarBg);
         
         ImGui::BeginChild("PropSidebar", ImVec2(sidebar_width, 0), false, ImGuiWindowFlags_NoScrollbar);
+
+        const ImVec2 sidebar_pos = ImGui::GetWindowPos();
+        const ImVec2 sidebar_size_actual = ImGui::GetWindowSize();
+        const float rail_width = 48.0f;
+        const float rail_x = sidebar_pos.x + (sidebar_width - rail_width) * 0.5f;
+        parent_dl->AddRectFilled(
+            ImVec2(rail_x, sidebar_pos.y + 8.0f),
+            ImVec2(rail_x + rail_width, sidebar_pos.y + sidebar_size_actual.y - 8.0f),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(0.11f, 0.125f, 0.15f, 0.92f)),
+            18.0f
+        );
+        parent_dl->AddRect(
+            ImVec2(rail_x, sidebar_pos.y + 8.0f),
+            ImVec2(rail_x + rail_width, sidebar_pos.y + sidebar_size_actual.y - 8.0f),
+            ImGui::ColorConvertFloat4ToU32(ImVec4(0.72f, 0.80f, 0.90f, 0.07f)),
+            18.0f,
+            0,
+            1.0f
+        );
         
         // Add a vertical line to separate sidebar - Use Parent DL to avoid clipping
         parent_dl->AddLine(
@@ -1388,65 +1886,153 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
         auto drawTabButton = [&](int index, UIWidgets::IconType icon, const char* tooltip) {
             bool is_active = (active_properties_tab == index);
+            static float hover_anim[16] = {};
             ImGui::PushID(index);
             
-            ImVec2 pos = ImGui::GetCursorScreenPos();
-            float size = 36.0f; // Slightly smaller buttons
+            const float size = 40.0f;
             float margin = (sidebar_width - size) * 0.5f;
 
             ImGui::SetCursorPosX(margin);
-            
+            ImVec2 pos = ImGui::GetCursorScreenPos();
+
+            auto getHoverTint = [&](UIWidgets::IconType iconType) -> ImVec4 {
+                switch (iconType) {
+                    case UIWidgets::IconType::Scene:      return ImVec4(0.82f, 0.88f, 1.00f, 1.0f);
+                    case UIWidgets::IconType::Render:     return ImVec4(1.00f, 0.84f, 0.42f, 1.0f);
+                    case UIWidgets::IconType::Terrain:    return ImVec4(0.56f, 0.90f, 0.47f, 1.0f);
+                    case UIWidgets::IconType::Water:      return ImVec4(0.38f, 0.78f, 1.00f, 1.0f);
+                    case UIWidgets::IconType::Volumetric: return ImVec4(0.82f, 0.92f, 1.00f, 1.0f);
+                    case UIWidgets::IconType::Force:      return ImVec4(1.00f, 0.66f, 0.34f, 1.0f);
+                    case UIWidgets::IconType::World:      return ImVec4(0.44f, 0.88f, 0.92f, 1.0f);
+                    case UIWidgets::IconType::Hair:       return ImVec4(1.00f, 0.73f, 0.42f, 1.0f);
+                    case UIWidgets::IconType::SprayTool:  return ImVec4(0.58f, 0.96f, 0.52f, 1.0f);
+                    case UIWidgets::IconType::Sculpt:     return ImVec4(1.00f, 0.56f, 0.38f, 1.0f);
+                    case UIWidgets::IconType::PaintTool:  return ImVec4(1.00f, 0.48f, 0.50f, 1.0f);
+                    case UIWidgets::IconType::System:     return ImVec4(0.84f, 0.86f, 0.94f, 1.0f);
+                    default:                              return ImVec4(0.50f, 0.92f, 0.72f, 1.0f);
+                }
+            };
+
+            const ImVec4 accent = getHoverTint(icon);
+            const ImVec4 baseBg(0.13f, 0.145f, 0.17f, 0.86f);
+            const float mix = is_active ? 0.72f : (0.18f + hover_anim[index] * 0.28f);
+            const ImVec4 buttonBg(
+                baseBg.x + (accent.x - baseBg.x) * mix,
+                baseBg.y + (accent.y - baseBg.y) * mix,
+                baseBg.z + (accent.z - baseBg.z) * mix,
+                is_active ? 0.98f : 0.90f);
+
             if (is_active) {
                 // Connection Bridge: Use Parent DL to bleed across the child border
                 parent_dl->AddRectFilled(
-                    ImVec2(pos.x - margin, pos.y), 
-                    ImVec2(pos.x + sidebar_width + 2, pos.y + size), 
+                    ImVec2(rail_x, pos.y),
+                    ImVec2(pos.x + sidebar_width + 2, pos.y + size),
                     ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)),
-                    0.0f
+                    12.0f
                 );
 
                 // Indicator on the right edge of the sidebar
                 parent_dl->AddRectFilled(
-                    ImVec2(win_pos.x + sidebar_width - 3, pos.y + 4), 
-                    ImVec2(win_pos.x + sidebar_width, pos.y + size - 4), 
-                    ImGui::ColorConvertFloat4ToU32(ImVec4(0.05f, 0.75f, 0.65f, 1.0f)),
-                    2.0f
+                    ImVec2(win_pos.x + sidebar_width - 3, pos.y + 4),
+                    ImVec2(win_pos.x + sidebar_width, pos.y + size - 4),
+                    ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 1.0f)),
+                    3.0f
                 );
-
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1,1,1, 0.05f));
-            } else {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0)); 
             }
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 11.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Button, buttonBg);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(
+                (std::min)(1.0f, buttonBg.x + 0.10f),
+                (std::min)(1.0f, buttonBg.y + 0.10f),
+                (std::min)(1.0f, buttonBg.z + 0.10f),
+                0.96f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(
+                (std::min)(1.0f, buttonBg.x + 0.05f),
+                (std::min)(1.0f, buttonBg.y + 0.05f),
+                (std::min)(1.0f, buttonBg.z + 0.05f),
+                0.98f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, is_active ? 0.52f : 0.18f));
 
             if (ImGui::Button("##tab", ImVec2(size, size))) {
                 active_properties_tab = index;
+                focus_properties_panel_next_frame = true;
             }
-            
-            // Draw Icon
-            ImU32 iconCol = is_active ? ImGui::ColorConvertFloat4ToU32(ImVec4(0.1f, 0.9f, 0.8f, 1.0f)) : ImGui::ColorConvertFloat4ToU32(ImVec4(0.55f, 0.55f, 0.6f, 1.0f));
-            UIWidgets::DrawIcon(icon, ImVec2(pos.x + (size-20)*0.5f, pos.y + (size-20)*0.5f), 20.0f, iconCol, 1.5f);
 
-            if (ImGui::IsItemHovered()) {
+            const bool is_hovered = ImGui::IsItemHovered();
+            const float target_hover = (is_hovered || is_active) ? 1.0f : 0.0f;
+            const float anim_speed = 12.0f * ImGui::GetIO().DeltaTime;
+            hover_anim[index] += (target_hover - hover_anim[index]) * ImClamp(anim_speed, 0.0f, 1.0f);
+
+            ImVec2 item_min = ImGui::GetItemRectMin();
+            ImVec2 item_max = ImGui::GetItemRectMax();
+            parent_dl->AddRectFilled(
+                item_min,
+                item_max,
+                ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 0.04f + hover_anim[index] * 0.10f)),
+                11.0f
+            );
+            parent_dl->AddRect(
+                item_min,
+                item_max,
+                ImGui::ColorConvertFloat4ToU32(ImVec4(accent.x, accent.y, accent.z, 0.16f + hover_anim[index] * 0.24f)),
+                11.0f, 0, 1.0f);
+
+            // Hover eases into a larger, colorized icon to make the narrow tab strip more legible.
+            const float iconSize = 24.0f + 4.0f * hover_anim[index];
+            ImVec4 idleTint(0.55f, 0.55f, 0.60f, 1.0f);
+            ImVec4 activeTint(
+                (std::min)(1.0f, accent.x + 0.10f),
+                (std::min)(1.0f, accent.y + 0.10f),
+                (std::min)(1.0f, accent.z + 0.10f),
+                1.0f);
+            ImVec4 hoverTint = accent;
+            ImVec4 iconTint = is_active
+                ? activeTint
+                : ImLerp(idleTint, hoverTint, hover_anim[index]);
+            UIWidgets::DrawIcon(
+                icon,
+                ImVec2(
+                    item_min.x + (size - iconSize) * 0.5f,
+                    item_min.y + (size - iconSize) * 0.5f),
+                iconSize,
+                ImGui::ColorConvertFloat4ToU32(iconTint),
+                1.75f + 0.40f * hover_anim[index]
+            );
+
+            if (is_hovered) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.07f, 0.08f, 0.10f, 0.84f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(iconTint.x, iconTint.y, iconTint.z, 0.22f));
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
                 ImGui::BeginTooltip();
+                ImGui::PushTextWrapPos(ImGui::GetFontSize() * 22.0f);
                 ImGui::TextUnformatted(tooltip);
+                ImGui::PopTextWrapPos();
                 ImGui::EndTooltip();
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(2);
             }
             
-            ImGui::PopStyleColor(1);
+            ImGui::PopStyleColor(4);
+            ImGui::PopStyleVar(2);
             ImGui::PopID();
         };
 
-        ImGui::Spacing(); // Top spacing
+        ImGui::Dummy(ImVec2(0.0f, 10.0f));
         drawTabButton(0, UIWidgets::IconType::Scene,      "Scene / Hierarchy");
         drawTabButton(1, UIWidgets::IconType::Render,     "Render Settings");
         if (show_terrain_tab)    drawTabButton(2, UIWidgets::IconType::Terrain,    "Terrain Editor");
-        if (show_water_tab)      drawTabButton(3, UIWidgets::IconType::Water,      "Water & Rivers");
+        if (show_water_tab)      drawTabButton(3, UIWidgets::IconType::Water,      active_water_subtab == 0 ? "Water" : "River Spline");
         if (show_volumetric_tab) drawTabButton(4, UIWidgets::IconType::Volumetric, "Volumetrics");
         if (show_forcefield_tab) drawTabButton(5, UIWidgets::IconType::Force,      "Force Fields");
         if (show_world_tab)      drawTabButton(6, UIWidgets::IconType::World,      "World & Sky");
-        if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Scene,      "Hair & Fur");
-        drawTabButton(7, UIWidgets::IconType::Sculpt, "Modifiers & Sculpt"); 
+        if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
+        if (show_scatter_tab)    drawTabButton(11, UIWidgets::IconType::SprayTool, "Scatter (Foliage & Mesh)");
+        drawTabButton(7, UIWidgets::IconType::Sculpt, "Modeling");
+        if (show_paint_tab)      drawTabButton(10, UIWidgets::IconType::PaintTool,  "Paint Mode");
         if (show_system_tab)     drawTabButton(9, UIWidgets::IconType::System,     "System & UI");
         
         ImGui::EndChild();
@@ -1457,20 +2043,20 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         
         // --- 2. CONTENT AREA (Inspector Style) ---
         ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg)); // Base background
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.105f, 0.12f, 0.98f));
         
         ImGui::BeginChild("PropContentArea", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar);
         
 
         // ── MAIN CONTENT (Flush Scroll Area) ──
         ImGui::BeginChild("PropScrollArea", ImVec2(0, 0), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 0)); // Adding safe padding to prevent clipping
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 12));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 6));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10, 14));
         
         // Start Global Indent for controls (leaving headers flush)
-        ImGui::Indent(8.0f); 
+        ImGui::Indent(10.0f); 
         ImGui::Spacing();
-        ImGui::Unindent(8.0f);
+        ImGui::Unindent(10.0f);
 
         // --- CAPPED ITEM WIDTH ---
         // Prevents sliders/inputs from stretching too far on wide panels, keeping labels legible
@@ -1478,79 +2064,134 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
 
         switch (active_properties_tab) {
             case 0: drawSceneHierarchy(ctx); break;
-            case 1: 
+            case 1:
+                {
+                    drawRenderInspectorContent(ctx);
+                }
+                break;
+#if 0
                 {
                     // ─────────────────────────────────────────────────────────────────────────
-                    // ENGINE & BACKEND
+                    // ENGINE & BACKEND  (always visible - render device selection should be
+                    // accessible regardless of the active viewport shading mode)
                     // ─────────────────────────────────────────────────────────────────────────
-                    if (UIWidgets::BeginSection("Render Engine", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
-                        extern bool g_hasOptix;
-                        extern bool g_hasVulkan;
-                        
-                        // Hardware support validation (essential when loading a project saved with a GPU backend)
-                        if (ctx.render_settings.use_optix && !g_hasOptix) {
-                            ctx.render_settings.use_optix = false;
-                        }
-                        if (ctx.render_settings.use_vulkan && !g_hasVulkan) {
-                            ctx.render_settings.use_vulkan = false;
-                        }
+                    // Viewport shading mode: 0=Solid, 1=MaterialPreview, 2=Rendered, 3=Matcap
+                    // When Solid/Matcap is active, the Vulkan raster pipeline is used
+                    // automatically. The engine selection below sets the path-tracing
+                    // backend used when the viewport switches to Rendered mode.
+                    {
+                        if (UIWidgets::BeginSection("Render Engine", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+                            extern bool g_hasOptix;
+                            extern bool g_hasVulkan;
+                            static int deferred_engine_type = -1; // 0=CPU,1=OptiX,2=Vulkan
 
-                        int engine_type = 0;
-                        if (ctx.render_settings.use_optix) engine_type = 1;
-                        if (ctx.render_settings.use_vulkan) engine_type = 2;
-                        
-                        const char* engines[] = { "CPU", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
-                        
-                        if (ImGui::BeginCombo("Engine", engines[engine_type])) {
-                            for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {
-                                bool is_disabled = false;
-                                if (i == 1 && !g_hasOptix) is_disabled = true;
-                                if (i == 2 && !g_hasVulkan) is_disabled = true;
+                            // Info text when in Solid/Matcap mode
+                            const bool is_raster_viewport = (viewport_settings.shading_mode == 0 || viewport_settings.shading_mode == 3);
+                            if (is_raster_viewport) {
+                                const bool interactive_backend_active =
+                                    (dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) != nullptr) ||
+                                    (g_viewport_backend != nullptr);
+                                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f), "[i] Solid / Matcap Experimental");
+                                ImGui::TextWrapped(interactive_backend_active
+                                    ? "Solid/Matcap is currently running on the interactive viewport path. Engine selection below still applies to Rendered mode."
+                                    : "Solid/Matcap is experimental and the interactive viewport path is unavailable right now. Engine selection below applies to Rendered mode.");
+                                ImGui::Spacing();
+                            }
 
-                                bool is_selected = (engine_type == i);
-                                ImGuiSelectableFlags flags = is_disabled ? ImGuiSelectableFlags_Disabled : 0;
-                                
-                                std::string label = engines[i];
-                                if (is_disabled) {
-                                    label += " [Not Supported]";
-                                }
-                                
-                                if (ImGui::Selectable(label.c_str(), is_selected, flags)) {
-                                    engine_type = i;
-                                    ctx.render_settings.use_optix = (engine_type == 1);
-                                    ctx.render_settings.use_vulkan = (engine_type == 2);
-                                    extern bool g_cpu_sync_pending; 
+                            // Hardware support validation (essential when loading a project saved with a GPU backend)
+                            if (ctx.render_settings.use_optix && !g_hasOptix) {
+                                ctx.render_settings.use_optix = false;
+                            }
+                            if (ctx.render_settings.use_vulkan && !g_hasVulkan) {
+                                ctx.render_settings.use_vulkan = false;
+                            }
+
+                            int engine_type = 0;
+                            if (ctx.render_settings.use_optix) engine_type = 1;
+                            if (ctx.render_settings.use_vulkan) engine_type = 2;
+
+                            // Apply deferred choice only when viewport is in Rendered mode.
+                            const bool rendered_viewport_active = (viewport_settings.shading_mode == 2);
+                            if (rendered_viewport_active && deferred_engine_type >= 0) {
+                                const int clamped_deferred = std::clamp(deferred_engine_type, 0, 2);
+                                const bool next_use_optix = (clamped_deferred == 1);
+                                const bool next_use_vulkan = (clamped_deferred == 2);
+                                if (ctx.render_settings.use_optix != next_use_optix ||
+                                    ctx.render_settings.use_vulkan != next_use_vulkan) {
+                                    ctx.render_settings.use_optix = next_use_optix;
+                                    ctx.render_settings.use_vulkan = next_use_vulkan;
+                                    extern bool g_cpu_sync_pending;
                                     g_cpu_sync_pending = true;
-                                    
                                     ctx.render_settings.backend_changed = true;
                                     ctx.start_render = true;
                                 }
-                                
-                                if (is_selected) {
-                                    ImGui::SetItemDefaultFocus();
+                                deferred_engine_type = -1;
+                            }
+                            if (!rendered_viewport_active && deferred_engine_type >= 0) {
+                                engine_type = std::clamp(deferred_engine_type, 0, 2);
+                            }
+
+                            const char* engines[] = { "CPU", "NVIDIA OptiX (CUDA)", "Vulkan (Experimental)" };
+
+                            if (ImGui::BeginCombo("Engine", engines[engine_type])) {
+                                for (int i = 0; i < IM_ARRAYSIZE(engines); i++) {
+                                    bool is_disabled = false;
+                                    if (i == 1 && !g_hasOptix) is_disabled = true;
+                                    if (i == 2 && !g_hasVulkan) is_disabled = true;
+
+                                    bool is_selected = (engine_type == i);
+                                    ImGuiSelectableFlags flags = is_disabled ? ImGuiSelectableFlags_Disabled : 0;
+
+                                    std::string label = engines[i];
+                                    if (is_disabled) {
+                                        label += " [Not Supported]";
+                                    }
+
+                                    if (ImGui::Selectable(label.c_str(), is_selected, flags)) {
+                                        engine_type = i;
+                                        if (rendered_viewport_active) {
+                                            ctx.render_settings.use_optix = (engine_type == 1);
+                                            ctx.render_settings.use_vulkan = (engine_type == 2);
+                                            extern bool g_cpu_sync_pending;
+                                            g_cpu_sync_pending = true;
+
+                                            ctx.render_settings.backend_changed = true;
+                                            ctx.start_render = true;
+                                        } else {
+                                            // In Solid/Matcap/MaterialPreview this is just a preference.
+                                            deferred_engine_type = engine_type;
+                                            addViewportMessage("Engine preference saved. It will apply in Rendered mode.",
+                                                2.0f, ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
+                                        }
+                                    }
+
+                                    if (is_selected) {
+                                        ImGui::SetItemDefaultFocus();
+                                    }
+                                }
+                                ImGui::EndCombo();
+                            }
+
+                            if (!g_hasOptix && !g_hasVulkan) {
+                                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU Available]");
+                            } else if (!g_hasOptix && engine_type == 1) {
+                                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU found]");
+                            } else if (!g_hasVulkan && engine_type == 2) {
+                                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[Vulkan Not Supported]");
+                            }
+
+                            if (!ctx.render_settings.use_optix && !ctx.render_settings.use_vulkan) {
+                                const char* bvh_items[] = { "Custom RayTrophi BVH", "Intel Embree (Recommended)" };
+                                int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
+                                if (ImGui::Combo("CPU BVH Type", &current_bvh, bvh_items, 2)) {
+                                    ctx.render_settings.UI_use_embree = (current_bvh == 1);
+                                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                                    ctx.start_render = true;
                                 }
                             }
-                            ImGui::EndCombo();
-                        }
-                        
-                        if (!g_hasOptix && !g_hasVulkan) {
-                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU Available]");
-                        } else if (!g_hasOptix && engine_type == 1) { // Fallback print if somehow matched
-                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[No Compatible GPU found]");
-                        } else if (!g_hasVulkan && engine_type == 2) {
-                            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "[Vulkan Not Supported]");
-                        }
 
-                        if (!ctx.render_settings.use_optix && !ctx.render_settings.use_vulkan) {
-                            const char* bvh_items[] = { "Custom RayTrophi BVH", "Intel Embree (Recommended)" };
-                            int current_bvh = ctx.render_settings.UI_use_embree ? 1 : 0;
-                            if (ImGui::Combo("CPU BVH Type", &current_bvh, bvh_items, 2)) {
-                                ctx.render_settings.UI_use_embree = (current_bvh == 1);
-                                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                                ctx.start_render = true;
-                            }
+                            UIWidgets::EndSection();
                         }
-                        UIWidgets::EndSection();
                     }
 
                     // ─────────────────────────────────────────────────────────────────────────
@@ -1808,13 +2449,28 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     }
                 }
                 break;
+#endif
             case 2: if (show_terrain_tab) drawTerrainPanel(ctx); break;
-            case 3: if (show_water_tab) { drawWaterPanel(ctx); ImGui::Separator(); drawRiverPanel(ctx); } break;
+            case 3:
+                if (show_water_tab) {
+                    if (ImGui::Button("Water##WaterSubtab")) active_water_subtab = 0;
+                    ImGui::SameLine();
+                    if (ImGui::Button("River##WaterSubtab")) active_water_subtab = 1;
+                    ImGui::Separator();
+                    if (active_water_subtab == 0) {
+                        drawWaterPanel(ctx);
+                    } else {
+                        drawRiverPanel(ctx);
+                    }
+                }
+                break;
             case 4: if (show_volumetric_tab) drawVolumetricPanel(ctx); break;
             case 5: if (show_forcefield_tab) ForceFieldUI::drawForceFieldPanel(ctx, ctx.scene); break;
             case 6: if (show_world_tab) drawWorldContent(ctx); break;
             case 7: drawModifiersPanel(ctx); break;
+            case 11: if (show_scatter_tab) drawScatterBrushPanel(ctx); break;
             case 9: drawThemeSelector(); drawResolutionPanel(ctx); break;
+            case 10: if (show_paint_tab) drawPaintPanel(ctx); break;
             case 8: if (show_hair_tab) {
                 // Get selected mesh triangles for hair generation target
                 static std::vector<std::shared_ptr<Triangle>> selectedMeshTriangles;
@@ -1913,8 +2569,43 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         }
         ImGui::PopItemWidth();
 
-        // Safety: Disable brushes if tab changed
-        if (active_properties_tab != 2) terrain_brush.enabled = false;
+        // Safety: Disable terrain brush when leaving terrain tools, unless the new paint mode
+        // is intentionally driving the same optimized terrain paint backend from the modifiers tab.
+        const bool allow_paint_bridge =
+            (active_properties_tab == 10) &&
+            paint_mode_state.enabled &&
+            paint_mode_state.hasValidTarget();
+        if (active_properties_tab != 2 && !allow_paint_bridge) {
+            terrain_brush.enabled = false;
+        }
+
+        // If the user switched sidebar tabs, ensure any panel-local paint/brush modes are
+        // deactivated so they don't continue painting when their panel is no longer visible.
+        static int s_last_active_tab = -1;
+        if (s_last_active_tab == -1) s_last_active_tab = active_properties_tab;
+        if (s_last_active_tab != active_properties_tab) {
+            // Leaving Terrain tab -> disable foliage brush
+            if (s_last_active_tab == 2) {
+                foliage_brush.enabled = false;
+                foliage_brush.active_group_id = -1;
+                foliage_brush.pending_instances.clear();
+                foliage_brush.pending_group_id = -1;
+            }
+            // Leaving Scatter (legacy) tab -> disable scatter brush
+            if (s_last_active_tab == 11) {
+                scatter_brush.enabled = false;
+                scatter_brush.active_group_id = -1;
+                scatter_brush.pending_instances.clear();
+                scatter_brush.pending_group_id = -1;
+            }
+            // Leaving Paint tab -> fully exit paint mode
+            if (s_last_active_tab == 10) {
+                paint_mode_state.enabled = false;
+                paint_mode_state.clearAdapter();
+            }
+
+            s_last_active_tab = active_properties_tab;
+        }
         
         ImGui::PopStyleVar(2);  // WindowPadding, ItemSpacing
         ImGui::EndChild();      // End PropScrollArea
@@ -1923,14 +2614,113 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         ImGui::PopStyleVar();   // ChildRounding
     }
     ImGui::End();
-    ImGui::PopStyleColor(); // Border
-    ImGui::PopStyleVar();   // BorderSize
+    ImGui::PopStyleColor(2); // WindowBg, Border
+    ImGui::PopStyleVar(3);   // WindowPadding, WindowRounding, BorderSize
 }
 
 // Main Menu Bar implementation moved to separate file: scene_ui_menu.hpp check end of file
 
 #include "scene_ui_menu.hpp"
 
+
+void SceneUI::validateSelectionAgainstScene(UIContext& ctx) {
+    if (ctx.selection.multi_selection.empty() && !ctx.selection.selected.is_valid()) {
+        return;
+    }
+
+    std::unordered_map<std::string, std::pair<int, std::shared_ptr<Triangle>>> live_objects_by_name;
+    live_objects_by_name.reserve(ctx.scene.world.objects.size());
+
+    for (size_t i = 0; i < ctx.scene.world.objects.size(); ++i) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[i]);
+        if (!tri) continue;
+
+        std::string node_name = tri->getNodeName();
+        if (node_name.empty()) node_name = tri->nodeName;
+        if (node_name.empty()) continue;
+
+        live_objects_by_name.emplace(node_name, std::make_pair(static_cast<int>(i), tri));
+    }
+
+    auto rebind_item = [&](SelectableItem& item) -> bool {
+        switch (item.type) {
+            case SelectableType::Object: {
+                std::string node_name = item.name;
+                if (node_name.empty() && item.object) {
+                    node_name = item.object->getNodeName();
+                    if (node_name.empty()) node_name = item.object->nodeName;
+                }
+                if (node_name.empty()) return false;
+
+                auto it = live_objects_by_name.find(node_name);
+                if (it == live_objects_by_name.end() || !it->second.second) {
+                    return false;
+                }
+
+                item.object = it->second.second;
+                item.object_index = it->second.first;
+                item.name = node_name;
+                return true;
+            }
+            case SelectableType::Light:
+                return selectionContainsLight(ctx.scene, item.light);
+            case SelectableType::Camera:
+            case SelectableType::CameraTarget:
+                return selectionContainsCamera(ctx.scene, item.camera);
+            case SelectableType::VDBVolume:
+                return selectionContainsVDB(ctx.scene, item.vdb_volume);
+            case SelectableType::GasVolume:
+                return selectionContainsGas(ctx.scene, item.gas_volume);
+            case SelectableType::ForceField:
+                return selectionContainsForceField(ctx.scene, item.force_field);
+            case SelectableType::World:
+                return true;
+            case SelectableType::None:
+            default:
+                return false;
+        }
+    };
+
+    bool changed = false;
+    auto& multi = ctx.selection.multi_selection;
+    for (auto it = multi.begin(); it != multi.end();) {
+        if (!rebind_item(*it)) {
+            it = multi.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+
+    if (!ctx.selection.selected.is_valid()) {
+        if (!multi.empty()) {
+            ctx.selection.syncPrimarySelection();
+            changed = true;
+        }
+    } else {
+        SelectableItem rebound_primary = ctx.selection.selected;
+        if (!rebind_item(rebound_primary)) {
+            ctx.selection.syncPrimarySelection();
+            changed = true;
+        } else if (rebound_primary.type != ctx.selection.selected.type ||
+                   rebound_primary.object != ctx.selection.selected.object ||
+                   rebound_primary.light != ctx.selection.selected.light ||
+                   rebound_primary.camera != ctx.selection.selected.camera ||
+                   rebound_primary.vdb_volume != ctx.selection.selected.vdb_volume ||
+                   rebound_primary.gas_volume != ctx.selection.selected.gas_volume ||
+                   rebound_primary.force_field != ctx.selection.selected.force_field ||
+                   rebound_primary.object_index != ctx.selection.selected.object_index ||
+                   rebound_primary.name != ctx.selection.selected.name) {
+            ctx.selection.selected = rebound_primary;
+            ctx.selection.updatePositionFromSelection();
+            changed = true;
+        }
+    }
+
+    if (changed && ctx.selection.multi_selection.empty()) {
+        ctx.selection.clearSelection();
+    }
+}
 
 void SceneUI::draw(UIContext& ctx)
 {
@@ -1946,6 +2736,9 @@ void SceneUI::draw(UIContext& ctx)
 
     // Texture Safety Cleanup
     manageTextureGraveyard();
+    syncMeshEditState(ctx);
+    tryRestoreSerializedMeshEditLayer(ctx);
+    processPendingMeshEditGpuSync(ctx);
 
     // Export Popup Logic
     if (SceneExporter::getInstance().drawExportPopup(ctx.scene)) {
@@ -2008,6 +2801,7 @@ void SceneUI::draw(UIContext& ctx)
     // ═══════════════════════════════════════════════════════════════════════════
     // CENTRALIZED SCENE SYNC - Ensure selection cache is consistent
     // ═══════════════════════════════════════════════════════════════════════════
+    bool scene_membership_changed = false;
     if (ctx.scene.world.objects.size() != last_scene_obj_count) {
         if (last_scene_obj_count != 0) {
             SCENE_LOG_INFO("Scene changed (Count: " + std::to_string(last_scene_obj_count) + 
@@ -2015,6 +2809,37 @@ void SceneUI::draw(UIContext& ctx)
         }
         mesh_cache_valid = false;
         last_scene_obj_count = ctx.scene.world.objects.size();
+        scene_membership_changed = true;
+    }
+
+    if (ctx.scene.lights.size() != last_scene_light_count) {
+        last_scene_light_count = ctx.scene.lights.size();
+        scene_membership_changed = true;
+    }
+    if (ctx.scene.cameras.size() != last_scene_camera_count) {
+        last_scene_camera_count = ctx.scene.cameras.size();
+        scene_membership_changed = true;
+    }
+    if (ctx.scene.vdb_volumes.size() != last_scene_vdb_count) {
+        last_scene_vdb_count = ctx.scene.vdb_volumes.size();
+        scene_membership_changed = true;
+    }
+    if (ctx.scene.gas_volumes.size() != last_scene_gas_count) {
+        last_scene_gas_count = ctx.scene.gas_volumes.size();
+        scene_membership_changed = true;
+    }
+    if (ctx.scene.force_field_manager.force_fields.size() != last_scene_forcefield_count) {
+        last_scene_forcefield_count = ctx.scene.force_field_manager.force_fields.size();
+        scene_membership_changed = true;
+    }
+
+    if (scene_membership_changed) {
+        selection_validation_pending = true;
+    }
+
+    if (selection_validation_pending) {
+        validateSelectionAgainstScene(ctx);
+        selection_validation_pending = false;
     }
 
     world_params_changed_this_frame = false;
@@ -2028,6 +2853,7 @@ void SceneUI::draw(UIContext& ctx)
     float left_offset = 0.0f;
     drawPanels(ctx);
     left_offset = showSidePanel ? side_panel_width : 0.0f;
+    drawPaintBrushDock(ctx);
 
     float vp_width = ImGui::GetIO().DisplaySize.x;
     float vp_height = ImGui::GetIO().DisplaySize.y;
@@ -2139,6 +2965,8 @@ void SceneUI::draw(UIContext& ctx)
     // Terrain Sculpting
     handleTerrainBrush(ctx);
     handleTerrainFoliageBrush(ctx);  // Foliage painting brush
+    handleMeshSculpt(ctx);
+    handleMeshPaint(ctx);
     
     // Hair Brush System
     handleHairBrush(ctx);      // Hair paint brush input + preview
@@ -2146,19 +2974,7 @@ void SceneUI::draw(UIContext& ctx)
     handleSceneInteraction(ctx, gizmo_hit);
     processDeferredSceneUpdates(ctx);
     
-     if (WaterManager::getInstance().update(ImGui::GetIO().DeltaTime)) {
-         if (ctx.backend_ptr) {
-             ctx.renderer.updateBackendMaterials(ctx.scene);
-             // Logic for resetAccumulation should ideally be in backend or handled via renderer
-             // For now, if we still need to talk to optix wrapper specifically, we go through backend
-             // if (auto optix = dynamic_cast<Backend::OptixBackend*>(ctx.backend_ptr)) optix->getOptixWrapper()->resetAccumulation();
-             ctx.backend_ptr->resetAccumulation();
-         }
-         // Also reset CPU accumulation if needed, though water FFT is mostly for GPU?
-         // If CPU supports it (sampleOceanHeight), maybe reset CPU too.
-         ctx.renderer.resetCPUAccumulation();
-    }
-
+    
     drawAuxWindows(ctx);
     
     // Global Sun Sync (Light -> Nishita)
@@ -2197,11 +3013,38 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
         SCENE_LOG_INFO(showSidePanel ? "Properties panel shown (N)" : "Properties panel hidden (N)");
     }
 
+    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Tab) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+        const bool hasSelectedObject =
+            ctx.selection.selected.type == SelectableType::Object &&
+            ctx.selection.selected.object != nullptr;
+
+        if (hasSelectedObject) {
+            showSidePanel = true;
+            show_modifiers_tab = true;
+            active_properties_tab = 7;
+            focus_properties_panel_next_frame = true;
+            tab_to_focus = "Modeling";
+
+            if (mesh_overlay_settings.enabled && mesh_overlay_settings.edit_mode) {
+                resetMeshEditState(ctx);
+            } else {
+                mesh_overlay_settings.enabled = true;
+                mesh_overlay_settings.edit_mode = true;
+                ctx.selection.mesh_element_mode = MeshElementSelectMode::Vertex;
+                active_mesh_edit_object_name = ctx.selection.selected.object->getNodeName();
+                active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
+                ensureMeshEditLayer(ctx, active_mesh_edit_object_name);
+            }
+        }
+    }
+
     // Undo / Redo
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift) {
         if (!block_history_actions && history.canUndo()) {
             history.undo(ctx);
             rebuildMeshCache(ctx.scene.world.objects);
+            mesh_overlay_cache = MeshOverlayCache{};
+            editable_mesh_cache = EditableMeshCache{};
             ctx.selection.updatePositionFromSelection();
             ctx.selection.selected.has_cached_aabb = false;
         }
@@ -2212,6 +3055,8 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
         if (!block_history_actions && history.canRedo()) {
             history.redo(ctx);
             rebuildMeshCache(ctx.scene.world.objects);
+            mesh_overlay_cache = MeshOverlayCache{};
+            editable_mesh_cache = EditableMeshCache{};
             ctx.selection.updatePositionFromSelection();
             ctx.selection.selected.has_cached_aabb = false;
         }
@@ -2277,12 +3122,20 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         ImGuiWindowFlags_NoBringToFrontOnFocus))
     {
         ImGui::SetCursorPosX(8); // Small left margin
+
+        auto closeOtherBottomPanels = [&](int keep_index) {
+            show_animation_panel = (keep_index == 0) ? show_animation_panel : false;
+            show_scene_log      = (keep_index == 1) ? show_scene_log : false;
+            show_terrain_graph  = (keep_index == 2) ? show_terrain_graph : false;
+            show_anim_graph     = (keep_index == 3) ? show_anim_graph : false;
+            show_asset_browser  = (keep_index == 4) ? show_asset_browser : false;
+        };
         
         if (UIWidgets::HorizontalTab("Timeline", UIWidgets::IconType::Timeline, show_animation_panel))
         {
             show_animation_panel = !show_animation_panel;
             if (show_animation_panel) {
-                show_scene_log = false;
+                closeOtherBottomPanels(0);
                 focus_bottom_panel_next_frame = true;
             }
         }
@@ -2291,8 +3144,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_scene_log = !show_scene_log;
             if (show_scene_log) { 
-                show_animation_panel = false; 
-                show_terrain_graph = false; 
+                closeOtherBottomPanels(1);
                 focus_bottom_panel_next_frame = true;
             }
         }
@@ -2301,9 +3153,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_terrain_graph = !show_terrain_graph;
             if (show_terrain_graph) {
-                show_scene_log = false;
-                show_animation_panel = false;
-                show_anim_graph = false;
+                closeOtherBottomPanels(2);
                 focus_bottom_panel_next_frame = true;
             }
         }
@@ -2312,22 +3162,16 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
         {
             show_anim_graph = !show_anim_graph;
             if (show_anim_graph) {
-                show_scene_log = false;
-                show_animation_panel = false;
-                show_terrain_graph = false;
-                show_asset_browser = false;
+                closeOtherBottomPanels(3);
                 focus_bottom_panel_next_frame = true;
             }
         }
 
-        if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Scene, show_asset_browser))
+        if (UIWidgets::HorizontalTab("Assets", UIWidgets::IconType::Assets, show_asset_browser))
         {
             show_asset_browser = !show_asset_browser;
             if (show_asset_browser) {
-                show_scene_log = false;
-                show_animation_panel = false;
-                show_terrain_graph = false;
-                show_anim_graph = false;
+                closeOtherBottomPanels(4);
                 focus_bottom_panel_next_frame = true;
             }
         }
@@ -2531,12 +3375,23 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
     const float min_height = 100.0f;
     const float max_height = screen_y * 0.6f;  // Max 60% of screen
     const float resize_handle_height = 14.0f;
-    
-    // Clamp height to valid range
-    bottom_panel_height = std::clamp(bottom_panel_height, min_height, max_height);
+    const bool viewport_is_stable = screen_y > (min_height + status_bar_height + 80.0f);
+
+    if (preferred_bottom_panel_height < min_height) {
+        preferred_bottom_panel_height = bottom_panel_height;
+    }
+
+    float effective_bottom_panel_height = bottom_panel_height;
+    if (viewport_is_stable) {
+        preferred_bottom_panel_height = (std::max)(preferred_bottom_panel_height, min_height);
+        effective_bottom_panel_height = std::clamp(preferred_bottom_panel_height, min_height, max_height);
+        bottom_panel_height = effective_bottom_panel_height;
+    } else {
+        effective_bottom_panel_height = (std::min)(bottom_panel_height, (std::max)(0.0f, screen_y - status_bar_height));
+    }
 
     // Calculate panel position
-    float panel_top = screen_y - bottom_panel_height - status_bar_height;
+    float panel_top = screen_y - effective_bottom_panel_height - status_bar_height;
     
     // --- RESIZE HANDLE (invisible button at top edge) ---
     ImGui::SetNextWindowPos(ImVec2(0, panel_top - resize_handle_height / 2), ImGuiCond_Always);
@@ -2569,8 +3424,10 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
         }
         if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-            bottom_panel_height -= ImGui::GetIO().MouseDelta.y;
-            bottom_panel_height = std::clamp(bottom_panel_height, min_height, max_height);
+            preferred_bottom_panel_height -= ImGui::GetIO().MouseDelta.y;
+            preferred_bottom_panel_height = std::clamp(preferred_bottom_panel_height, min_height, max_height);
+            bottom_panel_height = preferred_bottom_panel_height;
+            effective_bottom_panel_height = bottom_panel_height;
         }
     }
     ImGui::End();
@@ -2579,7 +3436,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
 
     // --- MAIN BOTTOM PANEL ---
     ImGui::SetNextWindowPos(ImVec2(0, panel_top), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(screen_x, bottom_panel_height), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(screen_x, effective_bottom_panel_height), ImGuiCond_Always);
     if (focus_bottom_panel_next_frame) {
         ImGui::SetNextWindowFocus();
     }
@@ -2777,7 +3634,7 @@ bool SceneUI::drawOverlays(UIContext& ctx)
 
         const bool show_bottom =
             (show_animation_panel || show_scene_log || show_terrain_graph || show_anim_graph || show_asset_browser);
-        const float menu_height = 19.0f;
+        const float menu_height = getMainMenuReservedHeight();
         const float status_bar_height = 24.0f;
         const float left_offset = showSidePanel ? side_panel_width : 0.0f;
         const float top = menu_height;
@@ -2857,21 +3714,34 @@ bool SceneUI::drawOverlays(UIContext& ctx)
 
 void SceneUI::handleSceneInteraction(UIContext& ctx, bool gizmo_hit)
 {
+    bool mesh_paint_locked = false;
+    if (paint_mode_state.enabled && paint_mode_state.hasValidTarget()) {
+        if (auto mesh_adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter())) {
+            if (auto* texture_set = mesh_adapter->getTextureSet()) {
+                mesh_paint_locked = texture_set->initialized;
+            }
+        }
+    }
+
+    if ((paint_mode_state.enabled && paint_mode_state.stroke.active) || mesh_paint_locked) {
+        return;
+    }
+
     if (ctx.scene.initialized && !gizmo_hit) {
         handleMouseSelection(ctx);
         handleMarqueeSelection(ctx);
     }
 }
+
 void SceneUI::processDeferredSceneUpdates(UIContext& ctx)
 {
     if (is_bvh_dirty && !ImGuizmo::IsUsing()) {
         ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
         ctx.renderer.resetCPUAccumulation();
         
-        // OPTIMIZATION: Only update OptiX geometry when OptiX rendering is enabled
-        if (ctx.render_settings.use_optix && ctx.backend_ptr) {
-            ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
-            ctx.backend_ptr->resetAccumulation();
+        if (Backend::IBackend* renderBackend = getSceneUiRenderBackend(ctx)) {
+            renderBackend->updateGeometry(ctx.scene.world.objects);
+            renderBackend->resetAccumulation();
         }
         is_bvh_dirty = false;
     }
@@ -2890,7 +3760,14 @@ void SceneUI::drawAuxWindows(UIContext& ctx)
 
 bool SceneUI::raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos, Vec3& hit_point, Vec3& hit_normal) const
 {
-    if (!ctx.scene.camera || !ctx.scene.bvh) {
+    HitRecord rec;
+    if (raycastViewportHit(ctx, screen_pos, rec)) {
+        hit_point = rec.point;
+        hit_normal = rec.normal.length_squared() > 0.0001f ? rec.normal.normalize() : Vec3(0, 1, 0);
+        return true;
+    }
+
+    if (!ctx.scene.camera) {
         return false;
     }
 
@@ -2903,13 +3780,6 @@ bool SceneUI::raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos,
     const float v = std::clamp(1.0f - (screen_pos.y / display.y), 0.0f, 1.0f);
     Ray ray = ctx.scene.camera->get_ray(u, v);
 
-    HitRecord rec;
-    if (ctx.scene.bvh->hit(ray, 0.001f, 1e30f, rec)) {
-        hit_point = rec.point;
-        hit_normal = rec.normal.length_squared() > 0.0001f ? rec.normal.normalize() : Vec3(0, 1, 0);
-        return true;
-    }
-
     const float denom = ray.direction.y;
     if (std::abs(denom) > 1e-5f) {
         const float t = -ray.origin.y / denom;
@@ -2921,6 +3791,23 @@ bool SceneUI::raycastViewportPlacement(UIContext& ctx, const ImVec2& screen_pos,
     }
 
     return false;
+}
+
+bool SceneUI::raycastViewportHit(UIContext& ctx, const ImVec2& screen_pos, HitRecord& hit_record) const
+{
+    if (!ctx.scene.camera || !ctx.scene.bvh) {
+        return false;
+    }
+
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    if (display.x <= 1.0f || display.y <= 1.0f) {
+        return false;
+    }
+
+    const float u = std::clamp(screen_pos.x / display.x, 0.0f, 1.0f);
+    const float v = std::clamp(1.0f - (screen_pos.y / display.y), 0.0f, 1.0f);
+    Ray ray = ctx.scene.camera->get_ray(u, v);
+    return ctx.scene.bvh->hit(ray, 0.001f, 1e30f, hit_record);
 }
 
 void SceneUI::drawAssetDragGhost(UIContext& ctx, const std::string& asset_name, const Vec3& hit_point, const Vec3& bounds_min, const Vec3& bounds_max) const
@@ -3170,11 +4057,23 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
         ctx.renderer.resetCPUAccumulation();
 
         if (ctx.backend_ptr) {
-            if (ctx.render_settings.use_vulkan) {
-                g_vulkan_rebuild_pending = true;
+            const bool has_vulkan_viewport_path =
+                (dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) != nullptr) ||
+                (g_viewport_backend != nullptr);
+            if (has_vulkan_viewport_path) {
+                extern bool g_viewport_raster_rebuild_pending;
+                g_viewport_raster_rebuild_pending = true;
+                if (sceneUiRenderBackendIsVulkan(ctx)) {
+                    g_vulkan_rebuild_pending = true;
+                } else if (Backend::IBackend* renderBackend = getSceneUiRenderBackend(ctx)) {
+                    VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend);
+                    renderBackend->resetAccumulation();
+                }
             } else {
-                VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.backend_ptr);
-                ctx.backend_ptr->resetAccumulation();
+                if (Backend::IBackend* renderBackend = getSceneUiRenderBackend(ctx)) {
+                    VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend);
+                    renderBackend->resetAccumulation();
+                }
             }
         }
 
@@ -3190,7 +4089,7 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
     const std::string import_prefix = makeUniqueAssetImportPrefix(asset_path);
     ctx.renderer.create_scene(
         ctx.scene,
-        ctx.backend_ptr,
+        g_backend.get(),
         asset_path.string(),
         nullptr,
         true,
@@ -3265,13 +4164,28 @@ void SceneUI::appendAssetToScene(UIContext& ctx, const std::filesystem::path& as
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
 
-    if (ctx.backend_ptr) {
+    if (g_backend) {
         ctx.renderer.rebuildBackendGeometry(ctx.scene);
-        ctx.backend_ptr->setLights(ctx.scene.lights);
+        applySceneUiPendingDeleteVisibility(ctx, g_backend.get());
+        g_backend->setLights(ctx.scene.lights);
         if (ctx.scene.camera) {
-            ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
+            g_backend->syncCamera(*ctx.scene.camera);
         }
-        ctx.backend_ptr->resetAccumulation();
+        g_backend->resetAccumulation();
+    }
+
+    // Always signal raster viewport rebuild so new objects appear in Solid/Matcap mode
+    // (rebuildBackendGeometry only updates the render backend, not the raster viewport)
+    extern bool g_vulkan_rebuild_pending;
+    extern bool g_viewport_raster_rebuild_pending;
+    g_viewport_raster_rebuild_pending = true;
+    // Increment geometry generation so raster viewport rebuilds mesh list
+    extern bool g_geometry_dirty;
+    extern std::atomic<uint64_t> g_scene_geometry_generation;
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    if (sceneUiRenderBackendIsVulkan(ctx)) {
+        g_vulkan_rebuild_pending = true;
     }
 
     ctx.start_render = true;
@@ -3324,6 +4238,7 @@ void SceneUI::pollAsyncAssetLibraryRefresh()
 
 void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
 {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.98f, 0.78f, 0.40f, 1.0f));
     pollAsyncAssetLibraryRefresh();
 
     const auto resetAssetDetailState = [&]() {
@@ -3355,6 +4270,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
         ImGui::SetNextWindowSize(ImVec2(1080, 720), ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Asset Browser", &show_asset_browser, ImGuiWindowFlags_NoCollapse)) {
             ImGui::End();
+            UIWidgets::PopControlSurfaceStyle();
             return;
         }
     }
@@ -3548,6 +4464,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
 
     const float avail_width_total = ImGui::GetContentRegionAvail().x;
     asset_browser_folder_width = (std::max)(180.0f, (std::min)(asset_browser_folder_width, avail_width_total * 0.6f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.13f, 0.82f));
     ImGui::BeginChild("AssetBrowserFolders", ImVec2(asset_browser_folder_width, 0), true);
     ImGui::TextDisabled("Collections");
     ImGui::Separator();
@@ -3646,6 +4563,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
         drawFolderNode(root_path);
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     ImGui::SameLine();
     ImGui::InvisibleButton("##AssetBrowserFolderSplitter", ImVec2(6.0f, ImGui::GetContentRegionAvail().y));
@@ -3657,6 +4575,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
     }
 
     ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.10f, 0.13f, 0.82f));
     ImGui::BeginChild("AssetBrowserExplorer", ImVec2(0, 0), true);
     ImGui::TextDisabled("Folder Contents");
     ImGui::Separator();
@@ -3977,6 +4896,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
     ImGui::Separator();
     ImGui::TextDisabled("Selected Asset Details");
     ImGui::Separator();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.07f, 0.09f, 0.12f, 0.68f));
     ImGui::BeginChild("AssetBrowserDetails", ImVec2(0, 0), false);
 
     if (!selected_asset) {
@@ -4177,7 +5097,7 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
             }
             ImGui::EndPopup();
         }
-        if (ImGui::Button("Save Asset Metadata", ImVec2(190, 0))) {
+        if (UIWidgets::PrimaryButton("Save Asset Metadata", ImVec2(190, 0))) {
             if (saveAssetMetadataChanges(asset_registry, *selected_asset, favorite_value, splitTagString(selected_asset_tags_edit))) {
                 asset_registry.refresh();
                 selected_asset = asset_registry.findByRelativeDirectory(selected_asset_relative_dir);
@@ -4194,11 +5114,11 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
 
         ImGui::Spacing();
         const char* append_button_label = selected_asset->asset_kind == "anim_clip" ? "Import Clip" : "Append To Scene";
-        if (ImGui::Button(append_button_label, ImVec2(160, 0)) && isPlaceableAssetRecord(*selected_asset)) {
+        if (UIWidgets::PrimaryButton(append_button_label, ImVec2(160, 0)) && isPlaceableAssetRecord(*selected_asset)) {
             appendAssetToScene(ctx, selected_asset->entry_path, selected_asset->name);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Generate Metadata", ImVec2(190, 0))) {
+        if (UIWidgets::SecondaryButton("Generate Metadata", ImVec2(190, 0))) {
             int generated_count = 0;
             for (const auto& asset : asset_registry.getAssets()) {
                 if (asset.directory_path == selected_folder_path) {
@@ -4224,14 +5144,18 @@ void SceneUI::drawAssetBrowser(UIContext& ctx, bool embedded)
     }
 
     ImGui::EndChild();
+    ImGui::PopStyleColor();
     ImGui::EndChild();
+    ImGui::PopStyleColor();
     if (!embedded) {
         ImGui::End();
     }
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 SceneUI::~SceneUI() {
     releaseSelectedAssetPreviewTexture();
+    //releaseLayerThumbnails();
 }
 
 bool SceneUI::ensureSelectedAssetPreviewTexture(UIContext& ctx, const std::filesystem::path& preview_path, int& width, int& height)
@@ -4470,24 +5394,47 @@ void SceneUI::drawControlsContent()
 
 
 void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& objects) {
-    SCENE_LOG_INFO("Rebuilding selection cache for " + std::to_string(objects.size()) + " objects...");
+    // Foliage instances are always appended at the END of the objects vector
+    // by InstanceManager::rebuildSceneObjects. Skip them entirely — they are
+    // not individually selectable and iterating 2M+ of them with RTTI is expensive.
+    size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+    size_t selectable_count = (foliage_count <= objects.size())
+                                  ? (objects.size() - foliage_count)
+                                  : objects.size();
+
+   /* SCENE_LOG_INFO("Rebuilding selection cache: " + std::to_string(selectable_count) +
+                   " selectable / " + std::to_string(objects.size()) + " total objects (" +
+                   std::to_string(foliage_count) + " foliage skipped)");*/
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    mesh_overlay_cache = MeshOverlayCache{};
+    editable_mesh_cache = EditableMeshCache{};
     this->tri_to_index.clear(); // Clear the lookup map
     cached_triangle_count_by_object.clear();
     cached_scene_triangle_count = 0;
     bbox_cache.clear();  
     material_slots_cache.clear();
     
-    // Hint for potential large scenes (1.2M objects!)
-    tri_to_index.reserve(objects.size());
+    tri_to_index.reserve(selectable_count);
 
-    for (size_t i = 0; i < objects.size(); ++i) {
+    for (size_t i = 0; i < selectable_count; ++i) {
         auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
         if (tri) {
             std::string name = tri->nodeName.empty() ? "Unnamed" : tri->nodeName;
             mesh_cache[name].push_back({(int)i, tri});
             this->tri_to_index[tri.get()] = (int)i; // Store const pointer to index mapping
+            continue;
+        }
+
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(objects[i]);
+        if (inst && inst->source_triangles) {
+            std::string inst_name = inst->node_name.empty() ? "Unnamed" : inst->node_name;
+            for (const auto& srcTri : *inst->source_triangles) {
+                if (!srcTri) continue;
+                std::string tri_name = srcTri->nodeName.empty() ? inst_name : srcTri->nodeName;
+                mesh_cache[tri_name].push_back({(int)i, srcTri});
+                this->tri_to_index[srcTri.get()] = (int)i;
+            }
         }
     }
     
@@ -4535,16 +5482,53 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
     
     mesh_cache_valid = true;
     last_scene_obj_count = objects.size();
+
+   /* SCENE_LOG_INFO("Selection cache built: " + std::to_string(mesh_cache.size()) +
+                   " mesh groups, " + std::to_string(cached_scene_triangle_count) +
+                   " triangles cached");*/
 }
 
-void SceneUI::invalidateCache() { 
+void SceneUI::rebuildTriToIndex(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    // Lightweight rebuild: only the tri_to_index hashmap (O(N) pointer inserts).
+    // Skips bbox, material slot, and mesh_ui_cache work that rebuildMeshCache does.
+    // Called immediately after deletion so picking keeps working with stale BVH.
+    // Skip foliage tail (always at end of vector) — not individually selectable.
+    size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+    size_t selectable_count = (foliage_count <= objects.size())
+                                  ? (objects.size() - foliage_count)
+                                  : objects.size();
+    tri_to_index.clear();
+    tri_to_index.reserve(selectable_count);
+    for (size_t i = 0; i < selectable_count; ++i) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(objects[i]);
+        if (tri) {
+            tri_to_index[tri.get()] = (int)i;
+            continue;
+        }
+
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(objects[i]);
+        if (inst && inst->source_triangles) {
+            for (const auto& srcTri : *inst->source_triangles) {
+                if (srcTri) {
+                    tri_to_index[srcTri.get()] = (int)i;
+                }
+            }
+        }
+    }
+    SCENE_LOG_INFO("rebuildTriToIndex: indexed " + std::to_string(tri_to_index.size()) + " triangles");
+}
+
+void SceneUI::invalidateCache() {
     mesh_cache_valid = false; 
     mesh_cache.clear();
     mesh_ui_cache.clear();
+    mesh_overlay_cache = MeshOverlayCache{};
+    editable_mesh_cache = EditableMeshCache{};
     cached_triangle_count_by_object.clear();
     cached_scene_triangle_count = 0;
     bbox_cache.clear();
     material_slots_cache.clear();
+    picking_vertices_synced = false;
     SCENE_LOG_INFO("Selection cache fully cleared and invalidated");
 }
 
@@ -4585,6 +5569,10 @@ void SceneUI::ensureCPUSyncForPicking(UIContext& ctx) {
     if (objects_needing_cpu_sync.empty()) return;
     
     size_t synced_count = 0;
+
+    if (!mesh_cache_valid) {
+        rebuildMeshCache(ctx.scene.world.objects);
+    }
     
     // Update all pending objects - apply current transforms to vertices
     for (const auto& name : objects_needing_cpu_sync) {
@@ -4601,8 +5589,11 @@ void SceneUI::ensureCPUSyncForPicking(UIContext& ctx) {
     objects_needing_cpu_sync.clear();
     
     if (synced_count > 0) {
-        // [FIX] Force rebuild BVH so picking works with new vertex positions
-        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+        // Queue async BVH rebuild instead of blocking synchronous rebuild on click.
+        // Selection can still use updated triangle hits/fallback while BVH refreshes at frame-end.
+        extern bool g_bvh_rebuild_pending;
+        g_bvh_rebuild_pending = true;
+        ctx.renderer.resetCPUAccumulation();
        // SCENE_LOG_INFO("Lazy CPU sync: updated " + std::to_string(synced_count) + " triangles for " + std::to_string(count) + " objects");
     }
 }
@@ -4922,7 +5913,6 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
                     nlohmann::json rootJson;
                     rootJson["terrain_graph"] = terrainNodeGraph.toJson();
                      rootJson["viewport_settings"] = {
-                        {"shading_mode", viewport_settings.shading_mode},
                         {"show_gizmos", viewport_settings.show_gizmos},
                         {"show_camera_hud", viewport_settings.show_camera_hud},
                         {"show_focus_ring", viewport_settings.show_focus_ring},
@@ -5001,6 +5991,9 @@ void SceneUI::drawExitConfirmation(UIContext& ctx) {
 void SceneUI::performNewProject(UIContext& ctx) {
      // Clear selection to remove references to objects about to be deleted
      ctx.selection.clearSelection();
+     resetMeshEditState(ctx);
+     ctx.scene.base_mesh_cache.clear();
+     ctx.scene.mesh_modifiers.clear();
 
      // Reset Foliage Brush to prevent crashes (referencing deleted terrain)
      foliage_brush.enabled = false;
@@ -5054,30 +6047,50 @@ void SceneUI::performNewProject(UIContext& ctx) {
      }
      
      // 5. Create Default Scene (Camera, Ground Plane, default light)
-     createDefaultScene(ctx.scene, ctx.renderer, ctx.backend_ptr);
+     createDefaultScene(ctx.scene, ctx.renderer, getSceneUiRenderBackend(ctx));
      
      ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-     if (ctx.backend_ptr) {
+     if (Backend::IBackend* renderBackend = getSceneUiRenderBackend(ctx)) {
          ctx.renderer.rebuildBackendGeometry(ctx.scene);
          ctx.renderer.updateBackendMaterials(ctx.scene);
          ctx.renderer.updateBackendGasVolumes(ctx.scene);
-         ctx.backend_ptr->setLights(ctx.scene.lights);
+         applySceneUiPendingDeleteVisibility(ctx, renderBackend);
+         renderBackend->setLights(ctx.scene.lights);
          auto wd = ctx.renderer.world.getGPUData();
-         ctx.backend_ptr->setWorldData(&wd);
+         renderBackend->setWorldData(&wd);
          if (ctx.scene.camera) {
              ctx.renderer.syncCameraToBackend(*ctx.scene.camera);
          }
-         ctx.backend_ptr->resetAccumulation();
+         renderBackend->resetAccumulation();
+     }
+     if (Backend::IViewportBackend* viewportBackend = getSceneUiViewportBackend(ctx)) {
+         viewportBackend->setLights(ctx.scene.lights);
+         viewportBackend->resetAccumulation();
+     }
+     // Signal raster viewport rebuild for Solid/Matcap mode
+     extern bool g_vulkan_rebuild_pending;
+     extern bool g_viewport_raster_rebuild_pending;
+     g_viewport_raster_rebuild_pending = true;
+     if (sceneUiRenderBackendIsVulkan(ctx)) {
+         g_vulkan_rebuild_pending = true;
      }
      if(ctx.scene.camera) ctx.scene.camera->update_camera_vectors();
 
      extern bool g_camera_dirty;
      extern bool g_lights_dirty;
      extern bool g_world_dirty;
+     extern bool g_geometry_dirty;
+     extern bool g_materials_dirty;
+     extern bool g_gas_volumes_dirty;
+     extern std::atomic<uint64_t> g_scene_geometry_generation;
      extern std::atomic<bool> g_needs_optix_sync;
      g_camera_dirty = true;
      g_lights_dirty = true;
      g_world_dirty = true;
+     g_geometry_dirty = true;
+     g_materials_dirty = true;
+     g_gas_volumes_dirty = true;
+     g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
      g_needs_optix_sync.store(true);
      
      active_model_path = "Untitled";
@@ -5106,6 +6119,9 @@ void SceneUI::performOpenProject(UIContext& ctx) {
     if (!filepath.empty()) {
         // Clear selection to remove references to old objects (Fixes ghost camera issue)
         ctx.selection.clearSelection();
+        resetMeshEditState(ctx);
+        ctx.scene.base_mesh_cache.clear();
+        ctx.scene.mesh_modifiers.clear();
 
         // Reset Foliage Brush
         foliage_brush.enabled = false;
@@ -5200,13 +6216,16 @@ void SceneUI::performOpenProject(UIContext& ctx) {
 
                                     if (rootJson.contains("viewport_settings")) {
                                         auto& vs = rootJson["viewport_settings"];
-                                        viewport_settings.shading_mode = vs.value("shading_mode", 1);
                                         viewport_settings.show_gizmos = vs.value("show_gizmos", true);
                                         viewport_settings.show_camera_hud = vs.value("show_camera_hud", true);
                                         viewport_settings.show_focus_ring = vs.value("show_focus_ring", true);
                                         viewport_settings.show_zoom_ring = vs.value("show_zoom_ring", true);
                                         viewport_settings.focus_mode = vs.value("focus_mode", 1); // Reset to AF-S if missing
                                     }
+
+                                    // Opened projects now start in Solid mode so the lightweight
+                                    // raster viewport is available immediately after load.
+                                    viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
 
                                     if (rootJson.contains("guide_settings")) {
                                         auto& gs = rootJson["guide_settings"];
@@ -5251,10 +6270,14 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                 invalidateCache();
                 active_model_path = g_ProjectManager.getProjectName();
 
+                scene_loading_progress = 92;
+                setSceneLoadingStage("Waiting for backend...");
                 if (ctx.backend_ptr) {
                     ctx.backend_ptr->waitForCompletion();
                 }
 
+                scene_loading_progress = 93;
+                setSceneLoadingStage("Registering animations...");
                 if (!ctx.scene.animationDataList.empty()) {
                     auto& animCtrl = AnimationController::getInstance();
                     animCtrl.registerClips(ctx.scene.animationDataList);
@@ -5272,13 +6295,22 @@ void SceneUI::performOpenProject(UIContext& ctx) {
                 auto& terrains = TerrainManager::getInstance().getTerrains();
                 if (!terrains.empty()) terrain = &terrains[0];
                 if (terrain) {
+                    scene_loading_progress = 95;
+                    setSceneLoadingStage("Evaluating terrain graph...");
+                    auto t_start = std::chrono::steady_clock::now();
                     terrainNodeGraph.evaluateTerrain(terrain, ctx.scene);
-                    SCENE_LOG_INFO("[Load] Terrain graph evaluated.");
+                    auto t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t_start).count();
+                    SCENE_LOG_INFO("[Load] Terrain graph evaluated in " + std::to_string(t_ms) + " ms");
                 }
 
+                scene_loading_progress = 98;
+                setSceneLoadingStage("Syncing volumes...");
                 hairUI.clear();
                 SceneUI::syncVDBVolumesToGPU(ctx);
 
+                scene_loading_progress = 100;
+                setSceneLoadingStage("Finalizing...");
                 ctx.active_model_path = filepath; // Update project name for window title
             } catch (const std::exception& e) {
                 SCENE_LOG_ERROR(std::string("[Open] Exception: ") + e.what());
@@ -6029,6 +7061,8 @@ std::string SceneUI::serialize() {
     j["show_world_tab"] = show_world_tab;
     j["show_hair_tab"] = show_hair_tab;
     j["show_modifiers_tab"] = show_modifiers_tab;
+    j["show_scatter_tab"] = show_scatter_tab;
+    j["show_paint_tab"] = show_paint_tab;
     j["vdb_import_orientation_preset"] = vdb_import_orientation_preset;
     j["pivot_mode"] = pivot_mode;
     j["active_properties_tab"] = active_properties_tab;
@@ -6066,10 +7100,39 @@ std::string SceneUI::serialize() {
 
     j["show_scene_log"] = show_scene_log;
 
+    // Persist terrain subsection open states
+    j["terrain_layer_open"] = nlohmann::json::array();
+    for (int i = 0; i < 4; ++i) j["terrain_layer_open"].push_back(terrain_layer_open[i]);
+    j["foliage_section_open"] = foliage_section_open;
+
     // Save panel dimensions
     j["side_panel_width"] = side_panel_width;
     j["bottom_panel_height"] = bottom_panel_height;
+    j["preferred_bottom_panel_height"] = preferred_bottom_panel_height;
     j["hierarchy_panel_height"] = hierarchy_panel_height;
+
+    if (mesh_edit_layer.active && !mesh_edit_layer.object_name.empty()) {
+        nlohmann::json layer;
+        layer["enabled"] = mesh_edit_layer.enabled;
+        layer["object_name"] = mesh_edit_layer.object_name;
+        layer["base_positions"] = nlohmann::json::array();
+        layer["edited_positions"] = nlohmann::json::array();
+        for (const auto& state : mesh_edit_layer.base_states) {
+            layer["base_positions"].push_back({
+                { state.positions[0].x, state.positions[0].y, state.positions[0].z },
+                { state.positions[1].x, state.positions[1].y, state.positions[1].z },
+                { state.positions[2].x, state.positions[2].y, state.positions[2].z }
+            });
+        }
+        for (const auto& state : mesh_edit_layer.edited_states) {
+            layer["edited_positions"].push_back({
+                { state.positions[0].x, state.positions[0].y, state.positions[0].z },
+                { state.positions[1].x, state.positions[1].y, state.positions[1].z },
+                { state.positions[2].x, state.positions[2].y, state.positions[2].z }
+            });
+        }
+        j["mesh_edit_layer"] = layer;
+    }
 
     // Save ImGui Settings (Window Layout)
     size_t size = 0;
@@ -6099,6 +7162,8 @@ void SceneUI::deserialize(const std::string& data) {
         if (j.contains("show_world_tab")) show_world_tab = j["show_world_tab"];
         if (j.contains("show_hair_tab")) show_hair_tab = j["show_hair_tab"];
         if (j.contains("show_modifiers_tab")) show_modifiers_tab = j["show_modifiers_tab"];
+        if (j.contains("show_scatter_tab")) show_scatter_tab = j["show_scatter_tab"];
+        if (j.contains("show_paint_tab")) show_paint_tab = j["show_paint_tab"];
         if (j.contains("vdb_import_orientation_preset")) vdb_import_orientation_preset = j["vdb_import_orientation_preset"];
         
         if (j.contains("pivot_mode")) pivot_mode = j["pivot_mode"];
@@ -6171,7 +7236,53 @@ void SceneUI::deserialize(const std::string& data) {
 
         if (j.contains("side_panel_width")) side_panel_width = j["side_panel_width"];
         if (j.contains("bottom_panel_height")) bottom_panel_height = j["bottom_panel_height"];
+        preferred_bottom_panel_height = bottom_panel_height;
+        if (j.contains("preferred_bottom_panel_height")) preferred_bottom_panel_height = j["preferred_bottom_panel_height"];
         if (j.contains("hierarchy_panel_height")) hierarchy_panel_height = j["hierarchy_panel_height"];
+
+        pending_serialized_mesh_edit_layer = PendingSerializedMeshEditLayer{};
+        if (j.contains("mesh_edit_layer") && j["mesh_edit_layer"].is_object()) {
+            const auto& layer = j["mesh_edit_layer"];
+            pending_serialized_mesh_edit_layer.has_data = true;
+            pending_serialized_mesh_edit_layer.enabled = layer.value("enabled", true);
+            pending_serialized_mesh_edit_layer.object_name = layer.value("object_name", std::string{});
+
+            auto readPositionList = [](const nlohmann::json& src, std::vector<std::array<Vec3, 3>>& dst) {
+                dst.clear();
+                if (!src.is_array()) return;
+                for (const auto& tri : src) {
+                    if (!tri.is_array() || tri.size() != 3) continue;
+                    std::array<Vec3, 3> points{};
+                    for (size_t i = 0; i < 3; ++i) {
+                        if (tri[i].is_array() && tri[i].size() == 3) {
+                            points[i] = Vec3(
+                                tri[i][0].get<float>(),
+                                tri[i][1].get<float>(),
+                                tri[i][2].get<float>());
+                        }
+                    }
+                    dst.push_back(points);
+                }
+            };
+
+            readPositionList(layer.value("base_positions", nlohmann::json::array()),
+                             pending_serialized_mesh_edit_layer.base_positions);
+            readPositionList(layer.value("edited_positions", nlohmann::json::array()),
+                             pending_serialized_mesh_edit_layer.edited_positions);
+            if (pending_serialized_mesh_edit_layer.object_name.empty() ||
+                pending_serialized_mesh_edit_layer.base_positions.empty() ||
+                pending_serialized_mesh_edit_layer.base_positions.size() != pending_serialized_mesh_edit_layer.edited_positions.size()) {
+                pending_serialized_mesh_edit_layer = PendingSerializedMeshEditLayer{};
+            }
+        }
+
+        // Restore terrain subsection open states
+        if (j.contains("terrain_layer_open") && j["terrain_layer_open"].is_array()) {
+            for (int i = 0; i < 4 && i < (int)j["terrain_layer_open"].size(); ++i) {
+                terrain_layer_open[i] = j["terrain_layer_open"][i];
+            }
+        }
+        if (j.contains("foliage_section_open")) foliage_section_open = j["foliage_section_open"];
 
         // Restore ImGui Settings
         if (j.contains("imgui_ini")) {

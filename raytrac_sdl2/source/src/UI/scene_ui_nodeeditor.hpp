@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -832,6 +832,21 @@ private:
                 ctx.renderer.resetCPUAccumulation();
                 g_bvh_rebuild_pending = true;
                 g_optix_rebuild_pending = true;
+                
+                extern bool g_geometry_dirty;
+                extern std::atomic<uint64_t> g_scene_geometry_generation;
+                extern std::atomic<bool> g_needs_optix_sync;
+                extern bool g_mesh_cache_dirty;
+                extern bool g_viewport_raster_rebuild_pending;
+                
+                g_geometry_dirty = true;
+                g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+                g_needs_optix_sync.store(true, std::memory_order_release);
+                g_mesh_cache_dirty = true;
+                g_viewport_raster_rebuild_pending = true;
+                
+                extern bool g_vulkan_rebuild_pending;
+                g_vulkan_rebuild_pending = true;
                 if (ctx.optix_gpu_ptr) {
                     if (g_hasCUDA) cudaDeviceSynchronize();
                     ctx.optix_gpu_ptr->resetAccumulation();

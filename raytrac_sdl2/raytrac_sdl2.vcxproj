@@ -272,6 +272,7 @@
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
     <ClInclude Include="source\include\scene_ui.h" />
+    <ClInclude Include="source\include\Viewport\ViewportSceneSync.h" />
     <ClInclude Include="source\include\stb_image_write.h" />
     <ClInclude Include="source\include\ui_modern.h" />
     <ClInclude Include="external\imgui\imconfig.h" />
@@ -338,6 +339,13 @@
     <ClInclude Include="source\include\ColorProcessingParams.h" />
     <ClInclude Include="source\include\MaterialManager.h" />
     <ClInclude Include="source\include\MeshModifiers.h" />
+    <ClInclude Include="source\include\Paint\IPaintSurfaceAdapter.h" />
+    <ClInclude Include="source\include\Paint\MeshPaintAdapter.h" />
+    <ClInclude Include="source\include\Paint\PaintLayer.h" />
+    <ClInclude Include="source\include\Paint\PaintModeState.h" />
+    <ClInclude Include="source\include\Paint\PaintSurfaceTarget.h" />
+    <ClInclude Include="source\include\Paint\PaintTextureSet.h" />
+    <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h" />
     <ClInclude Include="source\include\Transform.h" />
     <ClInclude Include="source\include\World.h" />
     <ClInclude Include="source\include\TerrainFFT.h" />
@@ -388,6 +396,7 @@
     <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation.cc" />
     <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_archive.cc" />
     <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_utils.cc" />
+    <ClCompile Include="external\ozz-animation\src\animation\offline\additive_animation_builder.cc" />
     <ClCompile Include="external\ozz-animation\src\animation\offline\animation_builder.cc" />
     <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton.cc" />
     <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton_archive.cc" />
@@ -395,6 +404,8 @@
     <ClCompile Include="source\src\Animation\OzzRuntime.cpp" />
     <ClCompile Include="source\src\Backend\OptixBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
+    <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
     <ClCompile Include="source\src\simdjson.cpp" />
     <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
@@ -406,6 +417,8 @@
     <ClCompile Include="source\src\Animation\AnimationNodes.cpp" />
     <ClCompile Include="source\src\Scene\AreaLight.cpp" />
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp" />
+    <ClCompile Include="source\src\UI\scene_ui_mesh_overlay.cpp" />
+    <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
     <ClCompile Include="source\src\Utils\AssimpLoader.cpp" />
     <ClCompile Include="source\src\Render\AtmosphereLUT.cpp" />
     <ClCompile Include="source\src\Render\Camera.cpp" />
@@ -444,6 +457,10 @@
     <ClCompile Include="source\src\Utils\SceneHistory.cpp" />
     <ClCompile Include="source\src\UI\SceneSelection.cpp" />
     <ClCompile Include="source\src\Utils\SceneSerializer.cpp" />
+    <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp" />
+    <ClCompile Include="source\src\Paint\PaintModeState.cpp" />
+    <ClCompile Include="source\src\Paint\PaintTextureSet.cpp" />
+    <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp" />
     <ClCompile Include="source\src\UI\scene_ui.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_animation.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_camera.cpp" />

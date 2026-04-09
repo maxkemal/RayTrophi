@@ -76,8 +76,43 @@ struct ScatterSource {
 
     ScatterSource() = default;
     ScatterSource(const std::string& n, const std::vector<std::shared_ptr<Triangle>>& tris);
-    
+
     void computeCenter();                           // Calculate mesh center from triangles
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MESH SURFACE SAMPLER - Area-weighted uniform sampling on arbitrary mesh
+// ═══════════════════════════════════════════════════════════════════════════════
+// Usage:
+//   MeshSurfaceSampler mss;
+//   mss.build(triangles);
+//   auto s = mss.sample(rng);   // s.position, s.normal
+// ─────────────────────────────────────────────────────────────────────────────
+// normal_influence in BrushSettings controls orientation:
+//   0.0 = always world-up  (buildings, large rocks)
+//   1.0 = full face normal (foliage, grass, ivy)
+//   0.x = blend            (medium rocks, props)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct MeshSurfaceSampler {
+    struct Sample {
+        Vec3 position;
+        Vec3 normal;    // Face normal, flipped to face upward hemisphere
+    };
+
+    // Build area-weighted CDF from triangle list. Call once before sampling.
+    void build(const std::vector<std::shared_ptr<Triangle>>& triangles);
+
+    // Draw a uniformly-distributed random sample from the surface.
+    Sample sample(std::mt19937& rng) const;
+
+    bool  isValid()    const { return !cdf.empty() && source_tris != nullptr; }
+    float totalArea()  const { return total_area; }
+
+private:
+    std::vector<float>                                  cdf;         // Normalised cumulative area [0..1]
+    float                                               total_area = 0.f;
+    const std::vector<std::shared_ptr<Triangle>>*       source_tris = nullptr;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -110,6 +145,16 @@ struct InstanceGroup {
     
     // Instances
     std::vector<InstanceTransform> instances;   // All instance transforms
+
+    // Targeting: allow scattering on TERRAIN (default) or on a specific MESH node
+    enum class TargetType {
+        TERRAIN = 0,
+        MESH = 1
+    };
+
+    TargetType target_type = TargetType::TERRAIN;
+    std::string target_node_name; // If target_type == MESH, the scene node name to sample surface from
+    std::string mesh_fingerprint; // Optional mesh fingerprint for determinism checks
     
     // GPU State
     int blas_id = -1;                           // GPU BLAS index

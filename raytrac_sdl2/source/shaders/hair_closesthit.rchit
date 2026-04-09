@@ -90,7 +90,7 @@ struct VkWorldDataExtended {
     float humidity;
     float temperature;
     float ozoneAbsorptionScale;
-    float _pad0;
+    float atmosphereIntensity;
     float airDensity;
     float dustDensity;
     float ozoneDensity;
@@ -268,7 +268,7 @@ vec3 get_ambient_sky(vec3 dir) {
     float cosAlt = dir.y;
     vec3 horizon = vec3(0.7, 0.85, 1.0);
     vec3 zenith = vec3(0.1, 0.3, 0.9);
-    vec3 sky = mix(horizon, zenith, pow(clamp(cosAlt, 0.0, 1.0), 0.6)) * (worldData.w.sunIntensity / 10.0);
+    vec3 sky = mix(horizon, zenith, pow(clamp(cosAlt, 0.0, 1.0), 0.6)) * (worldData.w.atmosphereIntensity / 10.0);
     if (cosAlt < 0.0) sky = mix(sky, vec3(0.02, 0.015, 0.01), smoothstep(0.0, -0.15, cosAlt));
     return sky;
 }

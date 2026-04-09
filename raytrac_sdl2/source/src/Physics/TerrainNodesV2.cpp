@@ -309,9 +309,8 @@ namespace TerrainNodesV2 {
         int h = tctx->height;
         auto result = createHeightOutput(w, h);
         
-        // Create NEW Perlin noise generator each time (seed affects random vectors)
-        // static so parameters can change
-       static Perlin perlin;
+        // Create Perlin generator seeded by node parameter so output is deterministic
+        Perlin perlin((unsigned int)seed);
         
         // ═══════════════════════════════════════════════════════════
         // NOISE HELPER FUNCTIONS

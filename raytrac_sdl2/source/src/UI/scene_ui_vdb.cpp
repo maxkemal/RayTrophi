@@ -18,6 +18,8 @@
 #include "Renderer.h"
 #include "OptixWrapper.h"
 #include "Backend/IBackend.h"
+#include "Backend/IViewportBackend.h"
+#include "Backend/VulkanBackend.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -27,6 +29,24 @@
 
 // External GPU availability flag
 extern bool g_hasOptix;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
+namespace {
+Backend::IBackend* getVdbRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+bool vdbRenderBackendIsVulkan(UIContext& ctx) {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(getVdbRenderBackend(ctx)) != nullptr;
+}
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Sync VDB volumes to GPU (OptiX) - with GPU availability check
@@ -35,8 +55,8 @@ void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
     // Sync to GPU for both OptiX and Vulkan backends.
     // Previously guarded by !g_hasOptix which caused animated VDB frames
     // to never be re-uploaded in Vulkan mode.
-    if (ctx.backend_ptr) {
-        VolumetricRenderer::syncVolumetricData(ctx.scene, ctx.backend_ptr);
+    if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
+        VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend);
     }
 }
 
@@ -185,18 +205,16 @@ void SceneUI::importVDBVolume(UIContext& ctx) {
     ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
     ctx.renderer.resetCPUAccumulation();
     
-    if (ctx.render_settings.use_vulkan) {
+    if (vdbRenderBackendIsVulkan(ctx)) {
         // Vulkan: must rebuild TLAS to add the new AABB instance.
-        // [FIX] Check use_vulkan FIRST — even when g_hasOptix=true, Vulkan mode requires
-        // a TLAS rebuild to add the VDB AABB. The old g_hasOptix-first check caused
-        // g_vulkan_rebuild_pending to never be set on OptiX hardware, leaving the TLAS
-        // without the VDB AABB instance → volume shader never invoked → VDB invisible.
-        // syncVDBVolumesToGPU will be called from the rebuild block after updateGeometry.
+        extern bool g_viewport_raster_rebuild_pending;
+        g_viewport_raster_rebuild_pending = true;
         g_vulkan_rebuild_pending = true;
-    } else if (g_hasOptix && ctx.backend_ptr) {
-        // OptiX: sync SSBO + reset (no TLAS AABB needed for OptiX)
+    } else if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
         syncVDBVolumesToGPU(ctx);
-        ctx.backend_ptr->resetAccumulation();
+        renderBackend->resetAccumulation();
+        extern bool g_viewport_raster_rebuild_pending;
+        g_viewport_raster_rebuild_pending = true;
     }
     
     g_ProjectManager.markModified();
@@ -330,13 +348,21 @@ void SceneUI::importVDBSequence(UIContext& ctx) {
     ctx.renderer.resetCPUAccumulation();
     
     if (ctx.backend_ptr) {
-        if (ctx.render_settings.use_vulkan) {
-            // Vulkan: rebuild TLAS to include new VDB AABB (syncVDBVolumesToGPU called from rebuild block)
+        if (vdbRenderBackendIsVulkan(ctx)) {
+            extern bool g_viewport_raster_rebuild_pending;
+            g_viewport_raster_rebuild_pending = true;
             g_vulkan_rebuild_pending = true;
         } else {
             syncVDBVolumesToGPU(ctx);
+            extern bool g_viewport_raster_rebuild_pending;
+            g_viewport_raster_rebuild_pending = true;
         }
-        ctx.backend_ptr->resetAccumulation();
+        if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
+            renderBackend->resetAccumulation();
+        }
+        if (g_viewport_backend && g_viewport_backend.get() != getVdbRenderBackend(ctx)) {
+            g_viewport_backend->resetAccumulation();
+        }
     }
     
     g_ProjectManager.markModified();
@@ -361,13 +387,15 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     auto& scene = ctx.scene;
     auto& selection = ctx.selection;
     
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.62f, 0.78f, 1.0f, 1.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
     
     // -------------------------------------------------------------
     // TOP SECTION: CREATION & IMPORT
     // -------------------------------------------------------------
     ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "Add / Import Volumetrics");
-    if (ImGui::Button("+ New Gas Simulation", ImVec2(160, 0))) {
+    if (UIWidgets::IconActionButton("VolumeNewGas", UIWidgets::IconType::Volumetric, "New Gas", false,
+        ImVec4(0.62f, 0.90f, 1.0f, 1.0f), ImVec2(128, 30), "Create a new gas simulation domain.")) {
         auto gas = std::make_shared<GasVolume>("Gas Sim " + std::to_string(scene.gas_volumes.size() + 1));
         gas->initialize();
         
@@ -382,11 +410,13 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
         selection.selectGasVolume(gas, -1, gas->name);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Import VDB File", ImVec2(120, 0))) {
+    if (UIWidgets::IconActionButton("VolumeImportVDB", UIWidgets::IconType::Assets, "Import VDB", false,
+        ImVec4(0.82f, 0.70f, 1.0f, 1.0f), ImVec2(132, 30), "Import a single VDB volume file.")) {
         importVDBVolume(ctx);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Import VDB Seq", ImVec2(120, 0))) {
+    if (UIWidgets::IconActionButton("VolumeImportVDBSeq", UIWidgets::IconType::Timeline, "Import Seq", false,
+        ImVec4(0.98f, 0.76f, 0.42f, 1.0f), ImVec2(132, 30), "Import an animated VDB sequence.")) {
         importVDBSequence(ctx);
     }
     const char* vdb_orientation_labels[] = { "Auto", "Standard", "Axis Convert (-90 X)" };
@@ -449,7 +479,7 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
                         selection.clearSelection();
                         // Vulkan: rebuild TLAS to remove the stale AABB instance.
                         // OptiX: sync SSBO to remove volume.
-                        if (ctx.render_settings.use_vulkan) {
+                        if (vdbRenderBackendIsVulkan(ctx)) {
                             g_vulkan_rebuild_pending = true;
                         } else {
                             syncVDBVolumesToGPU(ctx);
@@ -480,6 +510,7 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     }
     
     ImGui::PopStyleVar();
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
@@ -487,6 +518,7 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     
     // UNIQUE ID SCOPE: Use VDB volume ID to prevent ImGui ID conflicts
     ImGui::PushID(vdb->getVDBVolumeID());
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.76f, 0.64f, 1.0f, 1.0f));
     
     bool changed = false;
     
@@ -586,17 +618,17 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
 
         // Manual Rotation & Scale Overrides
         ImGui::SetNextItemWidth(200);
-        if (ImGui::Button("Apply Axis Convert -90 X")) {
+        if (UIWidgets::SecondaryButton("Apply Axis Convert -90 X")) {
             vdb->setRotation(Vec3(-90.0f, 0, 0));
             changed = true;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Scale 0.001 (mm Fix)")) {
+        if (UIWidgets::SecondaryButton("Scale 0.001 (mm Fix)")) {
             vdb->setScale(Vec3(0.001f));
             changed = true;
         }
         ImGui::SameLine();
-        if (ImGui::Button("Reset All")) {
+        if (UIWidgets::DangerButton("Reset All")) {
             vdb->setRotation(Vec3(0));
             vdb->setScale(Vec3(1.0f));
             changed = true;
@@ -633,6 +665,7 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
         g_ProjectManager.markModified();
     }
     
+    UIWidgets::PopControlSurfaceStyle();
     ImGui::PopID();  // Match PushID at function start
 }
 

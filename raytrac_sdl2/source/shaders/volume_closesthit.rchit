@@ -185,7 +185,7 @@ struct VkWorldDataExtended {
     float sunSize;      float mieAnisotropy;
     float rayleighDensity; float mieDensity;
     float humidity;     float temperature;
-    float ozoneAbsorptionScale; float _pad0;
+    float ozoneAbsorptionScale; float atmosphereIntensity;
     float airDensity;   float dustDensity;
     float ozoneDensity; float altitude;
     float planetRadius; float atmosphereHeight;
@@ -251,9 +251,9 @@ vec3 sampleSkyAmbient(vec3 viewDir) {
         float u = az / TWO_PI;
         float v = (1.0 - clamp(ambDir.y, -1.0, 1.0)) * 0.5;
         return textureLod(atmosphereLUTs[1], vec2(u, v), 0.0).rgb
-             * (0.15 * worldData.w.sunIntensity);
+             * (0.15 * worldData.w.atmosphereIntensity);
     }
-    return worldData.w.sunColor * (0.15 * worldData.w.sunIntensity);
+    return worldData.w.sunColor * (0.15 * worldData.w.atmosphereIntensity);
 }
 
 // ============================================================

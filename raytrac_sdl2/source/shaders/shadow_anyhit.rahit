@@ -31,6 +31,10 @@ struct Material {
     uint flags;
     float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
     float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
+    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
+    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
+    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
+    uint uv_wrap_mode;
     uint albedo_tex;
     uint normal_tex;
     uint roughness_tex;
@@ -41,7 +45,8 @@ struct Material {
     uint transmission_tex;
     float subsurface_ior;
     uint _terrain_layer_idx;
-    uint _reserved_2, _reserved_3;
+    float normal_strength;
+    uint _reserved_3;
 };
 
 struct VkInstanceData {
@@ -77,6 +82,67 @@ hitAttributeEXT vec2 baryCoord;
 layout(buffer_reference, scalar) readonly buffer MaterialIndexBuffer { uint m[]; };
 const float ALPHA_SHADOW_NEAR_IGNORE_T = 2e-3;
 
+float wrapRepeat(float x) {
+    float r = mod(x, 1.0);
+    return (r < 0.0) ? (r + 1.0) : r;
+}
+
+float wrapMirror(float x) {
+    float r = mod(x, 2.0);
+    if (r < 0.0) r += 2.0;
+    return (r > 1.0) ? (2.0 - r) : r;
+}
+
+vec2 applyMaterialUVTransform(Material mat, vec2 originalUV) {
+    vec2 uv = originalUV - vec2(0.5);
+    uv.x *= mat.uv_scale_x;
+    uv.y *= mat.uv_scale_y;
+
+    float angleRad = radians(mat.uv_rotation_degrees);
+    float c = cos(angleRad);
+    float s = sin(angleRad);
+    uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+
+    uv += vec2(0.5);
+    uv += vec2(mat.uv_offset_x, mat.uv_offset_y);
+    uv *= vec2(mat.uv_tiling_x, mat.uv_tiling_y);
+
+    switch (mat.uv_wrap_mode) {
+    case 0u:
+        uv = vec2(wrapRepeat(uv.x), wrapRepeat(uv.y));
+        break;
+    case 1u:
+        uv = vec2(wrapMirror(uv.x), wrapMirror(uv.y));
+        break;
+    case 2u:
+        uv = clamp(uv, vec2(0.0), vec2(1.0));
+        break;
+    case 3u:
+        uv = originalUV;
+        break;
+    case 4u: {
+        vec2 scaled = uv * 3.0;
+        int face = int(scaled.x) + 3 * int(scaled.y);
+        vec2 local = mod(scaled, 1.0);
+        if (local.x < 0.0) local.x += 1.0;
+        if (local.y < 0.0) local.y += 1.0;
+        switch (face % 6) {
+        case 0: uv = local; break;
+        case 1: uv = vec2(local.y, 1.0 - local.x); break;
+        case 2: uv = vec2(1.0 - local.x, local.y); break;
+        case 3: uv = vec2(1.0 - local.y, 1.0 - local.x); break;
+        case 4: uv = vec2(local.x, 1.0 - local.y); break;
+        default: uv = local.yx; break;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return uv;
+}
+
 void main() {
     VkInstanceData inst = instances.i[gl_InstanceID];
     VkGeometryData geo  = geometries.g[inst.blasIndex];
@@ -109,18 +175,11 @@ void main() {
             ui2 = uint(gl_PrimitiveID) * 3 + 2;
         }
         hitUV = uvBuf.u[ui0] * bary.x + uvBuf.u[ui1] * bary.y + uvBuf.u[ui2] * bary.z;
-        hitUV.y = 1.0 - hitUV.y;
+        hitUV = applyMaterialUVTransform(mat, hitUV);
     }
 
     int opacityTexID = int(mat.opacity_tex);
     if (opacityTexID > 0) {
-        // Alpha-card style geometry (eyelashes/foliage) often causes contact darkening
-        // when the shadow ray first touches the back face of a near-coplanar card.
-        if (gl_HitKindEXT == gl_HitKindBackFacingTriangleEXT) {
-            ignoreIntersectionEXT;
-            return;
-        }
-
         // Alpha cards very close to the receiver (e.g. eyelashes touching eyelid)
         // can produce hard black seams due to near-hit self/adjacent occlusion.
         // Ignore only extremely near intersections for opacity-textured materials.
