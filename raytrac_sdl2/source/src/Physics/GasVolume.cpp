@@ -2,8 +2,22 @@
 #include "Ray.h"
 #include "VDBVolumeManager.h"
 #include "globals.h" // For SCENE_LOG_*
+#include "Backend/IBackend.h"
+#include "Backend/VulkanBackend.h"
 #include <cmath>
 #include <algorithm>
+
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
+namespace {
+bool gasRenderBackendIsVulkan() {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr;
+}
+
+bool gasHasActiveRenderBackend() {
+    return g_backend != nullptr;
+}
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTRUCTION
@@ -427,8 +441,11 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
             live_vdb_id >= 0 &&
             ((previous_live_vdb_id < 0) || (sim_frame <= 0 && needs_live_vdb_upload));
         if (needs_unified_volume_rebuild) {
-            g_vulkan_rebuild_pending = true;
-            g_optix_rebuild_pending = true;
+            if (gasRenderBackendIsVulkan()) {
+                g_vulkan_rebuild_pending = true;
+            } else if (gasHasActiveRenderBackend()) {
+                g_optix_rebuild_pending = true;
+            }
         }
         
         // Also ensure individual volume data has the correct transform

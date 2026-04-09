@@ -216,6 +216,27 @@ Tam Teknik Rapor: [ARCHITECTURE_TR.md](ARCHITECTURE_TR.md)
 
 ---
 
+### 🛠️ Modelleme & Mesh Düzenleme Araçları
+
+- **Sculpt Modu (Sculpt Mod)**: Gerçek zamanlı sculpt fırçaları (Grab, Smooth, Inflate, Draw, Flatten) — topoğrafya (topology)-dostu falloff ve simetri seçenekleriyle. Çoklu çözünürlük önizlemesi ve sculpt delta'larını bake/ihraç etme desteği.
+- **Mesh Paint**: Renk, roughness, metallic ve mask kanalları için vertex/texture boyama araçları. Fırça falloff, projeksiyon ve katman harmanlama; sonuçlar texture olarak bake edilebilir veya vertex renkleri olarak kaydedilebilir.
+- **Edit Mesh Modu**: Klasik polygon düzenleme araçları:
+  - **Extrude** yüz/kenar transform gizmo ile
+  - **Yüz/Kenar/Vertex Silme** (akıllı yeniden üçgenleme)
+  - **Vertex Birleştirme** (mesafeye göre veya manuel çökertme)
+  - **Inset / Bevel / Loop Cut** işlemleri
+  - **Weld, Split, Flip Normal** yardımcı araçları
+  - **UV Otomatik Açma / Akıllı Paketleme** hızlı lightmap ve paint akışları için
+- **Undo/Redo & Geçmiş**: Düzenleme modlarında tam işlem geçmişi ve adım gruplayabilme.
+- **Eşzamanlılık (Interoperability)**: Edit-mode değişiklikleri CPU/GPU buffer'larını günceller ve isteğe bağlı olarak GLB'ye uygulanmış modifier'larla export edilebilir.
+
+### 🎛️ Viewport Gösterimi & Vulkan Raster Matcap Entegrasyonu
+
+- **Vulkan Raster Solid + Matcap**: Matcap gölgelendirmeyi destekleyen hızlı Vulkan raster "Solid" viewport modu — sculpt/paint için anlık geri bildirim sağlar. Matcap dosyaları `raytrac_sdl2/assets/matcaps/` içine koyulduğunda viewport tarafından kullanılabilir.
+- **Kullanım Senaryoları**: Ray-traced görünüm çok yavaş olduğunda sculpt ve topoloji inceleme için ideal; normal ve eğrilik bilgilerini düşük maliyetle korur.
+- **Etkinleştirme**: Viewport Shading menüsünden Matcap/Solid modunu aktifleştirin. Matcap seçimi Viewport → Shading → Matcap yolunda bulunur.
+- **Dosya & İş Akışı**: PNG/TGA/JPG matcap dosyalarını `raytrac_sdl2/assets/matcaps/` klasörüne ekleyin, ardından varlıkları yeniden yükleyin veya uygulamayı yeniden başlatın; Matcap seçiminde görünecektir.
+
 ## 🚦 Hızlı Başlangıç
 
 ### Ön Gereksinimler

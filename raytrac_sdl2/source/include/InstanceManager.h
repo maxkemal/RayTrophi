@@ -16,6 +16,7 @@
 #include <memory>
 #include <functional>
 #include <json.hpp>
+#include <simdjson.h>
 class OptixWrapper;
 class SceneData;
 namespace Backend {
@@ -60,8 +61,11 @@ public:
     // ─────────────────────────────────────────────────────────────────────────
     
     // Paint instances at a location (returns number added)
+    // If 'scene' is provided and the group's target_type == MESH, points will be
+    // projected onto the target mesh surface using scene->world.objects.
     int paintInstances(int group_id, const Vec3& center, const Vec3& normal,
-                       float brush_radius, float density_multiplier = 1.0f);
+                       float brush_radius, float density_multiplier = 1.0f,
+                       class SceneData* scene = nullptr);
     
     // Erase instances in radius (returns number removed)
     int eraseInstances(int group_id, const Vec3& center, float brush_radius);
@@ -106,6 +110,7 @@ public:
 
     nlohmann::json serialize();
     void deserialize(const nlohmann::json& j, SceneData& scene);
+    void deserializeFast(simdjson::dom::element el, SceneData& scene);
     void rebuildSceneObjects(SceneData& scene);
     
 private:

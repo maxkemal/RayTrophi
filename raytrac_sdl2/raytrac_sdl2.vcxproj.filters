@@ -55,6 +55,9 @@
     <Filter Include="Kaynak Dosyalar\shader">
       <UniqueIdentifier>{dfa80880-344e-4bcf-8552-0872c52a8403}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Kaynak Dosyalar\paint">
+      <UniqueIdentifier>{4ec93cdd-736d-4b6d-b4fa-41cfc31719e0}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="resource.h">
@@ -219,6 +222,27 @@
     <ClInclude Include="source\include\MeshModifiers.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Paint\IPaintSurfaceAdapter.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Paint\MeshPaintAdapter.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Paint\PaintLayer.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Paint\PaintModeState.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Paint\PaintSurfaceTarget.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Paint\PaintTextureSet.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Paint\TerrainPaintAdapter.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Transform.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -322,6 +346,9 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\TextureCompressionCache.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\OzzRuntime.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
   </ItemGroup>
@@ -454,6 +481,18 @@
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Utils\SceneSerializer.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\PaintModeState.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\PaintTextureSet.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Utils\MeshModifiers.cpp">
@@ -687,6 +726,9 @@
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Scene\AssetRegistry.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -708,5 +750,118 @@
     <ClCompile Include="source\src\Animation\OzzRuntime.cpp">
       <Filter>Kaynak Dosyalar\Animation</Filter>
     </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\log.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\platform.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\containers\string_archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\encode\group_varint.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\io\archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\io\stream.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\box.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\math_archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\simd_math.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\simd_math_archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\soa_math_archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\memory\allocator.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\animation.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\animation_utils.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\blending_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\ik_aim_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\ik_two_bone_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\local_to_model_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\motion_blending_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\sampling_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\skeleton.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\skeleton_utils.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track_sampling_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track_triggering_job.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton_archive.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\skeleton_builder.cc">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\animation_builder.cc">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\additive_animation_builder.cc">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_utils.cc">
+      <Filter>Kaynak Dosyalar\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\PaintLayerStack.cpp">
+      <Filter>Kaynak Dosyalar\paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_mesh_overlay.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Viewport\ViewportSceneSync.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>

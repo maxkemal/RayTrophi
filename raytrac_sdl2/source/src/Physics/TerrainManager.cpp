@@ -18,6 +18,8 @@
 #include "Texture.h"
 #include "Material.h" // Ensure Material class is fully defined
 #include "InstanceManager.h"
+#include "Backend/IBackend.h"
+#include "Backend/VulkanBackend.h"
 
 // CUDA Driver API
 #include <cuda.h>
@@ -32,6 +34,14 @@
 #pragma comment(lib, "cuda.lib")
 #pragma comment(lib, "cudart.lib")
 #pragma comment(lib, "delayimp.lib") // Required for delay load in MSVC
+
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
+namespace {
+bool terrainRenderBackendIsVulkan() {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr;
+}
+}
 
 // Helper function for autoMask
 inline float smoothstep(float edge0, float edge1, float x) {
@@ -463,6 +473,68 @@ Vec3 TerrainManager::sampleNormal(float worldX, float worldZ) const {
     return Vec3(0, 1, 0);
 }
 
+float TerrainManager::sampleSplatChannel(float worldX, float worldZ, int channel) const {
+    if (channel < 0 || channel > 3) return -1.0f;
+    if (terrains.empty()) return -1.0f;
+
+    for (const auto& terrain : terrains) {
+        if (!terrain.splatMap) continue;
+        auto& sp = terrain.splatMap;
+        if (sp->pixels.empty() || sp->width <= 0 || sp->height <= 0) continue;
+
+        // Transform world to local terrain space
+        Vec3 localPos(worldX, 0.0f, worldZ);
+        if (terrain.transform) {
+            Matrix4x4 inv = terrain.transform->getFinal().inverse();
+            localPos = inv.multiplyVector(Vec4(worldX, 0.0f, worldZ, 1.0f)).xyz();
+        }
+
+        float size = terrain.heightmap.scale_xz;
+        if (localPos.x < 0.0f || localPos.x > size || localPos.z < 0.0f || localPos.z > size) continue;
+
+        int w = sp->width;
+        int h = sp->height;
+
+        // Map local position to splatmap coordinates (note Y-flip used elsewhere)
+        float gridX = (localPos.x / size) * (w - 1);
+        float gridZ = (1.0f - (localPos.z / size)) * (h - 1);
+
+        // Bilinear sample
+        float fx = std::clamp(gridX, 0.0f, (float)(w - 1));
+        float fz = std::clamp(gridZ, 0.0f, (float)(h - 1));
+        int x0 = (int)std::floor(fx);
+        int y0 = (int)std::floor(fz);
+        int x1 = std::min(x0 + 1, w - 1);
+        int y1 = std::min(y0 + 1, h - 1);
+        float sx = fx - x0;
+        float sy = fz - y0;
+
+        auto samplePix = [&](int xx, int yy) -> float {
+            const auto& p = sp->pixels[yy * w + xx];
+            int v = 0;
+            switch (channel) {
+                case 0: v = p.r; break;
+                case 1: v = p.g; break;
+                case 2: v = p.b; break;
+                case 3: v = p.a; break;
+            }
+            return (float)v / 255.0f;
+        };
+
+        float v00 = samplePix(x0, y0);
+        float v10 = samplePix(x1, y0);
+        float v01 = samplePix(x0, y1);
+        float v11 = samplePix(x1, y1);
+
+        float vx0 = v00 * (1.0f - sx) + v10 * sx;
+        float vx1 = v01 * (1.0f - sx) + v11 * sx;
+        float v = vx0 * (1.0f - sy) + vx1 * sy;
+        return std::clamp(v, 0.0f, 1.0f);
+    }
+
+    return -1.0f;
+}
+
 bool TerrainManager::intersectRay(TerrainObject* terrain, const Ray& r, float& t_out, Vec3& normal_out, float t_min, float t_max) {
     if (!terrain || terrain->heightmap.data.empty()) return false;
     
@@ -518,8 +590,26 @@ bool TerrainManager::intersectRay(TerrainObject* terrain, const Ray& r, float& t
     int w = terrain->heightmap.width;
     int h = terrain->heightmap.height;
     
-    float cell_size_x = size / (float)(w-1);
-    float step_dist = cell_size_x * 0.5f; // Step half a cell for precision
+    const float cell_size_x = size / (float)(std::max(1, w - 1));
+    const float cell_size_z = size / (float)(std::max(1, h - 1));
+
+    // Advance in ray-param units based on how quickly the ray traverses terrain cells.
+    // The old fixed `cell_size_x * 0.5` step was not in ray-param space, so shallow-angle
+    // rays could tunnel across edited regions and produce patchy sculpt hits after the
+    // first terrain deformation.
+    float step_tx = std::numeric_limits<float>::infinity();
+    float step_tz = std::numeric_limits<float>::infinity();
+    if (std::abs(ray_dir.x) > 1e-6f) {
+        step_tx = cell_size_x / std::abs(ray_dir.x);
+    }
+    if (std::abs(ray_dir.z) > 1e-6f) {
+        step_tz = cell_size_z / std::abs(ray_dir.z);
+    }
+
+    float step_dist = std::min(step_tx, step_tz) * 0.5f;
+    if (!std::isfinite(step_dist) || step_dist <= 1e-6f) {
+        step_dist = std::min(cell_size_x, cell_size_z) * 0.5f;
+    }
     
     float t_curr = t0;
     
@@ -867,9 +957,11 @@ void TerrainManager::updateTerrainMesh(TerrainObject* terrain, bool signalRebuil
         extern bool g_bvh_rebuild_pending;
         extern bool g_optix_rebuild_pending;
         extern bool g_vulkan_rebuild_pending;
+        extern bool g_viewport_raster_rebuild_pending;
         g_bvh_rebuild_pending = true;
         g_optix_rebuild_pending = true;
-        g_vulkan_rebuild_pending = true;
+        g_viewport_raster_rebuild_pending = true;
+        if (terrainRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
     }
 }
 
@@ -910,9 +1002,11 @@ void TerrainManager::rebuildTerrainMesh(SceneData& scene, TerrainObject* terrain
     extern bool g_bvh_rebuild_pending;
     extern bool g_optix_rebuild_pending;
     extern bool g_vulkan_rebuild_pending;
+    extern bool g_viewport_raster_rebuild_pending;
     g_bvh_rebuild_pending = true;
     g_optix_rebuild_pending = true;
-    g_vulkan_rebuild_pending = true;
+    g_viewport_raster_rebuild_pending = true;
+    if (terrainRenderBackendIsVulkan()) g_vulkan_rebuild_pending = true;
 }
 
 // ===========================================================================
@@ -1473,24 +1567,43 @@ void TerrainManager::autoMask(TerrainObject* terrain, float slopeWeight, float h
             float u = (float)x / (float)(w > 1 ? w - 1 : 1);
             float v = 1.0f - (float)y / (float)(h > 1 ? h - 1 : 1);
             
-            // Map to heightmap coords
+            // Map to heightmap coords (use fractional coords and bilinear sampling)
             float hx_f = u * (terrain->heightmap.width - 1);
             float hy_f = v * (terrain->heightmap.height - 1);
-            int hx = (int)(hx_f + 0.5f); // Nearest neighbor
-            int hy = (int)(hy_f + 0.5f);
-            
-            hx = std::clamp(hx, 0, terrain->heightmap.width - 1);
-            hy = std::clamp(hy, 0, terrain->heightmap.height - 1);
+            int w_hm = terrain->heightmap.width;
+            int h_hm = terrain->heightmap.height;
 
-            // getHeight already returns height * scale_y
-            float local_height = terrain->heightmap.getHeight(hx, hy);
-            
-            // Calculate Slope
-            // Neighbors in Heightmap Grid
-            float hl = terrain->heightmap.getHeight(hx - 1, hy);
-            float hr = terrain->heightmap.getHeight(hx + 1, hy);
-            float hu = terrain->heightmap.getHeight(hx, hy - 1);
-            float hd = terrain->heightmap.getHeight(hx, hy + 1);
+            // Bilinear sample helper (samples using world-scaled heights via getHeight)
+            auto sampleBilinear = [&](float fx, float fy) -> float {
+                fx = std::clamp(fx, 0.0f, (float)(w_hm - 1));
+                fy = std::clamp(fy, 0.0f, (float)(h_hm - 1));
+                int x0 = (int)floorf(fx);
+                int x1 = std::min(x0 + 1, w_hm - 1);
+                int y0 = (int)floorf(fy);
+                int y1 = std::min(y0 + 1, h_hm - 1);
+                float sx = fx - (float)x0;
+                float sy = fy - (float)y0;
+                float h00 = terrain->heightmap.getHeight(x0, y0);
+                float h10 = terrain->heightmap.getHeight(x1, y0);
+                float h01 = terrain->heightmap.getHeight(x0, y1);
+                float h11 = terrain->heightmap.getHeight(x1, y1);
+                float hx0 = h00 * (1.0f - sx) + h10 * sx;
+                float hx1 = h01 * (1.0f - sx) + h11 * sx;
+                return hx0 * (1.0f - sy) + hx1 * sy;
+            };
+
+            // Keep integer indices for erosion map indexing where needed
+            int hx = (int)std::clamp((int)std::lround(hx_f), 0, w_hm - 1);
+            int hy = (int)std::clamp((int)std::lround(hy_f), 0, h_hm - 1);
+
+            // Sample height using bilinear interpolation for higher detail
+            float local_height = sampleBilinear(hx_f, hy_f);
+
+            // Calculate Slope using bilinear samples offset by one texel
+            float hl = sampleBilinear(hx_f - 1.0f, hy_f);
+            float hr = sampleBilinear(hx_f + 1.0f, hy_f);
+            float hu = sampleBilinear(hx_f, hy_f - 1.0f);
+            float hd = sampleBilinear(hx_f, hy_f + 1.0f);
             
             // Slope magnitude (Rise / Run)
             // Distance between hx-1 and hx+1 is 2 * HeightmapCellSize
@@ -4378,15 +4491,18 @@ void TerrainManager::updateFoliage(TerrainObject* terrain, OptixWrapper* optix) 
 
                         // Check Mask
                         float maskValue = 0.0f;
-                        if (splatTex && splatW > 0 && splatH > 0) {
-                            Vec3 color = splatTex->get_color(u, v);
-                            float alpha = splatTex->get_alpha(u, v);
-                            
-                            int ch = slayer.targetMaskLayerId;
-                            if (ch == 0) maskValue = color.x;
-                            else if (ch == 1) maskValue = color.y;
-                            else if (ch == 2) maskValue = color.z;
-                            else if (ch == 3) maskValue = alpha;
+                        if (splatTex && splatW > 0 && splatH > 0 && !splatTex->pixels.empty()) {
+                            int sampleX = std::clamp((int)(u * (float)(splatW - 1)), 0, splatW - 1);
+                            int sampleY = std::clamp((int)((1.0f - v) * (float)(splatH - 1)), 0, splatH - 1);
+                            int pIdx = sampleY * splatW + sampleX;
+                            if (pIdx >= 0 && pIdx < (int)splatTex->pixels.size()) {
+                                const auto& p = splatTex->pixels[pIdx];
+                                int ch = slayer.targetMaskLayerId;
+                                if (ch == 0) maskValue = p.r / 255.0f;
+                                else if (ch == 1) maskValue = p.g / 255.0f;
+                                else if (ch == 2) maskValue = p.b / 255.0f;
+                                else if (ch == 3) maskValue = p.a / 255.0f;
+                            }
                         } else {
                             maskValue = 1.0f;
                         }
@@ -4546,14 +4662,18 @@ int TerrainManager::migrateLegacyFoliageToInstanceGroups(SceneData& scene, bool 
                 float v = dist01(rng);
 
                 float maskValue = 1.0f;
-                if (splatTex && splatTex->is_loaded()) {
-                    Vec3 color = splatTex->get_color(u, v);
-                    float alpha = splatTex->get_alpha(u, v);
-                    const int ch = layer.targetMaskLayerId;
-                    if (ch == 0) maskValue = color.x;
-                    else if (ch == 1) maskValue = color.y;
-                    else if (ch == 2) maskValue = color.z;
-                    else if (ch == 3) maskValue = alpha;
+                if (splatTex && splatTex->is_loaded() && !splatTex->pixels.empty()) {
+                    int sampleX = std::clamp((int)(u * (float)(splatTex->width - 1)), 0, splatTex->width - 1);
+                    int sampleY = std::clamp((int)((1.0f - v) * (float)(splatTex->height - 1)), 0, splatTex->height - 1);
+                    int pIdx = sampleY * splatTex->width + sampleX;
+                    if (pIdx >= 0 && pIdx < (int)splatTex->pixels.size()) {
+                        const auto& p = splatTex->pixels[pIdx];
+                        const int ch = layer.targetMaskLayerId;
+                        if (ch == 0) maskValue = p.r / 255.0f;
+                        else if (ch == 1) maskValue = p.g / 255.0f;
+                        else if (ch == 2) maskValue = p.b / 255.0f;
+                        else if (ch == 3) maskValue = p.a / 255.0f;
+                    }
                 }
                 if (maskValue < layer.maskThreshold) continue;
 

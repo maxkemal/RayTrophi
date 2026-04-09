@@ -18,6 +18,22 @@
 #include "ProjectManager.h"
 #include <Backend/VulkanBackend.h>
 
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+
+namespace {
+void syncWorldToBackend(UIContext& ctx, Backend::IBackend* backend) {
+    if (!backend) return;
+    auto worldGPU = ctx.renderer.world.getGPUData();
+    backend->setWorldData(&worldGPU);
+    if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(backend)) {
+        auto* al = ctx.renderer.world.getLUT();
+        if (al && al->is_initialized()) {
+            vulkanBackend->uploadAtmosphereLUT(al);
+        }
+    }
+    backend->resetAccumulation();
+}
+} // namespace
 
 // =============================================================================
 void SceneUI::drawLightsContent(UIContext& ctx)
@@ -273,15 +289,10 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                 ctx.renderer.world.setSunIntensity(l->intensity);
                 ctx.renderer.world.flushLUT(); // Recompute LUT with new intensity BEFORE uploading to GPU
                 if (ctx.backend_ptr) {
-                    auto worldGPU = ctx.renderer.world.getGPUData();
-                    ctx.backend_ptr->setWorldData(&worldGPU);
-                    // Upload LUTs for Vulkan backend if available
-                    auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
-                    if (vulkanBackend) {
-                        auto* al = ctx.renderer.world.getLUT();
-                        if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
-                    }
-                    ctx.backend_ptr->resetAccumulation();
+                    syncWorldToBackend(ctx, ctx.backend_ptr);
+                }
+                if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+                    syncWorldToBackend(ctx, g_viewport_backend.get());
                 }
                 break; // Sync to first directional light only
             }
@@ -304,15 +315,11 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
     // GPU + CPU reset
             if (ctx.backend_ptr) {
                 ctx.backend_ptr->setLights(ctx.scene.lights);
-                // Ensure LUT upload after world sync
-                auto worldGPU = ctx.renderer.world.getGPUData();
-                ctx.backend_ptr->setWorldData(&worldGPU);
-                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
-                if (vulkanBackend) {
-                    auto* al = ctx.renderer.world.getLUT();
-                    if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
-                }
-                ctx.backend_ptr->resetAccumulation();
+                syncWorldToBackend(ctx, ctx.backend_ptr);
+            }
+    if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+        g_viewport_backend->setLights(ctx.scene.lights);
+        syncWorldToBackend(ctx, g_viewport_backend.get());
             }
     ctx.renderer.resetCPUAccumulation();
 
@@ -324,14 +331,10 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
             ctx.renderer.world.setSunIntensity(l->intensity);
             ctx.renderer.world.flushLUT(); // Recompute LUT with new intensity BEFORE uploading to GPU
             if (ctx.backend_ptr) {
-                auto worldGPU = ctx.renderer.world.getGPUData();
-                ctx.backend_ptr->setWorldData(&worldGPU);
-                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
-                if (vulkanBackend) {
-                    auto* al = ctx.renderer.world.getLUT();
-                    if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
-                }
-                ctx.backend_ptr->resetAccumulation();
+                syncWorldToBackend(ctx, ctx.backend_ptr);
+            }
+            if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+                syncWorldToBackend(ctx, g_viewport_backend.get());
             }
             break;
         }
@@ -341,15 +344,10 @@ bool SceneUI::deleteSelectedLight(UIContext& ctx)
         ctx.renderer.world.setSunIntensity(0.0f);
         ctx.renderer.world.flushLUT(); // Recompute LUT (will be all-zero at intensity=0)
         if (ctx.backend_ptr) {
-            auto worldGPU = ctx.renderer.world.getGPUData();
-            ctx.backend_ptr->setWorldData(&worldGPU);
-            // Upload zeroed LUT texture to GPU so Vulkan sky goes dark
-            auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ctx.backend_ptr);
-            if (vulkanBackend) {
-                auto* al = ctx.renderer.world.getLUT();
-                if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
-            }
-            ctx.backend_ptr->resetAccumulation();
+            syncWorldToBackend(ctx, ctx.backend_ptr);
+        }
+        if (g_viewport_backend && g_viewport_backend.get() != ctx.backend_ptr) {
+            syncWorldToBackend(ctx, g_viewport_backend.get());
         }
     }
 

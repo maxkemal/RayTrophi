@@ -693,6 +693,12 @@ void SceneUI::drawWorldContent(UIContext& ctx) {
         
         // Atmosphere Section (Realistic parameters)
         if (UIWidgets::BeginSection("Atmosphere", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+            // Atmosphere Intensity (independent of sun)
+            if (SceneUI::DrawSmartFloat("satm", "Intensity", &params.atmosphere_intensity, 0.0f, 100.0f, "%.1f", false, nullptr, 16)) {
+                changed = true;
+            }
+            ImGui::SameLine(); UIWidgets::HelpMarker("Atmospheric scattering brightness (sky color, halo, ambient). Independent of sun intensity.");
+            
             // Air
             bool airKeyed = isWorldKeyed(WorldProp::AirDensity);
             if (SceneUI::DrawSmartFloat("sair", "Air", &params.air_density, 0.0f, 10.0f, "%.2f", airKeyed, [&]{ insertWorldKey("Air", WorldProp::AirDensity); }, 16)) {

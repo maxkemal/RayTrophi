@@ -270,6 +270,10 @@ public:
 
     // Sample normal at world XZ coordinate
     Vec3 sampleNormal(float worldX, float worldZ) const;
+
+    // Sample splat map channel value (0..1) at world XZ coordinate for the terrain containing the point
+    // channel: 0=R,1=G,2=B,3=A. Returns -1.0f if no splat data or out of bounds.
+    float sampleSplatChannel(float worldX, float worldZ, int channel) const;
     
     // ===========================================================================
     // RIVER BED CARVING (for River System integration)

@@ -16,6 +16,8 @@
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
+#include "Backend/IViewportBackend.h"
+#include "Backend/VulkanViewportBackend.h"
 #include "CPUInfo.h"
 
 #include "imgui.h"
@@ -30,9 +32,11 @@
 #include "ColorProcessingParams.h"
 #include "CameraPresets.h"
 #include "scene_data.h"       // Added explicit include
+#include "AnimationNodes.h"
 #include "OptixWrapper.h"     // Added explicit include
 #include "SceneSelection.h"   // Added explicit include
 #include "Triangle.h"         // Added for CPU sync
+#include "HittableInstance.h" // Added for instance CPU sync
 #include "WaterSystem.h"      // Added for WaterManager
 #include "CloudManager.h"     // Added for CloudManager
 
@@ -113,6 +117,43 @@ bool hasArg(int argc, char* argv[], std::string_view arg) {
         }
     }
     return false;
+}
+}
+
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
+namespace {
+Backend::ViewportMode viewportModeFromShadingMode(int shadingMode) {
+    switch (shadingMode) {
+        case 0: return Backend::ViewportMode::Solid;
+        case 1: return Backend::ViewportMode::MaterialPreview;
+        case 3: return Backend::ViewportMode::Matcap;
+        case 2:
+        default:
+            return Backend::ViewportMode::Rendered;
+    }
+}
+
+bool isInteractiveViewportShadingMode(int shadingMode) {
+    return shadingMode != 2;
+}
+
+bool isVulkanInteractiveViewportActive(bool viewportBackendActive, int shadingMode) {
+    // Interactive viewport shading modes use a dedicated viewport backend that is
+    // intentionally separate from the selected render device for Rendered mode.
+    return viewportBackendActive && isInteractiveViewportShadingMode(shadingMode);
+}
+
+bool isActiveRenderBackendVulkan() {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr;
+}
+
+bool isActiveRenderBackendOptix() {
+    return dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr;
+}
+
+bool isActiveRenderBackendGpu() {
+    return isActiveRenderBackendVulkan() || isActiveRenderBackendOptix();
 }
 
 #ifdef _WIN32
@@ -407,7 +448,15 @@ bool rayhit = false;
 bool g_camera_dirty = true;
 bool g_lights_dirty = true;
 bool g_world_dirty = true;
-bool g_original_surface_needs_sync = true; 
+bool g_original_surface_needs_sync = true;
+
+// Granular scene-sync dirty flags
+bool g_geometry_dirty = true;        // Mesh/triangle data changed
+bool g_materials_dirty = true;       // Material properties changed
+bool g_gas_volumes_dirty = true;     // Gas/VDB volumes changed
+
+// Scene geometry generation counter
+std::atomic<uint64_t> g_scene_geometry_generation{1};
 
 // ===========================================================================
 // DEFERRED REBUILD FLAGS - For optimized batched rebuilds
@@ -416,6 +465,7 @@ bool g_original_surface_needs_sync = true;
 bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
 bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
 bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
+bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
 bool g_optix_rebuild_pending = false;
 std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
 bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
@@ -435,6 +485,9 @@ void EnsureOriginalSurface(SDL_Surface* reference) {
     if (!original_surface || original_surface->w != reference->w || original_surface->h != reference->h) {
         if (original_surface) SDL_FreeSurface(original_surface);
         original_surface = SDL_CreateRGBSurfaceWithFormat(0, reference->w, reference->h, 32, reference->format->format);
+        // [FIX] Initialize pixels to black — prevents random black/white/garbage
+        // when VulkanRT pipeline isn't ready yet and renderProgressiveImpl early-returns
+        if (original_surface) SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
     }
 }
 
@@ -444,6 +497,8 @@ void EnsureOriginalSurface(SDL_Surface* reference) {
 std::atomic<bool> g_scene_loading_in_progress{false};  // Prevents concurrent load operations
 std::atomic<bool> g_needs_geometry_rebuild{false};   // Set by loader thread, main loop does actual rebuild
 std::atomic<bool> g_needs_optix_sync{false};         // Set by loader thread, main loop syncs backend buffers
+std::atomic<bool> g_deferred_render_backend_prepare_pending{false};
+int g_deferred_render_backend_prepare_delay_frames = 0;
 
 // Async OptiX rebuild handle/state. Kept at file scope so backend switch can safely wait.
 std::future<void> g_optix_future;
@@ -471,7 +526,23 @@ SceneUI ui;
 SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
 std::unique_ptr<Backend::IBackend> g_backend;
+std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 ColorProcessor color_processor(image_width, image_height);
+
+// Sync render backend's material buffer to viewport backend for MaterialPreview mode.
+static void syncMaterialBufferToViewportBackend() {
+    if (!g_viewport_backend || !g_backend) return;
+    auto* vpBackend = dynamic_cast<Backend::VulkanViewportBackend*>(g_viewport_backend.get());
+    auto* renderAdapter = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+    if (vpBackend && renderAdapter) {
+        auto* renderDevice = renderAdapter->getVulkanDevice();
+        if (renderDevice && renderDevice->m_materialBuffer.buffer) {
+            vpBackend->setExternalMaterialBuffer(
+                renderDevice->m_materialBuffer.buffer,
+                renderDevice->m_materialBuffer.size);
+        }
+    }
+}
 
 static void shutdownAndResetBackendSafe(const char* reason) {
     if (!g_backend) return;
@@ -507,6 +578,69 @@ static void shutdownAndResetBackendSafe(const char* reason) {
         SCENE_LOG_WARN("[Backend] SetProcessWorkingSetSize trim request failed.");
     }
 #endif
+}
+
+static bool initializeViewportBackendIfAvailable() {
+    if (g_viewport_backend) return true;
+    if (!g_hasVulkan) return false;
+    try {
+        auto backend = std::make_unique<Backend::VulkanViewportBackend>();
+        if (!backend->initialize()) {
+            SCENE_LOG_WARN("Viewport Vulkan backend initialization returned false.");
+            return false;
+        }
+        g_viewport_backend = std::move(backend);
+        return true;
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("Viewport Vulkan initialization failed: ") + e.what());
+        return false;
+    } catch (...) {
+        SCENE_LOG_WARN("Viewport Vulkan initialization failed with unknown exception.");
+        return false;
+    }
+}
+
+static Backend::IViewportBackend* getRasterViewportBackend() {
+    if (g_viewport_backend) {
+        return g_viewport_backend.get();
+    }
+    if (auto* viewportBackend = dynamic_cast<Backend::IViewportBackend*>(g_backend.get())) {
+        return viewportBackend;
+    }
+    return nullptr;
+}
+
+static Backend::IBackend* getActiveViewportBackendForShading(int shadingMode) {
+    if (isInteractiveViewportShadingMode(shadingMode)) {
+        if (auto* vk = getRasterViewportBackend()) return vk;
+    }
+    return g_backend.get();
+}
+
+static void applyPendingDeleteVisibilityToBackend(SceneData& scene, Backend::IBackend* backend) {
+    if (!backend || scene.editor_pending_delete_object_names.empty()) {
+        return;
+    }
+
+    for (const auto& nodeName : scene.editor_pending_delete_object_names) {
+        if (!nodeName.empty()) {
+            backend->setVisibilityByNodeName(nodeName, false);
+        }
+    }
+}
+
+static std::vector<std::shared_ptr<Hittable>> collectVisibleSceneObjects(SceneData& scene) {
+    std::vector<std::shared_ptr<Hittable>> visibleObjects;
+    visibleObjects.reserve(scene.world.objects.size());
+
+    for (const auto& obj : scene.world.objects) {
+        if (!obj || !obj->visible) {
+            continue;
+        }
+        visibleObjects.push_back(obj);
+    }
+
+    return visibleObjects;
 }
 
 std::string active_model_path;
@@ -574,6 +708,13 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
                         const auto& pixel_data = renderer->cpu_accumulation_buffer[buffer_y * width + i];
                         raw_color = Vec3(pixel_data.x, pixel_data.y, pixel_data.z);
                     }
+                    // CPU path: ham linear HDR değerler. ToneMappingType::None ise
+                    // Reinhard ile 0-1'e getir; aksi hâlde seçilen operator processColor'da uygular.
+                    if (processor.params.tone_mapping_type == ToneMappingType::None) {
+                        raw_color.x = raw_color.x / (raw_color.x + 1.0f);
+                        raw_color.y = raw_color.y / (raw_color.y + 1.0f);
+                        raw_color.z = raw_color.z / (raw_color.z + 1.0f);
+                    }
                 } else {
                     // Fallback to LDR surface (sRGB/Gamma usually) - already Top-Down
                     if (!src) continue;
@@ -583,10 +724,19 @@ void applyToneMappingToSurface(SDL_Surface* surface, SDL_Surface* original, Colo
                 }
 
                 Vec3 final_color = processor.processColor(raw_color, i, j);
-                
+
                 if (processor.params.enable_vignette)
                     final_color = applyVignette(final_color, i, j, width, height, processor.params.vignette_strength);
-                
+
+                // CPU float buffer path: processColor linear LDR döndürür (Reinhard sıkıştırdı
+                // ama sRGB encoding yok). GPU surface path zaten sRGB-encoded gelir.
+                // CPU için sRGB encoding uygula, GPU için uygulama (zaten encoded).
+                if (use_float_buffer) {
+                    final_color.x = processor.linearToSRGB(std::clamp(final_color.x, 0.0f, 1.0f));
+                    final_color.y = processor.linearToSRGB(std::clamp(final_color.y, 0.0f, 1.0f));
+                    final_color.z = processor.linearToSRGB(std::clamp(final_color.z, 0.0f, 1.0f));
+                }
+
                 Uint8 r = static_cast<Uint8>(255.0f * std::clamp(final_color.x, 0.0f, 1.0f));
                 Uint8 g = static_cast<Uint8>(255.0f * std::clamp(final_color.y, 0.0f, 1.0f));
                 Uint8 b = static_cast<Uint8>(255.0f * std::clamp(final_color.z, 0.0f, 1.0f));
@@ -618,7 +768,7 @@ void applyCPUDenoisedPreviewToSurface(SDL_Surface* surface, Renderer& renderer, 
 
     auto toSRGB = [](float c) {
         if (c <= 0.0031308f) return 12.92f * c;
-        return 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
+        return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
     };
 
     float exposure_factor = 1.0f;
@@ -898,6 +1048,9 @@ bool initializeOptixIfAvailable() {
         if (!g_backend->initialize()) {
             SCENE_LOG_ERROR("OptiX backend initialize() returned false.");
             shutdownAndResetBackendSafe("optix_initialize_failed");
+            // Initialization failed - mark OptiX as unavailable so UI/backends
+            // won't continue to present it as a selectable runtime.
+            g_hasOptix = false;
             return false;
         }
         
@@ -933,11 +1086,13 @@ bool initializeOptixIfAvailable() {
     catch (const std::exception& e) {
         SCENE_LOG_ERROR(std::string("OptiX initialization failed: ") + e.what());
         shutdownAndResetBackendSafe("optix_initialize_exception");
+        g_hasOptix = false;
         return false;
     }
     catch (...) {
         SCENE_LOG_ERROR("OptiX initialization failed with unknown exception.");
         shutdownAndResetBackendSafe("optix_initialize_unknown_exception");
+        g_hasOptix = false;
         return false;
     }
 
@@ -1125,10 +1280,13 @@ int main(int argc, char* argv[]) try {
     detectOptixHardware();
         startupDiagLog("[Startup] detectOptixHardware done");
 
-     // Create main window
+    // Enable IME UI (must be set before creating window) so SDL can show native IME when needed
+    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
+
+    // Create main window
     if (splashOk) { splash.setStatus("Creating main window..."); splash.render(); }
     startupDiagLog("[Startup] before SDL_CreateWindow");
-     window = SDL_CreateWindow("RayTrophi Studio",
+      window = SDL_CreateWindow("RayTrophi Studio",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         image_width,
@@ -1142,6 +1300,9 @@ int main(int argc, char* argv[]) try {
 
      surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
      original_surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
+     // [FIX] Prevent uninitialized pixel data causing random black/white on startup
+     if (surface) SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
+     if (original_surface) SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
     startupDiagLog("[Startup] SDL_CreateRGBSurfaceWithFormat done");
 
      raytrace_texture =
@@ -1151,6 +1312,8 @@ int main(int argc, char* argv[]) try {
 
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
      startupDiagLog("[Startup] SDL_SetTextureBlendMode done");
+    // Ensure SDL_TEXTINPUT events are enabled so ImGui_ImplSDL2 can receive UTF-8 characters
+    SDL_StartTextInput();
     
     // Initialize ImGui
     if (splashOk) { splash.setStatus("Initializing ImGui..."); splash.render(); }
@@ -1167,69 +1330,125 @@ int main(int argc, char* argv[]) try {
     ThemeManager::instance().setTheme("RayTrophi Pro Dark");
     ThemeManager::instance().applyCurrentTheme(ui.panel_alpha); 
     startupDiagLog("[Startup] ThemeManager init done");
-	
-    // Initialize OptiX
-    bool ptx_exists = std::filesystem::exists("raygen.ptx");
-    if (splashOk && g_hasOptix) { 
-        if (!ptx_exists) {
-            splash.beginBusyStatus("Compiling GPU Shaders (First time setup, please wait)...");
-        } else if (!g_gpu_name.empty() && g_hasOptix) {
-            // Blackwell (SM 10.0+) JIT can take several minutes on first run with OptiX 9.0
-            splash.beginBusyStatus("Initializing OptiX for " + g_gpu_name +
-                                   " - JIT compile in progress, may take 1-3 minutes on first run...");
-        } else {
-            splash.beginBusyStatus("Initializing OptiX (One-time JIT compile, next starts will be fast)...");
+
+    auto attachActiveBackendStatusCallback = [&]() {
+        if (!g_backend) {
+            return;
         }
-    }
-
-    bool optixInitialized = false;
-    if (g_hasOptix && splashOk) {
-        auto optixInitFuture = std::async(std::launch::async, []() {
-            return initializeOptixIfAvailable();
-        });
-
-        while (optixInitFuture.wait_for(std::chrono::milliseconds(16)) != std::future_status::ready) {
-            splash.tick();
-        }
-
-        optixInitialized = optixInitFuture.get();
-        splash.stopBusyStatus();
-    } else {
-        optixInitialized = initializeOptixIfAvailable();
-    }
-
-    if (optixInitialized) {
-        SCENE_LOG_INFO("OptiX is ready!");
-        
-    if (g_backend) {
         g_backend->setStatusCallback([&](const std::string& msg, int type) {
-            // ui.addNotification(msg, type); // Integrated into addViewportMessage
-            ImVec4 color = ImVec4(1, 1, 1, 1); // Info = White
-            if (type == 1) color = ImVec4(1, 1, 0, 1); // Warn = Yellow
-            if (type == 2) color = ImVec4(1, 0.2f, 0.2f, 1); // Error = Red
-            ui.addViewportMessage(msg, 4.0f, color); // Slightly longer duration for backend msgs
+            ImVec4 color = ImVec4(1, 1, 1, 1);
+            if (type == 1) color = ImVec4(1, 1, 0, 1);
+            if (type == 2) color = ImVec4(1, 0.2f, 0.2f, 1);
+            ui.addViewportMessage(msg, 4.0f, color);
         });
-    }
-        
-        render_settings.use_optix = true;
-        ui_ctx.render_settings.use_optix = true;
+    };
 
-        // Ensure Renderer has access to OptiX for Hair/Geometry updates
-        ray_renderer.setBackend(g_backend.get());
-
-        // CRITICAL: Set optix_gpu_ptr on UIContext!
-        // After IBackend migration, this was left as nullptr causing ALL gizmo/transform
-        // code to fall through to the slow CPU path (no TLAS updates, no GPU refit,
-        // no lazy sync, no material GPU updates from gizmos, etc.)
-        auto* optixBackend = dynamic_cast<Backend::OptixBackend*>(g_backend.get());
-        if (optixBackend) {
-            ui_ctx.optix_gpu_ptr = optixBackend->getOptixWrapper();
-            SCENE_LOG_INFO("UIContext.optix_gpu_ptr set from OptixBackend");
+    // -----------------------------------------------------------------------
+    // syncActiveRenderBackendScene — GRANULAR version
+    // Only re-uploads subsystems whose dirty flag is set. Falls back to full
+    // sync when forceFullSync is true (e.g. first sync after backend create).
+    // -----------------------------------------------------------------------
+    auto syncActiveRenderBackendScene = [&](bool forceFullSync = false) -> bool {
+        if (!g_backend) {
+            return false;
         }
-    }
-    else {
-        SCENE_LOG_WARN("Falling back to CPU rendering.");
-    }
+
+        bool did_geometry = false;
+        if (forceFullSync || g_geometry_dirty) {
+            ray_renderer.rebuildBackendGeometry(scene);
+            applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
+            g_geometry_dirty = false;
+            did_geometry = true;
+        }
+
+        if (forceFullSync || g_materials_dirty || did_geometry) {
+            ray_renderer.updateBackendMaterials(scene);
+            syncMaterialBufferToViewportBackend();
+            g_materials_dirty = false;
+        }
+
+        if (forceFullSync || g_gas_volumes_dirty) {
+            ray_renderer.updateBackendGasVolumes(scene);
+            g_gas_volumes_dirty = false;
+        }
+
+        if (forceFullSync || g_world_dirty) {
+            auto wd = ray_renderer.world.getGPUData();
+            g_backend->setWorldData(&wd);
+            if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
+                auto* al = ray_renderer.world.getLUT();
+                if (al && al->is_initialized()) {
+                    vulkanBackend->uploadAtmosphereLUT(al);
+                }
+            }
+        }
+
+        if (forceFullSync || g_lights_dirty) {
+            g_backend->setLights(scene.lights);
+        }
+
+        if (forceFullSync || g_camera_dirty) {
+            if (scene.camera) {
+                ray_renderer.syncCameraToBackend(*scene.camera);
+            }
+        }
+
+        g_backend->resetAccumulation();
+        g_needs_optix_sync.store(false, std::memory_order_release);
+        return true;
+    };
+
+    auto resolveRequestedRenderBackend = [&](bool allowAutoSelect, bool showHudWarnings) {
+        bool requestedOptix = render_settings.use_optix;
+        bool requestedVulkan = render_settings.use_vulkan;
+        std::string fallbackMessage;
+
+        if (requestedOptix && requestedVulkan) {
+            requestedVulkan = false;
+            SCENE_LOG_WARN("Both OptiX and Vulkan were requested. Preferring OptiX.");
+        }
+
+        if (requestedOptix && !g_hasOptix) {
+            requestedOptix = false;
+            if (g_hasVulkan) {
+                requestedVulkan = true;
+                fallbackMessage = "OptiX unsupported on this machine. Falling back to Vulkan.";
+            } else {
+                requestedVulkan = false;
+                fallbackMessage = "OptiX unsupported on this machine. Falling back to CPU rendering.";
+            }
+        }
+
+        if (requestedVulkan && !g_hasVulkan) {
+            requestedVulkan = false;
+            if (g_hasOptix) {
+                requestedOptix = true;
+                fallbackMessage = "Vulkan unsupported on this machine. Falling back to OptiX.";
+            } else {
+                fallbackMessage = "Vulkan unsupported on this machine. Falling back to CPU rendering.";
+            }
+        }
+
+        if (!requestedOptix && !requestedVulkan && allowAutoSelect) {
+            if (g_hasOptix) {
+                requestedOptix = true;
+            } else if (g_hasVulkan) {
+                requestedVulkan = true;
+            }
+        }
+
+        render_settings.use_optix = requestedOptix;
+        render_settings.use_vulkan = requestedVulkan;
+        ui_ctx.render_settings.use_optix = requestedOptix;
+        ui_ctx.render_settings.use_vulkan = requestedVulkan;
+
+        if (!fallbackMessage.empty()) {
+            SCENE_LOG_WARN(fallbackMessage);
+            if (showHudWarnings) {
+                ui.addViewportMessage(fallbackMessage, 7.0f, ImVec4(1.0f, 0.5f, 0.2f, 1.0f));
+            }
+        }
+    };
 
     // ===========================================================================
     // VULKAN BACKEND TEST & CAPABILITY CHECK
@@ -1243,8 +1462,14 @@ int main(int argc, char* argv[]) try {
         try {
             auto vulkanTest = std::make_unique<Backend::VulkanBackendAdapter>();
             if (vulkanTest->initialize()) {
-                g_hasVulkan = true; // 
-                SCENE_LOG_INFO("Vulkan capabilities checked and supported!");
+                g_hasVulkan = true;
+                // Query whether the device supports hardware ray-tracing
+                if (auto* dev = vulkanTest->getVulkanDevice()) {
+                    g_hasVulkanRT = dev->hasHardwareRT();
+                } else {
+                    g_hasVulkanRT = false;
+                }
+                SCENE_LOG_INFO(std::string("Vulkan capabilities checked and supported! Hardware RT: ") + (g_hasVulkanRT ? "yes" : "no"));
                 vulkanTest->shutdown();
             }
         } catch (...) {
@@ -1264,6 +1489,10 @@ int main(int argc, char* argv[]) try {
     }
 #endif
 
+    if (g_hasVulkan && dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) == nullptr) {
+        (void)initializeViewportBackendIfAvailable();
+    }
+
     // Load Project or Create Default Scene
     if (!project_to_load.empty() && std::filesystem::exists(project_to_load)) {
         if (splashOk) { splash.setStatus("Loading Project..."); splash.render(); }
@@ -1274,10 +1503,13 @@ int main(int argc, char* argv[]) try {
                     splash.render();
                 }
             });
+        ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     } else {
         if (splashOk) { splash.setStatus("Creating default scene..."); splash.render(); }
         createDefaultScene(scene, ray_renderer, g_backend.get());
+        ui.viewport_settings.shading_mode = g_hasVulkan ? 0 : 2;
     }
+    resolveRequestedRenderBackend(true, false);
     ui_ctx.render_settings.use_optix = render_settings.use_optix;
     ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
     ui_ctx.render_settings.backend_changed = render_settings.backend_changed;
@@ -1287,26 +1519,30 @@ int main(int argc, char* argv[]) try {
     if (splashOk) { splash.setStatus("Building BVH structures..."); splash.render(); }
     ray_renderer.world.initializeLUT(); // Essential for Nishita Sky performance
     ray_renderer.rebuildBVH(scene, UI_use_embree);
-    if (g_backend) {
-        ray_renderer.rebuildBackendGeometry(scene);
-        // CRITICAL: Immediately sync GPU buffers so sun direction is correct at startup
+    if (g_viewport_backend) {
         WorldData wd = ray_renderer.world.getGPUData();
-        g_backend->setWorldData(&wd);
-        // If using Vulkan backend, upload Atmosphere LUT host arrays into Vulkan images
-        if (g_backend) {
-            auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
-            if (vulkanBackend) {
-                auto* al = ray_renderer.world.getLUT();
-                if (al && al->is_initialized()) {
-                    vulkanBackend->uploadAtmosphereLUT(al);
-                }
-            }
-        }
-        g_backend->setLights(scene.lights);
+        g_viewport_backend->setWorldData(&wd);
+        g_viewport_backend->setLights(scene.lights);
         if (scene.camera) {
-            g_backend->syncCamera(*scene.camera);
+            g_viewport_backend->syncCamera(*scene.camera);
+        }
+        if (ui.viewport_settings.shading_mode != 2) {
+            g_viewport_raster_rebuild_pending = true;
         }
     }
+    if (render_settings.use_optix || render_settings.use_vulkan) {
+        // Always allow deferred prepare so the render backend gets created.
+        // The granular syncActiveRenderBackendScene and generation-based
+        // buildRasterGeometry will prevent redundant heavy work.
+        g_deferred_render_backend_prepare_pending.store(true, std::memory_order_release);
+        g_deferred_render_backend_prepare_delay_frames = 2;
+        g_needs_optix_sync.store(true, std::memory_order_release);
+    } else {
+        g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+        g_deferred_render_backend_prepare_delay_frames = 0;
+        g_needs_optix_sync.store(false, std::memory_order_release);
+    }
+    g_needs_geometry_rebuild.store(false, std::memory_order_release);
     // Update initial camera vectors
     if (scene.camera) scene.camera->update_camera_vectors();
 
@@ -1328,13 +1564,21 @@ int main(int argc, char* argv[]) try {
     // ===========================================================================
     // GPU MODE HUD NOTIFICATION - Inform user about rendering backend
     // ===========================================================================
-    if (g_hasOptix) {
+    // Prefer render_settings flags (they may be set before backend object exists)
+    bool activeOptix = render_settings.use_optix || ui_ctx.render_settings.use_optix ||
+                       (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
+    bool activeVulkan = render_settings.use_vulkan || ui_ctx.render_settings.use_vulkan ||
+                        (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
+
+    if (activeOptix) {
         if (g_has_rt_cores) {
             ui.addViewportMessage("GPU: " + g_gpu_name + " (RTX - Hardware Ray Tracing)", 5.0f, ImVec4(0.3f, 1.0f, 0.5f, 1.0f));
         } else {
             ui.addViewportMessage("GPU: " + g_gpu_name + " (Compute Mode - No RT Cores)", 6.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
             ui.addViewportMessage("Performance may be slower than RTX cards", 6.0f, ImVec4(0.8f, 0.8f, 0.8f, 1.0f));
         }
+    } else if (activeVulkan) {
+        ui.addViewportMessage("GPU: " + g_gpu_name + " (Vulkan Path Tracing)", 5.0f, ImVec4(0.45f, 0.8f, 1.0f, 1.0f));
     } else {
         ui.addViewportMessage("CPU Rendering Mode (No compatible GPU found)", 6.0f, ImVec4(1.0f, 0.5f, 0.3f, 1.0f));
     }
@@ -1352,11 +1596,11 @@ int main(int argc, char* argv[]) try {
     while (!quit) {
         // If Vulkan reported memory pressure (typically OOM/shared-memory exhaustion),
         // schedule a safe backend recreate using the already hardened switch path.
-        if (ui_ctx.render_settings.use_vulkan &&
+        if (isActiveRenderBackendVulkan() &&
             g_vulkan_trim_recreate_requested.exchange(false, std::memory_order_acq_rel)) {
             if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
                 SCENE_LOG_WARN("Vulkan memory pressure detected. Scheduling safe Vulkan backend recreate.");
-                ui.addViewportMessage("Vulkan bellek baskisi: aygit yenileniyor...", 5.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+                ui.addViewportMessage("Vulkan memory pressure detected. Scheduling safe Vulkan backend recreate.", 5.0f, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
                 render_settings.backend_changed = true;
                 ui_ctx.render_settings.backend_changed = true;
                 // Force a fresh accumulation after device recreate.
@@ -1367,12 +1611,45 @@ int main(int argc, char* argv[]) try {
             }
         }
 
+        if (g_deferred_render_backend_prepare_pending.load(std::memory_order_acquire) &&
+            !render_settings.backend_changed &&
+            !ui_ctx.render_settings.backend_changed &&
+            !ui.scene_loading.load() &&
+            !g_scene_loading_in_progress.load() &&
+            !rendering_in_progress.load() &&
+            !g_viewport_raster_rebuild_pending) {
+            if (g_deferred_render_backend_prepare_delay_frames > 0) {
+                --g_deferred_render_backend_prepare_delay_frames;
+            } else {
+                resolveRequestedRenderBackend(false, false);
+
+                const bool currentIsVulkan = (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
+                const bool currentIsOptix = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
+                const bool requestedVulkan = render_settings.use_vulkan;
+                const bool requestedOptix = render_settings.use_optix;
+                const bool matchingBackendReady =
+                    (requestedVulkan && currentIsVulkan) ||
+                    (requestedOptix && currentIsOptix);
+
+                if ((requestedVulkan || requestedOptix) && !matchingBackendReady) {
+                    render_settings.backend_changed = true;
+                    ui_ctx.render_settings.backend_changed = true;
+                } else if (matchingBackendReady && g_needs_optix_sync.load(std::memory_order_acquire)) {
+                    (void)syncActiveRenderBackendScene();
+                    g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+                } else {
+                    g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+                }
+            }
+        }
+
         if (render_settings.backend_changed) {
             // Avoid backend destruction/recreation while a scene load thread is active.
             // The switch will be processed immediately after loading completes.
             if (ui.scene_loading.load() || g_scene_loading_in_progress.load()) {
                 SDL_Delay(1);
             } else {
+            resolveRequestedRenderBackend(false, true);
             // If user re-selects the already active backend, skip costly teardown/recreate.
             const bool currentIsVulkan = (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
             const bool currentIsOptix  = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
@@ -1384,11 +1661,17 @@ int main(int argc, char* argv[]) try {
                 ((!requestedVulkan && !requestedOptix) && !g_backend);
 
             if (sameBackendRequested) {
+                if (g_backend && g_needs_optix_sync.load(std::memory_order_acquire)) {
+                    attachActiveBackendStatusCallback();
+                    (void)syncActiveRenderBackendScene();
+                }
                 render_settings.backend_changed = false;
                 ui_ctx.render_settings.backend_changed = false;
                 ui_ctx.render_settings.use_optix = render_settings.use_optix;
                 ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
                 if (g_backend) g_backend->resetAccumulation();
+                g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+                g_deferred_render_backend_prepare_delay_frames = 0;
                 continue;
             }
 
@@ -1478,6 +1761,15 @@ int main(int argc, char* argv[]) try {
                 ui_ctx.render_settings.use_vulkan = false;
             }
 
+            // Also handle explicit GPU -> CPU switch (successful path with no backend requested).
+            // Without this, CPU may render with stale geometry/BVH after leaving GPU mode.
+            if (!render_settings.use_optix && !render_settings.use_vulkan && !g_backend) {
+                extern bool g_cpu_sync_pending;
+                g_cpu_sync_pending = true;
+                g_bvh_rebuild_pending = true;
+                start_render = true;
+            }
+
             if (g_backend) {
                 // Reattach renderer to the new backend
                 ray_renderer.setBackend(g_backend.get());
@@ -1487,26 +1779,24 @@ int main(int argc, char* argv[]) try {
                 } else {
                     ui_ctx.optix_gpu_ptr = nullptr;
                 }
+                attachActiveBackendStatusCallback();
+                (void)syncActiveRenderBackendScene(true); // New backend — full sync required
+            }
 
-                // IMPORTANT: Full scene sync on backend change
-                ray_renderer.rebuildBackendGeometry(scene);
-                ray_renderer.updateBackendMaterials(scene);
-                ray_renderer.updateBackendGasVolumes(scene);
-
-                // Final world/lights push
-                ray_renderer.syncCameraToBackend(*scene.camera);
-                g_backend->setLights(scene.lights);
-                auto wd = ray_renderer.world.getGPUData();
-                g_backend->setWorldData(&wd);
-                if (g_backend) {
-                    auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
-                    if (vulkanBackend) {
-                        auto* al = ray_renderer.world.getLUT();
-                        if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
-                    }
+            if (g_hasVulkan && dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) == nullptr) {
+                (void)initializeViewportBackendIfAvailable();
+            }
+            if (g_viewport_backend) {
+                auto wdViewport = ray_renderer.world.getGPUData();
+                g_viewport_backend->setWorldData(&wdViewport);
+                g_viewport_backend->setLights(scene.lights);
+                if (scene.camera) {
+                    g_viewport_backend->syncCamera(*scene.camera);
                 }
-
-                g_backend->resetAccumulation();
+                if (ui.viewport_settings.shading_mode != 2) {
+                    g_viewport_raster_rebuild_pending = true;
+                }
+                applyPendingDeleteVisibilityToBackend(scene, g_viewport_backend.get());
             }
 
             // Let backend/device settle for a few frames before animation-driven GPU updates
@@ -1517,6 +1807,8 @@ int main(int argc, char* argv[]) try {
             ui_ctx.render_settings.use_vulkan = render_settings.use_vulkan;
             render_settings.backend_changed = false;
             ui_ctx.render_settings.backend_changed = false;
+            g_deferred_render_backend_prepare_pending.store(false, std::memory_order_release);
+            g_deferred_render_backend_prepare_delay_frames = 0;
             }
         }
 
@@ -1542,6 +1834,13 @@ int main(int argc, char* argv[]) try {
         // ANIMATION RENDER LOCK: Block camera/viewport input during animation render
         bool input_locked = ui_ctx.render_settings.animation_render_locked || 
                            (rendering_in_progress && ui_ctx.is_animation_mode);
+
+        // [FIX] Master guard: Skip ALL GPU backend calls when animation thread
+        // is actively using the Vulkan/OptiX backend.  VulkanBackendAdapter
+        // methods acquire m_mutex — if the main thread calls any of them while
+        // renderProgressiveImpl holds the mutex, the main thread blocks for the
+        // entire GPU trace duration, freezing the UI.
+        const bool skip_backend_for_anim = rendering_in_progress.load() && ui_ctx.is_animation_mode;
 
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
@@ -1582,17 +1881,32 @@ int main(int argc, char* argv[]) try {
 
                 if (e.key.keysym.sym == SDLK_h) {
                     if (!ImGui::GetIO().WantCaptureKeyboard) {
-                        for (auto& obj : scene.world.objects) obj->visible = true;
+                        for (auto& obj : scene.world.objects) {
+                            if (!obj) continue;
+
+                            bool visible = true;
+                            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                                visible = !scene.isEditorPendingDeleteObjectName(tri->getNodeName());
+                            } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                                visible = !scene.isEditorPendingDeleteObjectName(inst->node_name);
+                            }
+
+                            obj->visible = visible;
+                        }
                         for (auto& light : scene.lights) light->visible = true;
                         for (auto& vdb : scene.vdb_volumes) vdb->visible = true;
                         for (auto& gas : scene.gas_volumes) gas->visible = true;
                         if (g_hasOptix) {
                         if (g_backend) {
                             g_backend->showAllInstances();
+                            applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
                             g_backend->setLights(scene.lights);
                         }
                         }
-                        g_bvh_rebuild_pending = true;
+                        if (g_viewport_backend) {
+                            applyPendingDeleteVisibilityToBackend(scene, g_viewport_backend.get());
+                            g_viewport_backend->resetAccumulation();
+                        }
                         ray_renderer.resetCPUAccumulation();
                         SCENE_LOG_INFO("All objects and lights are now visible.");
                         ui.addViewportMessage("All objects visible", 2.0f, ImVec4(0.4f, 1.0f, 0.6f, 1.0f));
@@ -1832,6 +2146,21 @@ int main(int argc, char* argv[]) try {
         last_sim_time = current_sim_time;
         
         bool timeline_playing = ui.timeline.isPlaying();
+        bool autonomous_anim_graph_playing = false;
+        for (const auto& modelCtx : scene.importedModelContexts) {
+            auto activeGraph = modelCtx.runtimeGraph ? modelCtx.runtimeGraph : modelCtx.graph;
+            if (!modelCtx.useAnimGraph || !activeGraph || modelCtx.animGraphFollowTimeline) {
+                continue;
+            }
+            const auto playback = activeGraph->getPlaybackStatus();
+            if (playback.isPlaying) {
+                autonomous_anim_graph_playing = true;
+                break;
+            }
+        }
+        if (autonomous_anim_graph_playing) {
+            start_render = true;
+        }
         
         // ===================================================================
         // VOLUMETRIC TIMELINE UPDATE (Gas & VDB)
@@ -1889,7 +2218,7 @@ int main(int argc, char* argv[]) try {
             continue;
         }
 
-        if (current_volume_frame != last_volume_frame) {
+        if (current_volume_frame != last_volume_frame && !skip_backend_for_anim) {
             bool volume_changed = false;
             
             // Update Gas Volumes
@@ -1925,6 +2254,7 @@ int main(int argc, char* argv[]) try {
 
         // Real-time Gas Simulation Step (sequential sim logic)
         bool gas_stepped = false;
+        if (!skip_backend_for_anim) {
            for (auto& gas : scene.gas_volumes) {
                if (gas->getSettings().mode == FluidSim::SimulationMode::RealTime) {
                  if (gas->isPlaying() || (timeline_playing && gas->linked_to_timeline)) {
@@ -1979,6 +2309,7 @@ int main(int argc, char* argv[]) try {
              // Static update (for editor changes)
              WaterManager::getInstance().update(0.0f);
         }
+        } // end skip_backend_for_anim guard (gas + timeline)
 
         // =========================================================================
         // SCENE LOADING STATE (PROTECT MAIN THREAD)
@@ -2044,39 +2375,62 @@ int main(int argc, char* argv[]) try {
             
             // Refresh UI cache and start render
             ui.invalidateCache();
+
+            // Pre-build mesh cache NOW so that the first click after scene load
+            // doesn't stall. rebuildMeshCache() is O(N) with bbox/material-slot
+            // computation and is the main source of first-click latency.
+            ui.rebuildMeshCache(scene.world.objects);
             
-            // Rebuild BVH and OptiX on main thread (required for GPU context safety)
+            // CPU BVH: defer to async path instead of blocking main thread.
+            // The async BVH builder at g_bvh_rebuild_pending handles large scenes
+            // without freezing the UI (copies objects, builds on a background thread).
             if (g_needs_geometry_rebuild.exchange(false, std::memory_order_acq_rel)) {
-                ui_ctx.renderer.rebuildBVH(ui_ctx.scene, ui_ctx.render_settings.UI_use_embree);
+                g_bvh_rebuild_pending = true;
             }
             
             ui_ctx.renderer.resetCPUAccumulation();
-            
-            if (ui_ctx.backend_ptr &&
+            const bool deferRenderBackendWarmup = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
+            if (g_backend && !skip_backend_for_anim &&
                 g_needs_optix_sync.load(std::memory_order_acquire) &&
-                !ui_ctx.render_settings.backend_changed) {
-                ui_ctx.renderer.rebuildBackendGeometry(ui_ctx.scene);
-                ui_ctx.renderer.updateBackendMaterials(ui_ctx.scene);
-                ui_ctx.renderer.updateBackendGasVolumes(ui_ctx.scene);
-                auto wd = ui_ctx.renderer.world.getGPUData();
-                ui_ctx.backend_ptr->setWorldData(&wd);
-                if (auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(ui_ctx.backend_ptr)) {
-                    auto* al = ui_ctx.renderer.world.getLUT();
-                    if (al && al->is_initialized()) {
-                        vulkanBackend->uploadAtmosphereLUT(al);
-                    }
-                }
-                
-                ui_ctx.backend_ptr->setLights(ui_ctx.scene.lights);
-                if (ui_ctx.scene.camera) ui_ctx.renderer.syncCameraToBackend(*ui_ctx.scene.camera);
-                ui_ctx.backend_ptr->resetAccumulation();
-                g_needs_optix_sync.store(false, std::memory_order_release);
+                !ui_ctx.render_settings.backend_changed &&
+                !deferRenderBackendWarmup) {
+                (void)syncActiveRenderBackendScene();
             }
             
+            // Raster viewport rebuild only needed when in Solid/Matcap mode.
+            // In Rendered mode (OptiX/Vulkan RT), defer raster rebuild until user
+            // actually switches to Solid/Matcap — avoids a synchronous
+            // buildRasterGeometry stall on 500K+ foliage instances at load time.
+            if (isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode)) {
+                g_viewport_raster_rebuild_pending = true;
+                // In interactive viewport mode the render backend is not visible.
+                // Defer its heavy sync until the user switches to Rendered mode.
+                // The granular dirty flags (g_geometry_dirty etc.) are already set
+                // below, so the first Solid→Rendered transition will pick them up.
+                if (render_settings.use_optix || render_settings.use_vulkan) {
+                    g_needs_optix_sync.store(true, std::memory_order_release);
+                }
+                // Do NOT set g_deferred_render_backend_prepare_pending here.
+                // That path can cascade into backend_changed→full teardown/recreate
+                // which is wasted work while the user is in Solid mode.
+            } else if (deferRenderBackendWarmup && (render_settings.use_optix || render_settings.use_vulkan || g_backend)) {
+                g_deferred_render_backend_prepare_pending.store(true, std::memory_order_release);
+                g_deferred_render_backend_prepare_delay_frames = 2;
+                if (render_settings.use_optix || render_settings.use_vulkan) {
+                    g_needs_optix_sync.store(true, std::memory_order_release);
+                }
+            } else if (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr) {
+                g_vulkan_rebuild_pending = true;
+            }
+
             // Mark all buffers dirty for fresh scene
             g_camera_dirty = true;
             g_lights_dirty = true;
             g_world_dirty = true;
+            g_geometry_dirty = true;
+            g_materials_dirty = true;
+            g_gas_volumes_dirty = true;
+            g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
             ui_ctx.start_render = true;
             SCENE_LOG_INFO("Project visualization ready.");
         }
@@ -2089,7 +2443,13 @@ int main(int argc, char* argv[]) try {
         ImGui::NewFrame();
         ui_ctx.ray_texture = raytrace_texture;
         
+        ui_ctx.backend_ptr = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
         ui.draw(ui_ctx);
+        const bool viewport_transform_dragging = ui.is_dragging;
+
+        if (viewport_transform_dragging) {
+            start_render = true;
+        }
         
         // ===========================================================================
         // CENTRALIZED CAMERA UPDATE (PHASE 1)
@@ -2107,9 +2467,8 @@ int main(int argc, char* argv[]) try {
                  scene.camera->update_camera_vectors();
                  ray_renderer.world.setCameraY(scene.camera->lookfrom.y);
                  
-                    if (ui_ctx.backend_ptr) {
+                    if (ui_ctx.backend_ptr && !skip_backend_for_anim) {
                         ui_ctx.renderer.syncCameraToBackend(*scene.camera);
-                        ui_ctx.backend_ptr->resetAccumulation();
                     }
                  ray_renderer.resetCPUAccumulation();
                  g_camera_dirty = false;
@@ -2160,7 +2519,7 @@ int main(int argc, char* argv[]) try {
             
             // Reset accumulation buffers BEFORE resolution change
             ray_renderer.resetCPUAccumulation();
-            if (g_hasOptix) {
+            if (g_hasOptix && !skip_backend_for_anim) {
                 if (g_backend) g_backend->resetAccumulation();
             }
             
@@ -2315,7 +2674,7 @@ int main(int argc, char* argv[]) try {
                     float anim_duration = ui_ctx.render_settings.animation_duration;
                     bool anim_use_denoiser = ui_ctx.render_settings.use_denoiser;
                     float anim_denoiser_blend = ui_ctx.render_settings.denoiser_blend_factor;
-                    bool anim_use_optix = ui_ctx.render_settings.use_optix;
+                    bool anim_use_gpu = isActiveRenderBackendGpu();
                     int anim_start_frame = ui_ctx.render_settings.animation_start_frame;
                     int anim_end_frame = ui_ctx.render_settings.animation_end_frame;
                     
@@ -2344,19 +2703,35 @@ int main(int argc, char* argv[]) try {
 
                     // Detach thread
                     std::thread anim_thread([=]() {
-                        ray_renderer.render_Animation(surface, window, raytrace_texture, renderer,
-                            anim_sample_count, anim_sample_per_pass,
-                            anim_fps, anim_duration, anim_start_frame, anim_end_frame,
-                            scene,
-                            output_folder,
-                            anim_use_denoiser,
-                            anim_denoiser_blend,
-                            g_backend.get(),
-                            anim_use_optix,
-                            &ui_ctx);
+                        try {
+                            ray_renderer.render_Animation(surface, window, raytrace_texture, renderer,
+                                anim_sample_count, anim_sample_per_pass,
+                                anim_fps, anim_duration, anim_start_frame, anim_end_frame,
+                                scene,
+                                output_folder,
+                                anim_use_denoiser,
+                                anim_denoiser_blend,
+                                g_backend.get(),
+                                anim_use_gpu,
+                                &ui_ctx);
+                        } catch (const std::exception& ex) {
+                            SCENE_LOG_ERROR(std::string("Animation render EXCEPTION: ") + ex.what());
+                        } catch (...) {
+                            SCENE_LOG_ERROR("Animation render UNKNOWN EXCEPTION");
+                        }
 
-                            
-                         SCENE_LOG_INFO("Animation render completed.");
+                        // GUARANTEE cleanup even if render_Animation threw
+                        rendering_in_progress = false;
+                        ui_ctx.is_animation_mode = false;
+                        ui_ctx.render_settings.animation_render_locked = false;
+
+                        // [FIX] Force viewport to re-sync all state after animation.
+                        // Without these, viewport stays on stale animation data.
+                        g_camera_dirty = true;
+                        g_lights_dirty = true;
+                        g_world_dirty = true;
+
+                        SCENE_LOG_INFO("Animation render completed.");
                     });
                     anim_thread.detach();
                 }
@@ -2395,7 +2770,36 @@ int main(int argc, char* argv[]) try {
                         last_vulkan_state = ui_ctx.render_settings.use_vulkan;
                     }
 
-                    if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                    // Allow GPU render path when:
+                    // 1. A GPU backend is actually active, OR
+                    // 2. Viewport is in Solid/Matcap mode and Vulkan raster backend is active
+                    Backend::IBackend* activeViewportBackend = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+                    const bool backendIsOptix = (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
+                    const bool backendIsVulkan = (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
+                    auto* activeViewportRasterBackend = dynamic_cast<Backend::IViewportBackend*>(activeViewportBackend);
+                    const bool activeViewportHasRasterBackend = (activeViewportRasterBackend != nullptr);
+                    const Backend::ViewportMode requestedViewportMode =
+                        viewportModeFromShadingMode(ui.viewport_settings.shading_mode);
+                    const bool backendSupportsRequestedViewport =
+                        activeViewportBackend && activeViewportBackend->supportsViewportMode(requestedViewportMode);
+                    const bool vulkanRasterActive = isVulkanInteractiveViewportActive(
+                        activeViewportHasRasterBackend,
+                        ui.viewport_settings.shading_mode);
+                    if (ui.viewport_settings.shading_mode != 2 &&
+                        !vulkanRasterActive &&
+                        !backendSupportsRequestedViewport) {
+                        static uint32_t lastUnsupportedViewportWarnMs = 0;
+                        const uint32_t nowMs = SDL_GetTicks();
+                        ui.viewport_settings.shading_mode = 2;
+                        if (nowMs - lastUnsupportedViewportWarnMs > 3000) {
+                            ui.addViewportMessage(
+                                "Selected viewport mode is not supported by the active backend. Switched to Rendered mode.",
+                                3.0f,
+                                ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+                            lastUnsupportedViewportWarnMs = nowMs;
+                        }
+                    }
+                    if (backendIsOptix || backendIsVulkan || vulkanRasterActive) {
                         if (render_settings.backend_changed || ui_ctx.render_settings.backend_changed) {
                             SDL_Delay(1);
                             continue;
@@ -2408,22 +2812,34 @@ int main(int argc, char* argv[]) try {
                         // ============ SYNCHRONOUS GPU RENDER (No Thread) ============
                         // Each pass is ~10-50ms for 1 sample, fast enough for UI
                         
-                        // OPTIMIZATION: Call every frame to allow AnimGraph autonomous playback
-                        // (breathing, idle, or node-graph based movement) even when timeline is stopped.
-                        // Renderer::updateAnimationState now internaly manages deltas.
+                        // [FIX] Skip ALL GPU state updates and rendering when animation render
+                        // thread is using the same backend — concurrent Vulkan/GPU access causes
+                        // contention, freezes, and T-pose artifacts.
+                        const bool anim_owns_backend = rendering_in_progress && ui_ctx.is_animation_mode
+                            && g_backend && (activeViewportBackend == g_backend.get());
+                        if (anim_owns_backend) {
+                            // Animation thread owns the GPU backend — skip viewport render this frame.
+                            // UI stays responsive, animation preview is updated via animation_preview_buffer.
+                            SDL_Delay(1);
+                        }
+                        else {
+
                         bool geometry_updated = false;
-                        bool has_file_animations = !scene.animationDataList.empty();
-                        
-                        // We still need to pass the target timeline time
+                        const bool has_file_animations = !scene.animationDataList.empty();
                         bool force_bind_pose = (ui.show_hair_tab && ui.active_properties_tab == 8);
-                        geometry_updated = ray_renderer.updateAnimationState(scene, time, false, force_bind_pose);
+                        const bool should_update_animation = has_file_animations || timeline_playing ||
+                            autonomous_anim_graph_playing ||
+                            ui_ctx.render_settings.animation_is_playing || force_bind_pose;
+                        if (should_update_animation) {
+                            geometry_updated = ray_renderer.updateAnimationState(scene, time, false, force_bind_pose);
+                        }
 
                         // WIND ANIMATION (Independent of FBX animations)
                         // Checks if any InstanceGroup has wind enabled and updates matrices
                         static float last_wind_time = -1.0f;
                         
 
-                        if (std::abs(time - last_wind_time) > 0.001f) {
+                        if (should_update_animation && std::abs(time - last_wind_time) > 0.001f) {
                             FoliageWindUpdateStats wind_stats = ray_renderer.updateWind(scene, time);
                             wind_active = wind_stats.any_cpu_update || wind_stats.gpu_deform_applied;
                             
@@ -2438,9 +2854,21 @@ int main(int argc, char* argv[]) try {
                             // SKINNING FIX: File-based animations may include skinning which deforms vertices.
                             // updateGeometry() in TLAS mode only updates matrices (transforms).
                             // For skinning, we need updateTLASGeometry() which rebuilds BLAS with new vertex data.
-                            if (g_backend) {
+                            if (activeViewportBackend && activeViewportBackend == g_backend.get()) {
                                 // Pass Calculated Bone Matrices for GPU Skinning
-                                g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                                activeViewportBackend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                            }
+                            // Solid/Matcap mode: update raster viewport skinning directly
+                            // (don't use g_vulkan_rebuild_pending — that calls buildRasterGeometry
+                            //  which uploads base-pose vertices and destroys skinning state)
+                            if (activeViewportHasRasterBackend && activeViewportBackend != g_backend.get()) {
+                                if (activeViewportRasterBackend) {
+                                    activeViewportRasterBackend->syncRasterInstanceTransforms(scene.world.objects);
+                                    if (!ray_renderer.finalBoneMatrices.empty()) {
+                                        activeViewportRasterBackend->syncRasterSkinnedVertices(
+                                            scene.world.objects, ray_renderer.finalBoneMatrices);
+                                    }
+                                }
                             }
 
                             
@@ -2454,11 +2882,11 @@ int main(int argc, char* argv[]) try {
                         // [CAMERA SYNC FIX] Force sync every frame if camera shake is enabled to allow real-time animation
                         bool needs_camera_sync = g_camera_dirty || (scene.camera && (scene.camera->enable_camera_shake));
                         if (needs_camera_sync && scene.camera) {
-                            if (g_backend) {
-                                ray_renderer.syncCameraToBackend(*scene.camera);
+                            if (activeViewportBackend) {
+                                activeViewportBackend->syncCamera(*scene.camera);
                                 // Vulkan already resets in setCamera(), but OptiX needs explicit reset
                                 // This ensures GPU accumulation buffer is cleared when camera/exposure changes
-                                g_backend->resetAccumulation();
+                                activeViewportBackend->resetAccumulation();
                             }
                             Vec3 dir = (scene.camera->lookat - scene.camera->lookfrom).normalize();
                             yaw = atan2f(dir.z, dir.x) * 180.0f / 3.14159265f;
@@ -2473,8 +2901,8 @@ int main(int argc, char* argv[]) try {
                         // (e.g., the Nishita sun stored in WorldData) when the user
                         // deletes the last directional light.
                         if (g_lights_dirty) {
-                            if (g_backend) {
-                                g_backend->setLights(scene.lights);
+                            if (activeViewportBackend) {
+                                activeViewportBackend->setLights(scene.lights);
                             }
                             g_lights_dirty = false;
                         }
@@ -2516,12 +2944,12 @@ int main(int argc, char* argv[]) try {
                             // (Not on every slider tick — prevents 50K-pixel blocking)
                             ray_renderer.world.flushLUT();
                             
-                            if (g_backend) {
+                            if (activeViewportBackend) {
                                 auto worldGPU = ray_renderer.world.getGPUData();
-                                g_backend->setWorldData(&worldGPU);
+                                activeViewportBackend->setWorldData(&worldGPU);
                                 // Re-upload Vulkan LUT textures after any nishita param change
                                 // (including sun_intensity=0 — ensures GPU texture goes dark)
-                                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                                auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(activeViewportBackend);
                                 if (vulkanBackend) {
                                     auto* al = ray_renderer.world.getLUT();
                                     if (al && al->is_initialized()) vulkanBackend->uploadAtmosphereLUT(al);
@@ -2531,21 +2959,21 @@ int main(int argc, char* argv[]) try {
                         }
 
 
-                        static std::vector<uchar4> framebuffer;
-                        if (framebuffer.size() != image_width * image_height) {
-                            framebuffer.resize(image_width * image_height);
+                        static std::vector<uint32_t> framebuffer;
+                        if (framebuffer.size() != (size_t)image_width * image_height) {
+                            framebuffer.resize((size_t)image_width * image_height);
                         }
                         
                         // Single pass render (1 sample) - fast, no UI blocking
                         auto sample_start = std::chrono::high_resolution_clock::now();
-                        if (g_backend) {
+                        if (activeViewportBackend) {
                             static Backend::IBackend* last_backend = nullptr;
                             static int last_w = -1, last_h = -1, last_max = -1, last_bounces = -1;
                             static bool last_adaptive = false;
                             static float last_threshold = -1.0f;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
 
-                            if (g_backend.get() != last_backend ||
+                            if (activeViewportBackend != last_backend ||
                                 image_width != last_w || image_height != last_h || 
                                 current_max != last_max || 
                                 render_settings.max_bounces != last_bounces ||
@@ -2559,9 +2987,9 @@ int main(int argc, char* argv[]) try {
                                 rp.maxBounces = std::max(1, render_settings.max_bounces);
                                 rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                                 rp.adaptiveThreshold = render_settings.variance_threshold;
-                                g_backend->setRenderParams(rp);
+                                activeViewportBackend->setRenderParams(rp);
 
-                                last_backend = g_backend.get();
+                                last_backend = activeViewportBackend;
                                 last_w = image_width;
                                 last_h = image_height;
                                 last_max = current_max;
@@ -2570,16 +2998,118 @@ int main(int argc, char* argv[]) try {
                                 last_threshold = render_settings.variance_threshold;
                             }
                         }
-                        if ((g_hasOptix && render_settings.use_optix) || render_settings.use_vulkan) {
+                        // Enter GPU render block when selected engine is GPU OR when
+                        // Vulkan raster pipeline is active for Solid/Matcap viewport
+                        if (backendIsOptix || backendIsVulkan || vulkanRasterActive) {
                              static bool logged_gpu = false;
                              if (!logged_gpu) { SCENE_LOG_INFO("[DEBUG] Entering GPU Render block"); logged_gpu = true; }
                             // Check if we are playing animation
                             int loop_count = 1;
+                            const Backend::ViewportMode viewportMode =
+                                viewportModeFromShadingMode(ui.viewport_settings.shading_mode);
+                            // Track viewport mode globally so solid→rendered transition is
+                            // detected even when activeViewportBackend changes between modes
+                            // (e.g. Vulkan raster in Solid → OptiX in Rendered).
+                            static Backend::ViewportMode s_prevGlobalViewportMode = Backend::ViewportMode::Rendered;
+                            if (activeViewportBackend) {
+                                activeViewportBackend->setViewportMode(viewportMode);
+                            }
+                            // Switching solid/matcap → rendered: trigger rebuild for the
+                            // active render backend so updated transforms are synced.
+                            if (s_prevGlobalViewportMode != Backend::ViewportMode::Rendered &&
+                                viewportMode == Backend::ViewportMode::Rendered) {
+                                // [FIX] Clear shared framebuffer so Solid-mode grey pixels
+                                // don't leak into the first Rendered frames while RT pipeline
+                                // is still being built (lazy-init window).
+                                if (!framebuffer.empty()) {
+                                    std::fill(framebuffer.begin(), framebuffer.end(), 0u);
+                                }
+                                if (original_surface && original_surface->pixels) {
+                                    SDL_FillRect(original_surface, nullptr, 0);
+                                }
+                                // Track whether scene geometry actually changed while in Solid mode.
+                                // If unchanged, skip the expensive full rebuild — just sync lightweight state.
+                                static uint64_t s_lastRenderedGeometryGen = 0;
+                                const uint64_t currentGen = g_scene_geometry_generation.load(std::memory_order_acquire);
+                                const bool geometryChangedSinceSolid = (currentGen != s_lastRenderedGeometryGen)
+                                    || g_geometry_dirty || g_materials_dirty || g_gas_volumes_dirty;
+
+                                auto* vkRenderBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());
+                                if (vkRenderBackend != nullptr) {
+                                    if (geometryChangedSinceSolid) {
+                                        // Geometry changed while in Solid mode — full sync needed
+                                        vkRenderBackend->rebuildAccelerationStructure();
+                                        vkRenderBackend->updateGeometry(scene.world.objects);
+                                        ui.syncVDBVolumesToGPU(ui_ctx);
+                                        ray_renderer.updateBackendGasVolumes(scene);
+                                        ray_renderer.uploadHairToGPU();
+                                        ray_renderer.updateBackendMaterials(scene);
+                                        syncMaterialBufferToViewportBackend();
+                                        g_geometry_dirty = false;
+                                        g_materials_dirty = false;
+                                        g_gas_volumes_dirty = false;
+                                    }
+                                    // Always sync lightweight state (camera/lights/world may have changed)
+                                    if (scene.camera) {
+                                        ray_renderer.syncCameraToBackend(*scene.camera);
+                                    }
+                                    vkRenderBackend->setLights(scene.lights);
+                                    auto wd = ray_renderer.world.getGPUData();
+                                    vkRenderBackend->setWorldData(&wd);
+                                    if (auto* al = ray_renderer.world.getLUT()) {
+                                        if (al->is_initialized()) {
+                                            vkRenderBackend->uploadAtmosphereLUT(al);
+                                        }
+                                    }
+                                    vkRenderBackend->resetAccumulation();
+                                    g_vulkan_rebuild_pending = false;
+                                    g_camera_dirty = true;
+                                    g_lights_dirty = true;
+                                    g_world_dirty = true;
+                                } else if (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr) {
+                                    if (geometryChangedSinceSolid) {
+                                        g_optix_rebuild_pending = true;
+                                        g_geometry_dirty = false;
+                                        g_materials_dirty = false;
+                                        g_gas_volumes_dirty = false;
+                                    } else {
+                                        // Only lightweight sync needed
+                                        g_backend->resetAccumulation();
+                                        g_camera_dirty = true;
+                                        g_lights_dirty = true;
+                                        g_world_dirty = true;
+                                    }
+                                } else {
+                                    // CPU mode (no GPU render backend): synchronous vertex sync
+                                    // so the first CPU frame renders with up-to-date geometry.
+                                    extern bool g_cpu_sync_pending;
+                                    g_cpu_sync_pending = true;
+                                }
+                                // CPU BVH only needs rebuild if geometry actually changed
+                                if (geometryChangedSinceSolid) {
+                                    g_bvh_rebuild_pending = true;
+                                }
+                                s_lastRenderedGeometryGen = currentGen;
+                            }
+                            // Switching rendered → solid/matcap: only rebuild raster geometry
+                            // if it doesn't exist yet or scene geometry has changed since last build.
+                            if (s_prevGlobalViewportMode == Backend::ViewportMode::Rendered &&
+                                viewportMode != Backend::ViewportMode::Rendered) {
+                                auto* rasterBk = getRasterViewportBackend();
+                                const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
+                                const bool rasterCacheValid = rasterBk && rasterBk->hasValidRasterCache(curGen);
+                                if (!rasterCacheValid) {
+                                    g_viewport_raster_rebuild_pending = true;
+                                }
+                            }
+                            s_prevGlobalViewportMode = viewportMode;
                             // Ensure we have a valid Raw Buffer (original_surface) for Backend output
                             EnsureOriginalSurface(surface);
                             
-                            // Mark frame as rendered so display update logic works
-                            did_render_this_frame = true;
+                            // [FIX] did_render_this_frame is set AFTER the render call below,
+                            // only if the backend actually produced output. Setting it before
+                            // caused uninitialized original_surface pixels to be blitted to
+                            // the display when the RT pipeline wasn't ready yet.
       
                             if (timeline_playing) {
                                 loop_count = std::max(1, render_settings.animation_samples_per_frame);
@@ -2589,37 +3119,44 @@ int main(int argc, char* argv[]) try {
                                  // [CRITICAL FIX] Check if camera changed during render and reset accumulation
                                  // This prevents bright-while-moving artifacts by ensuring GPU accumulation
                                  // is cleared when camera parameters change mid-render
-                                 if (g_camera_dirty && scene.camera && g_backend) {
-                                     ray_renderer.syncCameraToBackend(*scene.camera);
-                                     g_backend->resetAccumulation();
+                                 if (g_camera_dirty && scene.camera && activeViewportBackend) {
+                                     activeViewportBackend->syncCamera(*scene.camera);
+                                     activeViewportBackend->resetAccumulation();
                                      g_camera_dirty = false;
                                  }
                                  
                                  // Render using the backend's generic progressive interface
-                                 if (g_backend) {
-                                     if (g_backend->isAccumulationComplete()) break;
-                                     g_backend->renderProgressive(
+                                 if (activeViewportBackend) {
+                                     if (activeViewportBackend->isAccumulationComplete()) break;
+                                     activeViewportBackend->renderProgressive(
                                          original_surface, nullptr, renderer,
                                          image_width, image_height, &framebuffer, raytrace_texture);
+                                     // Backend always writes valid pixels to original_surface
+                                     // (RT trace, background fallback, or cached re-present).
+                                     // Flag as rendered so display pipeline blits to screen.
+                                     did_render_this_frame = true;
                                  }
                             }
                         } else {
                             // CPU Rendering (Fallback)
+                            const bool active_gpu_backend = backendIsOptix || backendIsVulkan || vulkanRasterActive;
                             // Check if camera changed during render
                             if (g_camera_dirty && scene.camera) {
                                 ray_renderer.syncCameraToBackend(*scene.camera);
-                                if (g_backend) g_backend->resetAccumulation();
+                                if (active_gpu_backend && activeViewportBackend) activeViewportBackend->resetAccumulation();
                                 ray_renderer.resetCPUAccumulation();
                                 g_camera_dirty = false;
                             }
                             
-                            if (g_backend) {
-                                if (g_backend->isAccumulationComplete()) {
-                                    // Done
+                            if (active_gpu_backend && activeViewportBackend) {
+                                if (activeViewportBackend->isAccumulationComplete()) {
+                                    // Done — but surface still has valid data from last render
+                                    did_render_this_frame = true;
                                 } else {
-                                    g_backend->renderProgressive(
+                                    activeViewportBackend->renderProgressive(
                                         original_surface, nullptr, renderer,
                                         image_width, image_height, &framebuffer, raytrace_texture);
+                                    did_render_this_frame = true;
                                 }
                             } else {
                                 // Default legacy CPU Path
@@ -2632,14 +3169,19 @@ int main(int argc, char* argv[]) try {
                         float sample_time_ms = std::chrono::duration<float, std::milli>(sample_end - sample_start).count();
                         
                         // Update progress for UI
+                        const bool active_gpu_backend_for_stats = backendIsOptix || backendIsVulkan;
                         int prev_samples = render_settings.render_current_samples;
-                        if (g_backend) render_settings.render_current_samples = g_backend->getCurrentSampleCount();
+                        if (active_gpu_backend_for_stats && g_backend) {
+                            render_settings.render_current_samples = g_backend->getCurrentSampleCount();
+                        }
                         
                         int effective_max_samples = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
                         render_settings.render_target_samples = effective_max_samples > 0 ? effective_max_samples : 100;
                         
                         render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
-                        if (g_backend) render_settings.is_rendering_active = !g_backend->isAccumulationComplete();
+                        if (active_gpu_backend_for_stats && g_backend) {
+                            render_settings.is_rendering_active = !g_backend->isAccumulationComplete();
+                        }
                         
                         // Update time estimation
                         if (render_settings.render_current_samples > prev_samples) {
@@ -2652,7 +3194,7 @@ int main(int argc, char* argv[]) try {
                         }
                         
                         // Update progress for UI from GPU Backend
-                        if (g_backend) {
+                        if (active_gpu_backend_for_stats && g_backend) {
                             render_settings.render_current_samples = g_backend->getCurrentSampleCount();
                             if (render_settings.render_target_samples > 0) {
                                 render_settings.render_progress = (float)render_settings.render_current_samples / render_settings.render_target_samples;
@@ -2661,7 +3203,7 @@ int main(int argc, char* argv[]) try {
                         }
 
                         // ===== WINDOW TITLE STATISTICS (GPU) =====
-                        if (window && ((g_hasOptix && render_settings.use_optix) || render_settings.use_vulkan)) {
+                        if (window && active_gpu_backend_for_stats) {
                             std::string projectName = active_model_path;
                             if (projectName.empty() || projectName == "Untitled") {
                                 projectName = "Untitled Project";
@@ -2675,7 +3217,12 @@ int main(int argc, char* argv[]) try {
                             if (dot != std::string::npos) projectName = projectName.substr(0, dot);
 
                             float progress_pct = render_settings.render_progress * 100.0f;
-                            std::string backend_name = (render_settings.use_vulkan) ? "Vulkan" : "OptiX";
+                            std::string backend_name = "CPU";
+                            if (isActiveRenderBackendVulkan()) {
+                                backend_name = "Vulkan";
+                            } else if (isActiveRenderBackendOptix()) {
+                                backend_name = "OptiX";
+                            }
                             std::string title = "RayTrophi Studio [" + projectName + "] - " + backend_name + " - Sample " + 
                                 std::to_string(render_settings.render_current_samples) + "/" + 
                                 std::to_string(render_settings.render_target_samples) +
@@ -2695,8 +3242,13 @@ int main(int argc, char* argv[]) try {
                             effective_denoiser = render_settings.use_denoiser;
                         }
                         const bool use_denoiser_aux = (ui_ctx.render_settings.denoiser_mode == DenoiserMode::Quality);
+                        const int denoiser_sample_count = (g_backend ? g_backend->getCurrentSampleCount() : 0);
+                        const bool allow_vulkan_viewport_denoiser = true;
                         
-                        if (effective_denoiser && g_backend && g_backend->getCurrentSampleCount() > 0) {
+                        if (effective_denoiser &&
+                            g_backend &&
+                            denoiser_sample_count > 0 &&
+                            allow_vulkan_viewport_denoiser) {
                             Backend::DenoiserFrameData denoiserFrame;
                             if (g_backend->getDenoiserFrame(denoiserFrame)) {
                                 Renderer::OIDNFrameData frame;
@@ -2779,6 +3331,7 @@ int main(int argc, char* argv[]) try {
                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
                             }
                         }
+                        } // end anim_owns_backend else
                         }
                     else {
                         // ============ SYNCHRONOUS CPU RENDER (Like OptiX) ============
@@ -2797,6 +3350,16 @@ int main(int argc, char* argv[]) try {
                                 auto tri = std::dynamic_pointer_cast<Triangle>(obj);
                                 if (tri) {
                                     tri->updateTransformedVertices();
+                                    continue;
+                                }
+
+                                auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                                if (inst && inst->source_triangles) {
+                                    for (auto& srcTri : *inst->source_triangles) {
+                                        if (srcTri) {
+                                            srcTri->updateTransformedVertices();
+                                        }
+                                    }
                                 }
                             }
                             
@@ -2842,7 +3405,7 @@ int main(int argc, char* argv[]) try {
                         }
                         
                         for (int i = 0; i < loop_count; ++i) {
-                            if (!ui_ctx.render_settings.use_optix) {
+                            if (!isActiveRenderBackendOptix()) {
                                 // Forced to scalar for stability and brightness fix
                                 // Ensure we have a valid Raw Buffer (original_surface) to render into
                                 EnsureOriginalSurface(surface);
@@ -2936,7 +3499,7 @@ int main(int argc, char* argv[]) try {
                 // Pass renderer to use float buffer if available (prevents quantization artifacts)
                 // Pass nullptr if using OptiX (OptiX handles its own buffer or falls back to surface)
                 applyToneMappingToSurface(surface, original_surface, color_processor, 
-                    (ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan) ? nullptr : &ray_renderer);
+                    isActiveRenderBackendGpu() ? nullptr : &ray_renderer);
             }
             if (apply_tonemap) {
                 apply_tonemap = false;
@@ -2947,8 +3510,7 @@ int main(int argc, char* argv[]) try {
         else if (did_render_this_frame && original_surface && surface) {
             // If CPU denoiser produced a float buffer, display it even when persistent tonemap is off.
             // Otherwise denoiser appears to do nothing because original_surface still contains raw pre-denoise pixels.
-            if (!ui_ctx.render_settings.use_optix &&
-                !ui_ctx.render_settings.use_vulkan &&
+            if (!isActiveRenderBackendGpu() &&
                 ray_renderer.hasCPUDenoisedBuffer()) {
                 applyCPUDenoisedPreviewToSurface(surface, ray_renderer, scene.camera.get());
             } else {
@@ -2958,11 +3520,32 @@ int main(int argc, char* argv[]) try {
             }
         }
 
+        // [DIAG] Log display pipeline state — separate counter for Rendered mode
+        {
+            static int s_diagDisplayFrame = 0;
+            static int s_diagDisplayRendered = 0;
+            ++s_diagDisplayFrame;
+            const bool inRenderedMode = (ui.viewport_settings.shading_mode == 2);
+            if (inRenderedMode) ++s_diagDisplayRendered;
+            const bool shouldLog = (s_diagDisplayFrame <= 5) || 
+                                   (inRenderedMode && s_diagDisplayRendered <= 15);
+            if (shouldLog) {
+                auto hexPixel = [](Uint32 v) {
+                    char buf[16]; snprintf(buf, sizeof(buf), "%08X", v); return std::string(buf);
+                };
+                Uint32 origP0 = (original_surface && original_surface->pixels) 
+                    ? static_cast<Uint32*>(original_surface->pixels)[0] : 0xDEADCAFE;
+                Uint32 surfP0 = (surface && surface->pixels) 
+                    ? static_cast<Uint32*>(surface->pixels)[0] : 0xDEADCAFE;
+                
+            }
+        }
+
         // Image save
         if (ui_ctx.render_settings.save_image_requested && original_surface) {
             ui_ctx.render_settings.save_image_requested = false;
 
-            std::string path = saveFileDialogW(L"PNG Dosyalar�\0*.png\0T�m Dosyalar\0*.*\0");
+            std::string path = saveFileDialogW(L"PNG Files\0*.png\0All Files\0*.*\0");
             if (!path.empty()) {
                 if (SaveSurface(surface, path.c_str())) {
                     SCENE_LOG_INFO("Image saved to: " + path);
@@ -3007,6 +3590,7 @@ int main(int argc, char* argv[]) try {
                     keyframe_cache_valid = true;
                 }
                 bool has_manual_keyframes = cached_total_keyframes > 0;
+                const bool has_active_render_gpu_backend = (g_backend != nullptr);
                 
                 // DEBUG: Uncomment to trace animation state
                 // SCENE_LOG_INFO("[ANIM DEBUG] Frame " + std::to_string(current_playback_frame) + 
@@ -3017,7 +3601,7 @@ int main(int argc, char* argv[]) try {
                 // SKIP EVERYTHING if no animations exist at all
                 if (!has_file_animations && !has_manual_keyframes) {
                     // No animation data - just reset accumulation and skip geometry updates
-                    if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                    if (has_active_render_gpu_backend) {
                         if (g_backend) g_backend->resetAccumulation();
                     } else {
                         ray_renderer.resetCPUAccumulation();
@@ -3032,14 +3616,14 @@ int main(int argc, char* argv[]) try {
                     if (has_file_animations) {
                         // File-based animations present - need full update (Assimp skinning, node hierarchy)
                         bool geometry_modified = ray_renderer.updateAnimationState(scene, time, 
-                           !(ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan));
+                           !has_active_render_gpu_backend);
                         
                         // CRITICAL: Update CPU BVH so viewport 'sees' the new pose (Fixes BBox/Selection)
-                        if (geometry_modified && !(ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan)) {
+                        if (geometry_modified && !has_active_render_gpu_backend) {
                             ray_renderer.updateBVH(scene, ui_ctx.render_settings.UI_use_embree);
                         }
                     }
-                    // else: TimelineWidget::draw() handles manual keyframes with O(1) object lookup - FAST!
+                        // else: TimelineWidget::draw() handles manual keyframes with O(1) object lookup - FAST!
                     
                     // Mark all buffers dirty for animation frame change
                     g_camera_dirty = true;
@@ -3047,7 +3631,7 @@ int main(int argc, char* argv[]) try {
                     g_world_dirty = true;
                     
                     // Update Backend if needed
-                    if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+                        if (has_active_render_gpu_backend) {
                         // PERFORMANCE: Only update geometry if file-based animations modified it
                         if (has_file_animations) {
                             if (g_backend) g_backend->updateGeometry(scene.world.objects);
@@ -3074,12 +3658,30 @@ int main(int argc, char* argv[]) try {
                             //
                             // REMOVED: optix_gpu.rebuildTLAS(); // Already done in TimelineWidget
                         }
+                        
+                        // Water timeline deformation needs an explicit OptiX geometry push here.
+                        // Realtime preview already handles this, but timeline playhead changes
+                        // can bypass the generic transform-only paths above.
+                        if (isActiveRenderBackendOptix()) {
+                            bool has_timeline_water_mesh = false;
+                            for (const auto& water : WaterManager::getInstance().getWaterSurfaces()) {
+                                if ((water.params.use_geometric_waves || (water.params.use_fft_ocean && water.params.use_fft_mesh_displacement)) &&
+                                    water.animate_mesh) {
+                                    has_timeline_water_mesh = true;
+                                    break;
+                                }
+                            }
+                            if (has_timeline_water_mesh) {
+                                g_backend->updateSceneGeometry(scene.world.objects, ray_renderer.finalBoneMatrices);
+                            }
+                        }
                         // If !has_file_animations && !has_manual_keyframes, we don't reach here
                         
                         if (scene.camera) ray_renderer.syncCameraToBackend(*scene.camera);
 
                         // Update GPU materials for material keyframe animation
                         ray_renderer.updateBackendMaterials(scene);
+                        syncMaterialBufferToViewportBackend();
                         
                         // Reset accumulation for new frame
                         g_backend->resetAccumulation();
@@ -3103,24 +3705,28 @@ int main(int argc, char* argv[]) try {
         
         // ============ CYCLES-STYLE AUTO-PROGRESSIVE ACCUMULATION ============
         // When camera is stationary, keep accumulating samples until max is reached
-        // SKIP during animation playback or when paused
+        // SKIP during animation playback, when paused, or in Solid/Matcap mode
+        // (raster viewport modes don't use sample accumulation)
         bool is_playing = ui_ctx.render_settings.animation_is_playing;
         bool is_paused = ui_ctx.render_settings.is_render_paused;
-        
-        if (scene.initialized && 
+        const bool in_rendered_mode = (ui.viewport_settings.shading_mode == 2);
+
+        if (scene.initialized &&
+            in_rendered_mode &&
             !camera_moved_recently &&
             !start_render &&
             !is_playing &&
-            !is_paused) {  // Don't accumulate when paused
-            
+            !is_paused &&
+            !skip_backend_for_anim) {  // Don't accumulate when animation render owns backend
+
             bool accumulation_complete = false;
-            
-            if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
+
+            if (isActiveRenderBackendGpu()) {
                 accumulation_complete = g_backend ? g_backend->isAccumulationComplete() : false;
             } else {
                 accumulation_complete = ray_renderer.isCPUAccumulationComplete();
             }
-            
+
             if (!accumulation_complete) {
                 // Automatically trigger next sample pass
                 start_render = true;
@@ -3132,10 +3738,25 @@ int main(int argc, char* argv[]) try {
         // Only update texture when there's actual rendering happening
         // ===========================================================================
         bool accumulation_done_for_display = false;
-        if ((ui_ctx.render_settings.use_optix && g_hasOptix) || ui_ctx.render_settings.use_vulkan) {
-            accumulation_done_for_display = g_backend ? g_backend->isAccumulationComplete() : false;
+        if (!in_rendered_mode) {
+            // Solid/Matcap: raster viewport has no progressive accumulation.
+            // Consider "done" whenever we didn't actively render this frame.
+            // Also force is_rendering_active off so idle detection works.
+            accumulation_done_for_display = !did_render_this_frame;
+            if (!did_render_this_frame) {
+                render_settings.is_rendering_active = false;
+            }
+        } else if (isActiveRenderBackendGpu()) {
+            accumulation_done_for_display = skip_backend_for_anim ? true :
+                (g_backend ? g_backend->isAccumulationComplete() : false);
+            if (accumulation_done_for_display) {
+                render_settings.is_rendering_active = false;
+            }
         } else {
             accumulation_done_for_display = ray_renderer.isCPUAccumulationComplete();
+            if (accumulation_done_for_display) {
+                render_settings.is_rendering_active = false;
+            }
         }
         
         // Only update texture if rendering is active, if we just applied a tonemap, or if UI needs it
@@ -3143,39 +3764,160 @@ int main(int argc, char* argv[]) try {
         
         // Force update if accumulation count changed, if we are in final render, 
         // if explicitly requested, OR if post-processing just happened.
-        bool needs_texture_update = !accumulation_done_for_display || !last_texture_updated || 
-                                     ImGui::GetIO().WantCaptureMouse || did_render_this_frame || post_processing_happened;
+        bool needs_texture_update = !accumulation_done_for_display || !last_texture_updated ||
+                                     did_render_this_frame || post_processing_happened;
         
-        if (needs_texture_update) {
-            // OPTIMIZATION: If Vulkan or OptiX already updated the texture inside renderProgressive, 
-            // we don't strictly need to do it again here from 'surface', unless post-processing happened.
-            // However, surface->pixels is what blit logic uses, so we keep it for now.
-            SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-            last_texture_updated = !accumulation_done_for_display;
-        }
-        
-        // original_surface handles are now managed in the post-processing block for better sync
-        ImGui::Render();       
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-        SDL_RenderPresent(renderer);
+        // ===========================================================================
+        // IDLE TIER SYSTEM
+        //
+        // Tier 0 – ACTIVE     : Rendering / camera / painting / drag  → full speed
+        // Tier 1 – INTERACT   : Brush hover, UI focus, mouse on vp    → ~60 FPS
+        // Tier 2 – LIGHT      : Foreground but nothing happening      → ~20 FPS
+        // Tier 3 – DORMANT    : Foreground, fully still               → event-wait
+        // Tier 4 – BACKGROUND : Window not focused                    → event-wait (long)
+        //
+        // GPU cost: T0 > T1 > T2 > T3 ≈ 0 > T4 ≈ 0
+        // ===========================================================================
 
-        // ===========================================================================
-        // IDLE OPTIMIZATION
-        // Keep the UI responsive even when rendering is complete. Large sleeps here
-        // make camera motion feel stuttery despite the GPU render path itself being fast.
-        // ===========================================================================
-        if (accumulation_done_for_display && !camera_moved && !dragging && !start_render && !ImGui::GetIO().WantCaptureMouse) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-        } else if (!ui_ctx.render_settings.is_rendering_active && !camera_moved) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // --- Window state ---
+        const Uint32 win_flags = SDL_GetWindowFlags(window);
+        const bool window_focused  = (win_flags & SDL_WINDOW_INPUT_FOCUS) != 0;
+        const bool window_visible  = (win_flags & SDL_WINDOW_MINIMIZED) == 0;
+
+        // --- Input state snapshot ---
+        const auto& io = ImGui::GetIO();
+        const bool ui_interacting = io.WantCaptureMouse || io.WantCaptureKeyboard;
+        const Uint32 mouse_buttons = SDL_GetMouseState(nullptr, nullptr);
+        const bool left_mouse_down = (mouse_buttons & SDL_BUTTON(SDL_BUTTON_LEFT)) != 0;
+
+        // --- Tool modes that need viewport alive ---
+        // Single source of truth — add new tools in SceneUI::isAnyViewportToolActive()
+        const bool any_brush_enabled = ui.isAnyViewportToolActive();
+
+        const bool brush_painting = left_mouse_down && any_brush_enabled;
+
+        // Mouse-over-viewport detection: mouse moved and NOT over ImGui panels
+        static int prev_mouse_x = 0, prev_mouse_y = 0;
+        int cur_mouse_x, cur_mouse_y;
+        SDL_GetMouseState(&cur_mouse_x, &cur_mouse_y);
+        const bool mouse_moved_on_viewport =
+            window_focused && !io.WantCaptureMouse &&
+            (cur_mouse_x != prev_mouse_x || cur_mouse_y != prev_mouse_y);
+        prev_mouse_x = cur_mouse_x;
+        prev_mouse_y = cur_mouse_y;
+
+        // --- Classify tier ---
+        // Mode-independent: direct frame signals only.
+        const bool scene_load_active =
+            ui.scene_loading.load() ||
+            ui.scene_loading_done.load();
+        const bool pending_scene_refresh =
+            scene_load_active ||
+            g_viewport_raster_rebuild_pending ||
+            g_vulkan_rebuild_pending ||
+            g_optix_rebuild_pending ||
+            g_bvh_rebuild_pending;
+        const bool rendering_active = did_render_this_frame || start_render ||
+                           autonomous_anim_graph_playing || pending_scene_refresh ||
+                                       ui_ctx.render_settings.is_rendering_active;
+
+        const bool tier0_active = window_focused &&
+                                   (rendering_active || camera_moved ||
+                                    brush_painting || dragging ||
+                                    viewport_transform_dragging);
+
+        const bool tier1_interact = !tier0_active && window_focused &&
+                                     (any_brush_enabled || ui_interacting ||
+                                      mouse_moved_on_viewport);
+
+        const bool tier2_light = !tier0_active && !tier1_interact && window_focused;
+
+        const bool tier3_dormant = tier2_light && !ui_interacting &&
+                                    !mouse_moved_on_viewport && !any_brush_enabled;
+
+        // Background: window lost focus (alt-tab, another app on top).
+        // Final render keeps running but we skip ALL presentation.
+        const bool tier4_background = !window_focused;
+
+        // Track consecutive dormant/background frames
+        static int idle_frame_count = 0;
+        if (tier3_dormant || tier4_background) {
+            idle_frame_count++;
+        } else {
+            idle_frame_count = 0;
+        }
+        const bool skip_present = tier4_background ||
+                                   (!window_visible) ||
+                       ((idle_frame_count > 3) && !autonomous_anim_graph_playing);
+
+        // --- Present / skip ---
+        if (!skip_present) {
+            if (needs_texture_update) {
+                SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
+                last_texture_updated = !accumulation_done_for_display;
+            }
+
+            ImGui::Render();
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+            SDL_RenderPresent(renderer);
+        } else {
+            // Idle — consume ImGui draw data without GPU work.
+            ImGui::Render();
+            ImGui::GetDrawData();
+
+            if (tier4_background || !window_visible) {
+                // Background / minimized: long sleep, wake only on events.
+                // GPU usage drops to ~0%. Final render thread (if any) keeps going.
+                const bool keep_pumping_scene_load = scene_load_active || pending_scene_refresh || start_render;
+                SDL_WaitEventTimeout(nullptr, keep_pumping_scene_load ? 16 : 500);
+            } else {
+                // Foreground dormant: moderate wait, responsive to mouse/keyboard.
+                SDL_WaitEventTimeout(nullptr, 200);
+            }
+        }
+
+        // --- Throttle based on tier ---
+        if (!skip_present) {
+            if (tier2_light) {
+                // Foreground idle → ~20 FPS
+                std::this_thread::sleep_for(std::chrono::milliseconds(48));
+            } else if (tier1_interact) {
+                // Brush hover / UI interaction → ~60 FPS
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            }
+            // tier0: full speed, no sleep
         }
         
         // ===========================================================================
         // DEFERRED REBUILD PROCESSING - Batched at frame end for faster UI response
         // ===========================================================================
+        auto* rasterViewportBackend = getRasterViewportBackend();
+        const bool interactive_viewport_active =
+            isVulkanInteractiveViewportActive(
+                rasterViewportBackend != nullptr,
+                ui.viewport_settings.shading_mode);
+        const bool active_optix_backend =
+            (dynamic_cast<Backend::OptixBackend*>(g_backend.get()) != nullptr);
+        const bool active_vulkan_render_backend =
+            (dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get()) != nullptr);
+        const bool active_vulkan_raster_backend =
+            (rasterViewportBackend != nullptr);
+
+        // Drop stale pending flags that belong to an inactive backend to avoid
+        // repeated heavy rebuild attempts after backend/mode transitions.
+        if (!active_optix_backend && g_optix_rebuild_pending) {
+            g_optix_rebuild_pending = false;
+        }
+        if (!active_vulkan_render_backend && g_vulkan_rebuild_pending) {
+            g_vulkan_rebuild_pending = false;
+        }
+        if (!active_vulkan_raster_backend && g_viewport_raster_rebuild_pending) {
+            g_viewport_raster_rebuild_pending = false;
+        }
+
         if (g_mesh_cache_dirty) {
             ui.rebuildMeshCache(scene.world.objects);
             g_mesh_cache_dirty = false;
@@ -3184,65 +3926,81 @@ int main(int argc, char* argv[]) try {
         // ===========================================================================
         // ASYNC BVH REBUILD (Non-Blocking)
         // ===========================================================================
-        if (g_gpu_refit_pending) {
-            // ui.addViewportMessage("Updating GPU...", 2.0f); // Removed to prevent spam
-            if (g_backend &&
-                ((ui_ctx.render_settings.use_optix && g_hasOptix) ||
-                 (ui_ctx.render_settings.use_vulkan && g_hasVulkan))) {
-                // CRITICAL INVARIANT:
-                // This block is for transform-only refit. Do NOT call
-                // rebuildAccelerationStructure() here for Vulkan.
-                // VulkanBackendAdapter::rebuildAccelerationStructure() is a full scene reset
-                // that clears mesh registry/BLAS/TLAS and expects a later updateGeometry() pass.
-                // For undo/redo transform this causes the "frozen viewport until backend switch" behavior.
-                g_backend->updateInstanceTransforms(scene.world.objects);
-                g_backend->setLights(scene.lights);
-                if (scene.camera) {
-                    g_backend->syncCamera(*scene.camera);
+        if (g_gpu_refit_pending && !skip_backend_for_anim) {
+            if ((g_backend || rasterViewportBackend) &&
+                (isActiveRenderBackendGpu() ||
+                 interactive_viewport_active)) {
+                if (interactive_viewport_active && !g_viewport_raster_rebuild_pending) {
+                    // Solid mode: only sync raster instance transforms (no TLAS cost)
+                    if (auto* vkBackend = rasterViewportBackend) {
+                        vkBackend->syncRasterInstanceTransforms(scene.world.objects);
+                    }
+                } else if (!interactive_viewport_active) {
+                    // Rendered mode: full TLAS refit
+                    g_backend->updateInstanceTransforms(scene.world.objects);
+                    g_backend->setLights(scene.lights);
+                    if (scene.camera) {
+                        g_backend->syncCamera(*scene.camera);
+                    }
+                    g_backend->resetAccumulation();
                 }
-                g_backend->resetAccumulation();
                 start_render = true;
             }
             g_gpu_refit_pending = false;
         }
 
         // CPU BVH Fast Refit (Embree only)
-        // CPU BVH Fast Refit (Embree only)
         if (g_cpu_bvh_refit_pending && !g_bvh_rebuild_pending) {
-            // Only update if not fully rebuilding
             bool use_embree = ui_ctx.render_settings.UI_use_embree;
-            // FORCE REBUILD for correctness during drag (User Request: "CPU Sync")
             ray_renderer.rebuildBVH(scene, use_embree);
             ray_renderer.resetCPUAccumulation();
             g_cpu_bvh_refit_pending = false;
         }
 
         static std::future<std::shared_ptr<Hittable>> g_bvh_future;
-        
+
         if (g_bvh_rebuild_pending) {
             ++g_cpu_bvh_requested_generation;
 
-            // OPTIMIZATION: In GPU mode, skip CPU BVH rebuild entirely!
-            // - GPU raytracing uses OptiX, not CPU BVH
-            // - Picking (mouse selection) uses linear search, not BVH
-            // - Copying 4M shared_ptr for async rebuild takes ~3 seconds due to atomic ref count increments
-            // NOTE: Only skip if actually using GPU AND not switching to CPU mode
-            // g_cpu_sync_pending means user switched from GPU to CPU - must rebuild!
-            if ((g_hasOptix && ui_ctx.render_settings.use_optix || ui_ctx.render_settings.use_vulkan) && !g_cpu_sync_pending) {
-                // GPU mode active: Skip expensive CPU BVH rebuild
-                g_bvh_rebuild_pending = false;
-            }
-            // Only trigger if not already rebuilding
-            else if (!g_bvh_future.valid()) {
+            // Always keep CPU BVH up to date (async) even while GPU backends are active.
+            // Solid/Vulkan sessions otherwise leave CPU BVH stale and CPU render appears empty.
+            if (!g_bvh_future.valid()) {
                 // Determine if we actually need it (if using OptiX, maybe unnecessary?)
                 // But picking (selection) uses CPU BVH. So we DO need it eventually.
                 // Async allows it to happen without freezing.
+
+                // Sync transform-handle based geometry to CPU-space before snapshot.
+                for (auto& obj : scene.world.objects) {
+                    if (!obj) continue;
+
+                    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                        if (tri->getTransformHandle() && tri->getVertexBoneWeights().empty()) {
+                            tri->updateTransformedVertices();
+                        }
+                        continue;
+                    }
+
+                    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                        if (inst->source_triangles) {
+                            for (auto& srcTri : *inst->source_triangles) {
+                                if (srcTri && srcTri->getTransformHandle() && srcTri->getVertexBoneWeights().empty()) {
+                                    srcTri->updateTransformedVertices();
+                                }
+                            }
+                        }
+                    }
+                }
+                // Vertices are now in world-space; mark UI flag so the first
+                // mouse-click selection won't redundantly re-sync them.
+                ui.picking_vertices_synced = true;
                 
                 // Copy list of objects for thread safety (prevents crashes if objects deleted from vector)
                 std::vector<std::shared_ptr<Hittable>> objects_copy = scene.world.objects;
                 bool use_embree = ui_ctx.render_settings.UI_use_embree;
                 
-                ui.addViewportMessage("Rebuilding BVH...", 10.0f); // Show status
+                if (!interactive_viewport_active) {
+                    ui.addViewportMessage("Rebuilding BVH...", 10.0f);
+                }
                 g_cpu_bvh_future_generation = g_cpu_bvh_requested_generation;
                 
                 // Capture by MOVE to avoid second copy (Save 1x copy of millions of shared_ptrs)
@@ -3263,7 +4021,7 @@ int main(int argc, char* argv[]) try {
                      } 
                 });
             }
-            g_bvh_rebuild_pending = false; 
+            g_bvh_rebuild_pending = false;
         }
         
         // Check Async Result
@@ -3296,11 +4054,13 @@ int main(int argc, char* argv[]) try {
                         ray_renderer.resetCPUAccumulation();
                         start_render = true;
                         render_settings.is_rendering_active = true;
-                        ui.clearViewportMessages(); 
-                        if (new_bvh) {
-                            ui.addViewportMessage("Async BVH Rebuild Complete", 2.0f);
-                        } else {
-                            ui.addViewportMessage("BVH cleared for empty scene", 2.0f);
+                        if (!interactive_viewport_active) {
+                            ui.clearViewportMessages();
+                            if (new_bvh) {
+                                ui.addViewportMessage("Async BVH Rebuild Complete", 2.0f);
+                            } else {
+                                ui.addViewportMessage("BVH cleared for empty scene", 2.0f);
+                            }
                         }
                     }
                 } catch (const std::exception& e) {
@@ -3312,7 +4072,7 @@ int main(int argc, char* argv[]) try {
         // -----------------------------------------------------------------
         // ASYNC OPTIX REBUILD (Non-blocking)
         // -----------------------------------------------------------------
-        if (g_optix_rebuild_pending && ui_ctx.render_settings.use_optix && g_hasOptix) {
+        if (g_optix_rebuild_pending && active_optix_backend && g_hasOptix && !interactive_viewport_active && !skip_backend_for_anim) {
             // Only start if not already rebuilding
             if (!g_optix_rebuilding) {
                 ui.addViewportMessage("Rebuilding OptiX Geometry...", 10.0f);
@@ -3327,7 +4087,7 @@ int main(int argc, char* argv[]) try {
 
                 // CRITICAL FIX: COPY the objects list to avoid race condition with Main Thread modifications 
                 // such as syncInstancesToScene or object deletion.
-                std::vector<std::shared_ptr<Hittable>> objects_snapshot = scene.world.objects;
+                std::vector<std::shared_ptr<Hittable>> objects_snapshot = collectVisibleSceneObjects(scene);
 
                 g_optix_future = std::async(std::launch::async, [objects_snapshot, &renderer_ref]() {
                     // Use the snapshot instead of direct reference to scene.world.objects
@@ -3341,11 +4101,12 @@ int main(int argc, char* argv[]) try {
         }
         
         // Check if async OptiX rebuild is complete
-        if (g_optix_rebuilding && g_optix_future.valid()) {
+        if (g_optix_rebuilding && g_optix_future.valid() && !skip_backend_for_anim) {
             if (g_optix_future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 try {
                     g_optix_future.get();
 
+                    applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
                     if (g_backend) g_backend->resetAccumulation();
                     ui.clearViewportMessages();
                     ui.addViewportMessage("OptiX Rebuild Complete", 2.0f);
@@ -3370,36 +4131,42 @@ int main(int argc, char* argv[]) try {
         // -----------------------------------------------------------------
         // VULKAN REBUILD (Synchronous for now)
         // -----------------------------------------------------------------
-        if (g_optix_rebuild_pending && ui_ctx.render_settings.use_vulkan) {
+        if (g_optix_rebuild_pending && active_vulkan_render_backend && !skip_backend_for_anim) {
             g_vulkan_rebuild_pending = true;
             g_optix_rebuild_pending = false; // Redirected
         }
 
-        if (g_vulkan_rebuild_pending && ui_ctx.render_settings.use_vulkan && g_hasVulkan) {
+        if (g_viewport_raster_rebuild_pending && active_vulkan_raster_backend && g_hasVulkan && !skip_backend_for_anim) {
+            if (auto* vkBackend = rasterViewportBackend) {
+                ui.addViewportMessage("Updating Solid View...", 1.0f);
+                vkBackend->buildRasterGeometry(scene.world.objects);
+                applyPendingDeleteVisibilityToBackend(scene, vkBackend);
+                g_viewport_raster_rebuild_pending = false;
+                start_render = true;
+                g_camera_dirty = true;
+            }
+        }
+
+        if (g_vulkan_rebuild_pending && active_vulkan_render_backend && g_hasVulkan && !interactive_viewport_active && !skip_backend_for_anim) {
             if (g_backend) {
                 ui.addViewportMessage("Rebuilding Vulkan Geometry...", 2.0f);
-                
+
                 // [VULKAN FIX] Clear mesh registry to ensure dynamic meshes (terrain) are re-uploaded
-                g_backend->rebuildAccelerationStructure(); 
-                
+                g_backend->rebuildAccelerationStructure();
+
                 g_backend->updateGeometry(scene.world.objects);
                 // Re-sync VDB SSBO after TLAS rebuild so SSBO order matches TLAS customIndex.
-                // This handles both VDB import and VDB deletion from Vulkan mode.
                 ui.syncVDBVolumesToGPU(ui_ctx);
-                // Re-upload hair after full BLAS rebuild — rebuildAccelerationStructure()
-                // clears ALL BLAS including hair, so hair must be re-added before the
-                // TLAS is finalized. Without this, hair is invisible until something
-                // else (e.g. the hidden checkbox) triggers uploadHairToGPU manually.
+                // Re-upload hair after full BLAS rebuild
                 ray_renderer.uploadHairToGPU();
-                // [FIX] Upload material SSBO after geometry rebuild so newly created objects
-                // (terrain, imported meshes, etc.) get their material data on the GPU.
-                // Without this call the SSBO is empty/stale and objects render invisible.
+                // Upload material SSBO after geometry rebuild
                 ray_renderer.updateBackendMaterials(scene);
+                syncMaterialBufferToViewportBackend();
+                applyPendingDeleteVisibilityToBackend(scene, g_backend.get());
                 g_backend->resetAccumulation();
                 g_vulkan_rebuild_pending = false;
                 start_render = true;
-                
-                // CRITICAL FIX: Mark all scene data dirty after rebuild to force re-sync
+
                 g_camera_dirty = true;
                 g_lights_dirty = true;
                 g_world_dirty = true;
@@ -3408,6 +4175,11 @@ int main(int argc, char* argv[]) try {
 
     }
     
+    if (g_viewport_backend) {
+        try { g_viewport_backend->waitForCompletion(); } catch (...) {}
+        try { g_viewport_backend->shutdown(); } catch (...) {}
+        g_viewport_backend.reset();
+    }
     SDL_DestroyTexture(raytrace_texture);
     ImGui_ImplSDLRenderer2_Shutdown();
     ImGui_ImplSDL2_Shutdown();

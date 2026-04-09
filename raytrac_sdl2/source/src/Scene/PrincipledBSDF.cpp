@@ -5,9 +5,7 @@
 #include <globals.h>
 #include <Dielectric.h>
 float PrincipledBSDF::getIndexOfRefraction() const {
-    // Metaller için genellikle kompleks kırılma indeksi kullanılır,
-    // ancak basitlik için sabit bir değer döndürebiliriz.
-    return 0.0; // veya başka bir uygun değer
+    return ior;
 }
 bool PrincipledBSDF::hasTexture() const {
     return albedoProperty.texture != nullptr ||
@@ -25,7 +23,7 @@ Vec3 PrincipledBSDF::get_normal_from_map(float u, float v) const {
         Vec2 Transform = applyTextureTransform(u, v);
 
         // std::cout << "Normal Map: (" << Normalmap.x << ", " << Normalmap.y << ", " << Normalmap.z << ")" << std::endl;
-        return normalProperty.texture->get_color(Transform.u, Transform.v);
+        return normalProperty.texture->get_color_bilinear(Transform.u, Transform.v);
     }
     return Vec3(0, 0, 1);
 }
@@ -66,8 +64,9 @@ void PrincipledBSDF::setAnisotropic(float anisotropic = 0.0f, const Vec3& anisot
     this->anisotropicDirection = anisotropicDirection.normalize();
 }
 float PrincipledBSDF::getTransmission(const Vec2& uv) const {
+    Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
     if (transmissionProperty.texture) {
-        return transmissionProperty.evaluate(uv).x * transmissionProperty.intensity;
+        return transmissionProperty.evaluate(sampleUv).x;
     }
     return transmission;
 }
@@ -91,7 +90,7 @@ Vec3 PrincipledBSDF::getTextureColor(float u, float v) const {
     Vec2 finalUV = applyWrapMode(uvData);
     std::cout << "Final UV: (" << finalUV.u << ", " << finalUV.v << ")" << std::endl;
     if (albedoProperty.texture) {
-        return albedoProperty.texture->get_color(finalUV.u, finalUV.v);
+        return albedoProperty.texture->get_color_bilinear(finalUV.u, finalUV.v);
     }
     return albedoProperty.color;
 }
@@ -106,7 +105,8 @@ void PrincipledBSDF::setOpacityTexture(const std::shared_ptr<Texture>& tex, floa
 }
 
 float PrincipledBSDF::get_opacity(const Vec2& uv) const {
-    return opacityProperty.evaluateOpacity(uv);
+    Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
+    return opacityProperty.evaluateOpacity(sampleUv);
 }
 
 float PrincipledBSDF::get_roughness(float u, float v) const {
@@ -165,9 +165,6 @@ bool PrincipledBSDF::scatter(
     bool& is_specular
 ) const {
     is_specular = false; // Default: non-specular or importance sampled
-    // UV koordinatları, texture dönüşümünü uygula
-    Vec2 uv = applyTextureTransform(rec.u, rec.v);
-
     // Albedo, roughness, metallic gibi değerlerin önceden hesaplanmış (Terrain) olup olmadığını kontrol et
     Vec3 albedo;
     float roughness;
@@ -180,10 +177,10 @@ bool PrincipledBSDF::scatter(
         metallic = rec.surface_override.metallic;
         transmissionValue = rec.surface_override.transmission;
     } else {
-        albedo = getPropertyValue(albedoProperty, uv);
-        roughness = getPropertyValue(roughnessProperty, uv).y;
-        metallic = getPropertyValue(metallicProperty, uv).z;
-        transmissionValue = getTransmission(uv);
+        albedo = getPropertyValue(albedoProperty, Vec2(rec.u, rec.v));
+        roughness = getPropertyValue(roughnessProperty, Vec2(rec.u, rec.v)).y;
+        metallic = getPropertyValue(metallicProperty, Vec2(rec.u, rec.v)).z;
+        transmissionValue = getTransmission(Vec2(rec.u, rec.v));
     }
     
     // Emission is computed separately in the render loop (Renderer.cpp / ray_color.cuh),
@@ -576,8 +573,9 @@ Vec3 PrincipledBSDF::sample_henyey_greenstein(const Vec3& wi, float g) const {
 
 
 Vec3 PrincipledBSDF::getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const {
+    Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
     if (prop.texture) {
-        return prop.texture->get_color(uv.u, uv.v) * prop.intensity;
+        return prop.texture->get_color_bilinear(sampleUv.u, sampleUv.v) * prop.intensity;
     }
     return prop.color * prop.intensity;
 }
@@ -588,6 +586,11 @@ Vec2 PrincipledBSDF::applyTiling(float u, float v) const {
 }
 
 Vec2 PrincipledBSDF::applyTextureTransform(float u, float v) const {
+    // CPU path stores raw mesh UVs, but Texture sampling flips V internally.
+    // To match GPU behavior we transform in the same "GPU-facing" UV space first,
+    // then convert back to CPU sampler space at the end.
+    v = 1.0f - v;
+    const Vec2 originalUv(u, v);
     // Merkezi (0.5, 0.5f) olarak kabul edelim
     u -= 0.5f;
     v -= 0.5f;
@@ -612,8 +615,11 @@ Vec2 PrincipledBSDF::applyTextureTransform(float u, float v) const {
     u *= textureTransform.tilingFactor.u;
     v *= textureTransform.tilingFactor.v;
     // Sarma modunu uygula
-    UVData uvData = transformUV(u, v); // Orijinal ve dönüşmüş UV'leri almak için çağır
-    return applyWrapMode(uvData);
+    UVData uvData;
+    uvData.original = originalUv;
+    uvData.transformed = Vec2(u, v);
+    Vec2 wrappedUv = applyWrapMode(uvData);
+    return Vec2(wrappedUv.u, 1.0f - wrappedUv.v);
 }
 
 UVData PrincipledBSDF::transformUV(float u, float v) const {
@@ -872,12 +878,11 @@ bool PrincipledBSDF::sss_random_walk_scatter(const Ray& r_in, const HitRecord& r
 
 bool PrincipledBSDF::translucent_scatter(const Ray& r_in, const HitRecord& rec, Vec3& attenuation, Ray& scattered) const {
     Vec3 N = rec.normal;
-    Vec2 uv = applyTextureTransform(rec.u, rec.v);
     Vec3 albedo;
     if (rec.surface_override.valid) {
         albedo = rec.surface_override.albedo;
     } else {
-        albedo = getPropertyValue(albedoProperty, uv);
+        albedo = getPropertyValue(albedoProperty, Vec2(rec.u, rec.v));
     }
     
     Vec3 trans_dir = Vec3::random_cosine_direction(-N);

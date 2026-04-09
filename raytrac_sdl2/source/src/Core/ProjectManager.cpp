@@ -14,6 +14,7 @@
 #include "AreaLight.h"
 #include "WaterSystem.h"
 #include "MeshModifiers.h"
+#include "Paint/PaintLayerStack.h"
 #include "json.hpp"
 #include "simdjson.h"
 #include <fstream>
@@ -45,6 +46,7 @@
 #include "RiverSpline.h"
 
 #include "stb_image_write.h"
+#include "ColorProcessingParams.h"
 
 // Helper for stbi_write_to_func
 namespace {
@@ -529,6 +531,10 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer) {
     render_settings.denoiser_mode = was_denoiser_mode;
 
     renderer.world.reset();             // Reset Atmosphere/Godrays
+    // Reset global and scene color processing (tonemap/postfx) to defaults for new project
+    extern ColorProcessor color_processor; // global in Main.cpp
+    color_processor.params = ColorProcessor::ColorProcessingParams();
+    scene.color_processor.params = color_processor.params;
     
     // 3. Clear Central Subsystems
     MaterialManager::getInstance().clear();
@@ -613,6 +619,14 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
     // Also store the current path
     g_project.current_file_path = filepath;
 
+    {
+        ScopedPerfTimer timer("saveProject compactPendingDeletedObjects");
+        const size_t compacted = scene.compactPendingDeletedObjects();
+        if (compacted > 0) {
+            SCENE_LOG_INFO("[ProjectManager] Compacted " + std::to_string(compacted) + " pending-deleted object(s) before save.");
+        }
+    }
+
     // Sync project data with current scene state
     {
         ScopedPerfTimer timer("saveProject syncProjectToScene");
@@ -664,6 +678,29 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             {"embed_missing_only", save_settings.embed_missing_only},
             {"save_geometry", save_settings.save_geometry}
         };
+
+        json imported_models_arr = json::array();
+        for (const auto& model : g_project.imported_models) {
+            json m;
+            m["id"] = model.id;
+            m["original_path"] = model.original_path;
+            m["package_path"] = model.package_path;
+            m["display_name"] = model.display_name;
+            m["deleted_objects"] = model.deleted_objects;
+
+            json objects_arr = json::array();
+            for (const auto& inst : model.objects) {
+                json o;
+                o["node_name"] = inst.node_name;
+                o["transform"] = mat4ToJson(inst.transform);
+                o["material_id"] = inst.material_id;
+                o["visible"] = inst.visible;
+                objects_arr.push_back(o);
+            }
+            m["objects"] = objects_arr;
+            imported_models_arr.push_back(m);
+        }
+        root["imported_models"] = imported_models_arr;
         
         // Procedural objects (still saved for non-geometry mode)
         json procedurals_arr = json::array();
@@ -702,6 +739,22 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
         
         // Render Settings
         root["render_settings"] = serializeRenderSettings(settings);
+
+        // Ensure UI/global color processor state is reflected into the scene before saving
+        extern ColorProcessor color_processor; // defined in Main.cpp
+        scene.color_processor.params = color_processor.params;
+
+        // Post-Process / Color Grading settings (store from scene's color processor)
+        const auto& pp = scene.color_processor.params;
+        root["postfx"] = {
+            {"exposure", pp.global_exposure},
+            {"gamma", pp.global_gamma},
+            {"saturation", pp.saturation},
+            {"color_temperature", pp.color_temperature},
+            {"tone_mapping", static_cast<int>(pp.tone_mapping_type)},
+            {"vignette_enabled", pp.enable_vignette},
+            {"vignette_strength", pp.vignette_strength}
+        };
 
         // UI Layout (ImGui state)
         if (!g_project.ui_layout_data.empty()) {
@@ -887,6 +940,19 @@ bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, 
             }
         }
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.mesh_modifiers.size()) + " mesh modifiers.");
+
+        // Paint Layer Stacks
+        if (!scene.mesh_paint_layer_stacks.empty()) {
+            if (progress_callback) progress_callback(84, "Saving paint layers...");
+            root["mesh_paint_layers"] = json::object();
+            for (const auto& [key, stack] : scene.mesh_paint_layer_stacks) {
+                if (stack.empty()) continue;
+                json j_stack;
+                stack.serialize(j_stack, out_bin);
+                root["mesh_paint_layers"][key] = j_stack;
+            }
+            SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
+        }
 
         // Foliage System
         if (progress_callback) progress_callback(84, "Saving foliage system...");
@@ -1112,6 +1178,37 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
         g_project.next_model_id = (uint32_t)next_model;
         g_project.next_object_id = (uint32_t)next_obj;
         g_project.next_texture_id = (uint32_t)next_tex;
+
+        g_project.imported_models.clear();
+        if (auto imported_models_el = root["imported_models"]; !imported_models_el.error()) {
+            simdjson::dom::array imported_models_arr;
+            if (!imported_models_el.get(imported_models_arr)) {
+                for (auto j_model_el : imported_models_arr) {
+                    auto j_model = sjsonToNlohmann(j_model_el);
+                    ImportedModelData model;
+                    model.id = j_model.value("id", 0u);
+                    model.original_path = j_model.value("original_path", "");
+                    model.package_path = j_model.value("package_path", "");
+                    model.display_name = j_model.value("display_name", "");
+                    model.deleted_objects = j_model.value("deleted_objects", std::vector<std::string>{});
+
+                    if (j_model.contains("objects") && j_model["objects"].is_array()) {
+                        for (const auto& j_obj : j_model["objects"]) {
+                            ImportedModelData::ObjectInstance inst;
+                            inst.node_name = j_obj.value("node_name", "");
+                            if (j_obj.contains("transform")) {
+                                inst.transform = jsonToMat4(j_obj["transform"]);
+                            }
+                            inst.material_id = j_obj.value("material_id", static_cast<uint16_t>(0));
+                            inst.visible = j_obj.value("visible", true);
+                            model.objects.push_back(inst);
+                        }
+                    }
+
+                    g_project.imported_models.push_back(std::move(model));
+                }
+            }
+        }
         
         fs::path project_folder = fs::path(filepath).parent_path();
         
@@ -1171,6 +1268,22 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 if (progress_callback) progress_callback(70, "Loading render settings...");
                 deserializeRenderSettings(sjsonToNlohmann(rs_el), settings);
             }
+            // Post-Process / Color Grading
+            simdjson::dom::element postfx_el;
+            if (!root["postfx"].get(postfx_el)) {
+                json pj = sjsonToNlohmann(postfx_el);
+                auto& pp = scene.color_processor.params;
+                pp.global_exposure = pj.value("exposure", pp.global_exposure);
+                pp.global_gamma = pj.value("gamma", pp.global_gamma);
+                pp.saturation = pj.value("saturation", pp.saturation);
+                pp.color_temperature = pj.value("color_temperature", pp.color_temperature);
+                pp.tone_mapping_type = static_cast<ToneMappingType>(pj.value("tone_mapping", static_cast<int>(pp.tone_mapping_type)));
+                pp.enable_vignette = pj.value("vignette_enabled", pp.enable_vignette);
+                pp.vignette_strength = pj.value("vignette_strength", pp.vignette_strength);
+                // Also copy into global UI color processor so UI reflects loaded values
+                extern ColorProcessor color_processor; // defined in Main.cpp
+                color_processor.params = pp;
+            }
             
             // UI Layout
             std::string_view ui_layout;
@@ -1214,7 +1327,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             if (!root["instances"].get(inst_el)) {
                 if (progress_callback) progress_callback(77, "Loading foliage system...");
                 ScopedPerfTimer timer("openProject deserialize foliage");
-                InstanceManager::getInstance().deserialize(sjsonToNlohmann(inst_el), scene);
+                InstanceManager::getInstance().deserializeFast(inst_el, scene);
             }
 
             if (InstanceManager::getInstance().getGroups().empty() &&
@@ -1226,6 +1339,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             }
 
             if (!InstanceManager::getInstance().getGroups().empty()) {
+                if (progress_callback) progress_callback(77, "Building foliage BVH & instances...");
                 InstanceManager::getInstance().rebuildSceneObjects(scene);
             }
 
@@ -1244,11 +1358,21 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 }
 
                 // We must lazily build base_mesh_cache for these modifiers, evaluate them and set new objects
+                // NOTE: Foliage instances (tail of objects vector) are never mesh-modified,
+                // so we can limit the scan to non-foliage objects for efficiency.
+                size_t mod_foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+                size_t mod_selectable = (mod_foliage_count <= scene.world.objects.size())
+                                            ? (scene.world.objects.size() - mod_foliage_count)
+                                            : scene.world.objects.size();
+
                 for(const auto& [nodeName, stack] : scene.mesh_modifiers) {
                     std::vector<std::shared_ptr<Triangle>> baseTriangles;
                     std::vector<std::shared_ptr<Hittable>> remainingObjects;
+                    remainingObjects.reserve(scene.world.objects.size());
 
-                    for (const auto& obj : scene.world.objects) {
+                    // Scan only non-foliage objects for modifier matches
+                    for (size_t mi = 0; mi < mod_selectable; ++mi) {
+                        const auto& obj = scene.world.objects[mi];
                         if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
                             if (tri->getNodeName() == nodeName) {
                                 baseTriangles.push_back(tri);
@@ -1259,16 +1383,37 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                             remainingObjects.push_back(obj);
                         }
                     }
+                    // Append foliage tail untouched
+                    for (size_t mi = mod_selectable; mi < scene.world.objects.size(); ++mi) {
+                        remainingObjects.push_back(scene.world.objects[mi]);
+                    }
 
                     if (!baseTriangles.empty() && !stack.modifiers.empty()) {
                         scene.base_mesh_cache[nodeName] = baseTriangles;
                         auto newMesh = stack.evaluate(baseTriangles);
+                        // Insert new mesh BEFORE foliage tail
+                        size_t insert_pos = remainingObjects.size() - mod_foliage_count;
                         for (const auto& tri : newMesh) {
-                            remainingObjects.push_back(tri);
+                            remainingObjects.insert(remainingObjects.begin() + insert_pos, tri);
+                            ++insert_pos;
+                            ++mod_selectable; // Track new non-foliage count
                         }
                         scene.world.objects = remainingObjects;
                     }
                 }
+            }
+
+            // Paint Layer Stacks
+            simdjson::dom::element paint_layers_el;
+            if (!root["mesh_paint_layers"].get(paint_layers_el)) {
+                if (progress_callback) progress_callback(79, "Loading paint layers...");
+                nlohmann::json j_paint = sjsonToNlohmann(paint_layers_el);
+                for (auto it = j_paint.begin(); it != j_paint.end(); ++it) {
+                    Paint::PaintLayerStack stack;
+                    stack.deserialize(it.value(), in_bin);
+                    scene.mesh_paint_layer_stacks[it.key()] = std::move(stack);
+                }
+                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
             }
 
             // VDB / Gas / Force Fields
@@ -1483,17 +1628,25 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_project.current_file_path = filepath;
     g_project.is_modified = false;
     
-    if (progress_callback) progress_callback(90, "Preparing for GPU sync...");
+    if (progress_callback) progress_callback(88, "Rebuilding model contexts...");
 
     scene.initialized = true;
     
+    // Foliage instances are always at the tail of scene.world.objects
+    // (appended by InstanceManager::rebuildSceneObjects). Skip them to
+    // avoid O(models × 2M) RTTI casts + string comparisons.
+    size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+    size_t selectable_count = (foliage_count <= scene.world.objects.size())
+                                  ? (scene.world.objects.size() - foliage_count)
+                                  : scene.world.objects.size();
+
     // Rebuild members
     for (auto& ctx : scene.importedModelContexts) {
         if (ctx.importName.empty()) continue;
         ctx.members.clear();
         std::string prefix = ctx.importName + "_";
-        for (auto& obj : scene.world.objects) {
-            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        for (size_t i = 0; i < selectable_count; ++i) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
             if (tri && tri->nodeName.find(prefix) == 0) {
                 ctx.members.push_back(tri);
             }
@@ -1517,13 +1670,17 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
     g_camera_dirty = true;
     g_lights_dirty = true;
     g_world_dirty = true;
+    g_geometry_dirty = true;
+    g_materials_dirty = true;
+    g_gas_volumes_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
     
     if (scene.camera) {
         scene.camera->update_camera_vectors();
         if (backend) renderer.syncCameraToBackend(*scene.camera);
     }
     
-    if (progress_callback) progress_callback(100, "Done.");
+    if (progress_callback) progress_callback(91, "Project data loaded, finalizing...");
     SCENE_LOG_INFO("Project loaded with turbo parser: " + filepath);
     return true;
 }
@@ -1748,8 +1905,8 @@ bool ProjectManager::readZipPackage(const std::string& filepath) {
 // ============================================================================
 
 // Binary format magic number and version (v5 adds transform components)
-static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '5'};
-static constexpr uint32_t RTP_VERSION = 5;
+static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '6'};
+static constexpr uint32_t RTP_VERSION = 6;
 
 bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& scene) {
     // Write header
@@ -1844,13 +2001,23 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
         out.write(reinterpret_cast<const char*>(&n1), sizeof(Vec3));
         out.write(reinterpret_cast<const char*>(&n2), sizeof(Vec3));
         
-        // UVs
+        // Active UVs
         Vec2 uv0 = tri->t0;
         Vec2 uv1 = tri->t1;
         Vec2 uv2 = tri->t2;
         out.write(reinterpret_cast<const char*>(&uv0), sizeof(Vec2));
         out.write(reinterpret_cast<const char*>(&uv1), sizeof(Vec2));
         out.write(reinterpret_cast<const char*>(&uv2), sizeof(Vec2));
+
+        // All UV sets (v6+)
+        uint32_t uv_set_count = static_cast<uint32_t>(tri->getUVSetCount());
+        out.write(reinterpret_cast<const char*>(&uv_set_count), sizeof(uv_set_count));
+        for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+            const auto [set_uv0, set_uv1, set_uv2] = tri->getUVSetCoordinates(uv_set);
+            out.write(reinterpret_cast<const char*>(&set_uv0), sizeof(Vec2));
+            out.write(reinterpret_cast<const char*>(&set_uv1), sizeof(Vec2));
+            out.write(reinterpret_cast<const char*>(&set_uv2), sizeof(Vec2));
+        }
         
         // Material ID
         uint16_t mat_id = tri->getMaterialID();
@@ -1892,12 +2059,12 @@ bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& sc
     }
     
     SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(tri_count) + " triangles, " + 
-                   std::to_string(transform_count) + " transforms to binary (v5).");
+                   std::to_string(transform_count) + " transforms to binary (v6).");
     return true;
 }
 
 bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
-    // Read and validate header (accept RTP3, RTP4, RTP5 formats)
+    // Read and validate header (accept RTP3, RTP4, RTP5, RTP6 formats)
     char magic[4];
     in.read(magic, 4);
     
@@ -1905,8 +2072,9 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
     bool is_v3 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '3');
     bool is_v4 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '4');
     bool is_v5 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '5');
+    bool is_v6 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '6');
     
-    if (!is_v3 && !is_v4 && !is_v5) {
+    if (!is_v3 && !is_v4 && !is_v5 && !is_v6) {
         SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
         return false;
     }
@@ -1982,6 +2150,18 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         in.read(reinterpret_cast<char*>(&uv1), sizeof(Vec2));
         in.read(reinterpret_cast<char*>(&uv2), sizeof(Vec2));
         
+        uint32_t uv_set_count = 0;
+        std::vector<std::array<Vec2, 3>> uv_sets;
+        if (version >= 6) {
+            in.read(reinterpret_cast<char*>(&uv_set_count), sizeof(uv_set_count));
+            uv_sets.resize(uv_set_count);
+            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][0]), sizeof(Vec2));
+                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][1]), sizeof(Vec2));
+                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][2]), sizeof(Vec2));
+            }
+        }
+
         // Material ID
         uint16_t mat_id;
         in.read(reinterpret_cast<char*>(&mat_id), sizeof(mat_id));
@@ -2002,6 +2182,20 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         // Create triangle
         auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
         tri->setNodeName(node_name);
+
+        if (version >= 6) {
+            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+                tri->setUVSetCoordinates(uv_set, uv_sets[uv_set][0], uv_sets[uv_set][1], uv_sets[uv_set][2]);
+            }
+        } else {
+            tri->setUVSetCoordinates(0, uv0, uv1, uv2);
+        }
+
+        if (Material* mat = MaterialManager::getInstance().getMaterial(mat_id)) {
+            if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(mat)) {
+                tri->applyUVSet(static_cast<size_t>(std::max(0, pbsdf->selected_uv_set)));
+            }
+        }
         
         // Read skinning data (v4+)
         bool has_skin_data = false;
@@ -2038,13 +2232,11 @@ bool ProjectManager::readGeometryBinary(std::ifstream& in, SceneData& scene) {
         if (tr_idx < transforms.size()) {
             tri->setTransformHandle(transforms[tr_idx]);
             
-            // CRITICAL FIX: DO NOT call updateTransformedVertices for skinned meshes!
-            // Skinned mesh vertices are computed by the animation system using bone matrices.
-            // Applying the object transform here would cause double transformation or incorrect positioning.
-            // Enable updateTransformedVertices for ALL meshes to ensure valid BVH for picking/AF immediately after load.
-            // Skinned meshes will effectively be in bind pose * world transform until animation system updates them.
-            tri->updateTransformedVertices();
-            // Note: Skinned meshes will be updated when animation system runs
+            // Static meshes need an initial CPU-space update for BVH/picking.
+            // Skinned meshes must stay in bind/local space until animation updates them.
+            if (!has_skin_data) {
+                tri->updateTransformedVertices();
+            }
         }
         
         tri->update_bounding_box();
@@ -2265,9 +2457,6 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["max_bounces"] = settings.max_bounces;
     j["final_render_width"] = settings.final_render_width;
     j["final_render_height"] = settings.final_render_height;
-    j["use_gpu"] = settings.use_optix;
-    j["use_vulkan"] = settings.use_vulkan;
-    j["backend"] = settings.use_vulkan ? "vulkan" : (settings.use_optix ? "optix" : "cpu");
     j["use_embree"] = settings.UI_use_embree;
     j["use_denoiser"] = settings.use_denoiser;
     j["render_use_denoiser"] = settings.render_use_denoiser;
@@ -2276,6 +2465,15 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["min_samples"] = settings.min_samples;
     j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
     j["variance_threshold"] = settings.variance_threshold;
+    // Additional UI / post-process fields
+    j["denoiser_blend_factor"] = settings.denoiser_blend_factor;
+    j["quality_preset"] = static_cast<int>(settings.quality_preset);
+    j["raster_viewport_quality_preset"] = static_cast<int>(settings.raster_viewport_quality_preset);
+    j["resolution_source"] = static_cast<int>(settings.resolution_source);
+    j["aspect_base_height"] = settings.aspect_base_height;
+    j["aspect_ratio_index"] = settings.aspect_ratio_index;
+    j["show_background"] = settings.show_background;
+    j["persistent_tonemap"] = settings.persistent_tonemap;
     
     return j;
 }
@@ -2287,30 +2485,8 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.max_bounces = j.value("max_bounces", 10);
     settings.final_render_width = j.value("final_render_width", 1280);
     settings.final_render_height = j.value("final_render_height", 720);
-    bool loaded_optix = j.value("use_gpu", false);
-    bool loaded_vulkan = j.value("use_vulkan", false);
-    std::string backend_name = j.value("backend", "");
-
-    if (!backend_name.empty()) {
-        std::transform(backend_name.begin(), backend_name.end(), backend_name.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (backend_name == "vulkan") {
-            loaded_vulkan = true;
-            loaded_optix = false;
-        } else if (backend_name == "optix") {
-            loaded_optix = true;
-            loaded_vulkan = false;
-        } else if (backend_name == "cpu") {
-            loaded_optix = false;
-            loaded_vulkan = false;
-        }
-    }
-
-    // Keep backend selection strictly exclusive.
-    if (loaded_vulkan) loaded_optix = false;
-
-    settings.use_optix = loaded_optix;
-    settings.use_vulkan = loaded_vulkan;
+    // Backend/device selection is no longer serialized with project files.
+    // Keep current runtime backend choice and ignore legacy fields if present.
     settings.UI_use_embree = j.value("use_embree", true);
     settings.use_denoiser = j.value("use_denoiser", false);
     settings.render_use_denoiser = j.value("render_use_denoiser", true);
@@ -2319,6 +2495,16 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.min_samples = j.value("min_samples", 1);
     settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);
     settings.variance_threshold = j.value("variance_threshold", 0.1f);
+    // Load additional UI / post-process fields (safe defaults used when missing)
+    settings.denoiser_blend_factor = j.value("denoiser_blend_factor", 1.0f);
+    settings.quality_preset = static_cast<QualityPreset>(j.value("quality_preset", static_cast<int>(QualityPreset::Preview)));
+    settings.raster_viewport_quality_preset = static_cast<RasterViewportQualityPreset>(
+        j.value("raster_viewport_quality_preset", static_cast<int>(RasterViewportQualityPreset::Auto)));
+    settings.resolution_source = static_cast<ResolutionSource>(j.value("resolution_source", static_cast<int>(ResolutionSource::Custom)));
+    settings.aspect_base_height = j.value("aspect_base_height", settings.aspect_base_height);
+    settings.aspect_ratio_index = j.value("aspect_ratio_index", settings.aspect_ratio_index);
+    settings.show_background = j.value("show_background", settings.show_background);
+    settings.persistent_tonemap = j.value("persistent_tonemap", settings.persistent_tonemap);
     
     SCENE_LOG_INFO("[ProjectManager] Loaded render settings.");
 }
@@ -2349,6 +2535,9 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
     const fs::path project_local_texture_dir = current_project_path.empty()
         ? fs::path()
         : (project_dir / (current_project_path.stem().string() + "_textures"));
+    const fs::path generated_texture_dir = current_project_path.empty()
+        ? fs::path()
+        : (project_dir / (current_project_path.stem().string() + "_generated_textures"));
     
     SCENE_LOG_INFO("Starting texture serialization for " + std::to_string(mgr.getMaterialCount()) + " materials.");
 
@@ -2399,13 +2588,20 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
 
                 tex_entry["original_name"] = path; // Save Original Name for restoration
 
+                // Detect generated/painted texture names so we prefer in-memory pixels
+                bool is_generated_name = (path.find("generated/") != std::string::npos) ||
+                                         (path.find("generated_tex_") != std::string::npos) ||
+                                         (path.find("_generated_textures") != std::string::npos);
+
                 if (should_embed) {
                     ++embedded_count;
                     // Embed texture data
                     tex_entry["mode"] = "embed";
                     tex_entry["offset"] = static_cast<long long>(bin_out.tellp());
 
-                    if (fs::exists(path)) {
+                    // If we have in-memory pixels (e.g. painted/generated texture) prefer encoding them
+                    // even if a file exists with the same name. This ensures painted overrides are serialized.
+                    if (fs::exists(path) && prop.texture->pixels.empty() && !is_generated_name) {
                         // Prefer passthrough from the original source file to avoid costly re-encoding.
                         std::ifstream tex_file(path, std::ios::binary);
                         if (tex_file) {
@@ -2432,14 +2628,34 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                         arr.push_back(tex_entry);
                         return;
                     } else if (!prop.texture->pixels.empty()) {
-                         // Last resort: encode from decoded pixels when no original bytes are available.
+                         // Encode from in-memory pixels (painted/generated textures).
                          std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
+
+                         auto linear_to_srgb_byte = [](float lin) -> uint8_t {
+                             lin = std::clamp(lin, 0.0f, 1.0f);
+                             float sr = (lin <= 0.0031308f) ? (lin * 12.92f) : (1.055f * powf(lin, 1.0f / 2.4f) - 0.055f);
+                             return static_cast<uint8_t>(std::roundf(sr * 255.0f));
+                         };
+
+                         bool convert_to_srgb = (usage == "albedo") && (!prop.texture->is_srgb);
+
                          for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
                              const auto& px = prop.texture->pixels[pi];
-                             raw_pixels[pi * 4 + 0] = px.r;
-                             raw_pixels[pi * 4 + 1] = px.g;
-                             raw_pixels[pi * 4 + 2] = px.b;
-                             raw_pixels[pi * 4 + 3] = px.a;
+                             if (convert_to_srgb) {
+                                 // pixels are stored as linear bytes -> convert to sRGB bytes
+                                 float r_lin = px.r / 255.0f;
+                                 float g_lin = px.g / 255.0f;
+                                 float b_lin = px.b / 255.0f;
+                                 raw_pixels[pi * 4 + 0] = linear_to_srgb_byte(r_lin);
+                                 raw_pixels[pi * 4 + 1] = linear_to_srgb_byte(g_lin);
+                                 raw_pixels[pi * 4 + 2] = linear_to_srgb_byte(b_lin);
+                                 raw_pixels[pi * 4 + 3] = px.a;
+                             } else {
+                                 raw_pixels[pi * 4 + 0] = px.r;
+                                 raw_pixels[pi * 4 + 1] = px.g;
+                                 raw_pixels[pi * 4 + 2] = px.b;
+                                 raw_pixels[pi * 4 + 3] = px.a;
+                             }
                          }
 
                          std::vector<char> png_data;
@@ -2464,6 +2680,56 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     } 
                 } else {
                     bool wrote_project_local = false;
+                    auto write_generated_png_from_pixels = [&](const fs::path& local_target) -> bool {
+                        if (prop.texture->pixels.empty()) {
+                            return false;
+                        }
+
+                        auto linear_to_srgb_byte = [](float lin) -> uint8_t {
+                            lin = std::clamp(lin, 0.0f, 1.0f);
+                            float sr = (lin <= 0.0031308f) ? (lin * 12.92f) : (1.055f * powf(lin, 1.0f / 2.4f) - 0.055f);
+                            return static_cast<uint8_t>(std::roundf(sr * 255.0f));
+                        };
+
+                        bool convert_to_srgb = (usage == "albedo") && (!prop.texture->is_srgb);
+
+                        std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
+                        for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
+                            const auto& px = prop.texture->pixels[pi];
+                            if (convert_to_srgb) {
+                                float r_lin = px.r / 255.0f;
+                                float g_lin = px.g / 255.0f;
+                                float b_lin = px.b / 255.0f;
+                                raw_pixels[pi * 4 + 0] = linear_to_srgb_byte(r_lin);
+                                raw_pixels[pi * 4 + 1] = linear_to_srgb_byte(g_lin);
+                                raw_pixels[pi * 4 + 2] = linear_to_srgb_byte(b_lin);
+                                raw_pixels[pi * 4 + 3] = px.a;
+                            } else {
+                                raw_pixels[pi * 4 + 0] = px.r;
+                                raw_pixels[pi * 4 + 1] = px.g;
+                                raw_pixels[pi * 4 + 2] = px.b;
+                                raw_pixels[pi * 4 + 3] = px.a;
+                            }
+                        }
+
+                        std::vector<char> png_data;
+                        stbi_write_png_to_func(
+                            write_to_vector_func, &png_data,
+                            prop.texture->width, prop.texture->height, 4,
+                            raw_pixels.data(), prop.texture->width * 4);
+                        if (png_data.empty()) {
+                            return false;
+                        }
+
+                        std::ofstream local_out(local_target, std::ios::binary);
+                        if (!local_out.is_open()) {
+                            return false;
+                        }
+                        local_out.write(png_data.data(), static_cast<std::streamsize>(png_data.size()));
+                        ++png_reencoded_count;
+                        project_local_bytes_written += static_cast<uint64_t>(png_data.size());
+                        return true;
+                    };
                     if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::ProjectLocal &&
                         !project_local_texture_dir.empty()) {
                         try {
@@ -2534,28 +2800,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                                 const fs::path local_target = project_local_texture_dir /
                                     (std::to_string(texture_id) + "_" + base_name + source_ext);
                                 if (!fs::exists(local_target)) {
-                                    std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
-                                    for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
-                                        const auto& px = prop.texture->pixels[pi];
-                                        raw_pixels[pi * 4 + 0] = px.r;
-                                        raw_pixels[pi * 4 + 1] = px.g;
-                                        raw_pixels[pi * 4 + 2] = px.b;
-                                        raw_pixels[pi * 4 + 3] = px.a;
-                                    }
-
-                                    std::vector<char> png_data;
-                                    stbi_write_png_to_func(
-                                        write_to_vector_func, &png_data,
-                                        prop.texture->width, prop.texture->height, 4,
-                                        raw_pixels.data(), prop.texture->width * 4);
-                                    if (!png_data.empty()) {
-                                        std::ofstream local_out(local_target, std::ios::binary);
-                                        if (local_out.is_open()) {
-                                            local_out.write(png_data.data(), static_cast<std::streamsize>(png_data.size()));
-                                            ++png_reencoded_count;
-                                            project_local_bytes_written += static_cast<uint64_t>(png_data.size());
-                                        }
-                                    }
+                                    write_generated_png_from_pixels(local_target);
                                 }
                                 if (fs::exists(local_target)) {
                                     finalize_project_local_path(local_target);
@@ -2570,7 +2815,34 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
                     ++referenced_count;
                     tex_entry["mode"] = "path";
                     if (!wrote_project_local) {
-                        tex_entry["path"] = path;
+                        bool wrote_generated_keep_path = false;
+                        if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::KeepOriginalPaths &&
+                            !fs::exists(path) &&
+                            !generated_texture_dir.empty()) {
+                            try {
+                                fs::create_directories(generated_texture_dir);
+                                const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string().empty()
+                                    ? ("generated_tex_" + std::to_string(texture_id))
+                                    : fs::path(path).stem().string());
+                                const fs::path generated_target = generated_texture_dir /
+                                    (std::to_string(texture_id) + "_" + base_name + ".png");
+                                if (!fs::exists(generated_target)) {
+                                    wrote_generated_keep_path = write_generated_png_from_pixels(generated_target);
+                                } else {
+                                    wrote_generated_keep_path = true;
+                                }
+                                if (wrote_generated_keep_path) {
+                                    tex_entry["path"] = fs::relative(generated_target, project_dir).generic_string();
+                                }
+                            } catch (const std::exception& e) {
+                                SCENE_LOG_WARN("[ProjectManager] Failed to materialize generated texture for KeepOriginalPaths: " +
+                                               path + " | " + e.what());
+                            }
+                        }
+
+                        if (!wrote_generated_keep_path) {
+                            tex_entry["path"] = path;
+                        }
                     }
                 }
                 
@@ -2585,6 +2857,7 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
         checkTexture(pbsdf->roughnessProperty, "roughness");
         checkTexture(pbsdf->metallicProperty, "metallic");
         checkTexture(pbsdf->emissionProperty, "emission");
+        checkTexture(pbsdf->heightProperty, "height");
         checkTexture(pbsdf->opacityProperty, "opacity");
         checkTexture(pbsdf->transmissionProperty, "transmission");
     }
@@ -2626,6 +2899,7 @@ void ProjectManager::deserializeTextures(const json& j, std::ifstream& bin_in, c
                 else if (usage == "roughness") texType = TextureType::Roughness;
                 else if (usage == "metallic") texType = TextureType::Metallic;
                 else if (usage == "emission") texType = TextureType::Emission;
+                else if (usage == "height") texType = TextureType::Unknown;
                 else if (usage == "opacity") texType = TextureType::Opacity;
                 else if (usage == "transmission") texType = TextureType::Transmission;
                 

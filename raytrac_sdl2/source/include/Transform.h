@@ -68,13 +68,25 @@ public:
         , final(baseTransform)
         , dirty(true)
     {
+        baseTransform.decompose(position, rotation, scale);
         updateNormalTransform();
     }
 
     void setBase(const Matrix4x4& baseTransform) {
-        Matrix4x4 adjusted = baseTransform * Matrix4x4::translation(pivot_offset);
-        adjusted.decompose(position, rotation, scale);
-        base = composeBaseMatrix();
+        if (pivot_offset.length_squared() < 1e-12f) {
+            // IMPORTANT:
+            // Preserve imported matrices exactly for GLB/glTF/static imported meshes.
+            // Rebuilding the matrix from decomposed TRS here can alter authored
+            // parent-space transforms (especially with empty parents or non-uniform
+            // scale), making imported objects appear correct in some backends but
+            // offset in others. Only recompose after an explicit gizmo/pivot edit.
+            base = baseTransform;
+            baseTransform.decompose(position, rotation, scale);
+        } else {
+            Matrix4x4 adjusted = baseTransform * Matrix4x4::translation(pivot_offset);
+            adjusted.decompose(position, rotation, scale);
+            base = composeBaseMatrix();
+        }
         dirty = true;
     }
 

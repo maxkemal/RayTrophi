@@ -92,6 +92,8 @@ struct RayPayload {
     vec3     primaryAlbedo;
     vec3     primaryNormal;
     uint     primaryHit;
+    float    primaryTransmission;
+    float    primaryMetallic;
 };
 
 layout(location = 0) rayPayloadInEXT RayPayload payload;
@@ -124,21 +126,90 @@ struct Material {
     float fft_amplitude, fft_time_scale, micro_detail_strength, micro_detail_scale;
     // Block 9: Extra water params
     float foam_threshold, fft_ocean_size, fft_choppiness, fft_wind_speed;
-    // Block 10: Standard Textures (first 4)
+    // Block 10: Extra water animation params
+    float micro_anim_speed, micro_morph_speed, foam_noise_scale, fft_wind_direction;
+    // Block 11: UV transform core
+    float uv_scale_x, uv_scale_y, uv_offset_x, uv_offset_y;
+    // Block 12: UV transform extra
+    float uv_rotation_degrees, uv_tiling_x, uv_tiling_y;
+    uint uv_wrap_mode;
+    // Block 13: Standard Textures (first 4)
     uint albedo_tex;
     uint normal_tex;
     uint roughness_tex;
     uint metallic_tex;
-    // Block 11: Standard Textures (second 4)
+    // Block 14: Standard Textures (second 4)
     uint emission_tex;
     uint height_tex;
     uint opacity_tex;
     uint transmission_tex;
-    // Block 12: Reserved
+    // Block 15: Reserved
     float subsurface_ior;
     uint _terrain_layer_idx; // terrain layer buffer index (valid when FLAG_TERRAIN set)
-    uint _reserved_2, _reserved_3;
+    float normal_strength;
+    uint _reserved_3;
 };
+
+float wrapRepeat(float x) {
+    float r = mod(x, 1.0);
+    return (r < 0.0) ? (r + 1.0) : r;
+}
+
+float wrapMirror(float x) {
+    float r = mod(x, 2.0);
+    if (r < 0.0) r += 2.0;
+    return (r > 1.0) ? (2.0 - r) : r;
+}
+
+vec2 applyMaterialUVTransform(Material mat, vec2 originalUV) {
+    vec2 uv = originalUV - vec2(0.5);
+    uv.x *= mat.uv_scale_x;
+    uv.y *= mat.uv_scale_y;
+
+    float angleRad = radians(mat.uv_rotation_degrees);
+    float c = cos(angleRad);
+    float s = sin(angleRad);
+    uv = vec2(uv.x * c - uv.y * s, uv.x * s + uv.y * c);
+
+    uv += vec2(0.5);
+    uv += vec2(mat.uv_offset_x, mat.uv_offset_y);
+    uv *= vec2(mat.uv_tiling_x, mat.uv_tiling_y);
+
+    switch (mat.uv_wrap_mode) {
+    case 0u:
+        uv = vec2(wrapRepeat(uv.x), wrapRepeat(uv.y));
+        break;
+    case 1u:
+        uv = vec2(wrapMirror(uv.x), wrapMirror(uv.y));
+        break;
+    case 2u:
+        uv = clamp(uv, vec2(0.0), vec2(1.0));
+        break;
+    case 3u:
+        uv = originalUV;
+        break;
+    case 4u: {
+        vec2 scaled = uv * 3.0;
+        int face = int(scaled.x) + 3 * int(scaled.y);
+        vec2 local = mod(scaled, 1.0);
+        if (local.x < 0.0) local.x += 1.0;
+        if (local.y < 0.0) local.y += 1.0;
+        switch (face % 6) {
+        case 0: uv = local; break;
+        case 1: uv = vec2(local.y, 1.0 - local.x); break;
+        case 2: uv = vec2(1.0 - local.x, local.y); break;
+        case 3: uv = vec2(1.0 - local.y, 1.0 - local.x); break;
+        case 4: uv = vec2(local.x, 1.0 - local.y); break;
+        default: uv = local.yx; break;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return uv;
+}
 
 struct LightData {
     vec4 position;    // xyz + type (0=point, 1=dir)
@@ -186,7 +257,7 @@ struct VkWorldDataExtended {
     float humidity;
     float temperature;
     float ozoneAbsorptionScale;
-    float _pad0;
+    float atmosphereIntensity;
     
     // ════════════════════════════ ATMOSPHERE DENSITY (32 bytes)
     float airDensity;
@@ -621,20 +692,6 @@ vec3 safeNormalize(vec3 v, vec3 fallback) {
     return v * inversesqrt(len2);
 }
 
-vec3 computeShadowNormal(vec3 geomNormal, vec3 shadingNormal, vec3 rayDir) {
-    vec3 ng = safeNormalize(geomNormal, vec3(0.0, 1.0, 0.0));
-    vec3 ns = safeNormalize(shadingNormal, ng);
-
-    if (dot(ng, rayDir) > 0.0) ng = -ng;
-    if (dot(ns, rayDir) > 0.0) ns = -ns;
-
-    vec3 blended = safeNormalize(ng + ns, ng);
-    if (dot(blended, ng) < 0.0) {
-        blended = ng;
-    }
-    return blended;
-}
-
 // -----------------------------
 // Unified light sampling (GLSL port - simplified parity)
 // -----------------------------
@@ -730,6 +787,12 @@ bool sample_light_direction_gl(const LightData light, vec3 hit_pos, float rand_u
     return false;
 }
 
+vec3 fresnel_schlick_roughness_gl(float cosTheta, vec3 F0, float roughness) {
+    vec3 F90 = max(vec3(1.0 - roughness), F0);
+    float f = pow(1.0 - cosTheta, 5.0);
+    return F0 + (F90 - F0) * f;
+}
+
 // BRDF evaluation (Cook-Torrance simplified port)
 vec3 evaluate_brdf_gl(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, float metallic, float transmission) {
     vec3 VpL = V + L;
@@ -740,9 +803,8 @@ vec3 evaluate_brdf_gl(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, floa
     float NdotH = max(dot(N, H), 1e-4);
     float VdotH = max(dot(V, H), 1e-4);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
-    // Fresnel
-    float f = pow(1.0 - VdotH, 5.0);
-    vec3 F = F0 + (vec3(1.0) - F0) * f;
+    vec3 F = fresnel_schlick_roughness_gl(VdotH, F0, roughness);
+    vec3 F_avg = F0 + (vec3(1.0) - F0) / 21.0;
     // D (GGX)
     float safeRoughness = clamp(roughness, 0.02, 1.0);
     float alpha = max(safeRoughness * safeRoughness, 1e-4);
@@ -755,7 +817,7 @@ vec3 evaluate_brdf_gl(vec3 N, vec3 V, vec3 L, vec3 albedo, float roughness, floa
     float G = (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
     vec3 spec = (F * D * G) / (4.0 * NdotV * NdotL + 1e-6);
     // Diffuse — F'yi gerçek açıyla kullan (energy conservation)
-    vec3 k_d = (vec3(1.0) - F) * (1.0 - metallic) * max(0.0, 1.0 - transmission);
+    vec3 k_d = (vec3(1.0) - F_avg) * (1.0 - metallic) * max(0.0, 1.0 - transmission);
     vec3 diff = (k_d * albedo) * INV_PI;
     return diff + spec;
 }
@@ -1055,7 +1117,20 @@ void scatterGlass(vec3 hitPos, vec3 normal, vec3 rayDir, vec3 albedo, float ior,
 
     payload.scatterOrigin = hitPos + offsetDir * RAY_OFFSET;
     payload.scatterDir    = normalize(dir);
-    payload.attenuation  *= albedo;      // Transmission tint
+    if (doReflect) {
+        payload.attenuation *= vec3(1.0);
+    } else {
+        vec3 glassTint = clamp(albedo, vec3(0.0), vec3(1.0));
+        float cosInside = max(abs(dot(normalize(dir), -macroNormal)), 0.05);
+        float opticalThickness = 0.1 / cosInside;
+        vec3 absorption = (vec3(1.0) - glassTint) * opticalThickness;
+        vec3 transmissionColor = vec3(
+            exp(-absorption.x),
+            exp(-absorption.y),
+            exp(-absorption.z)
+        );
+        payload.attenuation *= transmissionColor;
+    }
     payload.scattered     = true;
 }
 
@@ -1239,6 +1314,65 @@ float water_fbm(vec2 p) {
     return v;
 }
 
+vec3 calculateDepthColorGL(float depth, float depth_max, vec3 shallow_color, vec3 deep_color) {
+    float t = min(depth / max(depth_max, 0.1), 1.0);
+    t = t * t * (3.0 - 2.0 * t);
+    return mix(shallow_color, deep_color, t);
+}
+
+float calculateWaterCausticsGL(vec3 floor_position, float time, float caustic_scale, float caustic_speed) {
+    vec2 uv = vec2(floor_position.x, floor_position.z) * caustic_scale;
+    float t = time * caustic_speed;
+    float v1 = abs(water_fbm(uv + vec2(t * 0.4, -t * 0.2)));
+    float v2 = abs(water_fbm(uv * 1.5 + vec2(50.0 + t * 0.3, 50.0 - t * 0.25)));
+    float caustic = 1.0 - v1 * v2;
+    return pow(max(caustic, 0.0), 2.0);
+}
+
+float calculateShoreFoamGL(float depth, float shore_distance, float shore_intensity, vec3 position, float time, float foam_scale) {
+    if (depth > shore_distance || shore_distance < 0.001) return 0.0;
+    float shore_t = 1.0 - (depth / shore_distance);
+    shore_t = smoothstep(0.0, 1.0, shore_t * shore_t);
+    float scale = max(foam_scale, 0.001);
+    float foam_noise = water_fbm(vec2(position.x * scale + time * 0.5, position.z * scale - time * 0.3)) * 0.5 + 0.5;
+    float edge_pattern = sin(depth * (10.0 / shore_distance) - time * 3.0) * 0.5 + 0.5;
+    float shore_foam = shore_t * shore_intensity * ((foam_noise * 0.7) + (edge_pattern * 0.3));
+    return min(shore_foam * 1.5, 1.0);
+}
+
+bool estimateWaterDepthGL(vec3 hitPos, float maxDepth, out float waterDepth, out vec3 floorPosition) {
+    waterDepth = max(maxDepth, 0.1);
+    floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
+    if (waterDepth <= SHADOW_TMIN) return false;
+
+    float low = SHADOW_TMIN;
+    float high = waterDepth;
+    bool found = false;
+    vec3 probeOrigin = hitPos - vec3(0.0, 0.05, 0.0);
+    vec3 probeDir = vec3(0.0, -1.0, 0.0);
+    uint probeFlags = gl_RayFlagsTerminateOnFirstHitEXT
+                    | gl_RayFlagsSkipClosestHitShaderEXT
+                    | gl_RayFlagsNoOpaqueEXT;
+
+    for (int i = 0; i < 7; ++i) {
+        float mid = mix(low, high, 0.5);
+        shadowOccluded = true;
+        traceRayEXT(topLevelAS, probeFlags, 0x01, 0, 1, 1, probeOrigin, SHADOW_TMIN, probeDir, mid, 1);
+        if (shadowOccluded) {
+            found = true;
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+
+    if (found) {
+        waterDepth = high;
+        floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
+    }
+    return found;
+}
+
 // --- Multi-octave Gerstner waves (8 waves, matches CPU/CUDA impl) ---
 void evaluateWaterGerstner(vec3 pos, float time,
                            float speed_mult, float strength_mult, float freq_mult,
@@ -1283,42 +1417,98 @@ void evaluateWaterGerstner(vec3 pos, float time,
 void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
                   float wave_speed, float wave_strength, float wave_freq,
                   float foam_level, float foam_threshold,
-                  float micro_strength, float micro_scale, float wind_speed,
-                  float fft_time_scale,
+                  float micro_strength, float micro_scale,
+                  float micro_anim_speed, float micro_morph_speed,
+                  float foam_noise_scale, float wind_direction, float wind_speed,
+                  float fft_time_scale, float fft_ocean_size,
+                  uint fft_height_tex, uint fft_normal_tex,
+                  float depth_max, float absorption_density,
+                  float shore_foam_distance, float shore_foam_intensity,
+                  float caustic_intensity, float caustic_scale, float caustic_speed,
                   vec3 shallow_color, vec3 deep_color,
                   float ior, float roughness,
                   inout uint seed)
 {
-    // Animation time: frame count converted to seconds, user-scaled
-    float time = cam.waterTime * max(fft_time_scale, 0.1);
+    // OptiX parity: FFT simulation is already time-scaled before textures are generated.
+    // The shading pass uses the resolved water time directly for both FFT sampling and
+    // micro-ripple drift so Vulkan does not double-accelerate the surface.
+    float time = cam.waterTime;
 
     // ── Gerstner wave normal + foam ─────────────────────────────
+    bool useFFTOcean = fft_height_tex > 0u && fft_normal_tex > 0u && fft_ocean_size > 0.001;
     vec3  waveNormal;
     float foam;
-    evaluateWaterGerstner(hitPos, time, wave_speed, wave_strength, wave_freq,
-                          waveNormal, foam);
+    if (useFFTOcean) {
+        vec2 fftUV = fract(vec2(hitPos.x / fft_ocean_size, hitPos.z / fft_ocean_size));
+        float fftHeight = texture(materialTextures[nonuniformEXT(int(fft_height_tex))], fftUV).r;
+        vec2 fftSlopeXZ = texture(materialTextures[nonuniformEXT(int(fft_normal_tex))], fftUV).xy;
+        fftSlopeXZ *= 1.35;
+        float slopeLen = length(fftSlopeXZ);
+        if (slopeLen > 0.999) {
+            fftSlopeXZ *= 0.999 / slopeLen;
+        }
+        float fftNy = sqrt(max(0.0, 1.0 - dot(fftSlopeXZ, fftSlopeXZ)));
+        vec3 fftNormal = normalize(vec3(fftSlopeXZ.x, max(fftNy, 0.001), fftSlopeXZ.y));
+        waveNormal = fftNormal;
+        float fftSlope = clamp(1.0 - fftNormal.y, 0.0, 1.0);
+        foam = smoothstep(max(foam_threshold, 0.05), 1.0, fftSlope * 2.0 + abs(fftHeight) * 0.25);
+    } else {
+        evaluateWaterGerstner(hitPos, time, wave_speed, wave_strength, wave_freq,
+                              waveNormal, foam);
+    }
+    float foamSignal = foam;
 
     // ── Micro-detail capillary ripples ──────────────────────────
     if (micro_strength > 0.001) {
-        float sc = max(micro_scale, 1.0);
-        float morph = time * 0.5;
-        vec2 p1 = vec2(hitPos.x, hitPos.z) * sc       + vec2(sin(morph), cos(morph * 0.8)) * 0.3;
-        vec2 p2 = vec2(hitPos.x, hitPos.z) * sc * 0.5 + vec2(sin(time * 0.25), sin(time * 0.175)) * 0.4;
+        float domainCoordScale = 20.0 / max(fft_ocean_size, 0.001);
+        float sc = max(micro_scale * domainCoordScale, 0.001);
+        float wind_dx = cos(wind_direction);
+        float wind_dz = sin(wind_direction);
+        float cross_dx = -wind_dz;
+        float cross_dz = wind_dx;
+        float base_speed = sqrt(max(1.0, wind_speed)) * max(micro_anim_speed, 0.001);
+        float morph = max(micro_morph_speed, 0.001);
+
+        float off1_x = wind_dx * time * base_speed + sin(time * 0.3 * morph) * 0.5;
+        float off1_z = wind_dz * time * base_speed + cos(time * 0.2 * morph) * 0.5;
+        vec2 p1 = vec2(hitPos.x * sc + off1_x, hitPos.z * sc + off1_z);
+
+        float off2_x = (wind_dx * 0.7 + cross_dx * 0.3) * time * base_speed * 0.6 + cos(time * 0.15 * morph + 1.5) * 0.8;
+        float off2_z = (wind_dz * 0.7 + cross_dz * 0.3) * time * base_speed * 0.6 + sin(time * 0.25 * morph + 2.0) * 0.8;
+        vec2 p2 = vec2(hitPos.x * sc * 0.5 + off2_x, hitPos.z * sc * 0.5 + off2_z);
+
+        float off3_x = cross_dx * time * base_speed * 0.4 + sin(time * 0.5 * morph + 3.0) * 0.3;
+        float off3_z = cross_dz * time * base_speed * 0.4 + cos(time * 0.4 * morph + 1.0) * 0.3;
+        vec2 p3 = vec2(hitPos.x * sc * 2.0 + off3_x, hitPos.z * sc * 2.0 + off3_z);
 
         const float dx = 0.01;
-        float hc = water_fbm(p1) * 0.5 + water_fbm(p2) * 0.5;
-        float hx = water_fbm(p1 + vec2(dx,0.0)) * 0.5 + water_fbm(p2 + vec2(dx,0.0)) * 0.5;
-        float hz = water_fbm(p1 + vec2(0.0,dx)) * 0.5 + water_fbm(p2 + vec2(0.0,dx)) * 0.5;
+        float h1_c = water_fbm(p1);
+        float h1_x = water_fbm(p1 + vec2(dx,0.0));
+        float h1_z = water_fbm(p1 + vec2(0.0,dx));
+        float h2_c = water_fbm(p2);
+        float h2_x = water_fbm(p2 + vec2(dx,0.0));
+        float h2_z = water_fbm(p2 + vec2(0.0,dx));
+        float h3_c = water_noise(p3);
+        float h3_x = water_noise(p3 + vec2(dx,0.0));
+        float h3_z = water_noise(p3 + vec2(0.0,dx));
+
+        float hc = h1_c * 0.5 + h2_c * 0.35 + h3_c * 0.15;
+        float hx = h1_x * 0.5 + h2_x * 0.35 + h3_x * 0.15;
+        float hz = h1_z * 0.5 + h2_z * 0.35 + h3_z * 0.15;
 
         float dsdx = (hx - hc) / dx;
         float dsdz = (hz - hc) / dx;
-        vec3 microN = normalize(vec3(-dsdx * micro_strength, 1.0, -dsdz * micro_strength));
+        float microGain = useFFTOcean ? 1.45 : 1.0;
+        vec3 microN = normalize(vec3(-dsdx * micro_strength * microGain, 1.0, -dsdz * micro_strength * microGain));
         waveNormal  = normalize(waveNormal + microN);
 
         // Micro-peak foam (replaces/supplements Gerstner foam for FFT-style look)
         float microSlope = clamp(hc * 0.5 + 0.5, 0.0, 1.0);
-        float microFoam  = clamp((microSlope - foam_threshold) * foam_level * 5.0, 0.0, 1.0);
-        foam = max(foam, microFoam);
+        float scaledFoamNoise = max(foam_noise_scale * domainCoordScale, 0.001);
+        float foamBreakup = water_fbm(vec2(hitPos.x * scaledFoamNoise + off1_x * 0.5,
+                                           hitPos.z * scaledFoamNoise + off1_z * 0.5)) * 0.5 + 0.5;
+        float microFoam  = clamp((microSlope + (foamBreakup - 0.5) * 0.35 - foam_threshold) * 5.0, 0.0, 1.0);
+        foamSignal = max(foamSignal, microFoam);
     }
 
     // ── Build shading normal from wave perturbation ──────────────
@@ -1328,18 +1518,35 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 rayDir,
     vec3 shadingNormal = normalize(tgt * waveNormal.x + geoNormal * waveNormal.y + btgt * waveNormal.z);
     if (dot(shadingNormal, -rayDir) < 0.0) shadingNormal = geoNormal; // sanity
 
+    float maxProbeDepth = max(depth_max, 0.1);
+    float waterDepth = maxProbeDepth;
+    vec3 floorPosition = hitPos - vec3(0.0, waterDepth, 0.0);
+    bool foundFloor = false;
+    if (shore_foam_intensity > 0.01 || absorption_density > 0.01 || caustic_intensity > 0.01) {
+        foundFloor = estimateWaterDepthGL(hitPos, maxProbeDepth, waterDepth, floorPosition);
+    }
+    vec3 baseWaterColor = calculateDepthColorGL(waterDepth, depth_max, shallow_color, deep_color);
+    if (caustic_intensity > 0.01 && foundFloor) {
+        float causticVal = calculateWaterCausticsGL(floorPosition, time, caustic_scale, caustic_speed);
+        float causticFade = exp(-waterDepth * absorption_density * 0.5);
+        baseWaterColor += shallow_color * causticVal * caustic_intensity * causticFade;
+    }
+    float shoreFoam = 0.0;
+    if (shore_foam_intensity > 0.01 && foundFloor) {
+        shoreFoam = calculateShoreFoamGL(waterDepth, shore_foam_distance, shore_foam_intensity, hitPos, time, max(foam_noise_scale * (20.0 / max(fft_ocean_size, 0.001)), 0.001));
+    }
+    float totalFoam = min(foamSignal * foam_level + shoreFoam, 1.0);
+    float cosNV = 0.0;
+
     // ── Depth-based color blend ──────────────────────────────────
-    float cosNV    = max(dot(-rayDir, shadingNormal), 0.0);
     float tDepth   = 1.0 - cosNV;  // grazing angle → deeper look
-    tDepth = tDepth * tDepth * (3.0 - 2.0 * tDepth); // smoothstep
-    vec3 waterColor = mix(shallow_color, deep_color, tDepth);
 
     // ── Blend foam (white crest) ─────────────────────────────────
-    vec3 finalAlbedo = mix(waterColor, vec3(0.92, 0.95, 1.0), clamp(foam, 0.0, 0.85));
+    vec3 finalAlbedo = mix(baseWaterColor, vec3(0.92, 0.95, 1.0), clamp(totalFoam, 0.0, 0.85));
 
     // ── Tint attenuation with water color, then scatter as glass ─
     payload.attenuation *= finalAlbedo;
-    scatterGlass(hitPos, shadingNormal, rayDir, vec3(1.0), ior, roughness, seed);
+    scatterGlass(hitPos, shadingNormal, rayDir, vec3(1.0), ior, mix(roughness, 0.8, totalFoam), seed);
 }
 
 // ============================================================
@@ -1425,25 +1632,21 @@ void main() {
     // Vulkan shader coordinate origin differs; flip V to match OptiX (and texture upload)
     hitUV.y = 1.0 - hitUV.y;
 
-    // Double-sided: Normaller her zaman ray'e karşı baksın
-    // FIX NOTE:
-    // Front/back orientation must follow the geometric triangle normal first.
-    // Flipping the interpolated shading normal independently caused Vulkan-only
-    // discontinuities on smooth surfaces near grazing angles. Match OptiX by
-    // using geomNormalRaw as the authority for both normals.
     geomNormal = geomNormalRaw;
 
     if (dot(geomNormalRaw, rayDir) > 0.0) {
         worldNormal = -worldNormal;
     }
-    // Geometrik normali de kamera/ışın yönüne çeviriyoruz (kendi kendine çarpışmayı önlemek için)
     if (dot(geomNormal, rayDir) > 0.0) {
         geomNormal = -geomNormalRaw;
     }
 
+    vec2 tbnUV0 = vec2(uv0.x, 1.0 - uv0.y);
+    vec2 tbnUV1 = vec2(uv1.x, 1.0 - uv1.y);
+    vec2 tbnUV2 = vec2(uv2.x, 1.0 - uv2.y);
     vec3 surfaceTangent;
     vec3 surfaceBitangent;
-    buildSurfaceTBN(objV0, objV1, objV2, uv0, uv1, uv2, worldNormal, surfaceTangent, surfaceBitangent);
+    buildSurfaceTBN(objV0, objV1, objV2, tbnUV0, tbnUV1, tbnUV2, worldNormal, surfaceTangent, surfaceBitangent);
 
     // ----------------------------------------------------------
     // 2b. Terrain Splat-Layer Blending (FLAG_TERRAIN = bit 16)
@@ -1482,6 +1685,7 @@ void main() {
                 if (weights[k] < 0.001) continue;
                 Material lm = materials.m[tl.layer_mat_id[k]];
                 vec2 layerUV = hitUV * tl.layer_uv_scale[k];
+                layerUV = applyMaterialUVTransform(lm, layerUV);
 
                 // Layer albedo
                 vec3 lAlbedo = max(vec3(lm.albedo_r, lm.albedo_g, lm.albedo_b), vec3(0.0));
@@ -1493,14 +1697,14 @@ void main() {
                 // Layer roughness
                 float lRough = clamp(lm.roughness, 0.0, 1.0);
                 if (int(lm.roughness_tex) > 0) {
-                    lRough = texture(materialTextures[nonuniformEXT(int(lm.roughness_tex))], layerUV).r;
+                    lRough = texture(materialTextures[nonuniformEXT(int(lm.roughness_tex))], layerUV).g;
                 }
                 blendRoughness += weights[k] * lRough;
 
                 // Layer metallic
                 float lMetal = clamp(lm.metallic, 0.0, 1.0);
                 if (int(lm.metallic_tex) > 0) {
-                    lMetal = texture(materialTextures[nonuniformEXT(int(lm.metallic_tex))], layerUV).r;
+                    lMetal = texture(materialTextures[nonuniformEXT(int(lm.metallic_tex))], layerUV).b;
                 }
                 blendMetallic += weights[k] * lMetal;
 
@@ -1517,6 +1721,8 @@ void main() {
                 if (int(lm.normal_tex) > 0) {
                     vec3 ns = texture(materialTextures[nonuniformEXT(int(lm.normal_tex))], layerUV).rgb;
                     ns = ns * 2.0 - vec3(1.0); // [0,1] -> [-1,1]
+                    ns.x *= lm.normal_strength;
+                    ns.y *= lm.normal_strength;
                     blendNormal_ts += weights[k] * ns;
                     anyNormalTex = true;
                 } else {
@@ -1564,6 +1770,7 @@ void main() {
     float metallic    = clamp(mat.metallic, 0.0, 1.0);
     float ior         = (mat.ior > 0.01) ? mat.ior : 1.5;
     float transmission = clamp(mat.transmission, 0.0, 1.0);
+    vec2 materialUV = applyMaterialUVTransform(mat, hitUV);
 
     // ----------------------------------------------------------
     // 4. Emission — ayrı field, scatter ile karışmaz
@@ -1574,7 +1781,7 @@ void main() {
     // Sample albedo texture
     int albedoTexID = int(mat.albedo_tex);
     if (albedoTexID > 0) {
-        albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], hitUV).rgb;
+        albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], materialUV).rgb;
     }
     
     // ----------------------------------------------------------------
@@ -1598,9 +1805,9 @@ void main() {
         // Bit 8 set   = RGBA texture with opacity in alpha → use A channel
         float maskValue;
         if ((mat.flags & 256u) != 0u) {
-            maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], hitUV).a;
+            maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], materialUV).a;
         } else {
-            maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], hitUV).r;
+            maskValue = texture(materialTextures[nonuniformEXT(opacityTexID)], materialUV).r;
         }
         finalAlpha *= maskValue;
     }
@@ -1637,7 +1844,7 @@ void main() {
    // Sample emission texture
 int emissionTexID = int(mat.emission_tex);
 if (emissionTexID > 0) {
-    vec3 emTex = texture(materialTextures[nonuniformEXT(emissionTexID)], hitUV).rgb;
+    vec3 emTex = texture(materialTextures[nonuniformEXT(emissionTexID)], materialUV).rgb;
     // Emission texture is authoritative; intensity remains controlled by emission strength.
     emColor = emTex;
 } else if (emStrength > 0.001) {
@@ -1654,36 +1861,44 @@ if (emissionTexID > 0) {
     // Sample transmission texture (for glass/transparent materials)
     int transmissionTexID = int(mat.transmission_tex);
     if (transmissionTexID > 0) {
-        float trans = texture(materialTextures[nonuniformEXT(transmissionTexID)], hitUV).r;
+        float trans = texture(materialTextures[nonuniformEXT(transmissionTexID)], materialUV).r;
         transmission = clamp(trans, 0.0, 1.0);
     }
     
     // Sample roughness texture
     int roughTexID = int(mat.roughness_tex);
     if (roughTexID > 0) {
-        float r = texture(materialTextures[nonuniformEXT(roughTexID)], hitUV).r;
+        float r = texture(materialTextures[nonuniformEXT(roughTexID)], materialUV).g;
         roughness = clamp(r, 0.0, 1.0);
     }
     
     // Sample metallic texture
     int metallicTexID = int(mat.metallic_tex);
     if (metallicTexID > 0) {
-        float m = texture(materialTextures[nonuniformEXT(metallicTexID)], hitUV).r;
+        float m = texture(materialTextures[nonuniformEXT(metallicTexID)], materialUV).b;
         metallic = clamp(m, 0.0, 1.0);
     }
     
     // Apply normal map if present (perturb surface normal)
     int normalTexID = int(mat.normal_tex);
+    bool waterUsesFFT = mat.sheen > 0.001 &&
+                        mat.height_tex > 0u &&
+                        mat.normal_tex > 0u &&
+                        mat.fft_ocean_size > 0.001 &&
+                        abs(mat.anisotropic) < 1e-5 &&
+                        abs(mat.sheen_tint) < 1e-5;
     vec3 tangentNormal = worldNormal;  // Default to geometry normal
-    if (normalTexID > 0) {
+    if (normalTexID > 0 && !waterUsesFFT) {
         // Sample normal map (OpenGL format: RGB = normal direction)
-        vec3 normalMapSample = texture(materialTextures[nonuniformEXT(normalTexID)], hitUV).rgb;
+        vec3 normalMapSample = texture(materialTextures[nonuniformEXT(normalTexID)], materialUV).rgb;
         
         // Validate: ensure we don't have pure black or NaN
         float mapLength = length(normalMapSample);
         if (mapLength > 0.1) {  // Non-zero check
             // Convert from [0, 1] to [-1, 1] range
             vec3 normalMapDir = normalMapSample * 2.0 - vec3(1.0);
+            normalMapDir.x *= mat.normal_strength;
+            normalMapDir.y *= mat.normal_strength;
             
             // Normalize to ensure unit vector
             vec3 tangentSpaceNormal = normalize(normalMapDir);
@@ -1710,6 +1925,8 @@ if (emissionTexID > 0) {
         payload.primaryAlbedo = albedo;
         payload.primaryNormal = worldNormal;
         payload.primaryHit = 1u;
+        payload.primaryTransmission = transmission;
+        payload.primaryMetallic = metallic;
     }
     worldNormal = tangentNormal;
 
@@ -1728,8 +1945,22 @@ if (emissionTexID > 0) {
             /*foam_threshold*/ mat.foam_threshold,
             /*micro_strength*/ mat.micro_detail_strength,
             /*micro_scale*/    mat.micro_detail_scale,
+            /*micro_anim*/     mat.micro_anim_speed,
+            /*micro_morph*/    mat.micro_morph_speed,
+            /*foam_noise*/     mat.foam_noise_scale,
+            /*wind_dir*/       mat.fft_wind_direction,
             /*wind_speed*/     mat.fft_wind_speed,
             /*fft_time_scale*/ mat.fft_time_scale,
+            /*fft_ocean_size*/ mat.fft_ocean_size,
+            /*fft_height_tex*/ mat.height_tex,
+            /*fft_normal_tex*/ mat.normal_tex,
+            /*depth_max*/      mat.subsurface_amount * 100.0,
+            /*absorption*/     mat.subsurface_scale,
+            /*shore_dist*/     mat.subsurface_radius_r,
+            /*shore_int*/      mat.clearcoat,
+            /*caustic_int*/    mat.clearcoat_roughness,
+            /*caustic_scale*/  mat.subsurface_radius_g,
+            /*caustic_speed*/  mat.subsurface_anisotropy,
             /*shallow_color*/  vec3(mat.emission_r, mat.emission_g, mat.emission_b),
             /*deep_color*/     vec3(mat.albedo_r,   mat.albedo_g,   mat.albedo_b),
             /*ior*/            (mat.ior > 0.01) ? mat.ior : 1.333,
@@ -1783,7 +2014,12 @@ if (emissionTexID > 0) {
                         // SkipClosestHit: geometry hit without opacity test → stays true (solid shadow)
                         shadowOccluded = true;
                         // ULP-based offset: self-intersection-safe on thin/distant geometry
-                        vec3 shadowOrigin = offset_ray(hitPos, geomNormal);
+                        const uint FLAG_TERRAIN = (1u << 16);
+                        bool useTerrainShadowNormal = (mat.flags & FLAG_TERRAIN) != 0u;
+                        vec3 shadowNormal = useTerrainShadowNormal
+                            ? safeNormalize(geomNormal, vec3(0.0, 1.0, 0.0))
+                            : safeNormalize(worldNormal, vec3(0.0, 1.0, 0.0));
+                        vec3 shadowOrigin = hitPos + shadowNormal * SHADOW_TMIN;
                         float tmin = SHADOW_TMIN;
                         float tmax = min(max(0.0, dist - 1e-3), 10000.0);
                         if (tmax > tmin) {
@@ -1797,7 +2033,8 @@ if (emissionTexID > 0) {
                             // they are invisible to shadow rays and cannot cast hard shadows.
                             traceRayEXT(topLevelAS, shadowFlags, 0x01, 0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
                         }
-                        if (!shadowOccluded) {
+                        float shadowVisibility = shadowOccluded ? 0.0 : 1.0;
+                        if (shadowVisibility > 1e-4) {
                             // Volumetric soft shadow: march through any volume AABB between surface and light.
                             // cam.pad0 carries float(volumeCount) from C++ renderProgressive each frame.
                             float volShadowTr = computeVolumeShadowTransmittance(shadowOrigin, wi, tmax);
@@ -1830,7 +2067,7 @@ if (emissionTexID > 0) {
                             contrib.z = isnan(contrib.z) ? 0.0 : (isinf(contrib.z) ? (contrib.z > 0.0 ? 1e4 : 0.0) : contrib.z);
                             contrib = min(contrib, vec3(1e4));
                             // Apply volumetric transmittance (soft shadow from volumes)
-                            contrib *= volShadowTr;
+                            contrib *= volShadowTr * shadowVisibility;
 
                             vec3 att = max(payload.attenuation, vec3(0.0));
                             att.x = isnan(att.x) ? 0.0 : (isinf(att.x) ? (att.x > 0.0 ? 1e2 : 0.0) : att.x);
@@ -1855,7 +2092,12 @@ if (emissionTexID > 0) {
         if (NdotSun > 1e-6) {
             shadowOccluded = true;
             // ULP-based offset: self-intersection-safe on thin/distant geometry
-            vec3 sunShadowOrigin = offset_ray(hitPos, geomNormal);
+            const uint FLAG_TERRAIN = (1u << 16);
+            bool useTerrainShadowNormal = (mat.flags & FLAG_TERRAIN) != 0u;
+            vec3 sunShadowNormal = useTerrainShadowNormal
+                ? safeNormalize(geomNormal, vec3(0.0, 1.0, 0.0))
+                : safeNormalize(worldNormal, vec3(0.0, 1.0, 0.0));
+            vec3 sunShadowOrigin = hitPos + sunShadowNormal * SHADOW_TMIN;
             float sunTmin = SHADOW_TMIN;
             float sunTmax = 1e8;
             uint sunShadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
@@ -1864,13 +2106,14 @@ if (emissionTexID > 0) {
             // mask 0x01 = triangles only — volume AABBs skipped (handled by volumetric transmittance)
             traceRayEXT(topLevelAS, sunShadowFlags, 0x01, 0, 1, 1,
                         sunShadowOrigin, sunTmin, sunDir, sunTmax, 1);
-            if (!shadowOccluded) {
+            float sunShadowVisibility = shadowOccluded ? 0.0 : 1.0;
+            if (sunShadowVisibility > 1e-4) {
                 float sunVolTr = computeVolumeShadowTransmittance(sunShadowOrigin, sunDir, sunTmax);
                 vec3 V        = normalize(-rayDir);
                 vec3 sunBRDF  = evaluate_brdf_gl(worldNormal, V, sunDir,
                                                  albedo, roughness, metallic, transmission);
                 vec3 sunLi    = worldData.w.sunColor * worldData.w.sunIntensity;
-                vec3 sunContrib = sunBRDF * sunLi * NdotSun * sunVolTr;
+                vec3 sunContrib = sunBRDF * sunLi * NdotSun * sunVolTr * sunShadowVisibility;
                 sunContrib = clamp(sunContrib, vec3(0.0), vec3(1e4));
                 vec3 att = clamp(payload.attenuation, vec3(0.0), vec3(1e2));
                 payload.radiance += att * sunContrib;

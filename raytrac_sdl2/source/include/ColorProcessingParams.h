@@ -258,19 +258,10 @@ public:
     Vec3 processColor(const Vec3& color, int x, int y) {
         Vec3 processed_color = color * params.global_exposure;
 
-        // AGX Filmic ton eşleme
-        //  processed_color = AGXToneMapping(processed_color);
-       // ACES filmic ton eşleştirme 
-       // processed_color = ACESFilmicToneMapping(processed_color);
-       // UnchartedFilmic ton eşleştirme
-       // processed_color = UnchartedFilmic(processed_color);
-        // Filmic ton eşleştirme
-       // processed_color = FilmicTonemap(processed_color);
-        // Renk sıcaklığı ayarı
-        processed_color = adjustColorTemperature(processed_color, params.color_temperature);
-
-        // Renk doygunluğu ayarı
-        processed_color = adjustSaturation(processed_color, params.saturation);
+        // Tonemap ÖNCE uygulanır: HDR → 0-1 aralığı
+        // Bu sayede saturation ve gamma her zaman 0-1 üzerinde çalışır.
+        // None durumunda tonemap uygulanmaz — Reinhard caller tarafından
+        // CPU path için ayrıca uygulanır (GPU path zaten 0-1 sRGB gelir).
         switch (params.tone_mapping_type) {
         case ToneMappingType::AGX:
             processed_color = AGXToneMapping(processed_color);
@@ -285,18 +276,25 @@ public:
             processed_color = FilmicTonemap(processed_color);
             break;
         case ToneMappingType::None:
-            // no tonemapping
+            // Değerler zaten 0-1 aralığında olmalı (caller normalize etti)
             break;
         }
+
+        // Renk sıcaklığı ve doygunluk SONRA: artık 0-1 aralığında güvenli
+        processed_color = adjustColorTemperature(processed_color, params.color_temperature);
+        processed_color = adjustSaturation(processed_color, params.saturation);
+
         // Gamma düzeltmesi
         float gamma_adjust = 1.0f / params.global_gamma;
+        float gx = processed_color.x > 0.0f ? processed_color.x : 0.0f;
+        float gy = processed_color.y > 0.0f ? processed_color.y : 0.0f;
+        float gz = processed_color.z > 0.0f ? processed_color.z : 0.0f;
         processed_color = Vec3(
-            std::pow(processed_color.x, gamma_adjust),
-            std::pow(processed_color.y, gamma_adjust),
-            std::pow(processed_color.z, gamma_adjust)
+            std::pow(gx, gamma_adjust),
+            std::pow(gy, gamma_adjust),
+            std::pow(gz, gamma_adjust)
         );
-        
-        // SADECE EN SON: 0-1 clamp (ekrana gidecek, mecbur)
+
         return Vec3::clamp(processed_color, 0.0f, 1.0f);
     }
 };

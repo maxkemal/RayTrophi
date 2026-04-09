@@ -17,6 +17,46 @@
 #include "GasVolume.h"  // For gas simulation gizmos
 #include "scene_ui_gas.hpp"  // For GasUI::selected_gas_volume
 #include "scene_ui_forcefield.hpp"
+#include "Backend/IViewportBackend.h"
+#include <Backend/VulkanBackend.h>
+
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
+namespace {
+Backend::IBackend* getGizmoRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+Backend::IViewportBackend* getGizmoViewportBackend(UIContext& ctx) {
+    if (g_viewport_backend) {
+        return g_viewport_backend.get();
+    }
+    return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+}
+
+void updateGizmoObjectTransformOnActiveBackends(UIContext& ctx, const std::string& objectName, const Matrix4x4& transform) {
+    if (objectName.empty()) return;
+
+    if (Backend::IViewportBackend* viewportBackend = getGizmoViewportBackend(ctx)) {
+        viewportBackend->updateObjectTransform(objectName, transform);
+        viewportBackend->resetAccumulation();
+    }
+
+    if (Backend::IBackend* renderBackend = getGizmoRenderBackend(ctx)) {
+        if (renderBackend != getGizmoViewportBackend(ctx) && renderBackend->isUsingTLAS()) {
+            renderBackend->updateObjectTransform(objectName, transform);
+            renderBackend->resetAccumulation();
+        }
+    }
+}
+}
 
 void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta) {
     if (objectName.empty()) return;
@@ -48,15 +88,16 @@ void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, con
         ctx.selection.selected.has_cached_aabb = false;
     }
 
-    const bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
-    if (using_gpu_tlas) {
-        ctx.backend_ptr->updateObjectTransform(objectName, transform->base);
-        ctx.backend_ptr->resetAccumulation();
-    } else {
+    const bool render_backend_has_tlas =
+        (getGizmoRenderBackend(ctx) && getGizmoRenderBackend(ctx)->isUsingTLAS());
+    // Always push to active backends (raster viewport + render backend)
+    updateGizmoObjectTransformOnActiveBackends(ctx, objectName, transform->base);
+    if (!render_backend_has_tlas) {
+        // CPU mode: update vertices for BVH/picking
         for (auto& pair : cache_it->second) {
             pair.second->updateTransformedVertices();
         }
-        if (ctx.backend_ptr) {
+        if (ctx.backend_ptr && !dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr)) {
             ctx.backend_ptr->updateGeometry(ctx.scene.world.objects);
             ctx.backend_ptr->resetAccumulation();
         } else {
@@ -745,6 +786,19 @@ void SceneUI::drawLightGizmos(UIContext& ctx, bool& gizmo_hit)
 // ===============================================================================
 void SceneUI::drawTransformGizmo(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
+    ImGuiIO& io = ImGui::GetIO();
+
+    // IMPORTANT: Keep ImGuizmo's per-frame state alive even when we early-out.
+    // We hit a bug where deleting an object could clear selection before this
+    // function reached Manipulate(), leaving ImGuizmo::IsOver() latched from the
+    // previous frame. Viewport clicks were then blocked as if a gizmo was still
+    // under the mouse, and selection only "woke up" again after clicking an item
+    // in the hierarchy. Calling BeginFrame/SetRect before any early return resets
+    // that stale hover state and keeps viewport picking responsive after deletes.
+    ImGuizmo::BeginFrame();
+    ImGuizmo::SetOrthographic(false);
+    ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+
     if (!sel.hasSelection() || !sel.show_gizmo || !ctx.scene.camera) return;
 
     // Check visibility of selected item
@@ -757,12 +811,6 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     if (!is_visible) return;
 
     Camera& cam = *ctx.scene.camera;
-    ImGuiIO& io = ImGui::GetIO();
-
-    // Setup ImGuizmo
-    ImGuizmo::BeginFrame();
-    ImGuizmo::SetOrthographic(false);
-    ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
 
     // �������������������������������������������������������������������������
     // Build View Matrix (LookAt)
@@ -813,6 +861,155 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // �������������������������������������������������������������������������
     // Get Object Matrix
     // �������������������������������������������������������������������������
+    const bool edit_mode_active =
+        mesh_overlay_settings.enabled &&
+        mesh_overlay_settings.edit_mode &&
+        sel.multi_selection.size() == 1 &&
+        sel.selected.type == SelectableType::Object &&
+        sel.selected.object &&
+        sel.mesh_element_mode != MeshElementSelectMode::Object;
+
+    if (edit_mode_active) {
+        static bool edit_gizmo_active = false;
+        static bool edit_was_using_gizmo = false;
+        static bool edit_drag_changed = false;
+        static std::string edit_drag_object_name;
+        static std::vector<MeshEditTriangleState> edit_drag_start_states;
+        static float editGizmoMatrix[16] = {
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f
+        };
+
+        ImGuizmo::OPERATION editOperation = ImGuizmo::TRANSLATE;
+        switch (sel.transform_mode) {
+        case TransformMode::Translate: editOperation = ImGuizmo::TRANSLATE; break;
+        case TransformMode::Rotate: editOperation = ImGuizmo::ROTATE; break;
+        case TransformMode::Scale: editOperation = ImGuizmo::SCALE; break;
+        }
+        ImGuizmo::MODE editMode =
+            (sel.transform_space == TransformSpace::Local) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
+
+        bool has_editable_element = false;
+        const Vec3 editable_gizmo_pos = getSelectedMeshElementWorldPosition(ctx, &has_editable_element);
+        const bool gizmo_using = ImGuizmo::IsUsing();
+        if (!has_editable_element && !edit_gizmo_active && !gizmo_using) {
+            edit_gizmo_active = false;
+            return;
+        }
+
+        if (!edit_gizmo_active && !gizmo_using) {
+            editGizmoMatrix[0] = 1.0f; editGizmoMatrix[1] = 0.0f; editGizmoMatrix[2] = 0.0f; editGizmoMatrix[3] = 0.0f;
+            editGizmoMatrix[4] = 0.0f; editGizmoMatrix[5] = 1.0f; editGizmoMatrix[6] = 0.0f; editGizmoMatrix[7] = 0.0f;
+            editGizmoMatrix[8] = 0.0f; editGizmoMatrix[9] = 0.0f; editGizmoMatrix[10] = 1.0f; editGizmoMatrix[11] = 0.0f;
+            editGizmoMatrix[12] = editable_gizmo_pos.x;
+            editGizmoMatrix[13] = editable_gizmo_pos.y;
+            editGizmoMatrix[14] = editable_gizmo_pos.z;
+            editGizmoMatrix[15] = 1.0f;
+        }
+
+        const Vec3 oldEditPos(editGizmoMatrix[12], editGizmoMatrix[13], editGizmoMatrix[14]);
+        Matrix4x4 oldEditMatrix;
+        oldEditMatrix.m[0][0] = editGizmoMatrix[0]; oldEditMatrix.m[1][0] = editGizmoMatrix[1]; oldEditMatrix.m[2][0] = editGizmoMatrix[2]; oldEditMatrix.m[3][0] = editGizmoMatrix[3];
+        oldEditMatrix.m[0][1] = editGizmoMatrix[4]; oldEditMatrix.m[1][1] = editGizmoMatrix[5]; oldEditMatrix.m[2][1] = editGizmoMatrix[6]; oldEditMatrix.m[3][1] = editGizmoMatrix[7];
+        oldEditMatrix.m[0][2] = editGizmoMatrix[8]; oldEditMatrix.m[1][2] = editGizmoMatrix[9]; oldEditMatrix.m[2][2] = editGizmoMatrix[10]; oldEditMatrix.m[3][2] = editGizmoMatrix[11];
+        oldEditMatrix.m[0][3] = editGizmoMatrix[12]; oldEditMatrix.m[1][3] = editGizmoMatrix[13]; oldEditMatrix.m[2][3] = editGizmoMatrix[14]; oldEditMatrix.m[3][3] = editGizmoMatrix[15];
+
+        const bool manipulated = ImGuizmo::Manipulate(
+            viewMatrix, projMatrix, editOperation, editMode, editGizmoMatrix);
+        const bool gizmo_is_using_now = ImGuizmo::IsUsing();
+
+        if (gizmo_is_using_now && !edit_was_using_gizmo) {
+            edit_drag_object_name = sel.selected.object ? sel.selected.object->getNodeName() : std::string{};
+            edit_drag_start_states.clear();
+            edit_drag_changed = false;
+            if (!edit_drag_object_name.empty()) {
+                captureMeshEditLayerState(ctx, edit_drag_object_name, edit_drag_start_states);
+            }
+        }
+
+        if (manipulated) {
+            if (!edit_gizmo_active && !gizmo_is_using_now) {
+                edit_drag_object_name = sel.selected.object ? sel.selected.object->getNodeName() : std::string{};
+                edit_drag_start_states.clear();
+                if (!edit_drag_object_name.empty()) {
+                    captureMeshEditLayerState(ctx, edit_drag_object_name, edit_drag_start_states);
+                }
+            }
+            const Vec3 newPos(editGizmoMatrix[12], editGizmoMatrix[13], editGizmoMatrix[14]);
+            Matrix4x4 newEditMatrix;
+            newEditMatrix.m[0][0] = editGizmoMatrix[0]; newEditMatrix.m[1][0] = editGizmoMatrix[1]; newEditMatrix.m[2][0] = editGizmoMatrix[2]; newEditMatrix.m[3][0] = editGizmoMatrix[3];
+            newEditMatrix.m[0][1] = editGizmoMatrix[4]; newEditMatrix.m[1][1] = editGizmoMatrix[5]; newEditMatrix.m[2][1] = editGizmoMatrix[6]; newEditMatrix.m[3][1] = editGizmoMatrix[7];
+            newEditMatrix.m[0][2] = editGizmoMatrix[8]; newEditMatrix.m[1][2] = editGizmoMatrix[9]; newEditMatrix.m[2][2] = editGizmoMatrix[10]; newEditMatrix.m[3][2] = editGizmoMatrix[11];
+            newEditMatrix.m[0][3] = editGizmoMatrix[12]; newEditMatrix.m[1][3] = editGizmoMatrix[13]; newEditMatrix.m[2][3] = editGizmoMatrix[14]; newEditMatrix.m[3][3] = editGizmoMatrix[15];
+
+            bool applied = false;
+            if (editOperation == ImGuizmo::TRANSLATE) {
+                applied = applySelectedMeshElementTranslation(ctx, newPos - oldEditPos);
+            } else {
+                const Matrix4x4 deltaMatrix = newEditMatrix * oldEditMatrix.inverse();
+                applied = applySelectedMeshElementTransform(ctx, deltaMatrix);
+            }
+
+            if (applied) {
+                edit_drag_changed = true;
+                ProjectManager::getInstance().markModified();
+                if (ctx.backend_ptr && !edit_drag_object_name.empty()) {
+                    queueMeshEditGpuSync(edit_drag_object_name);
+                }
+            }
+        }
+
+        if (!gizmo_using && !manipulated && has_editable_element) {
+            editGizmoMatrix[0] = 1.0f; editGizmoMatrix[1] = 0.0f; editGizmoMatrix[2] = 0.0f; editGizmoMatrix[3] = 0.0f;
+            editGizmoMatrix[4] = 0.0f; editGizmoMatrix[5] = 1.0f; editGizmoMatrix[6] = 0.0f; editGizmoMatrix[7] = 0.0f;
+            editGizmoMatrix[8] = 0.0f; editGizmoMatrix[9] = 0.0f; editGizmoMatrix[10] = 1.0f; editGizmoMatrix[11] = 0.0f;
+            editGizmoMatrix[12] = editable_gizmo_pos.x;
+            editGizmoMatrix[13] = editable_gizmo_pos.y;
+            editGizmoMatrix[14] = editable_gizmo_pos.z;
+            editGizmoMatrix[15] = 1.0f;
+        }
+
+        if (edit_was_using_gizmo && !gizmo_is_using_now && edit_drag_changed &&
+            !edit_drag_start_states.empty() && !edit_drag_object_name.empty()) {
+            refreshMeshEditLayerEditedState(ctx);
+
+            std::vector<MeshEditTriangleState> edit_drag_end_states;
+            captureMeshEditLayerState(ctx, edit_drag_object_name, edit_drag_end_states);
+
+            bool mesh_edit_changed = edit_drag_end_states.size() == edit_drag_start_states.size() && !edit_drag_end_states.empty();
+            if (mesh_edit_changed) {
+                for (size_t i = 0; i < edit_drag_end_states.size(); ++i) {
+                    for (int corner = 0; corner < 3; ++corner) {
+                        if ((edit_drag_end_states[i].positions[corner] - edit_drag_start_states[i].positions[corner]).length_squared() > 1e-12f) {
+                            goto mesh_edit_changed_confirmed;
+                        }
+                    }
+                }
+                mesh_edit_changed = false;
+            }
+
+mesh_edit_changed_confirmed:
+            if (mesh_edit_changed) {
+                history.record(std::make_unique<MeshEditCommand>(
+                    edit_drag_object_name,
+                    edit_drag_start_states,
+                    std::move(edit_drag_end_states)));
+                ProjectManager::getInstance().markModified();
+            }
+
+            edit_drag_start_states.clear();
+            edit_drag_object_name.clear();
+            edit_drag_changed = false;
+        }
+
+        edit_gizmo_active = gizmo_is_using_now;
+        edit_was_using_gizmo = gizmo_is_using_now;
+        is_dragging = edit_gizmo_active;
+        return;
+    }
+
     float objectMatrix[16];
     Vec3 pos = sel.selected.position;
 
@@ -1194,7 +1391,6 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     if (pivot_edit_mode) {
         mode = ImGuizmo::WORLD;
     }
-
     // �������������������������������������������������������������������������
     // Shift + Drag Duplication Logic + IDLE PREVIEW
     // �������������������������������������������������������������������������
@@ -1554,12 +1750,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                     th->setPivotMatrix(deltaMat * pivotMat);
                                 }
                                 
-                                // TLAS MODE: Update GPU instance transform (fast path)
-                                bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
-                                if (using_gpu_tlas) {
-                                    ctx.backend_ptr->updateObjectTransform(targetName, th->base);
-                                    // NOTE: TLAS mode - NO CPU vertex update during drag! (saves millions of calls)
-                                }
+                                // GPU INSTANCE UPDATE (TLAS + Raster)
+                                updateGizmoObjectTransformOnActiveBackends(ctx, targetName, th->base);
                                 // CPU mode handled on release
                             }
                         }
@@ -1607,8 +1799,13 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                 } // End of multi_selection loop
 
                 // Trigger accumulation reset after processing all objects
-                if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                    ctx.backend_ptr->resetAccumulation();
+                if (Backend::IViewportBackend* viewportBackend = getGizmoViewportBackend(ctx)) {
+                    viewportBackend->resetAccumulation();
+                }
+                if (Backend::IBackend* renderBackend = getGizmoRenderBackend(ctx)) {
+                    if (renderBackend->isUsingTLAS()) {
+                        renderBackend->resetAccumulation();
+                    }
                 }
 
                 sel.selected.has_cached_aabb = false;
@@ -1819,21 +2016,21 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                             // Apply full matrix from gizmo (supports translate, rotate, scale)
                             t_handle->setPivotMatrix(newMat);
 
-                            // TLAS INSTANCING UPDATE (Fast GPU Path)
-                            // Use the GPU path when the active backend supports TLAS
-                            bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
-                            if (using_gpu_tlas) {
-                                 // Use unified update method
-                                 ctx.backend_ptr->updateObjectTransform(targetName, t_handle->base);
-                            }
-                            else {
+                            // GPU INSTANCE UPDATE (TLAS + Raster)
+                            // updateObjectTransform handles both TLAS instances and raster instances,
+                            // so it works for Rendered mode (RT) AND Solid/Matcap mode (raster).
+                            updateGizmoObjectTransformOnActiveBackends(ctx, targetName, t_handle->base);
+
+                            if (!getGizmoRenderBackend(ctx) || !getGizmoRenderBackend(ctx)->isUsingTLAS()) {
                                 // CPU/GAS MODE: Update CPU vertices (required for BVH/picking)
+                                // Note: viewport backend (raster preview) may exist but does NOT
+                                // handle CPU raytracing — always update vertices for CPU path.
                                 for (auto& pair : it->second) {
                                     pair.second->updateTransformedVertices();
                                 }
-                                
+
                                 is_bvh_dirty = true;
-                                
+
                                 // Trigger Fast Refit during interaction (CPU Mode only)
                                 extern bool g_cpu_bvh_refit_pending;
                                 g_cpu_bvh_refit_pending = true;
@@ -1877,10 +2074,9 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
                                     processed_transforms.insert(th.get());
 
                                     // TLAS INSTANCING UPDATE (Fast Path for Multi-Select)
-                                    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                                        // Use unified update method
-                                        ctx.backend_ptr->updateObjectTransform(targetName, th->base);
-                                    } else {
+                                    // Always push to active backends (raster + render)
+                                    updateGizmoObjectTransformOnActiveBackends(ctx, targetName, th->base);
+                                    if (!getGizmoRenderBackend(ctx) || !getGizmoRenderBackend(ctx)->isUsingTLAS()) {
                                         // CPU Mode: MUST update vertices for BVH refit/rebuild to see changes
                                         tri->updateTransformedVertices();
                                     }
@@ -1892,13 +2088,16 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
 
                 sel.selected.has_cached_aabb = false;
 
-                // DEFERRED UPDATE: Mark dirty when NOT using GPU rendering
-                // Consider GPU rendering active when backend supports TLAS
-                bool using_gpu_render = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
-                if (!using_gpu_render) {
+                // DEFERRED UPDATE: Mark dirty when NOT using GPU ray-tracing backend
+                // Viewport backend (raster preview) does NOT count as GPU ray-tracing
+                bool using_gpu_raytracing =
+                    (getGizmoRenderBackend(ctx) && getGizmoRenderBackend(ctx)->isUsingTLAS());
+                if (!using_gpu_raytracing) {
                     is_bvh_dirty = true;
                     extern bool g_cpu_bvh_refit_pending;
                     g_cpu_bvh_refit_pending = true;
+                    // Reset CPU accumulation so the render loop re-enters
+                    ctx.renderer.resetCPUAccumulation();
                 }
             }
         }
@@ -1908,24 +2107,46 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // This check is at the END so is_bvh_dirty has been set above
     if (!is_using && was_using_gizmo && is_bvh_dirty) {
         // SCENE_LOG_INFO("[GIZMO] Released - Triggering deferred geometry update");
-        // Check actual render mode, not just pointer existence
-        bool using_gpu = ctx.backend_ptr && ctx.render_settings.use_optix;
-        
-        if (using_gpu && ctx.backend_ptr->isUsingTLAS()) {
-            // TLAS MODE: Commits all pending transform changes
-            // During drag, updateInstanceTransform() queues changes but doesn't rebuild TLAS.
-            // On release, we must rebuild TLAS to apply those transforms to GPU.
-            ctx.backend_ptr->rebuildAccelerationStructure();
-        } else if (using_gpu) {
+        Backend::IViewportBackend* viewportBackend = getGizmoViewportBackend(ctx);
+        Backend::IBackend* renderBackend = getGizmoRenderBackend(ctx);
+        const bool using_gpu = (viewportBackend != nullptr) || (renderBackend != nullptr);
+        const bool active_interactive_viewport_backend = (viewportBackend != nullptr);
+        const bool active_vulkan_render_backend =
+            (renderBackend && dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr);
+
+        // Handle viewport backend (raster preview) independently
+        if (active_interactive_viewport_backend) {
+            viewportBackend->resetAccumulation();
+        }
+
+        const bool render_backend_has_tlas = (renderBackend && renderBackend->isUsingTLAS());
+        if (render_backend_has_tlas) {
+            if (active_interactive_viewport_backend) {
+                // Solid viewport already received live transform updates.
+                if (active_vulkan_render_backend) {
+                    extern bool g_vulkan_rebuild_pending;
+                    g_vulkan_rebuild_pending = true;
+                } else if (renderBackend) {
+                    extern bool g_optix_rebuild_pending;
+                    g_optix_rebuild_pending = true;
+                }
+            } else {
+                // Rendered/OptiX TLAS mode: commit transform changes
+                ctx.backend_ptr->rebuildAccelerationStructure();
+                if (active_vulkan_render_backend) {
+                    extern bool g_vulkan_rebuild_pending;
+                    g_vulkan_rebuild_pending = true;
+                }
+            }
+        } else if (renderBackend) {
             // GAS MODE: Defer update to Main loop to avoid UI freeze
             extern bool g_gpu_refit_pending;
             g_gpu_refit_pending = true;
-            
-            // Only GAS mode needs CPU BVH rebuild because vertex positions change
+
             extern bool g_bvh_rebuild_pending;
             g_bvh_rebuild_pending = true;
         } else {
-            // No OptiX / CPU rendering: needs BVH rebuild
+            // CPU-only mode: trigger BVH rebuild
             extern bool g_bvh_rebuild_pending;
             g_bvh_rebuild_pending = true;
         }
@@ -1936,7 +2157,8 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // LAZY CPU SYNC: Mark objects for later sync instead of updating now
     // This makes gizmo release INSTANT - sync happens when user tries to pick something
     if (!is_using && was_using_gizmo) {
-        bool using_gpu_tlas = ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS();
+        bool using_gpu_tlas =
+            (getGizmoRenderBackend(ctx) && getGizmoRenderBackend(ctx)->isUsingTLAS());
         
         if (sel.multi_selection.size() > 0) {
             for (auto& item : sel.multi_selection) {
@@ -2250,6 +2472,11 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
 {
     if (ctx.selection.hasSelection() && ctx.selection.show_gizmo && ctx.scene.camera && viewport_settings.show_gizmos) {
         drawSelectionBoundingBox(ctx);
+        if (mesh_overlay_settings.enabled && mesh_workspace_mode == MeshWorkspaceMode::Edit) {
+            drawEditableMeshOverlay(ctx);
+        }
         drawTransformGizmo(ctx);
     }
 }
+
+// Overlay grid removed — use depth-tested raster grid in Vulkan backends instead.

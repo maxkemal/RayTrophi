@@ -2,6 +2,9 @@
 #include <globals.h>
 
 AABB surrounding_box(const AABB& box0, const AABB& box1) {
+    if (!box0.is_valid()) return box1;
+    if (!box1.is_valid()) return box0;
+
     // AABB'nin min ve max vektörlerini SIMD'e yükle
     __m128 box0_min = _mm_set_ps(0.0f, box0.min.z, box0.min.y, box0.min.x);
     __m128 box1_min = _mm_set_ps(0.0f, box1.min.z, box1.min.y, box1.min.x);

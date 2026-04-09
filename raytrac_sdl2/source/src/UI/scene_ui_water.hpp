@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -21,27 +21,195 @@
 
 #include "WaterSystem.h"
 #include "PrincipledBSDF.h"
+#include "ProjectManager.h"
+#include "Backend/IViewportBackend.h"
+#include "Backend/VulkanBackend.h"
+
+extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+extern bool g_viewport_raster_rebuild_pending;
+extern bool g_optix_rebuild_pending;
+extern bool g_vulkan_rebuild_pending;
+
+extern bool g_geometry_dirty;
+extern std::atomic<uint64_t> g_scene_geometry_generation;
+extern std::atomic<bool> g_needs_optix_sync;
+extern bool g_mesh_cache_dirty;
+
+namespace {
+bool BeginWaterSection(const char* title, const ImVec4& accent, bool defaultOpen = true) {
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(accent.x * 0.24f, accent.y * 0.24f, accent.z * 0.24f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accent.x * 0.32f, accent.y * 0.32f, accent.z * 0.32f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accent.x * 0.38f, accent.y * 0.38f, accent.z * 0.38f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.96f, 0.99f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    const bool open = ImGui::CollapsingHeader(
+        title,
+        (defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0) | ImGuiTreeNodeFlags_SpanAvailWidth);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
+    return open;
+}
+
+void EndWaterSection() {}
+
+Backend::IBackend* getWaterRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+bool waterRenderBackendIsVulkan(UIContext& ctx) {
+    return dynamic_cast<Backend::VulkanBackendAdapter*>(getWaterRenderBackend(ctx)) != nullptr;
+}
+
+void rebuildWaterSceneMutation(UIContext& ctx, bool updateMaterials) {
+    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+    ctx.renderer.resetCPUAccumulation();
+
+    if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
+        ctx.renderer.rebuildBackendGeometry(ctx.scene);
+        if (updateMaterials) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+        }
+        renderBackend->resetAccumulation();
+    }
+
+    if (g_viewport_backend) {
+        g_viewport_raster_rebuild_pending = true;
+        g_viewport_backend->resetAccumulation();
+    }
+    if (waterRenderBackendIsVulkan(ctx)) {
+        g_vulkan_rebuild_pending = true;
+    } else if (getWaterRenderBackend(ctx)) {
+        g_optix_rebuild_pending = true;
+    }
+    
+    // Force global scene geometry updates for Vulkan Raster backend when water is created/updated
+    // Variables are declared at the global scope above
+    
+    g_geometry_dirty = true;
+    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+    g_needs_optix_sync.store(true, std::memory_order_release);
+    g_mesh_cache_dirty = true;
+}
+}
+
+inline bool SceneUI::drawWaterSurfaceMaterialEditor(UIContext& ctx, WaterSurface& surf, bool allow_delete) {
+    bool changed = false;
+
+    const char* preset_names[] = {
+        "Custom (Manual Settings)",
+        "Calm Ocean",
+        "Stormy Ocean",
+        "Tropical Ocean (Crystal)",
+        "Lake (Still)",
+        "River (Flowing)",
+        "Pool (Very Calm)",
+        "Pond (Murky)"
+    };
+
+    int preset_idx = static_cast<int>(surf.params.current_preset);
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::Combo("Preset", &preset_idx, preset_names, IM_ARRAYSIZE(preset_names))) {
+        WaterWaveParams::WaterPreset new_preset = static_cast<WaterWaveParams::WaterPreset>(preset_idx);
+        if (new_preset != WaterWaveParams::WaterPreset::Custom) {
+            surf.params.applyPreset(new_preset);
+            changed = true;
+        } else {
+            surf.params.current_preset = WaterWaveParams::WaterPreset::Custom;
+        }
+    }
+
+    if (BeginWaterSection("Colors", ImVec4(0.0f, 0.8f, 0.8f, 1.0f))) {
+        changed |= ImGui::ColorEdit3("Shallow Color", &surf.params.shallow_color.x);
+        changed |= ImGui::ColorEdit3("Deep Color", &surf.params.deep_color.x);
+        changed |= ImGui::ColorEdit3("Absorption Tint", &surf.params.absorption_color.x);
+        EndWaterSection();
+    }
+
+    if (BeginWaterSection("Depth & Optics", ImVec4(0.0f, 0.2f, 0.6f, 1.0f), false)) {
+        changed |= SceneUI::DrawSmartFloat("shared_w_ior", "IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_rgh", "Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_clr", "Clarity", &surf.params.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_dmax", "Max Depth", &surf.params.depth_max, 1.0f, 100.0f, "%.1f m", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_absd", "Absorption Density", &surf.params.absorption_density, 0.0f, 2.0f, "%.2f", false, nullptr, 16);
+        EndWaterSection();
+    }
+
+    if (BeginWaterSection("Foam", ImVec4(0.9f, 0.9f, 0.9f, 1.0f), false)) {
+        changed |= SceneUI::DrawSmartFloat("shared_w_wf", "Wave Foam", &surf.params.foam_level, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_fi", "Shore Intensity", &surf.params.shore_foam_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_fd", "Shore Distance", &surf.params.shore_foam_distance, 0.1f, 10.0f, "%.1f m", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_fns", "Foam Noise Scale", &surf.params.foam_noise_scale, 1.0f, 50.0f, "%.1f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_fth", "Foam Threshold", &surf.params.foam_threshold, 0.0f, 1.0f, "%.2f", false, nullptr, 16);
+        EndWaterSection();
+    }
+
+    if (BeginWaterSection("Surface Detail", ImVec4(1.0f, 0.6f, 0.0f, 1.0f), false)) {
+        changed |= SceneUI::DrawSmartFloat("shared_w_mds", "Micro Detail Strength", &surf.params.micro_detail_strength, 0.0f, 0.2f, "%.3f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_msc", "Micro Detail Scale", &surf.params.micro_detail_scale, 1.0f, 100.0f, "%.1f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_mas", "Micro Anim Speed", &surf.params.micro_anim_speed, 0.01f, 1.0f, "%.3f", false, nullptr, 16);
+        changed |= SceneUI::DrawSmartFloat("shared_w_mms", "Micro Morph Speed", &surf.params.micro_morph_speed, 0.1f, 5.0f, "%.2f", false, nullptr, 16);
+        EndWaterSection();
+    }
+
+    if (changed) {
+        surf.params.current_preset = WaterWaveParams::WaterPreset::Custom;
+        WaterManager::getInstance().syncSurfaceMaterial(&surf);
+        ctx.renderer.resetCPUAccumulation();
+        if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            renderBackend->resetAccumulation();
+        }
+        if (g_viewport_backend && g_viewport_backend.get() != getWaterRenderBackend(ctx)) {
+            g_viewport_backend->resetAccumulation();
+        }
+        ProjectManager::getInstance().markModified();
+    }
+
+    if (allow_delete) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (UIWidgets::DangerButton("Delete Water Surface", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            WaterManager::getInstance().removeWaterSurface(ctx.scene, surf.id);
+            rebuildWaterSceneMutation(ctx, true);
+            ProjectManager::getInstance().markModified();
+            return true;
+        }
+    }
+
+    return false;
+}
 
 void SceneUI::drawWaterPanel(UIContext& ctx) {
     ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "WATER SYSTEM");
     ImGui::Separator();
     
     // Create new water
-    if (ImGui::Button("Add Water Plane", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
-        // Default spawn at origin or focus point
-        Vec3 spawn_pos = ctx.scene.camera ? 
-            (ctx.scene.camera->lookfrom + (ctx.scene.camera->w * -10.0f)) : Vec3(0,0,0);
-        
-        spawn_pos.y = 0; // Keep flat
-        
-        WaterManager::getInstance().createWaterPlane(ctx.scene, spawn_pos, 20.0f, 4.0f); // Size 20, density 4
-        
-        // Rebuild BVH after adding geometry
-        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-        ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr) {
-            ctx.renderer.rebuildBackendGeometry(ctx.scene);
-        }
+    static float new_water_size = 20.0f;
+    static int new_water_density_idx = 2;
+    const float water_density_values[] = { 1.5f, 3.0f, 5.0f, 8.0f, 12.0f };
+    const char* water_density_labels[] = { "Low", "Medium", "High", "Very High", "Ultra" };
+
+    SceneUI::DrawSmartFloat("new_water_size", "Plane Size", &new_water_size, 2.0f, 500.0f, "%.1f m", false, nullptr, 16);
+    ImGui::SetItemTooltip("Initial world size of the generated water plane");
+    ImGui::Combo("Mesh Quality", &new_water_density_idx, water_density_labels, IM_ARRAYSIZE(water_density_labels));
+    ImGui::SetItemTooltip("Initial triangle density for the generated plane. Higher values reduce faceting on large geometric waves but cost more.");
+
+    if (UIWidgets::PrimaryButton("Add Water Plane", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+        // Create centered on world origin so the generated plane is truly centered in scene space.
+        Vec3 spawn_pos(0, 0, 0);
+
+        int density_idx = std::clamp(new_water_density_idx, 0, (int)IM_ARRAYSIZE(water_density_values) - 1);
+        WaterManager::getInstance().createWaterPlane(ctx.scene, spawn_pos, new_water_size, water_density_values[density_idx]);
+
+        rebuildWaterSceneMutation(ctx, false);
         SCENE_LOG_INFO("[Water] Created new water plane");
     }
     
@@ -54,17 +222,13 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
     if (waters.empty()) {
         ImGui::TextDisabled("No water surfaces in scene.");
     } else {
-        static int selected_water_idx = -1;
-        
         ImGui::Text("Active Water Surfaces (%zu):", waters.size());
         
         if (ImGui::BeginListBox("##waterlist", ImVec2(-1, 80))) {
             for (int i = 0; i < waters.size(); i++) {
-                // Show all water types, including rivers (since River panel delegates material editing here)
-                
-                bool is_selected = (selected_water_idx == i);
+                bool is_selected = (selected_water_surface_id == waters[i].id);
                 if (ImGui::Selectable(waters[i].name.c_str(), is_selected)) {
-                    selected_water_idx = i;
+                    selected_water_surface_id = waters[i].id;
                 }
                 if (is_selected) {
                     ImGui::SetItemDefaultFocus();
@@ -72,116 +236,47 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
             }
             ImGui::EndListBox();
         }
+
+        const char* preview_mode_names[] = {
+            "Realtime Preview",
+            "Timeline Preview",
+            "Static Preview"
+        };
+        int preview_mode = static_cast<int>(WaterManager::getInstance().getPreviewTimeMode());
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("Water Preview Mode", &preview_mode, preview_mode_names, IM_ARRAYSIZE(preview_mode_names))) {
+            WaterManager::getInstance().setPreviewTimeMode(static_cast<WaterPreviewTimeMode>(preview_mode));
+            ctx.renderer.resetCPUAccumulation();
+            if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
+                renderBackend->resetAccumulation();
+            }
+            if (g_viewport_backend && g_viewport_backend.get() != getWaterRenderBackend(ctx)) {
+                g_viewport_backend->resetAccumulation();
+            }
+        }
+        ImGui::SetItemTooltip("Realtime animates continuously. Timeline follows the current playback frame. Static freezes water at the current preview moment.");
         
         // Edit selected water
-        if (selected_water_idx >= 0 && selected_water_idx < waters.size()) {
-            WaterSurface& surf = waters[selected_water_idx];
-            bool changed = false;
-            
+        WaterSurface* selected_surface = WaterManager::getInstance().getWaterSurface(selected_water_surface_id);
+        if (!selected_surface && !waters.empty()) {
+            selected_water_surface_id = waters.front().id;
+            selected_surface = WaterManager::getInstance().getWaterSurface(selected_water_surface_id);
+        }
+
+        if (selected_surface) {
+            WaterSurface& surf = *selected_surface;
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "Edit: %s", surf.name.c_str());
-            
-            // ═══════════════════════════════════════════════════════════════════════════
-            // WATER PRESETS DROPDOWN
-            // ═══════════════════════════════════════════════════════════════════════════
-            ImGui::Spacing();
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.95f, 0.4f, 1.0f));
-            ImGui::Text("Quick Presets");
-            ImGui::PopStyleColor();
-            
-            const char* preset_names[] = {
-                "Custom (Manual Settings)",
-                "Calm Ocean",
-                "Stormy Ocean",
-                "Tropical Ocean (Crystal)",
-                "Lake (Still)",
-                "River (Flowing)",
-                "Pool (Very Calm)",
-                "Pond (Murky)"
-            };
-            
-            int preset_idx = static_cast<int>(surf.params.current_preset);
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::Combo("##waterpreset", &preset_idx, preset_names, IM_ARRAYSIZE(preset_names))) {
-                WaterWaveParams::WaterPreset new_preset = static_cast<WaterWaveParams::WaterPreset>(preset_idx);
-                if (new_preset != WaterWaveParams::WaterPreset::Custom) {
-                    surf.params.applyPreset(new_preset);
-                    changed = true;
-                    SCENE_LOG_INFO("[Water] Applied preset: %s", preset_names[preset_idx]);
-                } else {
-                    surf.params.current_preset = WaterWaveParams::WaterPreset::Custom;
-                }
+            if (drawWaterSurfaceMaterialEditor(ctx, surf, true)) {
+                selected_water_surface_id = -1;
+                return;
             }
-            ImGui::SetItemTooltip("Quick setup for common water types.\nSelect a preset to auto-configure all parameters.");
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            
-            // === SIMPLE WAVES (Legacy - Only when FFT is disabled) ===
-            // This section is hidden when FFT Ocean is enabled because FFT provides
-            // film-quality waves that replace these simple procedural waves.
-            if (!surf.params.use_fft_ocean) {
-                if (UIWidgets::BeginSection("Simple Waves (Fallback)", ImVec4(0.5f, 0.5f, 0.5f, 1.0f), false)) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Legacy Mode - Use FFT Ocean for better quality");
-                    if (SceneUI::DrawSmartFloat("w_wspd", "Speed", &surf.params.wave_speed, 0.0f, 10.0f, "%.2f", false, nullptr, 16)) changed = true;
-                    if (SceneUI::DrawSmartFloat("w_whgt", "Height", &surf.params.wave_strength, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) changed = true;
-                    if (SceneUI::DrawSmartFloat("w_wfrq", "Frequency", &surf.params.wave_frequency, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
-                    UIWidgets::EndSection();
-                }
-            }
-            
-            // === COLORS ===
-            if (UIWidgets::BeginSection("Colors", ImVec4(0.0f, 0.8f, 0.8f, 1.0f))) {
-                changed |= ImGui::ColorEdit3("Shallow Color", &surf.params.shallow_color.x);
-                changed |= ImGui::ColorEdit3("Deep Color", &surf.params.deep_color.x);
-                UIWidgets::EndSection();
-            }
-            
-            // === DEPTH & ABSORPTION ===
-            if (UIWidgets::BeginSection("Depth & Absorption", ImVec4(0.0f, 0.2f, 0.6f, 1.0f), false)) {
-                if (SceneUI::DrawSmartFloat("w_dmax", "Max Depth", &surf.params.depth_max, 1.0f, 100.0f, "%.1f m", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Distance at which water reaches full deep color");
-                
-                changed |= ImGui::ColorEdit3("Absorption Tint", &surf.params.absorption_color.x);
-                ImGui::SetItemTooltip("What colors are absorbed by the water");
-                
-                if (SceneUI::DrawSmartFloat("w_absd", "Absorption Density", &surf.params.absorption_density, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("How quickly light is absorbed (murkiness)");
-                UIWidgets::EndSection();
-            }
-            
-            // === FOAM ===
-            if (UIWidgets::BeginSection("Foam", ImVec4(0.9f, 0.9f, 0.9f, 1.0f), false)) {
-                if (SceneUI::DrawSmartFloat("w_wf", "Wave Foam", &surf.params.foam_level, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Foam on wave crests");
-                
-                ImGui::Separator();
-                ImGui::TextDisabled("Shore Foam");
-                if (SceneUI::DrawSmartFloat("w_fi", "Intensity", &surf.params.shore_foam_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                if (SceneUI::DrawSmartFloat("w_fd", "Distance", &surf.params.shore_foam_distance, 0.1f, 10.0f, "%.1f m", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("How far from shore foam appears");
-                UIWidgets::EndSection();
-            }
-            
-            // === CAUSTICS ===
-            if (UIWidgets::BeginSection("Caustics", ImVec4(0.4f, 1.0f, 1.0f, 1.0f), false)) {
-                if (SceneUI::DrawSmartFloat("w_ci", "Intensity", &surf.params.caustic_intensity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                if (SceneUI::DrawSmartFloat("w_cs", "Scale", &surf.params.caustic_scale, 0.1f, 10.0f, "%.2f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Size of caustic patterns");
-                if (SceneUI::DrawSmartFloat("w_csp", "Speed", &surf.params.caustic_speed, 0.1f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
-                UIWidgets::EndSection();
-            }
-            
-            // === SSS ===
-            if (UIWidgets::BeginSection("Scattering (SSS)", ImVec4(1.0f, 0.8f, 0.6f, 1.0f), false)) {
-                if (SceneUI::DrawSmartFloat("w_sssi", "SSS Intensity", &surf.params.sss_intensity, 0.0f, 0.5f, "%.3f", false, nullptr, 16)) changed = true;
-                ImGui::SetItemTooltip("Sub-surface light scattering at edges");
-                changed |= ImGui::ColorEdit3("SSS Color", &surf.params.sss_color.x);
-                UIWidgets::EndSection();
-            }
-            
+            bool changed = false;
+            bool geom_changed = false;     // wave shape params → mesh rebuild required
+            bool fft_geom_changed = false; // FFT mesh params → FFT mesh rebuild required
+
             // === FFT OCEAN (TESSENDORF) ===
-            if (UIWidgets::BeginSection("FFT Ocean (Film Quality)", ImVec4(1.0f, 0.8f, 0.0f, 1.0f))) {
+            if (BeginWaterSection("FFT Ocean (Film Quality)", ImVec4(1.0f, 0.8f, 0.0f, 1.0f))) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.5f, 1.0f));
                 ImGui::Text("Tessendorf Algorithm");
                 ImGui::PopStyleColor();
@@ -323,8 +418,15 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         toggleFFTKeyframe(false, false, false, false, false, true);
                     }
                     ImGui::SameLine();
+                    ImGui::BeginDisabled(surf.params.auto_domain_from_mesh);
                     if (SceneUI::DrawSmartFloat("fft_sz", "Ocean Size", &surf.params.fft_ocean_size, 10.0f, 10000.0f, "%.0f m", false, nullptr, 16)) changed = true;
+                    ImGui::EndDisabled();
                     ImGui::SetItemTooltip("World space covered by one tile (tiles infinitely)");
+                    if (ImGui::Checkbox("Auto Domain From Mesh", &surf.params.auto_domain_from_mesh)) changed = true;
+                    ImGui::SetItemTooltip("Use the water surface world extent as the shared wave domain for FFT, geometric waves and noise.");
+                    if (SceneUI::DrawSmartFloat("dom_mul", "Domain Multiplier", &surf.params.domain_size_multiplier, 0.1f, 20.0f, "%.2fx", false, nullptr, 16)) changed = true;
+                    ImGui::SetItemTooltip("Scales the shared domain size after mesh/world-scale adaptation.");
+                    ImGui::Text("Resolved Domain: %.2f m", WaterManager::getInstance().resolveWaveDomainSize(&surf));
                     
                     ImGui::Separator();
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), "Wind Settings (Animatable):");
@@ -373,8 +475,11 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         toggleFFTKeyframe(false, false, false, false, true, false);
                     }
                     ImGui::SameLine();
-                    if (SceneUI::DrawSmartFloat("fft_ts", "Animation Speed", &surf.params.fft_time_scale, 0.0f, 20.0f, "%.2f", false, nullptr, 16)) changed = true;
-                    ImGui::SetItemTooltip("Speed of wave animation [Keyframeable]");
+                    if (SceneUI::DrawSmartFloat("fft_ts", "Animation Speed", &surf.params.fft_time_scale, 0.0f, 20.0f, "%.2f", false, nullptr, 16)) {
+                        surf.params.geo_wave_speed = surf.params.fft_time_scale;
+                        changed = true;
+                    }
+                    ImGui::SetItemTooltip("Master water animation speed for FFT and geometric waves. [Keyframeable]");
                     
                     // ═══════════════════════════════════════════════════════════════════════
                     // FFT MESH DISPLACEMENT (Best Quality - Physical Mesh from FFT Data)
@@ -388,6 +493,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                     bool fft_mesh_changed = ImGui::Checkbox("Enable FFT Mesh Displacement", &surf.params.use_fft_mesh_displacement);
                     if (fft_mesh_changed) {
                         changed = true;
+                        fft_geom_changed = true;
                         if (surf.params.use_fft_mesh_displacement) {
                             // Auto-enable mesh animation
                             surf.animate_mesh = true;
@@ -404,13 +510,11 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         ImGui::Indent();
                         
                         // Height Scale - Amplifies FFT output (raw FFT values are small)
-                        bool height_changed = SceneUI::DrawSmartFloat("fft_mhs", "Height Scale", &surf.params.fft_mesh_height_scale, 1.0f, 200.0f, "%.1f", false, nullptr, 16);
-                        if (height_changed) changed = true;
+                        if (SceneUI::DrawSmartFloat("fft_mhs", "Height Scale", &surf.params.fft_mesh_height_scale, 1.0f, 200.0f, "%.1f", false, nullptr, 16)) fft_geom_changed = true;
                         ImGui::SetItemTooltip("Amplifies FFT wave height.\nTypical: 20-50 calm, 50-100 stormy.\n(FFT produces normalized values that need scaling)");
-                        
-                        // Choppiness - Horizontal displacement 
-                        bool chop_changed = SceneUI::DrawSmartFloat("fft_mch", "Choppiness", &surf.params.fft_mesh_choppiness, 0.0f, 5.0f, "%.2f", false, nullptr, 16);
-                        if (chop_changed) changed = true;
+
+                        // Choppiness - Horizontal displacement
+                        if (SceneUI::DrawSmartFloat("fft_mch", "Choppiness", &surf.params.fft_mesh_choppiness, 0.0f, 5.0f, "%.2f", false, nullptr, 16)) fft_geom_changed = true;
                         ImGui::SetItemTooltip("Horizontal displacement for sharper wave peaks.\n0 = smooth swells, 1-2 = realistic ocean, 2+ = very choppy.");
                         
                         ImGui::Unindent();
@@ -427,21 +531,22 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 } else {
                     ImGui::TextDisabled("Enable to use film-quality FFT ocean");
                 }
-                UIWidgets::EndSection();
+                EndWaterSection();
             }
             
             // === PHYSICS ===
-            if (UIWidgets::BeginSection("Physics", ImVec4(0.2f, 1.0f, 0.2f, 1.0f), false)) {
+            if (BeginWaterSection("Physics", ImVec4(0.2f, 1.0f, 0.2f, 1.0f), false)) {
                 if (SceneUI::DrawSmartFloat("w_ior", "IOR", &surf.params.ior, 1.0f, 2.0f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Index of Refraction (Water = 1.333)");
                 if (SceneUI::DrawSmartFloat("w_rgh", "Roughness", &surf.params.roughness, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Surface micro-roughness");
                 if (SceneUI::DrawSmartFloat("w_clr", "Clarity", &surf.params.clarity, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                UIWidgets::EndSection();
+                ImGui::SetItemTooltip("Legacy control. Current water shading derives perceived clarity from Absorption Density rather than this standalone value.");
+                EndWaterSection();
             }
             
             // === SURFACE DETAIL ===
-            if (UIWidgets::BeginSection("Surface Detail (Realism)", ImVec4(1.0f, 0.6f, 0.0f, 1.0f))) {
+            if (BeginWaterSection("Surface Detail (Realism)", ImVec4(1.0f, 0.6f, 0.0f, 1.0f))) {
                 if (SceneUI::DrawSmartFloat("w_mds", "Micro Detail Strength", &surf.params.micro_detail_strength, 0.0f, 0.2f, "%.3f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Adds high-frequency noise/ripples to break up the smooth surface");
                 if (SceneUI::DrawSmartFloat("w_msc", "Micro Detail Scale", &surf.params.micro_detail_scale, 1.0f, 100.0f, "%.1f", false, nullptr, 16)) changed = true;
@@ -458,20 +563,20 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 if (SceneUI::DrawSmartFloat("w_fns", "Foam Noise Scale", &surf.params.foam_noise_scale, 1.0f, 50.0f, "%.1f", false, nullptr, 16)) changed = true;
                 ImGui::SetItemTooltip("Scale of noise used to break up foam");
                 if (SceneUI::DrawSmartFloat("w_fth", "Foam Threshold", &surf.params.foam_threshold, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
-                UIWidgets::EndSection();
+                EndWaterSection();
             }
             
             // === GEOMETRIC WAVES (Physical Mesh Displacement) ===
             // NOTE: This is a legacy/alternative to FFT Mesh Displacement
             // When FFT Mesh Displacement is enabled, this section is disabled
             if (surf.params.use_fft_mesh_displacement) {
-                if (UIWidgets::BeginSection("Geometric Waves (Disabled)", ImVec4(0.4f, 0.4f, 0.4f, 1.0f), false)) {
+                if (BeginWaterSection("Geometric Waves (Disabled)", ImVec4(0.4f, 0.4f, 0.4f, 1.0f), false)) {
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), 
                         "FFT Mesh Displacement is active - provides better quality.");
                     ImGui::TextDisabled("Disable FFT Mesh Displacement above to use this.");
-                    UIWidgets::EndSection();
+                    EndWaterSection();
                 }
-            } else if (UIWidgets::BeginSection("Geometric Waves (CPU Mesh)", ImVec4(0.6f, 0.9f, 0.4f, 1.0f))) {
+            } else if (BeginWaterSection("Geometric Waves (CPU Mesh)", ImVec4(0.6f, 0.9f, 0.4f, 1.0f))) {
                 ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 1.0f, 0.6f, 1.0f));
                 ImGui::Text("Physical Mesh Displacement");
                 ImGui::PopStyleColor();
@@ -484,7 +589,13 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 }
                 
                 bool geo_changed = ImGui::Checkbox("Enable Geometric Waves", &surf.params.use_geometric_waves);
-                if (geo_changed) changed = true;
+                if (geo_changed) {
+                    changed = true;
+                    geom_changed = true;
+                    if (surf.params.use_geometric_waves) {
+                        surf.animate_mesh = true;
+                    }
+                }
                 
                 if (surf.params.use_geometric_waves) {
                     ImGui::Indent();
@@ -580,7 +691,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                     int noise_idx = static_cast<int>(surf.params.geo_noise_type);
                     if (ImGui::Combo("Noise Type", &noise_idx, noise_items, IM_ARRAYSIZE(noise_items))) {
                         surf.params.geo_noise_type = static_cast<WaterWaveParams::NoiseType>(noise_idx);
-                        changed = true;
+                        geom_changed = true;
                     }
                     ImGui::SetItemTooltip("Algorithm used for wave generation");
                     
@@ -592,89 +703,96 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         toggleGeoKeyframe(true, false, false, false);
                     }
                     ImGui::SameLine();
-                    if (SceneUI::DrawSmartFloat("geo_wh", "Wave Height", &surf.params.geo_wave_height, 0.0f, 20.0f, "%.2f m", false, nullptr, 16)) changed = true;
+                    if (SceneUI::DrawSmartFloat("geo_wh", "Wave Height", &surf.params.geo_wave_height, 0.0f, 20.0f, "%.2f m", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Maximum vertical displacement amplitude");
-                    
+
                     // Wave Scale (animatable)
                     if (GeoKeyframeButton("kf_geo_ws", isGeoPropertyKeyed(false, true, false, false))) {
                         toggleGeoKeyframe(false, true, false, false);
                     }
                     ImGui::SameLine();
-                    if (SceneUI::DrawSmartFloat("geo_ws", "Wave Scale", &surf.params.geo_wave_scale, 1.0f, 500.0f, "%.1f", false, nullptr, 16)) changed = true;
-                    ImGui::SetItemTooltip("Global scale of wave patterns (larger = broader waves)");
-                    
+                    if (SceneUI::DrawSmartFloat("geo_ws", "Wave Scale", &surf.params.geo_wave_scale, 0.5f, 500.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
+                    ImGui::SetItemTooltip("Wavelength in world units.\nShould be smaller than mesh size for visible waves.\nTypical: 2-10 for a 20-unit plane, 20-50 for large ocean tiles.");
+
                     // Choppiness (animatable)
                     if (GeoKeyframeButton("kf_geo_wc", isGeoPropertyKeyed(false, false, true, false))) {
                         toggleGeoKeyframe(false, false, true, false);
                     }
                     ImGui::SameLine();
-                    if (SceneUI::DrawSmartFloat("geo_wc", "Choppiness", &surf.params.geo_wave_choppiness, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) changed = true;
+                    if (SceneUI::DrawSmartFloat("geo_wc", "Choppiness", &surf.params.geo_wave_choppiness, 0.0f, 3.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Sharpness of wave peaks (Ridge offset)");
-                    
-                    // Animation Speed (animatable)
+
+                    // Animation Speed — only affects playback rate, no mesh/accumulation reset
                     if (GeoKeyframeButton("kf_geo_sp", isGeoPropertyKeyed(false, false, false, true))) {
                         toggleGeoKeyframe(false, false, false, true);
                     }
                     ImGui::SameLine();
-                    if (SceneUI::DrawSmartFloat("geo_sp", "Animation Speed", &surf.params.geo_wave_speed, 0.0f, 5.0f, "%.2f", false, nullptr, 16)) changed = true;
-                    ImGui::SetItemTooltip("Speed of wave animation (phase shift rate)");
-                    
+                    if (SceneUI::DrawSmartFloat("geo_sp", "Animation Speed", &surf.params.geo_wave_speed, 0.0f, 5.0f, "%.2f", false, nullptr, 16)) {
+                        surf.params.fft_time_scale = surf.params.geo_wave_speed;
+                        changed = true;
+                    }
+                    ImGui::SetItemTooltip("Legacy alias of the master water animation speed. Keeps geometric waves in sync with FFT/timeline playback.");
+
                     ImGui::Separator();
                     ImGui::TextDisabled("Noise Detail (Fractal)");
-                    
-                    if (ImGui::SliderInt("Octaves", &surf.params.geo_octaves, 1, 8)) changed = true;
+
+                    if (ImGui::SliderInt("Octaves", &surf.params.geo_octaves, 1, 8)) geom_changed = true;
                     ImGui::SetItemTooltip("Number of noise layers (more = finer detail)");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_ps", "Persistence", &surf.params.geo_persistence, 0.1f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_ps", "Persistence", &surf.params.geo_persistence, 0.1f, 1.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("How much each octave contributes (amplitude decay)");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_lc", "Lacunarity", &surf.params.geo_lacunarity, 1.0f, 4.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_lc", "Lacunarity", &surf.params.geo_lacunarity, 1.0f, 4.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Frequency multiplier between octaves");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_ro", "Ridge Offset", &surf.params.geo_ridge_offset, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_ro", "Ridge Offset", &surf.params.geo_ridge_offset, 0.0f, 2.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Offset for ridge noise (affects wave peak sharpness)");
-                    
+
                     ImGui::Separator();
                     ImGui::TextDisabled("Ocean Simulation");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_dp", "Ocean Depth", &surf.params.geo_depth, 1.0f, 1000.0f, "%.0f m", false, nullptr, 16)) changed = true;
+
+                    // geo_depth is currently unused in wave computation — no rebuild needed
+                    SceneUI::DrawSmartFloat("geo_dp", "Ocean Depth", &surf.params.geo_depth, 1.0f, 1000.0f, "%.0f m", false, nullptr, 16);
                     ImGui::SetItemTooltip("Ocean depth - affects shallow water wave behavior");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_dm", "Damping", &surf.params.geo_damping, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_dm", "Damping", &surf.params.geo_damping, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Damping for wind-perpendicular waves");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_al", "Alignment", &surf.params.geo_alignment, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_al", "Alignment", &surf.params.geo_alignment, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Wave alignment to wind direction (0=omni, 1=aligned)");
-                    
+
                     float swell_deg = surf.params.geo_swell_direction;
                     if (SceneUI::DrawSmartFloat("geo_sd", "Swell Direction", &swell_deg, 0.0f, 360.0f, "%.0f deg", false, nullptr, 16)) {
                         surf.params.geo_swell_direction = swell_deg;
-                        changed = true;
+                        geom_changed = true;
                     }
                     ImGui::SetItemTooltip("Direction offset for long-distance swell waves");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_sa", "Swell Amplitude", &surf.params.geo_swell_amplitude, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_sa", "Swell Amplitude", &surf.params.geo_swell_amplitude, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Contribution of swell (long-distance) waves");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_sh", "Sharpening", &surf.params.geo_sharpening, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_sh", "Sharpening", &surf.params.geo_sharpening, 0.0f, 1.0f, "%.2f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Post-process peak sharpening (0=smooth, 1=peaked)");
-                    
+
                     ImGui::Separator();
                     ImGui::TextDisabled("Secondary Detail");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_ds", "Detail Scale", &surf.params.geo_detail_scale, 1.0f, 10.0f, "%.1f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_ds", "Detail Scale", &surf.params.geo_detail_scale, 1.0f, 10.0f, "%.1f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Scale multiplier for secondary detail noise");
-                    
-                    if (SceneUI::DrawSmartFloat("geo_dt", "Detail Strength", &surf.params.geo_detail_strength, 0.0f, 0.5f, "%.3f", false, nullptr, 16)) changed = true;
+
+                    if (SceneUI::DrawSmartFloat("geo_dt", "Detail Strength", &surf.params.geo_detail_strength, 0.0f, 0.5f, "%.3f", false, nullptr, 16)) geom_changed = true;
                     ImGui::SetItemTooltip("Strength of secondary small-scale detail");
-                    
-                    changed |= ImGui::Checkbox("Smooth Normals", &surf.params.geo_smooth_normals);
+
+                    if (ImGui::Checkbox("Smooth Normals", &surf.params.geo_smooth_normals)) geom_changed = true;
                     ImGui::SetItemTooltip("Average vertex normals for smooth shading");
-                    
+
                     ImGui::Separator();
                     ImGui::TextDisabled("Animation");
-                    
-                    changed |= ImGui::Checkbox("Animate Mesh", &surf.animate_mesh);
+
+                    // Animate Mesh toggle — no immediate mesh/accumulation change needed
+                    if (ImGui::Checkbox("Animate Mesh", &surf.animate_mesh)) {
+                        geom_changed = true;
+                    }
                     ImGui::SetItemTooltip("Enable real-time mesh animation for geometric waves");
                     
                     if (surf.animate_mesh) {
@@ -685,7 +803,7 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                         }
                         
                         if (ImGui::Checkbox("Use GPU Acceleration", &surf.use_gpu_animation)) {
-                            changed = true;
+                            geom_changed = true;
                         }
                         
                         if (!g_hasCUDA) {
@@ -703,22 +821,18 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                     
                     ImGui::Unindent();
                     
-                    // If geometric waves enabled/changed, rebuild mesh
-                    if (geo_changed || changed) {
+                    // Rebuild mesh ONLY when wave shape parameters actually changed
+                    if (geom_changed) {
+                        WaterManager::getInstance().invalidateGeometricAnimationState(&surf);
                         WaterManager::getInstance().updateWaterMesh(&surf);
                         WaterManager::getInstance().cacheOriginalPositions(&surf);
-                        
-                        // Rebuild BVH after mesh change
-                        ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                        ctx.renderer.resetCPUAccumulation();
-                        if (ctx.backend_ptr) {
-                            ctx.renderer.rebuildBackendGeometry(ctx.scene);
-                        }
+
+                        rebuildWaterSceneMutation(ctx, false);
                     }
                 } else {
                     ImGui::TextDisabled("Enable to use physical mesh displacement");
                 }
-                UIWidgets::EndSection();
+                EndWaterSection();
             }
             
             // === APPLY CHANGES ===
@@ -726,95 +840,13 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 // Update material with new parameters
                 auto mat = MaterialManager::getInstance().getMaterialShared(surf.material_id);
                 if (mat) {
-                    auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(mat);
-                    if (pbsdf) {
-                        // Sync CPU Fields - disable simple wave params when FFT is active
-                        pbsdf->anisotropic = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
-                        pbsdf->sheen = fmaxf(0.001f, surf.params.wave_strength);  // IS_WATER flag always needed
-                        pbsdf->sheen_tint = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
-                        pbsdf->transmission = surf.params.ior > 1.01f ? 1.0f : 0.0f; // Enable transmission for water
-                        pbsdf->translucent = surf.params.foam_level;
-                        pbsdf->clearcoat = surf.params.shore_foam_intensity;
-                        pbsdf->clearcoatRoughness = surf.params.caustic_intensity;
-                        pbsdf->subsurface = surf.params.depth_max / 100.0f;
-                        pbsdf->subsurfaceScale = surf.params.absorption_density;
-                        pbsdf->subsurfaceColor = surf.params.absorption_color;
-                        pbsdf->roughness = surf.params.roughness;
-                        pbsdf->ior = surf.params.ior;
-                        // Synchronize deep_color and shallow_color with PrincipledBSDF properties
-                        pbsdf->albedoProperty.color = surf.params.deep_color;
-                        pbsdf->emissionProperty.color = surf.params.shallow_color;
-                        pbsdf->emissionProperty.intensity = 1.0f;
-                    }
-
-                    if (mat->gpuMaterial) {
-                        auto& gpu = mat->gpuMaterial;
-                        
-                        // Wave params - disable simple waves when FFT is active
-                        gpu->anisotropic = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_speed;
-                        gpu->sheen = fmaxf(0.001f, surf.params.wave_strength);  // IS_WATER flag always needed
-                        gpu->sheen_tint = surf.params.use_fft_ocean ? 0.0f : surf.params.wave_frequency;
-                        
-                        // Colors
-                        gpu->albedo = make_float3(surf.params.deep_color.x, surf.params.deep_color.y, surf.params.deep_color.z);
-                        gpu->emission = make_float3(surf.params.shallow_color.x, surf.params.shallow_color.y, surf.params.shallow_color.z);
-                        
-                        // Depth & Absorption
-                        gpu->subsurface = surf.params.depth_max / 100.0f;
-                        gpu->subsurface_scale = surf.params.absorption_density;
-                        gpu->subsurface_color = make_float3(surf.params.absorption_color.x, surf.params.absorption_color.y, surf.params.absorption_color.z);
-                        
-                        // Foam
-                        gpu->translucent = surf.params.foam_level;
-                        gpu->clearcoat = surf.params.shore_foam_intensity;
-                        gpu->subsurface_radius.x = surf.params.shore_foam_distance;
-                        
-                        // Caustics
-                        gpu->clearcoat_roughness = surf.params.caustic_intensity;
-                        gpu->subsurface_radius.y = surf.params.caustic_scale;
-                        gpu->subsurface_anisotropy = surf.params.caustic_speed;
-                        
-                        // SSS
-                        gpu->subsurface_radius.z = surf.params.sss_intensity;
-                        
-                        // Physics
-                        gpu->ior = surf.params.ior;
-                        gpu->roughness = surf.params.roughness;
-                        
-                        // Details (New)
-                        gpu->micro_detail_strength = surf.params.micro_detail_strength;
-                        gpu->micro_detail_scale = surf.params.micro_detail_scale;
-                        gpu->micro_anim_speed = surf.params.micro_anim_speed;
-                        gpu->micro_morph_speed = surf.params.micro_morph_speed;
-                        gpu->foam_noise_scale = surf.params.foam_noise_scale;
-                        gpu->foam_threshold = surf.params.foam_threshold;
-                        
-                        // FFT (Sync all parameters)
-                        gpu->fft_ocean_size = surf.params.fft_ocean_size;
-                        gpu->fft_choppiness = surf.params.fft_choppiness;
-                        gpu->fft_wind_speed = surf.params.fft_wind_speed;
-                        gpu->fft_wind_direction = surf.params.fft_wind_direction;
-                        gpu->fft_amplitude = surf.params.fft_amplitude;
-                        gpu->fft_time_scale = surf.params.fft_time_scale;
-                    }
+                    WaterManager::getInstance().syncSurfaceMaterial(&surf);
                 }
                 
-                // CRITICAL: Force FFT Ocean update when parameters change
-                // This regenerates the spectrum with new wind/amplitude settings
-                if (surf.params.use_fft_ocean) {
-                    WaterManager::getInstance().update(0.0f);
-                }
-                
-                // FFT Mesh Displacement - Update mesh and rebuild BVH when params change
-                if (surf.params.use_fft_mesh_displacement && surf.params.use_fft_ocean) {
-                    // Force mesh update with new height/choppiness values
+                // FFT Mesh Displacement - Only rebuild BVH when FFT mesh geometry params changed
+                if (fft_geom_changed && surf.params.use_fft_mesh_displacement && surf.params.use_fft_ocean) {
                     WaterManager::getInstance().updateFFTDrivenMesh(&surf, surf.animation_time);
-                    
-                    // Rebuild BVH for correct raytracing
-                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                    if (ctx.backend_ptr) {
-                        ctx.renderer.rebuildBackendGeometry(ctx.scene);
-                    }
+                    rebuildWaterSceneMutation(ctx, false);
                 }
                 
                 // Mark preset as Custom when any parameter is manually changed
@@ -822,29 +854,15 @@ void SceneUI::drawWaterPanel(UIContext& ctx) {
                 
                 // Reset accumulation and sync GPU materials for real-time preview
                 ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
+                if (Backend::IBackend* renderBackend = getWaterRenderBackend(ctx)) {
                     ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
+                    renderBackend->resetAccumulation();
+                }
+                if (g_viewport_backend && g_viewport_backend.get() != getWaterRenderBackend(ctx)) {
+                    g_viewport_backend->resetAccumulation();
                 }
             }
             
-            ImGui::Spacing();
-            ImGui::Separator();
-            
-            // Delete button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.2f, 1.0f));
-            if (ImGui::Button("Delete Water Surface", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
-                WaterManager::getInstance().removeWaterSurface(ctx.scene, surf.id);
-                ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-                ctx.renderer.resetCPUAccumulation();
-                if (ctx.backend_ptr) {
-                    ctx.renderer.rebuildBackendGeometry(ctx.scene);
-                    ctx.renderer.updateBackendMaterials(ctx.scene);
-                    ctx.backend_ptr->resetAccumulation();
-                }
-                selected_water_idx = -1;
-            }
-            ImGui::PopStyleColor();
         }
     }
 }

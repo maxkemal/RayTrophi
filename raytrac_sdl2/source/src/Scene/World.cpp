@@ -181,6 +181,7 @@ World::World() {
         cosf(elevRad) * cosf(azimRad)
     ));
     data.nishita.sun_intensity = 10.0f;
+    data.nishita.atmosphere_intensity = 10.0f;
     data.nishita.sun_size = 0.545f;        // Real sun angular size in degrees
     
     // Blender-style atmosphere multipliers (default 1.0)
@@ -520,7 +521,12 @@ void World::setSunDirection(const Vec3& direction) {
 
 void World::setSunIntensity(float intensity) {
     data.nishita.sun_intensity = intensity;
-    // Intensity change invalidates the baked LUT (sun_intensity is baked into LUT values)
+    // sun_intensity no longer baked into LUT — atmosphere_intensity is used instead
+}
+
+void World::setAtmosphereIntensity(float intensity) {
+    data.nishita.atmosphere_intensity = intensity;
+    // atmosphere_intensity is baked into the skyview LUT
     if (atmosphere_lut) {
         lut_dirty = true;
     }
@@ -620,7 +626,7 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
         float3 transSun = atmosphere_lut->sampleTransmittance(cosTheta, current_altitude, data.nishita.atmosphere_height);
         
         Vec3 mieScat = to_vec3(data.nishita.mie_scattering) * (data.nishita.mie_density * 0.15f);
-        L += to_vec3(transSun) * (mieScat * excessPhase * data.nishita.sun_intensity);
+        L += to_vec3(transSun) * (mieScat * excessPhase * data.nishita.atmosphere_intensity);
     }
     
     // --- MULTI-SCATTERING (Matches GPU Exactly) ---
@@ -771,6 +777,7 @@ void World::reset() {
     defaults.sun_elevation = 15.0f;
     defaults.sun_azimuth = 170.0f;
     defaults.sun_intensity = 10.0f;
+    defaults.atmosphere_intensity = 10.0f;
     defaults.sun_size = 0.545f;
     defaults.air_density = 1.0f;
     defaults.dust_density = 1.0f;
@@ -842,6 +849,7 @@ void World::serialize(nlohmann::json& j) const {
     n["sun_elevation"] = data.nishita.sun_elevation;
     n["sun_azimuth"] = data.nishita.sun_azimuth;
     n["sun_intensity"] = data.nishita.sun_intensity;
+    n["atmosphere_intensity"] = data.nishita.atmosphere_intensity;
     n["sun_size"] = data.nishita.sun_size;
     
     n["air_density"] = data.nishita.air_density;
@@ -952,6 +960,7 @@ void World::deserialize(const nlohmann::json& j) {
         data.nishita.sun_elevation = n.value("sun_elevation", 15.0f);
         data.nishita.sun_azimuth = n.value("sun_azimuth", 170.0f);
         data.nishita.sun_intensity = n.value("sun_intensity", 10.0f);
+        data.nishita.atmosphere_intensity = n.value("atmosphere_intensity", data.nishita.sun_intensity);
         data.nishita.sun_size = n.value("sun_size", 0.545f);
         
         data.nishita.air_density = n.value("air_density", 1.0f);

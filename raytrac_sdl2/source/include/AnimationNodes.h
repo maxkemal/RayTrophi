@@ -90,7 +90,7 @@ namespace AnimationGraph {
         RootMotionDelta rootMotion;           // Tracks extracted root motion from clips
         
         bool isValid() const { return !trsTransforms.empty() || !boneTransforms.empty(); }
-        size_t boneCount() const { return std::max(trsTransforms.size(), boneTransforms.size()); }
+        size_t boneCount() const { return (std::max)(trsTransforms.size(), boneTransforms.size()); }
         
         // Ensure matrices are up to date from TRS
         void updateMatrices() {

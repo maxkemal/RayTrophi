@@ -19,12 +19,19 @@
 #include "Texture.h" 
 #include "Triangle.h"
 #include "TerrainManager.h"
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <unordered_set>
 
 // Static editor instance
 static bool showMatNodeEditor = false;
 
+void projectObjectUVsFromView(UIContext& ctx, SceneUI& ui, const std::string& nodeName);
+
 void SceneUI::resetMaterialUI() {
     showMatNodeEditor = false;
+    uv_workflow_cache_dirty = true;
 }
 
 // ===============================================================================
@@ -46,15 +53,38 @@ void SceneUI::manageTextureGraveyard() {
 void SceneUI::drawMaterialPanel(UIContext& ctx) {
     SceneSelection& sel = ctx.selection;
 
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.98f, 0.72f, 0.42f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 14.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(8.0f, 6.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.115f, 0.14f, 0.94f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.13f, 0.145f, 0.17f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.16f, 0.18f, 0.215f, 0.99f));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.19f, 0.215f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.20f, 0.16f, 0.11f, 0.96f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.26f, 0.20f, 0.13f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.30f, 0.24f, 0.16f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(1.0f, 0.78f, 0.48f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(1.0f, 0.88f, 0.62f, 1.0f));
+
     // Only show for selected objects
     if (sel.selected.type != SelectableType::Object || !sel.selected.object) {
         ImGui::TextDisabled("Select an object to edit materials");
+        ImGui::PopStyleColor(9);
+        ImGui::PopStyleVar(6);
+        UIWidgets::PopControlSurfaceStyle();
         return;
     }
 
     std::string obj_name = sel.selected.name;
     if (obj_name.empty()) {
         ImGui::TextDisabled("Unnamed Object");
+        ImGui::PopStyleColor(9);
+        ImGui::PopStyleVar(6);
+        UIWidgets::PopControlSurfaceStyle();
         return;
     }
 
@@ -66,6 +96,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     auto cache_it = mesh_cache.find(obj_name);
     if (cache_it == mesh_cache.end()) {
         ImGui::TextColored(ImVec4(1, 0, 0, 1), "Object mesh data not found in cache.");
+        ImGui::PopStyleColor(9);
+        ImGui::PopStyleVar(6);
+        UIWidgets::PopControlSurfaceStyle();
         return;
     }
 
@@ -76,6 +109,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     auto slots_it = material_slots_cache.find(obj_name);
     if (slots_it == material_slots_cache.end()) {
         ImGui::TextDisabled("Material data not cached. Cache may need rebuild.");
+        ImGui::PopStyleColor(9);
+        ImGui::PopStyleVar(6);
+        UIWidgets::PopControlSurfaceStyle();
         return;
     }
     
@@ -83,6 +119,9 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
     if (used_material_ids.empty()) {
         ImGui::TextDisabled("No geometry/materials found.");
+        ImGui::PopStyleColor(9);
+        ImGui::PopStyleVar(6);
+        UIWidgets::PopControlSurfaceStyle();
         return;
     }
 
@@ -103,34 +142,42 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         last_selected_obj_name = obj_name;
     }
 
-    ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Material Slots");
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.11f, 0.13f, 0.16f, 0.94f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 12.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 10.0f));
+    ImGui::BeginChild("MaterialHeaderCard", ImVec2(0, 64), true);
+    ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.52f, 1.0f), "%s", obj_name.c_str());
+    ImGui::TextDisabled("Slot assignment and material editing for the active object.");
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
 
-    // Draw the Slot List
-    if (ImGui::BeginListBox("##MaterialSlots", ImVec2(-FLT_MIN, 5 * ImGui::GetTextLineHeightWithSpacing()))) {
-        for (int i = 0; i < (int)used_material_ids.size(); i++) {
-            uint16_t mat_id = used_material_ids[i];
-            Material* mat = MaterialManager::getInstance().getMaterial(mat_id);
+    if (UIWidgets::BeginSection("Material Slot Stack", ImVec4(1.0f, 0.72f, 0.42f, 1.0f))) {
+        if (ImGui::BeginListBox("##MaterialSlots", ImVec2(-FLT_MIN, 5 * ImGui::GetTextLineHeightWithSpacing()))) {
+            for (int i = 0; i < (int)used_material_ids.size(); i++) {
+                uint16_t mat_id = used_material_ids[i];
+                Material* mat = MaterialManager::getInstance().getMaterial(mat_id);
 
-            std::string slot_label;
-            if (mat) {
-                slot_label = std::string("Slot ") + std::to_string(i) + ": " + mat->materialName;
-            }
-            else {
-                slot_label = std::string("Slot ") + std::to_string(i) + ": [Null]";
-            }
+                std::string slot_label;
+                if (mat) {
+                    slot_label = std::string("Slot ") + std::to_string(i) + ": " + mat->materialName;
+                }
+                else {
+                    slot_label = std::string("Slot ") + std::to_string(i) + ": [Null]";
+                }
 
-            const bool is_selected = (active_slot_index == i);
-            if (ImGui::Selectable(slot_label.c_str(), is_selected)) {
-                active_slot_index = i;
-            }
+                const bool is_selected = (active_slot_index == i);
+                if (ImGui::Selectable(slot_label.c_str(), is_selected)) {
+                    active_slot_index = i;
+                }
 
-            // Set the initial focus when opening the combo (scrolling + keyboard navigation focus)
-            if (is_selected) {
-                ImGui::SetItemDefaultFocus();
+                if (is_selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
             }
+            ImGui::EndListBox();
         }
-        ImGui::EndListBox();
-
+        UIWidgets::EndSection();
     }
     // Current pointer to the active material
     uint16_t active_mat_id = (active_slot_index < (int)used_material_ids.size()) ? used_material_ids[active_slot_index] : MaterialManager::INVALID_MATERIAL_ID;
@@ -278,8 +325,11 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         }
         };
 
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.5f, 0.2f, 1.0f));
-    if (ImGui::SmallButton("Key Mat")) {
+    ImGui::Separator();
+    ImGui::TextColored(ImVec4(1.0f, 0.82f, 0.52f, 1.0f), "Slot Assignment & Actions");
+    if (UIWidgets::IconActionButton("MaterialKeyAll", UIWidgets::IconType::AddKey, "",
+        false, ImVec4(1.0f, 0.72f, 0.42f, 1.0f), ImVec2(42.0f, 38.0f),
+        "Insert a material keyframe for the active slot at the current frame.")) {
         // Insert material keyframe at current frame
         int current_frame = ctx.render_settings.animation_current_frame;
 
@@ -307,12 +357,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
             SCENE_LOG_INFO("Material keyframe inserted for '" + obj_name + "' at frame " + std::to_string(current_frame));
         }
     }
-    ImGui::PopStyleColor();
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Insert Material Keyframe at current frame (keys all material properties)");
-    }
     ImGui::SameLine();
-    ImGui::Text("Active Slot Assignment:");
+    ImGui::TextDisabled("Active Slot");
 
     ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 110); // Space for +New buttons (adjusted for +S and +V)
     if (ImGui::BeginCombo("##SlotAssignment", current_mat_name.c_str())) {
@@ -322,10 +368,12 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         for (size_t i = 0; i < all_materials.size(); i++) {
             if (!all_materials[i]) continue;
 
-            bool is_selected = ((uint16_t)i == active_mat_id);
+            uint16_t mat_id = (uint16_t)i;
+            bool is_selected = (mat_id == active_mat_id);
             std::string label = all_materials[i]->materialName;
             if (label.empty()) label = "Mat #" + std::to_string(i);
 
+            ImGui::PushID((int)mat_id);
             if (ImGui::Selectable(label.c_str(), is_selected)) {
                 if ((uint16_t)i != active_mat_id) {
                     // REPLACE MATERIAL LOGIC:
@@ -379,6 +427,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 }
             }
             if (is_selected) ImGui::SetItemDefaultFocus();
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -387,17 +436,22 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     // �������������������������������������������������������������������������
     // SHORTCUTS (New Surface / Volume) - affecting Active Slot
     // �������������������������������������������������������������������������
-    ImGui::SameLine();
-    if (ImGui::Button("+S", ImVec2(40, 0))) {
+    UIWidgets::Divider();
+    if (ImGui::Button("+ Surface")) {
         ImGui::OpenPopup("NewSurfPopup");
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create New Surface Material");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Create a new surface material and assign it to the active slot.");
+    }
 
     ImGui::SameLine();
-    if (ImGui::Button("+V", ImVec2(40, 0))) {
+    if (ImGui::Button("+ Volume")) {
         ImGui::OpenPopup("NewVolPopup");
     }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create New Volumetric Material");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Create a new volumetric material and assign it to the active slot.");
+    }
+    
 
     if (ImGui::BeginPopup("NewSurfPopup")) {
         ImGui::Text("Create New Surface");
@@ -442,6 +496,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 ctx.backend_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
+            ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
@@ -497,6 +552,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 ctx.backend_ptr->resetAccumulation();
             }
             g_ProjectManager.markModified();
+            ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
@@ -521,38 +577,40 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     // the potentially new material if we can.
 
     active_mat_ptr = MaterialManager::getInstance().getMaterial(active_mat_id);
-    if (!active_mat_ptr) return;
+    if (!active_mat_ptr) {
+        ImGui::TextDisabled("Active material could not be resolved.");
+        ImGui::PopStyleColor(9);
+        ImGui::PopStyleVar(6);
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
 
     // Check material type
     Volumetric* vol_mat = dynamic_cast<Volumetric*>(active_mat_ptr);
     PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(active_mat_ptr);
 
-    ImGui::Separator();
     bool material_changed = false;
     if (vol_mat) {
-        ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "[Volumetric Properties]");
-
-        // --- VDB LOAD UI ---
-        ImGui::Separator();
-        if (vol_mat->hasVDBVolume()) {
-             VDBVolumeData* vdb = VDBVolumeManager::getInstance().getVolume(vol_mat->getVDBVolumeID());
-             if (vdb) {
-                 ImGui::Text("Loaded VDB: %s", vdb->name.c_str());
-                 ImGui::TextDisabled("%s", vdb->filepath.c_str());
-                 
-                 if (ImGui::Button("Clear VDB")) {
-                     vol_mat->setVDBVolumeID(-1);
-                     vol_mat->setDensitySource(0); // Switch back to procedural
-                     material_changed = true;
-                 }
-
-                 ImGui::Spacing();
-                 ImGui::TextDisabled("Bounds: (%.1f, %.1f, %.1f) - (%.1f, %.1f, %.1f)", 
-                     vdb->bbox_min[0], vdb->bbox_min[1], vdb->bbox_min[2],
-                     vdb->bbox_max[0], vdb->bbox_max[1], vdb->bbox_max[2]);
+        if (UIWidgets::BeginSection("Volume Source", ImVec4(0.82f, 0.66f, 1.0f, 1.0f))) {
+            if (vol_mat->hasVDBVolume()) {
+                 VDBVolumeData* vdb = VDBVolumeManager::getInstance().getVolume(vol_mat->getVDBVolumeID());
+                 if (vdb) {
+                     ImGui::Text("Loaded VDB: %s", vdb->name.c_str());
+                     ImGui::TextDisabled("%s", vdb->filepath.c_str());
                      
-                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
-                 if (ImGui::Button("Fit Mesh to VDB")) {
+                     if (ImGui::Button("Clear VDB")) {
+                         vol_mat->setVDBVolumeID(-1);
+                         vol_mat->setDensitySource(0); // Switch back to procedural
+                         material_changed = true;
+                     }
+
+                     ImGui::Spacing();
+                     ImGui::TextDisabled("Bounds: (%.1f, %.1f, %.1f) - (%.1f, %.1f, %.1f)", 
+                         vdb->bbox_min[0], vdb->bbox_min[1], vdb->bbox_min[2],
+                         vdb->bbox_max[0], vdb->bbox_max[1], vdb->bbox_max[2]);
+                         
+                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.2f, 1.0f));
+                     if (ImGui::Button("Fit Mesh to VDB")) {
                      // Get bounding box size and center
                      Vec3 min_pt(vdb->bbox_min[0], vdb->bbox_min[1], vdb->bbox_min[2]);
                      Vec3 max_pt(vdb->bbox_max[0], vdb->bbox_max[1], vdb->bbox_max[2]);
@@ -601,36 +659,38 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                      } else {
                          addViewportMessage("Selection does not support transforms", 3.0f, ImVec4(1.0f, 0.5f, 0.5f, 1.0f));
                      }
-                 }
-                 ImGui::PopStyleColor();
+                     }
+                     ImGui::PopStyleColor();
 
-             } else {
-                 ImGui::TextColored(ImVec4(1,0,0,1), "Invalid VDB ID");
-                 if (ImGui::Button("Reset")) {
-                     vol_mat->setVDBVolumeID(-1);
-                     vol_mat->setDensitySource(0);
-                     material_changed = true;
+                 } else {
+                     ImGui::TextColored(ImVec4(1,0,0,1), "Invalid VDB ID");
+                     if (ImGui::Button("Reset")) {
+                         vol_mat->setVDBVolumeID(-1);
+                         vol_mat->setDensitySource(0);
+                         material_changed = true;
+                     }
                  }
-             }
-        } else {
-             if (ImGui::Button("Load VDB File")) {
-                 std::string path = SceneUI::openFileDialogW(L"OpenVDB/NanoVDB Files\0*.vdb;*.nvdb\0", "", "");
-                 if (!path.empty()) {
-                      int id = VDBVolumeManager::getInstance().loadVDB(path);
-                      if (id >= 0) {
-                          VDBVolumeManager::getInstance().uploadToGPU(id);
-                          vol_mat->setVDBVolumeID(id);
-                          vol_mat->setDensitySource(1); // Enable VDB density
-                          material_changed = true;
-                      }
+            } else {
+                 if (ImGui::Button("Load VDB File")) {
+                     std::string path = SceneUI::openFileDialogW(L"OpenVDB/NanoVDB Files\0*.vdb;*.nvdb\0", "", "");
+                     if (!path.empty()) {
+                          int id = VDBVolumeManager::getInstance().loadVDB(path);
+                          if (id >= 0) {
+                              VDBVolumeManager::getInstance().uploadToGPU(id);
+                              vol_mat->setVDBVolumeID(id);
+                              vol_mat->setDensitySource(1); // Enable VDB density
+                              material_changed = true;
+                          }
+                     }
                  }
-             }
-             ImGui::SameLine();
-             ImGui::TextDisabled("(Supports .vdb)");
+                 ImGui::SameLine();
+                 ImGui::TextDisabled("(Supports .vdb)");
+            }
+            UIWidgets::EndSection();
         }
-        ImGui::Separator();
 
         bool changed = false;
+        if (UIWidgets::BeginSection("Volumetric Properties", ImVec4(0.76f, 0.60f, 1.0f, 1.0f))) {
 
         // �� DISTINCT INPUT FIELD STYLING FOR VOLUMETRIC PANEL (For Colors only) ����������������
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
@@ -770,6 +830,8 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
                 ctx.backend_ptr->resetAccumulation();
             }
         }
+        UIWidgets::EndSection();
+        }
 
     }
 
@@ -779,6 +841,10 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     else {
         ImGui::TextDisabled("Unknown material type.");
     }
+
+    ImGui::PopStyleColor(9);
+    ImGui::PopStyleVar(6);
+    UIWidgets::PopControlSurfaceStyle();
 }
 
 // ===============================================================================
@@ -789,6 +855,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     
     bool changed = false;
     bool texture_changed = false;
+    std::string obj_n = ctx.selection.selected.name;
 
     // Helper functions re-implemented locally to Context
     auto SyncGpuMaterial = [&](PrincipledBSDF* mat) -> void {
@@ -828,10 +895,19 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         
         // Anisotropic
         mat->gpuMaterial->anisotropic = mat->anisotropic;
+        mat->gpuMaterial->normal_strength = mat->get_normal_strength();
 
         // Sheen (Water flags)
         mat->gpuMaterial->sheen = mat->sheen;
         mat->gpuMaterial->sheen_tint = mat->sheen_tint;
+        mat->gpuMaterial->uv_scale_x = static_cast<float>(mat->textureTransform.scale.u);
+        mat->gpuMaterial->uv_scale_y = static_cast<float>(mat->textureTransform.scale.v);
+        mat->gpuMaterial->uv_offset_x = static_cast<float>(mat->textureTransform.translation.u);
+        mat->gpuMaterial->uv_offset_y = static_cast<float>(mat->textureTransform.translation.v);
+        mat->gpuMaterial->uv_rotation_degrees = mat->textureTransform.rotation_degrees;
+        mat->gpuMaterial->uv_tiling_x = static_cast<float>(mat->textureTransform.tilingFactor.u);
+        mat->gpuMaterial->uv_tiling_y = static_cast<float>(mat->textureTransform.tilingFactor.v);
+        mat->gpuMaterial->uv_wrap_mode = static_cast<int>(mat->textureTransform.wrapMode);
     };
 
     auto UpdateTriangleTextureBundle = [&](std::shared_ptr<Triangle> target_tri, PrincipledBSDF* mat) {
@@ -879,6 +955,98 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         }
     };
 
+    auto rebuildUvWorkflowPreviewEntries = [&]() {
+        uv_workflow_preview_entries.clear();
+        if (uv_workflow_cached_triangles.empty()) {
+            return;
+        }
+
+        const size_t max_preview_tris = 300;
+        const size_t step = uv_workflow_cached_triangles.size() > max_preview_tris
+            ? static_cast<size_t>(std::ceil(static_cast<double>(uv_workflow_cached_triangles.size()) / static_cast<double>(max_preview_tris)))
+            : 1;
+
+        uv_workflow_preview_entries.reserve(std::min(max_preview_tris, uv_workflow_cached_triangles.size()));
+        for (size_t tri_index = 0; tri_index < uv_workflow_cached_triangles.size(); tri_index += step) {
+            const auto& tri = uv_workflow_cached_triangles[tri_index];
+            auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(uv_workflow_cached_uv_set));
+            uv_workflow_preview_entries.push_back({ { uv0, uv1, uv2 } });
+        }
+    };
+
+    auto ensureUvWorkflowCache = [&]() {
+        size_t object_triangle_count = 0;
+        auto mesh_it = mesh_cache.find(obj_n);
+        if (mesh_it != mesh_cache.end()) {
+            object_triangle_count = mesh_it->second.size();
+        }
+
+        const bool needs_rebuild =
+            uv_workflow_cache_dirty ||
+            uv_workflow_cached_object_name != obj_n ||
+            uv_workflow_cached_material_id != mat_id ||
+            uv_workflow_cached_uv_set != std::max(0, pbsdf->selected_uv_set) ||
+            uv_workflow_cached_object_triangle_count != object_triangle_count;
+
+        if (!needs_rebuild) {
+            return;
+        }
+
+        uv_workflow_cached_object_name = obj_n;
+        uv_workflow_cached_material_id = mat_id;
+        uv_workflow_cached_uv_set = std::max(0, pbsdf->selected_uv_set);
+        uv_workflow_cached_object_triangle_count = object_triangle_count;
+        uv_workflow_cached_max_uv_sets = 1;
+        uv_workflow_cached_triangles.clear();
+        uv_workflow_preview_entries.clear();
+
+        if (mesh_it == mesh_cache.end()) {
+            uv_workflow_cache_dirty = false;
+            return;
+        }
+
+        uv_workflow_cached_triangles.reserve(mesh_it->second.size());
+        for (const auto& entry : mesh_it->second) {
+            const auto& tri = entry.second;
+            if (!tri || tri->getMaterialID() != mat_id) {
+                continue;
+            }
+            uv_workflow_cached_max_uv_sets = std::max(uv_workflow_cached_max_uv_sets, static_cast<int>(tri->getUVSetCount()));
+            uv_workflow_cached_triangles.push_back(tri);
+        }
+
+        rebuildUvWorkflowPreviewEntries();
+
+        uv_workflow_cache_dirty = false;
+    };
+
+    auto refreshGeometryAfterUvChange = [&](bool invalidate_triangle_cache = false) {
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.rebuildBackendGeometry(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        if (invalidate_triangle_cache) {
+            uv_workflow_cache_dirty = true;
+        } else {
+            rebuildUvWorkflowPreviewEntries();
+        }
+        g_ProjectManager.markModified();
+    };
+
+    auto applyUvEditToSelectedSet = [&](const std::function<void(std::array<Vec2, 3>&)>& edit_fn) {
+        const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
+        ensureUvWorkflowCache();
+        for (const auto& tri : uv_workflow_cached_triangles) {
+            auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
+            std::array<Vec2, 3> uv_data = { uv0, uv1, uv2 };
+            edit_fn(uv_data);
+            tri->setUVSetCoordinates(static_cast<size_t>(selected_uv_set), uv_data[0], uv_data[1], uv_data[2]);
+            tri->applyUVSet(static_cast<size_t>(selected_uv_set));
+        }
+        refreshGeometryAfterUvChange();
+    };
+
     auto LoadTextureFromDialog = [&](TextureType type, const std::string& initialDir = "", const std::string& defaultFile = "") -> std::shared_ptr<Texture> {
         std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0", initialDir, defaultFile);
         if (path.empty()) return nullptr;
@@ -895,9 +1063,6 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     };
     
     // Keyframe helpers from drawMaterialPanel (simplified or copied)
-    // We need access to ctx.selection.selected.name which is available via ctx
-    std::string obj_n = ctx.selection.selected.name;
-    
     auto KeyframeButton = [&](const char* id, bool keyed) -> bool {
         ImGui::PushID(id);
         float s = ImGui::GetFrameHeight();
@@ -1023,6 +1188,29 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         }
     };
 
+    auto getPaintOverrideInfo = [&](const std::shared_ptr<Texture>& tex_ref, Paint::PaintChannel channel) -> std::pair<bool, std::string> {
+        if (!tex_ref) {
+            return { false, "" };
+        }
+
+        for (const auto& entry : ctx.scene.mesh_paint_texture_sets) {
+            const Paint::PaintTextureSet& set = entry.second;
+            if (set.material_id != mat_id) {
+                continue;
+            }
+
+            std::shared_ptr<Texture> override_tex = set.getTexture(channel);
+            if (override_tex && override_tex == tex_ref) {
+                if (set.wasSeededFromExisting(channel) && !set.getSourceTextureName(channel).empty()) {
+                    return { true, set.getSourceTextureName(channel) };
+                }
+                return { true, "" };
+            }
+        }
+
+        return { false, "" };
+    };
+
     // Style
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.18f, 0.20f, 0.25f, 1.0f));
@@ -1034,83 +1222,288 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 3));
 
+    if (UIWidgets::BeginSection("UV Workflow", ImVec4(0.54f, 0.86f, 1.0f, 1.0f))) {
+        ImGui::TextWrapped("Choose the UV set here and run repair/projection tools before painting.");
 
-    // Scalar Properties
-    Vec3 albedo = pbsdf->albedoProperty.color;
-    float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
-    bool albKeyed = isMatKeyed(mat_id, true, false, false, false, false, false, false, false);
-    if (KeyframeButton("##MAlb", albKeyed)) { insertMatPropKey(pbsdf, mat_id, true, false, false, false, false, false, false, false); }
-    ImGui::SameLine();
-    if (ImGui::ColorEdit3("Base Color", albedo_arr)) {
-        pbsdf->albedoProperty.color = Vec3(albedo_arr[0], albedo_arr[1], albedo_arr[2]);
-        changed = true;
+        ImGui::BeginDisabled(obj_n.empty());
+        if (UIWidgets::SecondaryButton("Project UVs from View", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            ImGui::OpenPopup("MaterialUVProjectConfirm");
+        }
+        if (history.getUndoDescription().find("Project UVs") != std::string::npos) {
+            ImVec2 btn_size = ImVec2(UIWidgets::GetInspectorActionWidth(), 0);
+            if (UIWidgets::SecondaryButton("Reset / Undo Projection", btn_size)) {
+                if (history.undo(ctx)) {
+                    rebuildMeshCache(ctx.scene.world.objects);
+                    ctx.selection.updatePositionFromSelection();
+                    ctx.selection.selected.has_cached_aabb = false;
+                    uv_workflow_cache_dirty = true;
+                }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Revert UV coordinates to previous state.");
+        }
+        if (ImGui::BeginPopupModal("MaterialUVProjectConfirm", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Warning: This will overwrite the active UV set for this object.\nExisting tiling textures might change.\nAre you sure?");
+            ImGui::Separator();
+            if (ImGui::Button("Yes, Project UVs", ImVec2(120, 0))) {
+                projectObjectUVsFromView(ctx, *this, obj_n);
+                uv_workflow_cache_dirty = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::EndDisabled();
+
+        ensureUvWorkflowCache();
+        int max_uv_sets = uv_workflow_cached_max_uv_sets;
+        if (max_uv_sets > 1) {
+            std::vector<std::string> uv_labels;
+            std::vector<const char*> uv_label_ptrs;
+            uv_labels.reserve(max_uv_sets);
+            uv_label_ptrs.reserve(max_uv_sets);
+            for (int uv_index = 0; uv_index < max_uv_sets; ++uv_index) {
+                uv_labels.push_back("UV Set " + std::to_string(uv_index));
+                uv_label_ptrs.push_back(uv_labels.back().c_str());
+            }
+
+            int selected_uv_set = std::clamp(pbsdf->selected_uv_set, 0, max_uv_sets - 1);
+            if (ImGui::Combo("UV Set", &selected_uv_set, uv_label_ptrs.data(), max_uv_sets)) {
+                pbsdf->selected_uv_set = selected_uv_set;
+                uv_workflow_cached_uv_set = selected_uv_set;
+                for (const auto& tri : uv_workflow_cached_triangles) {
+                    tri->applyUVSet(static_cast<size_t>(selected_uv_set));
+                }
+                refreshGeometryAfterUvChange();
+            }
+            ImGui::TextDisabled("Textures and mesh paint use the selected UV set.");
+        } else {
+            pbsdf->selected_uv_set = 0;
+            ImGui::TextDisabled("UV Set: UV 0");
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Material UV Transform");
+        {
+            auto& uvTransform = pbsdf->textureTransform;
+            static bool lockUvScaleAxes = true;
+            static bool lockUvOffsetAxes = false;
+            float uvScale[2] = {
+                static_cast<float>(uvTransform.scale.u),
+                static_cast<float>(uvTransform.scale.v)
+            };
+            float uvOffset[2] = {
+                static_cast<float>(uvTransform.translation.u),
+                static_cast<float>(uvTransform.translation.v)
+            };
+            float uvRotation = uvTransform.rotation_degrees;
+            int wrapMode = static_cast<int>(uvTransform.wrapMode);
+            const char* wrapLabels[] = { "Repeat", "Mirror", "Clamp", "Planar", "Cubic" };
+
+            ImGui::Checkbox("Lock Scale XY", &lockUvScaleAxes);
+            if (ImGui::DragFloat2("Scale XY", uvScale, 0.01f, 0.001f, 64.0f, "%.3f")) {
+                if (lockUvScaleAxes) {
+                    const float lockedScale = std::max(0.001f, uvScale[0]);
+                    uvScale[0] = lockedScale;
+                    uvScale[1] = lockedScale;
+                }
+                uvTransform.scale = Vec2(
+                    std::max(0.001f, uvScale[0]),
+                    std::max(0.001f, uvScale[1]));
+                changed = true;
+            }
+            ImGui::Checkbox("Lock Offset XY", &lockUvOffsetAxes);
+            if (ImGui::DragFloat2("Offset XY", uvOffset, 0.01f, -100.0f, 100.0f, "%.3f")) {
+                if (lockUvOffsetAxes) {
+                    uvOffset[1] = uvOffset[0];
+                }
+                uvTransform.translation = Vec2(uvOffset[0], uvOffset[1]);
+                changed = true;
+            }
+            if (ImGui::DragFloat("Rotation", &uvRotation, 0.25f, -360.0f, 360.0f, "%.1f deg")) {
+                uvTransform.rotation_degrees = uvRotation;
+                changed = true;
+            }
+            if (ImGui::Combo("Wrap", &wrapMode, wrapLabels, IM_ARRAYSIZE(wrapLabels))) {
+                uvTransform.wrapMode = static_cast<WrapMode>(wrapMode);
+                changed = true;
+            }
+
+            if (UIWidgets::SecondaryButton("Reset UV Transform", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                uvTransform.scale = Vec2(1.0, 1.0);
+                uvTransform.translation = Vec2(0.0, 0.0);
+                uvTransform.rotation_degrees = 0.0f;
+                uvTransform.wrapMode = WrapMode::Repeat;
+                changed = true;
+            }
+            ImGui::TextDisabled("Scale/Offset/Rotation affect texture sampling, not stored mesh UVs.");
+        }
+
+        const float uv_tool_w = (UIWidgets::GetInspectorActionWidth() - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        if (UIWidgets::SecondaryButton("Normalize UVs", ImVec2(uv_tool_w, 0))) {
+            const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
+            double min_u = std::numeric_limits<double>::max();
+            double min_v = std::numeric_limits<double>::max();
+            double max_u = std::numeric_limits<double>::lowest();
+            double max_v = std::numeric_limits<double>::lowest();
+            for (const auto& tri : uv_workflow_cached_triangles) {
+                auto [uv0, uv1, uv2] = tri->getUVSetCoordinates(static_cast<size_t>(selected_uv_set));
+                const Vec2 uvs[3] = { uv0, uv1, uv2 };
+                for (const Vec2& uv : uvs) {
+                    min_u = std::min(min_u, static_cast<double>(uv.u));
+                    min_v = std::min(min_v, static_cast<double>(uv.v));
+                    max_u = std::max(max_u, static_cast<double>(uv.u));
+                    max_v = std::max(max_v, static_cast<double>(uv.v));
+                }
+            }
+            const double span_u = std::max(1e-8, max_u - min_u);
+            const double span_v = std::max(1e-8, max_v - min_v);
+            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                for (Vec2& uv : uv_data) {
+                    uv.u = (uv.u - min_u) / span_u;
+                    uv.v = (uv.v - min_v) / span_v;
+                }
+            });
+        }
+        ImGui::SameLine();
+        if (UIWidgets::SecondaryButton("Flip U", ImVec2(uv_tool_w, 0))) {
+            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                for (Vec2& uv : uv_data) uv.u = 1.0 - uv.u;
+            });
+        }
+
+        if (UIWidgets::SecondaryButton("Flip V", ImVec2(uv_tool_w, 0))) {
+            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                for (Vec2& uv : uv_data) uv.v = 1.0 - uv.v;
+            });
+        }
+        ImGui::SameLine();
+        if (UIWidgets::SecondaryButton("Swap U/V", ImVec2(uv_tool_w, 0))) {
+            applyUvEditToSelectedSet([&](std::array<Vec2, 3>& uv_data) {
+                for (Vec2& uv : uv_data) std::swap(uv.u, uv.v);
+            });
+        }
+
+        ImGui::BeginChild("##uv_workflow_panel", ImVec2(0, 250.0f), true, ImGuiWindowFlags_NoScrollbar);
+        {
+            ImGui::Spacing();
+            const float preview_size = std::min(220.0f, ImGui::GetContentRegionAvail().x);
+            const ImVec2 preview_min = ImGui::GetCursorScreenPos();
+            const ImVec2 preview_max(preview_min.x + preview_size, preview_min.y + preview_size);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(preview_min, preview_max, IM_COL32(18, 22, 28, 255), 4.0f);
+            dl->AddRect(preview_min, preview_max, IM_COL32(90, 110, 130, 220), 4.0f);
+
+            for (int grid = 1; grid < 4; ++grid) {
+                const float t = static_cast<float>(grid) / 4.0f;
+                const float x = preview_min.x + preview_size * t;
+                const float y = preview_min.y + preview_size * t;
+                dl->AddLine(ImVec2(x, preview_min.y), ImVec2(x, preview_max.y), IM_COL32(55, 65, 78, 160), 1.0f);
+                dl->AddLine(ImVec2(preview_min.x, y), ImVec2(preview_max.x, y), IM_COL32(55, 65, 78, 160), 1.0f);
+            }
+
+            const int selected_uv_set = std::max(0, pbsdf->selected_uv_set);
+
+            auto toPreviewPoint = [&](const Vec2& uv) {
+                return ImVec2(
+                    preview_min.x + static_cast<float>(uv.u) * preview_size,
+                    preview_max.y - static_cast<float>(uv.v) * preview_size);
+            };
+
+            for (const auto& entry : uv_workflow_preview_entries) {
+                const ImVec2 p0 = toPreviewPoint(entry.uvs[0]);
+                const ImVec2 p1 = toPreviewPoint(entry.uvs[1]);
+                const ImVec2 p2 = toPreviewPoint(entry.uvs[2]);
+                dl->AddTriangle(p0, p1, p2, IM_COL32(110, 200, 255, 180), 1.0f);
+            }
+
+            ImGui::InvisibleButton("##uv_preview", ImVec2(preview_size, preview_size));
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("UV Preview\nActive Set: %d\nTriangles: %d", selected_uv_set, static_cast<int>(uv_workflow_cached_triangles.size()));
+            }
+        }
+        ImGui::EndChild();
+        UIWidgets::EndSection();
     }
 
-    float metallic = pbsdf->metallicProperty.intensity;
-    bool metKeyed = isMatKeyed(mat_id, false, false, false, true, false, false, false, false);
-    if (SceneUI::DrawSmartFloat("met", "Metal", &metallic, 0.0f, 1.0f, "%.3f", metKeyed, 
-        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, true, false, false, false, false); }, 16)) {
-        pbsdf->metallicProperty.intensity = metallic;
-        changed = true;
-    }
+    if (UIWidgets::BeginSection("Surface Core", ImVec4(1.0f, 0.72f, 0.42f, 1.0f))) {
+        Vec3 albedo = pbsdf->albedoProperty.color;
+        float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
+        bool albKeyed = isMatKeyed(mat_id, true, false, false, false, false, false, false, false);
+        if (KeyframeButton("##MAlb", albKeyed)) { insertMatPropKey(pbsdf, mat_id, true, false, false, false, false, false, false, false); }
+        ImGui::SameLine();
+        if (ImGui::ColorEdit3("Base Color", albedo_arr)) {
+            pbsdf->albedoProperty.color = Vec3(albedo_arr[0], albedo_arr[1], albedo_arr[2]);
+            changed = true;
+        }
 
-    float roughness = (float)pbsdf->roughnessProperty.color.x;
-    bool rghKeyed = isMatKeyed(mat_id, false, false, true, false, false, false, false, false);
-    if (SceneUI::DrawSmartFloat("rgh", "Rough", &roughness, 0.0f, 1.0f, "%.3f", rghKeyed,
-        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, true, false, false, false, false, false); }, 16)) {
-        pbsdf->roughnessProperty.color = Vec3(roughness);
-        changed = true;
-    }
+        float metallic = pbsdf->metallicProperty.intensity;
+        bool metKeyed = isMatKeyed(mat_id, false, false, false, true, false, false, false, false);
+        if (SceneUI::DrawSmartFloat("met", "Metal", &metallic, 0.0f, 1.0f, "%.3f", metKeyed,
+            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, true, false, false, false, false); }, 16)) {
+            pbsdf->metallicProperty.intensity = metallic;
+            changed = true;
+        }
 
-    float ior = pbsdf->ior;
-    bool iorKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, true, false);
-    if (SceneUI::DrawSmartFloat("ior", "IOR", &ior, 1.0f, 3.0f, "%.3f", iorKeyed,
-        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, true, false); }, 16)) {
-        pbsdf->ior = ior;
-        changed = true;
-    }
+        float roughness = (float)pbsdf->roughnessProperty.color.x;
+        bool rghKeyed = isMatKeyed(mat_id, false, false, true, false, false, false, false, false);
+        if (SceneUI::DrawSmartFloat("rgh", "Rough", &roughness, 0.0f, 1.0f, "%.3f", rghKeyed,
+            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, true, false, false, false, false, false); }, 16)) {
+            pbsdf->roughnessProperty.color = Vec3(roughness);
+            changed = true;
+        }
 
-    float transmission = pbsdf->transmission;
-    bool trnKeyed = isMatKeyed(mat_id, false, false, false, false, false, true, false, false);
-    if (SceneUI::DrawSmartFloat("trans", "Trans", &transmission, 0.0f, 1.0f, "%.3f", trnKeyed,
-        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, true, false, false); }, 16)) {
-        pbsdf->setTransmission(transmission, pbsdf->ior);
-        changed = true;
-    }
+        float ior = pbsdf->ior;
+        bool iorKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, true, false);
+        if (SceneUI::DrawSmartFloat("ior", "IOR", &ior, 1.0f, 3.0f, "%.3f", iorKeyed,
+            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, true, false); }, 16)) {
+            pbsdf->ior = ior;
+            changed = true;
+        }
 
-    float specular = pbsdf->specularProperty.intensity;
-    bool specKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, false, true);
-    if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
-        [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, false, true); }, 16)) {
-        pbsdf->specularProperty.intensity = specular;
-        changed = true;
-    }
+        float transmission = pbsdf->transmission;
+        bool trnKeyed = isMatKeyed(mat_id, false, false, false, false, false, true, false, false);
+        if (SceneUI::DrawSmartFloat("trans", "Trans", &transmission, 0.0f, 1.0f, "%.3f", trnKeyed,
+            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, true, false, false); }, 16)) {
+            pbsdf->setTransmission(transmission, pbsdf->ior);
+            changed = true;
+        }
 
-    float opacity = pbsdf->opacityProperty.alpha;
-    bool opKeyed = isMatKeyed(mat_id, false, true, false, false, false, false, false, false);
-    if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,
-        [&](){ insertMatPropKey(pbsdf, mat_id, false, true, false, false, false, false, false, false); }, 16)) {
-        pbsdf->opacityProperty.alpha = opacity;
-        changed = true;
-    }
+        float specular = pbsdf->specularProperty.intensity;
+        bool specKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, false, true);
+        if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
+            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, false, true); }, 16)) {
+            pbsdf->specularProperty.intensity = specular;
+            changed = true;
+        }
 
-    Vec3 emission = pbsdf->emissionProperty.color;
-    float emission_arr[3] = { (float)emission.x, (float)emission.y, (float)emission.z };
-    bool emsKeyed = isMatKeyed(mat_id, false, false, false, false, true, false, false, false);
-    if (KeyframeButton("##MEms", emsKeyed)) { insertMatPropKey(pbsdf, mat_id, false, false, false, false, true, false, false, false); }
-    ImGui::SameLine();
-    if (ImGui::ColorEdit3("Emission", emission_arr)) {
-        pbsdf->emissionProperty.color = Vec3(emission_arr[0], emission_arr[1], emission_arr[2]);
-        changed = true;
-    }
+        float opacity = pbsdf->opacityProperty.alpha;
+        bool opKeyed = isMatKeyed(mat_id, false, true, false, false, false, false, false, false);
+        if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,
+            [&](){ insertMatPropKey(pbsdf, mat_id, false, true, false, false, false, false, false, false); }, 16)) {
+            pbsdf->opacityProperty.alpha = opacity;
+            changed = true;
+        }
 
-    float emissionStr = pbsdf->emissionProperty.intensity;
-    if (SceneUI::DrawSmartFloat("mems", "EmStr", &emissionStr, 0.0f, 1000.0f, "%.1f", false, nullptr, 12)) {
-        pbsdf->emissionProperty.intensity = emissionStr;
-        changed = true;
-    }
+        Vec3 emission = pbsdf->emissionProperty.color;
+        float emission_arr[3] = { (float)emission.x, (float)emission.y, (float)emission.z };
+        bool emsKeyed = isMatKeyed(mat_id, false, false, false, false, true, false, false, false);
+        if (KeyframeButton("##MEms", emsKeyed)) { insertMatPropKey(pbsdf, mat_id, false, false, false, false, true, false, false, false); }
+        ImGui::SameLine();
+        if (ImGui::ColorEdit3("Emission", emission_arr)) {
+            pbsdf->emissionProperty.color = Vec3(emission_arr[0], emission_arr[1], emission_arr[2]);
+            changed = true;
+        }
 
-    ImGui::Separator();
+        float emissionStr = pbsdf->emissionProperty.intensity;
+        if (SceneUI::DrawSmartFloat("mems", "EmStr", &emissionStr, 0.0f, 1000.0f, "%.1f", false, nullptr, 12)) {
+            pbsdf->emissionProperty.intensity = emissionStr;
+            changed = true;
+        }
+        UIWidgets::EndSection();
+    }
     if (UIWidgets::BeginSection("Subsurface Scattering", ImVec4(1.0f, 0.7f, 0.4f, 1.0f))) {
         float sss_amount = pbsdf->subsurface;
         if (SceneUI::DrawSmartFloat("sss", "Subsurf", &sss_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
@@ -1239,7 +1632,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
     if (UIWidgets::BeginSection("Texture Maps", ImVec4(0.4f, 1.0f, 0.6f, 1.0f))) {
         static std::shared_ptr<Texture> texture_clipboard = nullptr;
 
-        auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type) {
+        auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type, Paint::PaintChannel paint_channel) {
             ImGui::PushID(label);
             
             // 1. Label
@@ -1262,6 +1655,7 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             if (tex_ref && tex_ref->is_loaded()) {
                 std::string name = tex_ref->name;
                 std::string shortName = std::filesystem::path(name).filename().string();
+                const auto [is_paint_override, source_name] = getPaintOverrideInfo(tex_ref, paint_channel);
                 
                 // Truncate if long 
                 if (shortName.length() > 20) {
@@ -1269,7 +1663,29 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                 }
 
                 ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", shortName.c_str());
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
+                if (ImGui::IsItemHovered()) {
+                    if (is_paint_override && !source_name.empty()) {
+                        ImGui::SetTooltip("%s\n(%dx%d)\nPaint Override\nSeeded from: %s",
+                            name.c_str(), tex_ref->width, tex_ref->height, source_name.c_str());
+                    } else if (is_paint_override) {
+                        ImGui::SetTooltip("%s\n(%dx%d)\nPaint Override",
+                            name.c_str(), tex_ref->width, tex_ref->height);
+                    } else {
+                        ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
+                    }
+                }
+
+                if (is_paint_override) {
+                    ImGui::SameLine(0, 6);
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f), "[Paint]");
+                    if (ImGui::IsItemHovered()) {
+                        if (!source_name.empty()) {
+                            ImGui::SetTooltip("Paint override active\nSeeded from: %s", source_name.c_str());
+                        } else {
+                            ImGui::SetTooltip("Paint override active");
+                        }
+                    }
+                }
                 
                 // 4. Buttons (Right Aligned)
                 ImGui::SameLine();
@@ -1353,12 +1769,20 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
             ImGui::PopID();
         };
 
-        DrawTextureSlot("Albedo", pbsdf->albedoProperty.texture, TextureType::Albedo);
-        DrawTextureSlot("Normal", pbsdf->normalProperty.texture, TextureType::Normal);
-        DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness);
-        DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic);
-        DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission);
-        DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity);
+        DrawTextureSlot("Albedo", pbsdf->albedoProperty.texture, TextureType::Albedo, Paint::PaintChannel::BaseColor);
+        DrawTextureSlot("Normal", pbsdf->normalProperty.texture, TextureType::Normal, Paint::PaintChannel::Normal);
+        float normal_strength = pbsdf->get_normal_strength();
+        if (SceneUI::DrawSmartFloat("nrmstr", "Normal Strength", &normal_strength, 0.0f, 8.0f, "%.2f", false, nullptr, 12)) {
+            pbsdf->set_normal_strength(normal_strength);
+            pbsdf->normalProperty.intensity = normal_strength;
+            changed = true;
+        }
+        DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness, Paint::PaintChannel::Roughness);
+        DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic, Paint::PaintChannel::Metallic);
+        DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission, Paint::PaintChannel::Emission);
+        DrawTextureSlot("Transmission", pbsdf->transmissionProperty.texture, TextureType::Transmission, Paint::PaintChannel::Transmission);
+        DrawTextureSlot("Height", pbsdf->heightProperty.texture, TextureType::Unknown, Paint::PaintChannel::Mask);
+        DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity, Paint::PaintChannel::Mask);
 
         UIWidgets::EndSection();
     }

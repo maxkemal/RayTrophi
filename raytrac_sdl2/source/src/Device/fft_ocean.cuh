@@ -217,6 +217,7 @@ extern "C" {
         float alignment;
         float damping;
         float ridge_offset;
+        float domain_coord_scale;
         int noise_type; // 0=Perlin, 1=FBM, 2=Ridge, 3=Voronoi, 4=Billow, 5=Gerstner, 6=Tessendorf
     };
     

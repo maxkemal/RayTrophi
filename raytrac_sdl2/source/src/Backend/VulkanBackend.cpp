@@ -12,6 +12,7 @@
 #include <iostream>
 #include <fstream>
 #include <set>
+#include <unordered_set>
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
@@ -36,6 +37,7 @@
 #include "AtmosphereLUT.h"
 #include "CameraPresets.h"
 #include "Camera.h"
+#include "InstanceManager.h"
 #include "DllLoadPolicy.h"
 
 // Delay-load handler: attempt to LoadLibrary when a delay-loaded DLL fails
@@ -93,25 +95,8 @@ ExternC const PfnDliHook __pfnDliFailureHook2 = DelayLoadFailureHook;
 #include <sstream>
 #include <SpotLight.h>
 
-namespace {
-    class VulkanLogHelper {
-        std::ostringstream ss;
-        LogLevel level;
-    public:
-        VulkanLogHelper(LogLevel l) : level(l) {}
-        ~VulkanLogHelper() { g_sceneLog.add(ss.str(), level); }
-        
-        template<typename T>
-        VulkanLogHelper& operator<<(const T& t) { ss << t; return *this; }
-        
-        // Ignore std::endl
-        VulkanLogHelper& operator<<(std::ostream& (*)(std::ostream&)) { return *this; }
-    };
-}
 
-#define VK_INFO() VulkanLogHelper(LogLevel::Info)
-#define VK_ERROR() VulkanLogHelper(LogLevel::Error)
-#define VK_WARN() VulkanLogHelper(LogLevel::Warning)
+
 
 // Structs moved to VulkanBackend.h for namespace consistency
 
@@ -716,12 +701,24 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &queueFamilyCount, queueFamilies.data());
 
     m_computeQueueFamily = UINT32_MAX;
+    uint32_t graphicsComputeFamily = UINT32_MAX;
+    uint32_t computeOnlyFamily = UINT32_MAX;
     for (uint32_t i = 0; i < queueFamilyCount; i++) {
-        if (queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-            m_computeQueueFamily = i;
-            // Prefer dedicated compute if available
-            if (!(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) break;
+        if (!(queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) continue;
+        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            if (graphicsComputeFamily == UINT32_MAX) graphicsComputeFamily = i;
+        } else if (computeOnlyFamily == UINT32_MAX) {
+            computeOnlyFamily = i;
         }
+    }
+    // Interactive viewport needs graphics commands, so prefer a queue family that
+    // supports both compute and graphics whenever one exists.
+    if (graphicsComputeFamily != UINT32_MAX) {
+        m_computeQueueFamily = graphicsComputeFamily;
+        m_queueSupportsGraphics = true;
+    } else {
+        m_computeQueueFamily = computeOnlyFamily;
+        m_queueSupportsGraphics = false;
     }
 
     if (m_computeQueueFamily == UINT32_MAX) {
@@ -781,36 +778,120 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         m_capabilities.rtMode = RayTracingMode::COMPUTE;
     }
 
+    // Query supported features first. Some drivers expose the extension string
+    // but still reject vkCreateDevice if unsupported feature bits are forced on.
+    VkPhysicalDeviceFeatures2 supportedFeatures{};
+    supportedFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+    VkPhysicalDeviceBufferDeviceAddressFeatures supportedBdaFeatures{};
+    supportedBdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR supportedAccelFeatures{};
+    supportedAccelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR supportedRtPipelineFeatures{};
+    supportedRtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+
+    VkPhysicalDeviceDescriptorIndexingFeatures supportedDescIdxFeatures{};
+    supportedDescIdxFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+
+    supportedFeatures.pNext = &supportedBdaFeatures;
+    supportedBdaFeatures.pNext = &supportedAccelFeatures;
+    supportedAccelFeatures.pNext = &supportedRtPipelineFeatures;
+    supportedRtPipelineFeatures.pNext = &supportedDescIdxFeatures;
+    vkGetPhysicalDeviceFeatures2(m_physicalDevice, &supportedFeatures);
+
+    const bool canUseBDA = hasBDA && supportedBdaFeatures.bufferDeviceAddress == VK_TRUE;
+    const bool canUseDescIdx = hasDescIdx &&
+        supportedDescIdxFeatures.runtimeDescriptorArray == VK_TRUE &&
+        supportedDescIdxFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE;
+    const bool canUseAccelStruct = hasAccelStruct && supportedAccelFeatures.accelerationStructure == VK_TRUE;
+    const bool canUseRTPipeline = hasRTPipeline && supportedRtPipelineFeatures.rayTracingPipeline == VK_TRUE;
+
+    if (hasBDA && !canUseBDA) {
+        VK_WARN() << "[VulkanDevice] BDA extension present but bufferDeviceAddress feature is unsupported." << std::endl;
+    }
+    if (hasDescIdx && !canUseDescIdx) {
+        VK_WARN() << "[VulkanDevice] Descriptor indexing extension present but required feature bits are unsupported." << std::endl;
+    }
+    if (hasAccelStruct && !canUseAccelStruct) {
+        VK_WARN() << "[VulkanDevice] Acceleration structure extension present but feature is unsupported." << std::endl;
+    }
+    if (hasRTPipeline && !canUseRTPipeline) {
+        VK_WARN() << "[VulkanDevice] RT pipeline extension present but feature is unsupported." << std::endl;
+    }
+
+    if (!canUseBDA) {
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME),
+            deviceExtensions.end());
+    }
+    if (!canUseDescIdx) {
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME),
+            deviceExtensions.end());
+    }
+
+    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && (!canUseBDA || !canUseAccelStruct || !canUseRTPipeline)) {
+        VK_WARN() << "[VulkanDevice] Downgrading to compute mode because required RT feature bits are unavailable." << std::endl;
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME),
+            deviceExtensions.end());
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME),
+            deviceExtensions.end());
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_RAY_QUERY_EXTENSION_NAME),
+            deviceExtensions.end());
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_SPIRV_1_4_EXTENSION_NAME),
+            deviceExtensions.end());
+        deviceExtensions.erase(
+            std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME),
+            deviceExtensions.end());
+        m_capabilities.rtMode = RayTracingMode::COMPUTE;
+    }
+
     // Features chain
     VkPhysicalDeviceFeatures2 features2{};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 
     VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
     bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-    bdaFeatures.bufferDeviceAddress = hasBDA ? VK_TRUE : VK_FALSE;
+    bdaFeatures.bufferDeviceAddress = canUseBDA ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelFeatures{};
     accelFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-    accelFeatures.accelerationStructure = VK_TRUE;
+    accelFeatures.accelerationStructure = (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseAccelStruct) ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
     rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
+    rtPipelineFeatures.rayTracingPipeline = (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseRTPipeline) ? VK_TRUE : VK_FALSE;
 
     VkPhysicalDeviceDescriptorIndexingFeatures descIdxFeatures{};
     descIdxFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-    descIdxFeatures.runtimeDescriptorArray = VK_TRUE;
-    descIdxFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+    descIdxFeatures.runtimeDescriptorArray = canUseDescIdx ? VK_TRUE : VK_FALSE;
+    descIdxFeatures.shaderSampledImageArrayNonUniformIndexing = canUseDescIdx ? VK_TRUE : VK_FALSE;
 
-    // Build pNext chain
-    features2.pNext = &bdaFeatures;
-    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR) {
-        bdaFeatures.pNext = &accelFeatures;
-        accelFeatures.pNext = &rtPipelineFeatures;
-        rtPipelineFeatures.pNext = hasDescIdx ? (void*)&descIdxFeatures : nullptr;
-    } else {
-        bdaFeatures.pNext = hasDescIdx ? (void*)&descIdxFeatures : nullptr;
+    // Build pNext chain conservatively.
+    void** nextLink = &features2.pNext;
+    if (canUseBDA) {
+        *nextLink = &bdaFeatures;
+        nextLink = &bdaFeatures.pNext;
     }
+    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseAccelStruct) {
+        *nextLink = &accelFeatures;
+        nextLink = &accelFeatures.pNext;
+    }
+    if (m_capabilities.rtMode == RayTracingMode::HARDWARE_KHR && canUseRTPipeline) {
+        *nextLink = &rtPipelineFeatures;
+        nextLink = &rtPipelineFeatures.pNext;
+    }
+    if (canUseDescIdx) {
+        *nextLink = &descIdxFeatures;
+        nextLink = &descIdxFeatures.pNext;
+    }
+    *nextLink = nullptr;
 
     VkDeviceCreateInfo deviceCreateInfo{};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1042,6 +1123,11 @@ VkMemoryPropertyFlags VulkanDevice::translateMemoryLocation(MemoryLocation locat
     switch (location) {
         case MemoryLocation::GPU_ONLY:  return VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         case MemoryLocation::CPU_TO_GPU: return VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        // GPU_TO_CPU uses HOST_CACHED for fast CPU readback (L1/L2 cache).
+        // downloadBuffer() calls vkInvalidateMappedMemoryRanges before memcpy
+        // to ensure cache coherency on non-coherent memory types.
+        // Using HOST_COHERENT without CACHED causes ~2-3× slower reads via
+        // uncached MMIO path, halving RT pathtracing throughput.
         case MemoryLocation::GPU_TO_CPU: return VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
         case MemoryLocation::CPU_ONLY:  return VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         default: return VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1181,10 +1267,67 @@ void VulkanDevice::uploadBuffer(const BufferHandle& dst, const void* data, uint6
 }
 
 void VulkanDevice::downloadBuffer(const BufferHandle& src, void* data, uint64_t size, uint64_t offset) {
-    void* mapped;
-    vkMapMemory(m_device, src.memory, offset, size, 0, &mapped);
-    memcpy(data, mapped, size);
-    vkUnmapMemory(m_device, src.memory);
+    if (!src.buffer || !data || size == 0) return;
+
+    void* mapped = nullptr;
+    VkResult mapRes = vkMapMemory(m_device, src.memory, offset, size, 0, &mapped);
+    if (mapRes == VK_SUCCESS && mapped) {
+        // [FIX] Invalidate mapped range for non-coherent memory.
+        // Without this, CPU cache may contain stale data on some GPU/driver
+        // combinations, causing intermittent black/white/garbage output.
+        VkMappedMemoryRange range{};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = src.memory;
+        range.offset = offset;
+        range.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(m_device, 1, &range);
+        memcpy(data, mapped, size);
+        vkUnmapMemory(m_device, src.memory);
+        return;
+    }
+
+    // Buffer memory is not host-visible (device-local). Perform readback via
+    // a temporary host-visible staging buffer and a GPU copy.
+    BufferCreateInfo stagingCI{};
+    stagingCI.size = size;
+    stagingCI.usage = BufferUsage::TRANSFER_DST;
+    stagingCI.location = MemoryLocation::GPU_TO_CPU;
+    stagingCI.initialData = nullptr;
+    BufferHandle staging = createBuffer(stagingCI);
+    if (!staging.buffer) {
+        VK_ERROR() << "[VulkanDevice] downloadBuffer fallback failed: staging allocation failed (size=" << size << ")" << std::endl;
+        return;
+    }
+
+    VkCommandBuffer cmdBuf = beginSingleTimeCommands();
+    if (cmdBuf == VK_NULL_HANDLE) {
+        destroyBuffer(staging);
+        return;
+    }
+
+    VkBufferCopy region{};
+    region.srcOffset = offset;
+    region.dstOffset = 0;
+    region.size = size;
+    vkCmdCopyBuffer(cmdBuf, src.buffer, staging.buffer, 1, &region);
+    endSingleTimeCommands(cmdBuf);
+
+    // Map staging and copy to user pointer
+    void* stagingMapped = nullptr;
+    if (vkMapMemory(m_device, staging.memory, 0, size, 0, &stagingMapped) == VK_SUCCESS && stagingMapped) {
+        VkMappedMemoryRange range{};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = staging.memory;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(m_device, 1, &range);
+        memcpy(data, stagingMapped, size);
+        vkUnmapMemory(m_device, staging.memory);
+    } else {
+        VK_ERROR() << "[VulkanDevice] downloadBuffer failed to map staging buffer" << std::endl;
+    }
+
+    destroyBuffer(staging);
 }
 
 // ========================================================================
@@ -1465,7 +1608,6 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
         endSingleTimeCommands(cmd);
         destroyBuffer(scratchBuffer);
     }
-
     // --- 8) Get device address for TLAS reference ---
     VkAccelerationStructureDeviceAddressInfoKHR addrInfo{};
     addrInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
@@ -1498,6 +1640,7 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
     blasHandle.hasSkinning = info.hasSkinning;
     blasHandle.allowUpdate = info.allowUpdate;
     blasHandle.vertexCount = info.vertexCount;
+    blasHandle.indexCount = info.indexCount;
     if (info.hasSkinning) {
         blasHandle.baseVertexBuffer = baseVertBuf;
         blasHandle.baseNormalBuffer = baseNormBuf;
@@ -1513,6 +1656,109 @@ uint32_t VulkanDevice::createBLAS(const BLASCreateInfo& info) {
                   << ", tris=" << primitiveCount << ", size=" << (sizeInfo.accelerationStructureSize / 1024) << " KB)" << std::endl;
     }
     return idx;
+}
+
+bool VulkanDevice::dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
+                                            BufferHandle& baseNormalBuffer,
+                                            BufferHandle& boneIndexBuffer,
+                                            BufferHandle& boneWeightBuffer,
+                                            BufferHandle& persistentBoneMatsBuffer,
+                                            uint64_t& persistentBoneMatsBufSize,
+                                            VkDescriptorSet& skinningDescSet,
+                                            const BufferHandle& outVertexBuffer,
+                                            const BufferHandle& outNormalBuffer,
+                                            uint32_t vertexCount,
+                                            const std::vector<Matrix4x4>& boneMatrices) {
+    if (!m_device || !m_commandPool || !m_computeQueue) return false;
+    if (m_skinningPipeline == VK_NULL_HANDLE) return false;
+    if (m_skinningPipelineLayout == VK_NULL_HANDLE || m_skinningDescPool == VK_NULL_HANDLE || m_skinningDescLayout == VK_NULL_HANDLE) return false;
+    if (!baseVertexBuffer.buffer || !baseNormalBuffer.buffer || !boneIndexBuffer.buffer || !boneWeightBuffer.buffer) return false;
+    if (!outVertexBuffer.buffer || !outNormalBuffer.buffer || vertexCount == 0 || boneMatrices.empty()) return false;
+
+    const uint64_t boneMatSize = boneMatrices.size() * sizeof(Matrix4x4);
+    if (!persistentBoneMatsBuffer.buffer || persistentBoneMatsBufSize < boneMatSize) {
+        if (persistentBoneMatsBuffer.buffer) destroyBuffer(persistentBoneMatsBuffer);
+        BufferCreateInfo bc{};
+        bc.size = boneMatSize;
+        bc.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        bc.location = MemoryLocation::CPU_TO_GPU;
+        persistentBoneMatsBuffer = createBuffer(bc);
+        if (!persistentBoneMatsBuffer.buffer || !persistentBoneMatsBuffer.memory) {
+            persistentBoneMatsBuffer = {};
+            persistentBoneMatsBufSize = 0;
+            skinningDescSet = VK_NULL_HANDLE;
+            return false;
+        }
+        persistentBoneMatsBufSize = boneMatSize;
+        skinningDescSet = VK_NULL_HANDLE;
+    }
+
+    void* mapped = nullptr;
+    if (vkMapMemory(m_device, persistentBoneMatsBuffer.memory, 0, boneMatSize, 0, &mapped) != VK_SUCCESS || !mapped) {
+        return false;
+    }
+    memcpy(mapped, boneMatrices.data(), boneMatSize);
+    vkUnmapMemory(m_device, persistentBoneMatsBuffer.memory);
+
+    if (skinningDescSet == VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = m_skinningDescPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &m_skinningDescLayout;
+        if (vkAllocateDescriptorSets(m_device, &allocInfo, &skinningDescSet) != VK_SUCCESS ||
+            skinningDescSet == VK_NULL_HANDLE) {
+            return false;
+        }
+    }
+
+    const uint64_t outNormalByteOffset =
+        (outNormalBuffer.buffer == outVertexBuffer.buffer)
+        ? (outNormalBuffer.deviceAddress - outVertexBuffer.deviceAddress)
+        : 0;
+    const uint64_t vertexByteSize = (uint64_t)vertexCount * 12;
+
+    VkDescriptorBufferInfo bInfo[7]{};
+    bInfo[0].buffer = baseVertexBuffer.buffer;          bInfo[0].offset = 0;                  bInfo[0].range = VK_WHOLE_SIZE;
+    bInfo[1].buffer = baseNormalBuffer.buffer;          bInfo[1].offset = 0;                  bInfo[1].range = VK_WHOLE_SIZE;
+    bInfo[2].buffer = boneIndexBuffer.buffer;           bInfo[2].offset = 0;                  bInfo[2].range = VK_WHOLE_SIZE;
+    bInfo[3].buffer = boneWeightBuffer.buffer;          bInfo[3].offset = 0;                  bInfo[3].range = VK_WHOLE_SIZE;
+    bInfo[4].buffer = persistentBoneMatsBuffer.buffer;  bInfo[4].offset = 0;                  bInfo[4].range = VK_WHOLE_SIZE;
+    bInfo[5].buffer = outVertexBuffer.buffer;           bInfo[5].offset = 0;                  bInfo[5].range = vertexByteSize;
+    bInfo[6].buffer = outNormalBuffer.buffer;           bInfo[6].offset = outNormalByteOffset; bInfo[6].range = vertexByteSize;
+
+    VkWriteDescriptorSet writes[7]{};
+    for (int i = 0; i < 7; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = skinningDescSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bInfo[i];
+    }
+    vkUpdateDescriptorSets(m_device, 7, writes, 0, nullptr);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return false;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_skinningPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_skinningPipelineLayout, 0, 1, &skinningDescSet, 0, nullptr);
+    uint32_t params[2] = { vertexCount, (uint32_t)boneMatrices.size() };
+    vkCmdPushConstants(cmd, m_skinningPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, 8, params);
+    const uint32_t groupCount = (vertexCount + 255) / 256;
+    vkCmdDispatch(cmd, groupCount, 1, 1);
+
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    endSingleTimeCommands(cmd);
+    return true;
 }
 
 void VulkanDevice::updateBLAS(uint32_t blasIndex, const float* newVertices, const float* newNormals) {
@@ -1930,7 +2176,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info) {
     m_tlasInstanceCount = instanceCount;
     m_tlasSupportsUpdate = info.allowUpdate;
 
-    VK_INFO() << "[VulkanDevice] TLAS " << (performUpdate ? "updated" : "created") << " (" << instanceCount << " instances)" << std::endl;
+    //VK_INFO() << "[VulkanDevice] TLAS " << (performUpdate ? "updated" : "created") << " (" << instanceCount << " instances)" << std::endl;
 }
 
 
@@ -3426,6 +3672,47 @@ void VulkanDevice::clearImage(const ImageHandle& image, float r, float g, float 
     endSingleTimeCommands(cmd);
 }
 
+void VulkanDevice::clearImages(const std::vector<ImageClearRequest>& requests) {
+    if (requests.empty()) return;
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return;
+
+    for (const auto& req : requests) {
+        if (!req.image || !req.image->image) continue;
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.image = req.image->image;
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkClearColorValue clearColor;
+        clearColor.float32[0] = req.r;
+        clearColor.float32[1] = req.g;
+        clearColor.float32[2] = req.b;
+        clearColor.float32[3] = req.a;
+        vkCmdClearColorImage(cmd, req.image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clearColor, 1, &barrier.subresourceRange);
+
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+
+    endSingleTimeCommands(cmd);
+}
+
 // ========================================================================
 // Compute Pipeline - Real Implementation
 // ========================================================================
@@ -3551,7 +3838,7 @@ void VulkanDevice::setPushConstants(const void* data, uint32_t size) {
 // Image Operations - Real Implementation
 // ========================================================================
 
-ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage) {
+ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkFormat format, VkImageUsageFlags usage, VkImageAspectFlags aspectMask) {
     ImageHandle handle{};
     if (width == 0 || height == 0) {
         VK_ERROR() << "[VulkanDevice] createImage2D called with invalid extent: "
@@ -3618,7 +3905,7 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
     viewInfo.image = handle.image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.aspectMask = aspectMask;
     viewInfo.subresourceRange.baseMipLevel = 0;
     viewInfo.subresourceRange.levelCount = 1;
     viewInfo.subresourceRange.baseArrayLayer = 0;
@@ -3698,21 +3985,21 @@ void VulkanDevice::transitionImageLayout(VkCommandBuffer cmd, VkImage image,
         0, nullptr, 0, nullptr, 1, &barrier);
 }
 
-void VulkanDevice::traceRaysAndReadback(uint32_t w, uint32_t h,
+bool VulkanDevice::traceRaysAndReadback(uint32_t w, uint32_t h,
     const ImageHandle& outputImage, const BufferHandle& stagingBuffer) {
-    if (!m_rtPipelineReady || !fpCmdTraceRaysKHR || !m_tlas.accel) return;
-    if (!outputImage.image || !stagingBuffer.buffer) return;
-    if (outputImage.width == 0 || outputImage.height == 0) return;
+    if (!m_rtPipelineReady || !fpCmdTraceRaysKHR || !m_tlas.accel) return false;
+    if (!outputImage.image || !stagingBuffer.buffer) return false;
+    if (outputImage.width == 0 || outputImage.height == 0) return false;
 
     const uint64_t bytesPerPixel = (outputImage.format == VK_FORMAT_R16G16B16A16_SFLOAT) ? 8ull : 16ull;
     const uint64_t requiredBytes = (uint64_t)outputImage.width * (uint64_t)outputImage.height * bytesPerPixel;
     if (stagingBuffer.size < requiredBytes) {
         SCENE_LOG_WARN("[Vulkan] traceRaysAndReadback skipped: staging buffer too small for output image.");
-        return;
+        return false;
     }
 
     VkCommandBuffer cmd = beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) return;
+    if (cmd == VK_NULL_HANDLE) return false;
 
     // ── 1. Bind pipeline + descriptors + push constants ───────────────────────
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_rtPipeline);
@@ -3768,6 +4055,7 @@ void VulkanDevice::traceRaysAndReadback(uint32_t w, uint32_t h,
         0, 0, nullptr, 0, nullptr, 1, &imgBarrier);
 
     endSingleTimeCommands(cmd); // single vkQueueWaitIdle
+    return true;
 }
 
 void VulkanDevice::copyImageToBuffer(const ImageHandle& src, const BufferHandle& dst) {
@@ -3980,6 +4268,167 @@ bool VulkanDevice::createSkinningPipeline(const std::vector<uint32_t>& computeSP
     return true;
 }
 
+bool VulkanDevice::createSculptPipeline(const std::vector<uint32_t>& computeSPV) {
+    if (computeSPV.empty()) return false;
+
+    if (m_sculptPipeline) { vkDestroyPipeline(m_device, m_sculptPipeline, nullptr); m_sculptPipeline = VK_NULL_HANDLE; }
+    if (m_sculptPipelineLayout) { vkDestroyPipelineLayout(m_device, m_sculptPipelineLayout, nullptr); m_sculptPipelineLayout = VK_NULL_HANDLE; }
+    if (m_sculptDescLayout) { vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr); m_sculptDescLayout = VK_NULL_HANDLE; }
+    if (m_sculptDescPool) { vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr); m_sculptDescPool = VK_NULL_HANDLE; }
+
+    // Descriptor pool: allow up to 64 sets, 3 storage buffers each
+    const uint32_t kMaxSculptSets = 64;
+    VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kMaxSculptSets * 3} };
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = poolSizes;
+    poolInfo.maxSets = kMaxSculptSets;
+    poolInfo.flags = 0;
+    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_sculptDescPool) != VK_SUCCESS) return false;
+
+    // Descriptor layout: 3 storage buffers (positions, normals, weights)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+    for (int i = 0; i < 3; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = (uint32_t)bindings.size();
+    layoutInfo.pBindings = bindings.data();
+    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_sculptDescLayout) != VK_SUCCESS) {
+        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
+        m_sculptDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // Pipeline layout with optional push constants (up to 64 bytes)
+    VkPushConstantRange pc{};
+    pc.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pc.offset = 0;
+    pc.size = 64;
+
+    VkPipelineLayoutCreateInfo plInfo{};
+    plInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plInfo.setLayoutCount = 1;
+    plInfo.pSetLayouts = &m_sculptDescLayout;
+    plInfo.pushConstantRangeCount = 1;
+    plInfo.pPushConstantRanges = &pc;
+    if (vkCreatePipelineLayout(m_device, &plInfo, nullptr, &m_sculptPipelineLayout) != VK_SUCCESS) {
+        vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr);
+        m_sculptDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
+        m_sculptDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    // Create shader module
+    VkShaderModuleCreateInfo smInfo{};
+    smInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smInfo.codeSize = computeSPV.size() * sizeof(uint32_t);
+    smInfo.pCode = computeSPV.data();
+    VkShaderModule compModule;
+    if (vkCreateShaderModule(m_device, &smInfo, nullptr, &compModule) != VK_SUCCESS) {
+        vkDestroyPipelineLayout(m_device, m_sculptPipelineLayout, nullptr);
+        m_sculptPipelineLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr);
+        m_sculptDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
+        m_sculptDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkComputePipelineCreateInfo cpInfo{};
+    cpInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpInfo.layout = m_sculptPipelineLayout;
+    cpInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpInfo.stage.module = compModule;
+    cpInfo.stage.pName = "main";
+
+    if (vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpInfo, nullptr, &m_sculptPipeline) != VK_SUCCESS) {
+        vkDestroyShaderModule(m_device, compModule, nullptr);
+        vkDestroyPipelineLayout(m_device, m_sculptPipelineLayout, nullptr);
+        m_sculptPipelineLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorSetLayout(m_device, m_sculptDescLayout, nullptr);
+        m_sculptDescLayout = VK_NULL_HANDLE;
+        vkDestroyDescriptorPool(m_device, m_sculptDescPool, nullptr);
+        m_sculptDescPool = VK_NULL_HANDLE;
+        return false;
+    }
+
+    vkDestroyShaderModule(m_device, compModule, nullptr);
+    return true;
+}
+
+bool VulkanDevice::hasSkinningPipeline() const {
+    return m_skinningPipeline != VK_NULL_HANDLE &&
+           m_skinningPipelineLayout != VK_NULL_HANDLE &&
+           m_skinningDescLayout != VK_NULL_HANDLE &&
+           m_skinningDescPool != VK_NULL_HANDLE;
+}
+
+void VulkanDevice::dispatchSculpt(const BufferHandle& positions, const BufferHandle& normals, const BufferHandle& weights,
+                                  uint32_t vertexCount, const void* pushConstants, uint32_t pushSize) {
+    if (!m_device || !m_commandPool || !m_computeQueue) return;
+    if (m_sculptPipeline == VK_NULL_HANDLE || m_sculptPipelineLayout == VK_NULL_HANDLE || m_sculptDescPool == VK_NULL_HANDLE || m_sculptDescLayout == VK_NULL_HANDLE) return;
+    if (!positions.buffer || vertexCount == 0) return;
+
+    // Allocate descriptor set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = m_sculptDescPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &m_sculptDescLayout;
+
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(m_device, &allocInfo, &descSet) != VK_SUCCESS || descSet == VK_NULL_HANDLE) return;
+
+    VkDescriptorBufferInfo bInfo[3]{};
+    bInfo[0].buffer = positions.buffer; bInfo[0].offset = 0; bInfo[0].range = VK_WHOLE_SIZE;
+    bInfo[1].buffer = normals.buffer ? normals.buffer : positions.buffer; bInfo[1].offset = 0; bInfo[1].range = VK_WHOLE_SIZE;
+    bInfo[2].buffer = weights.buffer; bInfo[2].offset = 0; bInfo[2].range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet writes[3]{};
+    for (int i = 0; i < 3; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = descSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &bInfo[i];
+    }
+    vkUpdateDescriptorSets(m_device, 3, writes, 0, nullptr);
+
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_sculptPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_sculptPipelineLayout, 0, 1, &descSet, 0, nullptr);
+    if (pushConstants && pushSize > 0) {
+        vkCmdPushConstants(cmd, m_sculptPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, pushSize, pushConstants);
+    }
+
+    const uint32_t WG = 128;
+    uint32_t groups = (vertexCount + WG - 1) / WG;
+    vkCmdDispatch(cmd, groups, 1, 1);
+
+    // Ensure writes are visible to subsequent graphics or BLAS updates
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    endSingleTimeCommands(cmd);
+}
+
 void VulkanDevice::dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices) {
     if (!m_device || !m_commandPool || !m_computeQueue) return;
     if (blasIndex >= m_blasList.size() || m_skinningPipeline == VK_NULL_HANDLE) return;
@@ -4166,6 +4615,10 @@ VulkanBackendAdapter::~VulkanBackendAdapter() {
 }
 
 bool VulkanBackendAdapter::initialize() {
+    if (!m_device) {
+        m_device = std::make_unique<VulkanRT::VulkanDevice>();
+    }
+
 #ifdef _DEBUG
     bool validation = true;
 #else
@@ -4174,15 +4627,29 @@ bool VulkanBackendAdapter::initialize() {
     bool ok = m_device->initialize(true, validation);
 
     if (ok && !m_device->hasHardwareRT()) {
-        VK_ERROR() << "[VulkanBackendAdapter] Hardware RT not supported by this GPU, Vulkan backend disabled." << std::endl;
-        m_device->shutdown();
-        return false;
+        if (m_device->supportsGraphicsQueue()) {
+            VK_INFO() << "[VulkanBackendAdapter] No hardware RT — path tracing disabled, "
+                         "but raster viewport (Solid/Matcap) is available." << std::endl;
+        } else {
+            VK_ERROR() << "[VulkanBackendAdapter] No hardware RT and no graphics queue, "
+                          "Vulkan backend disabled." << std::endl;
+            m_device->shutdown();
+            return false;
+        }
     }
 
     if (ok && !m_cachedLights.empty()) {
         VK_INFO() << "[VulkanBackendAdapter] Uploading cached lights after device init (" << m_cachedLights.size() << ")" << std::endl;
         setLights(m_cachedLights);
         m_cachedLights.clear();
+    }
+
+    if (ok) {
+        m_forceClearOnNextPresent = true;
+        m_hasPresentedRenderedFrame = false;
+        m_currentSamples = 0;
+        m_testInitialized = false;
+        m_device->m_rtPipelineReady = false;
     }
     return ok;
 }
@@ -4202,6 +4669,90 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
     m_nextTextureID = 1;
 }
 
+void VulkanBackendAdapter::setInteractiveViewportMatcap(int64_t textureID) {
+    setInteractiveViewportMatcapImpl(textureID);
+}
+
+void VulkanBackendAdapter::setInteractiveViewportMatcapImpl(int64_t textureID) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+
+    // textureID <= 0 means "clear matcap" → revert to procedural
+    if (textureID <= 0) {
+        m_interactiveViewport.matcapUserLoaded = false;
+        m_interactiveViewport.dirty = true;
+        SCENE_LOG_INFO("[Matcap] Cleared — reverting to procedural matcap");
+        return;
+    }
+
+    auto it = m_uploadedImages.find(textureID);
+    if (it == m_uploadedImages.end()) { SCENE_LOG_INFO("[Matcap] textureID not found in uploaded images"); return; }
+
+    VkDevice vkDevice = m_device->getDevice();
+
+    // Assign the uploaded image to interactive viewport matcap reference.
+    m_interactiveViewport.matcapImage = it->second;
+    m_interactiveViewport.matcapUserLoaded = true;
+
+    // If descriptor set doesn't exist yet, allocate it now
+    if (m_interactiveViewport.matcapDescSet == VK_NULL_HANDLE &&
+        m_interactiveViewport.matcapDescPool != VK_NULL_HANDLE &&
+        m_interactiveViewport.matcapDescLayout != VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = m_interactiveViewport.matcapDescPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &m_interactiveViewport.matcapDescLayout;
+        vkAllocateDescriptorSets(vkDevice, &dsai, &m_interactiveViewport.matcapDescSet);
+    }
+
+    // Update descriptor set with the user's texture
+    if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE && m_interactiveViewport.matcapImage.image) {
+        VkDescriptorImageInfo di{};
+        di.sampler = m_interactiveViewport.matcapImage.sampler;
+        di.imageView = m_interactiveViewport.matcapImage.view;
+        di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkWriteDescriptorSet wds{};
+        wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wds.dstSet = m_interactiveViewport.matcapDescSet;
+        wds.dstBinding = 0;
+        wds.dstArrayElement = 0;
+        wds.descriptorCount = 1;
+        wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wds.pImageInfo = &di;
+
+        vkUpdateDescriptorSets(vkDevice, 1, &wds, 0, nullptr);
+        SCENE_LOG_INFO("[Matcap] Texture bound: " + std::to_string(it->second.width) + "x" + std::to_string(it->second.height));
+    } else {
+        SCENE_LOG_INFO("[Matcap] WARNING: Could not bind texture — descSet="
+                       + std::to_string((uintptr_t)m_interactiveViewport.matcapDescSet)
+                       + " pool=" + std::to_string((uintptr_t)m_interactiveViewport.matcapDescPool)
+                       + " layout=" + std::to_string((uintptr_t)m_interactiveViewport.matcapDescLayout));
+    }
+
+    m_interactiveViewport.dirty = true;
+}
+
+void VulkanBackendAdapter::setInteractiveViewportMatcapPreset(int preset) {
+    setInteractiveViewportMatcapPresetImpl(preset);
+}
+
+void VulkanBackendAdapter::setInteractiveViewportMatcapPresetImpl(int preset) {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_device) return;
+    // clamp to allowed range 0..9
+    if (preset < 0) preset = 0;
+    if (preset > 9) preset = 9;
+    // Selecting a preset clears any user-loaded texture
+    m_interactiveViewport.matcapUserLoaded = false;
+    m_interactiveViewport.matcapPreset = preset;
+    m_interactiveViewport.dirty = true;
+    SCENE_LOG_INFO("[Matcap] Preset selected: " + std::to_string(preset));
+}
+
+/* custom matcap support removed */
+
 void VulkanBackendAdapter::shutdown() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
@@ -4212,6 +4763,9 @@ void VulkanBackendAdapter::shutdown() {
     if (m_device->isInitialized()) {
         m_device->waitIdle();
     }
+
+    destroyInteractiveViewportResources(false);
+    destroyAllRasterMeshes();
 
     // Adapter-owned output/readback resources.
     if (m_outputImage.image) {
@@ -4282,12 +4836,22 @@ void VulkanBackendAdapter::shutdown() {
     m_prevViewDir = Vec3(0.0f);
     m_hasPrevView = false;
     m_forceClearOnNextPresent = false;
+    m_hasPresentedRenderedFrame = false;
     m_currentSamples = 0;
     m_testInitialized = false;
     m_hdrPixels.clear();
     m_denoiserColorPixels.clear();
     m_denoiserAlbedoPixels.clear();
     m_denoiserNormalPixels.clear();
+    m_outputImage = {};
+    m_varianceImage = {};
+    m_stagingBuffer = {};
+    m_denoiserColorImage = {};
+    m_denoiserAlbedoImage = {};
+    m_denoiserNormalImage = {};
+    m_denoiserColorStagingBuffer = {};
+    m_denoiserAlbedoStagingBuffer = {};
+    m_denoiserNormalStagingBuffer = {};
 
     // Destroy the device object once. VulkanDevice destructor calls shutdown(),
     // so reset the unique_ptr to release all remaining VulkanDevice-owned resources.
@@ -4303,6 +4867,13 @@ BackendInfo VulkanBackendAdapter::getInfo() const {
     BackendInfo info;
     info.type = BackendType::VULKAN_RT;
     info.name = "Vulkan RT";
+    if (!m_device) {
+        info.deviceName = "Uninitialized";
+        info.hasHardwareRT = false;
+        info.vramBytes = 0;
+        info.driverVersion = "0";
+        return info;
+    }
     const auto& caps = m_device->getCapabilities();
     info.deviceName = caps.deviceName;
     info.hasHardwareRT = m_device->hasHardwareRT();
@@ -4377,7 +4948,10 @@ uint32_t VulkanBackendAdapter::uploadTriangles(const std::vector<TriangleData>& 
     blasInfo.materialIndexCount = (uint32_t)materialIndices.size();
     
     blasInfo.hasSkinning = hasSkinning;
-    const bool allowDynamicUpdate = hasSkinning || meshName.rfind("[World-Solo]-", 0) == 0;
+    const bool allowDynamicUpdate =
+        hasSkinning ||
+        meshName.rfind("[World-Solo]-", 0) == 0 ||
+        meshName.rfind("[InstSource]-", 0) == 0;
     blasInfo.allowUpdate = allowDynamicUpdate;
     blasInfo.boneIndicesData = hasSkinning ? boneIndices.data() : nullptr;
     blasInfo.boneWeightsData = hasSkinning ? boneWeights.data() : nullptr;
@@ -4456,6 +5030,127 @@ bool VulkanBackendAdapter::updateTerrainBLASPartial(const std::string& nodeName,
         m_device->updateTLAS(merged);
     }
     return true;
+}
+
+bool VulkanBackendAdapter::updateMeshBLASPartial(const std::string& nodeName, const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    if (!m_device || !m_device->isInitialized() || !m_device->hasHardwareRT()) return false;
+    if (triangles.empty() || m_vkInstances.empty() || m_instanceSources.empty()) return false;
+
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // NOTE:
+    // This path is currently not used by edit/sculpt runtime sync because
+    // transformed editable meshes can still desynchronize here. Keep the logic
+    // intact for future debugging/rework, but the UI layer intentionally gates
+    // Vulkan RT mesh edits to the full rebuild path for correctness.
+
+    uint32_t targetBlasIndex = UINT32_MAX;
+    bool targetUsesLocalSpace = false;
+    const Triangle* firstTriangle = triangles.front().get();
+    const size_t expectedTriangleCount = triangles.size();
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (!m_instanceSources[i]) continue;
+
+        std::string instName;
+        bool strongMatch = false;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            instName = inst->node_name;
+            if (inst->source_triangles &&
+                !inst->source_triangles->empty() &&
+                inst->source_triangles->size() == expectedTriangleCount &&
+                inst->source_triangles->front().get() == firstTriangle) {
+                strongMatch = true;
+                targetUsesLocalSpace = true;
+            }
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            instName = tri->getNodeName();
+            if (tri.get() == firstTriangle) {
+                strongMatch = true;
+                targetUsesLocalSpace = (tri->getTransformHandle() != nullptr);
+            }
+        }
+
+        if (strongMatch) {
+            targetBlasIndex = m_vkInstances[i].blasIndex;
+            break;
+        }
+
+        if (matchesNodeNameForInstance(instName, nodeName)) {
+            targetBlasIndex = m_vkInstances[i].blasIndex;
+            if (std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+                targetUsesLocalSpace = true;
+            } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+                targetUsesLocalSpace = (tri->getTransformHandle() != nullptr);
+            }
+            break;
+        }
+    }
+
+    if (targetBlasIndex == UINT32_MAX || targetBlasIndex >= m_device->m_blasList.size()) {
+        return false;
+    }
+
+    const auto& blasHandle = m_device->m_blasList[targetBlasIndex];
+    const size_t expectedVertexCount = triangles.size() * 3ull;
+    if (expectedVertexCount == 0 || expectedVertexCount != blasHandle.vertexCount || !blasHandle.allowUpdate) {
+        return false;
+    }
+
+    std::vector<float> positions;
+    std::vector<float> normals;
+    positions.reserve(expectedVertexCount * 3ull);
+    normals.reserve(expectedVertexCount * 3ull);
+
+    for (const auto& tri : triangles) {
+        if (!tri) continue;
+        for (int v = 0; v < 3; ++v) {
+            const Vec3 p = targetUsesLocalSpace ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+            const Vec3 n = targetUsesLocalSpace ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
+            positions.push_back(p.x);
+            positions.push_back(p.y);
+            positions.push_back(p.z);
+            normals.push_back(n.x);
+            normals.push_back(n.y);
+            normals.push_back(n.z);
+        }
+    }
+
+    if (positions.size() != expectedVertexCount * 3ull || normals.size() != expectedVertexCount * 3ull) {
+        return false;
+    }
+
+    m_device->updateBLAS(targetBlasIndex, positions.data(), normals.data());
+
+    // Refresh the TLAS instance transform from the live transform handle so that
+    // objects scaled/rotated since the last full rebuild are rendered at the
+    // correct world-space position.  Without this, editing vertices of a
+    // recently-scaled object would show the BLAS data through a stale TLAS
+    // transform, producing oversized / misplaced geometry.
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (m_vkInstances[i].blasIndex != targetBlasIndex) continue;
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            m_vkInstances[i].transform = inst->transform;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            if (tri->getTransformHandle()) {
+                m_vkInstances[i].transform = tri->getTransformHandle()->getFinal();
+            }
+        }
+    }
+
+    auto merged = m_vkInstances;
+    for (const auto& h : m_hairVkInstances) merged.push_back(h);
+    if (!merged.empty()) {
+        m_device->updateTLAS(merged);
+    }
+
+    resetAccumulation();
+    return true;
+}
+
+bool VulkanBackendAdapter::updateInteractiveMesh(const std::string& nodeName,
+                                                 const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    return updateMeshBLASPartial(nodeName, triangles);
 }
 
 void VulkanBackendAdapter::clearHairGeometry(bool rebuild_tlas) {
@@ -4640,6 +5335,9 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
     m_hairGroomRegistry.clear();
     m_meshBlasCount = 0; // Reset: all existing BLASes will be destroyed below
     m_topology_dirty = true;
+    m_rasterGeometryDirty = true;
+    destroyAllRasterMeshes();
+    m_rasterBuiltGeometryGeneration = 0; // Invalidate raster cache
     m_envTexID = 0;
     m_atmosphereLutReady = false;
     
@@ -4748,6 +5446,15 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
         for (const auto& h : m_hairVkInstances) merged.push_back(h);
         m_device->updateTLAS(merged);
 
+        // Sync raster viewport instances so Solid/Matcap mode reflects animation
+        if (!m_rasterInstances.empty() && shouldUseInteractiveViewport()) {
+            syncRasterInstanceTransforms(o);
+            // CPU-skin raster vertex buffers so skinned meshes don't stay in T-pose
+            if (!b.empty()) {
+                syncRasterSkinnedVertices(o, b);
+            }
+        }
+
         resetAccumulation();
         return;
     }
@@ -4763,14 +5470,24 @@ void VulkanBackendAdapter::updateSceneGeometry(const std::vector<std::shared_ptr
     }
     updateGeometry(o);
     m_topology_dirty = false;
+
+    // Sync raster viewport instances so Solid/Matcap mode reflects animation
+    if (!m_rasterInstances.empty() && shouldUseInteractiveViewport()) {
+        syncRasterInstanceTransforms(o);
+        // CPU-skin raster vertex buffers so skinned meshes don't stay in T-pose
+        if (!b.empty()) {
+            syncRasterSkinnedVertices(o, b);
+        }
+    }
 }
 
 void VulkanBackendAdapter::updateInstanceMaterialBinding(const std::string& n, int o, int nw) { (void)n; (void)o; (void)nw; }
 void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, bool visible) {
-    if (!m_device || !m_device->isInitialized() || m_instanceSources.empty()) return;
+    if (!m_device || !m_device->isInitialized()) return;
 
     bool changed = false;
-    for (size_t i = 0; i < m_instanceSources.size(); ++i) {
+    std::unordered_set<std::string> dirtyRasterMeshes;
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
         if (!m_instanceSources[i]) continue;
 
         std::string instName;
@@ -4789,11 +5506,30 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
         }
     }
 
+    for (auto& ri : m_rasterInstances) {
+        if (matchesNodeNameForInstance(ri.nodeName, nodeName)) {
+            uint8_t newMask = visible ? 0xFF : 0x00;
+            if (ri.mask != newMask) {
+                ri.mask = newMask;
+                dirtyRasterMeshes.insert(ri.meshKey);
+                changed = true;
+            }
+        }
+    }
+
     if (changed) {
-        // [VULKAN FIX] Update the TLAS with new visibility masks (include hair)
-        auto mergedVis = m_vkInstances;
-        for (const auto& h : m_hairVkInstances) mergedVis.push_back(h);
-        m_device->updateTLAS(mergedVis);
+        for (const auto& meshKey : dirtyRasterMeshes) {
+            auto meshIt = m_rasterMeshes.find(meshKey);
+            if (meshIt != m_rasterMeshes.end()) {
+                uploadRasterInstanceBuffer(meshIt->second);
+            }
+        }
+        if (!m_vkInstances.empty()) {
+            // [VULKAN FIX] Update the TLAS with new visibility masks (include hair)
+            auto mergedVis = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) mergedVis.push_back(h);
+            m_device->updateTLAS(mergedVis);
+        }
         resetAccumulation();
     }
 }
@@ -4854,8 +5590,19 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                     
                     for (const auto& t : *inst->source_triangles) {
                         TriangleData d;
-                        d.v0 = t->getV0(); d.v1 = t->getV1(); d.v2 = t->getV2();
-                        d.n0 = t->getN0(); d.n1 = t->getN1(); d.n2 = t->getN2();
+                        // IMPORTANT:
+                        // Keep instanced source geometry in LOCAL/object space here.
+                        // World transforms belong only in TLAS (`inst->transform` below).
+                        // If world-space vertices are uploaded here as well, Vulkan applies
+                        // the same transform twice (once in BLAS data, once in TLAS),
+                        // which shows up as imported/project-loaded meshes being offset
+                        // while CPU/OptiX still look correct.
+                        d.v0 = t->getOriginalVertexPosition(0);
+                        d.v1 = t->getOriginalVertexPosition(1);
+                        d.v2 = t->getOriginalVertexPosition(2);
+                        d.n0 = t->getOriginalVertexNormal(0);
+                        d.n1 = t->getOriginalVertexNormal(1);
+                        d.n2 = t->getOriginalVertexNormal(2);
                         auto uv = t->getUVCoordinates();
                         d.uv0 = std::get<0>(uv); d.uv1 = std::get<1>(uv); d.uv2 = std::get<2>(uv);
                         d.materialID = t->getMaterialID();
@@ -4909,14 +5656,27 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
             if (!tri->visible) return;
             TriangleData d;
-            // IMPORTANT: BLAS geometry must stay in local space.
-            // World/object transform is carried by TLAS instance transform.
-            d.v0 = tri->getOriginalVertexPosition(0);
-            d.v1 = tri->getOriginalVertexPosition(1);
-            d.v2 = tri->getOriginalVertexPosition(2);
-            d.n0 = tri->getOriginalVertexNormal(0);
-            d.n1 = tri->getOriginalVertexNormal(1);
-            d.n2 = tri->getOriginalVertexNormal(2);
+            // Use the live vertex state here so deformed standalone meshes such as
+            // animated water surfaces reach Vulkan BLAS rebuilds correctly.
+            const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+            if (hasSharedTransform) {
+                // Static imported meshes keep BLAS geometry in object-local space.
+                // Their world transform is carried by the TLAS instance transform.
+                d.v0 = tri->getOriginalVertexPosition(0);
+                d.v1 = tri->getOriginalVertexPosition(1);
+                d.v2 = tri->getOriginalVertexPosition(2);
+                d.n0 = tri->getOriginalVertexNormal(0);
+                d.n1 = tri->getOriginalVertexNormal(1);
+                d.n2 = tri->getOriginalVertexNormal(2);
+            } else {
+                // Procedural/deformed standalone triangles may already live in world space.
+                d.v0 = tri->getV0();
+                d.v1 = tri->getV1();
+                d.v2 = tri->getV2();
+                d.n0 = tri->getN0();
+                d.n1 = tri->getN1();
+                d.n2 = tri->getN2();
+            }
             auto uv = tri->getUVCoordinates();
             d.uv0 = std::get<0>(uv); d.uv1 = std::get<1>(uv); d.uv2 = std::get<2>(uv);
             d.materialID = tri->getMaterialID();
@@ -4953,7 +5713,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
                 if (group.nodeName.empty()) {
                     group.nodeName = "[World-Solo-Node-" + std::to_string(soloGroups.size()) + "]";
                 }
-                group.transform = tri->getTransformMatrix();
+                group.transform = hasSharedTransform ? tri->getTransformMatrix() : Matrix4x4::identity();
                 group.materialID = tri->getMaterialID();
                 group.representative = tri;
                 soloGroups.push_back(std::move(group));
@@ -5157,6 +5917,18 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
         m_device->m_rtPipelineReady = false;
         resetAccumulation();
     }
+
+    // Keep raster geometry only when this backend is actively serving the
+    // interactive viewport itself. In the refactored architecture a dedicated
+    // viewport backend owns Solid/Matcap raster state, so letting the Vulkan RT
+    // render backend also retain/rebuild raster meshes causes duplicate uploads,
+    // slower backend switches, and extra instability during Rendered mode.
+    if (shouldUseInteractiveViewport()) {
+        buildRasterGeometry(objects);
+    } else if (!m_rasterMeshes.empty() || !m_rasterInstances.empty()) {
+        destroyAllRasterMeshes();
+        m_interactiveViewport.dirty = true;
+    }
 }
 
 // Materials & Textures
@@ -5200,6 +5972,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.subsurface_radius_r = m.subsurfaceRadius.x; gm.subsurface_radius_g = m.subsurfaceRadius.y; gm.subsurface_radius_b = m.subsurfaceRadius.z;
         gm.subsurface_scale = m.subsurfaceScale;
         gm.subsurface_ior = m.subsurfaceIOR;
+        gm.normal_strength = m.normalStrength;
         // SSS control flags (match VkGpuMaterial layout Block 12)
        
         gm.clearcoat = m.clearcoat;
@@ -5210,6 +5983,14 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.sheen = m.sheen;
         gm.sheen_tint = m.sheenTint;
         gm.flags = (uint32_t)m.flags;
+        gm.uv_scale_x = static_cast<float>(m.uvScale.x);
+        gm.uv_scale_y = static_cast<float>(m.uvScale.y);
+        gm.uv_offset_x = static_cast<float>(m.uvOffset.x);
+        gm.uv_offset_y = static_cast<float>(m.uvOffset.y);
+        gm.uv_rotation_degrees = m.uvRotationDegrees;
+        gm.uv_tiling_x = static_cast<float>(m.uvTiling.x);
+        gm.uv_tiling_y = static_cast<float>(m.uvTiling.y);
+        gm.uv_wrap_mode = m.uvWrapMode;
         // If this is a terrain material, embed the terrain layer buffer index
         if (m.flags & Backend::IBackend::MAT_FLAG_TERRAIN) {
             gm._terrain_layer_idx = m.terrainLayerIdx;
@@ -5223,9 +6004,23 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         gm.fft_ocean_size        = m.fft_ocean_size;
         gm.fft_choppiness        = m.fft_choppiness;
         gm.fft_wind_speed        = m.fft_wind_speed;
+        gm.fft_wind_direction    = m.fft_wind_direction;
+        gm.micro_anim_speed      = m.micro_anim_speed;
+        gm.micro_morph_speed     = m.micro_morph_speed;
+        gm.foam_noise_scale      = m.foam_noise_scale;
         // ... getTexID mapping (cast to uint32_t for GLSL compatibility)
         auto getTexID = [this](int64_t key, TextureType textureType, bool forceLinear = false, bool preferSingleChannel = false) -> uint32_t {
             if (!key) return 0;
+            auto uploadedIt = m_uploadedImages.find(key);
+            if (uploadedIt != m_uploadedImages.end()) {
+                return static_cast<uint32_t>(key);
+            }
+            // Runtime backend-owned texture handles are small integer ids, not real Texture* pointers.
+            // If such a handle is stale/missing from the uploaded-image table, fail safely instead of
+            // treating it as a host pointer and dereferencing invalid memory.
+            if (key > 0 && static_cast<uint64_t>(key) < (1ull << 32)) {
+                return 0;
+            }
             uint64_t cacheKey = (static_cast<uint64_t>(key) << 2) |
                                 (forceLinear ? 1ull : 0ull) |
                                 (preferSingleChannel ? 2ull : 0ull);
@@ -5320,6 +6115,25 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
     }
 
     m_device->updateMaterialBuffer(gpuMats.data(), gpuMats.size() * sizeof(::VulkanRT::VkGpuMaterial), (uint32_t)gpuMats.size());
+
+    // Update material preview descriptor set when material buffer changes
+    if (m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
+        m_device->m_materialBuffer.buffer != VK_NULL_HANDLE) {
+        VkDescriptorBufferInfo matBufInfo{};
+        matBufInfo.buffer = m_device->m_materialBuffer.buffer;
+        matBufInfo.offset = 0;
+        matBufInfo.range = VK_WHOLE_SIZE;
+
+        VkWriteDescriptorSet mpWds{};
+        mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+        mpWds.dstBinding = 0;
+        mpWds.descriptorCount = 1;
+        mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        mpWds.pBufferInfo = &matBufInfo;
+        vkUpdateDescriptorSets(m_device->getDevice(), 1, &mpWds, 0, nullptr);
+    }
+
     if (m_textureUploadSummaryDirty) {
         SCENE_LOG_INFO("[Perf] [Vulkan] textures | count=" + std::to_string(m_textureUploadCount) +
                        " | est_vram=" + std::to_string(m_textureUploadBytes) +
@@ -5939,7 +6753,7 @@ void VulkanBackendAdapter::setCamera(const CameraParams& c) {
 void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     // Convert CPU Camera to CameraParams and call setCamera()
     // This ensures all camera properties (including advanced cinema settings) are synchronized
-    Backend::CameraParams cp;
+    Backend::CameraParams cp{};
     cp.origin = cam.lookfrom;
     cp.lookAt = cam.lookat;
     cp.up = cam.vup;
@@ -5954,6 +6768,20 @@ void VulkanBackendAdapter::syncCamera(const Camera& cam) {
     cp.autoAE = cam.auto_exposure;
     cp.usePhysicalExposure = cam.use_physical_exposure;
     cp.exposureFactor = cam.getPhysicalExposureMultiplier();
+
+    // Pro camera features
+    cp.distortion = cam.distortion;
+    cp.vignettingEnabled = cam.enable_vignetting;
+    cp.vignetting_amount = cam.vignetting_amount;
+    cp.vignetting_falloff = cam.vignetting_falloff;
+    cp.chromaticAberrationEnabled = cam.enable_chromatic_aberration;
+    cp.chromatic_aberration = cam.chromatic_aberration;
+    cp.chromatic_aberration_r = cam.chromatic_aberration_r;
+    cp.chromatic_aberration_b = cam.chromatic_aberration_b;
+    cp.blade_count = cam.blade_count;
+    cp.lens_quality = cam.lens_quality;
+    cp.camera_mode = (int)cam.camera_mode;
+    cp.motionBlurEnabled = cam.enable_motion_blur;
 
     cp.shake_enabled = cam.enable_camera_shake;
     cp.shake_intensity = cam.shake_intensity;
@@ -6044,6 +6872,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
             }
             resetAccumulation();
         }
+        // Always sync raster instances for Solid/Matcap - even when TLAS is empty/unchanged
+        if (!m_rasterInstances.empty() && shouldUseInteractiveViewport()) {
+            syncRasterInstanceTransforms(objects);
+        }
         return;
     }
 
@@ -6106,6 +6938,10 @@ void VulkanBackendAdapter::updateInstanceTransforms(const std::vector<std::share
             if (m_device->m_rtDescriptorSet != VK_NULL_HANDLE) { VkDescriptorBufferInfo instInfo{}; instInfo.buffer = m_device->m_instanceDataBuffer.buffer; instInfo.offset = 0; instInfo.range = VK_WHOLE_SIZE; VkWriteDescriptorSet w5{}; w5.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w5.dstSet = m_device->m_rtDescriptorSet; w5.dstBinding = 5; w5.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w5.descriptorCount = 1; w5.pBufferInfo = &instInfo; vkUpdateDescriptorSets(m_device->m_device, 1, &w5, 0, nullptr); }
         }
         resetAccumulation();
+    }
+    // Always sync raster instances for Solid/Matcap - even when TLAS is empty/unchanged
+    if (!m_rasterInstances.empty() && shouldUseInteractiveViewport()) {
+        syncRasterInstanceTransforms(objects);
     }
 }
 
@@ -6203,8 +7039,11 @@ void VulkanBackendAdapter::updateInstanceTransform(int instance_id, const float 
 void VulkanBackendAdapter::updateObjectTransform(const std::string& nodeName, const Matrix4x4& transform) {
     if (!m_device || !m_device->isInitialized()) return;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
-    
+
     bool changed = false;
+    std::unordered_set<std::string> dirtyRasterMeshes;
+
+    // Update RT instances (when hardware RT is available)
     for (size_t i = 0; i < m_vkInstances.size(); ++i) {
         if (m_instanceSources.size() > i && m_instanceSources[i]) {
             std::string instName;
@@ -6216,7 +7055,6 @@ void VulkanBackendAdapter::updateObjectTransform(const std::string& nodeName, co
 
             if (matchesNodeNameForInstance(instName, nodeName)) {
                 m_vkInstances[i].transform = transform;
-                // Also update the sync cache so updateInstanceTransforms doesn't revert it
                 if (m_instanceSources.size() > i) {
                      if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
                           inst->setTransform(transform);
@@ -6228,14 +7066,29 @@ void VulkanBackendAdapter::updateObjectTransform(const std::string& nodeName, co
             }
         }
     }
-    
+
+    // Always sync raster instance transforms (for Solid/Matcap viewport)
+    for (auto& ri : m_rasterInstances) {
+        if (matchesNodeNameForInstance(ri.nodeName, nodeName)) {
+            ri.transform = transform;
+            dirtyRasterMeshes.insert(ri.meshKey);
+            changed = true;
+        }
+    }
+
     if (changed) {
-        // [VULKAN] Must wait idle before modifying AS that is actively being traced
-        m_device->waitIdle();
-        { 
-            auto merged = m_vkInstances; 
-            for (const auto& h : m_hairVkInstances) merged.push_back(h); 
-            m_device->updateTLAS(merged); 
+        for (const auto& meshKey : dirtyRasterMeshes) {
+            auto meshIt = m_rasterMeshes.find(meshKey);
+            if (meshIt != m_rasterMeshes.end()) {
+                uploadRasterInstanceBuffer(meshIt->second);
+            }
+        }
+        if (m_viewportMode == ViewportMode::Rendered && m_device->hasHardwareRT()) {
+            // Only update TLAS in rendered mode (expensive, not needed for solid rasterization)
+            m_device->waitIdle();
+            auto merged = m_vkInstances;
+            for (const auto& h : m_hairVkInstances) merged.push_back(h);
+            m_device->updateTLAS(merged);
         }
         resetAccumulation();
     }
@@ -6244,17 +7097,2455 @@ void VulkanBackendAdapter::setStatusCallback(std::function<void(const std::strin
 void* VulkanBackendAdapter::getNativeCommandQueue() { return (void*)m_device->getComputeQueue(); }
 
 void VulkanBackendAdapter::renderPass(bool accumulate) { (void)accumulate; /* TODO */ }
+
+// ============================================================================
+// Raster mesh buffers — lightweight vertex/normal/index for solid mode
+// ============================================================================
+
+void VulkanBackendAdapter::buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    buildRasterGeometryImpl(objects);
+}
+
+void VulkanBackendAdapter::syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    syncRasterInstanceTransformsImpl(objects);
+}
+
+void VulkanBackendAdapter::syncRasterSkinnedVertices(
+    const std::vector<std::shared_ptr<Hittable>>& objects,
+    const std::vector<Matrix4x4>& boneMatrices) {
+    syncRasterSkinnedVerticesImpl(objects, boneMatrices);
+}
+
+bool VulkanBackendAdapter::updateRasterMeshFromTriangles(
+    const std::string& nodeName,
+    const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    return updateRasterMeshFromTrianglesImpl(nodeName, triangles);
+}
+
+bool VulkanBackendAdapter::patchRasterMeshTriangles(
+    const std::string& nodeName,
+    const std::vector<size_t>& dirtyIndices,
+    const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries) {
+    return patchRasterMeshTrianglesImpl(nodeName, dirtyIndices, meshEntries);
+}
+
+bool VulkanBackendAdapter::shouldUseInteractiveViewport() const {
+    return shouldUseInteractiveViewportImpl();
+}
+
+bool VulkanBackendAdapter::ensureInteractiveViewportResources(const std::string& shaderDir, int width, int height) {
+    return ensureInteractiveViewportResourcesImpl(shaderDir, width, height);
+}
+
+void VulkanBackendAdapter::destroyInteractiveViewportResources(bool keepPipeline) {
+    destroyInteractiveViewportResourcesImpl(keepPipeline);
+}
+
+void VulkanBackendAdapter::renderInteractiveViewport(void* outSurface, int width, int height,
+                                                     void* outFramebuffer, void* outTexture) {
+    renderInteractiveViewportImpl(outSurface, width, height, outFramebuffer, outTexture);
+}
+
 void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int width, int height, void* fb, void* tex) {
-    (void)s; (void)w; (void)r; 
+    renderProgressiveImpl(s, w, r, width, height, fb, tex);
+}
+
+void VulkanBackendAdapter::destroyRasterMesh(RasterMeshBuffer& mesh) {
+    if (!m_device) return;
+    if (mesh.vertexBuffer.buffer) m_device->destroyBuffer(mesh.vertexBuffer);
+    if (mesh.normalBuffer.buffer) m_device->destroyBuffer(mesh.normalBuffer);
+    if (mesh.uvBuffer.buffer) m_device->destroyBuffer(mesh.uvBuffer);
+    if (mesh.matIdBuffer.buffer) m_device->destroyBuffer(mesh.matIdBuffer);
+    if (mesh.indexBuffer.buffer)  m_device->destroyBuffer(mesh.indexBuffer);
+    if (mesh.instanceBuffer.buffer) m_device->destroyBuffer(mesh.instanceBuffer);
+    if (mesh.baseVertexBuffer.buffer) m_device->destroyBuffer(mesh.baseVertexBuffer);
+    if (mesh.baseNormalBuffer.buffer) m_device->destroyBuffer(mesh.baseNormalBuffer);
+    if (mesh.boneIndexBuffer.buffer) m_device->destroyBuffer(mesh.boneIndexBuffer);
+    if (mesh.boneWeightBuffer.buffer) m_device->destroyBuffer(mesh.boneWeightBuffer);
+    if (mesh.persistentBoneMatsBuffer.buffer) m_device->destroyBuffer(mesh.persistentBoneMatsBuffer);
+    mesh = RasterMeshBuffer{};
+}
+
+void VulkanBackendAdapter::destroyAllRasterMeshes() {
+    for (auto& [key, mesh] : m_rasterMeshes) {
+        destroyRasterMesh(mesh);
+    }
+    m_rasterMeshes.clear();
+    m_rasterInstances.clear();
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Frustum Culling for Solid Viewport
+// ─────────────────────────────────────────────────────────────────────
+
+void VulkanBackendAdapter::extractFrustumPlanes(const Matrix4x4& vp) {
+    const auto* vpBytes = reinterpret_cast<const unsigned char*>(&vp);
+    uint64_t frustumHash = 1469598103934665603ull;
+    for (size_t i = 0; i < sizeof(Matrix4x4); ++i) {
+        frustumHash ^= static_cast<uint64_t>(vpBytes[i]);
+        frustumHash *= 1099511628211ull;
+    }
+    if (frustumHash != m_rasterFrustumHash) {
+        m_rasterFrustumHash = frustumHash;
+        ++m_rasterFrustumRevision;
+    }
+
+    // Extract 6 frustum planes from the view-projection matrix (row-major).
+    // Each plane: dot(normal, point) + d >= 0 means inside.
+    auto row = [&](int r, int c) -> float { return vp.m[r][c]; };
+
+    // Left:   row3 + row0
+    m_frustumPlanes[0].normal = Vec3(row(3,0)+row(0,0), row(3,1)+row(0,1), row(3,2)+row(0,2));
+    m_frustumPlanes[0].d      =      row(3,3)+row(0,3);
+    // Right:  row3 - row0
+    m_frustumPlanes[1].normal = Vec3(row(3,0)-row(0,0), row(3,1)-row(0,1), row(3,2)-row(0,2));
+    m_frustumPlanes[1].d      =      row(3,3)-row(0,3);
+    // Bottom: row3 + row1
+    m_frustumPlanes[2].normal = Vec3(row(3,0)+row(1,0), row(3,1)+row(1,1), row(3,2)+row(1,2));
+    m_frustumPlanes[2].d      =      row(3,3)+row(1,3);
+    // Top:    row3 - row1
+    m_frustumPlanes[3].normal = Vec3(row(3,0)-row(1,0), row(3,1)-row(1,1), row(3,2)-row(1,2));
+    m_frustumPlanes[3].d      =      row(3,3)-row(1,3);
+    // Near:   row3 + row2
+    m_frustumPlanes[4].normal = Vec3(row(3,0)+row(2,0), row(3,1)+row(2,1), row(3,2)+row(2,2));
+    m_frustumPlanes[4].d      =      row(3,3)+row(2,3);
+    // Far:    row3 - row2
+    m_frustumPlanes[5].normal = Vec3(row(3,0)-row(2,0), row(3,1)-row(2,1), row(3,2)-row(2,2));
+    m_frustumPlanes[5].d      =      row(3,3)-row(2,3);
+
+    // Normalize planes
+    for (auto& p : m_frustumPlanes) {
+        float len = p.normal.length();
+        if (len > 1e-6f) {
+            p.normal = p.normal / len;
+            p.d /= len;
+        }
+    }
+}
+
+bool VulkanBackendAdapter::isAABBInFrustum(const AABB& box) const {
+    const Vec3 halfExtents = (box.max - box.min) * 0.5f;
+    const float conservativeSlack = std::max(halfExtents.length() * 0.75f, 0.05f);
+    for (int i = 0; i < 6; ++i) {
+        if (i == 4) {
+            // Skip CPU-side near-plane rejection for raster viewport culling.
+            // When the camera gets very close to a surface, object AABBs often
+            // straddle the near plane even though a visible portion should still
+            // render. Let the GPU clipper handle the near plane instead of
+            // dropping the whole mesh/chunk on the CPU side.
+            continue;
+        }
+        const auto& pl = m_frustumPlanes[i];
+        // P-vertex: the corner of AABB most in the direction of the plane normal
+        Vec3 pVertex(
+            pl.normal.x >= 0 ? box.max.x : box.min.x,
+            pl.normal.y >= 0 ? box.max.y : box.min.y,
+            pl.normal.z >= 0 ? box.max.z : box.min.z
+        );
+        if (Vec3::dot(pl.normal, pVertex) + pl.d < -conservativeSlack)
+            return false;
+    }
+    return true;
+}
+
+bool VulkanBackendAdapter::isAABBFullyInsideFrustum(const AABB& box) const {
+    if (!box.is_valid()) return false;
+    const Vec3 halfExtents = (box.max - box.min) * 0.5f;
+    const float conservativeSlack = std::max(halfExtents.length() * 0.35f, 0.02f);
+    for (int i = 0; i < 6; ++i) {
+        if (i == 4) {
+            continue;
+        }
+        const auto& pl = m_frustumPlanes[i];
+        Vec3 nVertex(
+            pl.normal.x >= 0 ? box.min.x : box.max.x,
+            pl.normal.y >= 0 ? box.min.y : box.max.y,
+            pl.normal.z >= 0 ? box.min.z : box.max.z
+        );
+        if (Vec3::dot(pl.normal, nVertex) + pl.d < -conservativeSlack)
+            return false;
+    }
+    return true;
+}
+
+bool VulkanBackendAdapter::isRasterChunkTooSmallToDraw(const AABB& box) const {
+    if (!box.is_valid() || m_rasterCullFocalLengthPixels <= 0.0f ||
+        m_rasterMinChunkScreenRadiusPixels <= 0.0f) {
+        return false;
+    }
+
+    const Vec3 center = (box.min + box.max) * 0.5f;
+    const Vec3 halfExtents = (box.max - box.min) * 0.5f;
+    const float radius = halfExtents.length();
+    if (radius <= 0.0f) {
+        return false;
+    }
+
+    const float distance = (center - m_rasterCullCameraPosition).length();
+    if (distance <= radius) {
+        return false;
+    }
+
+    const float projectedRadiusPixels = (radius * m_rasterCullFocalLengthPixels) / distance;
+    return projectedRadiusPixels < m_rasterMinChunkScreenRadiusPixels;
+}
+
+void VulkanBackendAdapter::updateRasterInstanceWorldBBox(RasterInstance& ri) const {
+    // Transform local AABB 8 corners to world space, compute enclosing AABB
+    const AABB& lb = ri.localBBox;
+    if (!lb.is_valid()) {
+        ri.worldBBox = lb;
+        return;
+    }
+    const Vec3 corners[8] = {
+        Vec3(lb.min.x, lb.min.y, lb.min.z),
+        Vec3(lb.max.x, lb.min.y, lb.min.z),
+        Vec3(lb.min.x, lb.max.y, lb.min.z),
+        Vec3(lb.max.x, lb.max.y, lb.min.z),
+        Vec3(lb.min.x, lb.min.y, lb.max.z),
+        Vec3(lb.max.x, lb.min.y, lb.max.z),
+        Vec3(lb.min.x, lb.max.y, lb.max.z),
+        Vec3(lb.max.x, lb.max.y, lb.max.z),
+    };
+    Vec3 wMin(1e18f, 1e18f, 1e18f), wMax(-1e18f, -1e18f, -1e18f);
+    for (const auto& c : corners) {
+        Vec3 wc = ri.transform.transform_point(c);
+        wMin.x = std::min(wMin.x, wc.x);
+        wMin.y = std::min(wMin.y, wc.y);
+        wMin.z = std::min(wMin.z, wc.z);
+        wMax.x = std::max(wMax.x, wc.x);
+        wMax.y = std::max(wMax.y, wc.y);
+        wMax.z = std::max(wMax.z, wc.z);
+    }
+    ri.worldBBox = AABB(wMin, wMax);
+}
+
+void VulkanBackendAdapter::rebuildRasterMeshCullingChunks(RasterMeshBuffer& mesh) {
+    mesh.cullingChunks.clear();
+    if (mesh.instanceIndices.size() < 128) {
+        return;
+    }
+
+    float baseCellSize = 0.0f;
+    for (uint32_t instanceIndex : mesh.instanceIndices) {
+        if (instanceIndex >= m_rasterInstances.size()) continue;
+        const AABB& localBBox = m_rasterInstances[instanceIndex].localBBox;
+        if (!localBBox.is_valid()) continue;
+        const float extentX = std::max(0.0f, localBBox.max.x - localBBox.min.x);
+        const float extentZ = std::max(0.0f, localBBox.max.z - localBBox.min.z);
+        baseCellSize = std::max(baseCellSize, std::max(extentX, extentZ));
+        if (baseCellSize > 0.0f) break;
+    }
+
+    const float cellSize = std::clamp(baseCellSize > 0.0f ? baseCellSize * 8.0f : 8.0f, 4.0f, 96.0f);
+
+    struct ChunkKey {
+        int32_t x;
+        int32_t z;
+        bool operator==(const ChunkKey& other) const {
+            return x == other.x && z == other.z;
+        }
+    };
+    struct ChunkKeyHash {
+        size_t operator()(const ChunkKey& key) const {
+            return (static_cast<size_t>(static_cast<uint32_t>(key.x)) << 32) ^
+                   static_cast<size_t>(static_cast<uint32_t>(key.z));
+        }
+    };
+
+    std::unordered_map<ChunkKey, size_t, ChunkKeyHash> chunkLookup;
+    chunkLookup.reserve(mesh.instanceIndices.size() / 8 + 1);
+
+    for (uint32_t instanceIndex : mesh.instanceIndices) {
+        if (instanceIndex >= m_rasterInstances.size()) continue;
+        const auto& ri = m_rasterInstances[instanceIndex];
+        if (ri.mask == 0 || !ri.worldBBox.is_valid()) continue;
+
+        const float centerX = (ri.worldBBox.min.x + ri.worldBBox.max.x) * 0.5f;
+        const float centerZ = (ri.worldBBox.min.z + ri.worldBBox.max.z) * 0.5f;
+        const ChunkKey key{
+            static_cast<int32_t>(std::floor(centerX / cellSize)),
+            static_cast<int32_t>(std::floor(centerZ / cellSize))
+        };
+
+        auto [it, inserted] = chunkLookup.emplace(key, mesh.cullingChunks.size());
+        if (inserted) {
+            mesh.cullingChunks.emplace_back();
+            mesh.cullingChunks.back().worldBBox = ri.worldBBox;
+        } else {
+            auto& bbox = mesh.cullingChunks[it->second].worldBBox;
+            bbox.min.x = std::min(bbox.min.x, ri.worldBBox.min.x);
+            bbox.min.y = std::min(bbox.min.y, ri.worldBBox.min.y);
+            bbox.min.z = std::min(bbox.min.z, ri.worldBBox.min.z);
+            bbox.max.x = std::max(bbox.max.x, ri.worldBBox.max.x);
+            bbox.max.y = std::max(bbox.max.y, ri.worldBBox.max.y);
+            bbox.max.z = std::max(bbox.max.z, ri.worldBBox.max.z);
+        }
+
+        mesh.cullingChunks[it->second].instanceIndices.push_back(instanceIndex);
+    }
+
+    if (mesh.cullingChunks.size() <= 1) {
+        mesh.cullingChunks.clear();
+    }
+}
+
+void VulkanBackendAdapter::setRasterVisibleInstances(RasterMeshBuffer& mesh,
+                                                     const std::vector<uint32_t>& visibleInstanceIndices) {
+    struct RasterInstanceGPU {
+        float model[16];
+    };
+
+    const bool visibleSetChanged =
+        visibleInstanceIndices.size() != mesh.visibleInstanceIndicesCache.size() ||
+        !std::equal(visibleInstanceIndices.begin(), visibleInstanceIndices.end(),
+                    mesh.visibleInstanceIndicesCache.begin(), mesh.visibleInstanceIndicesCache.end());
+
+    mesh.instanceCount = static_cast<uint32_t>(visibleInstanceIndices.size());
+    if (mesh.instanceCount == 0) {
+        mesh.visibleInstanceIndicesCache.clear();
+        mesh.visibleInstancesDirty = false;
+        mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+        return;
+    }
+
+    if (!mesh.visibleInstancesDirty && !visibleSetChanged && mesh.instanceBuffer.buffer) {
+        return;
+    }
+
+    auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
+        Matrix4x4 t = mat.transpose();
+        int k = 0;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out[k++] = t.m[r][c];
+            }
+        }
+    };
+
+    std::vector<RasterInstanceGPU> gpuInstances(mesh.instanceCount);
+    for (size_t i = 0; i < visibleInstanceIndices.size(); ++i) {
+        const uint32_t instanceIndex = visibleInstanceIndices[i];
+        if (instanceIndex >= m_rasterInstances.size()) continue;
+        matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+    }
+
+    mesh.visibleInstanceIndicesCache = visibleInstanceIndices;
+    mesh.visibleInstancesDirty = false;
+    mesh.lastVisibleFrustumRevision = m_rasterFrustumRevision;
+
+    const VkDeviceSize requiredSize = gpuInstances.size() * sizeof(RasterInstanceGPU);
+    if (mesh.instanceBuffer.buffer && mesh.instanceBuffer.size >= requiredSize) {
+        m_device->uploadBuffer(mesh.instanceBuffer, gpuInstances.data(), requiredSize, 0);
+        return;
+    }
+
+    if (mesh.instanceBuffer.buffer) {
+        m_device->destroyBuffer(mesh.instanceBuffer);
+        mesh.instanceBuffer = VulkanRT::BufferHandle{};
+    }
+
+    const VkDeviceSize allocCapacity = std::max<size_t>(
+        visibleInstanceIndices.size(), mesh.instanceIndices.size()) * sizeof(RasterInstanceGPU);
+    VulkanRT::BufferCreateInfo ici{};
+    ici.size = std::max(requiredSize, allocCapacity);
+    ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+    ici.location = VulkanRT::MemoryLocation::GPU_ONLY;
+    ici.initialData = nullptr;
+    mesh.instanceBuffer = m_device->createBuffer(ici);
+    if (mesh.instanceBuffer.buffer) {
+        m_device->uploadBuffer(mesh.instanceBuffer, gpuInstances.data(), requiredSize, 0);
+    }
+}
+
+void VulkanBackendAdapter::uploadVisibleRasterInstances(RasterMeshBuffer& mesh) {
+    if (!m_device) return;
+    if (mesh.isScatterProxy) return;
+
+    constexpr bool kDisableRasterFrustumCulling = true;
+
+    if (!mesh.visibleInstancesDirty &&
+        mesh.lastVisibleFrustumRevision == m_rasterFrustumRevision &&
+        (mesh.instanceBuffer.buffer || mesh.visibleInstanceIndicesCache.empty())) {
+        mesh.instanceCount = static_cast<uint32_t>(mesh.visibleInstanceIndicesCache.size());
+        return;
+    }
+
+    std::vector<uint32_t> visibleInstanceIndices;
+    visibleInstanceIndices.reserve(mesh.instanceIndices.size());
+
+    auto appendVisibleInstance = [&](uint32_t instanceIndex, bool skipFrustumTest) {
+        if (instanceIndex >= m_rasterInstances.size()) return;
+        const auto& ri = m_rasterInstances[instanceIndex];
+        if (ri.mask == 0) return;
+        if (!kDisableRasterFrustumCulling &&
+            !skipFrustumTest &&
+            !mesh.hasSkinning &&
+            ri.worldBBox.is_valid() &&
+            !isAABBInFrustum(ri.worldBBox)) {
+            return;
+        }
+        visibleInstanceIndices.push_back(instanceIndex);
+    };
+
+    if (!kDisableRasterFrustumCulling && !mesh.hasSkinning && !mesh.cullingChunks.empty()) {
+        for (const auto& chunk : mesh.cullingChunks) {
+            if (chunk.worldBBox.is_valid() && !isAABBInFrustum(chunk.worldBBox)) {
+                continue;
+            }
+            if (chunk.instanceIndices.size() >= 16 && isRasterChunkTooSmallToDraw(chunk.worldBBox)) {
+                continue;
+            }
+            const bool chunkFullyInside = chunk.worldBBox.is_valid() && isAABBFullyInsideFrustum(chunk.worldBBox);
+            for (uint32_t instanceIndex : chunk.instanceIndices) {
+                appendVisibleInstance(instanceIndex, chunkFullyInside);
+            }
+        }
+    } else {
+        for (uint32_t instanceIndex : mesh.instanceIndices) {
+            appendVisibleInstance(instanceIndex, false);
+        }
+    }
+
+    std::vector<uint32_t> proxyInstanceIndices;
+    if (mesh.isScatterGroup) {
+        const uint64_t trianglesPerInstance = (mesh.indexBuffer.buffer && mesh.indexCount > 0)
+            ? (static_cast<uint64_t>(mesh.indexCount) / 3ull)
+            : (static_cast<uint64_t>(mesh.vertexCount) / 3ull);
+        const uint64_t scatterTriangleBudget = std::max<uint64_t>(1ull, m_rasterScatterTriangleBudget);
+        if (trianglesPerInstance > 0) {
+            const uint64_t visibleTriangles = trianglesPerInstance * static_cast<uint64_t>(visibleInstanceIndices.size());
+            if (visibleTriangles > scatterTriangleBudget) {
+                const size_t cappedVisibleCount = static_cast<size_t>(std::max<uint64_t>(
+                    1ull, scatterTriangleBudget / trianglesPerInstance));
+                if (cappedVisibleCount < visibleInstanceIndices.size()) {
+                    struct DistanceEntry {
+                        float distanceSq;
+                        uint32_t instanceIndex;
+                    };
+                    std::vector<DistanceEntry> nearestInstances;
+                    nearestInstances.reserve(visibleInstanceIndices.size());
+                    for (uint32_t instanceIndex : visibleInstanceIndices) {
+                        if (instanceIndex >= m_rasterInstances.size()) continue;
+                        const auto& ri = m_rasterInstances[instanceIndex];
+                        Vec3 center = ri.worldBBox.is_valid()
+                            ? (ri.worldBBox.min + ri.worldBBox.max) * 0.5f
+                            : ri.transform.transform_point(Vec3(0.0f, 0.0f, 0.0f));
+                        const Vec3 delta = center - m_rasterCullCameraPosition;
+                        nearestInstances.push_back({ Vec3::dot(delta, delta), instanceIndex });
+                    }
+
+                    auto distanceCmp = [](const DistanceEntry& a, const DistanceEntry& b) {
+                        if (a.distanceSq != b.distanceSq) return a.distanceSq < b.distanceSq;
+                        return a.instanceIndex < b.instanceIndex;
+                    };
+                    std::nth_element(nearestInstances.begin(),
+                                     nearestInstances.begin() + cappedVisibleCount,
+                                     nearestInstances.end(),
+                                     distanceCmp);
+                    std::sort(nearestInstances.begin(), nearestInstances.begin() + cappedVisibleCount, distanceCmp);
+                    std::sort(nearestInstances.begin() + cappedVisibleCount, nearestInstances.end(), distanceCmp);
+
+                    proxyInstanceIndices.reserve(nearestInstances.size() - cappedVisibleCount);
+                    for (size_t i = cappedVisibleCount; i < nearestInstances.size(); ++i) {
+                        proxyInstanceIndices.push_back(nearestInstances[i].instanceIndex);
+                    }
+
+                    visibleInstanceIndices.clear();
+                    visibleInstanceIndices.reserve(cappedVisibleCount);
+                    for (size_t i = 0; i < cappedVisibleCount; ++i) {
+                        visibleInstanceIndices.push_back(nearestInstances[i].instanceIndex);
+                    }
+                }
+            }
+        }
+    }
+
+    if (!mesh.proxyMeshKey.empty()) {
+        auto proxyIt = m_rasterMeshes.find(mesh.proxyMeshKey);
+        if (proxyIt != m_rasterMeshes.end()) {
+            proxyIt->second.visibleInstancesDirty = mesh.visibleInstancesDirty;
+            setRasterVisibleInstances(proxyIt->second, proxyInstanceIndices);
+        }
+    }
+
+    setRasterVisibleInstances(mesh, visibleInstanceIndices);
+}
+
+void VulkanBackendAdapter::uploadRasterInstanceBuffer(RasterMeshBuffer& mesh) {
+    if (!m_device) return;
+
+    mesh.visibleInstancesDirty = true;
+    mesh.lastVisibleFrustumRevision = 0;
+    rebuildRasterMeshCullingChunks(mesh);
+
+    struct RasterInstanceGPU {
+        float model[16];
+    };
+
+    if (mesh.instanceBuffer.buffer) {
+        m_device->destroyBuffer(mesh.instanceBuffer);
+        mesh.instanceBuffer = VulkanRT::BufferHandle{};
+    }
+
+    std::vector<uint32_t> visibleInstanceIndices;
+    visibleInstanceIndices.reserve(mesh.instanceIndices.size());
+    for (uint32_t instanceIndex : mesh.instanceIndices) {
+        if (instanceIndex >= m_rasterInstances.size()) continue;
+        if (m_rasterInstances[instanceIndex].mask == 0) continue;
+        visibleInstanceIndices.push_back(instanceIndex);
+    }
+
+    mesh.instanceCount = static_cast<uint32_t>(visibleInstanceIndices.size());
+    if (mesh.instanceCount == 0) {
+        mesh.visibleInstanceIndicesCache.clear();
+        mesh.visibleInstancesDirty = false;
+        return;
+    }
+
+    auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
+        Matrix4x4 t = mat.transpose();
+        int k = 0;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out[k++] = t.m[r][c];
+            }
+        }
+    };
+
+    std::vector<RasterInstanceGPU> gpuInstances(mesh.instanceCount);
+    for (size_t i = 0; i < visibleInstanceIndices.size(); ++i) {
+        const uint32_t instanceIndex = visibleInstanceIndices[i];
+        matrixToGL(m_rasterInstances[instanceIndex].transform, gpuInstances[i].model);
+    }
+
+    VulkanRT::BufferCreateInfo ici{};
+    ici.size = gpuInstances.size() * sizeof(RasterInstanceGPU);
+    ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+    ici.location = VulkanRT::MemoryLocation::GPU_ONLY;
+    ici.initialData = nullptr;
+    mesh.instanceBuffer = m_device->createBuffer(ici);
+    if (mesh.instanceBuffer.buffer) {
+        m_device->uploadBuffer(mesh.instanceBuffer,
+                               gpuInstances.data(),
+                               gpuInstances.size() * sizeof(RasterInstanceGPU),
+                               0);
+    }
+
+    mesh.visibleInstanceIndicesCache = std::move(visibleInstanceIndices);
+    mesh.visibleInstancesDirty = false;
+}
+
+void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    if (!m_device || !m_device->isInitialized()) return;
+
+    // Skip rebuild if raster cache is still valid for the current scene generation.
+    {
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
+        if (!m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == curGen) {
+            m_rasterGeometryDirty = false;
+            return;
+        }
+    }
+
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    m_device->waitIdle();
+
+    // Destroy old raster buffers
+    destroyAllRasterMeshes();
+
+    auto hasInstancePrefix = [](const std::string& nodeName) -> bool {
+        return nodeName.rfind("_inst_gid", 0) == 0;
+    };
+
+    size_t baseObjectCount = objects.size();
+    while (baseObjectCount > 0) {
+        const auto& obj = objects[baseObjectCount - 1];
+        auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+        if (!inst || !hasInstancePrefix(inst->node_name)) {
+            break;
+        }
+        --baseObjectCount;
+    }
+
+    auto ensureRasterMeshForTriangles = [&](const std::string& meshKey,
+                                            const std::vector<std::shared_ptr<Triangle>>& triangles) {
+        if (triangles.empty()) return;
+        if (m_rasterMeshes.find(meshKey) != m_rasterMeshes.end()) return;
+
+        std::vector<float> positions, normals, uvs;
+        std::vector<uint32_t> matIds;
+        positions.reserve(triangles.size() * 9);
+        normals.reserve(triangles.size() * 9);
+        uvs.reserve(triangles.size() * 6);
+        matIds.reserve(triangles.size() * 3);
+
+        // Compute local-space AABB while iterating vertices
+        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+
+        for (const auto& t : triangles) {
+            if (!t) continue;
+            auto [uv0, uv1, uv2] = t->getUVCoordinates();
+            uint32_t mid = static_cast<uint32_t>(t->getMaterialID());
+            for (int v = 0; v < 3; ++v) {
+                Vec3 p = t->getOriginalVertexPosition(v);
+                Vec3 n = t->getOriginalVertexNormal(v);
+                positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
+                normals.push_back(n.x); normals.push_back(n.y); normals.push_back(n.z);
+                matIds.push_back(mid);
+                bMin.x = std::min(bMin.x, p.x); bMin.y = std::min(bMin.y, p.y); bMin.z = std::min(bMin.z, p.z);
+                bMax.x = std::max(bMax.x, p.x); bMax.y = std::max(bMax.y, p.y); bMax.z = std::max(bMax.z, p.z);
+            }
+            uvs.push_back(uv0.x); uvs.push_back(uv0.y);
+            uvs.push_back(uv1.x); uvs.push_back(uv1.y);
+            uvs.push_back(uv2.x); uvs.push_back(uv2.y);
+        }
+
+        // Cache the local bounding box for this mesh key
+        m_rasterMeshBBoxes[meshKey] = AABB(bMin, bMax);
+
+        RasterMeshBuffer rmb;
+        rmb.vertexCount = (uint32_t)(positions.size() / 3);
+        VulkanRT::BufferCreateInfo vci{};
+        vci.size = positions.size() * sizeof(float);
+        vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        vci.initialData = nullptr;
+        rmb.vertexBuffer = m_device->createBuffer(vci);
+
+        VulkanRT::BufferCreateInfo nci{};
+        nci.size = normals.size() * sizeof(float);
+        nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        nci.initialData = nullptr;
+        rmb.normalBuffer = m_device->createBuffer(nci);
+
+        // UV buffer for MaterialPreview
+        if (!uvs.empty()) {
+            VulkanRT::BufferCreateInfo uci{};
+            uci.size = uvs.size() * sizeof(float);
+            uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            rmb.uvBuffer = m_device->createBuffer(uci);
+            if (rmb.uvBuffer.buffer) {
+                m_device->uploadBuffer(rmb.uvBuffer, uvs.data(), uvs.size() * sizeof(float), 0);
+            }
+        }
+
+        // MaterialID buffer for MaterialPreview
+        if (!matIds.empty()) {
+            VulkanRT::BufferCreateInfo mci{};
+            mci.size = matIds.size() * sizeof(uint32_t);
+            mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            rmb.matIdBuffer = m_device->createBuffer(mci);
+            if (rmb.matIdBuffer.buffer) {
+                m_device->uploadBuffer(rmb.matIdBuffer, matIds.data(), matIds.size() * sizeof(uint32_t), 0);
+            }
+        }
+
+        if (rmb.vertexBuffer.buffer) {
+            m_device->uploadBuffer(rmb.vertexBuffer, positions.data(), positions.size() * sizeof(float), 0);
+        }
+        if (rmb.normalBuffer.buffer) {
+            m_device->uploadBuffer(rmb.normalBuffer, normals.data(), normals.size() * sizeof(float), 0);
+        }
+
+        m_rasterMeshes[meshKey] = rmb;
+    };
+
+    struct RasterTriGroup {
+        std::string meshKey;
+        std::string nodeName;
+        std::vector<float> positions; // interleaved x,y,z
+        std::vector<float> normals;
+        std::vector<float> uvs;       // interleaved u,v per vertex
+        std::vector<uint32_t> matIds; // per-vertex material ID
+        Matrix4x4 transform;
+        uint8_t mask = 0xFF;
+    };
+
+    std::vector<RasterTriGroup> groups;
+    std::unordered_map<void*, size_t> groupByKey;
+
+    // Recursive traversal — same logic as updateGeometry but only collects vertex data
+    std::function<void(const std::shared_ptr<Hittable>&)> processObj;
+    processObj = [&](const std::shared_ptr<Hittable>& obj) {
+        if (!obj) return;
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (!inst->visible || !inst->source_triangles || inst->source_triangles->empty()) return;
+            if (hasInstancePrefix(inst->node_name)) return;
+
+            const auto srcPtr = reinterpret_cast<uintptr_t>(inst->source_triangles.get());
+            std::string meshKey = "[Raster]-" + std::to_string(srcPtr) +
+                                  "-" + std::to_string(inst->source_triangles->size());
+
+            ensureRasterMeshForTriangles(meshKey, *inst->source_triangles);
+
+            RasterInstance ri;
+            ri.meshKey = meshKey;
+            ri.nodeName = inst->node_name;
+            ri.transform = inst->transform;
+            ri.mask = 0xFF;
+            m_rasterInstances.push_back(ri);
+
+        } else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
+            for (auto& child : list->objects) processObj(child);
+        } else if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
+            processObj(bvh->left);
+            processObj(bvh->right);
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (!tri->visible) return;
+
+            void* groupKey = nullptr;
+            auto triTransformHandle = tri->getTransformHandle();
+            if (triTransformHandle) groupKey = triTransformHandle.get();
+            else groupKey = tri.get();
+
+            const bool hasSharedTransform = (triTransformHandle != nullptr);
+
+            auto found = groupByKey.find(groupKey);
+            if (found == groupByKey.end()) {
+                RasterTriGroup g;
+                std::string nodeName = tri->getNodeName();
+                if (nodeName.empty()) nodeName = "[Solo-" + std::to_string(groups.size()) + "]";
+                g.meshKey = "[Raster-Solo]-" + nodeName;
+                g.nodeName = nodeName;
+                g.transform = hasSharedTransform ? tri->getTransformMatrix() : Matrix4x4::identity();
+                groups.push_back(std::move(g));
+                found = groupByKey.emplace(groupKey, groups.size() - 1).first;
+            }
+
+            auto& grp = groups[found->second];
+            auto [uv0, uv1, uv2] = tri->getUVCoordinates();
+            uint32_t mid = static_cast<uint32_t>(tri->getMaterialID());
+            for (int v = 0; v < 3; ++v) {
+                Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+                Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
+                grp.positions.push_back(p.x); grp.positions.push_back(p.y); grp.positions.push_back(p.z);
+                grp.normals.push_back(n.x); grp.normals.push_back(n.y); grp.normals.push_back(n.z);
+                grp.matIds.push_back(mid);
+            }
+            grp.uvs.push_back(uv0.x); grp.uvs.push_back(uv0.y);
+            grp.uvs.push_back(uv1.x); grp.uvs.push_back(uv1.y);
+            grp.uvs.push_back(uv2.x); grp.uvs.push_back(uv2.y);
+        }
+        // VDB/Gas volumes are not rasterized in solid mode
+    };
+
+    for (size_t i = 0; i < baseObjectCount; ++i) {
+        processObj(objects[i]);
+    }
+
+    // Upload solo triangle groups
+    for (auto& grp : groups) {
+        if (grp.positions.empty()) continue;
+
+        // Compute local-space AABB from collected positions
+        Vec3 bMin(1e18f, 1e18f, 1e18f), bMax(-1e18f, -1e18f, -1e18f);
+        for (size_t pi = 0; pi + 2 < grp.positions.size(); pi += 3) {
+            float px = grp.positions[pi], py = grp.positions[pi+1], pz = grp.positions[pi+2];
+            bMin.x = std::min(bMin.x, px); bMin.y = std::min(bMin.y, py); bMin.z = std::min(bMin.z, pz);
+            bMax.x = std::max(bMax.x, px); bMax.y = std::max(bMax.y, py); bMax.z = std::max(bMax.z, pz);
+        }
+        m_rasterMeshBBoxes[grp.meshKey] = AABB(bMin, bMax);
+
+        RasterMeshBuffer rmb;
+        rmb.vertexCount = (uint32_t)(grp.positions.size() / 3);
+
+        VulkanRT::BufferCreateInfo vci{};
+        vci.size = grp.positions.size() * sizeof(float);
+        vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        vci.initialData = nullptr;
+        rmb.vertexBuffer = m_device->createBuffer(vci);
+
+        VulkanRT::BufferCreateInfo nci{};
+        nci.size = grp.normals.size() * sizeof(float);
+        nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        nci.initialData = nullptr;
+        rmb.normalBuffer = m_device->createBuffer(nci);
+
+        if (rmb.vertexBuffer.buffer) {
+            m_device->uploadBuffer(rmb.vertexBuffer, grp.positions.data(), grp.positions.size() * sizeof(float), 0);
+        }
+        if (rmb.normalBuffer.buffer) {
+            m_device->uploadBuffer(rmb.normalBuffer, grp.normals.data(), grp.normals.size() * sizeof(float), 0);
+        }
+
+        // UV buffer for MaterialPreview
+        if (!grp.uvs.empty()) {
+            VulkanRT::BufferCreateInfo uci{};
+            uci.size = grp.uvs.size() * sizeof(float);
+            uci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            uci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            rmb.uvBuffer = m_device->createBuffer(uci);
+            if (rmb.uvBuffer.buffer) {
+                m_device->uploadBuffer(rmb.uvBuffer, grp.uvs.data(), grp.uvs.size() * sizeof(float), 0);
+            }
+        }
+        // MaterialID buffer for MaterialPreview
+        if (!grp.matIds.empty()) {
+            VulkanRT::BufferCreateInfo mci{};
+            mci.size = grp.matIds.size() * sizeof(uint32_t);
+            mci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            mci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            rmb.matIdBuffer = m_device->createBuffer(mci);
+            if (rmb.matIdBuffer.buffer) {
+                m_device->uploadBuffer(rmb.matIdBuffer, grp.matIds.data(), grp.matIds.size() * sizeof(uint32_t), 0);
+            }
+        }
+
+        m_rasterMeshes[grp.meshKey] = rmb;
+
+        RasterInstance ri;
+        ri.meshKey = grp.meshKey;
+        ri.nodeName = grp.nodeName;
+        ri.transform = grp.transform;
+        ri.mask = 0xFF;
+        m_rasterInstances.push_back(ri);
+    }
+
+    // Append foliage/scatter instances directly from grouped instance data so
+    // solid viewport does not have to traverse millions of expanded scene objects.
+    const auto& instanceGroups = InstanceManager::getInstance().getGroups();
+    for (const auto& group : instanceGroups) {
+        if (group.instances.empty() || group.sources.empty()) continue;
+
+        for (size_t instanceIdx = 0; instanceIdx < group.instances.size(); ++instanceIdx) {
+            const auto& inst = group.instances[instanceIdx];
+            int srcIdx = inst.source_index;
+            if (srcIdx < 0 || srcIdx >= (int)group.sources.size()) srcIdx = 0;
+            const auto& source = group.sources[srcIdx];
+
+            const auto* triSource = source.centered_triangles_ptr ? source.centered_triangles_ptr.get() : nullptr;
+            if ((!triSource || triSource->empty()) && source.triangles.empty()) continue;
+
+            std::string meshKey;
+            if (triSource) {
+                const auto srcPtr = reinterpret_cast<uintptr_t>(triSource);
+                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(srcIdx) +
+                          "-" + std::to_string(srcPtr) + "-" + std::to_string(triSource->size());
+                ensureRasterMeshForTriangles(meshKey, *triSource);
+            } else {
+                const auto srcPtr = reinterpret_cast<uintptr_t>(&source.triangles);
+                meshKey = "[Raster-Group]-" + std::to_string(group.id) + "-" + std::to_string(srcIdx) +
+                          "-" + std::to_string(srcPtr) + "-" + std::to_string(source.triangles.size());
+                ensureRasterMeshForTriangles(meshKey, source.triangles);
+            }
+
+            RasterInstance ri;
+            ri.meshKey = meshKey;
+            ri.nodeName = "_inst_gid" + std::to_string(group.id) + "_" + std::to_string(instanceIdx);
+            ri.transform = inst.toMatrix();
+            ri.mask = 0xFF;
+            m_rasterInstances.push_back(std::move(ri));
+        }
+    }
+
+    // Assign localBBox from cached mesh AABB and compute worldBBox per instance
+    for (auto& ri : m_rasterInstances) {
+        auto bboxIt = m_rasterMeshBBoxes.find(ri.meshKey);
+        if (bboxIt != m_rasterMeshBBoxes.end()) {
+            ri.localBBox = bboxIt->second;
+            updateRasterInstanceWorldBBox(ri);
+        }
+    }
+
+    for (uint32_t i = 0; i < static_cast<uint32_t>(m_rasterInstances.size()); ++i) {
+        auto meshIt = m_rasterMeshes.find(m_rasterInstances[i].meshKey);
+        if (meshIt == m_rasterMeshes.end()) continue;
+        meshIt->second.instanceIndices.push_back(i);
+    }
+    for (auto& [key, mesh] : m_rasterMeshes) {
+        uploadRasterInstanceBuffer(mesh);
+    }
+
+    m_rasterGeometryDirty = false;
+    m_interactiveViewport.dirty = true;
+
+    // Stamp current scene generation so we can skip redundant rebuilds later.
+    {
+        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        m_rasterBuiltGeometryGeneration = g_scene_geometry_generation.load(std::memory_order_acquire);
+    }
+
+    SCENE_LOG_INFO("[Vulkan] Raster geometry built: " + std::to_string(m_rasterMeshes.size()) +
+                   " meshes, " + std::to_string(m_rasterInstances.size()) + " instances. " +
+                   "(base objects scanned: " + std::to_string(baseObjectCount) + "/" + std::to_string(objects.size()) + ")");
+}
+
+void VulkanBackendAdapter::syncRasterInstanceTransformsImpl(const std::vector<std::shared_ptr<Hittable>>& objects) {
+    if (m_rasterInstances.empty()) return;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // Build nodeName → transform lookup from current scene objects
+    std::unordered_map<std::string, Matrix4x4> transformMap;
+
+    std::function<void(const std::shared_ptr<Hittable>&)> collectTransforms;
+    collectTransforms = [&](const std::shared_ptr<Hittable>& obj) {
+        if (!obj) return;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (!inst->node_name.empty()) {
+                transformMap[inst->node_name] = inst->transform;
+            }
+        } else if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
+            for (auto& child : list->objects) collectTransforms(child);
+        } else if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
+            collectTransforms(bvh->left);
+            collectTransforms(bvh->right);
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            auto th = tri->getTransformHandle();
+            std::string name = tri->getNodeName();
+            if (!name.empty() && th) {
+                transformMap[name] = tri->getTransformMatrix();
+            }
+        }
+    };
+
+    for (const auto& obj : objects) {
+        collectTransforms(obj);
+    }
+
+    // Apply to raster instances
+    bool changed = false;
+    std::unordered_set<std::string> dirtyMeshKeys;
+    for (auto& ri : m_rasterInstances) {
+        auto it = transformMap.find(ri.nodeName);
+        if (it != transformMap.end()) {
+            if (!(ri.transform == it->second)) {
+                ri.transform = it->second;
+                changed = true;
+                dirtyMeshKeys.insert(ri.meshKey);
+            }
+        }
+    }
+    if (changed) {
+        // Recompute worldBBox for instances whose transforms changed
+        for (auto& ri : m_rasterInstances) {
+            if (dirtyMeshKeys.count(ri.meshKey)) {
+                updateRasterInstanceWorldBBox(ri);
+            }
+        }
+        for (const auto& meshKey : dirtyMeshKeys) {
+            auto meshIt = m_rasterMeshes.find(meshKey);
+            if (meshIt != m_rasterMeshes.end()) {
+                uploadRasterInstanceBuffer(meshIt->second);
+            }
+        }
+        m_interactiveViewport.dirty = true;
+    }
+}
+
+void VulkanBackendAdapter::syncRasterSkinnedVerticesImpl(
+    const std::vector<std::shared_ptr<Hittable>>& objects,
+    const std::vector<Matrix4x4>& boneMatrices)
+{
+    if (m_rasterInstances.empty() || m_rasterMeshes.empty() || boneMatrices.empty()) return;
+    if (m_viewportMode != ViewportMode::Solid && m_viewportMode != ViewportMode::Matcap) return;
+
+    // Collect skinned triangles grouped by raster mesh key (same grouping as buildRasterGeometry)
+    // Key = transform handle pointer → meshKey
+    struct SkinnedGroup {
+        std::string meshKey;
+        std::vector<std::shared_ptr<Triangle>> triangles;
+    };
+    std::unordered_map<void*, SkinnedGroup> skinnedGroups;
+
+    // Map raster instance nodeName → meshKey
+    std::unordered_map<std::string, std::string> nodeToMeshKey;
+    for (const auto& ri : m_rasterInstances) {
+        nodeToMeshKey[ri.nodeName] = ri.meshKey;
+    }
+
+    // Traverse scene objects to find skinned triangles
+    std::function<void(const std::shared_ptr<Hittable>&)> collectSkinned;
+    collectSkinned = [&](const std::shared_ptr<Hittable>& obj) {
+        if (!obj) return;
+        if (auto list = std::dynamic_pointer_cast<HittableList>(obj)) {
+            for (auto& child : list->objects) collectSkinned(child);
+        } else if (auto bvh = std::dynamic_pointer_cast<ParallelBVHNode>(obj)) {
+            collectSkinned(bvh->left);
+            collectSkinned(bvh->right);
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (!tri->visible || !tri->hasSkinData()) return;
+            auto th = tri->getTransformHandle();
+            void* groupKey = th ? (void*)th.get() : (void*)tri.get();
+            auto& grp = skinnedGroups[groupKey];
+            if (grp.meshKey.empty()) {
+                std::string nodeName = tri->getNodeName();
+                auto it = nodeToMeshKey.find(nodeName);
+                if (it != nodeToMeshKey.end()) {
+                    grp.meshKey = it->second;
+                }
+            }
+            grp.triangles.push_back(tri);
+        }
+    };
+    for (const auto& obj : objects) collectSkinned(obj);
+
+    if (skinnedGroups.empty()) return;
+
+    // For each skinned group, compute skinned positions/normals and upload
+    for (auto& [key, grp] : skinnedGroups) {
+        if (grp.meshKey.empty() || grp.triangles.empty()) continue;
+        auto meshIt = m_rasterMeshes.find(grp.meshKey);
+        if (meshIt == m_rasterMeshes.end()) continue;
+
+        auto& rmb = meshIt->second;
+        const size_t vertCount = grp.triangles.size() * 3;
+        const size_t floatCount = vertCount * 3;
+        if (rmb.vertexCount != (uint32_t)vertCount) continue; // topology mismatch
+
+        std::vector<float> newPositions(floatCount);
+        std::vector<float> newNormals(floatCount);
+        size_t idx = 0;
+
+        for (const auto& tri : grp.triangles) {
+            for (int v = 0; v < 3; ++v) {
+                // Compute bone-skinned position (local space, no root transform)
+                Vec3 p = tri->apply_bone_to_vertex(v, boneMatrices);
+                Vec3 n = tri->apply_bone_to_normal(
+                    tri->getOriginalVertexNormal(v),
+                    tri->getSkinBoneWeights(v),
+                    boneMatrices);
+                newPositions[idx]   = p.x; newPositions[idx+1] = p.y; newPositions[idx+2] = p.z;
+                newNormals[idx]     = n.x; newNormals[idx+1]   = n.y; newNormals[idx+2]   = n.z;
+                idx += 3;
+            }
+        }
+
+        // Dirty-range upload for efficiency
+        if (rmb.cpuPositions.size() == floatCount) {
+            size_t dirtyMin = floatCount, dirtyMax = 0;
+            for (size_t i = 0; i < floatCount; ++i) {
+                if (newPositions[i] != rmb.cpuPositions[i] || newNormals[i] != rmb.cpuNormals[i]) {
+                    if (i < dirtyMin) dirtyMin = i;
+                    if (i > dirtyMax) dirtyMax = i;
+                }
+            }
+            if (dirtyMin <= dirtyMax) {
+                dirtyMin = (dirtyMin / 3) * 3;
+                dirtyMax = ((dirtyMax / 3) + 1) * 3;
+                if (dirtyMax > floatCount) dirtyMax = floatCount;
+                const uint64_t byteOff = dirtyMin * sizeof(float);
+                const uint64_t byteLen = (dirtyMax - dirtyMin) * sizeof(float);
+                m_device->uploadBuffer(rmb.vertexBuffer, &newPositions[dirtyMin], byteLen, byteOff);
+                m_device->uploadBuffer(rmb.normalBuffer, &newNormals[dirtyMin],  byteLen, byteOff);
+                std::memcpy(&rmb.cpuPositions[dirtyMin], &newPositions[dirtyMin], byteLen);
+                std::memcpy(&rmb.cpuNormals[dirtyMin],   &newNormals[dirtyMin],  byteLen);
+            }
+        } else {
+            m_device->uploadBuffer(rmb.vertexBuffer, newPositions.data(), floatCount * sizeof(float));
+            m_device->uploadBuffer(rmb.normalBuffer, newNormals.data(),  floatCount * sizeof(float));
+            rmb.cpuPositions = std::move(newPositions);
+            rmb.cpuNormals   = std::move(newNormals);
+        }
+    }
+
+    m_interactiveViewport.dirty = true;
+}
+
+bool VulkanBackendAdapter::updateRasterMeshFromTrianglesImpl(const std::string& nodeName,
+                                                             const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    if (!m_device || !m_device->isInitialized() || triangles.empty()) return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // Find matching raster mesh by node name. For instanced meshes the meshKey does
+    // not contain the scene node name, so prefer RasterInstance.nodeName matching.
+    std::string targetKey;
+    for (const auto& ri : m_rasterInstances) {
+        if (matchesNodeNameForInstance(ri.nodeName, nodeName) ||
+            matchesNodeNameForInstance(nodeName, ri.nodeName) ||
+            ri.meshKey.find(nodeName) != std::string::npos) {
+            targetKey = ri.meshKey;
+            break;
+        }
+    }
+    if (targetKey.empty()) return false;
+
+    auto meshIt = m_rasterMeshes.find(targetKey);
+    if (meshIt == m_rasterMeshes.end()) return false;
+
+    auto& rmb = meshIt->second;
+    const size_t vertCount = triangles.size() * 3;
+    const size_t floatCount = vertCount * 3;
+
+    // Extract new vertex/normal data
+    std::vector<float> newPositions, newNormals;
+    newPositions.resize(floatCount);
+    newNormals.resize(floatCount);
+
+    size_t idx = 0;
+    for (const auto& tri : triangles) {
+        if (!tri) continue;
+        const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+        for (int v = 0; v < 3; ++v) {
+            Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+            Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
+            newPositions[idx]   = p.x; newPositions[idx+1] = p.y; newPositions[idx+2] = p.z;
+            newNormals[idx]     = n.x; newNormals[idx+1]   = n.y; newNormals[idx+2]   = n.z;
+            idx += 3;
+        }
+    }
+
+    const uint32_t newVertCount = (uint32_t)vertCount;
+
+    // Topology changed — full recreate
+    if (newVertCount != rmb.vertexCount) {
+        const std::vector<uint32_t> preservedInstanceIndices = rmb.instanceIndices;
+        m_device->waitIdle();
+        destroyRasterMesh(rmb);
+        rmb.instanceIndices = preservedInstanceIndices;
+
+        rmb.vertexCount = newVertCount;
+        VulkanRT::BufferCreateInfo vci{};
+        vci.size = floatCount * sizeof(float);
+        vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        vci.initialData = nullptr;
+        rmb.vertexBuffer = m_device->createBuffer(vci);
+
+        VulkanRT::BufferCreateInfo nci{};
+        nci.size = floatCount * sizeof(float);
+        nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        nci.initialData = nullptr;
+        rmb.normalBuffer = m_device->createBuffer(nci);
+
+        // Upload data into device-local buffers via staging path
+        if (rmb.vertexBuffer.buffer) {
+            m_device->uploadBuffer(rmb.vertexBuffer, newPositions.data(), floatCount * sizeof(float), 0);
+        }
+        if (rmb.normalBuffer.buffer) {
+            m_device->uploadBuffer(rmb.normalBuffer, newNormals.data(), floatCount * sizeof(float), 0);
+        }
+
+        rmb.cpuPositions = std::move(newPositions);
+        rmb.cpuNormals = std::move(newNormals);
+        if (!rmb.instanceIndices.empty()) {
+            uploadRasterInstanceBuffer(rmb);
+        }
+    } else if (rmb.cpuPositions.size() == floatCount) {
+        // Same topology — find dirty range and upload only that region
+        size_t dirtyMin = floatCount;
+        size_t dirtyMax = 0;
+
+        for (size_t i = 0; i < floatCount; ++i) {
+            if (newPositions[i] != rmb.cpuPositions[i] || newNormals[i] != rmb.cpuNormals[i]) {
+                if (i < dirtyMin) dirtyMin = i;
+                if (i > dirtyMax) dirtyMax = i;
+            }
+        }
+
+        if (dirtyMin <= dirtyMax) {
+            // Align to vec3 boundaries (12 bytes = 3 floats)
+            dirtyMin = (dirtyMin / 3) * 3;
+            dirtyMax = ((dirtyMax / 3) + 1) * 3;
+            if (dirtyMax > floatCount) dirtyMax = floatCount;
+
+            const uint64_t byteOffset = dirtyMin * sizeof(float);
+            const uint64_t byteSize   = (dirtyMax - dirtyMin) * sizeof(float);
+
+            m_device->uploadBuffer(rmb.vertexBuffer, &newPositions[dirtyMin], byteSize, byteOffset);
+            m_device->uploadBuffer(rmb.normalBuffer, &newNormals[dirtyMin],  byteSize, byteOffset);
+
+            // Update CPU shadow
+            std::memcpy(&rmb.cpuPositions[dirtyMin], &newPositions[dirtyMin], byteSize);
+            std::memcpy(&rmb.cpuNormals[dirtyMin],   &newNormals[dirtyMin],  byteSize);
+        }
+    } else {
+        // No CPU shadow yet — full upload and store shadow
+        m_device->uploadBuffer(rmb.vertexBuffer, newPositions.data(), floatCount * sizeof(float));
+        m_device->uploadBuffer(rmb.normalBuffer, newNormals.data(),  floatCount * sizeof(float));
+        rmb.cpuPositions = std::move(newPositions);
+        rmb.cpuNormals = std::move(newNormals);
+    }
+
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
+bool VulkanBackendAdapter::patchRasterMeshTrianglesImpl(
+    const std::string& nodeName,
+    const std::vector<size_t>& dirtyIndices,
+    const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries) {
+    if (!m_device || !m_device->isInitialized() || dirtyIndices.empty() || meshEntries.empty())
+        return false;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // Find matching raster mesh by node name. For instanced meshes the meshKey does
+    // not contain the scene node name, so prefer RasterInstance.nodeName matching.
+    std::string targetKey;
+    for (const auto& ri : m_rasterInstances) {
+        if (matchesNodeNameForInstance(ri.nodeName, nodeName) ||
+            matchesNodeNameForInstance(nodeName, ri.nodeName) ||
+            ri.meshKey.find(nodeName) != std::string::npos) {
+            targetKey = ri.meshKey;
+            break;
+        }
+    }
+    if (targetKey.empty()) return false;
+
+    auto meshIt = m_rasterMeshes.find(targetKey);
+    if (meshIt == m_rasterMeshes.end()) return false;
+
+    auto& rmb = meshIt->second;
+    const size_t expectedVertCount = meshEntries.size() * 3;
+    const size_t expectedFloatCount = expectedVertCount * 3;
+
+    // Topology must match; if not, fall back to full update
+    if (rmb.vertexCount != static_cast<uint32_t>(expectedVertCount) ||
+        rmb.cpuPositions.size() != expectedFloatCount) {
+        return false;
+    }
+
+    size_t dirtyMinFloat = expectedFloatCount;
+    size_t dirtyMaxFloat = 0;
+
+    for (const size_t triIdx : dirtyIndices) {
+        if (triIdx >= meshEntries.size()) continue;
+        const auto& tri = meshEntries[triIdx].second;
+        if (!tri) continue;
+
+        const size_t baseFloat = triIdx * 9; // 3 vertices * 3 floats
+        if (baseFloat + 8 >= expectedFloatCount) continue;
+
+        const bool hasSharedTransform = (tri->getTransformHandle() != nullptr);
+        for (int v = 0; v < 3; ++v) {
+            Vec3 p = hasSharedTransform ? tri->getOriginalVertexPosition(v) : tri->getVertexPosition(v);
+            Vec3 n = hasSharedTransform ? tri->getOriginalVertexNormal(v) : tri->getOriginalVertexNormal(v);
+            const size_t idx = baseFloat + static_cast<size_t>(v) * 3;
+            rmb.cpuPositions[idx]     = p.x;
+            rmb.cpuPositions[idx + 1] = p.y;
+            rmb.cpuPositions[idx + 2] = p.z;
+            rmb.cpuNormals[idx]       = n.x;
+            rmb.cpuNormals[idx + 1]   = n.y;
+            rmb.cpuNormals[idx + 2]   = n.z;
+        }
+
+        if (baseFloat < dirtyMinFloat) dirtyMinFloat = baseFloat;
+        if (baseFloat + 8 > dirtyMaxFloat) dirtyMaxFloat = baseFloat + 8;
+    }
+
+    if (dirtyMinFloat <= dirtyMaxFloat) {
+        // Align to vec3 boundaries
+        dirtyMinFloat = (dirtyMinFloat / 3) * 3;
+        dirtyMaxFloat = ((dirtyMaxFloat / 3) + 1) * 3;
+        if (dirtyMaxFloat > expectedFloatCount) dirtyMaxFloat = expectedFloatCount;
+
+        const uint64_t byteOffset = dirtyMinFloat * sizeof(float);
+        const uint64_t byteSize   = (dirtyMaxFloat - dirtyMinFloat) * sizeof(float);
+
+        m_device->uploadBuffer(rmb.vertexBuffer, &rmb.cpuPositions[dirtyMinFloat], byteSize, byteOffset);
+        m_device->uploadBuffer(rmb.normalBuffer, &rmb.cpuNormals[dirtyMinFloat], byteSize, byteOffset);
+    }
+
+    m_interactiveViewport.dirty = true;
+    return true;
+}
+
+void VulkanBackendAdapter::setViewportMode(ViewportMode mode) {
+    if (m_viewportMode == mode) return;
+    const ViewportMode oldMode = m_viewportMode;
+    m_viewportMode = mode;
+    m_loggedInteractiveViewportFallback = false;
+
+    // Switching from solid→rendered: BLAS/TLAS may be stale (solid mode defers RT rebuilds).
+    // Mark topology dirty so the next render triggers a full rebuild.
+    if (oldMode != ViewportMode::Rendered && mode == ViewportMode::Rendered) {
+        m_topology_dirty = true;
+        // Interactive solid/matcap resources must not leak into the RT rendered path.
+        destroyInteractiveViewportResourcesImpl(false);
+        m_interactiveViewport = {};
+    } else if (oldMode == ViewportMode::Rendered && mode != ViewportMode::Rendered) {
+        // Re-entering interactive modes should rebuild cleanly from scratch.
+        destroyInteractiveViewportResourcesImpl(false);
+        m_interactiveViewport = {};
+        m_interactiveViewport.dirty = true;
+    }
+
+    resetAccumulation();
+}
+
+ViewportMode VulkanBackendAdapter::getViewportMode() const {
+    return m_viewportMode;
+}
+
+bool VulkanBackendAdapter::supportsViewportMode(ViewportMode mode) const {
+    switch (mode) {
+        case ViewportMode::Rendered:
+            return true;
+        case ViewportMode::Solid:
+            return true;
+        case ViewportMode::MaterialPreview:
+            return true;
+        case ViewportMode::Matcap:
+            // Matcap is supported via the interactive/raster solid pipeline
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool VulkanBackendAdapter::shouldUseInteractiveViewportImpl() const {
+    // Use the interactive viewport only for modes the Vulkan backend supports
+    // and that are non-raytraced (Rendered uses the pathtracer).
+    return (m_viewportMode != ViewportMode::Rendered) && supportsViewportMode(m_viewportMode);
+}
+
+void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipeline) {
+    if (!m_device) return;
+    VkDevice vkDevice = m_device->getDevice();
+
+    if (m_interactiveViewport.framebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(vkDevice, m_interactiveViewport.framebuffer, nullptr);
+        m_interactiveViewport.framebuffer = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.renderPass != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyRenderPass(vkDevice, m_interactiveViewport.renderPass, nullptr);
+        m_interactiveViewport.renderPass = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.solidPipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.solidPipeline, nullptr);
+        m_interactiveViewport.solidPipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.pipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.pipelineLayout, nullptr);
+        m_interactiveViewport.pipelineLayout = VK_NULL_HANDLE;
+    }
+    // Material Preview pipeline cleanup
+    if (m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_interactiveViewport.materialPreviewPipeline, nullptr);
+        m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewPipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.materialPreviewPipelineLayout, nullptr);
+        m_interactiveViewport.materialPreviewPipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewDescPool != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.materialPreviewDescPool, nullptr);
+        m_interactiveViewport.materialPreviewDescPool = VK_NULL_HANDLE;
+        m_interactiveViewport.materialPreviewDescSet = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.materialPreviewDescLayout != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.materialPreviewDescLayout, nullptr);
+        m_interactiveViewport.materialPreviewDescLayout = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.colorImage.image) {
+        m_device->destroyImage(m_interactiveViewport.colorImage);
+    }
+    if (m_interactiveViewport.depthImage.image) {
+        m_device->destroyImage(m_interactiveViewport.depthImage);
+    }
+    if (m_interactiveViewport.stagingBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.stagingBuffer);
+    }
+    if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+        // descriptor sets are freed when pool is destroyed; just reset handle
+        m_interactiveViewport.matcapDescSet = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.matcapDescPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(vkDevice, m_interactiveViewport.matcapDescPool, nullptr);
+        m_interactiveViewport.matcapDescPool = VK_NULL_HANDLE;
+    }
+    if (m_interactiveViewport.matcapDescLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.matcapDescLayout, nullptr);
+        m_interactiveViewport.matcapDescLayout = VK_NULL_HANDLE;
+    }
+    // Note: matcap images uploaded via uploadTexture2D are tracked in m_uploadedImages
+    // and should not be destroyed here to avoid double-free. We keep the ImageHandle
+    // reference around but do not free the underlying VkImage.
+    if (m_interactiveViewport.gridVertexBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
+        m_interactiveViewport.gridVertexCount = 0;
+    }
+    if (m_interactiveViewport.gridNormalBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.gridNormalBuffer);
+    }
+    if (m_interactiveViewport.identityInstanceBuffer.buffer) {
+        m_device->destroyBuffer(m_interactiveViewport.identityInstanceBuffer);
+    }
+    m_interactiveViewport.width = 0;
+    m_interactiveViewport.height = 0;
+    if (!keepPipeline) {
+        m_interactiveViewport.initialized = false;
+    }
+}
+
+bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height) {
+    if (!m_device || !m_device->isInitialized() || width <= 0 || height <= 0) return false;
+    if (!m_device->supportsGraphicsQueue()) return false;
+
+    VkDevice vkDevice = m_device->getDevice();
+
+    if (m_interactiveViewport.solidPipeline == VK_NULL_HANDLE) {
+        const std::string vertPath = shaderDir + "/solid.spv";
+        const std::string fragPath = shaderDir + "/solid_frag.spv";
+        if (!std::filesystem::exists(vertPath) || !std::filesystem::exists(fragPath)) {
+            return false;
+        }
+
+        std::vector<uint32_t> vertSPV = loadSPV(vertPath);
+        std::vector<uint32_t> fragSPV = loadSPV(fragPath);
+        if (vertSPV.empty() || fragSPV.empty()) {
+            return false;
+        }
+
+        VkShaderModuleCreateInfo shaderInfo{};
+        shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+
+        shaderInfo.codeSize = vertSPV.size() * sizeof(uint32_t);
+        shaderInfo.pCode = vertSPV.data();
+        VkShaderModule vertModule = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(vkDevice, &shaderInfo, nullptr, &vertModule) != VK_SUCCESS) {
+            return false;
+        }
+
+        shaderInfo.codeSize = fragSPV.size() * sizeof(uint32_t);
+        shaderInfo.pCode = fragSPV.data();
+        VkShaderModule fragModule = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(vkDevice, &shaderInfo, nullptr, &fragModule) != VK_SUCCESS) {
+            vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+            return false;
+        }
+
+        VkAttachmentDescription attachments[2]{};
+        attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+        attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[0].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        attachments[1].format = VK_FORMAT_D32_SFLOAT;
+        attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colorRef{};
+        colorRef.attachment = 0;
+        colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depthRef{};
+        depthRef.attachment = 1;
+        depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorRef;
+        subpass.pDepthStencilAttachment = &depthRef;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 2;
+        renderPassInfo.pAttachments = attachments;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
+        if (vkCreateRenderPass(vkDevice, &renderPassInfo, nullptr, &m_interactiveViewport.renderPass) != VK_SUCCESS) {
+            vkDestroyShaderModule(vkDevice, fragModule, nullptr);
+            vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+            return false;
+        }
+
+        VkPushConstantRange pushRange{};
+        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushRange.offset = 0;
+        // Two mat4 (32 floats -> 128 bytes) plus int + custom params
+        pushRange.size = sizeof(float) * 32 + sizeof(int) + sizeof(float) * (3 + 3 + 3 + 2); // custom colors (3*3) + 2 floats
+        // Create descriptor set layout for matcap (binding = 0)
+        VkDescriptorSetLayoutBinding matcapBinding{};
+        matcapBinding.binding = 0;
+        matcapBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        matcapBinding.descriptorCount = 1;
+        matcapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        matcapBinding.pImmutableSamplers = nullptr;
+
+        VkDescriptorSetLayoutCreateInfo dslci{};
+        dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        dslci.bindingCount = 1;
+        dslci.pBindings = &matcapBinding;
+        if (vkCreateDescriptorSetLayout(vkDevice, &dslci, nullptr, &m_interactiveViewport.matcapDescLayout) != VK_SUCCESS) {
+            vkDestroyShaderModule(vkDevice, fragModule, nullptr);
+            vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+            return false;
+        }
+
+        // Descriptor pool for a single combined image sampler
+        VkDescriptorPoolSize poolSize{};
+        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSize.descriptorCount = 1;
+        VkDescriptorPoolCreateInfo dpci{};
+        dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        dpci.poolSizeCount = 1;
+        dpci.pPoolSizes = &poolSize;
+        dpci.maxSets = 1;
+        if (vkCreateDescriptorPool(vkDevice, &dpci, nullptr, &m_interactiveViewport.matcapDescPool) != VK_SUCCESS) {
+            vkDestroyDescriptorSetLayout(vkDevice, m_interactiveViewport.matcapDescLayout, nullptr);
+            m_interactiveViewport.matcapDescLayout = VK_NULL_HANDLE;
+            vkDestroyShaderModule(vkDevice, fragModule, nullptr);
+            vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+            return false;
+        }
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+        pipelineLayoutInfo.setLayoutCount = 1;
+        pipelineLayoutInfo.pSetLayouts = &m_interactiveViewport.matcapDescLayout;
+        if (vkCreatePipelineLayout(vkDevice, &pipelineLayoutInfo, nullptr, &m_interactiveViewport.pipelineLayout) != VK_SUCCESS) {
+            vkDestroyRenderPass(vkDevice, m_interactiveViewport.renderPass, nullptr);
+            m_interactiveViewport.renderPass = VK_NULL_HANDLE;
+            vkDestroyShaderModule(vkDevice, fragModule, nullptr);
+            vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo shaderStages[2]{};
+        shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        shaderStages[0].module = vertModule;
+        shaderStages[0].pName = "main";
+        shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        shaderStages[1].module = fragModule;
+        shaderStages[1].pName = "main";
+
+        VkVertexInputBindingDescription bindings[3]{};
+        bindings[0].binding = 0;
+        bindings[0].stride = sizeof(float) * 3;
+        bindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        bindings[1].binding = 1;
+        bindings[1].stride = sizeof(float) * 3;
+        bindings[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        bindings[2].binding = 2;
+        bindings[2].stride = sizeof(float) * 16;
+        bindings[2].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+        VkVertexInputAttributeDescription attributes[6]{};
+        attributes[0].location = 0;
+        attributes[0].binding = 0;
+        attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributes[0].offset = 0;
+        attributes[1].location = 1;
+        attributes[1].binding = 1;
+        attributes[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributes[1].offset = 0;
+        attributes[2].location = 2;
+        attributes[2].binding = 2;
+        attributes[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributes[2].offset = sizeof(float) * 0;
+        attributes[3].location = 3;
+        attributes[3].binding = 2;
+        attributes[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributes[3].offset = sizeof(float) * 4;
+        attributes[4].location = 4;
+        attributes[4].binding = 2;
+        attributes[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributes[4].offset = sizeof(float) * 8;
+        attributes[5].location = 5;
+        attributes[5].binding = 2;
+        attributes[5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributes[5].offset = sizeof(float) * 12;
+
+        VkPipelineVertexInputStateCreateInfo vertexInput{};
+        vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertexInput.vertexBindingDescriptionCount = 3;
+        vertexInput.pVertexBindingDescriptions = bindings;
+        vertexInput.vertexAttributeDescriptionCount = 6;
+        vertexInput.pVertexAttributeDescriptions = attributes;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.lineWidth = 1.0f;
+        rasterizer.cullMode = VK_CULL_MODE_NONE;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineDepthStencilStateCreateInfo depthStencil{};
+        depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        VkDynamicState dynamicStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = 2;
+        dynamicState.pDynamicStates = dynamicStates;
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInput;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pDepthStencilState = &depthStencil;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = m_interactiveViewport.pipelineLayout;
+        pipelineInfo.renderPass = m_interactiveViewport.renderPass;
+        pipelineInfo.subpass = 0;
+
+        if (vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_interactiveViewport.solidPipeline) != VK_SUCCESS) {
+            vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.pipelineLayout, nullptr);
+            m_interactiveViewport.pipelineLayout = VK_NULL_HANDLE;
+            vkDestroyRenderPass(vkDevice, m_interactiveViewport.renderPass, nullptr);
+            m_interactiveViewport.renderPass = VK_NULL_HANDLE;
+            vkDestroyShaderModule(vkDevice, fragModule, nullptr);
+            vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+            return false;
+        }
+
+        vkDestroyShaderModule(vkDevice, fragModule, nullptr);
+        vkDestroyShaderModule(vkDevice, vertModule, nullptr);
+        // Allocate and update matcap descriptor set (one combined image sampler)
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = m_interactiveViewport.matcapDescPool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &m_interactiveViewport.matcapDescLayout;
+        VkDescriptorSet descSet = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(vkDevice, &dsai, &descSet) == VK_SUCCESS) {
+            // Always keep the descriptor set handle — texture will be bound later
+            // when user loads a matcap via setInteractiveViewportMatcap().
+            m_interactiveViewport.matcapDescSet = descSet;
+
+            // Bind a dummy texture so the descriptor set is valid for Vulkan
+            // (even though solid/procedural modes don't sample it).
+            if (!m_interactiveViewport.matcapImage.image) {
+                std::vector<uint8_t> white(4 * 2 * 2, 255);
+                int64_t id = this->uploadTexture2D(white.data(), 2, 2, 4, false, false);
+                if (id && m_uploadedImages.find(id) != m_uploadedImages.end()) {
+                    m_interactiveViewport.matcapImage = m_uploadedImages[id];
+                }
+            }
+
+            if (m_interactiveViewport.matcapImage.image) {
+                VkDescriptorImageInfo di{};
+                di.sampler = m_interactiveViewport.matcapImage.sampler;
+                di.imageView = m_interactiveViewport.matcapImage.view;
+                di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+                VkWriteDescriptorSet wds{};
+                wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                wds.dstSet = descSet;
+                wds.dstBinding = 0;
+                wds.dstArrayElement = 0;
+                wds.descriptorCount = 1;
+                wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                wds.pImageInfo = &di;
+
+                vkUpdateDescriptorSets(vkDevice, 1, &wds, 0, nullptr);
+            }
+        }
+        m_interactiveViewport.initialized = true;
+    }
+
+    // ── Material Preview Pipeline (created once, reuses solid render pass) ──
+    if (m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE &&
+        m_interactiveViewport.renderPass != VK_NULL_HANDLE) {
+        const std::string mpVertPath = shaderDir + "/material_preview.spv";
+        const std::string mpFragPath = shaderDir + "/material_preview_frag.spv";
+        if (std::filesystem::exists(mpVertPath) && std::filesystem::exists(mpFragPath)) {
+            std::vector<uint32_t> mpVertSPV = loadSPV(mpVertPath);
+            std::vector<uint32_t> mpFragSPV = loadSPV(mpFragPath);
+            if (!mpVertSPV.empty() && !mpFragSPV.empty()) {
+                VkShaderModuleCreateInfo smci{};
+                smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+
+                smci.codeSize = mpVertSPV.size() * sizeof(uint32_t);
+                smci.pCode = mpVertSPV.data();
+                VkShaderModule mpVertModule = VK_NULL_HANDLE;
+                vkCreateShaderModule(vkDevice, &smci, nullptr, &mpVertModule);
+
+                smci.codeSize = mpFragSPV.size() * sizeof(uint32_t);
+                smci.pCode = mpFragSPV.data();
+                VkShaderModule mpFragModule = VK_NULL_HANDLE;
+                vkCreateShaderModule(vkDevice, &smci, nullptr, &mpFragModule);
+
+                if (mpVertModule && mpFragModule) {
+                    // Descriptor set layout: binding 0 = material SSBO
+                    VkDescriptorSetLayoutBinding matBufBinding{};
+                    matBufBinding.binding = 0;
+                    matBufBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    matBufBinding.descriptorCount = 1;
+                    matBufBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+                    VkDescriptorSetLayoutCreateInfo mpDslci{};
+                    mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+                    mpDslci.bindingCount = 1;
+                    mpDslci.pBindings = &matBufBinding;
+                    vkCreateDescriptorSetLayout(vkDevice, &mpDslci, nullptr,
+                                                &m_interactiveViewport.materialPreviewDescLayout);
+
+                    // Descriptor pool
+                    VkDescriptorPoolSize mpPoolSize{};
+                    mpPoolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                    mpPoolSize.descriptorCount = 1;
+                    VkDescriptorPoolCreateInfo mpDpci{};
+                    mpDpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+                    mpDpci.poolSizeCount = 1;
+                    mpDpci.pPoolSizes = &mpPoolSize;
+                    mpDpci.maxSets = 1;
+                    vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
+                                           &m_interactiveViewport.materialPreviewDescPool);
+
+                    // Push constant range: 2x mat4 + 4x vec4 = 128 + 64 = 192 bytes
+                    VkPushConstantRange mpPushRange{};
+                    mpPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpPushRange.offset = 0;
+                    mpPushRange.size = sizeof(float) * 48; // 2x mat4(32) + 4x vec4(16)
+
+                    VkPipelineLayoutCreateInfo mpPlci{};
+                    mpPlci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+                    mpPlci.pushConstantRangeCount = 1;
+                    mpPlci.pPushConstantRanges = &mpPushRange;
+                    mpPlci.setLayoutCount = 1;
+                    mpPlci.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
+                    vkCreatePipelineLayout(vkDevice, &mpPlci, nullptr,
+                                           &m_interactiveViewport.materialPreviewPipelineLayout);
+
+                    // Shader stages
+                    VkPipelineShaderStageCreateInfo mpStages[2]{};
+                    mpStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    mpStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+                    mpStages[0].module = mpVertModule;
+                    mpStages[0].pName = "main";
+                    mpStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                    mpStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpStages[1].module = mpFragModule;
+                    mpStages[1].pName = "main";
+
+                    // Vertex input: binding 0=pos, 1=normal, 2=uv, 3=matId, 4=instance matrix
+                    VkVertexInputBindingDescription mpBindings[5]{};
+                    mpBindings[0].binding = 0; mpBindings[0].stride = sizeof(float) * 3; mpBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[1].binding = 1; mpBindings[1].stride = sizeof(float) * 3; mpBindings[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[2].binding = 2; mpBindings[2].stride = sizeof(float) * 2; mpBindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[3].binding = 3; mpBindings[3].stride = sizeof(uint32_t);  mpBindings[3].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                    mpBindings[4].binding = 4; mpBindings[4].stride = sizeof(float) * 16; mpBindings[4].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+
+                    VkVertexInputAttributeDescription mpAttribs[8]{};
+                    // location 0: position
+                    mpAttribs[0].location = 0; mpAttribs[0].binding = 0; mpAttribs[0].format = VK_FORMAT_R32G32B32_SFLOAT; mpAttribs[0].offset = 0;
+                    // location 1: normal
+                    mpAttribs[1].location = 1; mpAttribs[1].binding = 1; mpAttribs[1].format = VK_FORMAT_R32G32B32_SFLOAT; mpAttribs[1].offset = 0;
+                    // location 2: uv
+                    mpAttribs[2].location = 2; mpAttribs[2].binding = 2; mpAttribs[2].format = VK_FORMAT_R32G32_SFLOAT; mpAttribs[2].offset = 0;
+                    // location 3: materialID
+                    mpAttribs[3].location = 3; mpAttribs[3].binding = 3; mpAttribs[3].format = VK_FORMAT_R32_UINT; mpAttribs[3].offset = 0;
+                    // location 4-7: instance model matrix (4 columns)
+                    mpAttribs[4].location = 4; mpAttribs[4].binding = 4; mpAttribs[4].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[4].offset = sizeof(float) * 0;
+                    mpAttribs[5].location = 5; mpAttribs[5].binding = 4; mpAttribs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[5].offset = sizeof(float) * 4;
+                    mpAttribs[6].location = 6; mpAttribs[6].binding = 4; mpAttribs[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[6].offset = sizeof(float) * 8;
+                    mpAttribs[7].location = 7; mpAttribs[7].binding = 4; mpAttribs[7].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[7].offset = sizeof(float) * 12;
+
+                    VkPipelineVertexInputStateCreateInfo mpVertInput{};
+                    mpVertInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                    mpVertInput.vertexBindingDescriptionCount = 5;
+                    mpVertInput.pVertexBindingDescriptions = mpBindings;
+                    mpVertInput.vertexAttributeDescriptionCount = 8;
+                    mpVertInput.pVertexAttributeDescriptions = mpAttribs;
+
+                    VkPipelineInputAssemblyStateCreateInfo mpIA{};
+                    mpIA.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+                    mpIA.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+                    VkPipelineViewportStateCreateInfo mpVpState{};
+                    mpVpState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+                    mpVpState.viewportCount = 1;
+                    mpVpState.scissorCount = 1;
+
+                    VkPipelineRasterizationStateCreateInfo mpRast{};
+                    mpRast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+                    mpRast.polygonMode = VK_POLYGON_MODE_FILL;
+                    mpRast.lineWidth = 1.0f;
+                    mpRast.cullMode = VK_CULL_MODE_NONE;
+                    mpRast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+                    VkPipelineMultisampleStateCreateInfo mpMS{};
+                    mpMS.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+                    mpMS.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+                    VkPipelineDepthStencilStateCreateInfo mpDS{};
+                    mpDS.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+                    mpDS.depthTestEnable = VK_TRUE;
+                    mpDS.depthWriteEnable = VK_TRUE;
+                    mpDS.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+                    VkPipelineColorBlendAttachmentState mpCBA{};
+                    mpCBA.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                           VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+                    VkPipelineColorBlendStateCreateInfo mpCB{};
+                    mpCB.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+                    mpCB.attachmentCount = 1;
+                    mpCB.pAttachments = &mpCBA;
+
+                    VkDynamicState mpDynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+                    VkPipelineDynamicStateCreateInfo mpDyn{};
+                    mpDyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+                    mpDyn.dynamicStateCount = 2;
+                    mpDyn.pDynamicStates = mpDynStates;
+
+                    VkGraphicsPipelineCreateInfo mpPCI{};
+                    mpPCI.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+                    mpPCI.stageCount = 2;
+                    mpPCI.pStages = mpStages;
+                    mpPCI.pVertexInputState = &mpVertInput;
+                    mpPCI.pInputAssemblyState = &mpIA;
+                    mpPCI.pViewportState = &mpVpState;
+                    mpPCI.pRasterizationState = &mpRast;
+                    mpPCI.pMultisampleState = &mpMS;
+                    mpPCI.pDepthStencilState = &mpDS;
+                    mpPCI.pColorBlendState = &mpCB;
+                    mpPCI.pDynamicState = &mpDyn;
+                    mpPCI.layout = m_interactiveViewport.materialPreviewPipelineLayout;
+                    mpPCI.renderPass = m_interactiveViewport.renderPass;
+                    mpPCI.subpass = 0;
+
+                    VkResult mpResult = vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &mpPCI, nullptr,
+                                                                   &m_interactiveViewport.materialPreviewPipeline);
+                    if (mpResult != VK_SUCCESS) {
+                        SCENE_LOG_WARN("[Vulkan] Material preview pipeline creation failed.");
+                        m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
+                    } else {
+                        // Allocate descriptor set and bind material buffer
+                        VkDescriptorSetAllocateInfo mpDsai{};
+                        mpDsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                        mpDsai.descriptorPool = m_interactiveViewport.materialPreviewDescPool;
+                        mpDsai.descriptorSetCount = 1;
+                        mpDsai.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
+                        vkAllocateDescriptorSets(vkDevice, &mpDsai, &m_interactiveViewport.materialPreviewDescSet);
+
+                        if (m_device->m_materialBuffer.buffer && m_interactiveViewport.materialPreviewDescSet) {
+                            VkDescriptorBufferInfo matBufInfo{};
+                            matBufInfo.buffer = m_device->m_materialBuffer.buffer;
+                            matBufInfo.offset = 0;
+                            matBufInfo.range = VK_WHOLE_SIZE;
+
+                            VkWriteDescriptorSet mpWds{};
+                            mpWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                            mpWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
+                            mpWds.dstBinding = 0;
+                            mpWds.descriptorCount = 1;
+                            mpWds.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                            mpWds.pBufferInfo = &matBufInfo;
+                            vkUpdateDescriptorSets(vkDevice, 1, &mpWds, 0, nullptr);
+                        }
+                        SCENE_LOG_INFO("[Vulkan] Material preview pipeline created successfully.");
+                    }
+                }
+                if (mpVertModule) vkDestroyShaderModule(vkDevice, mpVertModule, nullptr);
+                if (mpFragModule) vkDestroyShaderModule(vkDevice, mpFragModule, nullptr);
+            }
+        }
+    }
+
+    if (m_interactiveViewport.width == width &&
+        m_interactiveViewport.height == height &&
+        m_interactiveViewport.framebuffer != VK_NULL_HANDLE &&
+        m_interactiveViewport.colorImage.image != VK_NULL_HANDLE &&
+        m_interactiveViewport.depthImage.image != VK_NULL_HANDLE &&
+        m_interactiveViewport.stagingBuffer.buffer != VK_NULL_HANDLE) {
+        return true;
+    }
+
+    destroyInteractiveViewportResources(true);
+
+    m_interactiveViewport.colorImage = m_device->createImage2D(
+        (uint32_t)width, (uint32_t)height, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    m_interactiveViewport.depthImage = m_device->createImage2D(
+        (uint32_t)width, (uint32_t)height, VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    VulkanRT::BufferCreateInfo stagingInfo{};
+    stagingInfo.size = (uint64_t)width * (uint64_t)height * 4ull;
+    stagingInfo.usage = VulkanRT::BufferUsage::TRANSFER_DST;
+    stagingInfo.location = VulkanRT::MemoryLocation::GPU_TO_CPU;
+    m_interactiveViewport.stagingBuffer = m_device->createBuffer(stagingInfo);
+
+    if (!m_interactiveViewport.colorImage.image ||
+        !m_interactiveViewport.depthImage.image ||
+        !m_interactiveViewport.stagingBuffer.buffer) {
+        destroyInteractiveViewportResources(true);
+        return false;
+    }
+
+    VkImageView attachments[2] = {
+        m_interactiveViewport.colorImage.view,
+        m_interactiveViewport.depthImage.view
+    };
+    VkFramebufferCreateInfo framebufferInfo{};
+    framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    framebufferInfo.renderPass = m_interactiveViewport.renderPass;
+    framebufferInfo.attachmentCount = 2;
+    framebufferInfo.pAttachments = attachments;
+    framebufferInfo.width = (uint32_t)width;
+    framebufferInfo.height = (uint32_t)height;
+    framebufferInfo.layers = 1;
+    if (vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &m_interactiveViewport.framebuffer) != VK_SUCCESS) {
+        destroyInteractiveViewportResources(true);
+        return false;
+    }
+
+    m_interactiveViewport.width = width;
+    m_interactiveViewport.height = height;
+    return true;
+}
+
+void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int height, void* fb, void* tex) {
+    m_interactiveViewport.initialized = true;
+    const ViewportMode requestedMode = m_viewportMode;
+
+    if (!m_loggedInteractiveViewportFallback) {
+        const char* mode_name = "Interactive";
+        switch (requestedMode) {
+            case ViewportMode::Solid: mode_name = "Solid"; break;
+            case ViewportMode::MaterialPreview: mode_name = "MaterialPreview"; break;
+            case ViewportMode::Matcap: mode_name = "Matcap"; break;
+            case ViewportMode::Rendered: mode_name = "Rendered"; break;
+        }
+        SCENE_LOG_INFO(std::string("[Vulkan] Interactive viewport mode selected: '")
+                       + mode_name + "'.");
+        m_loggedInteractiveViewportFallback = true;
+    }
+
+    auto resolveShaderDir = [&]() -> std::string {
+        std::string shaderDir = "shaders";
+        if (!std::filesystem::exists(shaderDir + "/solid.spv")) shaderDir = "source/shaders";
+        if (!std::filesystem::exists(shaderDir + "/solid.spv")) shaderDir = "../shaders";
+        if (!std::filesystem::exists(shaderDir + "/solid.spv")) {
+            char exePath[MAX_PATH] = {};
+            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+            std::string exeDir = std::filesystem::path(exePath).parent_path().string();
+            shaderDir = exeDir + "/shaders";
+        }
+        return shaderDir;
+    };
+
+    const bool rasterModeRequested = (requestedMode == ViewportMode::Solid ||
+                                      requestedMode == ViewportMode::Matcap ||
+                                      requestedMode == ViewportMode::MaterialPreview);
+    const std::string shaderDir = resolveShaderDir();
+    if (!rasterModeRequested ||
+        !m_device ||
+        !m_device->supportsGraphicsQueue() ||
+        !ensureInteractiveViewportResources(shaderDir, width, height)) {
+        m_viewportMode = ViewportMode::Rendered;
+        renderProgressive(s, nullptr, nullptr, width, height, fb, tex);
+        m_viewportMode = requestedMode;
+        return;
+    }
+
+    // Camera change detection — only re-render when something changed
+    auto hashCamera = [](const CameraParams& c) -> uint64_t {
+        uint64_t h = 14695981039346656037ull;
+        auto mix = [&](float v) { uint32_t bits; std::memcpy(&bits, &v, 4); h ^= bits; h *= 1099511628211ull; };
+        mix(c.origin.x); mix(c.origin.y); mix(c.origin.z);
+        mix(c.lookAt.x); mix(c.lookAt.y); mix(c.lookAt.z);
+        mix(c.up.x); mix(c.up.y); mix(c.up.z);
+        mix(c.fov);
+        return h;
+    };
+    uint64_t camHash = hashCamera(m_camera);
+    if (!m_interactiveViewport.dirty && camHash == m_lastCameraHash &&
+        m_interactiveViewport.width == width && m_interactiveViewport.height == height) {
+        // Nothing changed — just re-present the cached framebuffer
+        std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
+        if (framebuffer && !framebuffer->empty()) {
+            if (s) {
+                SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+                if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+                    std::memcpy(outSurf->pixels, framebuffer->data(), framebuffer->size() * sizeof(uint32_t));
+                }
+            }
+            if (tex) {
+                SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
+            }
+        }
+        return;
+    }
+    m_lastCameraHash = camHash;
+    m_interactiveViewport.dirty = false;
+
+    struct SolidPushConstants {
+        float viewProj[16];
+        float view[16];
+        int useMatcap; // -1 = flat color, 0 = off, 1 = matcap texture, 2..9 procedural
+        float overrideR, overrideG, overrideB; // flat color (useMatcap == -1)
+    };
+
+    auto matrixToGL = [](const Matrix4x4& mat, float out[16]) {
+        Matrix4x4 t = mat.transpose();
+        int k = 0;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out[k++] = t.m[r][c];
+            }
+        }
+    };
+
+    auto makeViewMatrix = [](const Vec3& eye, const Vec3& center, const Vec3& up) {
+        Vec3 f = (center - eye).normalize();
+        Vec3 sAxis = Vec3::cross(f, up).normalize();
+        if (sAxis.length() < 0.0001f) sAxis = Vec3(1.0f, 0.0f, 0.0f);
+        Vec3 uAxis = Vec3::cross(sAxis, f);
+        return Matrix4x4(
+            sAxis.x, sAxis.y, sAxis.z, -Vec3::dot(sAxis, eye),
+            uAxis.x, uAxis.y, uAxis.z, -Vec3::dot(uAxis, eye),
+            -f.x,   -f.y,   -f.z,    Vec3::dot(f, eye),
+            0.0f,   0.0f,   0.0f,    1.0f
+        );
+    };
+
+    auto makePerspectiveMatrix = [&](float fovDeg, float aspect, float zNear, float zFar) {
+        const float f = 1.0f / std::tan(fovDeg * 0.5f * 3.14159265358979f / 180.0f);
+        Matrix4x4 proj = Matrix4x4::zero();
+        proj.m[0][0] = f / aspect;
+        proj.m[1][1] = -f; // Vulkan clip Y flip
+        proj.m[2][2] = zFar / (zNear - zFar);
+        proj.m[2][3] = (zFar * zNear) / (zNear - zFar);
+        proj.m[3][2] = -1.0f;
+        return proj;
+    };
+
+    Matrix4x4 view = makeViewMatrix(m_camera.origin, m_camera.lookAt, m_camera.up);
+    const float aspect = (height > 0) ? ((float)width / (float)height) : 1.0f;
+    Matrix4x4 proj = makePerspectiveMatrix(
+        m_camera.fov > 1.0f ? m_camera.fov : 60.0f,
+        aspect,
+        0.01f,
+        1000000.0f);
+    Matrix4x4 viewProj = proj * view;
+    if (!m_interactiveViewport.identityInstanceBuffer.buffer) {
+        struct RasterInstanceGPU {
+            float model[16];
+        } identityGpu{};
+        matrixToGL(Matrix4x4::identity(), identityGpu.model);
+        VulkanRT::BufferCreateInfo ici{};
+        ici.size = sizeof(identityGpu);
+        ici.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+        ici.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        ici.initialData = nullptr;
+        m_interactiveViewport.identityInstanceBuffer = m_device->createBuffer(ici);
+        if (m_interactiveViewport.identityInstanceBuffer.buffer) {
+            m_device->uploadBuffer(m_interactiveViewport.identityInstanceBuffer,
+                                   &identityGpu,
+                                   sizeof(identityGpu),
+                                   0);
+        }
+    }
+
+    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) {
+        return;
+    }
+
+    VkClearValue clearValues[2]{};
+    // Use World's solid background color for the raster viewport clear
+    const bool hasWorldBg = (m_cachedWorld.color.x != 0.0f || m_cachedWorld.color.y != 0.0f || m_cachedWorld.color.z != 0.0f);
+    clearValues[0].color = { {
+        hasWorldBg ? m_cachedWorld.color.x : 0.13f,
+        hasWorldBg ? m_cachedWorld.color.y : 0.14f,
+        hasWorldBg ? m_cachedWorld.color.z : 0.16f,
+        1.0f } };
+    clearValues[1].depthStencil = { 1.0f, 0 };
+
+    VkRenderPassBeginInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    renderPassInfo.renderPass = m_interactiveViewport.renderPass;
+    renderPassInfo.framebuffer = m_interactiveViewport.framebuffer;
+    renderPassInfo.renderArea.offset = { 0, 0 };
+    renderPassInfo.renderArea.extent = { (uint32_t)width, (uint32_t)height };
+    renderPassInfo.clearValueCount = 2;
+    renderPassInfo.pClearValues = clearValues;
+
+    vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+    // Decide which pipeline to use based on viewport mode
+    const bool useMaterialPreview = (m_viewportMode == ViewportMode::MaterialPreview) &&
+                                     m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE &&
+                                     m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
+                                     m_device->m_materialBuffer.buffer != VK_NULL_HANDLE;
+
+    if (useMaterialPreview) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.materialPreviewPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_interactiveViewport.materialPreviewPipelineLayout,
+                                0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
+    } else {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.solidPipeline);
+        if (m_interactiveViewport.matcapDescSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_interactiveViewport.pipelineLayout, 0, 1, &m_interactiveViewport.matcapDescSet, 0, nullptr);
+        }
+    }
+
+    VkViewport viewport{};
+    viewport.x = 0.0f;
+    viewport.y = 0.0f;
+    viewport.width = (float)width;
+    viewport.height = (float)height;
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = { (uint32_t)width, (uint32_t)height };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    // Draw from raster buffers (lightweight, BLAS-independent)
+    if (!m_rasterInstances.empty()) {
+        for (const auto& [meshKey, rmb] : m_rasterMeshes) {
+            if (!rmb.vertexBuffer.buffer || !rmb.instanceBuffer.buffer || rmb.vertexCount == 0 || rmb.instanceCount == 0) continue;
+
+            if (useMaterialPreview) {
+                // Material Preview push constants
+                struct MaterialPreviewPushConstants {
+                    float viewProj[16];
+                    float view[16];
+                    float cameraPos[4];   // xyz + pad
+                    float lightDir0[4];   // xyz = dir, w = intensity
+                    float lightDir1[4];   // fill
+                    float lightDir2[4];   // rim
+                };
+                MaterialPreviewPushConstants mpPush{};
+                matrixToGL(viewProj, mpPush.viewProj);
+                matrixToGL(view, mpPush.view);
+                mpPush.cameraPos[0] = m_camera.origin.x;
+                mpPush.cameraPos[1] = m_camera.origin.y;
+                mpPush.cameraPos[2] = m_camera.origin.z;
+                mpPush.cameraPos[3] = 0.0f;
+                // Key light: from upper-right-front
+                mpPush.lightDir0[0] = 0.45f; mpPush.lightDir0[1] = 0.8f; mpPush.lightDir0[2] = 0.35f; mpPush.lightDir0[3] = 2.5f;
+                // Fill light: from left side, softer
+                mpPush.lightDir1[0] = -0.6f; mpPush.lightDir1[1] = 0.3f; mpPush.lightDir1[2] = 0.4f; mpPush.lightDir1[3] = 0.8f;
+                // Rim light: from behind
+                mpPush.lightDir2[0] = -0.2f; mpPush.lightDir2[1] = 0.4f; mpPush.lightDir2[2] = -0.8f; mpPush.lightDir2[3] = 1.2f;
+
+                vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(MaterialPreviewPushConstants), &mpPush);
+
+                // Bind 5 vertex buffers: pos, normal, uv, matId, instance
+                VkBuffer mpVertBuffers[5] = {
+                    rmb.vertexBuffer.buffer,
+                    rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
+                    rmb.uvBuffer.buffer ? rmb.uvBuffer.buffer : rmb.vertexBuffer.buffer,
+                    rmb.matIdBuffer.buffer ? rmb.matIdBuffer.buffer : rmb.vertexBuffer.buffer,
+                    rmb.instanceBuffer.buffer
+                };
+                VkDeviceSize mpOffsets[5] = { 0, 0, 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 5, mpVertBuffers, mpOffsets);
+            } else {
+                // Solid / Matcap push constants
+                SolidPushConstants push{};
+                matrixToGL(viewProj, push.viewProj);
+                matrixToGL(view, push.view);
+                const bool isMatcap = (m_viewportMode == ViewportMode::Matcap);
+                if (isMatcap) {
+                    if (m_interactiveViewport.matcapUserLoaded) {
+                        push.useMatcap = 1;
+                    } else {
+                        push.useMatcap = m_interactiveViewport.matcapPreset;
+                    }
+                } else {
+                    push.useMatcap = 0;
+                }
+                vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &push);
+
+                VkBuffer vertexBuffers[3] = {
+                    rmb.vertexBuffer.buffer,
+                    rmb.normalBuffer.buffer ? rmb.normalBuffer.buffer : rmb.vertexBuffer.buffer,
+                    rmb.instanceBuffer.buffer
+                };
+                VkDeviceSize offsets[3] = { 0, 0, 0 };
+                vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
+            }
+
+            if (rmb.indexBuffer.buffer && rmb.indexCount > 0) {
+                vkCmdBindIndexBuffer(cmd, rmb.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, rmb.indexCount, rmb.instanceCount, 0, 0, 0);
+            } else {
+                vkCmdDraw(cmd, rmb.vertexCount, rmb.instanceCount, 0, 0);
+            }
+        }
+    } else if (m_rasterGeometryDirty) {
+        // Fallback: draw from BLAS buffers only while raster geometry is still waiting
+        // for its first build/sync. If raster geometry was already rebuilt and ended up
+        // empty, drawing stale RT BLAS data here causes ghost objects in Solid mode.
+        for (const auto& instance : m_vkInstances) {
+            if (instance.mask == 0) continue;
+            if (instance.blasIndex >= m_device->m_blasList.size()) continue;
+
+            const auto& blas = m_device->m_blasList[instance.blasIndex];
+            if (!blas.vertexBuffer.buffer || blas.vertexCount == 0) continue;
+
+            SolidPushConstants push{};
+            matrixToGL(viewProj, push.viewProj);
+            matrixToGL(view, push.view);
+            const bool isMatcap = (m_viewportMode == ViewportMode::Matcap);
+            if (isMatcap) {
+                push.useMatcap = m_interactiveViewport.matcapUserLoaded ? 1 : m_interactiveViewport.matcapPreset;
+            } else {
+                push.useMatcap = 0;
+            }
+            vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &push);
+
+            VkBuffer vertexBuffers[3] = {
+                blas.vertexBuffer.buffer,
+                blas.normalBuffer.buffer ? blas.normalBuffer.buffer : blas.vertexBuffer.buffer,
+                m_interactiveViewport.identityInstanceBuffer.buffer
+            };
+            VkDeviceSize offsets[3] = { 0, 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 3, vertexBuffers, offsets);
+
+            if (blas.indexBuffer.buffer && blas.indexCount > 0) {
+                vkCmdBindIndexBuffer(cmd, blas.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdDrawIndexed(cmd, blas.indexCount, 1, 0, 0, 0);
+            } else {
+                vkCmdDraw(cmd, blas.vertexCount, 1, 0, 0);
+            }
+        }
+    }
+
+    // ── Reference Grid (Y=0 plane, ±10m, 1m spacing, colored axes) ──
+    {
+        if (!m_interactiveViewport.gridVertexBuffer.buffer) {
+            const float gridHalf = 10.0f;
+            const float step     = 1.0f;
+            const float thin     = 0.005f;
+            const float axisThin = 0.020f;
+
+            std::vector<float> positions, normals;
+            auto addLineQuad = [&](Vec3 a, Vec3 b, Vec3 widthDir) {
+                Vec3 w = widthDir;
+                Vec3 p0 = a - w, p1 = a + w, p2 = b + w, p3 = b - w;
+                Vec3 n(0.0f, 1.0f, 0.0f);
+                // Emit triangles (front-facing) and reversed (back-facing) so grid is double-sided
+                for (const Vec3& p : {p0, p1, p2, p0, p2, p3, p2, p1, p0, p3, p2, p0}) {
+                    positions.push_back(p.x); positions.push_back(p.y); positions.push_back(p.z);
+                    normals.push_back(n.x);   normals.push_back(n.y);   normals.push_back(n.z);
+                }
+            };
+
+            // Segment 0: regular grid (skip center axes)
+            uint32_t seg0Start = 0;
+            for (float x = -gridHalf; x <= gridHalf + 0.001f; x += step) {
+                if (std::abs(x) < 0.01f) continue;
+                addLineQuad(Vec3(x, 0.0f, -gridHalf), Vec3(x, 0.0f, gridHalf), Vec3(thin, 0.0f, 0.0f));
+            }
+            for (float z = -gridHalf; z <= gridHalf + 0.001f; z += step) {
+                if (std::abs(z) < 0.01f) continue;
+                addLineQuad(Vec3(-gridHalf, 0.0f, z), Vec3(gridHalf, 0.0f, z), Vec3(0.0f, 0.0f, thin));
+            }
+            uint32_t seg0Count = (uint32_t)(positions.size() / 3);
+
+            // Segment 1: +X axis (red)
+            uint32_t seg1Start = (uint32_t)(positions.size() / 3);
+            addLineQuad(Vec3(0.0f, 0.001f, 0.0f), Vec3(gridHalf, 0.001f, 0.0f), Vec3(0.0f, 0.0f, axisThin));
+            uint32_t seg1Count = (uint32_t)(positions.size() / 3) - seg1Start;
+
+            // Segment 2: +Z axis (blue)
+            uint32_t seg2Start = (uint32_t)(positions.size() / 3);
+            // Use same small Y offset as +X axis and slightly larger width so it's visible
+            addLineQuad(Vec3(0.0f, 0.001f, 0.0f), Vec3(0.0f, 0.001f, gridHalf), Vec3(axisThin, 0.0f, 0.0f));
+            uint32_t seg2Count = (uint32_t)(positions.size() / 3) - seg2Start;
+
+            // Segment 3: -X/-Z axis halves (dim grey)
+            uint32_t seg3Start = (uint32_t)(positions.size() / 3);
+            addLineQuad(Vec3(-gridHalf, 0.001f, 0.0f), Vec3(0.0f, 0.001f, 0.0f), Vec3(0.0f, 0.0f, thin));
+            addLineQuad(Vec3(0.0f, 0.001f, -gridHalf), Vec3(0.0f, 0.001f, 0.0f), Vec3(thin, 0.0f, 0.0f));
+            uint32_t seg3Count = (uint32_t)(positions.size() / 3) - seg3Start;
+
+            m_interactiveViewport.gridVertexCount = (uint32_t)(positions.size() / 3);
+            m_interactiveViewport.gridSegments[0] = seg0Start;  m_interactiveViewport.gridSegments[1] = seg0Count;
+            m_interactiveViewport.gridSegments[2] = seg1Start;  m_interactiveViewport.gridSegments[3] = seg1Count;
+            m_interactiveViewport.gridSegments[4] = seg2Start;  m_interactiveViewport.gridSegments[5] = seg2Count;
+            m_interactiveViewport.gridSegments[6] = seg3Start;  m_interactiveViewport.gridSegments[7] = seg3Count;
+
+            VulkanRT::BufferCreateInfo vci{};
+            vci.size = positions.size() * sizeof(float);
+            vci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            vci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            m_interactiveViewport.gridVertexBuffer = m_device->createBuffer(vci);
+            if (m_interactiveViewport.gridVertexBuffer.buffer)
+                m_device->uploadBuffer(m_interactiveViewport.gridVertexBuffer, positions.data(), vci.size, 0);
+
+            VulkanRT::BufferCreateInfo nci{};
+            nci.size = normals.size() * sizeof(float);
+            nci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::TRANSFER_DST;
+            nci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+            m_interactiveViewport.gridNormalBuffer = m_device->createBuffer(nci);
+            if (m_interactiveViewport.gridNormalBuffer.buffer)
+                m_device->uploadBuffer(m_interactiveViewport.gridNormalBuffer, normals.data(), nci.size, 0);
+        }
+
+        if (m_interactiveViewport.gridVertexBuffer.buffer && m_interactiveViewport.gridVertexCount > 0) {
+            Matrix4x4 identity = Matrix4x4::identity();
+            Matrix4x4 gridMvp = proj * view;
+
+            VkBuffer gridBufs[3] = {
+                m_interactiveViewport.gridVertexBuffer.buffer,
+                m_interactiveViewport.gridNormalBuffer.buffer,
+                m_interactiveViewport.identityInstanceBuffer.buffer
+            };
+            VkDeviceSize gridOff[3] = { 0, 0, 0 };
+            vkCmdBindVertexBuffers(cmd, 0, 3, gridBufs, gridOff);
+
+            auto drawSeg = [&](uint32_t first, uint32_t count, float r, float g, float b) {
+                if (!count) return;
+                SolidPushConstants gp{};
+                matrixToGL(gridMvp, gp.viewProj);
+                matrixToGL(identity, gp.view);
+                gp.useMatcap = -1;
+                gp.overrideR = r; gp.overrideG = g; gp.overrideB = b;
+                vkCmdPushConstants(cmd, m_interactiveViewport.pipelineLayout,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SolidPushConstants), &gp);
+                vkCmdDraw(cmd, count, 1, first, 0);
+            };
+
+            const auto* s = m_interactiveViewport.gridSegments;
+            // Draw raster grid (depth-tested) so it is occluded by scene geometry.
+            drawSeg(s[0], s[1], 0.38f, 0.38f, 0.38f);  // regular grid: grey
+            drawSeg(s[2], s[3], 0.75f, 0.15f, 0.15f);  // +X axis: red
+            drawSeg(s[4], s[5], 0.20f, 0.45f, 0.95f);  // +Z axis: bright blue
+            drawSeg(s[6], s[7], 0.30f, 0.30f, 0.30f);  // negative halves: dim grey
+        }
+    }
+
+    vkCmdEndRenderPass(cmd);
+    m_device->endSingleTimeCommands(cmd);
+
+    m_device->copyImageToBuffer(m_interactiveViewport.colorImage, m_interactiveViewport.stagingBuffer);
+
+    std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
+    const size_t pixelCount = (size_t)width * (size_t)height;
+    if (framebuffer->size() != pixelCount) {
+        framebuffer->resize(pixelCount);
+    }
+    m_device->downloadBuffer(m_interactiveViewport.stagingBuffer, framebuffer->data(), pixelCount * sizeof(uint32_t));
+
+    if (s) {
+        SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+        if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+            std::memcpy(outSurf->pixels, framebuffer->data(), pixelCount * sizeof(uint32_t));
+        }
+    }
+    if (tex) {
+        SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
+    }
+}
+
+void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int width, int height, void* fb, void* tex) {
+    (void)w; (void)r; 
     
     // [VULKAN THREAD SAFETY] Mutex prevents background updateGeometry from destroying resources mid-frame.
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
+    // [DIAG] Track render path — separate counter for Rendered mode
+    static int s_diagFrameCounter = 0;
+    static int s_diagRenderedCounter = 0;
+    ++s_diagFrameCounter;
+    const bool isRenderedMode = (m_viewportMode == ViewportMode::Rendered);   
+    if (isRenderedMode) ++s_diagRenderedCounter;   
+
+    // [FIX] Helper lambda: re-present last valid framebuffer to SDL surface/texture.
+    // When the RT pipeline or TLAS isn't ready yet, or accumulation is already
+    // complete, we must still write valid pixel data to the output surface so
+    // Main.cpp's display blit doesn't show uninitialized memory (black/white/garbage).
+    auto rePresentCachedFrame = [&]() {
+        if (!fb || !s) return;
+        std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
+        const size_t pixelCount = (size_t)width * (size_t)height;
+        // If framebuffer hasn't been filled yet, allocate and zero-fill so the
+        // surface gets deterministic black instead of uninitialized garbage.
+        if (framebuffer->size() != pixelCount) {
+            framebuffer->resize(pixelCount, 0u);
+        }
+        SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+        if (outSurf && outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+            std::memcpy(outSurf->pixels, framebuffer->data(), pixelCount * sizeof(uint32_t));
+        }
+        if (tex) {
+            SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
+        }
+    };
+
     // [STABILITY] Robust null checks to prevent startup/switch crashes
-    if (!m_device || !m_device->isInitialized()) return;
-    if (!m_device->hasHardwareRT() || !fb || !tex) return;
+    if (!m_device || !m_device->isInitialized()) {
+        rePresentCachedFrame();
+        return;
+    }
+
+    if (shouldUseInteractiveViewport()) {
+        const ViewportMode requestedMode = m_viewportMode;
+        renderInteractiveViewport(s, width, height, fb, tex);
+        m_viewportMode = requestedMode;
+        return;
+    }
+
+    if (!m_device->hasHardwareRT() || !fb || !tex) {
+        // Still write valid (black) pixels so original_surface isn't left uninitialized
+        rePresentCachedFrame();
+        return;
+    }
     
-    if (isAccumulationComplete()) return;
+    if (isAccumulationComplete()) {
+        // [FIX] Even when done accumulating, re-present the last valid frame
+        // so original_surface always has valid pixel data for display blit.
+        rePresentCachedFrame();
+        return;
+    }
 
     auto presentBackgroundOnly = [&]() {
         std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
@@ -6263,7 +9554,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             framebuffer->resize(count);
         }
 
-        static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888);
+        static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA32);
         static std::unique_ptr<World> fallbackWorld;
         static uint64_t fallbackWorldHash = 0;
         auto hashWorld = [](const WorldData& wd) -> uint64_t {
@@ -6311,6 +9602,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             return std::max(v, 0.0f);
         };
 
+        uint32_t* fbData = framebuffer->data();
         for (int j = 0; j < height; ++j) {
             for (int i = 0; i < width; ++i) {
                 float u = ((float)i + 0.5f) / (float)width;
@@ -6327,24 +9619,28 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
                 const uint8_t gi = linearToSRGB8Fast(gg);
                 const uint8_t bi = linearToSRGB8Fast(bb);
                 size_t idx = (size_t)j * (size_t)width + (size_t)i;
-                (*framebuffer)[idx] = SDL_MapRGB(fmt, ri, gi, bi);
-                if (s) {
-                    SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
-                    if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
-                        Uint32* pixels_ptr = static_cast<Uint32*>(outSurf->pixels);
-                        pixels_ptr[idx] = SDL_MapRGB(outSurf->format, ri, gi, bi);
-                    }
-                }
+                fbData[idx] = SDL_MapRGB(fmt, ri, gi, bi);
             }
         }
 
+        // Bulk copy framebuffer → SDL surface (single memcpy instead of per-pixel write)
+        if (s) {
+            SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+            if (outSurf && outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+                std::memcpy(outSurf->pixels, fbData, count * sizeof(uint32_t));
+            }
+        }
         if (tex) {
-            SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
+            SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, fbData, width * 4);
         }
     };
 
-    // If a reset requested immediate UI clear, wipe the provided framebuffer/texture now
-    if (m_forceClearOnNextPresent) {
+    // If a reset requested immediate UI clear, wipe the provided framebuffer/texture now.
+    // In RT Rendered mode this can cause a white/blank viewport if the next frame
+    // temporarily skips tracing (for example while TLAS/RT readiness catches up after
+    // a camera or scene change), so keep the last valid host-side image in that mode.
+    const bool allowImmediateHostClear = shouldUseInteractiveViewport();
+    if (m_forceClearOnNextPresent && allowImmediateHostClear) {
         // Clear CPU-side framebuffer vector if provided
         if (fb) {
             auto vec = static_cast<std::vector<uint32_t>*>(fb);
@@ -6385,6 +9681,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
 
     // 1. Recreate output image if size changed
     if (m_imageWidth != width || m_imageHeight != height) {
+        m_hasPresentedRenderedFrame = false;
         if (m_outputImage.image) m_device->destroyImage(m_outputImage);
         if (m_varianceImage.image) m_device->destroyImage(m_varianceImage);
         if (m_stagingBuffer.buffer) m_device->destroyBuffer(m_stagingBuffer);
@@ -6529,10 +9826,25 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             }
         }
 
-        if (!m_device->createRTPipeline(raygenSPV, missSPV, chitSPV, ahitSPV,
-                volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV)) {
-            SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
-            return;
+        // Load Sculpt Compute Shader (optional)
+        if (std::filesystem::exists(shaderDir + "/sculpt.spv")) {
+            std::vector<std::uint32_t> sculptSPV = loadSPV(shaderDir + "/sculpt.spv");
+            if (m_device->createSculptPipeline(sculptSPV)) {
+                SCENE_LOG_INFO("[Vulkan] Sculpt compute pipeline created successfully.");
+            } else {
+                SCENE_LOG_ERROR("[Vulkan] Failed to create Sculpt compute pipeline.");
+            }
+        }
+
+        // Only create the heavy RT pipeline when the viewport mode requires it.
+        if (m_viewportMode == ViewportMode::Rendered) {
+            if (!m_device->createRTPipeline(raygenSPV, missSPV, chitSPV, ahitSPV,
+                    volChitSPV, volIntSPV, hairChitSPV, hairIntSPV, shadowMissSPV, hairAhitSPV)) {
+                SCENE_LOG_ERROR("[Vulkan] Failed to create RT Pipeline.");
+                return;
+            }
+        } else {
+            SCENE_LOG_INFO("[Vulkan] Skipping RT pipeline creation (not in Rendered mode)");
         }
 
         // [FIX] Hair SBT offset correction after pipeline creation.
@@ -6567,9 +9879,20 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     }
 
     // Safety: ensure pipeline is actually built and TLAS exist before proceeding to trace.
+    // Preserve the last valid host-side frame while RT resources catch up after
+    // camera/backend changes.
     if (!m_device->isRTReady() || !m_device->hasTLAS()) {
-        presentBackgroundOnly();
+        // [FIX] Render world/sky background so the user sees the environment
+        // instead of stale Solid-mode grey pixels while the RT pipeline builds.
+        if (m_hasPresentedRenderedFrame) {
+            rePresentCachedFrame();
+        } else {
+            presentBackgroundOnly();
+        }
         return;
+    }
+    if (m_forceClearOnNextPresent && !allowImmediateHostClear) {
+        m_forceClearOnNextPresent = false;
     }
 
     // Push Constants
@@ -6687,7 +10010,7 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     // the VolumeBuffer SSBO (binding 9) for volumetric shadow transmittance computation.
     pushConst.pad0 = float(m_device->m_volumeCount);
 
-    pushConst.waterTime = (float)SDL_GetTicks() / 1000.0f;
+    pushConst.waterTime = (m_currentTime > 0.0f) ? m_currentTime : (float)SDL_GetTicks() / 1000.0f;
     pushConst.maxBounces = (uint32_t)std::max(1, m_maxBounces); // m_maxBounces her zaman UI'dan gelir
 
     pushConst.shakeEnabled = this->m_camera.shake_enabled ? 1 : 0;
@@ -6768,7 +10091,11 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
 
     if (camHash != this->m_lastCameraHash) {
         this->m_lastCameraHash = camHash;
-        resetAccumulation();
+        // [PERF] Only reset if not already reset — setCamera() from Main.cpp
+        // may have already called resetAccumulation() this frame.
+        if (m_currentSamples > 0) {
+            resetAccumulation();
+        }
     }
 
     // Additionally detect significant view direction changes using previous view dir
@@ -6776,13 +10103,13 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     if (this->m_hasPrevView) {
         float dotv = std::clamp(this->m_prevViewDir.dot(viewDir), -1.0f, 1.0f);
         float ang = acos(dotv);
-        if (ang > 0.01f) { // ~0.57 degrees
+        if (ang > 0.01f && m_currentSamples > 0) { // ~0.57 degrees
             resetAccumulation();
         }
     }
     // If camera is looking almost straight down, force a full reset to avoid
     // horizon/undersampling ghosting artifacts when pitch approaches -Y.
-    if (viewDir.y < -0.999f) {
+    if (viewDir.y < -0.999f && m_currentSamples > 0) {
         resetAccumulation();
     }
     this->m_prevViewDir = viewDir;
@@ -6793,13 +10120,17 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
     // 3. Trace Rays
         if (m_device->isRTReady() && m_device->hasTLAS()) {
         // Explicitly clear image on frame 0 to prevent ghosting or stale adaptive data
-        if (m_currentSamples == 0) {
-            m_device->clearImage(m_outputImage, 0.0f, 0.0f, 0.0f, 0.0f);
-            m_device->clearImage(m_varianceImage, 0.0f, 0.0f, 0.0f, 0.0f);
-            m_device->clearImage(m_denoiserColorImage, 0.0f, 0.0f, 0.0f, 0.0f);
-            m_device->clearImage(m_denoiserAlbedoImage, 0.0f, 0.0f, 0.0f, 0.0f);
-            m_device->clearImage(m_denoiserNormalImage, 0.5f, 0.5f, 0.5f, 0.0f);
+        // [PERF] Skip if resetAccumulation() already cleared them this cycle
+        if (m_currentSamples == 0 && !m_imagesCleared) {
+            std::vector<VulkanRT::VulkanDevice::ImageClearRequest> clears;
+            if (m_outputImage.image)        clears.push_back({&m_outputImage, 0,0,0,0});
+            if (m_varianceImage.image)      clears.push_back({&m_varianceImage, 0,0,0,0});
+            if (m_denoiserColorImage.image) clears.push_back({&m_denoiserColorImage, 0,0,0,0});
+            if (m_denoiserAlbedoImage.image) clears.push_back({&m_denoiserAlbedoImage, 0,0,0,0});
+            if (m_denoiserNormalImage.image) clears.push_back({&m_denoiserNormalImage, 0.5f,0.5f,0.5f,0});
+            m_device->clearImages(clears);
         }
+        m_imagesCleared = false; // consumed — next reset can clear again
 
         m_device->bindRTDescriptors(
             m_outputImage,
@@ -6811,7 +10142,17 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
 
         // Single command buffer: trace + layout transition + buffer copy + transition back
         // This reduces the per-frame GPU stalls from 4× vkQueueWaitIdle down to 1×.
-        m_device->traceRaysAndReadback(width, height, m_outputImage, m_stagingBuffer);
+        // [FIX] Check return value — if trace failed (e.g. command buffer exhaustion),
+        // do NOT download stale staging data. Fall back to cached/background display.
+        bool traceOK = m_device->traceRaysAndReadback(width, height, m_outputImage, m_stagingBuffer);
+        if (!traceOK) {
+            if (m_hasPresentedRenderedFrame) {
+                rePresentCachedFrame();
+            } else {
+                presentBackgroundOnly();
+            }
+            return;
+        }
 
         std::vector<uint32_t>* framebuffer = static_cast<std::vector<uint32_t>*>(fb);
         if (framebuffer->size() != (size_t)(width * height)) {
@@ -6833,55 +10174,49 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
             }
 
             // Convert HDR floats -> 8-bit sRGB packed pixels
-            static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA8888);
-            for (int j = 0; j < height; ++j) {
-                for (int i = 0; i < width; ++i) {
-                    size_t idx = (size_t)j * (size_t)width + (size_t)i;
-                    // Exposure is already applied in raygen shader via cam.exposure_factor.
-                    // Do not apply exposure again here (prevents double-exposure/gamma-like artifacts).
-                    float r = m_hdrPixels[idx * 4 + 0];
-                    float g = m_hdrPixels[idx * 4 + 1];
-                    float b = m_hdrPixels[idx * 4 + 2];
+            // [PERF] Single-pass: tonemap into framebuffer, then bulk-copy to surface.
+            // Eliminates per-pixel SDL_MapRGB on surface (was double-write per pixel).
+            static SDL_PixelFormat* fmt = SDL_AllocFormat(SDL_PIXELFORMAT_RGBA32);
+            const size_t totalPixels = (size_t)width * (size_t)height;
+            uint32_t* fbData = framebuffer->data();
+            const float* hdrData = m_hdrPixels.data();
 
-                    // Match CPU renderer pipeline (Renderer.cpp):
-                    // 1) sanitize NaN/Inf, clamp negatives to 0
-                    // 2) Reinhard tone mapping: x / (x + 1) — compresses HDR range without clipping
-                    // 3) Piecewise IEC 61966-2-1 sRGB transfer function
-                    // This matches what the CPU path writes to original_surface for all backends.
-                    auto sanitize = [](float v) -> float {
-                        if (std::isnan(v)) return 0.0f;
-                        if (std::isinf(v)) return (v > 0.0f) ? 65504.0f : 0.0f;
-                        return std::max(v, 0.0f); // clamp negatives only, preserve HDR range
-                    };
-                    float rr = sanitize(r);
-                    float gg = sanitize(g);
-                    float bb = sanitize(b);
+            for (size_t idx = 0; idx < totalPixels; ++idx) {
+                float r = hdrData[idx * 4 + 0];
+                float g = hdrData[idx * 4 + 1];
+                float b = hdrData[idx * 4 + 2];
 
-                    // Reinhard operator — same as CPU renderer (exposed_color / (exposed_color + 1))
-                    rr = rr / (rr + 1.0f);
-                    gg = gg / (gg + 1.0f);
-                    bb = bb / (bb + 1.0f);
+                // sanitize NaN/Inf, clamp negatives
+                auto sanitize = [](float v) -> float {
+                    if (std::isnan(v)) return 0.0f;
+                    if (std::isinf(v)) return (v > 0.0f) ? 65504.0f : 0.0f;
+                    return std::max(v, 0.0f);
+                };
+                float rr = sanitize(r);
+                float gg = sanitize(g);
+                float bb = sanitize(b);
 
-                    uint8_t ri = linearToSRGB8Fast(rr);
-                    uint8_t gi = linearToSRGB8Fast(gg);
-                    uint8_t bi = linearToSRGB8Fast(bb);
+                // Reinhard tonemap
+                rr = rr / (rr + 1.0f);
+                gg = gg / (gg + 1.0f);
+                bb = bb / (bb + 1.0f);
 
-                    uint32_t packed = SDL_MapRGB(fmt, ri, gi, bi);
-                    (*framebuffer)[idx] = packed;
+                uint8_t ri = linearToSRGB8Fast(rr);
+                uint8_t gi = linearToSRGB8Fast(gg);
+                uint8_t bi = linearToSRGB8Fast(bb);
 
-                    // Write to SDL surface if provided
-                    if (s) {
-                        SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
-                        if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
-                            Uint32* pixels_ptr = static_cast<Uint32*>(outSurf->pixels);
-                            size_t screen_idx = idx;
-                            pixels_ptr[screen_idx] = SDL_MapRGB(outSurf->format, ri, gi, bi);
-                        }
-                    }
+                fbData[idx] = SDL_MapRGB(fmt, ri, gi, bi);
+            }
+
+            // Bulk copy framebuffer → SDL surface (single memcpy instead of per-pixel write)
+            if (s) {
+                SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
+                if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
+                    std::memcpy(outSurf->pixels, fbData, totalPixels * sizeof(uint32_t));
                 }
             }
 
-            if (tex) SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, framebuffer->data(), width * 4);
+            if (tex) SDL_UpdateTexture(static_cast<SDL_Texture*>(tex), nullptr, fbData, width * 4);
         }
         else {
             m_device->downloadBuffer(m_stagingBuffer, framebuffer->data(), (uint64_t)width * height * 4);
@@ -6900,9 +10235,19 @@ void VulkanBackendAdapter::renderProgressive(void* s, void* w, void* r, int widt
         }
 
         this->m_currentSamples++;
+        m_hasPresentedRenderedFrame = true;
 
+       
         if (m_statusCallback) {
-            m_statusCallback("Vulkan Progressive Rendering (" + std::to_string(m_currentSamples) + " samples)", m_currentSamples);
+           // m_statusCallback("Vulkan Progressive Rendering (" + std::to_string(m_currentSamples) + " samples)", m_currentSamples);
+        }
+    } else {
+        // [FIX] RT pipeline or TLAS not ready yet — show background (sky) instead
+        // of returning without writing anything (which caused black screen).
+        if (m_hasPresentedRenderedFrame) {
+            rePresentCachedFrame();
+        } else {
+            presentBackgroundOnly();
         }
     }
 }
@@ -7139,6 +10484,7 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
         gw.sunColor[2] = 0.9f;
     }
     gw.sunIntensity = wd->nishita.sun_intensity;
+    gw.atmosphereIntensity = wd->nishita.atmosphere_intensity;
 
     // ═════════════════════════════════════════════════════════════════
     // NISHITA SUN PARAMETERS
@@ -7151,7 +10497,7 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
     gw.humidity = wd->nishita.humidity;
     gw.temperature = wd->nishita.temperature;
     gw.ozoneAbsorptionScale = wd->nishita.ozone_absorption_scale;
-    gw._pad0 = 0.0f;
+    gw.atmosphereIntensity = wd->nishita.atmosphere_intensity;
 
     // ═════════════════════════════════════════════════════════════════
     // ATMOSPHERE DENSITY PARAMETERS
@@ -7576,22 +10922,25 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
 void VulkanBackendAdapter::waitForCompletion() { m_device->waitIdle(); }
 void VulkanBackendAdapter::resetAccumulation() {
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // [PERF] Skip GPU image clears if already at sample 0 — images were already
+    // cleared by a prior resetAccumulation() this frame.  This eliminates 10-25
+    // redundant synchronous GPU round-trips during camera movement.
+    const bool needsImageClear = (m_currentSamples > 0);
     m_currentSamples = 0;
+    m_hasPresentedRenderedFrame = false;
+    m_interactiveViewport.dirty = true;
     // Also clear the output image to avoid ghosting when accumulation restarts
-    if (m_outputImage.image && m_device) {
-        m_device->clearImage(m_outputImage, 0.0f, 0.0f, 0.0f, 0.0f);
-    }
-    if (m_varianceImage.image && m_device) {
-        m_device->clearImage(m_varianceImage, 0.0f, 0.0f, 0.0f, 0.0f);
-    }
-    if (m_denoiserColorImage.image && m_device) {
-        m_device->clearImage(m_denoiserColorImage, 0.0f, 0.0f, 0.0f, 0.0f);
-    }
-    if (m_denoiserAlbedoImage.image && m_device) {
-        m_device->clearImage(m_denoiserAlbedoImage, 0.0f, 0.0f, 0.0f, 0.0f);
-    }
-    if (m_denoiserNormalImage.image && m_device) {
-        m_device->clearImage(m_denoiserNormalImage, 0.5f, 0.5f, 0.5f, 0.0f);
+    // [PERF] Batch all clears into a single GPU command buffer submission
+    // instead of 5 separate submit+fence-wait round-trips.
+    if (needsImageClear && m_device) {
+        std::vector<VulkanRT::VulkanDevice::ImageClearRequest> clears;
+        if (m_outputImage.image)        clears.push_back({&m_outputImage, 0,0,0,0});
+        if (m_varianceImage.image)      clears.push_back({&m_varianceImage, 0,0,0,0});
+        if (m_denoiserColorImage.image) clears.push_back({&m_denoiserColorImage, 0,0,0,0});
+        if (m_denoiserAlbedoImage.image) clears.push_back({&m_denoiserAlbedoImage, 0,0,0,0});
+        if (m_denoiserNormalImage.image) clears.push_back({&m_denoiserNormalImage, 0.5f,0.5f,0.5f,0});
+        m_device->clearImages(clears);
+        m_imagesCleared = true;
     }
     // Request UI-level clear on next present so host-side view is immediately cleared
     m_forceClearOnNextPresent = true;

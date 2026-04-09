@@ -35,6 +35,13 @@ enum class TimelineQualityPreset {
     High = 3          // 64 samples - high quality preview
 };
 
+enum class RasterViewportQualityPreset {
+    Auto = 0,
+    Performance = 1,
+    Balanced = 2,
+    Quality = 3
+};
+
 // Helper to get sample count from timeline quality preset
 inline int getTimelineSamplesFromPreset(TimelineQualityPreset preset) {
     switch (preset) {
@@ -64,6 +71,7 @@ struct RenderSettings {
 
     // Quality Preset
     QualityPreset quality_preset = QualityPreset::Preview;
+    RasterViewportQualityPreset raster_viewport_quality_preset = RasterViewportQualityPreset::Auto;
     
     // Sampling
     int samples_per_pixel = 1;
@@ -272,6 +280,7 @@ extern  int hitcount;
 extern bool use_embree;
 extern bool g_hasOptix ;
 extern bool g_hasVulkan;
+extern bool g_hasVulkanRT;
 extern bool g_hasCUDA; // General CUDA availability (independent of OptiX)
 extern float last_render_time_ms;
 extern bool pending_resolution_change;
@@ -293,6 +302,19 @@ extern bool g_camera_dirty;
 extern bool g_lights_dirty;
 extern bool g_world_dirty;
 
+// Granular scene-sync dirty flags (for syncActiveRenderBackendScene optimization)
+// Each flag tracks whether a specific subsystem needs re-uploading to the GPU.
+// Set to true by scene loaders, editors, and mode switches that modify data.
+extern bool g_geometry_dirty;        // Mesh/triangle data changed (requires rebuildBackendGeometry)
+extern bool g_materials_dirty;       // Material properties changed (requires updateBackendMaterials)
+extern bool g_gas_volumes_dirty;     // Gas/VDB volumes changed
+
+// Scene geometry generation counter — monotonically increasing.
+// Incremented whenever scene geometry actually changes (load, add, delete, edit).
+// Viewport/backend code compares against its last-seen generation to skip
+// redundant rebuilds when geometry hasn't changed between mode switches.
+extern std::atomic<uint64_t> g_scene_geometry_generation;
+
 // ===========================================================================
 // DEFERRED REBUILD FLAGS - For optimized batched rebuilds
 // Set these instead of calling rebuild immediately, Main loop handles them
@@ -300,6 +322,7 @@ extern bool g_world_dirty;
 extern bool g_bvh_rebuild_pending;      // CPU BVH needs rebuild
 extern bool g_gpu_refit_pending;        // GPU Geometry needs update (Deferred)
 extern bool g_vulkan_rebuild_pending;    // GPU Vulkan geometry needs rebuild
+extern bool g_viewport_raster_rebuild_pending; // Interactive raster viewport needs rebuild
 extern bool g_optix_rebuild_pending;
 extern std::atomic<bool> g_optix_rebuild_in_progress; // True while TLAS rebuild is happening - blocks render // GPU OptiX geometry needs rebuild
 extern bool g_mesh_cache_dirty;         // UI mesh cache needs rebuild

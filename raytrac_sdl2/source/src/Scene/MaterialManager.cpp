@@ -186,6 +186,17 @@ static Vec3 jsonToVec3(const json& j, const Vec3& defaultVal = Vec3(0,0,0)) {
     return defaultVal;
 }
 
+static json vec2ToJson(const Vec2& v) {
+    return { v.u, v.v };
+}
+
+static Vec2 jsonToVec2(const json& j, const Vec2& defaultVal = Vec2(0, 0)) {
+    if (j.is_array() && j.size() >= 2) {
+        return Vec2(j[0].get<double>(), j[1].get<double>());
+    }
+    return defaultVal;
+}
+
 // Helper: Serialize MaterialProperty
 static json serializeProperty(const MaterialProperty& prop, const std::string& sceneDir) {
     json j;
@@ -252,7 +263,7 @@ static void deserializeProperty(MaterialProperty& prop, const json& j, const std
         if (embedded) {
             // Load directly from memory buffer - fast and no temp files!
             const auto start = std::chrono::steady_clock::now();
-            prop.texture = std::make_shared<Texture>(embedded->data, texType, texPath);
+            prop.texture = std::make_shared<Texture>(embedded->data, embedded->type, texPath);
             if (stats) {
                 ++stats->embedded_hits;
                 stats->embedded_construct_ms += static_cast<size_t>(
@@ -369,6 +380,10 @@ uint16_t MaterialManager::getOrCreateMaterialID(const std::string& name, std::sh
                         existingPbsdf->emissionProperty.texture = newPbsdf->emissionProperty.texture;
                         updated = true;
                     }
+                    if (newPbsdf->heightProperty.texture && !existingPbsdf->heightProperty.texture) {
+                        existingPbsdf->heightProperty.texture = newPbsdf->heightProperty.texture;
+                        updated = true;
+                    }
                     if (newPbsdf->opacityProperty.texture && !existingPbsdf->opacityProperty.texture) {
                         existingPbsdf->opacityProperty.texture = newPbsdf->opacityProperty.texture;
                         updated = true;
@@ -469,6 +484,7 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 matJson["roughnessProperty"] = serializeProperty(pbsdf->roughnessProperty, sceneDir);
                 matJson["metallicProperty"] = serializeProperty(pbsdf->metallicProperty, sceneDir);
                 matJson["normalProperty"] = serializeProperty(pbsdf->normalProperty, sceneDir);
+                matJson["heightProperty"] = serializeProperty(pbsdf->heightProperty, sceneDir);
                 matJson["opacityProperty"] = serializeProperty(pbsdf->opacityProperty, sceneDir);
                 matJson["emissionProperty"] = serializeProperty(pbsdf->emissionProperty, sceneDir);
                 matJson["transmissionProperty"] = serializeProperty(pbsdf->transmissionProperty, sceneDir);
@@ -491,8 +507,17 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
                 // Translucent
                 matJson["translucent"] = pbsdf->translucent;
                 
-                // Tiling
+                // Legacy tiling fallback for older scene compatibility
                 matJson["tilingFactor"] = { pbsdf->tilingFactor.x, pbsdf->tilingFactor.y };
+                matJson["selectedUvSet"] = pbsdf->selected_uv_set;
+
+                json uvTransformJson;
+                uvTransformJson["scale"] = vec2ToJson(pbsdf->textureTransform.scale);
+                uvTransformJson["offset"] = vec2ToJson(pbsdf->textureTransform.translation);
+                uvTransformJson["rotationDegrees"] = pbsdf->textureTransform.rotation_degrees;
+                uvTransformJson["tiling"] = vec2ToJson(pbsdf->textureTransform.tilingFactor);
+                uvTransformJson["wrapMode"] = static_cast<int>(pbsdf->textureTransform.wrapMode);
+                matJson["uvTransform"] = uvTransformJson;
             }
         }
         
@@ -542,6 +567,8 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             collectTextureRequest(matJson["metallicProperty"], sceneDir, TextureType::Metallic, preloadRequests);
         if (matJson.contains("normalProperty"))
             collectTextureRequest(matJson["normalProperty"], sceneDir, TextureType::Normal, preloadRequests);
+        if (matJson.contains("heightProperty"))
+            collectTextureRequest(matJson["heightProperty"], sceneDir, TextureType::Unknown, preloadRequests);
         if (matJson.contains("opacityProperty"))
             collectTextureRequest(matJson["opacityProperty"], sceneDir, TextureType::Opacity, preloadRequests);
         if (matJson.contains("emissionProperty"))
@@ -575,6 +602,8 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
                 deserializeProperty(pbsdf->metallicProperty, matJson["metallicProperty"], sceneDir, TextureType::Metallic, &textureCache, &textureStats);
             if (matJson.contains("normalProperty"))
                 deserializeProperty(pbsdf->normalProperty, matJson["normalProperty"], sceneDir, TextureType::Normal, &textureCache, &textureStats);
+            if (matJson.contains("heightProperty"))
+                deserializeProperty(pbsdf->heightProperty, matJson["heightProperty"], sceneDir, TextureType::Unknown, &textureCache, &textureStats);
             if (matJson.contains("opacityProperty"))
                 deserializeProperty(pbsdf->opacityProperty, matJson["opacityProperty"], sceneDir, TextureType::Opacity, &textureCache, &textureStats);
             if (matJson.contains("emissionProperty"))
@@ -598,14 +627,37 @@ void MaterialManager::deserialize(const json& data, const std::string& sceneDir)
             pbsdf->subsurfaceScale = matJson.value("subsurfaceScale", 0.05f);
             pbsdf->subsurfaceAnisotropy = matJson.value("subsurfaceAnisotropy", 0.0f);
             pbsdf->subsurfaceIOR = matJson.value("subsurfaceIOR", 1.4f);
+            pbsdf->selected_uv_set = std::max(0, matJson.value("selectedUvSet", 0));
             
             // Translucent
             pbsdf->translucent = matJson.value("translucent", 0.0f);
             
-            // Tiling
+            // Legacy tiling fallback
             if (matJson.contains("tilingFactor") && matJson["tilingFactor"].is_array()) {
                 pbsdf->tilingFactor = Vec2(matJson["tilingFactor"][0], matJson["tilingFactor"][1]);
             }
+
+            if (matJson.contains("uvTransform") && matJson["uvTransform"].is_object()) {
+                const auto& uvTransformJson = matJson["uvTransform"];
+                pbsdf->textureTransform.scale =
+                    jsonToVec2(uvTransformJson.value("scale", json::array({1.0, 1.0})), Vec2(1.0, 1.0));
+                pbsdf->textureTransform.translation =
+                    jsonToVec2(uvTransformJson.value("offset", json::array({0.0, 0.0})), Vec2(0.0, 0.0));
+                pbsdf->textureTransform.rotation_degrees = uvTransformJson.value("rotationDegrees", 0.0f);
+                pbsdf->textureTransform.tilingFactor =
+                    jsonToVec2(uvTransformJson.value("tiling", json::array({1.0, 1.0})), Vec2(1.0, 1.0));
+                pbsdf->textureTransform.wrapMode =
+                    static_cast<WrapMode>(uvTransformJson.value("wrapMode", static_cast<int>(WrapMode::Repeat)));
+            } else {
+                pbsdf->textureTransform.scale = Vec2(1.0, 1.0);
+                pbsdf->textureTransform.translation = Vec2(0.0, 0.0);
+                pbsdf->textureTransform.rotation_degrees = 0.0f;
+                pbsdf->textureTransform.tilingFactor = pbsdf->tilingFactor;
+                pbsdf->textureTransform.wrapMode = WrapMode::Repeat;
+            }
+
+            // Keep legacy/base tiling field in sync with the new transform payload.
+            pbsdf->tilingFactor = pbsdf->textureTransform.tilingFactor;
             
             mat = pbsdf;
         }
@@ -691,7 +743,16 @@ void MaterialManager::syncAllGpuMaterials_internal() {
             // Translucent & Anisotropic
             mat->gpuMaterial->translucent = pbsdf->translucent;
             mat->gpuMaterial->anisotropic = pbsdf->anisotropic;
-            
+            mat->gpuMaterial->normal_strength = pbsdf->get_normal_strength();
+            mat->gpuMaterial->uv_scale_x = static_cast<float>(pbsdf->textureTransform.scale.u);
+            mat->gpuMaterial->uv_scale_y = static_cast<float>(pbsdf->textureTransform.scale.v);
+            mat->gpuMaterial->uv_offset_x = static_cast<float>(pbsdf->textureTransform.translation.u);
+            mat->gpuMaterial->uv_offset_y = static_cast<float>(pbsdf->textureTransform.translation.v);
+            mat->gpuMaterial->uv_rotation_degrees = pbsdf->textureTransform.rotation_degrees;
+            mat->gpuMaterial->uv_tiling_x = static_cast<float>(pbsdf->textureTransform.tilingFactor.u);
+            mat->gpuMaterial->uv_tiling_y = static_cast<float>(pbsdf->textureTransform.tilingFactor.v);
+            mat->gpuMaterial->uv_wrap_mode = static_cast<int>(pbsdf->textureTransform.wrapMode);
+
             synced_count++;
         }
     }

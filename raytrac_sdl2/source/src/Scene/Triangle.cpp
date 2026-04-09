@@ -10,6 +10,9 @@
 
 Triangle::Triangle()
     : materialID(MaterialManager::INVALID_MATERIAL_ID)
+    , t0(0.0f, 0.0f)
+    , t1(0.0f, 0.0f)
+    , t2(0.0f, 0.0f)
     , faceIndex(-1)
     , aabbDirty(true)
 {
@@ -21,6 +24,7 @@ Triangle::Triangle()
         vertices[i].originalNormal = Vec3(0.0f, 1.0f, 0.0f);
         vertices[i].color = Vec3(0.0f);
     }
+    uv_sets.push_back({t0, t1, t2});
 }
 
 Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
@@ -52,6 +56,7 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
     vertices[0].color = Vec3(0.0f);
     vertices[1].color = Vec3(0.0f);
     vertices[2].color = Vec3(0.0f);
+    uv_sets.push_back({ta, tb, tc});
 
     update_bounding_box();
 }
@@ -95,6 +100,7 @@ Triangle::Triangle(const Vec3& a, const Vec3& b, const Vec3& c,
     vertices[0].color = Vec3(0.0f);
     vertices[1].color = Vec3(0.0f);
     vertices[2].color = Vec3(0.0f);
+    uv_sets.push_back({ta, tb, tc});
 
     update_bounding_box();
 }
@@ -126,10 +132,42 @@ void Triangle::setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv
     t0 = uv0;
     t1 = uv1;
     t2 = uv2;
+    if (uv_sets.empty()) {
+        uv_sets.push_back({uv0, uv1, uv2});
+    } else {
+        uv_sets[0] = {uv0, uv1, uv2};
+    }
 }
 
 std::tuple<Vec2, Vec2, Vec2> Triangle::getUVCoordinates() const {
     return std::make_tuple(t0, t1, t2);
+}
+
+void Triangle::setUVSetCoordinates(size_t set_index, const Vec2& uv0, const Vec2& uv1, const Vec2& uv2) {
+    if (uv_sets.size() <= set_index) {
+        uv_sets.resize(set_index + 1, {Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f)});
+    }
+    uv_sets[set_index] = {uv0, uv1, uv2};
+}
+
+std::tuple<Vec2, Vec2, Vec2> Triangle::getUVSetCoordinates(size_t set_index) const {
+    if (set_index < uv_sets.size()) {
+        const auto& uv_set = uv_sets[set_index];
+        return std::make_tuple(uv_set[0], uv_set[1], uv_set[2]);
+    }
+    return std::make_tuple(t0, t1, t2);
+}
+
+void Triangle::applyUVSet(size_t set_index) {
+    if (uv_sets.empty()) {
+        uv_sets.push_back({t0, t1, t2});
+    }
+
+    const size_t resolved_index = (set_index < uv_sets.size()) ? set_index : 0;
+    const auto& uv_set = uv_sets[resolved_index];
+    t0 = uv_set[0];
+    t1 = uv_set[1];
+    t2 = uv_set[2];
 }
 
 // ============================================================================

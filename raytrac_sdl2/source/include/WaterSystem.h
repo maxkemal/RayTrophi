@@ -60,6 +60,8 @@ struct WaterWaveParams {
     bool use_fft_ocean = false;         // Enable FFT ocean simulation
     int fft_resolution = 256;           // FFT grid size (64, 128, 256, 512)
     float fft_ocean_size = 100.0f;      // World space coverage (meters)
+    bool auto_domain_from_mesh = true;  // Derive wave/FFT domain from water surface world size
+    float domain_size_multiplier = 1.0f;// Extra tiling/coverage multiplier for all wave models
     float fft_wind_speed = 10.0f;       // Wind speed (m/s) - affects wave size
     float fft_wind_direction = 0.0f;    // Wind direction (degrees)
     float fft_choppiness = 1.0f;        // Horizontal displacement strength
@@ -80,7 +82,7 @@ struct WaterWaveParams {
 
     bool use_geometric_waves = false;
     float geo_wave_height = 2.0f;       // Amplitude
-    float geo_wave_scale = 50.0f;       // Global Scale
+    float geo_wave_scale = 5.0f;        // Global Scale (world units; keep <= mesh size for visible waves)
     float geo_wave_choppiness = 1.0f;   // Ridge Offset / Sharpness
     float geo_wave_speed = 0.5f;        // Animation Speed (Phase Shift)
     
@@ -337,6 +339,24 @@ struct WaterSurface {
     float animation_time = 0.0f;
     bool animate_mesh = false;      // Enable mesh animation
     bool use_gpu_animation = true;  // Use GPU for geometric waves (faster)
+    int64_t vulkan_fft_height_texture = 0;
+    int64_t vulkan_fft_normal_texture = 0;
+};
+
+enum class WaterPreviewTimeMode {
+    Realtime,
+    Timeline,
+    Static
+};
+
+struct WaterUpdateResult {
+    bool time_changed = false;
+    bool material_changed = false;
+    bool mesh_changed = false;
+
+    bool requiresAccumulationReset() const {
+        return time_changed || material_changed || mesh_changed;
+    }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -346,6 +366,7 @@ struct WaterSurface {
 struct SceneData;
 class Renderer;
 class OptixWrapper;
+namespace Backend { class IBackend; }
 
 class WaterManager {
 public:
@@ -364,16 +385,17 @@ public:
     void updateWaterMesh(WaterSurface* surf);
     
     // Update mesh with animation - CPU path (called each frame for animated surfaces)
-    void updateAnimatedWaterMesh(WaterSurface* surf, float time);
+    bool updateAnimatedWaterMesh(WaterSurface* surf, float time);
     
     // Update mesh with animation - GPU path (much faster for large meshes)
-    void updateGPUAnimatedWaterMesh(WaterSurface* surf, float time);
+    bool updateGPUAnimatedWaterMesh(WaterSurface* surf, float time);
     
     // Update mesh using FFT ocean data - highest quality (GPU accelerated)
-    void updateFFTDrivenMesh(WaterSurface* surf, float time);
+    bool updateFFTDrivenMesh(WaterSurface* surf, float time);
     
     // Store original positions for animation (call after initial mesh creation)
     void cacheOriginalPositions(WaterSurface* surf);
+    void invalidateGeometricAnimationState(WaterSurface* surf);
     
     // Get all water surfaces
     std::vector<WaterSurface>& getWaterSurfaces() { return water_surfaces; }
@@ -381,9 +403,20 @@ public:
     // Get water surface by ID
     WaterSurface* getWaterSurface(int id);
     
-    // Updates all water surfaces (FFT simulation + animated meshes)
-    // Returns true if material parameters (like texture handles) changed and require GPU sync
-    bool update(float dt);
+    // Updates all water surfaces for an absolute water time (seconds).
+    WaterUpdateResult update(float waterTime);
+
+    // Synchronize the water surface params into its bound PrincipledBSDF/GpuMaterial.
+    void syncSurfaceMaterial(WaterSurface* surf);
+    bool syncVulkanFFTTexturesForMaterial(uint16_t material_id, Backend::IBackend* backend, int64_t& outHeightTexture, int64_t& outNormalTexture);
+    float getSurfaceWorldExtent(const WaterSurface* surf) const;
+    float resolveWaveDomainSize(const WaterSurface* surf) const;
+    float getLegacyDomainReferenceSize() const;
+    float resolveSharedAnimationSpeed(const WaterSurface* surf) const;
+
+    void setPreviewTimeMode(WaterPreviewTimeMode mode);
+    WaterPreviewTimeMode getPreviewTimeMode() const { return preview_time_mode; }
+    float resolvePreviewWaterTime(float realtimeSeconds, int timelineFrame, float fps);
     
     // Returns the height map texture of the first active FFT water surface (or 0)
     cudaTextureObject_t getFirstFFTHeightMap();
@@ -412,5 +445,11 @@ private:
     
     std::vector<WaterSurface> water_surfaces;
     int next_id = 1;
+    WaterPreviewTimeMode preview_time_mode = WaterPreviewTimeMode::Static;
+    float last_resolved_preview_time = 0.0f;
+    float static_preview_time = 0.0f;
+    float last_simulation_time = 0.0f;
+    bool has_last_resolved_preview_time = false;
+    bool has_last_simulation_time = false;
 };
 

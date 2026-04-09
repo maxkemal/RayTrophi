@@ -32,6 +32,19 @@ for %%f in (%SHADER_DIR%\*.comp) do (
     echo   OK: %%~nf.spv
 )
 
+REM Compile raster shaders (.vert, .frag)
+for %%e in (vert frag) do (
+    for %%f in (%SHADER_DIR%\*.%%e) do (
+        echo Compiling: %%~nxf
+        "%GLSLC%" "%%f" -o "%OUTPUT_DIR%\%%~nf.spv" --target-env=vulkan1.3
+        if errorlevel 1 (
+            echo FAILED: %%~nxf
+            goto :error
+        )
+        echo   OK: %%~nf.spv
+    )
+)
+
 REM Compile ray tracing shaders (.rgen, .rmiss, .rchit, .rahit, .rint)
 for %%e in (rgen rmiss rchit rahit rint) do (
     for %%f in (%SHADER_DIR%\*.%%e) do (
@@ -52,6 +65,18 @@ for %%e in (rgen rmiss rchit rahit rint) do (
 
 echo.
 echo ===== All shaders compiled successfully =====
+
+REM Also compile any extra top-level shaders (e.g. shaders\sculpt.comp)
+REM Also compile any extra top-level shaders (e.g. raytrac_sdl2\shaders\sculpt.comp)
+if exist "%~dp0shaders\sculpt.comp" (
+    echo Compiling extra shader: sculpt.comp
+    "%GLSLC%" "%~dp0shaders\sculpt.comp" -o "%OUTPUT_DIR%\sculpt.spv" --target-env=vulkan1.3
+    if errorlevel 1 (
+        echo FAILED: sculpt.comp
+        goto :error
+    )
+    echo   OK: sculpt.spv
+)
 
 REM Remove stale shader artifacts that are no longer loaded by the Vulkan backend
 if exist "%OUTPUT_DIR%\gradient_test.spv" del /Q "%OUTPUT_DIR%\gradient_test.spv"

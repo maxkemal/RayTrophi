@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <optional>
 #include <array>
+#include <vector>
 #include "Hittable.h"
 #include "Vec2.h"
 #include "Matrix4x4.h"
@@ -153,6 +154,10 @@ public:
     
     void setUVCoordinates(const Vec2& uv0, const Vec2& uv1, const Vec2& uv2);
     std::tuple<Vec2, Vec2, Vec2> getUVCoordinates() const;
+    void setUVSetCoordinates(size_t set_index, const Vec2& uv0, const Vec2& uv1, const Vec2& uv2);
+    std::tuple<Vec2, Vec2, Vec2> getUVSetCoordinates(size_t set_index) const;
+    size_t getUVSetCount() const { return uv_sets.size(); }
+    void applyUVSet(size_t set_index);
 
     // ========================================================================
     // Skinning (Optional - only allocated for rigged triangles)
@@ -252,6 +257,7 @@ private:
     
    
     uint16_t materialID = 0xFFFF;                       // Material lookup ID (2 bytes)
+    std::vector<std::array<Vec2, 3>> uv_sets;
   
     std::shared_ptr<Transform> transformHandle; // Shared transform (8 bytes)
     std::optional<SkinnedTriangleData> skinData; // Optional skinning data (1 byte when empty)
