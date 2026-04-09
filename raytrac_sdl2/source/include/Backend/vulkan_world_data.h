@@ -47,7 +47,7 @@ struct VkWorldDataExtended {
     float humidity;         // 0.0 (Dry) to 1.0 (Humid)
     float temperature;      // Celsius (-50 to +50)
     float ozoneAbsorptionScale; // Blue hour intensity (0.0-10.0)
-    float _pad0;            // Padding for alignment
+    float atmosphereIntensity; // Atmospheric scattering brightness (independent of sun)
     
     // ═══════════════════════════════════════════════════════════════════════════════
     // ATMOSPHERE DENSITY PARAMETERS (32 bytes) - Cache Line 2-3

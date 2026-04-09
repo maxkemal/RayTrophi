@@ -1,5 +1,7 @@
 ﻿#include "scene_ui.h"
 #include "ui_modern.h"
+#include "HittableInstance.h"
+
 #include "MeshModifiers.h"
 #include "ProjectManager.h"
 #include "globals.h"
@@ -7,139 +9,4513 @@
 #include "Renderer.h"
 #include "scene_data.h"
 #include <SceneSelection.h>
+#include "Paint/TerrainPaintAdapter.h"
+#include "Paint/MeshPaintAdapter.h"
+#include "TerrainManager.h"
+#include "PrincipledBSDF.h"
+#include "Volumetric.h"
+#include "MaterialManager.h"
+#include "Texture.h"
+#include "stb_image_write.h"
+#include "SceneCommand.h"
+#include <algorithm>
+#include <vector>
+#include <unordered_map>
+#include <cfloat>
+#include <cstdio>
+#include <cmath>
+#include <filesystem>
+#include <SDL.h>
+
+namespace {
+
+TerrainObject* resolvePaintTerrain(SceneUI& ui) {
+    if (ui.terrain_brush.active_terrain_id == -1) {
+        return nullptr;
+    }
+    return TerrainManager::getInstance().getTerrain(ui.terrain_brush.active_terrain_id);
+}
+
+std::shared_ptr<Triangle> resolvePaintMesh(UIContext& ctx) {
+    if (ctx.selection.selected.type != SelectableType::Object || !ctx.selection.selected.object) {
+        return nullptr;
+    }
+
+    auto tri = std::dynamic_pointer_cast<Triangle>(ctx.selection.selected.object);
+    if (!tri || tri->terrain_id != -1) {
+        return nullptr;
+    }
+
+    return tri;
+}
+
+std::shared_ptr<Triangle> findMeshTriangleForMaterial(
+    const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& mesh_entries,
+    uint16_t material_id) {
+    for (const auto& pair : mesh_entries) {
+        if (pair.second && pair.second->getMaterialID() == material_id) {
+            return pair.second;
+        }
+    }
+    return nullptr;
+}
+
+int countTrianglesUsingMaterial(
+    const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& mesh_entries,
+    uint16_t material_id) {
+    int count = 0;
+    for (const auto& pair : mesh_entries) {
+        if (pair.second && pair.second->getMaterialID() == material_id) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+static std::string getHittableNodeName(const std::shared_ptr<Hittable>& obj) {
+    if (!obj) return "";
+    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) return tri->getNodeName();
+    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) return inst->node_name;
+    return "";
+}
+
+std::vector<std::shared_ptr<Triangle>> collectTrianglesForNode(
+    const std::vector<std::shared_ptr<Hittable>>& objects,
+    const std::string& nodeName) {
+    std::vector<std::shared_ptr<Triangle>> triangles;
+    for (const auto& obj : objects) {
+        if (getHittableNodeName(obj) != nodeName) {
+            continue;
+        }
+
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            triangles.push_back(tri);
+        } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (inst->source_triangles) {
+                triangles.insert(triangles.end(), inst->source_triangles->begin(), inst->source_triangles->end());
+            }
+        }
+    }
+    return triangles;
+}
+
+} // End of anonymous namespace
+
+void projectObjectUVsFromView(UIContext& ctx, SceneUI& ui, const std::string& nodeName) {
+    auto it = ctx.scene.base_mesh_cache.find(nodeName);
+    if (it == ctx.scene.base_mesh_cache.end()) {
+        std::vector<std::shared_ptr<Triangle>> baseTriangles;
+        for (const auto& obj : ctx.scene.world.objects) {
+            if (getHittableNodeName(obj) == nodeName) {
+                if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+                    baseTriangles.push_back(tri);
+                } else if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+                    if (inst->source_triangles) {
+                        for (auto& t : *inst->source_triangles) baseTriangles.push_back(t);
+                    }
+                    break;
+                }
+            }
+        }
+        if (baseTriangles.empty()) return;
+        ctx.scene.base_mesh_cache[nodeName] = baseTriangles;
+        it = ctx.scene.base_mesh_cache.find(nodeName);
+    }
+
+    std::shared_ptr<Camera> camera = ctx.scene.getActiveCamera();
+    if (!camera) return;
+
+    Vec3 cam_forward = (camera->lookat - camera->lookfrom).normalize();
+    Vec3 cam_right = Vec3::cross(cam_forward, camera->vup).normalize();
+    Vec3 cam_up = Vec3::cross(cam_right, cam_forward).normalize();
+
+    // 1. Project all vertices to camera plane (Perspective projection)
+    struct ProjData { float px, py; bool in_front; };
+    std::vector<std::vector<ProjData>> tri_projs;
+    tri_projs.reserve(it->second.size());
+
+    float min_x = FLT_MAX, max_x = -FLT_MAX;
+    float min_y = FLT_MAX, max_y = -FLT_MAX;
+    bool any_visible = false;
+
+    for (auto& tri : it->second) {
+        Matrix4x4 world_mat = tri->getTransformMatrix();
+        std::vector<ProjData> pts;
+        for (int i = 0; i < 3; ++i) {
+            Vec3 world_v = world_mat * tri->getVertexPosition(i);
+            Vec3 to_v = world_v - camera->lookfrom;
+            float dist = Vec3::dot(to_v, cam_forward);
+            
+            bool in_front = (dist > 0.05f); // Safe near plane
+            float p_dist = std::max(0.05f, dist);
+            
+            float px = Vec3::dot(to_v, cam_right) / p_dist;
+            float py = Vec3::dot(to_v, cam_up) / p_dist;
+            pts.push_back({px, py, in_front});
+            
+            if (in_front) {
+                min_x = std::min(min_x, px);
+                max_x = std::max(max_x, px);
+                min_y = std::min(min_y, py);
+                max_y = std::max(max_y, py);
+                any_visible = true;
+            }
+        }
+        tri_projs.push_back(pts);
+    }
+
+    if (!any_visible) { // Fallback if nothing in front
+        min_x = -1.0f; max_x = 1.0f; min_y = -1.0f; max_y = 1.0f;
+    }
+
+    float span_x = std::max(1e-5f, max_x - min_x);
+    float span_y = std::max(1e-5f, max_y - min_y);
+
+    std::vector<TriangleUVSetState> before_states;
+    std::vector<TriangleUVSetState> after_states;
+    before_states.reserve(it->second.size());
+    after_states.reserve(it->second.size());
+
+    // 2. Map projection to UV [0, 1] range
+    for (size_t t_idx = 0; t_idx < it->second.size(); ++t_idx) {
+        auto& tri = it->second[t_idx];
+        auto& projs = tri_projs[t_idx];
+        std::array<Vec2, 3> projected_uvs;
+        for (int i = 0; i < 3; ++i) {
+            projected_uvs[i].u = (projs[i].px - min_x) / span_x;
+            projected_uvs[i].v = (projs[i].py - min_y) / span_y;
+        }
+        int target_uv_set = 0;
+        Material* material = MaterialManager::getInstance().getMaterial(tri->getMaterialID());
+        if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(material)) {
+            target_uv_set = std::max(0, pbsdf->selected_uv_set);
+        }
+        const size_t uv_set_index = static_cast<size_t>(target_uv_set);
+        auto [old_uv0, old_uv1, old_uv2] = tri->getUVSetCoordinates(uv_set_index);
+        before_states.push_back(TriangleUVSetState{ tri, uv_set_index, { old_uv0, old_uv1, old_uv2 } });
+        after_states.push_back(TriangleUVSetState{ tri, uv_set_index, projected_uvs });
+    }
+
+    auto command = std::make_unique<UVProjectionCommand>(nodeName, std::move(before_states), std::move(after_states));
+    command->execute(ctx);
+    ui.history.record(std::move(command));
+
+    ui.rebuildMeshCache(ctx.scene.world.objects);
+
+    if (ui.paint_mode_state.enabled) {
+        auto mesh_adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(ui.paint_mode_state.getAdapter());
+        auto selected_tri = std::dynamic_pointer_cast<Triangle>(ctx.selection.selected.object);
+        if (mesh_adapter && selected_tri && mesh_adapter->getNodeName() == nodeName) {
+            ui.paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, selected_tri));
+        }
+    }
+
+    g_ProjectManager.markModified();
+    SCENE_LOG_INFO("Projected UVs for object '" + nodeName + "' from current view.");
+}
+
+UIWidgets::IconType getPaintToolIcon(Paint::BrushTool tool) {
+    switch (tool) {
+        case Paint::BrushTool::Paint:  return UIWidgets::IconType::PaintTool;
+        case Paint::BrushTool::Erase:  return UIWidgets::IconType::EraseTool;
+        case Paint::BrushTool::Soften: return UIWidgets::IconType::SoftenTool;
+        case Paint::BrushTool::Stamp:  return UIWidgets::IconType::StampTool;
+        case Paint::BrushTool::Fill:   return UIWidgets::IconType::FillTool;
+        case Paint::BrushTool::Clone:  return UIWidgets::IconType::CloneTool;
+        case Paint::BrushTool::Spray:  return UIWidgets::IconType::SprayTool;
+    }
+    return UIWidgets::IconType::PaintTool;
+}
+
+UIWidgets::IconType getSculptToolIcon(SceneUI::SculptBrushTool tool) {
+    switch (tool) {
+        case SceneUI::SculptBrushTool::Grab:       return UIWidgets::IconType::GrabTool;
+        case SceneUI::SculptBrushTool::Inflate:    return UIWidgets::IconType::InflateTool;
+        case SceneUI::SculptBrushTool::Smooth:     return UIWidgets::IconType::SmoothTool;
+        case SceneUI::SculptBrushTool::Flatten:    return UIWidgets::IconType::FlattenTool;
+        case SceneUI::SculptBrushTool::Draw:       return UIWidgets::IconType::DrawTool;
+        case SceneUI::SculptBrushTool::Layer:      return UIWidgets::IconType::LayerTool;
+        case SceneUI::SculptBrushTool::Pinch:      return UIWidgets::IconType::PinchTool;
+        case SceneUI::SculptBrushTool::Clay:       return UIWidgets::IconType::ClayTool;
+        case SceneUI::SculptBrushTool::ClayStrips: return UIWidgets::IconType::ClayStripsTool;
+        case SceneUI::SculptBrushTool::Crease:     return UIWidgets::IconType::CreaseTool;
+        case SceneUI::SculptBrushTool::Scrape:     return UIWidgets::IconType::ScrapeTool;
+    }
+    return UIWidgets::IconType::Sculpt;
+}
+
+UIWidgets::IconType getMeshSelectModeIcon(MeshElementSelectMode mode) {
+    switch (mode) {
+        case MeshElementSelectMode::Vertex: return UIWidgets::IconType::VertexMode;
+        case MeshElementSelectMode::Edge:   return UIWidgets::IconType::EdgeMode;
+        case MeshElementSelectMode::Face:   return UIWidgets::IconType::FaceMode;
+    }
+    return UIWidgets::IconType::Mesh;
+}
+
+UIWidgets::IconType getMeshActionIcon(const char* action) {
+    if (!action) return UIWidgets::IconType::Mesh;
+    const std::string name(action);
+    if (name == "Add Face") return UIWidgets::IconType::AddFace;
+    if (name == "Merge") return UIWidgets::IconType::MergeVertices;
+    if (name == "Merge To Center") return UIWidgets::IconType::MergeVertices;
+    if (name == "Weld by Distance") return UIWidgets::IconType::WeldVertices;
+    if (name == "Dissolve Vertex") return UIWidgets::IconType::DissolveTopology;
+    if (name == "Loop Cut") return UIWidgets::IconType::LoopCutTool;
+    if (name == "Dissolve Edge") return UIWidgets::IconType::DissolveTopology;
+    if (name == "Extrude Face") return UIWidgets::IconType::ExtrudeFaceTool;
+    if (name == "Delete Face") return UIWidgets::IconType::DeleteFaceTool;
+    if (name == "Shade Flat") return UIWidgets::IconType::ShadeFlatTool;
+    if (name == "Shade Smooth") return UIWidgets::IconType::ShadeSmoothTool;
+    return UIWidgets::IconType::Mesh;
+}
+
+bool drawMeshIconButton(const char* id,
+                        const char* label,
+                        const char* tooltip,
+                        UIWidgets::IconType icon,
+                        const ImVec4& accent,
+                        bool active = false,
+                        const ImVec2& size = ImVec2(0, 0),
+                        bool enabled = true,
+                        bool showLabel = false) {
+    return UIWidgets::IconActionButton(id, icon, showLabel ? label : "", active, accent, size, tooltip, enabled);
+}
+
+bool drawPaintToolSelectorButton(const char* id,
+                                 const char* tooltip,
+                                 Paint::BrushTool tool,
+                                 Paint::BrushTool& current_tool,
+                                 float width = 56.0f,
+                                 float height = 54.0f) {
+    if (UIWidgets::IconActionButton(
+            id,
+            getPaintToolIcon(tool),
+            "",
+            current_tool == tool,
+            ImVec4(0.28f, 0.90f, 0.82f, 1.0f),
+            ImVec2(width, height),
+            tooltip)) {
+        current_tool = tool;
+        return true;
+    }
+    return false;
+}
+
+bool drawSculptToolSelectorButton(const char* id,
+                                  const char* tooltip,
+                                  SceneUI::SculptBrushTool tool,
+                                  SceneUI::SculptBrushTool& current_tool,
+                                  float width = 56.0f,
+                                  float height = 54.0f) {
+    if (UIWidgets::IconActionButton(
+            id,
+            getSculptToolIcon(tool),
+            "",
+            current_tool == tool,
+            ImVec4(1.00f, 0.58f, 0.34f, 1.0f),
+            ImVec2(width, height),
+            tooltip)) {
+        current_tool = tool;
+        return true;
+    }
+    return false;
+}
+
+bool brushSupportsRaisedPaint(Paint::BrushTool tool) {
+    switch (tool) {
+        case Paint::BrushTool::Paint:
+        case Paint::BrushTool::Erase:
+        case Paint::BrushTool::Stamp:
+        case Paint::BrushTool::Fill:
+        case Paint::BrushTool::Spray:
+            return true;
+        case Paint::BrushTool::Soften:
+        case Paint::BrushTool::Clone:
+            return false;
+    }
+    return false;
+}
+
+bool beginBrushDockSection(const char* label, bool default_open = true) {
+    ImVec4 accent(0.40f, 0.78f, 1.0f, 1.0f);
+    const std::string section_label = label ? label : "";
+    if (section_label.find("Tool") != std::string::npos) accent = ImVec4(0.30f, 0.88f, 0.82f, 1.0f);
+    else if (section_label.find("Stroke") != std::string::npos) accent = ImVec4(0.62f, 0.82f, 1.0f, 1.0f);
+    else if (section_label.find("Color") != std::string::npos) accent = ImVec4(1.0f, 0.58f, 0.66f, 1.0f);
+    else if (section_label.find("Behavior") != std::string::npos) accent = ImVec4(0.96f, 0.76f, 0.36f, 1.0f);
+    else if (section_label.find("Alpha") != std::string::npos) accent = ImVec4(0.86f, 0.68f, 1.0f, 1.0f);
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 7.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 10.0f);
+    ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(accent.x * 0.22f, accent.y * 0.22f, accent.z * 0.22f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(accent.x * 0.30f, accent.y * 0.30f, accent.z * 0.30f, 0.98f));
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(accent.x * 0.34f, accent.y * 0.34f, accent.z * 0.34f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.24f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.95f, 0.98f, 1.0f));
+    const bool open = ImGui::CollapsingHeader(
+        label,
+        (default_open ? ImGuiTreeNodeFlags_DefaultOpen : 0) |
+        ImGuiTreeNodeFlags_SpanAvailWidth);
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar(2);
+    return open;
+}
+
+std::shared_ptr<Material> clonePaintableMaterial(const std::shared_ptr<Material>& src, const std::string& new_name) {
+    if (!src) {
+        return nullptr;
+    }
+
+    if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(src.get())) {
+        auto clone = std::make_shared<PrincipledBSDF>(*pbsdf);
+        clone->materialName = new_name;
+        return clone;
+    }
+
+    if (auto* vol = dynamic_cast<Volumetric*>(src.get())) {
+        auto clone = std::make_shared<Volumetric>(*vol);
+        clone->materialName = new_name;
+        return clone;
+    }
+
+    return nullptr;
+}
+
+uint16_t makeObjectSlotPaintMaterialUnique(UIContext& ctx,
+                                           const std::string& obj_name,
+                                           int slot_index,
+                                           uint16_t source_material_id,
+                                           std::vector<std::pair<int, std::shared_ptr<Triangle>>>& mesh_entries,
+                                           std::vector<uint16_t>& slot_ids) {
+    auto& mgr = MaterialManager::getInstance();
+    const std::string paint_name = obj_name + "_PaintSlot_" + std::to_string(slot_index);
+
+    if (mgr.hasMaterial(paint_name)) {
+        const uint16_t existing_id = mgr.getMaterialID(paint_name);
+        if (slot_index >= 0 &&
+            slot_index < static_cast<int>(slot_ids.size()) &&
+            slot_ids[slot_index] != existing_id) {
+            for (auto& pair : mesh_entries) {
+                if (pair.second && pair.second->getMaterialID() == source_material_id) {
+                    pair.second->setMaterialID(existing_id);
+                }
+            }
+            slot_ids[slot_index] = existing_id;
+            ctx.renderer.updateMeshMaterialBinding(obj_name, source_material_id, existing_id);
+        }
+        return existing_id;
+    }
+
+    std::shared_ptr<Material> source_material = mgr.getMaterialShared(source_material_id);
+    std::shared_ptr<Material> clone = clonePaintableMaterial(source_material, paint_name);
+    if (!clone) {
+        return source_material_id;
+    }
+
+    const uint16_t new_id = mgr.addMaterial(paint_name, clone);
+    for (auto& pair : mesh_entries) {
+        if (pair.second && pair.second->getMaterialID() == source_material_id) {
+            pair.second->setMaterialID(new_id);
+        }
+    }
+
+    if (slot_index >= 0 && slot_index < static_cast<int>(slot_ids.size())) {
+        slot_ids[slot_index] = new_id;
+    }
+
+    ctx.renderer.updateMeshMaterialBinding(obj_name, source_material_id, new_id);
+    return new_id;
+}
+
+void syncPaintBrushToTerrain(SceneUI& ui, TerrainObject* terrain) {
+    if (!terrain || !ui.paint_mode_state.enabled) {
+        return;
+    }
+
+    ui.terrain_brush.enabled = true;
+    ui.terrain_brush.active_terrain_id = terrain->id;
+    ui.terrain_brush.mode = 5;
+    ui.terrain_brush.paint_channel = ui.paint_mode_state.active_layer_index;
+    ui.terrain_brush.radius = ui.paint_mode_state.brush.radius;
+    ui.terrain_brush.strength = ui.paint_mode_state.brush.strength;
+    ui.terrain_brush.curve = 0.25f + (ui.paint_mode_state.brush.falloff * 3.75f);
+    ui.terrain_brush.show_preview = ui.paint_mode_state.brush.show_preview;
+}
+
+bool isMeshPaintTargetHit(const HitRecord& rec, const Paint::MeshPaintAdapter& adapter) {
+    if (!rec.triangle) {
+        return false;
+    }
+
+    return rec.triangle->getNodeName() == adapter.getNodeName() &&
+           rec.triangle->getMaterialID() == adapter.getMaterialID();
+}
+
+Vec3 closestPointOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const Vec3& c, float& out_u, float& out_v, float& out_w) {
+    const Vec3 ab = b - a;
+    const Vec3 ac = c - a;
+    const Vec3 ap = p - a;
+    const float d1 = ab.dot(ap);
+    const float d2 = ac.dot(ap);
+    if (d1 <= 0.0f && d2 <= 0.0f) {
+        out_u = 1.0f; out_v = 0.0f; out_w = 0.0f;
+        return a;
+    }
+
+    const Vec3 bp = p - b;
+    const float d3 = ab.dot(bp);
+    const float d4 = ac.dot(bp);
+    if (d3 >= 0.0f && d4 <= d3) {
+        out_u = 0.0f; out_v = 1.0f; out_w = 0.0f;
+        return b;
+    }
+
+    const float vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f) {
+        const float v = d1 / (d1 - d3);
+        out_u = 1.0f - v; out_v = v; out_w = 0.0f;
+        return a + ab * v;
+    }
+
+    const Vec3 cp = p - c;
+    const float d5 = ab.dot(cp);
+    const float d6 = ac.dot(cp);
+    if (d6 >= 0.0f && d5 <= d6) {
+        out_u = 0.0f; out_v = 0.0f; out_w = 1.0f;
+        return c;
+    }
+
+    const float vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f) {
+        const float w = d2 / (d2 - d6);
+        out_u = 1.0f - w; out_v = 0.0f; out_w = w;
+        return a + ac * w;
+    }
+
+    const float va = d3 * d6 - d5 * d4;
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) {
+        const float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        out_u = 0.0f; out_v = 1.0f - w; out_w = w;
+        return b + (c - b) * w;
+    }
+
+    const float denom = 1.0f / (va + vb + vc);
+    const float v = vb * denom;
+    const float w = vc * denom;
+    out_u = 1.0f - v - w;
+    out_v = v;
+    out_w = w;
+    return a + ab * v + ac * w;
+}
+
+Vec2 interpolateTriangleUV(const Triangle& tri, float bu, float bv, float bw) {
+    const auto [uv0, uv1, uv2] = tri.getUVCoordinates();
+    return Vec2(
+        uv0.u * bu + uv1.u * bv + uv2.u * bw,
+        uv0.v * bu + uv1.v * bv + uv2.v * bw
+    );
+}
+
+bool resolveMirroredMeshPaintHit(UIContext& ctx,
+                                 const Paint::MeshPaintAdapter& adapter,
+                                 const HitRecord& source_hit,
+                                 bool mx,
+                                 bool my,
+                                 bool mz,
+                                 HitRecord& out_hit) {
+    auto source_tri = adapter.getTriangle();
+    if (!source_tri) {
+        return false;
+    }
+
+    const Matrix4x4 local_to_world = source_tri->getTransformMatrix();
+    const Matrix4x4 world_to_local = local_to_world.inverse();
+    Vec3 local_pos = world_to_local.transform_point(source_hit.point);
+    Vec3 local_normal = world_to_local.transform_vector(source_hit.normal).normalize();
+    if (mx) { local_pos.x *= -1.0f; local_normal.x *= -1.0f; }
+    if (my) { local_pos.y *= -1.0f; local_normal.y *= -1.0f; }
+    if (mz) { local_pos.z *= -1.0f; local_normal.z *= -1.0f; }
+
+    const Vec3 target_world = local_to_world.transform_point(local_pos);
+    const std::string node_name = adapter.getNodeName();
+    const uint16_t material_id = adapter.getMaterialID();
+
+    float best_dist2 = FLT_MAX;
+    std::shared_ptr<Triangle> best_tri;
+    Vec3 best_point;
+    Vec3 best_normal;
+    Vec2 best_uv;
+
+    for (const auto& obj : ctx.scene.world.objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (!tri || tri->terrain_id != -1) {
+            continue;
+        }
+        if (tri->getNodeName() != node_name || tri->getMaterialID() != material_id) {
+            continue;
+        }
+
+        float bu = 0.0f, bv = 0.0f, bw = 0.0f;
+        const Vec3 a = tri->getV0();
+        const Vec3 b = tri->getV1();
+        const Vec3 c = tri->getV2();
+        const Vec3 closest = closestPointOnTriangle(target_world, a, b, c, bu, bv, bw);
+        const float dist2 = (closest - target_world).length_squared();
+        if (dist2 < best_dist2) {
+            best_dist2 = dist2;
+            best_tri = tri;
+            best_point = closest;
+            best_normal = (tri->getN0() * bu + tri->getN1() * bv + tri->getN2() * bw).normalize();
+            best_uv = interpolateTriangleUV(*tri, bu, bv, bw);
+        }
+    }
+
+    if (!best_tri || best_dist2 > 0.25f) {
+        return false;
+    }
+
+    out_hit = source_hit;
+    out_hit.triangle = best_tri.get();
+    out_hit.point = best_point;
+    out_hit.normal = best_normal;
+    out_hit.uv = best_uv;
+    return true;
+}
+
+bool hasMeshPaintTargetLocked(SceneUI& ui) {
+    if (!ui.paint_mode_state.enabled || !ui.paint_mode_state.hasValidTarget()) {
+        return false;
+    }
+
+    auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(ui.paint_mode_state.getAdapter());
+    if (!adapter || !adapter->isValid()) {
+        return false;
+    }
+
+    Paint::PaintTextureSet* set = adapter->getTextureSet();
+    return set && set->initialized;
+}
+
+Vec3 lerpColor(const Vec3& a, const Vec3& b, float t) {
+    const float clamped = std::clamp(t, 0.0f, 1.0f);
+    return Vec3(
+        a.x + (b.x - a.x) * clamped,
+        a.y + (b.y - a.y) * clamped,
+        a.z + (b.z - a.z) * clamped
+    );
+}
+
+Vec3 applyPreviewTint(const Vec3& sampled, const Vec3& tint, float tint_strength, Paint::PaintTextureTintMode tint_mode) {
+    const float strength = std::clamp(tint_strength, 0.0f, 1.0f);
+    Vec3 tinted = sampled;
+    switch (tint_mode) {
+        case Paint::PaintTextureTintMode::Multiply:
+            tinted = Vec3(
+                std::clamp(sampled.x * tint.x, 0.0f, 1.0f),
+                std::clamp(sampled.y * tint.y, 0.0f, 1.0f),
+                std::clamp(sampled.z * tint.z, 0.0f, 1.0f));
+            break;
+        case Paint::PaintTextureTintMode::Recolor: {
+            const float luminance = std::clamp(sampled.x * 0.299f + sampled.y * 0.587f + sampled.z * 0.114f, 0.0f, 1.0f);
+            tinted = Vec3(
+                std::clamp(tint.x * luminance, 0.0f, 1.0f),
+                std::clamp(tint.y * luminance, 0.0f, 1.0f),
+                std::clamp(tint.z * luminance, 0.0f, 1.0f));
+            break;
+        }
+        case Paint::PaintTextureTintMode::Overlay: {
+            const auto overlay = [](float base, float blend) -> float {
+                return base < 0.5f
+                    ? (2.0f * base * blend)
+                    : (1.0f - 2.0f * (1.0f - base) * (1.0f - blend));
+            };
+            tinted = Vec3(
+                std::clamp(overlay(sampled.x, tint.x), 0.0f, 1.0f),
+                std::clamp(overlay(sampled.y, tint.y), 0.0f, 1.0f),
+                std::clamp(overlay(sampled.z, tint.z), 0.0f, 1.0f));
+            break;
+        }
+    }
+    return Vec3(
+        sampled.x + (tinted.x - sampled.x) * strength,
+        sampled.y + (tinted.y - sampled.y) * strength,
+        sampled.z + (tinted.z - sampled.z) * strength);
+}
+
+float uiHash01(float x, float y) {
+    const float value = std::sin(x * 91.173f + y * 37.719f) * 43758.5453f;
+    return value - std::floor(value);
+}
+
+float uiBrushHashNoise(float x, float y) {
+    const float value = std::sin(x * 12.9898f + y * 78.233f) * 43758.5453f;
+    return value - std::floor(value);
+}
+
+float uiSmoothNoise(float x, float y) {
+    const float ix = std::floor(x);
+    const float iy = std::floor(y);
+    const float tx = x - ix;
+    const float ty = y - iy;
+
+    const float n00 = uiBrushHashNoise(ix, iy);
+    const float n10 = uiBrushHashNoise(ix + 1.0f, iy);
+    const float n01 = uiBrushHashNoise(ix, iy + 1.0f);
+    const float n11 = uiBrushHashNoise(ix + 1.0f, iy + 1.0f);
+
+    const float sx = tx * tx * (3.0f - 2.0f * tx);
+    const float sy = ty * ty * (3.0f - 2.0f * ty);
+    const float nx0 = n00 + (n10 - n00) * sx;
+    const float nx1 = n01 + (n11 - n01) * sx;
+    return nx0 + (nx1 - nx0) * sy;
+}
+
+void uiRotateBrushCoords(float& x, float& y, float degrees) {
+    if (std::abs(degrees) <= 0.001f) {
+        return;
+    }
+
+    const float radians = degrees * 3.14159265f / 180.0f;
+    const float cs = std::cos(radians);
+    const float sn = std::sin(radians);
+    const float rx = x * cs - y * sn;
+    const float ry = x * sn + y * cs;
+    x = rx;
+    y = ry;
+}
+
+float uiSampleBrushAlpha(Paint::BrushAlphaPreset preset, float nx, float ny, float scale, float rotation_degrees) {
+    float sx = nx * std::max(0.01f, scale);
+    float sy = ny * std::max(0.01f, scale);
+    uiRotateBrushCoords(sx, sy, rotation_degrees);
+    const float radial = std::clamp(1.0f - std::sqrt(nx * nx + ny * ny), 0.0f, 1.0f);
+
+    switch (preset) {
+        case Paint::BrushAlphaPreset::SoftRound:
+            return radial;
+        case Paint::BrushAlphaPreset::HardRound:
+            return radial > 0.2f ? 1.0f : 0.0f;
+        case Paint::BrushAlphaPreset::Noise: {
+            const float noise = uiBrushHashNoise((sx + 1.0f) * 17.0f, (sy + 1.0f) * 19.0f);
+            return radial * (0.45f + noise * 0.55f);
+        }
+        case Paint::BrushAlphaPreset::Scratch: {
+            const float streaks = std::abs(std::sin((sx * 18.0f) + (sy * 2.5f)));
+            const float breakup = uiBrushHashNoise((sx + 2.0f) * 11.0f, (sy + 2.0f) * 23.0f);
+            const float scratch = std::pow(1.0f - streaks, 3.0f) * (0.35f + breakup * 0.65f);
+            return radial * std::clamp(scratch * 2.2f, 0.0f, 1.0f);
+        }
+        case Paint::BrushAlphaPreset::Cloud: {
+            const float n1 = uiSmoothNoise((sx + 3.0f) * 3.0f, (sy + 5.0f) * 3.0f);
+            const float n2 = uiSmoothNoise((sx + 11.0f) * 6.0f, (sy + 7.0f) * 6.0f) * 0.5f;
+            const float n3 = uiSmoothNoise((sx + 19.0f) * 12.0f, (sy + 13.0f) * 12.0f) * 0.25f;
+            const float cloud = std::clamp((n1 + n2 + n3) / 1.75f, 0.0f, 1.0f);
+            return radial * (0.25f + cloud * 0.75f);
+        }
+    }
+
+    return radial;
+}
+
+float uiSampleImportedBrushAlpha(const std::shared_ptr<Texture>& texture, float nx, float ny, float scale, float rotation_degrees) {
+    if (!texture || !texture->is_loaded()) {
+        return 1.0f;
+    }
+
+    float scaled_x = nx * std::max(0.01f, scale);
+    float scaled_y = ny * std::max(0.01f, scale);
+    uiRotateBrushCoords(scaled_x, scaled_y, rotation_degrees);
+    const float u = std::clamp(scaled_x * 0.5f + 0.5f, 0.0f, 1.0f);
+    const float v = std::clamp(scaled_y * 0.5f + 0.5f, 0.0f, 1.0f);
+    return std::clamp(texture->sampleIntensity(u, v), 0.0f, 1.0f);
+}
+
+float uiSampleBrushMask(const Paint::BrushSettings& brush, float nx, float ny) {
+    if (brush.use_imported_alpha && brush.alpha_texture && brush.alpha_texture->is_loaded()) {
+        return uiSampleImportedBrushAlpha(brush.alpha_texture, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
+    }
+
+    return uiSampleBrushAlpha(brush.alpha_preset, nx, ny, brush.alpha_scale, brush.alpha_rotation_degrees);
+}
+
+void drawBrushAlphaPreview(const Paint::BrushSettings& brush) {
+    const ImVec2 size(92.0f, 92.0f);
+    ImGui::TextDisabled("Alpha Preview");
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##BrushAlphaPreview", size);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), IM_COL32(20, 22, 26, 255), 6.0f);
+    dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), IM_COL32(70, 74, 82, 255), 6.0f);
+
+    const int cells = 40;
+    const float pad = 8.0f;
+    const float inner_w = size.x - pad * 2.0f;
+    const float inner_h = size.y - pad * 2.0f;
+    const float cell_w = inner_w / static_cast<float>(cells);
+    const float cell_h = inner_h / static_cast<float>(cells);
+
+    for (int y = 0; y < cells; ++y) {
+        for (int x = 0; x < cells; ++x) {
+            const float u = ((static_cast<float>(x) + 0.5f) / static_cast<float>(cells)) * 2.0f - 1.0f;
+            const float v = ((static_cast<float>(y) + 0.5f) / static_cast<float>(cells)) * 2.0f - 1.0f;
+            const float r = std::sqrt(u * u + v * v);
+            if (r > 1.0f) {
+                continue;
+            }
+
+            const float falloff = std::clamp(brush.falloff, 0.0f, 1.0f);
+            const float inner = std::clamp(1.0f - falloff, 0.0f, 1.0f);
+            float base = 1.0f;
+            if (r > inner) {
+                const float t = std::clamp((r - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
+                base = 1.0f - (t * t * (3.0f - 2.0f * t));
+            }
+
+            const float alpha = std::clamp(
+                base * uiSampleBrushMask(brush, u, v),
+                0.0f, 1.0f);
+            const int shade = static_cast<int>(50.0f + alpha * 205.0f);
+            const ImU32 color = IM_COL32(shade, shade, shade, 255);
+            const float x0 = p.x + pad + static_cast<float>(x) * cell_w;
+            const float y0 = p.y + pad + static_cast<float>(y) * cell_h;
+            dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + cell_w + 0.5f, y0 + cell_h + 0.5f), color);
+        }
+    }
+}
+
+void drawBrushPaintTexturePreview(const Paint::BrushSettings& brush) {
+    if (!brush.paint_texture || !brush.paint_texture->is_loaded()) {
+        return;
+    }
+
+    const ImVec2 size(92.0f, 92.0f);
+    ImGui::TextDisabled("Paint Preview");
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##BrushPaintPreview", size);
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), IM_COL32(20, 22, 26, 255), 6.0f);
+    dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), IM_COL32(70, 74, 82, 255), 6.0f);
+
+    const int cells = 40;
+    const float pad = 8.0f;
+    const float inner_w = size.x - pad * 2.0f;
+    const float inner_h = size.y - pad * 2.0f;
+    const float cell_w = inner_w / static_cast<float>(cells);
+    const float cell_h = inner_h / static_cast<float>(cells);
+
+    for (int y = 0; y < cells; ++y) {
+        for (int x = 0; x < cells; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(cells);
+            const float v = 1.0f - ((static_cast<float>(y) + 0.5f) / static_cast<float>(cells));
+            Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
+            sampled = applyPreviewTint(sampled, brush.color, brush.paint_texture_tint_strength, brush.paint_texture_tint_mode);
+            sampled.x = std::clamp(sampled.x, 0.0f, 1.0f);
+            sampled.y = std::clamp(sampled.y, 0.0f, 1.0f);
+            sampled.z = std::clamp(sampled.z, 0.0f, 1.0f);
+
+            const ImU32 color = IM_COL32(
+                static_cast<int>(sampled.x * 255.0f + 0.5f),
+                static_cast<int>(sampled.y * 255.0f + 0.5f),
+                static_cast<int>(sampled.z * 255.0f + 0.5f),
+                255);
+            const float x0 = p.x + pad + static_cast<float>(x) * cell_w;
+            const float y0 = p.y + pad + static_cast<float>(y) * cell_h;
+            dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + cell_w + 0.5f, y0 + cell_h + 0.5f), color);
+        }
+    }
+}
+
+std::string brushAlphaDisplayName(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
+
+    const size_t slash = path.find_last_of("/\\");
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+std::string brushAssetDisplayName(const std::string& path) {
+    return brushAlphaDisplayName(path);
+}
+
+std::filesystem::path utf8PathFromString(const std::string& path) {
+    const char8_t* begin = reinterpret_cast<const char8_t*>(path.data());
+    return std::filesystem::path(begin, begin + path.size());
+}
+
+const char* paintChannelFileTag(Paint::PaintChannel channel) {
+    switch (channel) {
+        case Paint::PaintChannel::BaseColor: return "basecolor";
+        case Paint::PaintChannel::Normal: return "normal";
+        case Paint::PaintChannel::Roughness: return "roughness";
+        case Paint::PaintChannel::Metallic: return "metallic";
+        case Paint::PaintChannel::Emission: return "emission";
+        case Paint::PaintChannel::Mask: return "mask";
+        case Paint::PaintChannel::Transmission: return "transmission";
+    }
+    return "channel";
+}
+
+const char* paintChannelDisplayName(Paint::PaintChannel channel) {
+    switch (channel) {
+        case Paint::PaintChannel::BaseColor: return "Base Color";
+        case Paint::PaintChannel::Normal: return "Normal";
+        case Paint::PaintChannel::Roughness: return "Roughness";
+        case Paint::PaintChannel::Metallic: return "Metallic";
+        case Paint::PaintChannel::Emission: return "Emission";
+        case Paint::PaintChannel::Mask: return "Height Mask";
+        case Paint::PaintChannel::Transmission: return "Transmission";
+    }
+    return "Channel";
+}
+
+TextureType inferBrushTextureType(Paint::PaintChannel channel) {
+    switch (channel) {
+        case Paint::PaintChannel::BaseColor:
+            return TextureType::Albedo;
+        case Paint::PaintChannel::Emission:
+            return TextureType::Emission;
+        case Paint::PaintChannel::Normal:
+            return TextureType::Normal;
+        case Paint::PaintChannel::Roughness:
+            return TextureType::Roughness;
+        case Paint::PaintChannel::Metallic:
+            return TextureType::Metallic;
+        case Paint::PaintChannel::Mask:
+            return TextureType::Unknown;
+        case Paint::PaintChannel::Transmission:
+            return TextureType::Transmission;
+    }
+    return TextureType::Unknown;
+}
+
+std::vector<Paint::PaintChannel> getSelectedMaterialBrushChannels(const Paint::PaintModeState& state) {
+    std::vector<Paint::PaintChannel> channels;
+    channels.push_back(state.active_channel);
+    for (int i = 0; i < 7; ++i) {
+        const Paint::PaintChannel channel = static_cast<Paint::PaintChannel>(i);
+        if (channel == state.active_channel) {
+            continue;
+        }
+        if (state.linked_channels[static_cast<size_t>(i)]) {
+            channels.push_back(channel);
+        }
+    }
+    return channels;
+}
+
+bool exportTextureToPng(const std::shared_ptr<Texture>& texture, const std::string& file_path) {
+    if (!texture || texture->width <= 0 || texture->height <= 0 || texture->pixels.empty() || file_path.empty()) {
+        return false;
+    }
+
+    const std::filesystem::path out_path = utf8PathFromString(file_path);
+    if (std::filesystem::exists(out_path)) {
+        std::error_code ec;
+        std::filesystem::remove(out_path, ec);
+        if (ec) {
+            return false;
+        }
+    }
+
+    return stbi_write_png(
+        out_path.string().c_str(),
+        texture->width,
+        texture->height,
+        4,
+        texture->pixels.data(),
+        texture->width * 4) != 0;
+}
+
+bool exportTextureSetChannels(const Paint::PaintTextureSet& set, const std::filesystem::path& directory) {
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    if (ec) {
+        return false;
+    }
+
+    const struct ChannelExportEntry {
+        Paint::PaintChannel channel;
+        const char* suffix;
+    } entries[] = {
+        { Paint::PaintChannel::BaseColor, "basecolor" },
+        { Paint::PaintChannel::Normal, "normal" },
+        { Paint::PaintChannel::Roughness, "roughness" },
+        { Paint::PaintChannel::Metallic, "metallic" },
+        { Paint::PaintChannel::Emission, "emission" },
+        { Paint::PaintChannel::Mask, "mask" },
+        { Paint::PaintChannel::Transmission, "transmission" }
+    };
+
+    bool wrote_any = false;
+    for (const auto& entry : entries) {
+        std::shared_ptr<Texture> texture = set.getTexture(entry.channel);
+        if (!texture) {
+            continue;
+        }
+
+        const std::string base_name = set.target_node_name.empty() ? "paintset" : set.target_node_name;
+        const std::filesystem::path out_path =
+            directory / (base_name + "_" + std::to_string(set.material_id) + "_" + entry.suffix + ".png");
+        if (exportTextureToPng(texture, out_path.string())) {
+            wrote_any = true;
+        }
+    }
+
+    return wrote_any;
+}
+
+float estimateMeshPaintWorldRadius(const Triangle& tri, const Texture& texture, float radius_px) {
+    const Vec3 v0 = tri.getV0();
+    const Vec3 v1 = tri.getV1();
+    const Vec3 v2 = tri.getV2();
+    const Vec3 cross = (v1 - v0).cross(v2 - v0);
+    const float world_area = 0.5f * std::sqrt(cross.length_squared());
+
+    const auto [uv0, uv1, uv2] = tri.getUVCoordinates();
+    const Vec2 duv1 = uv1 - uv0;
+    const Vec2 duv2 = uv2 - uv0;
+    const float uv_area = 0.5f * std::abs(duv1.u * duv2.v - duv1.v * duv2.u);
+    if (world_area <= 1e-6f || uv_area <= 1e-8f || texture.width <= 0 || texture.height <= 0) {
+        return 0.0f;
+    }
+
+    const float world_per_uv = std::sqrt(world_area / uv_area);
+    const float baseline = 1024.0f;
+    const float uv_radius = radius_px / baseline;
+    return std::max(0.001f, uv_radius * world_per_uv);
+}
+
+ImU32 makePreviewColorU32(const Paint::BrushSettings& brush, Paint::PaintChannel channel, float nx, float ny, float alpha, bool ghost) {
+    Vec3 color = brush.color;
+    if (brush.use_paint_texture && brush.paint_texture && brush.paint_texture->is_loaded()) {
+        float sx = nx * std::max(0.01f, brush.alpha_scale);
+        float sy = ny * std::max(0.01f, brush.alpha_scale);
+        uiRotateBrushCoords(sx, sy, brush.alpha_rotation_degrees);
+        const float u = std::clamp(sx * 0.5f + 0.5f, 0.0f, 1.0f);
+        const float v = std::clamp(sy * 0.5f + 0.5f, 0.0f, 1.0f);
+
+        if (channel == Paint::PaintChannel::BaseColor || channel == Paint::PaintChannel::Emission) {
+            Vec3 sampled = brush.paint_texture->get_color_bilinear(u, v);
+            sampled = applyPreviewTint(sampled, brush.color, brush.paint_texture_tint_strength, brush.paint_texture_tint_mode);
+            color = Vec3(
+                std::clamp(sampled.x, 0.0f, 1.0f),
+                std::clamp(sampled.y, 0.0f, 1.0f),
+                std::clamp(sampled.z, 0.0f, 1.0f));
+        } else {
+            const float texture_value = brush.paint_texture->sampleIntensity(u, v);
+            const float tint_value = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+            const float grayscale = texture_value + (texture_value * tint_value - texture_value) *
+                std::clamp(brush.paint_texture_tint_strength, 0.0f, 1.0f);
+            color = Vec3(grayscale, grayscale, grayscale);
+        }
+    } else if (channel != Paint::PaintChannel::BaseColor && channel != Paint::PaintChannel::Emission) {
+        const float grayscale = std::clamp((brush.color.x + brush.color.y + brush.color.z) / 3.0f, 0.0f, 1.0f);
+        color = Vec3(grayscale, grayscale, grayscale);
+    }
+
+    const int a = static_cast<int>(std::clamp(alpha, 0.0f, 1.0f) * (ghost ? 90.0f : 150.0f));
+    return IM_COL32(
+        static_cast<int>(std::clamp(color.x, 0.0f, 1.0f) * 255.0f),
+        static_cast<int>(std::clamp(color.y, 0.0f, 1.0f) * 255.0f),
+        static_cast<int>(std::clamp(color.z, 0.0f, 1.0f) * 255.0f),
+        a);
+}
+
+void drawMeshPaintPreview(UIContext& ctx, const HitRecord& rec, const Paint::MeshPaintAdapter& adapter, const Paint::BrushSettings& brush, Paint::PaintChannel channel, bool ghost = false) {
+    if (!brush.show_preview || !rec.triangle || !ctx.scene.camera) {
+        return;
+    }
+
+    Paint::PaintTextureSet* set = adapter.getTextureSet();
+    std::shared_ptr<Texture> texture = set ? set->getTexture(channel) : nullptr;
+    if (!texture || texture->width <= 0 || texture->height <= 0) {
+        return;
+    }
+
+    const float world_radius = estimateMeshPaintWorldRadius(*rec.triangle, *texture, brush.radius);
+    if (world_radius <= 0.0f) {
+        return;
+    }
+
+    const Vec3 normal = rec.normal.length_squared() > 1e-6f ? rec.normal.normalize() : Vec3(0, 1, 0);
+    Vec3 tangent, bitangent;
+    
+    bool has_uv_tangent = false;
+    if (rec.triangle) {
+        const Vec3 p0 = rec.triangle->getVertexPosition(0);
+        const Vec3 p1 = rec.triangle->getVertexPosition(1);
+        const Vec3 p2 = rec.triangle->getVertexPosition(2);
+        const Vec3 edge1 = p1 - p0;
+        const Vec3 edge2 = p2 - p0;
+        const Vec2 deltaUV1 = rec.triangle->t1 - rec.triangle->t0;
+        const Vec2 deltaUV2 = rec.triangle->t2 - rec.triangle->t0;
+        
+        const float f = 1.0f / (deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v);
+        if (std::isfinite(f) && std::abs(deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v) > 1e-6f) {
+            tangent.x = f * (deltaUV2.v * edge1.x - deltaUV1.v * edge2.x);
+            tangent.y = f * (deltaUV2.v * edge1.y - deltaUV1.v * edge2.y);
+            tangent.z = f * (deltaUV2.v * edge1.z - deltaUV1.v * edge2.z);
+            tangent = tangent.normalize();
+            
+            // To prevent precision issues or degenerates
+            if (tangent.length_squared() > 1e-6f) {
+                // Ensure orthogonality
+                tangent = (tangent - normal * tangent.dot(normal)).normalize();
+                if (tangent.length_squared() > 1e-6f) {
+                    bitangent = normal.cross(tangent).normalize();
+                    // Determine handedness of bitangent relative to computed UV bitangent
+                    Vec3 computed_bitangent;
+                    computed_bitangent.x = f * (-deltaUV2.u * edge1.x + deltaUV1.u * edge2.x);
+                    computed_bitangent.y = f * (-deltaUV2.u * edge1.y + deltaUV1.u * edge2.y);
+                    computed_bitangent.z = f * (-deltaUV2.u * edge1.z + deltaUV1.u * edge2.z);
+                    if (bitangent.dot(computed_bitangent) < 0.0f) {
+                        bitangent = -bitangent;
+                    }
+                    has_uv_tangent = true;
+                }
+            }
+        }
+    }
+    
+    if (!has_uv_tangent) {
+        tangent = std::abs(normal.y) < 0.95f ? normal.cross(Vec3(0, 1, 0)) : normal.cross(Vec3(1, 0, 0));
+        if (tangent.length_squared() <= 1e-8f) {
+            return;
+        }
+        tangent = tangent.normalize();
+        bitangent = normal.cross(tangent).normalize();
+    }
+
+    auto project = [&](const Vec3& p) -> ImVec2 {
+        Camera& cam = *ctx.scene.camera;
+        ImGuiIO& io = ImGui::GetIO();
+        const float win_w = io.DisplaySize.x;
+        const float win_h = io.DisplaySize.y;
+        Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+        Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+        Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+        float fov_rad = cam.vfov * 3.14159f / 180.0f;
+
+        Vec3 to_p = p - cam.lookfrom;
+        float depth = to_p.dot(cam_forward);
+        if (depth <= 0.1f) {
+            return ImVec2(-1000.0f, -1000.0f);
+        }
+
+        float half_h = depth * tanf(fov_rad / 2.0f);
+        float half_w = half_h * (win_w / std::max(1.0f, win_h));
+        float lx = to_p.dot(cam_right);
+        float ly = to_p.dot(cam_up);
+        float ndc_x = lx / half_w;
+        float ndc_y = ly / half_h;
+        return ImVec2((ndc_x * 0.5f + 0.5f) * win_w, (0.5f - ndc_y * 0.5f) * win_h);
+    };
+
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    constexpr int segments = 40;
+    const float inner_scale = std::clamp(1.0f - brush.falloff, 0.15f, 0.95f);
+    const float inner_radius = world_radius * inner_scale;
+    const ImVec2 center_screen = project(rec.point + normal * 0.002f);
+    const ImVec2 radius_screen = project(rec.point + tangent * world_radius + normal * 0.002f);
+    const float approx_screen_radius = (center_screen.x < -900.0f || radius_screen.x < -900.0f)
+        ? 24.0f
+        : std::sqrt(
+            (radius_screen.x - center_screen.x) * (radius_screen.x - center_screen.x) +
+            (radius_screen.y - center_screen.y) * (radius_screen.y - center_screen.y));
+
+    if (!ghost) {
+        const int grid = std::clamp(static_cast<int>(approx_screen_radius * 1.15f), 36, 96);
+        const float cell_span = 2.0f / static_cast<float>(grid);
+        for (int gy = 0; gy < grid; ++gy) {
+            for (int gx = 0; gx < grid; ++gx) {
+                const float nx = ((static_cast<float>(gx) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f;
+                const float ny = ((static_cast<float>(gy) + 0.5f) / static_cast<float>(grid)) * 2.0f - 1.0f;
+                const float rr = std::sqrt(nx * nx + ny * ny);
+                if (rr > 1.0f) {
+                    continue;
+                }
+
+                const float falloff = std::clamp(brush.falloff, 0.0f, 1.0f);
+                const float inner = std::clamp(1.0f - falloff, 0.0f, 1.0f);
+                float base = 1.0f;
+                if (rr > inner) {
+                    const float t = std::clamp((rr - inner) / std::max(0.001f, 1.0f - inner), 0.0f, 1.0f);
+                    base = 1.0f - (t * t * (3.0f - 2.0f * t));
+                }
+
+                const float mask_alpha = uiSampleBrushMask(brush, nx, ny);
+                const float alpha = base * mask_alpha;
+                if (alpha <= 0.025f) {
+                    continue;
+                }
+
+                const float local_x = nx * world_radius;
+                const float local_y = ny * world_radius;
+                const float half_cell = world_radius * cell_span * 0.42f;
+                const Vec3 center = rec.point + tangent * local_x - bitangent * local_y + normal * 0.002f;
+                const Vec3 right = tangent * half_cell;
+                const Vec3 up = -bitangent * half_cell;
+                const ImVec2 c = project(center);
+                const ImVec2 px = project(center + right);
+                const ImVec2 py = project(center + up);
+                if (c.x < -900.0f || px.x < -900.0f || py.x < -900.0f) {
+                    continue;
+                }
+                const ImU32 fill = makePreviewColorU32(brush, channel, nx, ny, alpha, ghost);
+                const ImVec2 p0 = project(center - right - up);
+                const ImVec2 p1 = project(center + right - up);
+                const ImVec2 p2 = project(center + right + up);
+                const ImVec2 p3 = project(center - right + up);
+                if (p0.x < -900.0f || p1.x < -900.0f || p2.x < -900.0f || p3.x < -900.0f) {
+                    continue;
+                }
+                const ImVec2 points[4] = { p0, p1, p2, p3 };
+                dl->AddConvexPolyFilled(points, 4, fill);
+            }
+        }
+    }
+
+    auto draw_ring = [&](float radius, ImU32 color, float thickness) {
+        ImVec2 prev;
+        bool has_prev = false;
+        for (int i = 0; i <= segments; ++i) {
+            const float angle = (static_cast<float>(i) / static_cast<float>(segments)) * 6.2831853f;
+            const Vec3 offset = tangent * std::cos(angle) * radius + bitangent * std::sin(angle) * radius;
+            const ImVec2 p = project(rec.point + offset + normal * 0.002f);
+            if (p.x > -900.0f && p.y > -900.0f) {
+                if (has_prev) {
+                    dl->AddLine(prev, p, color, thickness);
+                }
+                prev = p;
+                has_prev = true;
+            } else {
+                has_prev = false;
+            }
+        }
+    };
+
+    const ImU32 outer = ghost ? IM_COL32(255, 196, 96, 120) : IM_COL32(255, 196, 96, 230);
+    const ImU32 inner = ghost ? IM_COL32(255, 196, 96, 70) : IM_COL32(255, 196, 96, 120);
+    draw_ring(world_radius, outer, ghost ? 1.2f : 2.0f);
+    draw_ring(inner_radius, inner, 1.0f);
+}
+
+ // namespace
+
+void SceneUI::ensurePaintBrushPresets() {
+    if (paint_brush_presets_initialized) {
+        return;
+    }
+
+    paint_brush_presets_initialized = true;
+    paint_brush_presets.clear();
+
+    auto add_preset = [&](const std::string& name, const Paint::BrushSettings& brush) {
+        paint_brush_presets.push_back(PaintBrushPreset{ name, brush });
+    };
+
+    Paint::BrushSettings soft_paint;
+    soft_paint.radius = 36.0f;
+    soft_paint.strength = 0.6f;
+    soft_paint.falloff = 0.8f;
+    soft_paint.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
+    add_preset("Soft Paint", soft_paint);
+
+    Paint::BrushSettings hard_stamp;
+    hard_stamp.tool = Paint::BrushTool::Stamp;
+    hard_stamp.radius = 48.0f;
+    hard_stamp.strength = 1.0f;
+    hard_stamp.falloff = 0.15f;
+    hard_stamp.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    hard_stamp.stamp_mode = Paint::StampPlacementMode::Single;
+    add_preset("Hard Stamp", hard_stamp);
+
+    Paint::BrushSettings grunge;
+    grunge.tool = Paint::BrushTool::Stamp;
+    grunge.radius = 56.0f;
+    grunge.strength = 0.8f;
+    grunge.falloff = 0.55f;
+    grunge.alpha_preset = Paint::BrushAlphaPreset::Cloud;
+    grunge.stamp_mode = Paint::StampPlacementMode::Continuous;
+    grunge.spacing = 0.35f;
+    add_preset("Grunge Stamp", grunge);
+
+    Paint::BrushSettings wet;
+    wet.radius = 32.0f;
+    wet.strength = 0.7f;
+    wet.falloff = 0.7f;
+    wet.paint_mode = Paint::BrushPaintMode::Wet;
+    wet.wetness = 0.75f;
+    wet.paint_load = 0.9f;
+    wet.pickup_rate = 0.3f;
+    wet.deposit_rate = 0.7f;
+    add_preset("Wet Blend", wet);
+
+    Paint::BrushSettings smudge;
+    smudge.radius = 30.0f;
+    smudge.strength = 0.55f;
+    smudge.falloff = 0.75f;
+    smudge.paint_mode = Paint::BrushPaintMode::Smudge;
+    smudge.smudge_strength = 0.8f;
+    add_preset("Smudge Soft", smudge);
+
+    Paint::BrushSettings spray;
+    spray.tool = Paint::BrushTool::Spray;
+    spray.radius = 42.0f;
+    spray.strength = 0.45f;
+    spray.falloff = 0.6f;
+    spray.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
+    spray.spray_particles = 16;
+    spray.spray_spread = 0.75f;
+    spray.spray_droplet_size = 0.18f;
+    add_preset("Soft Spray", spray);
+}
+
+void SceneUI::ensureSculptBrushPresets() {
+    if (sculpt_brush_presets_initialized) return;
+    sculpt_brush_presets_initialized = true;
+    sculpt_brush_presets.clear();
+
+    auto add = [&](const std::string& name, const Paint::BrushSettings& b) {
+        sculpt_brush_presets.push_back(PaintBrushPreset{ name, b });
+    };
+
+    Paint::BrushSettings soft;
+    soft.radius   = 0.3f;
+    soft.strength = 1.0f;
+    soft.falloff  = 0.75f;
+    soft.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
+    add("Soft Sculpt", soft);
+
+    Paint::BrushSettings clay;
+    clay.radius   = 0.2f;
+    clay.strength = 2.5f;
+    clay.falloff  = 0.45f;
+    clay.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Clay", clay);
+
+    Paint::BrushSettings layer = clay;
+    layer.radius = 0.22f;
+    layer.strength = 1.8f;
+    layer.falloff = 0.55f;
+    add("Layer", layer);
+
+    Paint::BrushSettings clay_strips;
+    clay_strips.radius   = 0.12f;
+    clay_strips.strength = 3.0f;
+    clay_strips.falloff  = 0.25f;
+    clay_strips.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Clay Strips", clay_strips);
+
+    Paint::BrushSettings smooth;
+    smooth.radius   = 0.4f;
+    smooth.strength = 1.5f;
+    smooth.falloff  = 0.8f;
+    smooth.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
+    add("Smooth", smooth);
+
+    Paint::BrushSettings sharp;
+    sharp.radius   = 0.12f;
+    sharp.strength = 3.0f;
+    sharp.falloff  = 0.25f;
+    sharp.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Sharp Detail", sharp);
+
+    Paint::BrushSettings flatten;
+    flatten.radius   = 0.5f;
+    flatten.strength = 2.0f;
+    flatten.falloff  = 0.6f;
+    flatten.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
+    add("Flatten", flatten);
+
+    Paint::BrushSettings pinch;
+    pinch.radius   = 0.15f;
+    pinch.strength = 2.0f;
+    pinch.falloff  = 0.5f;
+    pinch.alpha_preset = Paint::BrushAlphaPreset::SoftRound;
+    add("Pinch", pinch);
+
+    Paint::BrushSettings crease;
+    crease.radius   = 0.09f;
+    crease.strength = 2.6f;
+    crease.falloff  = 0.35f;
+    crease.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Crease", crease);
+
+    Paint::BrushSettings scrape;
+    scrape.radius   = 0.24f;
+    scrape.strength = 2.2f;
+    scrape.falloff  = 0.55f;
+    scrape.alpha_preset = Paint::BrushAlphaPreset::HardRound;
+    add("Scrape", scrape);
+}
 
 void SceneUI::drawModifiersPanel(UIContext& ctx) {
-    if (UIWidgets::BeginSection("Modifiers & Sculpting", ImVec4(0.8f, 0.4f, 0.9f, 1.0f))) {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.92f, 0.56f, 0.38f, 1.0f));
+    if (UIWidgets::BeginSection("Modeling", ImVec4(0.8f, 0.4f, 0.9f, 1.0f))) {
         bool hasSelection = (ctx.selection.selected.type == SelectableType::Object &&
                              ctx.selection.selected.object != nullptr);
+        const bool editSessionActive =
+            mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
+            mesh_overlay_settings.enabled &&
+            mesh_overlay_settings.edit_mode &&
+            !active_mesh_edit_object_name.empty();
 
         if (!hasSelection) {
             ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.6f, 1.0f), "Please select a mesh object.");
             UIWidgets::EndSection();
+        } else {
+            const std::string selectedNodeName =
+                hasSelection ? ctx.selection.selected.object->getNodeName() : std::string{};
+            const std::string effectiveNodeName =
+                editSessionActive ? active_mesh_edit_object_name : selectedNodeName;
+
+            if (!selectedNodeName.empty()) {
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Selected: %s", selectedNodeName.c_str());
+            }
+            if (editSessionActive && effectiveNodeName != selectedNodeName) {
+                ImGui::TextColored(ImVec4(0.95f, 0.78f, 0.40f, 1.0f), "Editing: %s", effectiveNodeName.c_str());
+            }
+
+            if (!mesh_cache_valid) {
+                rebuildMeshCache(ctx.scene.world.objects);
+            }
+
+            auto meshEntriesIt = mesh_cache.find(effectiveNodeName);
+            const bool hasMeshEntries = meshEntriesIt != mesh_cache.end();
+            auto selectedTriangle =
+                hasSelection ? std::dynamic_pointer_cast<Triangle>(ctx.selection.selected.object) : nullptr;
+            const bool selectedIsTerrain = selectedTriangle && selectedTriangle->terrain_id != -1;
+            const bool isVertexMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Vertex);
+            const bool isEdgeMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Edge);
+            const bool isFaceMode = (ctx.selection.mesh_element_mode == MeshElementSelectMode::Face);
+            auto activateEditWorkspace = [&]() {
+                if (!hasSelection) {
+                    return;
+                }
+
+                // Ensure CPU-side vertices are up-to-date before entering edit mode.
+                // In Vulkan TLAS mode, object scaling is deferred (lazy CPU sync).
+                // Without this, edit mode could read stale positions and produce
+                // oversized overlays or corrupt the mesh on vertex edits.
+                ensureCPUSyncForPicking(ctx);
+
+                mesh_workspace_mode = SceneUI::MeshWorkspaceMode::Edit;
+                mesh_overlay_settings.enabled = true;
+                mesh_overlay_settings.edit_mode = true;
+                sculpt_mode_state.enabled = false;
+                sculpt_mode_state.active_target_name.clear();
+                terrain_sculpt_proxy_active = false;
+                ctx.selection.mesh_element_mode = MeshElementSelectMode::Vertex;
+                clearEditableMeshSelection();
+                active_mesh_edit_object_name = selectedNodeName;
+                active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
+                // Force editable cache rebuild so it picks up any pending transform changes
+                editable_mesh_cache = EditableMeshCache{};
+                mesh_overlay_cache = MeshOverlayCache{};
+                ensureMeshEditLayer(ctx, selectedNodeName);
+            };
+
+            auto activateSculptWorkspace = [&]() {
+                if (!hasSelection) {
+                    return;
+                }
+
+                mesh_workspace_mode = SceneUI::MeshWorkspaceMode::Sculpt;
+                sculpt_mode_state.enabled = true;
+                mesh_overlay_settings.edit_mode = true;
+                active_mesh_edit_object_name = selectedNodeName;
+                active_mesh_edit_object_ptr = ctx.selection.selected.object.get();
+                sculpt_mode_state.active_target_name = selectedNodeName;
+                clearEditableMeshSelection();
+                editable_mesh_cache = EditableMeshCache{};
+                mesh_overlay_cache = MeshOverlayCache{};
+                terrain_sculpt_proxy_active = selectedIsTerrain;
+
+                if (!mesh_cache_valid) {
+                    rebuildMeshCache(ctx.scene.world.objects);
+                }
+                auto meshIt = mesh_cache.find(selectedNodeName);
+                if (meshIt != mesh_cache.end()) {
+                    for (auto& entry : meshIt->second) {
+                        if (entry.second) {
+                            entry.second->updateTransformedVertices();
+                        }
+                    }
+                    objects_needing_cpu_sync.erase(selectedNodeName);
+                }
+                extern bool g_bvh_rebuild_pending;
+                g_bvh_rebuild_pending = true;
+
+                if (selectedIsTerrain) {
+                    terrain_brush.active_terrain_id = selectedTriangle->terrain_id;
+                    if (terrain_brush.mode < 0 || terrain_brush.mode > 4) {
+                        terrain_brush.mode = 0;
+                    }
+                } else {
+                    ctx.selection.mesh_element_mode = MeshElementSelectMode::Object;
+                    ensureMeshEditLayer(ctx, selectedNodeName);
+                }
+            };
+
+            // Auto-enter edit workspace only for newly-selected objects.
+            // If the user manually exited edit mode for this object, respect that.
+            if (hasSelection && !mesh_overlay_settings.edit_mode && !sculpt_mode_state.enabled) {
+                if (modifier_panel_exit_object != selectedNodeName) {
+                    activateEditWorkspace();
+                }
+            }
+            // Reset the exit flag when a different object is selected.
+            if (!modifier_panel_exit_object.empty() && modifier_panel_exit_object != selectedNodeName) {
+                modifier_panel_exit_object.clear();
+            }
+
+            ImGui::TextDisabled("Workspace");
+            const float modeWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+            const bool editWorkspaceActive =
+                mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit && !sculpt_mode_state.enabled;
+            const bool sculptWorkspaceActive =
+                mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Sculpt && sculpt_mode_state.enabled;
+            const char* editButtonLabel = editWorkspaceActive ? "Edit Active" : "Edit";
+            const char* sculptButtonLabel =
+                selectedIsTerrain
+                    ? (sculptWorkspaceActive ? "Terrain Sculpt Active" : "Terrain Sculpt")
+                    : (sculptWorkspaceActive ? "Sculpt Active" : "Sculpt");
+
+            if (editWorkspaceActive) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.42f, 0.86f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.50f, 0.95f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.34f, 0.72f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.76f, 0.88f, 1.0f, 0.95f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+            }
+            if (ImGui::Button(editButtonLabel, ImVec2(modeWidth, 0.0f))) {
+                if (editSessionActive && hasSelection && active_mesh_edit_object_name == selectedNodeName) {
+                    modifier_panel_exit_object = selectedNodeName;
+                    resetMeshEditState(ctx);
+                } else {
+                    modifier_panel_exit_object.clear();
+                    activateEditWorkspace();
+                }
+            }
+            if (editWorkspaceActive) {
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
+            }
+            ImGui::SameLine();
+            if (sculptWorkspaceActive) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.86f, 0.42f, 0.18f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.95f, 0.52f, 0.24f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.72f, 0.34f, 0.14f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1.0f, 0.86f, 0.70f, 0.95f));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.5f);
+            }
+            if (ImGui::Button(sculptButtonLabel, ImVec2(modeWidth, 0.0f))) {
+                modifier_panel_exit_object.clear();
+                activateSculptWorkspace();
+            }
+            if (sculptWorkspaceActive) {
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(4);
+            }
+
+            ImGui::TextDisabled(
+                mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Sculpt
+                    ? (selectedIsTerrain
+                        ? "Terrain sculpt tools live here directly; no extra edit toggle required."
+                        : "Sculpt tools live here directly; no extra edit toggle required.")
+                    : "Edit tools and sculpt now share this panel as workspace tabs.");
+
+            if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit) {
+                if (ImGui::Checkbox("Viewport Mesh Overlay", &mesh_overlay_settings.enabled)) {
+                    if (!mesh_overlay_settings.enabled) {
+                        modifier_panel_exit_object = selectedNodeName;
+                        resetMeshEditState(ctx);
+                    }
+                }
+            }
+
+            if (mesh_overlay_settings.edit_mode) {
+                if (mesh_edit_layer.active && mesh_edit_layer.object_name == effectiveNodeName) {
+                    ImGui::SeparatorText("Edit Layer");
+                    bool layerEnabled = mesh_edit_layer.enabled;
+                    if (ImGui::Checkbox("##LayerEnabled", &layerEnabled)) {
+                        setMeshEditLayerEnabled(ctx, layerEnabled);
+                    }
+                    ImGui::SameLine();
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted("Layer 1");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled(mesh_edit_layer.enabled ? "Active" : "Muted");
+
+                    const float buttonWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+                    if (ImGui::Button("Apply", ImVec2(buttonWidth, 0))) {
+                        applyMeshEditLayer(ctx);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bake the current edit layer changes into the mesh.");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Discard", ImVec2(buttonWidth, 0))) {
+                        discardMeshEditLayer(ctx);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Throw away the current edit layer changes.");
+                    ImGui::Spacing();
+                } else if (effectiveNodeName == active_mesh_edit_object_name) {
+                    ImGui::SeparatorText("Edit Layer");
+                    if (drawMeshIconButton(
+                            "EditLayerCreate",
+                            "Create Edit Layer",
+                            "Create Edit Layer\nStart a non-destructive edit layer for this mesh.",
+                            UIWidgets::IconType::AddKey,
+                            ImVec4(0.52f, 0.82f, 1.0f, 1.0f),
+                            false,
+                            ImVec2(UIWidgets::GetInspectorActionWidth(), 40.0f))) {
+                        ensureMeshEditLayer(ctx, effectiveNodeName);
+                    }
+                    ImGui::Spacing();
+                }
+
+                if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit) {
+                    ImGui::Checkbox("Soft Selection", &mesh_overlay_settings.proportional_edit);
+                    if (mesh_overlay_settings.proportional_edit) {
+                        ImGui::SliderFloat("Radius", &mesh_overlay_settings.proportional_radius, 0.05f, 5.0f, "%.2f");
+                        static const char* falloffTypes[] = { "Smooth", "Linear", "Sharp", "Sphere", "Root" };
+                        ImGui::Combo("Falloff Type", &mesh_overlay_settings.proportional_falloff_type, falloffTypes, IM_ARRAYSIZE(falloffTypes));
+                        ImGui::SliderFloat("Falloff Bias", &mesh_overlay_settings.proportional_falloff, 0.05f, 1.0f, "%.2f");
+                    }
+                } else if (sculpt_mode_state.enabled) {
+                    UIWidgets::Divider();
+                    ImGui::TextDisabled("Sculpt Workspace");
+                    ImGui::Checkbox("Compact Sculpt UI", &sculpt_mode_state.compact_ui);
+                    sculpt_mode_state.use_gpu = false;
+                    ImGui::TextDisabled("CPU sculpt path active.");
+                    ImGui::TextDisabled("Brush tools in the right sculpt dock.");
+                }
+            }
+
+            if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit && mesh_overlay_settings.edit_mode) {
+                UIWidgets::Divider();
+                UIWidgets::ColoredHeader("Mesh Select Mode", ImVec4(0.72f, 0.84f, 1.0f, 1.0f));
+                ImGui::TextDisabled("Pick the editable component type for this object.");
+
+                auto activateMeshSelectMode = [&](MeshElementSelectMode mode) {
+                    mesh_overlay_settings.edit_mode = true;
+                    mesh_overlay_settings.enabled = true;
+                    sculpt_mode_state.enabled = false;
+                    ctx.selection.mesh_element_mode = mode;
+                    clearEditableMeshSelection();
+                    active_mesh_edit_object_name = effectiveNodeName;
+                    active_mesh_edit_object_ptr =
+                        (hasSelection && selectedNodeName == effectiveNodeName) ? ctx.selection.selected.object.get() : nullptr;
+                    ensureMeshEditLayer(ctx, effectiveNodeName);
+                };
+
+                const float modeButtonWidth = 38.0f;
+                const float modeButtonHeight = 38.0f;
+                if (drawMeshIconButton(
+                        "MeshSelectVertex",
+                        "Vertex",
+                        "Vertex Mode\nSelect and edit control cage points.",
+                        getMeshSelectModeIcon(MeshElementSelectMode::Vertex),
+                        ImVec4(0.94f, 0.76f, 0.26f, 1.0f),
+                        isVertexMode,
+                        ImVec2(modeButtonWidth, modeButtonHeight))) {
+                    activateMeshSelectMode(MeshElementSelectMode::Vertex);
+                }
+                ImGui::SameLine();
+                if (drawMeshIconButton(
+                        "MeshSelectEdge",
+                        "Edge",
+                        "Edge Mode\nSelect strips, loops, cuts, and dissolves.",
+                        getMeshSelectModeIcon(MeshElementSelectMode::Edge),
+                        ImVec4(0.30f, 0.82f, 0.78f, 1.0f),
+                        isEdgeMode,
+                        ImVec2(modeButtonWidth, modeButtonHeight))) {
+                    activateMeshSelectMode(MeshElementSelectMode::Edge);
+                }
+                ImGui::SameLine();
+                if (drawMeshIconButton(
+                        "MeshSelectFace",
+                        "Face",
+                        "Face Mode\nSelect polygons for extrusion and deletion.",
+                        getMeshSelectModeIcon(MeshElementSelectMode::Face),
+                        ImVec4(0.38f, 0.72f, 0.92f, 1.0f),
+                        isFaceMode,
+                        ImVec2(modeButtonWidth, modeButtonHeight))) {
+                    activateMeshSelectMode(MeshElementSelectMode::Face);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled(isVertexMode ? "Vertex" : (isEdgeMode ? "Edge" : "Face"));
+
+                const size_t selectedVertexCount = editable_mesh_cache.selection.vertex_ids.size();
+                const bool hasVertexTools =
+                    isVertexMode &&
+                    !effectiveNodeName.empty() &&
+                    selectedVertexCount >= 2;
+                const bool canAddFace = hasVertexTools && (selectedVertexCount == 3 || selectedVertexCount == 4);
+                const bool canMergeVertices = hasVertexTools;
+                const bool canWeldVertices = hasVertexTools;
+                if (hasVertexTools) {
+                    UIWidgets::Divider();
+                    UIWidgets::ColoredHeader("Vertex Tools", ImVec4(0.94f, 0.76f, 0.26f, 1.0f));
+                    const float toolButtonSize = 38.0f;
+                    if (canAddFace) {
+                        ImGui::TextDisabled("Build or clean topology directly from the selected cage points.");
+                        if (drawMeshIconButton(
+                                "VertexAddFace",
+                                "Add Face",
+                                "Add Face\nCreate a triangle or quad from 3 or 4 selected vertices.",
+                                getMeshActionIcon("Add Face"),
+                                ImVec4(0.86f, 0.78f, 0.36f, 1.0f),
+                                false,
+                                ImVec2(toolButtonSize, toolButtonSize))) {
+                            addFaceFromSelectedVertices(ctx);
+                        }
+                        if (canMergeVertices) {
+                            ImGui::SameLine();
+                            if (drawMeshIconButton(
+                                    "VertexMerge",
+                                    "Merge",
+                                    "Merge\nCollapse selected vertices to their center point.",
+                                    getMeshActionIcon("Merge"),
+                                    ImVec4(0.78f, 0.70f, 1.0f, 1.0f),
+                                    false,
+                                    ImVec2(toolButtonSize, toolButtonSize))) {
+                                mergeSelectedVerticesToCenter(ctx);
+                            }
+                        }
+                    }
+                    else if (canMergeVertices) {
+                        ImGui::TextDisabled("Collapse the current point selection into a single anchor.");
+                        if (drawMeshIconButton(
+                                "VertexMergeOnly",
+                                "Merge To Center",
+                                "Merge To Center\nWeld the selected vertices to their shared center.",
+                                getMeshActionIcon("Merge To Center"),
+                                ImVec4(0.78f, 0.70f, 1.0f, 1.0f),
+                                false,
+                                ImVec2(toolButtonSize, toolButtonSize))) {
+                            mergeSelectedVerticesToCenter(ctx);
+                        }
+                    }
+
+                    if (canWeldVertices) {
+                        ImGui::Spacing();
+                        ImGui::SliderFloat("Weld Distance", &mesh_vertex_weld_distance, 0.0001f, 0.5f, "%.4f", ImGuiSliderFlags_Logarithmic);
+                        ImGui::TextDisabled("Merge only points that fall inside the current threshold.");
+                        if (drawMeshIconButton(
+                                "VertexWeldByDistance",
+                                "Weld by Distance",
+                                "Weld by Distance\nSnap nearby selected vertices together using the weld distance.",
+                                getMeshActionIcon("Weld by Distance"),
+                                ImVec4(0.72f, 0.84f, 1.0f, 1.0f),
+                                false,
+                                ImVec2(toolButtonSize, toolButtonSize))) {
+                            weldSelectedVerticesByDistance(ctx, mesh_vertex_weld_distance);
+                        }
+                        ImGui::SameLine();
+                        if (drawMeshIconButton(
+                                "VertexDissolve",
+                                "Dissolve Vertex",
+                                "Dissolve Vertex\nRemove the selected vertex while preserving the surrounding surface.",
+                                getMeshActionIcon("Dissolve Vertex"),
+                                ImVec4(1.0f, 0.66f, 0.54f, 1.0f),
+                                false,
+                                ImVec2(toolButtonSize, toolButtonSize))) {
+                            dissolveSelectedVertices(ctx);
+                        }
+                    }
+                }
+
+                const bool hasSelectedFaces =
+                    isFaceMode &&
+                    !editable_mesh_cache.selection.face_ids.empty() &&
+                    !effectiveNodeName.empty();
+                const bool hasSelectedEdges =
+                    isEdgeMode &&
+                    !editable_mesh_cache.selection.edge_ids.empty() &&
+                    !effectiveNodeName.empty();
+                if (hasSelectedEdges) {
+                    UIWidgets::Divider();
+                    UIWidgets::ColoredHeader("Edge Tools", ImVec4(0.30f, 0.82f, 0.78f, 1.0f));
+                    ImGui::TextDisabled("Alt+Click: Loop  |  Shift+Alt+Click: Ring");
+                    ImGui::SliderFloat("Loop Cut Position", &mesh_loop_cut_position, 0.05f, 0.95f, "%.2f");
+                    const float edgeToolSize = 38.0f;
+                    if (drawMeshIconButton(
+                            "EdgeLoopCut",
+                            "Loop Cut",
+                            "Loop Cut\nInsert a new edge strip across the selected ring.",
+                            getMeshActionIcon("Loop Cut"),
+                            ImVec4(0.36f, 0.84f, 0.82f, 1.0f),
+                            false,
+                            ImVec2(edgeToolSize, edgeToolSize))) {
+                        loopCutSelectedEdges(ctx, mesh_loop_cut_position);
+                    }
+                    ImGui::SameLine();
+                    if (drawMeshIconButton(
+                            "EdgeDissolve",
+                            "Dissolve Edge",
+                            "Dissolve Edge\nRemove the selected edge while preserving the surrounding polygon flow.",
+                            getMeshActionIcon("Dissolve Edge"),
+                            ImVec4(1.0f, 0.68f, 0.52f, 1.0f),
+                            false,
+                            ImVec2(edgeToolSize, edgeToolSize))) {
+                        dissolveSelectedEdges(ctx);
+                    }
+                }
+                if (hasSelectedFaces) {
+                    UIWidgets::Divider();
+                    UIWidgets::ColoredHeader("Face Tools", ImVec4(0.38f, 0.72f, 0.92f, 1.0f));
+                    ImGui::SliderFloat("Extrude Distance", &mesh_face_extrude_distance, -2.0f, 2.0f, "%.3f");
+                    ImGui::TextDisabled("Build volume or remove caps from the active polygon selection.");
+                    const float faceToolSize = 38.0f;
+                    if (drawMeshIconButton(
+                            "FaceExtrude",
+                            "Extrude Face",
+                            "Extrude Face\nPush the selected face set along its normals.",
+                            getMeshActionIcon("Extrude Face"),
+                            ImVec4(0.42f, 0.78f, 1.0f, 1.0f),
+                            false,
+                            ImVec2(faceToolSize, faceToolSize))) {
+                        extrudeSelectedMeshFaces(ctx, mesh_face_extrude_distance);
+                    }
+                    ImGui::SameLine();
+                    if (drawMeshIconButton(
+                            "FaceDelete",
+                            "Delete Face",
+                            "Delete Face\nRemove the selected polygon faces and leave an open boundary.",
+                            getMeshActionIcon("Delete Face"),
+                            ImVec4(1.0f, 0.48f, 0.42f, 1.0f),
+                            false,
+                            ImVec2(faceToolSize, faceToolSize))) {
+                        deleteSelectedMeshFaces(ctx);
+                    }
+                }
+
+                if (!effectiveNodeName.empty()) {
+                    auto& shading = ensureMeshShadingSettings(effectiveNodeName);
+                    UIWidgets::Divider();
+                    UIWidgets::ColoredHeader("Shading", ImVec4(0.46f, 0.76f, 0.98f, 1.0f));
+                    const float shadingSize = 38.0f;
+                    if (drawMeshIconButton(
+                            "ShadeFlat",
+                            "Shade Flat",
+                            "Shade Flat\nUse split normals so every polygon shades as a hard surface.",
+                            getMeshActionIcon("Shade Flat"),
+                            ImVec4(0.86f, 0.72f, 0.52f, 1.0f),
+                            shading.flat_shading && !shading.auto_smooth,
+                            ImVec2(shadingSize, shadingSize))) {
+                        shading.flat_shading = true;
+                        shading.auto_smooth = false;
+                        applyMeshShadingSettings(ctx, effectiveNodeName);
+                    }
+                    ImGui::SameLine();
+                    if (drawMeshIconButton(
+                            "ShadeSmooth",
+                            "Shade Smooth",
+                            "Shade Smooth\nBlend normals across the surface for a softer preview.",
+                            getMeshActionIcon("Shade Smooth"),
+                            ImVec4(0.52f, 0.82f, 0.88f, 1.0f),
+                            !shading.flat_shading && !shading.auto_smooth,
+                            ImVec2(shadingSize, shadingSize))) {
+                        shading.flat_shading = false;
+                        shading.auto_smooth = false;
+                        applyMeshShadingSettings(ctx, effectiveNodeName);
+                    }
+
+                    bool autoSmooth = shading.auto_smooth;
+                    if (ImGui::Checkbox("Auto Smooth", &autoSmooth)) {
+                        shading.auto_smooth = autoSmooth;
+                        if (autoSmooth) {
+                            shading.flat_shading = false;
+                        }
+                        applyMeshShadingSettings(ctx, effectiveNodeName);
+                    }
+                    if (shading.auto_smooth) {
+                        if (ImGui::SliderFloat("Smooth Angle", &shading.auto_smooth_angle_degrees, 1.0f, 180.0f, "%.0f deg")) {
+                            applyMeshShadingSettings(ctx, effectiveNodeName);
+                        }
+                    }
+                }
+            }
+
+            UIWidgets::Divider();
+
+            if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit) {
+                // 1. Lazy initialize base mesh cache if not present
+                if (ctx.scene.base_mesh_cache.find(selectedNodeName) == ctx.scene.base_mesh_cache.end()) {
+                    std::vector<std::shared_ptr<Triangle>> baseTriangles;
+                    if (hasMeshEntries) {
+                        baseTriangles.reserve(meshEntriesIt->second.size());
+                        for (const auto& entry : meshEntriesIt->second) {
+                            if (entry.second) {
+                                baseTriangles.push_back(entry.second);
+                            }
+                        }
+                    }
+                    if (!baseTriangles.empty()) {
+                        ctx.scene.base_mesh_cache[selectedNodeName] = baseTriangles;
+                    }
+                }
+
+                // Get reference to stack
+                auto& modifierStack = ctx.scene.mesh_modifiers[selectedNodeName];
+
+                bool stackChanged = false;
+                int applyModifierIndex = -1;
+
+                auto replaceEvaluatedMesh = [&](const std::vector<std::shared_ptr<Triangle>>& meshToShow,
+                                                const std::vector<std::shared_ptr<Triangle>>& selectionFallback,
+                                                const std::string& message) {
+                    std::vector<std::shared_ptr<Hittable>> remainingObjects;
+                    remainingObjects.reserve(ctx.scene.world.objects.size() + meshToShow.size());
+                    for (const auto& obj : ctx.scene.world.objects) {
+                        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                        if (!tri || tri->getNodeName() != selectedNodeName) {
+                            remainingObjects.push_back(obj);
+                        }
+                    }
+
+                    for (const auto& tri : meshToShow) {
+                        remainingObjects.push_back(tri);
+                    }
+
+                    ctx.scene.world.objects = remainingObjects;
+
+                    if (!meshToShow.empty()) {
+                        ctx.selection.selectObject(meshToShow[0], -1, selectedNodeName);
+                    } else if (!selectionFallback.empty()) {
+                        ctx.selection.selectObject(selectionFallback[0], -1, selectedNodeName);
+                    }
+
+                    if (mesh_overlay_settings.edit_mode &&
+                        mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
+                        !selectedNodeName.empty()) {
+                        active_mesh_edit_object_name = selectedNodeName;
+                        active_mesh_edit_object_ptr =
+                            (!meshToShow.empty() ? meshToShow[0].get()
+                                : (!selectionFallback.empty() ? selectionFallback[0].get() : nullptr));
+                        editable_mesh_cache = EditableMeshCache{};
+                        mesh_overlay_cache = MeshOverlayCache{};
+                        mesh_edit_layer = MeshEditLayer{};
+                    }
+
+                    rebuildMeshCache(ctx.scene.world.objects);
+                    if (mesh_overlay_settings.edit_mode &&
+                        mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Edit &&
+                        !selectedNodeName.empty()) {
+                        ensureEditableMeshCache(ctx, selectedNodeName);
+                        ensureMeshEditLayer(ctx, selectedNodeName);
+                    }
+                    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
+
+                    addViewportMessage(message);
+                    g_ProjectManager.markModified();
+                };
+
+                if (!selectedNodeName.empty() &&
+                    ctx.scene.base_mesh_cache.find(selectedNodeName) != ctx.scene.base_mesh_cache.end() &&
+                    !ctx.scene.base_mesh_cache[selectedNodeName].empty() &&
+                    !modifierStack.modifiers.empty()) {
+                    const auto evaluatedPreview = modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName]);
+                    const bool previewMismatch =
+                        !hasMeshEntries ||
+                        meshEntriesIt->second.size() != evaluatedPreview.size();
+                    if (previewMismatch) {
+                        replaceEvaluatedMesh(evaluatedPreview, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Preview Synced");
+                        meshEntriesIt = mesh_cache.find(effectiveNodeName);
+                    }
+                }
+
+                // 2. Draw existing modifiers
+                for (size_t i = 0; i < modifierStack.modifiers.size(); ++i) {
+                    auto& mod = modifierStack.modifiers[i];
+
+                    ImGui::PushID(static_cast<int>(i));
+                    if (UIWidgets::BeginSection(mod.name.c_str(), ImVec4(0.4f, 0.6f, 0.9f, 1.0f))) {
+
+                        if (ImGui::Checkbox("Enabled", &mod.enabled)) stackChanged = true;
+
+                        ImGui::SameLine();
+                        if (UIWidgets::DangerButton("Delete")) {
+                            modifierStack.modifiers.erase(modifierStack.modifiers.begin() + i);
+                            stackChanged = true;
+                            UIWidgets::EndSection();
+                            ImGui::PopID();
+                            break; // iterator invalidated
+                        }
+
+                        ImGui::SameLine();
+                        if ((mod.type == MeshModifiers::ModifierType::FlatSubdivision ||
+                             mod.type == MeshModifiers::ModifierType::SmoothSubdivision) &&
+                            UIWidgets::PrimaryButton("Apply")) {
+                            applyModifierIndex = static_cast<int>(i);
+                        }
+
+                        if (mod.type == MeshModifiers::ModifierType::FlatSubdivision || mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
+                            if (ImGui::SliderInt("Levels", &mod.levels, 1, 4)) stackChanged = true;
+                        }
+
+                        if (mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
+                            if (ImGui::SliderFloat("Smooth Weight", &mod.smoothAngle, 0.0f, 1.0f)) stackChanged = true;
+                        }
+
+                        UIWidgets::EndSection();
+                    }
+                    ImGui::PopID();
+                }
+
+                UIWidgets::Divider();
+
+                // 3. Add new modifier
+                UIWidgets::ColoredHeader("Add Modifier", ImVec4(0.5f, 0.8f, 1.0f, 1.0f));
+                if (UIWidgets::SecondaryButton("Flat Subdivision", ImVec2(-1, 0))) {
+                    MeshModifiers::ModifierData newMod;
+                    newMod.name = "Flat Subdivision";
+                    newMod.type = MeshModifiers::ModifierType::FlatSubdivision;
+                    modifierStack.modifiers.push_back(newMod);
+                    stackChanged = true;
+                }
+                if (UIWidgets::SecondaryButton("Smooth Subdivision", ImVec2(-1, 0))) {
+                    MeshModifiers::ModifierData newMod;
+                    newMod.name = "Smooth Subdivision";
+                    newMod.type = MeshModifiers::ModifierType::SmoothSubdivision;
+                    modifierStack.modifiers.push_back(newMod);
+                    stackChanged = true;
+                }
+
+                if (applyModifierIndex >= 0) {
+                    SCENE_LOG_INFO("Applying Modifier Stack up to index " + std::to_string(applyModifierIndex) + " for '" + selectedNodeName + "'...");
+
+                    const auto& baseMesh = ctx.scene.base_mesh_cache[selectedNodeName];
+                    MeshModifiers::ModifierStack bakedStack;
+                    bakedStack.modifiers.assign(
+                        modifierStack.modifiers.begin(),
+                        modifierStack.modifiers.begin() + applyModifierIndex + 1);
+
+                    auto bakedMesh = bakedStack.evaluate(baseMesh);
+                    ctx.scene.base_mesh_cache[selectedNodeName] = bakedMesh;
+                    modifierStack.modifiers.erase(
+                        modifierStack.modifiers.begin(),
+                        modifierStack.modifiers.begin() + applyModifierIndex + 1);
+
+                    auto displayMesh = modifierStack.modifiers.empty()
+                        ? bakedMesh
+                        : modifierStack.evaluate(ctx.scene.base_mesh_cache[selectedNodeName]);
+
+                    replaceEvaluatedMesh(displayMesh, ctx.scene.base_mesh_cache[selectedNodeName], "Modifier Applied");
+                }
+
+                // 4. Evaluate stack if changed
+                if (stackChanged) {
+                    SCENE_LOG_INFO("Evaluating Modifier Stack for '" + selectedNodeName + "'...");
+
+                    const auto& baseMesh = ctx.scene.base_mesh_cache[selectedNodeName];
+                    auto newMesh = modifierStack.evaluate(baseMesh);
+
+                    SCENE_LOG_INFO("Evaluated mesh '" + selectedNodeName + "': " + std::to_string(baseMesh.size()) + " -> " + std::to_string(newMesh.size()) + " triangles.");
+                    replaceEvaluatedMesh(newMesh, baseMesh, "Modifiers Updated");
+                }
+
+                UIWidgets::Divider();
+            } else if (mesh_workspace_mode == SceneUI::MeshWorkspaceMode::Sculpt) {
+                ImGui::TextDisabled("Subdivision modifiers are available only in Edit workspace.");
+                ImGui::TextDisabled("Sculpt stays focused on brush-based surface editing.");
+                UIWidgets::Divider();
+            }
+
+            UIWidgets::ColoredHeader("WIP Features:", ImVec4(0.8f, 0.4f, 0.9f, 1.0f));
+            ImGui::BulletText("Mesh Sculpting Brush");
+        }
+
+        UIWidgets::EndSection();
+    }
+    UIWidgets::PopControlSurfaceStyle();
+}
+
+void SceneUI::drawPaintPanel(UIContext& ctx) {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(0.32f, 0.88f, 0.82f, 1.0f));
+    std::shared_ptr<Triangle> mesh_triangle = resolvePaintMesh(ctx);
+    TerrainObject* terrain = nullptr;
+    if (!mesh_triangle) {
+        terrain = resolvePaintTerrain(*this);
+    }
+
+    const std::string next_target_name = mesh_triangle ? mesh_triangle->getNodeName() : std::string();
+    if (!next_target_name.empty() && paint_mode_state.active_target_name != next_target_name) {
+        paint_mode_state.active_material_slot = 0;
+        paint_mode_state.stroke = Paint::PaintStroke{};
+    }
+
+    if (mesh_triangle) {
+        // Adapter creation for mesh targets is handled by drawMeshPaintPanel()
+        // which resolves the correct triangle for the active material slot.
+        // Setting it here would conflict with slot-based selection on
+        // multi-material objects, causing setAdapter to fire every frame
+        // and resetting active_layer_index.
+    } else if (terrain && terrain->splatMap) {
+        auto terrain_adapter = std::dynamic_pointer_cast<Paint::TerrainPaintAdapter>(paint_mode_state.getAdapter());
+        if (!terrain_adapter || terrain_adapter->getTerrain() != terrain) {
+            paint_mode_state.setAdapter(std::make_shared<Paint::TerrainPaintAdapter>(terrain));
+        }
+    } else {
+        paint_mode_state.clearAdapter();
+        paint_mode_state.enabled = false;
+    }
+
+    if (!UIWidgets::BeginSection("Paint Mode", ImVec4(0.95f, 0.55f, 0.30f, 1.0f))) {
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+
+    ImGui::TextWrapped("Fast, focused paint workflow. Terrain uses the existing splat painter backend, so viewport feedback stays light.");
+    UIWidgets::Divider();
+
+    if (!terrain && !mesh_triangle) {
+        ImGui::TextDisabled("Paint target: none");
+        ImGui::TextDisabled("Select a terrain for splat paint or a regular mesh for texture-set paint.");
+        UIWidgets::EndSection();
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+
+    bool enabled = paint_mode_state.enabled;
+    if (ImGui::Checkbox("Enable Paint Mode", &enabled)) {
+        paint_mode_state.enabled = enabled;
+        if (!paint_mode_state.enabled) {
+            terrain_brush.enabled = false;
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Compact", &paint_mode_state.compact_ui);
+
+    UIWidgets::Divider();
+    if (mesh_triangle) {
+        ImGui::Text("Target: %s", mesh_triangle->getNodeName().empty() ? "(unknown)" : mesh_triangle->getNodeName().c_str());
+        ImGui::TextDisabled("Target Type: Mesh");
+        ImGui::TextDisabled("Terrain paint, splat, and mask tools are hidden for this target.");
+    } else if (terrain) {
+        ImGui::Text("Target: %s", terrain->name.empty() ? "(unknown terrain)" : terrain->name.c_str());
+        ImGui::TextDisabled("Target Type: Terrain");
+        ImGui::TextDisabled("Mesh material slot and texture-set controls are hidden for this target.");
+    }
+    UIWidgets::Divider();
+
+    if (mesh_triangle) {
+        drawMeshPaintPanel(ctx, mesh_triangle);
+    } else if (terrain) {
+        drawTerrainPaintPanel(ctx, terrain);
+    }
+    UIWidgets::EndSection();
+    UIWidgets::PopControlSurfaceStyle();
+}
+
+void SceneUI::drawTerrainPaintPanel(UIContext& ctx, TerrainObject* terrain) {
+    if (!terrain) {
+        return;
+    }
+
+    if (terrain->layers.empty() || !terrain->splatMap) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.45f, 1.0f), "Terrain paint needs initialized layers and a splat map.");
+        if (UIWidgets::PrimaryButton("Initialize Terrain Layers", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            TerrainManager::getInstance().initLayers(terrain);
+            paint_mode_state.setAdapter(std::make_shared<Paint::TerrainPaintAdapter>(terrain));
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
+            }
+        }
+        return;
+    }
+
+    Paint::PaintSurfaceAdapterPtr adapter = paint_mode_state.getAdapter();
+    paint_mode_state.syncLayersFromAdapter();
+    paint_mode_state.clampActiveLayer();
+
+    Paint::PaintSurfaceTarget target = adapter ? adapter->getTarget() : Paint::PaintSurfaceTarget{};
+    ImGui::Text("Target: %s", target.display_name.empty() ? "(unknown)" : target.display_name.c_str());
+    ImGui::TextDisabled("Mode: Terrain splat paint");
+    ImGui::TextDisabled("Mesh-specific paint controls stay hidden while a terrain target is active.");
+
+    UIWidgets::Divider();
+    UIWidgets::ColoredHeader("Layers", ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+
+    if (!paint_mode_state.ui_layers.empty()) {
+        std::string active_layer_label = paint_mode_state.ui_layers[paint_mode_state.active_layer_index].name;
+        active_layer_label += " (Channel ";
+        active_layer_label += std::to_string(paint_mode_state.active_layer_index);
+        active_layer_label += ")";
+
+        if (ImGui::BeginCombo("Active Layer", active_layer_label.c_str())) {
+            for (int i = 0; i < static_cast<int>(paint_mode_state.ui_layers.size()); ++i) {
+                const bool selected = (paint_mode_state.active_layer_index == i);
+                std::string item_label = paint_mode_state.ui_layers[i].name;
+                item_label += " (Channel ";
+                item_label += std::to_string(i);
+                item_label += ")";
+                if (ImGui::Selectable(item_label.c_str(), selected)) {
+                    paint_mode_state.active_layer_index = i;
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+
+    if (terrain->splatMap && terrain->splatMap->is_loaded()) {
+        if (UIWidgets::IconActionButton("FillActiveLayerMask", UIWidgets::IconType::FillTool, "Fill Active Layer",
+                                        false, ImVec4(1.0f, 0.70f, 0.45f, 1.0f),
+                                        ImVec2(UIWidgets::GetInspectorActionWidth(), 34.0f),
+                                        "Fill the active terrain mask channel")) {
+            auto& pixels = terrain->splatMap->pixels;
+            for (auto& p : pixels) {
+                if (paint_mode_state.active_layer_index == 0) p.r = 255;
+                else if (paint_mode_state.active_layer_index == 1) p.g = 255;
+                else if (paint_mode_state.active_layer_index == 2) p.b = 255;
+                else if (paint_mode_state.active_layer_index == 3) p.a = 255;
+            }
+            terrain->splatMap->updateGPU();
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
+            }
+            SCENE_LOG_INFO("Filled terrain paint mask for active layer on: " + terrain->name);
+        }
+    }
+
+    UIWidgets::Divider();
+    UIWidgets::ColoredHeader("Brush", ImVec4(1.0f, 0.70f, 0.45f, 1.0f));
+    ImGui::SliderFloat("Radius", &paint_mode_state.brush.radius, 1.0f, 200.0f, "%.1f m");
+    ImGui::SliderFloat("Strength", &paint_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
+    ImGui::SliderFloat("Falloff", &paint_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
+    if (!paint_mode_state.compact_ui) {
+        ImGui::SliderFloat("Spacing", &paint_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+        ImGui::SliderFloat("Flow", &paint_mode_state.brush.flow, 0.1f, 2.0f, "%.2f");
+    }
+    ImGui::Checkbox("Show Brush Preview", &paint_mode_state.brush.show_preview);
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Viewport painting stays on the terrain brush path for now.");
+    syncPaintBrushToTerrain(*this, terrain);
+
+    UIWidgets::Divider();
+    UIWidgets::ColoredHeader("Mask & Splat Tools", ImVec4(0.85f, 0.68f, 0.40f, 1.0f));
+
+    ImGui::PushItemWidth(160.0f);
+    SceneUI::DrawSmartFloat("mhmin_paint", "Height Start", &terrain->am_height_min, 0.0f, 500.0f, "%.1f", false, nullptr, 12);
+    SceneUI::DrawSmartFloat("mhmax_paint", "Height End", &terrain->am_height_max, 0.0f, 500.0f, "%.1f", false, nullptr, 12);
+    SceneUI::DrawSmartFloat("mslope_paint", "Slope Steep", &terrain->am_slope, 1.0f, 20.0f, "%.1f", false, nullptr, 12);
+    SceneUI::DrawSmartFloat("mflow_paint", "Flow Thresh", &terrain->am_flow_threshold, 1.0f, 500.0f, "%.0f", false, nullptr, 12);
+    ImGui::PopItemWidth();
+
+    if (UIWidgets::PrimaryButton("Generate Mask##terrain_paint", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+        TerrainManager::getInstance().autoMask(terrain, 0.0f, 0.0f, terrain->am_height_min, terrain->am_height_max, terrain->am_slope);
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        SCENE_LOG_INFO("Auto-mask generated for: " + terrain->name);
+    }
+
+    if (UIWidgets::IconActionButton("ImportSplatMap", UIWidgets::IconType::Assets, "Import Splat Map",
+                                    false, ImVec4(0.92f, 0.72f, 0.42f, 1.0f),
+                                    ImVec2(UIWidgets::GetInspectorActionWidth(), 34.0f),
+                                    "Import a terrain splat map")) {
+        std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0All Files\0*.*\0");
+        if (!path.empty()) {
+            TerrainManager::getInstance().importSplatMap(terrain, path);
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
+            }
+        }
+    }
+
+    static float bake_flow_threshold = 25.0f;
+    ImGui::PushItemWidth(160.0f);
+    ImGui::DragFloat("Flow Bake Threshold##terrain_paint", &bake_flow_threshold, 1.0f, 1.0f, 500.0f, "%.0f");
+    ImGui::PopItemWidth();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Minimum flow accumulation written to alpha.");
+
+    if (UIWidgets::PrimaryButton("Bake Flow to Alpha##terrain_paint", ImVec2(UIWidgets::GetInspectorActionWidth() * 0.7f, 30))) {
+        if (terrain->splatMap && terrain->splatMap->is_loaded() && !terrain->flowMap.empty()) {
+            int w = terrain->heightmap.width;
+            int h = terrain->heightmap.height;
+            int sw = terrain->splatMap->width;
+            int sh = terrain->splatMap->height;
+
+            for (int y = 0; y < sh; y++) {
+                for (int x = 0; x < sw; x++) {
+                    float u = (float)x / (float)(sw > 1 ? sw - 1 : 1);
+                    float v = (float)y / (float)(sh > 1 ? sh - 1 : 1);
+                    int fx = std::clamp((int)(u * (w - 1) + 0.5f), 0, w - 1);
+                    int fy = std::clamp((int)(v * (h - 1) + 0.5f), 0, h - 1);
+
+                    float flowVal = terrain->flowMap[fy * w + fx];
+                    float flowNorm = fmaxf(0.0f, flowVal - terrain->am_flow_threshold);
+                    float final_A = 1.0f - expf(-flowNorm * 0.4f);
+                    final_A = std::clamp(final_A, 0.0f, 0.98f);
+
+                    terrain->splatMap->pixels[y * sw + x].a = (uint8_t)(final_A * 255.0f);
+                }
+            }
+            terrain->splatMap->updateGPU();
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            SCENE_LOG_INFO("Flow baked to splat alpha for: " + terrain->name);
+        } else {
+            SCENE_LOG_WARN("Please run erosion first to generate a flow map.");
+        }
+    }
+
+    if (ImGui::Button("Export Splat Map##terrain_paint", ImVec2(UIWidgets::GetInspectorActionWidth(), 30))) {
+        if (terrain->splatMap && !terrain->splatMap->pixels.empty()) {
+            std::string path = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
+            if (!path.empty()) {
+                TerrainManager::getInstance().exportSplatMap(terrain, path);
+                SCENE_LOG_INFO("Splat map exported to: " + path);
+            }
+        }
+    }
+}
+
+void SceneUI::drawMeshPaintPanel(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle) {
+    if (!meshTriangle) {
+        ImGui::TextDisabled("Mesh target unavailable.");
+        return;
+    }
+
+    const std::string obj_name = meshTriangle->getNodeName();
+    auto mesh_cache_it = mesh_cache.find(obj_name);
+    auto slots_it = material_slots_cache.find(obj_name);
+    if (mesh_cache_it == mesh_cache.end() || slots_it == material_slots_cache.end() || slots_it->second.empty()) {
+        ImGui::TextDisabled("Mesh slot cache unavailable.");
+        return;
+    }
+
+    auto& mesh_entries = mesh_cache_it->second;
+    auto& slot_ids = slots_it->second;
+    paint_mode_state.active_material_slot = std::clamp(
+        paint_mode_state.active_material_slot, 0, static_cast<int>(slot_ids.size()) - 1);
+
+    uint16_t slot_material_id = slot_ids[paint_mode_state.active_material_slot];
+    std::shared_ptr<Triangle> slot_triangle = findMeshTriangleForMaterial(mesh_entries, slot_material_id);
+    if (!slot_triangle) {
+        slot_triangle = meshTriangle;
+        slot_material_id = slot_triangle->getMaterialID();
+    }
+
+    auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+    if (!adapter || adapter->getTriangle() != slot_triangle) {
+        paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, slot_triangle));
+        adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+    }
+
+    if (!adapter) {
+        ImGui::TextDisabled("Mesh adapter unavailable.");
+        return;
+    }
+
+    const Paint::PaintSurfaceTarget target = adapter->getTarget();
+    ImGui::Text("Target: %s", target.display_name.empty() ? "(unknown)" : target.display_name.c_str());
+    ImGui::Text("Material: %s", adapter->getMaterialName().empty() ? "(unnamed)" : adapter->getMaterialName().c_str());
+    ImGui::TextDisabled("Mode: Mesh texture paint");
+    ImGui::TextDisabled("Terrain mask and splat controls stay hidden while a mesh target is active.");
+
+    UIWidgets::Divider();
+    UIWidgets::ColoredHeader("Slot", ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+
+    if (ImGui::BeginCombo("Material Slot", ("Slot " + std::to_string(paint_mode_state.active_material_slot)).c_str())) {
+        for (int i = 0; i < static_cast<int>(slot_ids.size()); ++i) {
+            const bool selected = (paint_mode_state.active_material_slot == i);
+            const std::string slot_name = MaterialManager::getInstance().getMaterialName(slot_ids[i]);
+            const std::string item_label =
+                "Slot " + std::to_string(i) + ": " + (slot_name.empty() ? "[Unnamed]" : slot_name);
+            if (ImGui::Selectable(item_label.c_str(), selected)) {
+                paint_mode_state.active_material_slot = i;
+            }
+            if (selected) {
+                ImGui::SetItemDefaultFocus();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::TextDisabled("Paint works per object-slot. Multi-material meshes should be edited slot by slot.");
+
+    UIWidgets::Divider();
+    UIWidgets::ColoredHeader("Binding", ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+
+    int shared_usage_count = countTrianglesUsingMaterial(mesh_entries, slot_material_id);
+    bool appears_shared = false;
+    for (const auto& entry : material_slots_cache) {
+        if (entry.first != obj_name) {
+            for (uint16_t mat_id : entry.second) {
+                if (mat_id == slot_material_id) {
+                    appears_shared = true;
+                    break;
+                }
+            }
+        }
+        if (appears_shared) break;
+    }
+
+    int binding_mode = static_cast<int>(paint_mode_state.material_binding_mode);
+    const char* binding_labels[] = { "Use Current Material", "Make Unique For Paint" };
+    if (ImGui::Combo("Binding Mode", &binding_mode, binding_labels, IM_ARRAYSIZE(binding_labels))) {
+        paint_mode_state.material_binding_mode = static_cast<Paint::MaterialBindingMode>(binding_mode);
+    }
+
+    if (appears_shared) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.45f, 1.0f), "Shared material detected.");
+        ImGui::TextDisabled("Painting current material may affect other objects using the same slot material.");
+    } else {
+        ImGui::TextDisabled("Current slot material appears local to this object.");
+    }
+    ImGui::TextDisabled("Triangles in this slot: %d", shared_usage_count);
+
+    UIWidgets::ColoredHeader("Texture Set", ImVec4(0.95f, 0.65f, 0.35f, 1.0f));
+
+    static const int resolutions[] = { 512, 1024, 2048, 4096 };
+    auto* texture_set = adapter->getTextureSet();
+
+    // Auto-restore: if a layer stack was loaded from a saved project but no
+    // texture set exists yet, create the texture set and composite from layers.
+    if (!texture_set || !texture_set->initialized) {
+        Paint::PaintLayerStack* loaded_stack = adapter->getLayerStack();
+        if (loaded_stack && !loaded_stack->empty() && loaded_stack->width() > 0) {
+            const int res = loaded_stack->width();
+            adapter->ensureTextureSet(res);
+            adapter->createTextureSet();
+            texture_set = adapter->getTextureSet();
+            if (texture_set && texture_set->initialized) {
+                loaded_stack->flattenInto(*texture_set);
+                adapter->bindTextureSetToMaterial();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+            }
+        }
+    }
+
+    const bool has_set = texture_set != nullptr && texture_set->initialized;
+    const std::shared_ptr<Texture> active_channel_texture =
+        texture_set ? texture_set->getTexture(paint_mode_state.active_channel) : nullptr;
+    const int effective_resolution = active_channel_texture
+        ? std::max(active_channel_texture->width, active_channel_texture->height)
+        : (texture_set && texture_set->resolution > 0 ? texture_set->resolution : paint_mode_state.requested_texture_resolution);
+    int current_resolution_index = 1;
+    for (int i = 0; i < 4; ++i) {
+        if (resolutions[i] == paint_mode_state.requested_texture_resolution) {
+            current_resolution_index = i;
+            break;
+        }
+    }
+    const char* resolution_labels[] = { "512", "1024", "2048", "4096" };
+    if (ImGui::Combo("Resolution", &current_resolution_index, resolution_labels, IM_ARRAYSIZE(resolution_labels))) {
+        paint_mode_state.requested_texture_resolution = resolutions[current_resolution_index];
+    }
+    if (has_set) {
+        ImGui::TextDisabled("Current set size stays unchanged until you press Resize Texture Set.");
+    }
+
+    int channel_index = static_cast<int>(paint_mode_state.active_channel);
+    const char* channel_labels[] = { "Base Color", "Normal", "Roughness", "Metallic", "Emission", "Height Mask", "Transmission" };
+    if (ImGui::Combo("Channel", &channel_index, channel_labels, IM_ARRAYSIZE(channel_labels))) {
+        paint_mode_state.active_channel = static_cast<Paint::PaintChannel>(channel_index);
+    }
+    ImGui::TextDisabled("Material Brush");
+    for (int i = 0; i < 7; ++i) {
+        const Paint::PaintChannel channel = static_cast<Paint::PaintChannel>(i);
+        if (channel == paint_mode_state.active_channel) {
+            continue;
+        }
+        bool enabled = paint_mode_state.linked_channels[static_cast<size_t>(i)];
+        if (ImGui::Checkbox(paintChannelDisplayName(channel), &enabled)) {
+            paint_mode_state.linked_channels[static_cast<size_t>(i)] = enabled;
+        }
+        if (channel == Paint::PaintChannel::BaseColor ||
+            channel == Paint::PaintChannel::Roughness ||
+            channel == Paint::PaintChannel::Emission) {
+            ImGui::SameLine();
+        }
+    }
+
+    const bool has_active_channel_texture = texture_set && texture_set->getTexture(paint_mode_state.active_channel) != nullptr;
+    if (has_active_channel_texture) {
+        ImGui::TextDisabled("Status: active channel ready");
+    } else if (has_set) {
+        ImGui::TextDisabled("Status: texture set ready, channel empty");
+    } else {
+        ImGui::TextDisabled("Status: no texture set yet");
+    }
+
+    if (paint_mode_state.material_binding_mode == Paint::MaterialBindingMode::MakeUniqueForPaint) {
+        if (UIWidgets::SecondaryButton("Make Unique Now", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            const uint16_t unique_material_id = makeObjectSlotPaintMaterialUnique(
+                ctx,
+                obj_name,
+                paint_mode_state.active_material_slot,
+                slot_material_id,
+                mesh_entries,
+                slot_ids);
+            slot_triangle = findMeshTriangleForMaterial(mesh_entries, unique_material_id);
+            if (slot_triangle) {
+                paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, slot_triangle));
+                adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+            }
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.backend_ptr) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                ctx.backend_ptr->resetAccumulation();
+            }
+            g_ProjectManager.markModified();
+        }
+    }
+
+    const char* create_button_label = !has_set
+        ? "Create Texture Set"
+        : (has_active_channel_texture ? "Ensure Channel Texture" : "Create Channel Texture");
+    if (UIWidgets::PrimaryButton(create_button_label, ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+        uint16_t paint_material_id = slot_material_id;
+        if (paint_mode_state.material_binding_mode == Paint::MaterialBindingMode::MakeUniqueForPaint) {
+            paint_material_id = makeObjectSlotPaintMaterialUnique(
+                ctx,
+                obj_name,
+                paint_mode_state.active_material_slot,
+                slot_material_id,
+                mesh_entries,
+                slot_ids);
+        }
+
+        slot_triangle = findMeshTriangleForMaterial(mesh_entries, paint_material_id);
+        if (slot_triangle) {
+            paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, slot_triangle));
+            adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+        }
+        if (!adapter) {
             return;
         }
 
-        std::string selectedNodeName = ctx.selection.selected.object->getNodeName();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Selected: %s", selectedNodeName.c_str());
-        UIWidgets::Divider();
+        adapter->ensureTextureSet(paint_mode_state.requested_texture_resolution);
+        if (!has_set) {
+            adapter->createTextureSet();
+        } else {
+            adapter->assignTextureToChannel(paint_mode_state.active_channel);
+        }
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            ctx.renderer.updateBackendMaterials(ctx.scene);
+            ctx.backend_ptr->resetAccumulation();
+        }
+        g_ProjectManager.markModified();
+    }
 
-        // 1. Lazy initialize base mesh cache if not present
-        if (ctx.scene.base_mesh_cache.find(selectedNodeName) == ctx.scene.base_mesh_cache.end()) {
-            std::vector<std::shared_ptr<Triangle>> baseTriangles;
-            for (const auto& obj : ctx.scene.world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (tri && tri->getNodeName() == selectedNodeName) {
-                    baseTriangles.push_back(tri);
+    texture_set = adapter->getTextureSet();
+    if (texture_set) {
+        ImGui::Spacing();
+        if (texture_set->initialized) {
+            ImGui::TextDisabled("Set Resolution: %d", texture_set->resolution > 0 ? texture_set->resolution : effective_resolution);
+            if (effective_resolution != paint_mode_state.requested_texture_resolution) {
+                if (UIWidgets::SecondaryButton("Resize Texture Set", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                    if (adapter->resizeTextureSet(paint_mode_state.requested_texture_resolution)) {
+                        texture_set = adapter->getTextureSet();
+                        ctx.renderer.resetCPUAccumulation();
+                        if (ctx.backend_ptr) {
+                            ctx.renderer.updateBackendMaterials(ctx.scene);
+                            ctx.backend_ptr->resetAccumulation();
+                        }
+                        g_ProjectManager.markModified();
+                    }
                 }
             }
-            if (!baseTriangles.empty()) {
-                ctx.scene.base_mesh_cache[selectedNodeName] = baseTriangles;
+        } else {
+            ImGui::TextDisabled("Texture set reset. Resolution can be changed before recreating.");
+        }
+        if (texture_set->initialized && texture_set->wasSeededFromExisting(paint_mode_state.active_channel)) {
+            ImGui::TextDisabled("Seed: existing texture");
+            const std::string& source_name = texture_set->getSourceTextureName(paint_mode_state.active_channel);
+            if (!source_name.empty()) {
+                ImGui::TextDisabled("Source: %s", source_name.c_str());
+            }
+        } else if (texture_set->initialized) {
+            ImGui::TextDisabled("Seed: blank texture");
+        }
+        // Per-channel texture import/export slots
+        drawPaintChannelTextureSlots(ctx, adapter.get());
+
+        if (UIWidgets::SecondaryButton("Export All Channels", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            const std::string folder_hint = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
+            if (!folder_hint.empty()) {
+                const std::filesystem::path folder_path = utf8PathFromString(folder_hint).parent_path() /
+                    (texture_set->target_node_name.empty() ? "paint_export" : (texture_set->target_node_name + "_paint"));
+                if (exportTextureSetChannels(*texture_set, folder_path)) {
+                    ImGui::SetTooltip("Exported set to: %s", folder_path.string().c_str());
+                }
             }
         }
 
-        // Get reference to stack
-        auto& modifierStack = ctx.scene.mesh_modifiers[selectedNodeName];
+        // Bake Layers & Export: flatten all layers into baked textures, then export.
+        Paint::PaintLayerStack* export_stack = adapter->getLayerStack();
+        const bool has_layers = export_stack && export_stack->layerCount() > 1;
+        if (has_layers) {
+            if (UIWidgets::SecondaryButton("Bake Layers & Export", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+                const std::string folder_hint = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
+                if (!folder_hint.empty()) {
+                    // Flatten layers into the texture set first
+                    export_stack->flattenInto(*texture_set);
+                    adapter->bindTextureSetToMaterial();
 
-        bool stackChanged = false;
-
-        // 2. Draw existing modifiers
-        for (size_t i = 0; i < modifierStack.modifiers.size(); ++i) {
-            auto& mod = modifierStack.modifiers[i];
-            
-            ImGui::PushID(static_cast<int>(i));
-            if (UIWidgets::BeginSection(mod.name.c_str(), ImVec4(0.4f, 0.6f, 0.9f, 1.0f))) {
-                
-                if (ImGui::Checkbox("Enabled", &mod.enabled)) stackChanged = true;
-                
-                ImGui::SameLine();
-                if (ImGui::Button("Delete")) {
-                    modifierStack.modifiers.erase(modifierStack.modifiers.begin() + i);
-                    stackChanged = true;
-                    UIWidgets::EndSection();
-                    ImGui::PopID();
-                    break; // iterator invalidated
+                    const std::filesystem::path folder_path = utf8PathFromString(folder_hint).parent_path() /
+                        (texture_set->target_node_name.empty() ? "paint_baked" : (texture_set->target_node_name + "_baked"));
+                    if (exportTextureSetChannels(*texture_set, folder_path)) {
+                        SCENE_LOG_INFO("Baked and exported layers to: " + folder_path.string());
+                    }
                 }
-
-                if (mod.type == MeshModifiers::ModifierType::FlatSubdivision || mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
-                    if (ImGui::SliderInt("Levels", &mod.levels, 1, 4)) stackChanged = true;
-                }
-                
-                if (mod.type == MeshModifiers::ModifierType::SmoothSubdivision) {
-                    if (ImGui::SliderFloat("Smooth Weight", &mod.smoothAngle, 0.0f, 1.0f)) stackChanged = true;
-                }
-
-                UIWidgets::EndSection();
             }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Flatten all layers and export baked textures as PNG files.");
+            }
+        }
+
+        if (UIWidgets::SecondaryButton("Restore Original Material", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            if (adapter->restoreOriginalMaterialTextures()) {
+                texture_set = adapter->getTextureSet();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                g_ProjectManager.markModified();
+            }
+        }
+        const bool has_height_mask = texture_set->getTexture(Paint::PaintChannel::Mask) != nullptr;
+        ImGui::Spacing();
+        ImGui::TextDisabled("Height To Normal");
+        ImGui::SliderFloat("Normal Strength", &paint_mode_state.height_to_normal_strength, 0.1f, 32.0f, "%.2f");
+        ImGui::Checkbox("Clear Height After Bake", &paint_mode_state.clear_height_after_bake);
+        ImGui::BeginDisabled(!has_height_mask);
+        if (UIWidgets::SecondaryButton("Generate Normal From Height", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            adapter->ensureTextureSet(paint_mode_state.requested_texture_resolution);
+            adapter->assignTextureToChannel(Paint::PaintChannel::Normal);
+            Paint::PaintTextureSet* refreshed_set = adapter->getTextureSet();
+            std::shared_ptr<Texture> normal_texture = refreshed_set ? refreshed_set->getTexture(Paint::PaintChannel::Normal) : nullptr;
+            const std::vector<CompactVec4> before_pixels = normal_texture ? normal_texture->pixels : std::vector<CompactVec4>{};
+            if (adapter->generateNormalFromHeight(paint_mode_state.height_to_normal_strength)) {
+                refreshed_set = adapter->getTextureSet();
+                normal_texture = refreshed_set ? refreshed_set->getTexture(Paint::PaintChannel::Normal) : nullptr;
+                if (normal_texture) {
+                    history.record(std::make_unique<PaintTextureCommand>(
+                        adapter->getNodeName(),
+                        adapter->getMaterialID(),
+                        normal_texture,
+                        before_pixels,
+                        normal_texture->pixels));
+                }
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                g_ProjectManager.markModified();
+            }
+        }
+        if (UIWidgets::SecondaryButton("Bake Current Height To Normal", ImVec2(UIWidgets::GetInspectorActionWidth(), 0))) {
+            adapter->ensureTextureSet(paint_mode_state.requested_texture_resolution);
+            adapter->assignTextureToChannel(Paint::PaintChannel::Normal);
+            Paint::PaintTextureSet* refreshed_set = adapter->getTextureSet();
+            std::shared_ptr<Texture> normal_texture = refreshed_set ? refreshed_set->getTexture(Paint::PaintChannel::Normal) : nullptr;
+            std::shared_ptr<Texture> height_texture = refreshed_set ? refreshed_set->getTexture(Paint::PaintChannel::Mask) : nullptr;
+            const std::vector<CompactVec4> normal_before_pixels = normal_texture ? normal_texture->pixels : std::vector<CompactVec4>{};
+            const std::vector<CompactVec4> height_before_pixels = height_texture ? height_texture->pixels : std::vector<CompactVec4>{};
+            if (adapter->bakeHeightIntoNormal(
+                    paint_mode_state.height_to_normal_strength,
+                    paint_mode_state.clear_height_after_bake)) {
+                refreshed_set = adapter->getTextureSet();
+                normal_texture = refreshed_set ? refreshed_set->getTexture(Paint::PaintChannel::Normal) : nullptr;
+                height_texture = refreshed_set ? refreshed_set->getTexture(Paint::PaintChannel::Mask) : nullptr;
+                auto composite = std::make_unique<CompositeSceneCommand>(
+                    "Bake Height To Normal " + adapter->getNodeName());
+                if (normal_texture) {
+                    composite->add(std::make_unique<PaintTextureCommand>(
+                        adapter->getNodeName(),
+                        adapter->getMaterialID(),
+                        normal_texture,
+                        normal_before_pixels,
+                        normal_texture->pixels));
+                }
+                if (paint_mode_state.clear_height_after_bake && height_texture) {
+                    composite->add(std::make_unique<PaintTextureCommand>(
+                        adapter->getNodeName(),
+                        adapter->getMaterialID(),
+                        height_texture,
+                        height_before_pixels,
+                        height_texture->pixels));
+                }
+                if (!composite->empty()) {
+                    history.record(std::move(composite));
+                }
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                g_ProjectManager.markModified();
+            }
+        }
+        ImGui::EndDisabled();
+        if (!has_height_mask) {
+            ImGui::TextDisabled("Paint a Height Mask first.");
+        } else {
+            ImGui::TextDisabled("Bake fixes current height detail into the normal result.");
+        }
+    }
+
+    UIWidgets::Divider();
+    UIWidgets::ColoredHeader("Brush", ImVec4(1.0f, 0.70f, 0.45f, 1.0f));
+    ImGui::TextDisabled("Brush controls are docked to the right side of the viewport while Paint Mode is active.");
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("Paints on the active layer and channel.");
+    ImGui::TextDisabled("Existing textures are seeded first, then composited through the layer stack.");
+    if (texture_set && texture_set->initialized) {
+        ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "Selection locked to active paint target.");
+    }
+}
+
+// ======================== Paint Layer Panel ========================
+
+// ---------- Layer Thumbnail helpers ----------
+
+void SceneUI::releaseLayerThumbnails() {
+    for (auto& entry : layer_thumb_cache) entry.release();
+    layer_thumb_cache.clear();
+}
+
+namespace {
+
+// Fast hash of pixel data for change detection (sample a few pixels).
+uint64_t hashLayerChannel(const std::vector<CompactVec4>& pixels) {
+    if (pixels.empty()) return 0;
+    uint64_t h = pixels.size();
+    const size_t step = std::max<size_t>(1, pixels.size() / 64);
+    for (size_t i = 0; i < pixels.size(); i += step) {
+        const auto& p = pixels[i];
+        h ^= (static_cast<uint64_t>(p.r) << 24 | static_cast<uint64_t>(p.g) << 16 |
+               static_cast<uint64_t>(p.b) << 8 | static_cast<uint64_t>(p.a)) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    }
+    return h;
+}
+
+// Downsample layer channel pixels to a small RGBA buffer (thumb_size x thumb_size).
+void downsampleToThumb(const std::vector<CompactVec4>& src, int src_w, int src_h,
+                       std::vector<uint8_t>& dst_rgba, int thumb_size) {
+    dst_rgba.resize(static_cast<size_t>(thumb_size) * thumb_size * 4);
+    if (src.empty() || src_w <= 0 || src_h <= 0) {
+        // Checkerboard pattern for empty layers
+        for (int y = 0; y < thumb_size; ++y) {
+            for (int x = 0; x < thumb_size; ++x) {
+                const size_t idx = (static_cast<size_t>(y) * thumb_size + x) * 4;
+                const uint8_t c = ((x / 4 + y / 4) % 2 == 0) ? 40 : 55;
+                dst_rgba[idx + 0] = c; dst_rgba[idx + 1] = c;
+                dst_rgba[idx + 2] = c; dst_rgba[idx + 3] = 255;
+            }
+        }
+        return;
+    }
+    const float sx = static_cast<float>(src_w) / static_cast<float>(thumb_size);
+    const float sy = static_cast<float>(src_h) / static_cast<float>(thumb_size);
+    for (int y = 0; y < thumb_size; ++y) {
+        for (int x = 0; x < thumb_size; ++x) {
+            const int src_x = std::min(static_cast<int>(x * sx), src_w - 1);
+            const int src_y = std::min(static_cast<int>(y * sy), src_h - 1);
+            const auto& p = src[static_cast<size_t>(src_y) * src_w + src_x];
+            const size_t idx = (static_cast<size_t>(y) * thumb_size + x) * 4;
+            // Alpha-blend over checkerboard
+            const float a = static_cast<float>(p.a) / 255.0f;
+            const uint8_t bg = ((x / 4 + y / 4) % 2 == 0) ? 40 : 55;
+            dst_rgba[idx + 0] = static_cast<uint8_t>(p.r * a + bg * (1.0f - a));
+            dst_rgba[idx + 1] = static_cast<uint8_t>(p.g * a + bg * (1.0f - a));
+            dst_rgba[idx + 2] = static_cast<uint8_t>(p.b * a + bg * (1.0f - a));
+            dst_rgba[idx + 3] = 255;
+        }
+    }
+}
+
+} // anonymous namespace
+
+SDL_Texture* SceneUI::getOrCreateLayerThumbnail(UIContext& ctx, Paint::PaintLayerData* layer,
+                                                 Paint::PaintChannel channel) {
+    if (!layer) return nullptr;
+    constexpr int THUMB_SIZE = 36;
+
+    const size_t ch_idx = static_cast<size_t>(channel);
+    const auto& pixels = layer->channel_pixels[ch_idx];
+    const uint64_t current_hash = hashLayerChannel(pixels);
+
+    // Find existing cache entry
+    for (auto& entry : layer_thumb_cache) {
+        if (entry.layer_id == layer->id) {
+            if (entry.content_hash == current_hash && entry.texture) {
+                return entry.texture;
+            }
+            // Update existing
+            std::vector<uint8_t> rgba;
+            downsampleToThumb(pixels, layer->width, layer->height, rgba, THUMB_SIZE);
+            if (!entry.texture) {
+                SDL_Renderer* sdl_r = ctx.renderer.sdlRenderer;
+                if (sdl_r) {
+                    entry.texture = SDL_CreateTexture(sdl_r, SDL_PIXELFORMAT_RGBA32,
+                                                      SDL_TEXTUREACCESS_STREAMING, THUMB_SIZE, THUMB_SIZE);
+                }
+            }
+            if (entry.texture) {
+                SDL_UpdateTexture(entry.texture, nullptr, rgba.data(), THUMB_SIZE * 4);
+            }
+            entry.content_hash = current_hash;
+            return entry.texture;
+        }
+    }
+
+    // Create new
+    LayerThumbEntry entry;
+    entry.layer_id = layer->id;
+    entry.content_hash = current_hash;
+    SDL_Renderer* sdl_r = ctx.renderer.sdlRenderer;
+    if (sdl_r) {
+        entry.texture = SDL_CreateTexture(sdl_r, SDL_PIXELFORMAT_RGBA32,
+                                           SDL_TEXTUREACCESS_STREAMING, THUMB_SIZE, THUMB_SIZE);
+        if (entry.texture) {
+            std::vector<uint8_t> rgba;
+            downsampleToThumb(pixels, layer->width, layer->height, rgba, THUMB_SIZE);
+            SDL_UpdateTexture(entry.texture, nullptr, rgba.data(), THUMB_SIZE * 4);
+        }
+    }
+    layer_thumb_cache.push_back(entry);
+    return entry.texture;
+}
+
+void SceneUI::drawPaintLayerPanel(UIContext& ctx, Paint::MeshPaintAdapter* adapter) {
+    if (!adapter) return;
+
+    Paint::PaintTextureSet* tex_set = adapter->getTextureSet();
+    if (!tex_set || !tex_set->initialized) {
+        paint_mode_state.bindLayerStack(nullptr);
+        ImGui::TextDisabled("Create a texture set to enable layers.");
+        return;
+    }
+
+    Paint::PaintLayerStack& stack = adapter->ensureLayerStack();
+    if (paint_mode_state.getBoundLayerStack() != &stack)
+        paint_mode_state.bindLayerStack(&stack);
+
+    const float panel_width = ImGui::GetContentRegionAvail().x;
+    const int layer_count = stack.layerCount();
+    const ImGuiStyle& style = ImGui::GetStyle();
+
+    // -------- header row: "Layers" + blend + opacity --------
+    Paint::PaintLayerData* active = stack.layerAt(paint_mode_state.active_layer_index);
+    {
+        ImGui::TextColored(ImVec4(0.55f, 0.78f, 1.0f, 1.0f), "Layers");
+        if (active) {
+            // Blend mode right of header
+            ImGui::SameLine();
+            const float remaining = ImGui::GetContentRegionAvail().x;
+            const float combo_w = remaining * 0.5f;
+            const float slider_w = remaining - combo_w - style.ItemSpacing.x;
+
+            const char* blend_labels[] = { "Normal", "Add", "Multiply", "Screen", "Overlay" };
+            int blend = static_cast<int>(active->meta.blend_mode);
+            ImGui::SetNextItemWidth(combo_w);
+            if (ImGui::Combo("##blend", &blend, blend_labels, Paint::kLayerBlendModeCount)) {
+                active->meta.blend_mode = static_cast<Paint::LayerBlendMode>(blend);
+                paint_mode_state.syncLayersFromStack();
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(slider_w);
+            float opacity = active->meta.opacity;
+            if (ImGui::SliderFloat("##opacity", &opacity, 0.0f, 1.0f, "%.2f")) {
+                active->meta.opacity = opacity;
+                paint_mode_state.syncLayersFromStack();
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity");
+        }
+    }
+
+    // -------- layer list (top = highest, Photoshop order) --------
+    constexpr float ROW_HEIGHT = 32.0f;
+    constexpr float EYE_COL_W = 22.0f;
+    constexpr float LOCK_COL_W = 20.0f;
+    {
+        // Clamp stored height
+        paint_layer_list_height = std::clamp(paint_layer_list_height, 60.0f, 500.0f);
+        ImGui::BeginChild("##layer_list", ImVec2(panel_width, paint_layer_list_height), true);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        for (int i = layer_count - 1; i >= 0; --i) {
+            Paint::PaintLayerData* ld = stack.layerAt(i);
+            if (!ld) continue;
+
+            ImGui::PushID(i);
+            const bool is_active = (paint_mode_state.active_layer_index == i);
+            const ImVec2 row_min = ImGui::GetCursorScreenPos();
+            const float row_w = ImGui::GetContentRegionAvail().x;
+            const ImVec2 row_max(row_min.x + row_w, row_min.y + ROW_HEIGHT);
+
+            // --- Row background ---
+            if (is_active) {
+                dl->AddRectFilled(row_min, row_max, IM_COL32(50, 85, 140, 140), 3.0f);
+                dl->AddRect(row_min, row_max, IM_COL32(90, 150, 255, 200), 3.0f);
+            } else {
+                dl->AddRectFilled(row_min, row_max, IM_COL32(42, 42, 48, 220), 2.0f);
+            }
+
+            // --- Eye toggle (real checkbox, not InvisibleButton) ---
+            ImGui::SetCursorScreenPos(ImVec2(row_min.x + 3.0f, row_min.y + (ROW_HEIGHT - 16.0f) * 0.5f));
+            bool vis = ld->meta.visible;
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+            if (ImGui::Checkbox("##vis", &vis)) {
+                ld->meta.visible = vis;
+                paint_mode_state.syncLayersFromStack();
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+            ImGui::PopStyleVar();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(vis ? "Hide" : "Show");
+
+            // --- Layer name (Selectable for row selection) ---
+            ImGui::SameLine();
+            ImGui::SetCursorScreenPos(ImVec2(row_min.x + EYE_COL_W + 2.0f, row_min.y));
+            const float selectable_w = row_w - EYE_COL_W - LOCK_COL_W - 6.0f;
+
+            ImGui::PushStyleColor(ImGuiCol_Header, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, IM_COL32(0, 0, 0, 0));
+            // Dim hidden layers
+            if (!ld->meta.visible) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.45f, 0.48f, 1.0f));
+            if (ImGui::Selectable(ld->meta.name.c_str(), is_active,
+                                  ImGuiSelectableFlags_AllowItemOverlap,
+                                  ImVec2(selectable_w, ROW_HEIGHT))) {
+                paint_mode_state.active_layer_index = i;
+            }
+            if (!ld->meta.visible) ImGui::PopStyleColor();
+            ImGui::PopStyleColor(3);
+
+            // --- Lock toggle ---
+            ImGui::SameLine();
+            ImGui::SetCursorScreenPos(ImVec2(row_max.x - LOCK_COL_W,
+                                              row_min.y + (ROW_HEIGHT - 16.0f) * 0.5f));
+            bool lck = ld->meta.locked;
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+            if (ImGui::Checkbox("##lck", &lck)) {
+                ld->meta.locked = lck;
+                paint_mode_state.syncLayersFromStack();
+            }
+            ImGui::PopStyleVar();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(lck ? "Unlock" : "Lock");
+
+            // Advance cursor
+            ImGui::SetCursorScreenPos(ImVec2(row_min.x, row_max.y + 1.0f));
             ImGui::PopID();
         }
 
-        UIWidgets::Divider();
+        ImGui::EndChild();
 
-        // 3. Add new modifier
-        UIWidgets::ColoredHeader("Add Modifier", ImVec4(0.5f, 0.8f, 1.0f, 1.0f));
-        if (ImGui::Button("Flat Subdivision", ImVec2(-1, 0))) {
-            MeshModifiers::ModifierData newMod;
-            newMod.name = "Flat Subdivision";
-            newMod.type = MeshModifiers::ModifierType::FlatSubdivision;
-            modifierStack.modifiers.push_back(newMod);
-            stackChanged = true;
-        }
-        if (ImGui::Button("Smooth Subdivision", ImVec2(-1, 0))) {
-            MeshModifiers::ModifierData newMod;
-            newMod.name = "Smooth Subdivision";
-            newMod.type = MeshModifiers::ModifierType::SmoothSubdivision;
-            modifierStack.modifiers.push_back(newMod);
-            stackChanged = true;
-        }
-
-        // 4. Evaluate stack if changed
-        if (stackChanged) {
-            SCENE_LOG_INFO("Evaluating Modifier Stack for '" + selectedNodeName + "'...");
-            
-            // 4a. Get base geometry
-            const auto& baseMesh = ctx.scene.base_mesh_cache[selectedNodeName];
-            
-            // 4b. Evaluate
-            auto newMesh = modifierStack.evaluate(baseMesh);
-            
-            // 4c. Replace in scene
-            std::vector<std::shared_ptr<Hittable>> remainingObjects;
-            for (const auto& obj : ctx.scene.world.objects) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(obj);
-                if (!tri || tri->getNodeName() != selectedNodeName) {
-                    remainingObjects.push_back(obj);
-                }
+        // Resize handle: drag bottom edge of layer list
+        {
+            const ImVec2 handle_min = ImGui::GetCursorScreenPos();
+            const ImVec2 handle_max(handle_min.x + panel_width, handle_min.y + 6.0f);
+            ImGui::InvisibleButton("##layer_resize", ImVec2(panel_width, 6.0f));
+            if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            if (ImGui::IsItemActive()) {
+                paint_layer_list_height += ImGui::GetIO().MouseDelta.y;
+                paint_layer_list_height = std::clamp(paint_layer_list_height, 60.0f, 500.0f);
             }
-            
-            for (const auto& tri : newMesh) {
-                remainingObjects.push_back(tri);
-            }
-            
-            ctx.scene.world.objects = remainingObjects;
+            // Visual handle bar
+            ImDrawList* hdl = ImGui::GetWindowDrawList();
+            const float cx = (handle_min.x + handle_max.x) * 0.5f;
+            const float cy = (handle_min.y + handle_max.y) * 0.5f;
+            const ImU32 hcol = ImGui::IsItemHovered() ? IM_COL32(120, 160, 220, 200)
+                                                       : IM_COL32(80, 80, 90, 150);
+            hdl->AddLine(ImVec2(cx - 16.0f, cy), ImVec2(cx + 16.0f, cy), hcol, 2.0f);
+        }
+    }
 
-            // Make sure selection is valid
-            if (!newMesh.empty()) {
-                ctx.selection.selected.object = newMesh[0];
-            } else if (!baseMesh.empty()) {
-                ctx.selection.selected.object = baseMesh[0];
-            } // else handling deleting all?
-            
-            SCENE_LOG_INFO("Evaluated mesh '" + selectedNodeName + "': " + std::to_string(baseMesh.size()) + " -> " + std::to_string(newMesh.size()) + " triangles.");
-
-            // 4d. Rebuild acceleration structures
-            rebuildMeshCache(ctx.scene.world.objects);
-            ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-            ctx.renderer.resetCPUAccumulation();
-            if (ctx.backend_ptr) ctx.renderer.rebuildBackendGeometry(ctx.scene);
-
-            addViewportMessage("Modifiers Updated");
+    // -------- active layer name edit --------
+    if (active) {
+        char name_buf[128];
+        snprintf(name_buf, sizeof(name_buf), "%s", active->meta.name.c_str());
+        ImGui::SetNextItemWidth(panel_width);
+        if (ImGui::InputText("##layer_name", name_buf, sizeof(name_buf))) {
+            active->meta.name = name_buf;
+            paint_mode_state.syncLayersFromStack();
             g_ProjectManager.markModified();
         }
+    }
 
-        UIWidgets::Divider();
-        UIWidgets::ColoredHeader("WIP Features:", ImVec4(0.8f, 0.4f, 0.9f, 1.0f));
-        ImGui::BulletText("Mesh Sculpting Brush");
+    // -------- bottom toolbar (centered) --------
+    {
+        const float btn_w = 26.0f;
+        const float btn_h = 22.0f;
+        const int btn_count = 7;
+        const float spacing = 2.0f;
+        const float total_w = btn_w * btn_count + spacing * (btn_count - 1);
+        const float offset = (panel_width - total_w) * 0.5f;
+        if (offset > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + offset);
 
-        UIWidgets::EndSection();
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(spacing, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+
+        if (ImGui::Button("+##add", ImVec2(btn_w, btn_h))) {
+            const int idx = paint_mode_state.addLayerAboveCurrent();
+            if (idx >= 0) {
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Layer");
+
+        ImGui::SameLine();
+        if (ImGui::Button("D##dup", ImVec2(btn_w, btn_h))) {
+            if (paint_mode_state.duplicateCurrentLayer() >= 0) {
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Duplicate");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(paint_mode_state.active_layer_index >= layer_count - 1);
+        if (ImGui::Button("^##up", ImVec2(btn_w, btn_h))) {
+            if (paint_mode_state.moveCurrentLayer(1)) {
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move Up");
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(paint_mode_state.active_layer_index <= 0);
+        if (ImGui::Button("v##dn", ImVec2(btn_w, btn_h))) {
+            if (paint_mode_state.moveCurrentLayer(-1)) {
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Move Down");
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(paint_mode_state.active_layer_index <= 0);
+        if (ImGui::Button("M##mrg", ImVec2(btn_w, btn_h))) {
+            if (paint_mode_state.mergeCurrentLayerDown()) {
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Merge Down");
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(layer_count <= 1);
+        if (ImGui::Button("F##flat", ImVec2(btn_w, btn_h))) {
+            paint_mode_state.flattenAllLayers();
+            adapter->compositeAndUpload();
+            ctx.renderer.resetCPUAccumulation();
+            if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+            g_ProjectManager.markModified();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flatten All");
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(layer_count <= 1);
+        if (ImGui::Button("X##del", ImVec2(btn_w, btn_h))) {
+            if (paint_mode_state.removeCurrentLayer()) {
+                adapter->compositeAndUpload();
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
+                g_ProjectManager.markModified();
+            }
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Delete Layer");
+        ImGui::EndDisabled();
+
+        ImGui::PopStyleVar(2);
+    }
+}
+
+// ======================== Per-Channel Texture Slots ========================
+
+void SceneUI::drawPaintChannelTextureSlots(UIContext& ctx, Paint::MeshPaintAdapter* adapter) {
+    if (!adapter) return;
+
+    Paint::PaintTextureSet* texture_set = adapter->getTextureSet();
+    if (!texture_set || !texture_set->initialized) return;
+
+    UIWidgets::ColoredHeader("Channel Textures", ImVec4(0.75f, 0.88f, 0.55f, 1.0f));
+
+    // Compact channel overview — colored indicators for all 7 channels
+    {
+        const char* short_labels[] = { "BC", "N", "R", "M", "E", "H", "T" };
+        const char* long_labels[] = { "Base Color", "Normal", "Roughness", "Metallic", "Emission", "Height Mask", "Transmission" };
+        for (int ch = 0; ch < 7; ++ch) {
+            if (ch > 0) ImGui::SameLine(0.0f, 4.0f);
+            const bool has_tex = texture_set->getTexture(static_cast<Paint::PaintChannel>(ch)) != nullptr;
+            const bool is_active = (ch == static_cast<int>(paint_mode_state.active_channel));
+            ImVec4 color = has_tex
+                ? (is_active ? ImVec4(0.3f, 1.0f, 0.5f, 1.0f) : ImVec4(0.6f, 0.8f, 0.6f, 1.0f))
+                : ImVec4(0.5f, 0.5f, 0.5f, 0.6f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::Text("[%s]", short_labels[ch]);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) {
+                std::shared_ptr<Texture> t = texture_set->getTexture(static_cast<Paint::PaintChannel>(ch));
+                if (t) ImGui::SetTooltip("%s: %dx%d", long_labels[ch], t->width, t->height);
+                else   ImGui::SetTooltip("%s: Empty", long_labels[ch]);
+            }
+        }
+    }
+
+    // Active channel detail — import / export for the selected channel only
+    const auto active_ch = paint_mode_state.active_channel;
+    std::shared_ptr<Texture> active_tex = texture_set->getTexture(active_ch);
+    const char* ch_name = paintChannelDisplayName(active_ch);
+
+    if (active_tex) {
+        ImGui::Text("%s: %d x %d", ch_name, active_tex->width, active_tex->height);
+    } else {
+        ImGui::TextDisabled("%s: Empty", ch_name);
+    }
+
+    // Source info
+    if (texture_set->wasSeededFromExisting(active_ch)) {
+        const std::string& src_name = texture_set->getSourceTextureName(active_ch);
+        if (!src_name.empty()) {
+            std::string short_name = src_name;
+            const auto last_sep = src_name.find_last_of("/\\");
+            if (last_sep != std::string::npos)
+                short_name = src_name.substr(last_sep + 1);
+            if (short_name.size() > 24)
+                short_name = "..." + short_name.substr(short_name.size() - 21);
+            ImGui::TextDisabled("Source: %s", short_name.c_str());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", src_name.c_str());
+        }
+    }
+
+    // Import / Export buttons side by side for active channel
+    const float btn_w = (UIWidgets::GetInspectorActionWidth() - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+    if (ImGui::Button("Import##ch_active", ImVec2(btn_w, 0))) {
+        const std::string path = SceneUI::openFileDialogW(
+            L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0", "", "");
+        if (!path.empty()) {
+            auto imported = std::make_shared<Texture>(path, TextureType::Unknown);
+            if (imported && imported->is_loaded() && !imported->pixels.empty()) {
+                const int target_res = texture_set->resolution > 0 ? texture_set->resolution : 1024;
+                if (imported->width != target_res || imported->height != target_res) {
+                    std::vector<CompactVec4> resized(
+                        static_cast<size_t>(target_res) * static_cast<size_t>(target_res));
+                    for (int y = 0; y < target_res; ++y) {
+                        for (int x = 0; x < target_res; ++x) {
+                            const float u = static_cast<float>(x) / static_cast<float>(target_res - 1);
+                            const float v = static_cast<float>(y) / static_cast<float>(target_res - 1);
+                            const int sx = std::clamp(static_cast<int>(u * (imported->width - 1) + 0.5f), 0, imported->width - 1);
+                            const int sy = std::clamp(static_cast<int>(v * (imported->height - 1) + 0.5f), 0, imported->height - 1);
+                            resized[y * target_res + x] = imported->pixels[sy * imported->width + sx];
+                        }
+                    }
+                    imported->pixels = std::move(resized);
+                    imported->width = target_res;
+                    imported->height = target_res;
+                }
+
+                std::shared_ptr<Texture>& target_ref = texture_set->getTextureRef(active_ch);
+                if (!target_ref) {
+                    target_ref = imported;
+                } else {
+                    target_ref->pixels = imported->pixels;
+                    target_ref->width = imported->width;
+                    target_ref->height = imported->height;
+                    target_ref->m_is_loaded = true;
+                }
+                texture_set->setSourceInfo(active_ch, true, path);
+                texture_set->setSourceTexture(active_ch, imported);
+
+                adapter->bindTextureSetToMaterial();
+                if (target_ref->isUploaded()) {
+                    target_ref->updateGPU();
+                } else {
+                    target_ref->upload_to_gpu();
+                }
+
+                Paint::PaintLayerStack* layer_stack = adapter->getLayerStack();
+                if (layer_stack && layer_stack->layerCount() > 0) {
+                    Paint::PaintLayerData* base_layer = layer_stack->layerAt(0);
+                    if (base_layer) {
+                        auto& buf = base_layer->ensurePixels(active_ch);
+                        buf = target_ref->pixels;
+                    }
+                }
+
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                g_ProjectManager.markModified();
+            }
+        }
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!active_tex);
+    if (ImGui::Button("Export##ch_active", ImVec2(btn_w, 0))) {
+        const std::string path = SceneUI::saveFileDialogW(L"PNG Files\0*.png\0", L"png");
+        if (!path.empty() && active_tex) {
+            exportTextureToPng(active_tex, path);
+        }
+    }
+    ImGui::EndDisabled();
+}
+
+bool SceneUI::shouldShowPaintBrushDock() const {
+    if (sculpt_mode_state.enabled &&
+        (!sculpt_mode_state.active_target_name.empty() || terrain_sculpt_proxy_active) &&
+        mesh_overlay_settings.edit_mode) {
+        return true;
+    }
+
+    if (!paint_mode_state.enabled || !paint_mode_state.hasValidTarget()) {
+        return false;
+    }
+
+    const auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+    return adapter && adapter->isValid();
+}
+
+float SceneUI::getPaintBrushDockWidth() const {
+    return shouldShowPaintBrushDock() ? std::clamp(paint_brush_dock_width, 228.0f, 420.0f) : 0.0f;
+}
+
+void SceneUI::drawPaintBrushControls(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle) {
+    auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+    if (!adapter && meshTriangle) {
+        paint_mode_state.setAdapter(std::make_shared<Paint::MeshPaintAdapter>(&ctx.scene, meshTriangle));
+        adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+    }
+    if (!adapter) {
+        ImGui::TextDisabled("Select a paintable mesh target to edit brush settings.");
+        return;
+    }
+
+    Paint::PaintTextureSet* texture_set = adapter->getTextureSet();
+
+    auto savePresetUI = [&]() {
+        ensurePaintBrushPresets();
+        if (!paint_brush_presets.empty()) {
+            int selected_preset_index = 0;
+            for (int i = 0; i < static_cast<int>(paint_brush_presets.size()); ++i) {
+                if (paint_brush_presets[i].name == paint_brush_preset_name) {
+                    selected_preset_index = i;
+                    break;
+                }
+            }
+            std::vector<const char*> preset_names;
+            preset_names.reserve(paint_brush_presets.size());
+            for (const auto& preset : paint_brush_presets) {
+                preset_names.push_back(preset.name.c_str());
+            }
+            if (ImGui::Combo("Brush Preset", &selected_preset_index, preset_names.data(), static_cast<int>(preset_names.size()))) {
+                paint_mode_state.brush = paint_brush_presets[selected_preset_index].brush;
+                std::snprintf(paint_brush_preset_name, sizeof(paint_brush_preset_name), "%s", paint_brush_presets[selected_preset_index].name.c_str());
+            }
+            ImGui::InputText("Preset Name", paint_brush_preset_name, sizeof(paint_brush_preset_name));
+            if (UIWidgets::SecondaryButton("Save Brush Preset", ImVec2(-1.0f, 0))) {
+                std::string preset_name = paint_brush_preset_name;
+                if (preset_name.empty()) {
+                    preset_name = "Custom Brush";
+                }
+                bool updated_existing = false;
+                for (auto& preset : paint_brush_presets) {
+                    if (preset.name == preset_name) {
+                        preset.brush = paint_mode_state.brush;
+                        updated_existing = true;
+                        break;
+                    }
+                }
+                if (!updated_existing) {
+                    paint_brush_presets.push_back(PaintBrushPreset{ preset_name, paint_mode_state.brush });
+                }
+            }
+        }
+    };
+
+    ImGui::PushItemWidth((std::min)(176.0f, ImGui::GetContentRegionAvail().x - 18.0f));
+
+    // Layer panel at the top of the Brush Dock (like Photoshop)
+    if (adapter) {
+        drawPaintLayerPanel(ctx, adapter.get());
+        ImGui::Separator();
+    }
+
+    savePresetUI();
+
+    if (beginBrushDockSection("Tool")) {
+        const float tool_gap = 6.0f;
+        const float tool_size = 48.0f;
+        const int columns = 4;
+        int tool_index = 0;
+        auto drawPaintTool = [&](const char* id, const char* tooltip, Paint::BrushTool tool) {
+            if (tool_index > 0 && (tool_index % columns) != 0) {
+                ImGui::SameLine(0.0f, tool_gap);
+            }
+            drawPaintToolSelectorButton(id, tooltip, tool, paint_mode_state.brush.tool, tool_size, tool_size);
+            ++tool_index;
+        };
+        drawPaintTool("PaintToolPaint", "Paint\nApplies color or texture to the active channel.", Paint::BrushTool::Paint);
+        drawPaintTool("PaintToolErase", "Erase\nRemoves paint from the active channel.", Paint::BrushTool::Erase);
+        drawPaintTool("PaintToolSoften", "Soften\nBlends and smooths harsh paint transitions.", Paint::BrushTool::Soften);
+        drawPaintTool("PaintToolStamp", "Stamp\nPlaces a stamped alpha or texture imprint.", Paint::BrushTool::Stamp);
+        drawPaintTool("PaintToolFill", "Fill\nFills the whole target with the current value.", Paint::BrushTool::Fill);
+        drawPaintTool("PaintToolClone", "Clone\nCopies paint from a sampled source area.", Paint::BrushTool::Clone);
+        drawPaintTool("PaintToolSpray", "Spray\nScatters many small droplets across the brush radius.", Paint::BrushTool::Spray);
+    }
+
+    if (beginBrushDockSection("Stroke")) {
+        ImGui::SliderFloat("Radius", &paint_mode_state.brush.radius, 0.1f, 256.0f, "%.2f px");
+        ImGui::SliderFloat("Strength", &paint_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Falloff", &paint_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
+        if (!paint_mode_state.compact_ui) {
+            ImGui::SliderFloat("Spacing", &paint_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Flow", &paint_mode_state.brush.flow, 0.1f, 2.0f, "%.2f");
+        }
+        ImGui::Checkbox("Show Brush Preview", &paint_mode_state.brush.show_preview);
+    }
+
+    if (beginBrushDockSection("Color & Texture")) {
+        float brush_color[3] = {
+            paint_mode_state.brush.color.x,
+            paint_mode_state.brush.color.y,
+            paint_mode_state.brush.color.z
+        };
+        if (ImGui::ColorEdit3(
+                paint_mode_state.brush.use_paint_texture ? "Tint" : "Paint Value",
+                brush_color,
+                ImGuiColorEditFlags_NoInputs)) {
+            paint_mode_state.brush.color = Vec3(brush_color[0], brush_color[1], brush_color[2]);
+        }
+
+        if (ImGui::Button("Load Paint Texture")) {
+            const std::string path = SceneUI::openFileDialogW(
+                L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0",
+                "",
+                "");
+            if (!path.empty()) {
+                auto paint_texture = std::make_shared<Texture>(path, inferBrushTextureType(paint_mode_state.active_channel));
+                if (paint_texture && paint_texture->is_loaded()) {
+                    paint_mode_state.brush.paint_texture = paint_texture;
+                    paint_mode_state.brush.paint_texture_path = path;
+                    paint_mode_state.brush.use_paint_texture = true;
+                }
+            }
+        }
+        if (paint_mode_state.brush.paint_texture && paint_mode_state.brush.paint_texture->is_loaded()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Paint Texture")) {
+                paint_mode_state.brush.paint_texture.reset();
+                paint_mode_state.brush.paint_texture_path.clear();
+                paint_mode_state.brush.use_paint_texture = false;
+            }
+
+            ImGui::Checkbox("Use Paint Texture", &paint_mode_state.brush.use_paint_texture);
+            const std::string paint_name = brushAssetDisplayName(paint_mode_state.brush.paint_texture_path);
+            ImGui::TextDisabled("Paint Texture: %s", paint_name.empty() ? "Untitled" : paint_name.c_str());
+            ImGui::TextDisabled("Loaded as: %s", paintChannelDisplayName(paint_mode_state.active_channel));
+            int tint_mode = static_cast<int>(paint_mode_state.brush.paint_texture_tint_mode);
+            const char* tint_mode_labels[] = { "Multiply", "Recolor", "Overlay" };
+            if (ImGui::Combo("Tint Mode", &tint_mode, tint_mode_labels, IM_ARRAYSIZE(tint_mode_labels))) {
+                paint_mode_state.brush.paint_texture_tint_mode = static_cast<Paint::PaintTextureTintMode>(tint_mode);
+            }
+            ImGui::SliderFloat("Tint Strength", &paint_mode_state.brush.paint_texture_tint_strength, 0.0f, 1.0f, "%.2f");
+        }
+
+        if (brushSupportsRaisedPaint(paint_mode_state.brush.tool)) {
+            ImGui::Separator();
+            ImGui::Checkbox("Raised Paint", &paint_mode_state.brush.write_height_mask);
+            if (paint_mode_state.brush.write_height_mask) {
+                ImGui::SliderFloat("Height Contribution", &paint_mode_state.brush.height_contribution, 0.01f, 1.0f, "%.2f");
+                ImGui::Checkbox("Auto Normal From Height", &paint_mode_state.auto_normal_from_height);
+                if (paint_mode_state.auto_normal_from_height) {
+                    ImGui::SliderFloat("Normal Strength", &paint_mode_state.height_to_normal_strength, 0.1f, 32.0f, "%.2f");
+                }
+            }
+        }
+    }
+
+    if (paint_mode_state.brush.tool != Paint::BrushTool::Erase &&
+        paint_mode_state.brush.tool != Paint::BrushTool::Soften &&
+        paint_mode_state.brush.tool != Paint::BrushTool::Stamp &&
+        paint_mode_state.brush.tool != Paint::BrushTool::Fill &&
+        paint_mode_state.brush.tool != Paint::BrushTool::Clone &&
+        beginBrushDockSection("Behavior")) {
+        int paint_mode = static_cast<int>(paint_mode_state.brush.paint_mode);
+        const char* paint_mode_labels[] = { "Normal", "Mix", "Smudge", "Wet" };
+        if (ImGui::Combo("Paint Behavior", &paint_mode, paint_mode_labels, IM_ARRAYSIZE(paint_mode_labels))) {
+            paint_mode_state.brush.paint_mode = static_cast<Paint::BrushPaintMode>(paint_mode);
+        }
+        if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Mix) {
+            ImGui::SliderFloat("Mix Amount", &paint_mode_state.brush.mix_amount, 0.05f, 0.95f, "%.2f");
+        } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Smudge) {
+            ImGui::SliderFloat("Smudge Strength", &paint_mode_state.brush.smudge_strength, 0.05f, 1.00f, "%.2f");
+        } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet) {
+            ImGui::SliderFloat("Wetness", &paint_mode_state.brush.wetness, 0.05f, 1.00f, "%.2f");
+            ImGui::SliderFloat("Load", &paint_mode_state.brush.paint_load, 0.05f, 1.00f, "%.2f");
+            ImGui::SliderFloat("Pickup", &paint_mode_state.brush.pickup_rate, 0.00f, 1.00f, "%.2f");
+            ImGui::SliderFloat("Deposit", &paint_mode_state.brush.deposit_rate, 0.05f, 1.00f, "%.2f");
+        }
+    }
+
+    const bool has_tool_settings =
+        paint_mode_state.brush.tool == Paint::BrushTool::Stamp ||
+        paint_mode_state.brush.tool == Paint::BrushTool::Fill ||
+        paint_mode_state.brush.tool == Paint::BrushTool::Clone ||
+        paint_mode_state.brush.tool == Paint::BrushTool::Spray;
+    if (has_tool_settings && beginBrushDockSection("Tool Settings")) {
+        if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
+            int stamp_mode = static_cast<int>(paint_mode_state.brush.stamp_mode);
+            const char* stamp_mode_labels[] = { "Single", "Continuous" };
+            if (ImGui::Combo("Stamp Mode", &stamp_mode, stamp_mode_labels, IM_ARRAYSIZE(stamp_mode_labels))) {
+                paint_mode_state.brush.stamp_mode = static_cast<Paint::StampPlacementMode>(stamp_mode);
+            }
+            ImGui::TextDisabled(
+                paint_mode_state.brush.stamp_mode == Paint::StampPlacementMode::Single
+                    ? "Stamp places one imprint per click."
+                    : "Stamp places repeated imprints while dragging.");
+        } else if (paint_mode_state.brush.tool == Paint::BrushTool::Fill) {
+            ImGui::TextDisabled("Fill writes the active channel across the whole texture.");
+        } else if (paint_mode_state.brush.tool == Paint::BrushTool::Clone) {
+            ImGui::TextDisabled("Ctrl + Click sets clone source. Paint copies from that source.");
+            if (paint_mode_state.stroke.has_clone_source) {
+                ImGui::TextDisabled("Clone Source: %.3f, %.3f", paint_mode_state.stroke.clone_source_u, paint_mode_state.stroke.clone_source_v);
+            } else {
+                ImGui::TextDisabled("Clone Source: not set");
+            }
+        } else if (paint_mode_state.brush.tool == Paint::BrushTool::Spray) {
+            ImGui::TextDisabled("Spray scatters many small dabs across the brush radius.");
+            ImGui::SliderInt("Particles", &paint_mode_state.brush.spray_particles, 1, 64);
+            ImGui::SliderFloat("Spread", &paint_mode_state.brush.spray_spread, 0.1f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Droplet Size", &paint_mode_state.brush.spray_droplet_size, 0.05f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Size Jitter", &paint_mode_state.brush.spray_size_jitter, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Opacity Jitter", &paint_mode_state.brush.spray_opacity_jitter, 0.0f, 1.0f, "%.2f");
+        }
+    }
+
+    if (beginBrushDockSection("Shape")) {
+        ImGui::TextDisabled("Symmetry");
+        ImGui::Checkbox("Mirror X", &paint_mode_state.brush.mirror_x); ImGui::SameLine();
+        ImGui::Checkbox("Mirror Y", &paint_mode_state.brush.mirror_y); ImGui::SameLine();
+        ImGui::Checkbox("Mirror Z", &paint_mode_state.brush.mirror_z);
+
+        int alpha_preset = static_cast<int>(paint_mode_state.brush.alpha_preset);
+        const char* alpha_labels[] = { "Soft Round", "Hard Round", "Noise", "Scratch", "Cloud" };
+        if (ImGui::Combo("Brush Alpha", &alpha_preset, alpha_labels, IM_ARRAYSIZE(alpha_labels))) {
+            paint_mode_state.brush.alpha_preset = static_cast<Paint::BrushAlphaPreset>(alpha_preset);
+        }
+        if (ImGui::Button("Load Alpha Mask")) {
+            const std::string path = SceneUI::openFileDialogW(
+                L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0",
+                "",
+                "");
+            if (!path.empty()) {
+                auto alpha_texture = std::make_shared<Texture>(path, TextureType::Unknown);
+                if (alpha_texture && alpha_texture->is_loaded()) {
+                    paint_mode_state.brush.alpha_texture = alpha_texture;
+                    paint_mode_state.brush.alpha_texture_path = path;
+                    paint_mode_state.brush.use_imported_alpha = true;
+                }
+            }
+        }
+        if (paint_mode_state.brush.alpha_texture && paint_mode_state.brush.alpha_texture->is_loaded()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear Alpha")) {
+                paint_mode_state.brush.alpha_texture.reset();
+                paint_mode_state.brush.alpha_texture_path.clear();
+                paint_mode_state.brush.use_imported_alpha = false;
+            }
+            ImGui::Checkbox("Use Imported Alpha", &paint_mode_state.brush.use_imported_alpha);
+            const std::string alpha_name = brushAlphaDisplayName(paint_mode_state.brush.alpha_texture_path);
+            ImGui::TextDisabled("Imported: %s", alpha_name.empty() ? "Untitled" : alpha_name.c_str());
+        }
+        if (paint_mode_state.brush.alpha_preset == Paint::BrushAlphaPreset::Noise ||
+            paint_mode_state.brush.alpha_preset == Paint::BrushAlphaPreset::Scratch ||
+            paint_mode_state.brush.alpha_preset == Paint::BrushAlphaPreset::Cloud ||
+            paint_mode_state.brush.use_imported_alpha) {
+            ImGui::SliderFloat("Alpha Scale", &paint_mode_state.brush.alpha_scale, 0.25f, 8.0f, "%.2f");
+        }
+        ImGui::SliderFloat("Alpha Rotation", &paint_mode_state.brush.alpha_rotation_degrees, -180.0f, 180.0f, "%.0f deg");
+        ImGui::Checkbox("Follow Stroke Angle", &paint_mode_state.brush.follow_stroke_angle);
+        if (paint_mode_state.brush.tool != Paint::BrushTool::Stamp) {
+            ImGui::BeginDisabled();
+        }
+        ImGui::SliderFloat("Scatter Jitter", &paint_mode_state.brush.scatter_jitter, 0.0f, 1.0f, "%.2f");
+        if (paint_mode_state.brush.tool != Paint::BrushTool::Stamp) {
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("Scatter Jitter affects Stamp placement.");
+        }
+        if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
+            ImGui::Checkbox("Random Rotate", &paint_mode_state.brush.stamp_random_rotation);
+            ImGui::SliderFloat("Scale Jitter", &paint_mode_state.brush.stamp_scale_jitter, 0.0f, 0.9f, "%.2f");
+        }
+
+        drawBrushAlphaPreview(paint_mode_state.brush);
+        if (paint_mode_state.brush.paint_texture && paint_mode_state.brush.paint_texture->is_loaded()) {
+            ImGui::SameLine();
+            drawBrushPaintTexturePreview(paint_mode_state.brush);
+        }
+    }
+
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Fill) {
+        const std::vector<Paint::PaintChannel> fill_channels = getSelectedMaterialBrushChannels(paint_mode_state);
+        bool can_fill = false;
+        if (texture_set) {
+            for (Paint::PaintChannel channel : fill_channels) {
+                if (texture_set->getTexture(channel)) {
+                    can_fill = true;
+                    break;
+                }
+            }
+        }
+        if (UIWidgets::PrimaryButton("Apply Fill", ImVec2(-1.0f, 0)) && can_fill) {
+            bool any_changed = false;
+            auto composite = std::make_unique<CompositeSceneCommand>(
+                "Fill " + adapter->getNodeName());
+            const bool auto_height_fill =
+                paint_mode_state.brush.write_height_mask &&
+                brushSupportsRaisedPaint(paint_mode_state.brush.tool);
+            for (Paint::PaintChannel channel : fill_channels) {
+                adapter->assignTextureToChannel(channel);
+                std::shared_ptr<Texture> channel_texture = texture_set ? texture_set->getTexture(channel) : nullptr;
+                const std::vector<CompactVec4> before_pixels = channel_texture ? channel_texture->pixels : std::vector<CompactVec4>{};
+                if (adapter->fillChannel(channel, paint_mode_state.brush)) {
+                    any_changed = true;
+                    if (channel_texture) {
+                        composite->add(std::make_unique<PaintTextureCommand>(
+                            adapter->getNodeName(),
+                            adapter->getMaterialID(),
+                            channel_texture,
+                            before_pixels,
+                            channel_texture->pixels));
+                    }
+                }
+            }
+            if (auto_height_fill) {
+                Paint::BrushSettings height_brush = paint_mode_state.brush;
+                height_brush.use_paint_texture = false;
+                height_brush.paint_texture.reset();
+                height_brush.paint_texture_path.clear();
+                const float h = std::clamp(height_brush.height_contribution, 0.0f, 1.0f);
+                height_brush.color = Vec3(h, h, h);
+
+                adapter->assignTextureToChannel(Paint::PaintChannel::Mask);
+                std::shared_ptr<Texture> mask_texture = texture_set ? texture_set->getTexture(Paint::PaintChannel::Mask) : nullptr;
+                const std::vector<CompactVec4> mask_before_pixels = mask_texture ? mask_texture->pixels : std::vector<CompactVec4>{};
+                if (adapter->fillChannel(Paint::PaintChannel::Mask, height_brush)) {
+                    any_changed = true;
+                    if (mask_texture) {
+                        composite->add(std::make_unique<PaintTextureCommand>(
+                            adapter->getNodeName(),
+                            adapter->getMaterialID(),
+                            mask_texture,
+                            mask_before_pixels,
+                            mask_texture->pixels));
+                    }
+                }
+
+                if (paint_mode_state.auto_normal_from_height) {
+                    adapter->assignTextureToChannel(Paint::PaintChannel::Normal);
+                    std::shared_ptr<Texture> normal_texture = texture_set ? texture_set->getTexture(Paint::PaintChannel::Normal) : nullptr;
+                    const std::vector<CompactVec4> normal_before_pixels = normal_texture ? normal_texture->pixels : std::vector<CompactVec4>{};
+                    if (adapter->generateNormalFromHeight(paint_mode_state.height_to_normal_strength)) {
+                        any_changed = true;
+                        normal_texture = texture_set ? texture_set->getTexture(Paint::PaintChannel::Normal) : nullptr;
+                        if (normal_texture) {
+                            composite->add(std::make_unique<PaintTextureCommand>(
+                                adapter->getNodeName(),
+                                adapter->getMaterialID(),
+                                normal_texture,
+                                normal_before_pixels,
+                                normal_texture->pixels));
+                        }
+                    }
+                }
+            }
+            if (any_changed) {
+                ctx.renderer.resetCPUAccumulation();
+                if (ctx.backend_ptr) {
+                    ctx.renderer.updateBackendMaterials(ctx.scene);
+                    ctx.backend_ptr->resetAccumulation();
+                }
+                if (!composite->empty()) {
+                    history.record(std::move(composite));
+                }
+                g_ProjectManager.markModified();
+            }
+        }
+    }
+    ImGui::PopItemWidth();
+}
+
+void SceneUI::drawSculptBrushControls(UIContext& ctx, const std::shared_ptr<Triangle>& meshTriangle) {
+    UIWidgets::PushControlSurfaceStyle(ImVec4(1.0f, 0.58f, 0.34f, 1.0f));
+    TerrainObject* terrain = terrain_sculpt_proxy_active && terrain_brush.active_terrain_id != -1
+        ? TerrainManager::getInstance().getTerrain(terrain_brush.active_terrain_id)
+        : nullptr;
+    if (!meshTriangle && !terrain) {
+        ImGui::TextDisabled("Select a mesh or terrain object to configure sculpt brushes.");
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+
+    auto savePresetUI = [&]() {
+        ensureSculptBrushPresets();
+        if (!sculpt_brush_presets.empty()) {
+            int selected_preset_index = 0;
+            for (int i = 0; i < static_cast<int>(sculpt_brush_presets.size()); ++i) {
+                if (sculpt_brush_presets[i].name == sculpt_brush_preset_name) {
+                    selected_preset_index = i;
+                    break;
+                }
+            }
+            std::vector<const char*> preset_names;
+            preset_names.reserve(sculpt_brush_presets.size());
+            for (const auto& preset : sculpt_brush_presets) {
+                preset_names.push_back(preset.name.c_str());
+            }
+            if (ImGui::Combo("Brush Preset##sculpt", &selected_preset_index, preset_names.data(), static_cast<int>(preset_names.size()))) {
+                sculpt_mode_state.brush = sculpt_brush_presets[selected_preset_index].brush;
+                std::snprintf(sculpt_brush_preset_name, sizeof(sculpt_brush_preset_name), "%s", sculpt_brush_presets[selected_preset_index].name.c_str());
+            }
+        }
+    };
+
+    ImGui::PushItemWidth((std::min)(176.0f, ImGui::GetContentRegionAvail().x - 18.0f));
+    if (terrain) {
+        terrain_sculpt_proxy_active = true;
+        ImGui::Text("Target: %s", terrain->name.empty() ? "(unknown terrain)" : terrain->name.c_str());
+        ImGui::TextDisabled("Target Type: Terrain");
+        ImGui::TextDisabled("Mode: Terrain sculpt");
+    } else {
+        terrain_sculpt_proxy_active = false;
+        ImGui::Text("Target: %s", meshTriangle->getNodeName().empty() ? "(unknown)" : meshTriangle->getNodeName().c_str());
+        ImGui::TextDisabled("Target Type: Mesh");
+        ImGui::TextDisabled("Mode: Mesh sculpt");
+    }
+    ImGui::Separator();
+
+    const float action_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+    if (UIWidgets::IconActionButton("UnlockTargetSculpt", UIWidgets::IconType::PivotEdit, "Unlock",
+                                    false, ImVec4(0.72f, 0.80f, 0.92f, 1.0f), ImVec2(action_width, 34.0f),
+                                    "Unlock current sculpt target")) {
+        modifier_panel_exit_object = sculpt_mode_state.active_target_name;
+        sculpt_mode_state.enabled = false;
+        sculpt_mode_state.active_target_name.clear();
+        terrain_sculpt_proxy_active = false;
+        mesh_overlay_settings.edit_mode = false;
+        mesh_overlay_settings.enabled = false;
+        mesh_workspace_mode = MeshWorkspaceMode::Edit;
+        clearEditableMeshSelection();
+    }
+    ImGui::SameLine();
+    if (UIWidgets::IconActionButton("ExitSculpt", UIWidgets::IconType::Stop, "Exit",
+                                    false, ImVec4(1.0f, 0.46f, 0.46f, 1.0f), ImVec2(action_width, 34.0f),
+                                    "Exit sculpt mode")) {
+        modifier_panel_exit_object = meshTriangle ? meshTriangle->getNodeName() : std::string{};
+        resetMeshEditState(ctx);
+        ImGui::PopItemWidth();
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+    ImGui::Separator();
+
+    savePresetUI();
+
+    if (terrain) {
+        if (terrain_brush.active_terrain_id != terrain->id) {
+            terrain_brush.active_terrain_id = terrain->id;
+        }
+
+        if (beginBrushDockSection("Tool")) {
+            const float tool_gap = 4.0f;
+            const float tool_width = (ImGui::GetContentRegionAvail().x - tool_gap) * 0.5f;
+            ImGui::TextDisabled("Available tools for terrain height sculpting");
+            auto drawTerrainToolButton = [&](const char* label, int mode) {
+                if (UIWidgets::IconActionButton(label, UIWidgets::IconType::Terrain, label,
+                                                terrain_brush.mode == mode, ImVec4(1.0f, 0.58f, 0.34f, 1.0f),
+                                                ImVec2(tool_width, 34.0f), label)) {
+                    terrain_brush.mode = mode;
+                }
+            };
+            drawTerrainToolButton("Raise", 0);
+            ImGui::SameLine(0.0f, tool_gap);
+            drawTerrainToolButton("Lower", 1);
+            drawTerrainToolButton("Flatten", 2);
+            ImGui::SameLine(0.0f, tool_gap);
+            drawTerrainToolButton("Smooth", 3);
+            drawTerrainToolButton("Stamp", 4);
+        }
+
+        if (beginBrushDockSection("Stroke")) {
+            ImGui::TextDisabled("Only terrain-safe brush controls are active here");
+            ImGui::SliderFloat("Radius", &terrain_brush.radius, 1.0f, 200.0f, "%.1f m");
+            ImGui::SliderFloat("Strength", &terrain_brush.strength, 0.01f, 10.0f, "%.2f");
+            ImGui::SliderFloat("Curve", &terrain_brush.curve, 0.25f, 4.0f, "%.2f");
+            terrain_brush.show_preview = sculpt_mode_state.brush.show_preview;
+            if (ImGui::Checkbox("Show Brush Preview", &terrain_brush.show_preview)) {
+                sculpt_mode_state.brush.show_preview = terrain_brush.show_preview;
+            }
+        }
+
+        if (terrain_brush.mode == 2 && beginBrushDockSection("Flatten##terrain_sculpt_section")) {
+            ImGui::Checkbox("Use Fixed Height", &terrain_brush.use_fixed_height);
+            if (terrain_brush.use_fixed_height) {
+                ImGui::DragFloat("Altitude", &terrain_brush.flatten_target, 0.1f, -1000.0f, 5000.0f, "%.1f m");
+            } else {
+                ImGui::TextDisabled("Samples the initial click height.");
+            }
+        }
+
+        if (terrain_brush.mode == 4 && beginBrushDockSection("Stamp##terrain_sculpt_section")) {
+            ImGui::SliderFloat("Rotation", &terrain_brush.stamp_rotation, 0.0f, 360.0f, "%.0f deg");
+            if (UIWidgets::IconActionButton("LoadTerrainStamp", UIWidgets::IconType::StampTool, "Load Stamp",
+                                            false, ImVec4(1.0f, 0.58f, 0.34f, 1.0f), ImVec2(140.0f, 34.0f),
+                                            "Load terrain stamp texture")) {
+                std::string path = SceneUI::openFileDialogW(L"Image Files\0*.png;*.jpg;*.jpeg;*.bmp\0");
+                if (!path.empty()) {
+                    terrain_brush.stamp_texture = std::make_shared<Texture>(path, TextureType::Albedo);
+                }
+            }
+            if (terrain_brush.stamp_texture) {
+                ImGui::TextDisabled("Stamp: %s", std::filesystem::path(terrain_brush.stamp_texture->name).filename().string().c_str());
+            }
+        }
+
+        ImGui::PopItemWidth();
+        UIWidgets::PopControlSurfaceStyle();
+        return;
+    }
+
+    if (beginBrushDockSection("Tool")) {
+        const float tool_gap = 8.0f;
+        const float tool_size = 48.0f;
+        const int columns = 4;
+        int tool_index = 0;
+        ImGui::TextDisabled("Available tools for editable mesh sculpting");
+        auto drawSculptToolButton = [&](const char* id, const char* tooltip, SceneUI::SculptBrushTool tool) {
+            if (tool_index > 0 && (tool_index % columns) != 0) {
+                ImGui::SameLine(0.0f, tool_gap);
+            }
+            drawSculptToolSelectorButton(id, tooltip, tool, sculpt_mode_state.tool, tool_size, tool_size);
+            ++tool_index;
+        };
+        drawSculptToolButton("SculptGrab", "Grab\nPulls the surface by dragging points.", SceneUI::SculptBrushTool::Grab);
+        drawSculptToolButton("SculptDraw", "Draw\nBuilds or digs along the surface normal.", SceneUI::SculptBrushTool::Draw);
+        drawSculptToolButton("SculptInflate", "Inflate\nExpands volume outward or inward.", SceneUI::SculptBrushTool::Inflate);
+        drawSculptToolButton("SculptLayer", "Layer\nBuilds toward a capped height.", SceneUI::SculptBrushTool::Layer);
+        drawSculptToolButton("SculptClay", "Clay\nAdds soft clay-like buildup.", SceneUI::SculptBrushTool::Clay);
+        drawSculptToolButton("SculptPinch", "Pinch\nPulls vertices inward to tighten forms.", SceneUI::SculptBrushTool::Pinch);
+        drawSculptToolButton("SculptClayStrips", "Clay Strips\nLays down ribbon-like clay strokes.", SceneUI::SculptBrushTool::ClayStrips);
+        drawSculptToolButton("SculptSmooth", "Smooth\nRelaxes and evens surface detail.", SceneUI::SculptBrushTool::Smooth);
+        drawSculptToolButton("SculptFlatten", "Flatten\nLevels peaks toward a plane.", SceneUI::SculptBrushTool::Flatten);
+        drawSculptToolButton("SculptScrape", "Scrape\nTrims high spots for hard-surface shaping.", SceneUI::SculptBrushTool::Scrape);
+        drawSculptToolButton("SculptCrease", "Crease\nCarves a sharp groove and pinch.", SceneUI::SculptBrushTool::Crease);
+    }
+
+    if (beginBrushDockSection("Stroke")) {
+        ImGui::TextDisabled("Mesh-only controls are active for this target");
+        ImGui::SliderFloat("Radius", &sculpt_mode_state.brush.radius, 0.01f, 20.0f, "%.3f m");
+        ImGui::SliderFloat("Strength", &sculpt_mode_state.brush.strength, 0.01f, 10.0f, "%.2f");
+        ImGui::SliderFloat("Falloff", &sculpt_mode_state.brush.falloff, 0.0f, 1.0f, "%.2f");
+        if (!sculpt_mode_state.compact_ui) {
+            ImGui::SliderFloat("Spacing", &sculpt_mode_state.brush.spacing, 0.01f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Flow", &sculpt_mode_state.brush.flow, 0.1f, 2.0f, "%.2f");
+        }
+        ImGui::Checkbox("Show Brush Preview", &sculpt_mode_state.brush.show_preview);
+        ImGui::Checkbox("Front Faces Only", &sculpt_mode_state.front_faces_only);
+        ImGui::Checkbox("Accumulate Live", &sculpt_mode_state.accumulate_live);
+        ImGui::Separator();
+        ImGui::TextDisabled("Symmetry");
+        ImGui::Checkbox("Mirror X##sculpt", &sculpt_mode_state.mirror_x); ImGui::SameLine();
+        ImGui::Checkbox("Mirror Y##sculpt", &sculpt_mode_state.mirror_y); ImGui::SameLine();
+        ImGui::Checkbox("Mirror Z##sculpt", &sculpt_mode_state.mirror_z);
+    }
+
+    if (beginBrushDockSection("Behavior")) {
+        ImGui::SliderFloat("Normal Strength", &sculpt_mode_state.normal_strength, 0.0f, 2.0f, "%.2f");
+        static const char* falloffTypes[] = { "Smooth", "Linear", "Sharp", "Sphere", "Root" };
+        ImGui::Combo("Falloff Type", &mesh_overlay_settings.proportional_falloff_type, falloffTypes, IM_ARRAYSIZE(falloffTypes));
+        const char* tool_hint = "This sculpt pass reuses the edit/soft-selection falloff model.";
+        switch (sculpt_mode_state.tool) {
+        case SculptBrushTool::Clay:
+            tool_hint = "Clay now builds a real soft layer; hold Ctrl to carve instead of add.";
+            break;
+        case SculptBrushTool::Layer:
+            tool_hint = "Layer builds toward a capped height for cleaner stepped buildup; hold Ctrl to cut down.";
+            break;
+        case SculptBrushTool::ClayStrips:
+            tool_hint = "Clay Strips stacks muddy ribbons with rake-like grooves; hold Ctrl for subtractive cuts.";
+            break;
+        case SculptBrushTool::Crease:
+            tool_hint = "Crease combines inward pinch with a cut along the stroke normal.";
+            break;
+        case SculptBrushTool::Scrape:
+            tool_hint = "Scrape trims only the peaks above the current stroke plane.";
+            break;
+        case SculptBrushTool::Draw:
+            tool_hint = "Draw pushes along the surface normal; hold Ctrl to dig negative relief.";
+            break;
+        case SculptBrushTool::Inflate:
+            tool_hint = "Inflate swells volume evenly; hold Ctrl to deflate inward.";
+            break;
+        default:
+            break;
+        }
+        ImGui::TextDisabled("%s", tool_hint);
+        ImGui::TextDisabled("Shortcuts: Shift = temporary Smooth, Ctrl = invert additive sculpt brushes");
+    }
+
+    if (beginBrushDockSection("Alpha")) {
+        int alpha_preset = static_cast<int>(sculpt_mode_state.brush.alpha_preset);
+        const char* alpha_labels[] = { "Soft Round", "Hard Round", "Noise", "Scratch", "Cloud" };
+        if (ImGui::Combo("Shape##sculpt", &alpha_preset, alpha_labels, IM_ARRAYSIZE(alpha_labels))) {
+            sculpt_mode_state.brush.alpha_preset = static_cast<Paint::BrushAlphaPreset>(alpha_preset);
+            sculpt_mode_state.brush.use_imported_alpha = false;
+        }
+        if (ImGui::Button("Load Alpha Mask##sculpt")) {
+            const std::string path = SceneUI::openFileDialogW(
+                L"Image Files\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.exr;*.hdr\0",
+                "",
+                "");
+            if (!path.empty()) {
+                auto tex = std::make_shared<Texture>(path, TextureType::Unknown);
+                if (tex && tex->is_loaded()) {
+                    sculpt_mode_state.brush.alpha_texture = tex;
+                    sculpt_mode_state.brush.alpha_texture_path = path;
+                    sculpt_mode_state.brush.use_imported_alpha = true;
+                }
+            }
+        }
+        if (sculpt_mode_state.brush.alpha_texture && sculpt_mode_state.brush.alpha_texture->is_loaded()) {
+            ImGui::SameLine();
+            if (ImGui::Button("Clear##sculpt_alpha")) {
+                sculpt_mode_state.brush.alpha_texture.reset();
+                sculpt_mode_state.brush.alpha_texture_path.clear();
+                sculpt_mode_state.brush.use_imported_alpha = false;
+            }
+            ImGui::Checkbox("Use Imported Alpha##sculpt", &sculpt_mode_state.brush.use_imported_alpha);
+            const std::string alpha_name = brushAlphaDisplayName(sculpt_mode_state.brush.alpha_texture_path);
+            ImGui::TextDisabled("Imported: %s", alpha_name.empty() ? "Untitled" : alpha_name.c_str());
+        }
+        if (sculpt_mode_state.brush.alpha_preset == Paint::BrushAlphaPreset::Noise ||
+            sculpt_mode_state.brush.alpha_preset == Paint::BrushAlphaPreset::Scratch ||
+            sculpt_mode_state.brush.alpha_preset == Paint::BrushAlphaPreset::Cloud ||
+            sculpt_mode_state.brush.use_imported_alpha) {
+            ImGui::SliderFloat("Alpha Scale##sculpt", &sculpt_mode_state.brush.alpha_scale, 0.25f, 8.0f, "%.2f");
+        }
+        ImGui::SliderFloat("Alpha Rotation##sculpt", &sculpt_mode_state.brush.alpha_rotation_degrees, -180.0f, 180.0f, "%.0f deg");
+        drawBrushAlphaPreview(sculpt_mode_state.brush);
+    }
+
+    ImGui::PopItemWidth();
+    UIWidgets::PopControlSurfaceStyle();
+}
+
+void SceneUI::drawPaintBrushDock(UIContext& ctx) {
+    if (!shouldShowPaintBrushDock()) {
+        return;
+    }
+
+    const bool sculptDock = sculpt_mode_state.enabled &&
+        (!sculpt_mode_state.active_target_name.empty() || terrain_sculpt_proxy_active);
+    std::shared_ptr<Triangle> mesh_triangle = sculptDock ? resolvePaintMesh(ctx) : resolvePaintMesh(ctx);
+    if (!mesh_triangle) {
+        auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+        mesh_triangle = adapter ? adapter->getTriangle() : nullptr;
+    }
+    if (!mesh_triangle && sculptDock &&
+        ctx.selection.selected.type == SelectableType::Object &&
+        ctx.selection.selected.object) {
+        mesh_triangle = ctx.selection.selected.object;
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    const float menu_height = 19.0f;
+    const bool bottom_visible = show_animation_panel || show_scene_log;
+    const float bottom_margin = bottom_visible ? (bottom_panel_height + 24.0f) : 24.0f;
+    const float dock_width = getPaintBrushDockWidth();
+    const float dock_height = (std::max)(260.0f, io.DisplaySize.y - menu_height - bottom_margin);
+
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - dock_width, menu_height), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(dock_width, dock_height), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.97f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 8.0f));
+
+    ImGuiWindowFlags flags =
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings;
+
+    if (!ImGui::Begin("Brush Dock", nullptr, flags)) {
+        ImGui::PopStyleVar();
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), sculptDock ? "Sculpt Brush Dock" : "Brush Dock");
+    ImGui::Separator();
+    if (sculptDock) {
+        drawSculptBrushControls(ctx, mesh_triangle);
+    } else {
+        drawPaintBrushControls(ctx, mesh_triangle);
+    }
+    paint_brush_dock_width = std::clamp(ImGui::GetWindowWidth(), 228.0f, 420.0f);
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+void SceneUI::handleMeshPaint(UIContext& ctx) {
+    if (!paint_mode_state.enabled || !paint_mode_state.hasValidTarget()) {
+        paint_mode_state.stroke = Paint::PaintStroke{};
+        return;
+    }
+
+    auto adapter = std::dynamic_pointer_cast<Paint::MeshPaintAdapter>(paint_mode_state.getAdapter());
+    if (!adapter || !adapter->isValid()) {
+        paint_mode_state.stroke = Paint::PaintStroke{};
+        return;
+    }
+    const std::vector<Paint::PaintChannel> paint_channels = getSelectedMaterialBrushChannels(paint_mode_state);
+    const bool auto_height_brush =
+        paint_mode_state.brush.write_height_mask &&
+        brushSupportsRaisedPaint(paint_mode_state.brush.tool) &&
+        paint_mode_state.brush.tool != Paint::BrushTool::Clone;
+    auto makeHeightBrush = [&](const Paint::BrushSettings& source_brush, float deposit_ratio) {
+        Paint::BrushSettings height_brush = source_brush;
+        height_brush.use_paint_texture = false;
+        height_brush.paint_texture.reset();
+        height_brush.paint_texture_path.clear();
+        
+        // The core user request calculation: Scale the height mask application speed
+        // by the exact amount of physical paint deposited during wet/mix modes.
+        // By reducing the strength towards 0, the blending weight natively drops to 0,
+        // cleanly preventing the erasure of existing geometry and blocking unearned spikes.
+        height_brush.strength *= deposit_ratio;
+
+        const float h = std::clamp(height_brush.height_contribution, 0.0f, 1.0f);
+        height_brush.color = Vec3(h, h, h);
+        return height_brush;
+    };
+    auto snapshot_channels_for_stroke = [&](std::vector<Paint::PaintChannel> channels) {
+        if (auto_height_brush &&
+            std::find(channels.begin(), channels.end(), Paint::PaintChannel::Mask) == channels.end()) {
+            channels.push_back(Paint::PaintChannel::Mask);
+        }
+        if (auto_height_brush && paint_mode_state.auto_normal_from_height &&
+            std::find(channels.begin(), channels.end(), Paint::PaintChannel::Normal) == channels.end()) {
+            channels.push_back(Paint::PaintChannel::Normal);
+        }
+        return channels;
+    };
+
+    ImGuiIO& io = ImGui::GetIO();
+    static float last_vulkan_paint_sync_time = -1000.0f;
+    auto finish_stroke = [&]() {
+        if (!paint_mode_state.stroke.active) {
+            return;
+        }
+
+        const bool keep_clone_source = paint_mode_state.stroke.has_clone_source;
+        const float clone_source_u = paint_mode_state.stroke.clone_source_u;
+        const float clone_source_v = paint_mode_state.stroke.clone_source_v;
+
+        if (paint_mode_state.stroke.changed &&
+            auto_height_brush &&
+            paint_mode_state.auto_normal_from_height) {
+            // Normals are now updated per-dab for real-time smoothness
+        }
+        adapter->endStroke();
+        if (paint_mode_state.stroke.changed) {
+            auto composite = std::make_unique<CompositeSceneCommand>(
+                "Paint " + adapter->getNodeName());
+
+            if (paint_mode_state.stroke.using_layers) {
+                // Layer-aware undo: capture layer pixel changes + flat texture changes.
+                Paint::PaintLayerStack* undo_stack = adapter->getLayerStack();
+                Paint::PaintLayerData* undo_layer = undo_stack ? undo_stack->layerById(paint_mode_state.stroke.layer_id) : nullptr;
+
+                for (int i = 0; i < 7; ++i) {
+                    const size_t idx = static_cast<size_t>(i);
+                    const auto channel = static_cast<Paint::PaintChannel>(i);
+                    std::vector<CompactVec4>& before_lp = paint_mode_state.stroke.before_layer_pixels[idx];
+                    if (before_lp.empty() && !(undo_layer && undo_layer->hasPixels(channel))) {
+                        continue; // Channel was not painted
+                    }
+                    // Get current (after) layer pixels
+                    std::vector<CompactVec4> after_lp;
+                    if (undo_layer && undo_layer->hasPixels(channel)) {
+                        after_lp = undo_layer->getPixels(channel);
+                    }
+                    // Skip if nothing changed
+                    if (before_lp.size() == after_lp.size() && before_lp == after_lp) continue;
+
+                    composite->add(std::make_unique<PaintLayerCommand>(
+                        adapter->getNodeName(),
+                        adapter->getMaterialID(),
+                        paint_mode_state.stroke.layer_stack_key,
+                        paint_mode_state.stroke.layer_id,
+                        channel,
+                        std::move(before_lp),
+                        std::move(after_lp)));
+                }
+            } else {
+                // Flat texture undo (no layers)
+                for (int i = 0; i < 7; ++i) {
+                    std::shared_ptr<Texture> texture_ref = paint_mode_state.stroke.texture_snapshot_refs[static_cast<size_t>(i)];
+                    std::vector<CompactVec4>& before_pixels = paint_mode_state.stroke.before_pixels_by_channel[static_cast<size_t>(i)];
+                    if (!texture_ref || before_pixels.empty()) {
+                        continue;
+                    }
+                    composite->add(std::make_unique<PaintTextureCommand>(
+                        adapter->getNodeName(),
+                        adapter->getMaterialID(),
+                        texture_ref,
+                        before_pixels,
+                        texture_ref->pixels));
+                }
+            }
+
+            if (!composite->empty()) {
+                history.record(std::move(composite));
+                g_ProjectManager.markModified();
+            }
+        }
+        paint_mode_state.stroke = Paint::PaintStroke{};
+        if (keep_clone_source) {
+            paint_mode_state.stroke.has_clone_source = true;
+            paint_mode_state.stroke.clone_source_u = clone_source_u;
+            paint_mode_state.stroke.clone_source_v = clone_source_v;
+        }
+    };
+
+    if (io.WantCaptureMouse) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && paint_mode_state.stroke.active) {
+            finish_stroke();
+        }
+        return;
+    }
+
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Fill) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && paint_mode_state.stroke.active) {
+            finish_stroke();
+        }
+        return;
+    }
+
+    // Ensure CPU triangle positions match current GPU transforms before raycasting.
+    // In TLAS mode, gizmo transforms update the GPU AS but defer CPU vertex sync
+    // (objects_needing_cpu_sync). Without this, the paint raycast would use stale
+    // triangle positions and produce UV drift when the object was recently moved.
+    ensureCPUSyncForPicking(ctx);
+
+    HitRecord rec;
+    const bool has_hit = raycastViewportHit(ctx, ImGui::GetMousePos(), rec);
+    const bool is_target_hit = has_hit && isMeshPaintTargetHit(rec, *adapter);
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Clone &&
+        io.KeyCtrl &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        is_target_hit) {
+        paint_mode_state.stroke.has_clone_source = true;
+        paint_mode_state.stroke.clone_source_u = rec.uv.u;
+        paint_mode_state.stroke.clone_source_v = rec.uv.v;
+        paint_mode_state.stroke.clone_offset_initialized = false;
+        return;
+    }
+    if (has_hit && is_target_hit) {
+        drawMeshPaintPreview(ctx, rec, *adapter, paint_mode_state.brush, paint_mode_state.active_channel);
+        for (int i = 1; i < 8; ++i) {
+            const bool mx = (i & 1) && paint_mode_state.brush.mirror_x;
+            const bool my = (i & 2) && paint_mode_state.brush.mirror_y;
+            const bool mz = (i & 4) && paint_mode_state.brush.mirror_z;
+            if ((i & 1) && !paint_mode_state.brush.mirror_x) continue;
+            if ((i & 2) && !paint_mode_state.brush.mirror_y) continue;
+            if ((i & 4) && !paint_mode_state.brush.mirror_z) continue;
+
+            HitRecord mirrored_hit;
+            if (resolveMirroredMeshPaintHit(ctx, *adapter, rec, mx, my, mz, mirrored_hit)) {
+                drawMeshPaintPreview(ctx, mirrored_hit, *adapter, paint_mode_state.brush, paint_mode_state.active_channel, true);
+            }
+        }
+    }
+
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        if (paint_mode_state.stroke.active) {
+            finish_stroke();
+        }
+        return;
+    }
+
+    adapter->ensureTextureSet(paint_mode_state.requested_texture_resolution);
+    for (Paint::PaintChannel channel : paint_channels) {
+        if (!adapter->assignTextureToChannel(channel)) {
+            return;
+        }
+    }
+    if (auto_height_brush) {
+        if (!adapter->assignTextureToChannel(Paint::PaintChannel::Mask)) {
+            return;
+        }
+        if (paint_mode_state.auto_normal_from_height &&
+            !adapter->assignTextureToChannel(Paint::PaintChannel::Normal)) {
+            return;
+        }
+    }
+
+    if (!is_target_hit) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && paint_mode_state.stroke.active) {
+            finish_stroke();
+        }
+        return;
+    }
+
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Clone && !paint_mode_state.stroke.has_clone_source) {
+        return;
+    }
+
+    if (!paint_mode_state.stroke.active) {
+        Paint::PaintStrokeContext stroke_ctx;
+        stroke_ctx.layer_index = paint_mode_state.active_layer_index;
+        stroke_ctx.dt = io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f);
+        adapter->beginStroke(stroke_ctx);
+        paint_mode_state.stroke.active = true;
+        paint_mode_state.stroke.changed = false;
+        paint_mode_state.stroke.channel = paint_mode_state.active_channel;
+        paint_mode_state.stroke.remaining_paint_load = paint_mode_state.brush.paint_load;
+        paint_mode_state.stroke.wet_color = paint_mode_state.brush.color;
+        paint_mode_state.stroke.has_wet_color = true;
+        Paint::PaintTextureSet* set = adapter->getTextureSet();
+        const std::vector<Paint::PaintChannel> snapshot_channels = snapshot_channels_for_stroke(paint_channels);
+
+        // Determine if layer-aware painting will be used for this stroke.
+        Paint::PaintLayerStack* stroke_layer_stack = adapter->getLayerStack();
+        const bool stroke_uses_layers = (stroke_layer_stack != nullptr && stroke_layer_stack->layerCount() > 0);
+        paint_mode_state.stroke.using_layers = stroke_uses_layers;
+
+        for (Paint::PaintChannel channel : snapshot_channels) {
+            std::shared_ptr<Texture> active_texture = set ? set->getTexture(channel) : nullptr;
+            const size_t index = static_cast<size_t>(channel);
+            paint_mode_state.stroke.texture_snapshot_refs[index] = active_texture;
+            paint_mode_state.stroke.before_pixels_by_channel[index] = active_texture ? active_texture->pixels : std::vector<CompactVec4>{};
+        }
+
+        // Capture layer pixel snapshots for layer-aware undo.
+        if (stroke_uses_layers) {
+            paint_mode_state.stroke.layer_stack_key = adapter->getNodeName() + "#" + std::to_string(adapter->getMaterialID());
+            Paint::PaintLayerData* active_ld = stroke_layer_stack->layerAt(paint_mode_state.active_layer_index);
+            paint_mode_state.stroke.layer_id = active_ld ? active_ld->id : 0;
+            for (Paint::PaintChannel channel : snapshot_channels) {
+                const size_t index = static_cast<size_t>(channel);
+                if (active_ld && active_ld->hasPixels(channel)) {
+                    paint_mode_state.stroke.before_layer_pixels[index] = active_ld->getPixels(channel);
+                } else {
+                    paint_mode_state.stroke.before_layer_pixels[index].clear();
+                }
+            }
+        }
+    }
+
+    bool should_apply = true;
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
+        if (paint_mode_state.brush.stamp_mode == Paint::StampPlacementMode::Single) {
+            should_apply = !paint_mode_state.stroke.stamp_applied;
+        } else if (paint_mode_state.stroke.has_last_uv) {
+            Paint::PaintTextureSet* set = adapter->getTextureSet();
+            std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
+            if (active_texture && active_texture->width > 0 && active_texture->height > 0) {
+            const float dx = (rec.uv.u - paint_mode_state.stroke.last_u) * static_cast<float>(active_texture->width);
+            const float dy = (rec.uv.v - paint_mode_state.stroke.last_v) * static_cast<float>(active_texture->height);
+            const float distance_px = std::sqrt(dx * dx + dy * dy);
+            
+            const float baseline = 1024.0f;
+            const float scaled_radius = paint_mode_state.brush.radius * (static_cast<float>(active_texture->width) / baseline);
+            const float spacing_px = std::max(1.0f, scaled_radius * std::max(0.05f, paint_mode_state.brush.spacing));
+            should_apply = distance_px >= spacing_px;
+        }
+        }
+    } else if (paint_mode_state.stroke.has_last_uv) {
+        Paint::PaintTextureSet* set = adapter->getTextureSet();
+        std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
+        if (active_texture && active_texture->width > 0 && active_texture->height > 0) {
+        const float dx = (rec.uv.u - paint_mode_state.stroke.last_u) * static_cast<float>(active_texture->width);
+        const float dy = (rec.uv.v - paint_mode_state.stroke.last_v) * static_cast<float>(active_texture->height);
+        const float distance_px = std::sqrt(dx * dx + dy * dy);
+        
+        const float baseline = 1024.0f;
+        const float scaled_radius = paint_mode_state.brush.radius * (static_cast<float>(active_texture->width) / baseline);
+        const float spacing_px = std::max(1.0f, scaled_radius * std::max(0.05f, paint_mode_state.brush.spacing));
+        should_apply = distance_px >= spacing_px;
+    }
+    }
+
+    if (!should_apply) {
+        return;
+    }
+
+    Paint::BrushSettings dab_brush = paint_mode_state.brush;
+    Vec2 dab_uv = rec.uv;
+    if (paint_mode_state.brush.follow_stroke_angle && paint_mode_state.stroke.has_last_uv) {
+        const float du = rec.uv.u - paint_mode_state.stroke.last_u;
+        const float dv = rec.uv.v - paint_mode_state.stroke.last_v;
+        if ((du * du + dv * dv) > 1e-8f) {
+            dab_brush.alpha_rotation_degrees += std::atan2(dv, du) * 57.2957795f;
+        }
+    }
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp) {
+        if (paint_mode_state.brush.stamp_random_rotation) {
+            const float random_turn = uiHash01(rec.uv.u * 173.0f, rec.uv.v * 257.0f);
+            dab_brush.alpha_rotation_degrees += (random_turn * 360.0f) - 180.0f;
+        }
+        if (paint_mode_state.brush.stamp_scale_jitter > 0.001f) {
+            const float random_scale = uiHash01(rec.uv.u * 311.0f, rec.uv.v * 149.0f);
+            const float jitter = (random_scale * 2.0f - 1.0f) * paint_mode_state.brush.stamp_scale_jitter;
+            dab_brush.alpha_scale *= std::max(0.1f, 1.0f + jitter);
+        }
+        if (paint_mode_state.brush.scatter_jitter > 0.001f) {
+            Paint::PaintTextureSet* set = adapter->getTextureSet();
+            std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
+            if (active_texture && active_texture->width > 0 && active_texture->height > 0) {
+                const float angle = uiHash01(rec.uv.u * 401.0f, rec.uv.v * 197.0f) * 6.2831853f;
+                const float baseline = 1024.0f;
+                const float scaled_radius = paint_mode_state.brush.radius * (static_cast<float>(active_texture->width) / baseline);
+                const float radius = std::sqrt(uiHash01(rec.uv.u * 167.0f, rec.uv.v * 557.0f)) *
+                    paint_mode_state.brush.scatter_jitter * scaled_radius;
+                dab_uv.u = std::clamp(dab_uv.u + (std::cos(angle) * radius) / static_cast<float>(active_texture->width), 0.0f, 1.0f);
+                dab_uv.v = std::clamp(dab_uv.v + (std::sin(angle) * radius) / static_cast<float>(active_texture->height), 0.0f, 1.0f);
+            }
+        }
+    }    float current_deposit_ratio = 1.0f;
+
+    if ((paint_mode_state.brush.tool == Paint::BrushTool::Paint ||
+         paint_mode_state.brush.tool == Paint::BrushTool::Stamp) &&
+        (paint_mode_state.active_channel == Paint::PaintChannel::BaseColor ||
+         paint_mode_state.active_channel == Paint::PaintChannel::Emission)) {
+        Paint::PaintTextureSet* set = adapter->getTextureSet();
+        std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
+        
+        if (active_texture && paint_mode_state.brush.paint_mode != Paint::BrushPaintMode::Normal) {
+            const Vec3 sampled = active_texture->get_color_bilinear(rec.uv.u, rec.uv.v);
+            
+            if (!paint_mode_state.stroke.has_pickup_color) {
+                paint_mode_state.stroke.pickup_color = sampled;
+                paint_mode_state.stroke.has_pickup_color = true;
+            } else {
+                paint_mode_state.stroke.pickup_color = lerpColor(
+                    paint_mode_state.stroke.pickup_color,
+                    sampled,
+                    0.35f);
+            }
+            if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Mix) {
+                dab_brush.color = lerpColor(
+                    paint_mode_state.brush.color,
+                    paint_mode_state.stroke.pickup_color,
+                    paint_mode_state.brush.mix_amount);
+            } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Smudge) {
+                dab_brush.color = lerpColor(
+                    sampled,
+                    paint_mode_state.stroke.pickup_color,
+                    paint_mode_state.brush.smudge_strength);
+                dab_brush.strength *= 0.75f;
+                dab_brush.flow *= 0.9f;
+            } else if (paint_mode_state.brush.paint_mode == Paint::BrushPaintMode::Wet) {
+                if (!paint_mode_state.stroke.has_wet_color) {
+                    paint_mode_state.stroke.wet_color = paint_mode_state.brush.color;
+                    paint_mode_state.stroke.has_wet_color = true;
+                }
+                const float load = std::clamp(paint_mode_state.stroke.remaining_paint_load, 0.0f, 1.0f);
+                const float wetness = std::clamp(paint_mode_state.brush.wetness, 0.0f, 1.0f);
+                const float pickup = std::clamp(paint_mode_state.brush.pickup_rate, 0.0f, 1.0f);
+                const float deposit = std::clamp(paint_mode_state.brush.deposit_rate, 0.0f, 1.0f);
+                
+                const Vec3 loaded_paint = lerpColor(
+                    paint_mode_state.stroke.wet_color,
+                    paint_mode_state.brush.color,
+                    load);
+                    
+                dab_brush.color = lerpColor(
+                    sampled,
+                    loaded_paint,
+                    deposit * (0.35f + 0.65f * wetness));
+                
+                paint_mode_state.stroke.wet_color = lerpColor(
+                    paint_mode_state.stroke.wet_color,
+                    sampled,
+                    pickup * wetness);
+                    
+                paint_mode_state.stroke.remaining_paint_load = std::clamp(
+                    paint_mode_state.stroke.remaining_paint_load - deposit * 0.08f + pickup * 0.03f,
+                    0.0f,
+                    1.0f);
+                dab_brush.flow *= 0.9f + 0.2f * wetness;
+            }
+            
+            // Calculate the absolute visual difference representing strictly how much fresh external paint weight
+            // was introduced exactly to this blended pixel by the engine algorithms vs standard background color.
+            const float color_diff = (dab_brush.color - sampled).length() / 1.73205f;
+            current_deposit_ratio = std::clamp(color_diff, 0.0f, 1.0f);
+        }
+    }
+
+    // Determine if layer-aware painting is active.
+    Paint::PaintLayerStack* layer_stack = adapter->getLayerStack();
+    const bool use_layers = (layer_stack != nullptr && layer_stack->layerCount() > 0);
+    const int active_layer = paint_mode_state.active_layer_index;
+    const float dab_dt = io.DeltaTime > 0.0f ? io.DeltaTime : (1.0f / 60.0f);
+
+    // Accumulated dirty rect for region-based compositing (layers only).
+    Paint::PaintDirtyRect accumulated_dirty;
+
+    // Helper lambdas: paint / clone through layers or direct depending on mode.
+    // When using layers, returns true and accumulates the dirty rect.
+    auto doPaintAtUV = [&](Paint::PaintChannel ch, const Vec2& uv, const Paint::BrushSettings& br, float dt) -> bool {
+        if (use_layers) {
+            Paint::PaintDirtyRect dirty = adapter->paintLayerAtUV(active_layer, ch, uv, br, dt);
+            if (!dirty.empty()) { accumulated_dirty.expand(dirty); return true; }
+            return false;
+        }
+        return adapter->paintAtUV(ch, uv, br, dt);
+    };
+    auto doCloneAtUV = [&](Paint::PaintChannel ch, const Vec2& dst, const Vec2& src, const Paint::BrushSettings& br, float dt) -> bool {
+        if (use_layers) {
+            Paint::PaintDirtyRect dirty = adapter->cloneLayerAtUV(active_layer, ch, dst, src, br, dt);
+            if (!dirty.empty()) { accumulated_dirty.expand(dirty); return true; }
+            return false;
+        }
+        return adapter->cloneAtUV(ch, dst, src, br, dt);
+    };
+    auto updateAutoNormalAtUV = [&](const Vec2& uv, float brush_radius) -> bool {
+        if (!paint_mode_state.auto_normal_from_height) {
+            return false;
+        }
+        if (use_layers && !accumulated_dirty.empty()) {
+            const Paint::PaintChannel mask_channel = Paint::PaintChannel::Mask;
+            adapter->compositeAndUploadRegion(&mask_channel, 1, accumulated_dirty);
+        }
+        return adapter->updateNormalFromHeightArea(
+            uv,
+            brush_radius,
+            paint_mode_state.height_to_normal_strength);
+    };
+
+    // Collect channels that were actually painted for selective compositing.
+    std::vector<Paint::PaintChannel> painted_channels;
+
+    bool dab_changed = false;
+    if (paint_mode_state.brush.tool == Paint::BrushTool::Spray) {
+        Paint::PaintTextureSet* set = adapter->getTextureSet();
+        std::shared_ptr<Texture> active_texture = set ? set->getTexture(paint_mode_state.active_channel) : nullptr;
+        if (active_texture && active_texture->width > 0 && active_texture->height > 0) {
+            const int particles = std::clamp(paint_mode_state.brush.spray_particles, 1, 64);
+            const float spread = std::clamp(paint_mode_state.brush.spray_spread, 0.05f, 1.0f);
+            const float size_jitter = std::clamp(paint_mode_state.brush.spray_size_jitter, 0.0f, 1.0f);
+            const float opacity_jitter = std::clamp(paint_mode_state.brush.spray_opacity_jitter, 0.0f, 1.0f);
+            for (int p = 0; p < particles; ++p) {
+                const float seed_u = rec.uv.u * (137.0f + static_cast<float>(p) * 17.0f);
+                const float seed_v = rec.uv.v * (251.0f + static_cast<float>(p) * 23.0f);
+                const float angle = uiHash01(seed_u, seed_v) * 6.2831853f;
+                const float radius = std::sqrt(uiHash01(seed_v + 13.0f, seed_u + 29.0f)) *
+                    spread * paint_mode_state.brush.radius;
+                const Vec2 spray_uv(
+                    std::clamp(rec.uv.u + (std::cos(angle) * radius) / static_cast<float>(active_texture->width), 0.0f, 1.0f),
+                    std::clamp(rec.uv.v + (std::sin(angle) * radius) / static_cast<float>(active_texture->height), 0.0f, 1.0f));
+                Paint::BrushSettings spray_brush = dab_brush;
+                const float droplet_base_size = std::clamp(paint_mode_state.brush.spray_droplet_size, 0.05f, 1.0f);
+                const float size_noise = uiHash01(seed_u + 41.0f, seed_v + 97.0f) * 2.0f - 1.0f;
+                const float opacity_noise = uiHash01(seed_u + 149.0f, seed_v + 211.0f) * 2.0f - 1.0f;
+                const float droplet_size = std::max(0.05f, droplet_base_size * (1.0f + size_noise * size_jitter));
+                const float droplet_strength = std::max(0.05f, 1.0f + opacity_noise * opacity_jitter);
+                spray_brush.radius = std::max(1.0f, paint_mode_state.brush.radius * droplet_size);
+                spray_brush.strength *= (1.0f / std::sqrt(static_cast<float>(particles))) * droplet_strength;
+                for (Paint::PaintChannel channel : paint_channels) {
+                    if (doPaintAtUV(channel, spray_uv, spray_brush, dab_dt)) {
+                        dab_changed = true;
+                        painted_channels.push_back(channel);
+                    }
+                }
+                if (auto_height_brush) {
+                    const Paint::BrushSettings height_brush = makeHeightBrush(spray_brush, current_deposit_ratio);
+                    if (doPaintAtUV(Paint::PaintChannel::Mask, spray_uv, height_brush, dab_dt)) {
+                        dab_changed = true;
+                        painted_channels.push_back(Paint::PaintChannel::Mask);
+                        if (paint_mode_state.auto_normal_from_height) {
+                            updateAutoNormalAtUV(spray_uv, spray_brush.radius);
+                        }
+                    }
+                }
+            }
+        }
+    } else if (paint_mode_state.brush.tool == Paint::BrushTool::Clone) {
+        if (!paint_mode_state.stroke.clone_offset_initialized) {
+            paint_mode_state.stroke.clone_offset_u = paint_mode_state.stroke.clone_source_u - rec.uv.u;
+            paint_mode_state.stroke.clone_offset_v = paint_mode_state.stroke.clone_source_v - rec.uv.v;
+            paint_mode_state.stroke.clone_offset_initialized = true;
+        }
+        const Vec2 src_uv(
+            dab_uv.u + paint_mode_state.stroke.clone_offset_u,
+            dab_uv.v + paint_mode_state.stroke.clone_offset_v);
+        for (Paint::PaintChannel channel : paint_channels) {
+            if (doCloneAtUV(channel, dab_uv, src_uv, dab_brush, dab_dt)) {
+                dab_changed = true;
+                painted_channels.push_back(channel);
+            }
+        }
+    } else {
+        for (Paint::PaintChannel channel : paint_channels) {
+            if (doPaintAtUV(channel, dab_uv, dab_brush, dab_dt)) {
+                dab_changed = true;
+                painted_channels.push_back(channel);
+            }
+        }
+        if (auto_height_brush) {
+            const Paint::BrushSettings height_brush = makeHeightBrush(dab_brush, current_deposit_ratio);
+            if (doPaintAtUV(Paint::PaintChannel::Mask, dab_uv, height_brush, dab_dt)) {
+                dab_changed = true;
+                painted_channels.push_back(Paint::PaintChannel::Mask);
+                if (paint_mode_state.auto_normal_from_height) {
+                    updateAutoNormalAtUV(dab_uv, dab_brush.radius);
+                }
+            }
+        }
+    }
+
+    // If using layers, composite the painted channels to the flat texture for display.
+    if (dab_changed && use_layers && !painted_channels.empty()) {
+        // Deduplicate painted_channels
+        std::sort(painted_channels.begin(), painted_channels.end());
+        painted_channels.erase(std::unique(painted_channels.begin(), painted_channels.end()), painted_channels.end());
+        if (!accumulated_dirty.empty()) {
+            adapter->compositeAndUploadRegion(painted_channels.data(), static_cast<int>(painted_channels.size()), accumulated_dirty);
+        } else {
+            adapter->compositeAndUploadChannels(painted_channels.data(), static_cast<int>(painted_channels.size()));
+        }
+    }
+
+    if (dab_changed) {
+        paint_mode_state.stroke.changed = true;
+        paint_mode_state.stroke.has_last_uv = true;
+        paint_mode_state.stroke.last_u = rec.uv.u;
+        paint_mode_state.stroke.last_v = rec.uv.v;
+        if (paint_mode_state.brush.tool == Paint::BrushTool::Stamp &&
+            paint_mode_state.brush.stamp_mode == Paint::StampPlacementMode::Single) {
+            paint_mode_state.stroke.stamp_applied = true;
+        }
+        if (dab_brush.paint_mode == Paint::BrushPaintMode::Mix) {
+            paint_mode_state.stroke.pickup_color = lerpColor(
+                paint_mode_state.stroke.pickup_color,
+                dab_brush.color,
+                0.5f);
+            paint_mode_state.stroke.has_pickup_color = true;
+        } else if (dab_brush.paint_mode == Paint::BrushPaintMode::Smudge) {
+            paint_mode_state.stroke.pickup_color = lerpColor(
+                paint_mode_state.stroke.pickup_color,
+                dab_brush.color,
+                0.65f);
+            paint_mode_state.stroke.has_pickup_color = true;
+        } else if (dab_brush.paint_mode == Paint::BrushPaintMode::Wet) {
+            paint_mode_state.stroke.pickup_color = lerpColor(
+                paint_mode_state.stroke.pickup_color,
+                dab_brush.color,
+                0.35f);
+            paint_mode_state.stroke.has_pickup_color = true;
+        }
+        ctx.renderer.resetCPUAccumulation();
+        if (ctx.backend_ptr) {
+            const float now = static_cast<float>(ImGui::GetTime());
+            if (now - last_vulkan_paint_sync_time > 0.08f) {
+                ctx.renderer.updateBackendMaterials(ctx.scene);
+                last_vulkan_paint_sync_time = now;
+            }
+            ctx.backend_ptr->resetAccumulation();
+        }
+
+        // Mirror painting
+        for (int i = 1; i < 8; ++i) {
+            const bool mx = (i & 1) && paint_mode_state.brush.mirror_x;
+            const bool my = (i & 2) && paint_mode_state.brush.mirror_y;
+            const bool mz = (i & 4) && paint_mode_state.brush.mirror_z;
+            if ((i & 1) && !paint_mode_state.brush.mirror_x) continue;
+            if ((i & 2) && !paint_mode_state.brush.mirror_y) continue;
+            if ((i & 4) && !paint_mode_state.brush.mirror_z) continue;
+
+            HitRecord mirrored_hit;
+            if (resolveMirroredMeshPaintHit(ctx, *adapter, rec, mx, my, mz, mirrored_hit)) {
+                bool mirror_changed = false;
+                for (Paint::PaintChannel channel : paint_channels) {
+                    if (doPaintAtUV(channel, mirrored_hit.uv, dab_brush, dab_dt)) {
+                        paint_mode_state.stroke.changed = true;
+                        mirror_changed = true;
+                    }
+                }
+                if (auto_height_brush) {
+                    const Paint::BrushSettings height_brush = makeHeightBrush(dab_brush, current_deposit_ratio);
+                    if (doPaintAtUV(Paint::PaintChannel::Mask, mirrored_hit.uv, height_brush, dab_dt)) {
+                        paint_mode_state.stroke.changed = true;
+                        mirror_changed = true;
+                        if (paint_mode_state.auto_normal_from_height) {
+                            updateAutoNormalAtUV(mirrored_hit.uv, dab_brush.radius);
+                        }
+                    }
+                }
+                if (mirror_changed && use_layers && !painted_channels.empty()) {
+                    if (!accumulated_dirty.empty()) {
+                        adapter->compositeAndUploadRegion(painted_channels.data(), static_cast<int>(painted_channels.size()), accumulated_dirty);
+                    } else {
+                        adapter->compositeAndUploadChannels(painted_channels.data(), static_cast<int>(painted_channels.size()));
+                    }
+                }
+            }
+        }
     }
 }

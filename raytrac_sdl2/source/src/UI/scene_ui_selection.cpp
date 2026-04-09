@@ -10,6 +10,11 @@
 #include "ColorProcessingParams.h"
 #include "SceneSelection.h"
 #include "globals.h"
+#include "Backend/VulkanBackend.h"
+#include "Backend/OptixBackend.h"
+#include "Backend/IViewportBackend.h"
+#include "HittableInstance.h"
+#include "InstanceManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include "scene_data.h"
@@ -17,6 +22,169 @@
 #include <ProjectManager.h>
 #include "WaterSystem.h"
 #include "TerrainManager.h"
+
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+
+namespace {
+bool projectSelectionPointToScreen(const Camera& cam, const ImVec2& displaySize, const Vec3& point, ImVec2& out) {
+    if (displaySize.x <= 1.0f || displaySize.y <= 1.0f) {
+        return false;
+    }
+
+    const Vec3 cam_forward = (cam.lookat - cam.lookfrom).normalize();
+    const Vec3 cam_right = cam_forward.cross(cam.vup).normalize();
+    const Vec3 cam_up = cam_right.cross(cam_forward).normalize();
+    const Vec3 to_point = point - cam.lookfrom;
+    const float depth = to_point.dot(cam_forward);
+    if (depth <= 0.01f) {
+        return false;
+    }
+
+    const float aspect = displaySize.x / displaySize.y;
+    const float tan_half_fov = tanf(cam.vfov * 3.14159265359f / 180.0f * 0.5f);
+    if (fabsf(aspect) <= 1e-6f || fabsf(tan_half_fov) <= 1e-6f) {
+        return false;
+    }
+
+    const float local_x = to_point.dot(cam_right);
+    const float local_y = to_point.dot(cam_up);
+    const float half_h = depth * tan_half_fov;
+    const float half_w = half_h * aspect;
+    if (fabsf(half_w) <= 1e-6f || fabsf(half_h) <= 1e-6f) {
+        return false;
+    }
+
+    out.x = ((local_x / half_w) * 0.5f + 0.5f) * displaySize.x;
+    out.y = (0.5f - (local_y / half_h) * 0.5f) * displaySize.y;
+    return true;
+}
+
+bool useInteractiveViewportSelectionFallback(const UIContext& ctx, const SceneUI& ui) {
+    const bool hasInteractiveViewportBackend =
+        (dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) != nullptr) ||
+        (g_viewport_backend != nullptr);
+    return hasInteractiveViewportBackend && ui.viewport_settings.shading_mode != 2;
+}
+
+bool selectionNodeMatches(const std::string& candidate, const std::string& target) {
+    if (candidate.empty() || target.empty()) return false;
+    return candidate == target || candidate.rfind(target + "_mat_", 0) == 0;
+}
+
+Backend::IBackend* getSelectionRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+Backend::IViewportBackend* getSelectionViewportBackend(UIContext& ctx) {
+    if (g_viewport_backend) {
+        return g_viewport_backend.get();
+    }
+    return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+}
+
+void rebuildInteractiveViewportAfterTopologyChange(UIContext& ctx) {
+    if (Backend::IViewportBackend* viewportBackend = getSelectionViewportBackend(ctx)) {
+        viewportBackend->buildRasterGeometry(ctx.scene.world.objects);
+        viewportBackend->resetAccumulation();
+    }
+}
+
+void setSelectionObjectVisibility(UIContext& ctx, const std::string& nodeName, bool visible) {
+    if (nodeName.empty()) return;
+    if (ctx.scene.isEditorPendingDeleteObjectName(nodeName)) {
+        visible = false;
+    }
+
+    if (Backend::IViewportBackend* viewportBackend = getSelectionViewportBackend(ctx)) {
+        viewportBackend->setVisibilityByNodeName(nodeName, visible);
+    }
+
+    if (Backend::IBackend* renderBackend = getSelectionRenderBackend(ctx)) {
+        if (renderBackend != getSelectionViewportBackend(ctx)) {
+            renderBackend->setVisibilityByNodeName(nodeName, visible);
+        }
+    }
+}
+
+void setSelectionSceneNodeLocalVisibility(UIContext& ctx, const std::string& nodeName, bool visible) {
+    if (nodeName.empty()) return;
+    if (ctx.scene.isEditorPendingDeleteObjectName(nodeName)) {
+        visible = false;
+    }
+
+    for (const auto& world_obj : ctx.scene.world.objects) {
+        if (!world_obj) continue;
+
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(world_obj)) {
+            if (selectionNodeMatches(tri->getNodeName(), nodeName)) {
+                tri->visible = visible;
+            }
+            continue;
+        }
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(world_obj)) {
+            if (selectionNodeMatches(inst->node_name, nodeName)) {
+                inst->visible = visible;
+            }
+        }
+    }
+}
+
+bool selectionHasGpuRenderBackend(UIContext& ctx) {
+    Backend::IBackend* renderBackend = getSelectionRenderBackend(ctx);
+    if (!renderBackend) return false;
+    // Don't treat viewport-only backends as GPU selection targets
+    if (dynamic_cast<Backend::IViewportBackend*>(renderBackend) != nullptr) return false;
+
+    // If Vulkan backend is present but ray-tracing pipeline / TLAS isn't ready,
+    // fall back to CPU selection (we only want GPU selection when path-tracing is available).
+    if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend)) {
+        auto* dev = vk->getVulkanDevice();
+        if (!dev) return false;
+        if (!dev->isRTReady() || !dev->hasTLAS()) return false;
+        return true;
+    }
+
+    if (dynamic_cast<Backend::OptixBackend*>(renderBackend) != nullptr) return true;
+
+    return false;
+}
+
+void syncSelectionSceneState(UIContext& ctx, bool syncLights, bool syncCamera) {
+    Backend::IBackend* renderBackend = getSelectionRenderBackend(ctx);
+    Backend::IViewportBackend* viewportBackend = getSelectionViewportBackend(ctx);
+
+    if (syncLights) {
+        if (renderBackend) {
+            renderBackend->setLights(ctx.scene.lights);
+            renderBackend->resetAccumulation();
+        }
+        if (viewportBackend && viewportBackend != renderBackend) {
+            viewportBackend->setLights(ctx.scene.lights);
+            viewportBackend->resetAccumulation();
+        }
+    }
+
+    if (syncCamera && ctx.scene.camera) {
+        if (renderBackend) {
+            renderBackend->syncCamera(*ctx.scene.camera);
+            renderBackend->resetAccumulation();
+        }
+        if (viewportBackend && viewportBackend != renderBackend) {
+            viewportBackend->syncCamera(*ctx.scene.camera);
+            viewportBackend->resetAccumulation();
+        }
+    }
+}
+
+}
 
 
 
@@ -77,7 +245,13 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
         float fov_rad = cam.vfov * 3.14159265359f / 180.0f;
         float tan_half_fov = tanf(fov_rad * 0.5f);
 
-        // Lambda to project 3D point to screen
+        // FIX: Use actual screen aspect ratio, not the global render aspect_ratio.
+        // The global aspect_ratio may be locked to e.g. 16:9 for final render but
+        // the viewport can have any size. Mismatch causes horizontal misalignment.
+        const float viewport_aspect = (screen_h > 1.0f) ? (screen_w / screen_h) : 1.0f;
+
+        // Lambda to project 3D world-space point to screen coordinates.
+        // Returns {-10000,-10000} when the point is behind the camera.
         auto ProjectToScreen = [&](const Vec3& p) -> ImVec2 {
             Vec3 to_point = p - cam.lookfrom;
             float depth = to_point.dot(cam_forward);
@@ -87,7 +261,7 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
             float local_y = to_point.dot(cam_up);
 
             float half_height = depth * tan_half_fov;
-            float half_width = half_height * aspect_ratio;
+            float half_width = half_height * viewport_aspect;
 
             float ndc_x = local_x / half_width;
             float ndc_y = local_y / half_height;
@@ -111,7 +285,9 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
             auto firstHandle = triangles[0].second->getTransformHandle();
             bool all_same_transform = true;
 
-            for (size_t i = 1; i < triangles.size() && all_same_transform; ++i) {
+            // Performance: for objects with many triangles, only sample a few
+            const size_t check_limit = std::min(triangles.size(), (size_t)16);
+            for (size_t i = 1; i < check_limit && all_same_transform; ++i) {
                 auto handle = triangles[i].second->getTransformHandle();
                 if (handle.get() != firstHandle.get()) {
                     all_same_transform = false;
@@ -119,20 +295,28 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
             }
 
             if (!all_same_transform) {
-                // This object has mixed transforms - skip it
-                // (would break if selected because transform would only affect some triangles)
                 skipped_procedural++;
                 continue;
             }
 
-            // Calculate bounding box center for quick check - USE CACHED BBOX!
+            // Get the object's transform matrix (for converting local AABB to world space)
+            Matrix4x4 obj_transform = Matrix4x4::identity();
+            bool has_transform = false;
+            if (firstHandle) {
+                obj_transform = firstHandle->getMatrix();
+                has_transform = true;
+            }
+
+            // Get AABB - cached is in LOCAL space, fallback computes in WORLD space
             Vec3 bb_min, bb_max;
+            bool bbox_is_local = false;
             auto bbox_it = bbox_cache.find(name);
             if (bbox_it != bbox_cache.end()) {
                 bb_min = bbox_it->second.first;
                 bb_max = bbox_it->second.second;
+                bbox_is_local = true; // cached bbox uses getOriginalVertexPosition (local space)
             } else {
-                // Fallback: calculate if not in cache (shouldn't happen if cache is valid)
+                // Fallback: calculate from transformed vertices (already world space)
                 bb_min = Vec3(1e10f, 1e10f, 1e10f);
                 bb_max = Vec3(-1e10f, -1e10f, -1e10f);
                 for (auto& pair : triangles) {
@@ -149,19 +333,49 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
                 }
             }
 
-            Vec3 corners[8] = {
+            // Build 8 corners of the AABB
+            Vec3 local_corners[8] = {
                 Vec3(bb_min.x, bb_min.y, bb_min.z), Vec3(bb_max.x, bb_min.y, bb_min.z),
                 Vec3(bb_min.x, bb_max.y, bb_min.z), Vec3(bb_max.x, bb_max.y, bb_min.z),
                 Vec3(bb_min.x, bb_min.y, bb_max.z), Vec3(bb_max.x, bb_min.y, bb_max.z),
                 Vec3(bb_min.x, bb_max.y, bb_max.z), Vec3(bb_max.x, bb_max.y, bb_max.z)
             };
 
+            // FIX: Transform local-space corners to world space when using cached bbox.
+            // bbox_cache stores LOCAL (original) vertex positions. Without this transform,
+            // moved/rotated/scaled objects would be tested at their untransformed position,
+            // causing "select all" or "select none" bugs in crowded scenes.
+            Vec3 world_corners[8];
+            if (bbox_is_local && has_transform) {
+                for (int ci = 0; ci < 8; ++ci) {
+                    world_corners[ci] = obj_transform.transform_point(local_corners[ci]);
+                }
+            } else {
+                for (int ci = 0; ci < 8; ++ci) {
+                    world_corners[ci] = local_corners[ci];
+                }
+            }
+
+            // Early rejection: check if the object center is entirely behind the camera
+            // (all 8 corners behind camera → skip entirely)
+            int behind_count = 0;
+            for (int ci = 0; ci < 8; ++ci) {
+                Vec3 to_corner = world_corners[ci] - cam.lookfrom;
+                if (to_corner.dot(cam_forward) <= 0.01f) {
+                    behind_count++;
+                }
+            }
+            if (behind_count == 8) {
+                continue; // entire object behind camera
+            }
+
             float proj_min_x = 1e10f, proj_min_y = 1e10f;
             float proj_max_x = -1e10f, proj_max_y = -1e10f;
             bool has_projected_point = false;
+            bool has_behind_corner = (behind_count > 0);
 
-            for (const Vec3& corner : corners) {
-                ImVec2 sp = ProjectToScreen(corner);
+            for (int ci = 0; ci < 8; ++ci) {
+                ImVec2 sp = ProjectToScreen(world_corners[ci]);
                 if (sp.x <= -9999.0f || sp.y <= -9999.0f) {
                     continue;
                 }
@@ -173,8 +387,20 @@ void SceneUI::handleMarqueeSelection(UIContext& ctx) {
                 proj_max_y = fmaxf(proj_max_y, sp.y);
             }
 
+            // FIX: When some corners are behind the camera, the projected AABB can be
+            // too small (missing corners shrink it). Expand to full screen extent because
+            // the object straddles the camera plane and could fill much of the viewport.
+            if (has_projected_point && has_behind_corner) {
+                proj_min_x = fminf(proj_min_x, 0.0f);
+                proj_min_y = fminf(proj_min_y, 0.0f);
+                proj_max_x = fmaxf(proj_max_x, screen_w);
+                proj_max_y = fmaxf(proj_max_y, screen_h);
+            }
+
             if (!has_projected_point) {
-                Vec3 center = (bb_min + bb_max) * 0.5f;
+                // All corners behind camera but center might be in front (shouldn't happen
+                // after the behind_count==8 early-out, but kept as safety)
+                Vec3 center = (world_corners[0] + world_corners[7]) * 0.5f;
                 ImVec2 center_screen = ProjectToScreen(center);
                 if (center_screen.x > -9999.0f && center_screen.y > -9999.0f) {
                     has_projected_point = true;
@@ -250,14 +476,19 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
     if (ImGui::IsMouseClicked(0)) {
         bool capture = ImGui::GetIO().WantCaptureMouse;
         bool gizmo_over = ImGuizmo::IsOver();
+        if (gizmo_over && !ctx.selection.hasSelection()) {
+            gizmo_over = false;
+        }
         
         //// Detailed logging for diagnostics
-        //SCENE_LOG_INFO("Viewport click. Cache: " + std::string(mesh_cache_valid ? "OK" : "NO") + 
-        //               ", ObjCount: " + std::to_string(ctx.scene.world.objects.size()) + 
-        //               ", Capture=" + std::to_string(capture) + 
-        //               ", GizmoOver=" + std::to_string(gizmo_over) + 
+        //SCENE_LOG_INFO("Viewport click. Cache: " + std::string(mesh_cache_valid ? "OK" : "NO") +
+        //               ", ObjCount: " + std::to_string(ctx.scene.world.objects.size()) +
+        //               ", TriToIdx: " + std::to_string(tri_to_index.size()) +
+        //               ", Capture=" + std::to_string(capture) +
+        //               ", GizmoOver=" + std::to_string(gizmo_over) +
         //               ", HUD=" + std::to_string(hud_captured_mouse) +
-        //               ", Dragging=" + std::to_string(is_dragging));
+        //               ", Dragging=" + std::to_string(is_dragging) +
+        //               ", BVH=" + std::string(ctx.scene.bvh ? "yes" : "no"));
                        
         if (!is_dragging) {
             // Ignore click if over UI elements (Window/Panel), Gizmo, or HUD overlay
@@ -276,40 +507,73 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         }
 
         // ===========================================================================
-        // GPU MODE VERTEX SYNC: In GPU TLAS mode, CPU vertices are NOT updated during
-        // gizmo drag (only GPU transform is updated). We must sync before picking.
-        // This is a one-time cost per click - acceptable for accurate selection.
+        // CPU VERTEX SYNC FOR PICKING: Triangle::hit() uses vertices[i].position
+        // which must be in world space. In Solid/Matcap viewport the Vulkan raster
+        // backend uploads getOriginalVertexPosition() + GPU transform, so CPU .position
+        // may never have been synced from the TransformHandle. This causes complete
+        // selection failure: the ray is in world space but triangles are tested at
+        // their local-space positions.
+        //
+        // Sync when:
+        //  - g_bvh_rebuild_pending (transforms changed via gizmo/animation/load)
+        //  - !picking_vertices_synced (first click after scene load / cache clear)
+        //
+        // CRITICAL: Runs in ALL viewport modes (Solid, Matcap, Rendered).
         // ===========================================================================
         extern bool g_bvh_rebuild_pending;
-        if (g_bvh_rebuild_pending && ctx.render_settings.use_optix) {
-            // BVH is stale - transforms changed. Sync ALL objects with TransformHandle.
-            int synced_objects = 0;
-            for (auto& [name, triangles] : mesh_cache) {
-                if (triangles.empty()) continue;
-                auto first_tri = triangles[0].second;
-                if (first_tri && first_tri->getTransformHandle()) {
-                    for (auto& pair : triangles) {
-                        pair.second->updateTransformedVertices();
-                    }
-                    synced_objects++;
-                }
-            }
-            if (synced_objects > 0) {
-              //  SCENE_LOG_INFO("GPU picking sync: updated " + std::to_string(synced_objects) + " objects");
-            }
-            // Clear the pending flag after full sync
-            g_bvh_rebuild_pending = false;
-        }
+        const bool interactive_selection_fallback = useInteractiveViewportSelectionFallback(ctx, *this);
 
-        // Also process lazy sync queue (for any stragglers)
+        // Process lazy sync queue first (objects moved with gizmo).
         ensureCPUSyncForPicking(ctx);
 
+        if (g_bvh_rebuild_pending || !picking_vertices_synced) {
+            int synced_objects = 0;
+            if (mesh_cache_valid) {
+                for (auto& [obj_name, tris] : mesh_cache) {
+                    if (tris.empty()) continue;
+                    if (!tris[0].second->getTransformHandle()) continue;
+                    for (auto& pair : tris) {
+                        pair.second->updateTransformedVertices();
+                    }
+                    ++synced_objects;
+                }
+            } else {
+                // Skip foliage tail: InstanceManager always appends at end
+                size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+                size_t selectable_count = (foliage_count <= ctx.scene.world.objects.size())
+                                              ? (ctx.scene.world.objects.size() - foliage_count)
+                                              : ctx.scene.world.objects.size();
+                for (size_t si = 0; si < selectable_count; ++si) {
+                    const auto& obj = ctx.scene.world.objects[si];
+                    if (!obj) continue;
+                    auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+                    if (tri && tri->getTransformHandle()) {
+                        tri->updateTransformedVertices();
+                        ++synced_objects;
+                        continue;
+                    }
+                    auto inst = std::dynamic_pointer_cast<HittableInstance>(obj);
+                    if (inst && inst->source_triangles) {
+                        for (auto& srcTri : *inst->source_triangles) {
+                            if (srcTri && srcTri->getTransformHandle()) {
+                                srcTri->updateTransformedVertices();
+                            }
+                        }
+                        ++synced_objects;
+                    }
+                }
+            }
+            picking_vertices_synced = true;
+            // Don't clear g_bvh_rebuild_pending here. Main.cpp's async BVH builder
+            // needs it to reconstruct the acceleration structure with updated positions.
+            // We only sync vertices for the linear scan / hit tests on this click.
+        }
 
         // ===========================================================================
         // SKINNED MESH FIX: When using GPU rendering with animations,
         // CPU vertices may be out of sync. Force a sync for picking accuracy.
         // ===========================================================================
-        if (ctx.render_settings.use_optix && !ctx.scene.animationDataList.empty()) {
+        if (!ctx.scene.animationDataList.empty()) {
             // We have GPU rendering + animations: sync CPU vertices for skinned meshes
             // This is a one-time cost per click, acceptable for accurate selection
             bool synced_any = false;
@@ -344,6 +608,34 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
         if (ctx.scene.camera) {
 
             Ray r = ctx.scene.camera->get_ray(u, v);
+
+            const bool edit_mode_locked =
+                mesh_overlay_settings.enabled &&
+                mesh_overlay_settings.edit_mode &&
+                ctx.selection.mesh_element_mode != MeshElementSelectMode::Object &&
+                !active_mesh_edit_object_name.empty();
+
+            const bool sculpt_mode_locked =
+                sculpt_mode_state.enabled &&
+                mesh_workspace_mode == MeshWorkspaceMode::Sculpt &&
+                mesh_overlay_settings.edit_mode &&
+                (terrain_sculpt_proxy_active || !sculpt_mode_state.active_target_name.empty());
+
+            if (edit_mode_locked) {
+                if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
+                    return;
+                }
+
+                handleMeshElementSelection(ctx, ImVec2(static_cast<float>(x), static_cast<float>(y)));
+                return;
+            }
+
+            if (sculpt_mode_locked) {
+                if (ImGuizmo::IsOver() || ImGuizmo::IsUsing()) {
+                    return;
+                }
+                return;
+            }
 
             // Check for Light Selection first (Bounding Sphere Intersection)
             std::shared_ptr<Light> closest_light = nullptr;
@@ -451,7 +743,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             bool has_ptr = (ctx.backend_ptr != nullptr);
             bool rebuild_pending = g_optix_rebuild_pending || g_vulkan_rebuild_pending;
             
-            if (use_gpu && has_ptr && !rebuild_pending) {
+            // Temporary safety fallback: GPU pick name lookup occasionally returns an unsafe path
+            // into the selection cache. Keep selection stable by forcing CPU/BVH picking here.
+            if (false && use_gpu && has_ptr && !rebuild_pending) {
                 // Pass viewport dimensions for coordinate scaling
                 int vp_w = static_cast<int>(win_w);
                 int vp_h = static_cast<int>(win_h);
@@ -474,9 +768,12 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
             // CPU BVH PICKING: Faster fallback for large scenes (e.g. 1.2M triangles)
             // =======================================================================
             if (!gpu_pick_success) {
-                // First try the world BVH (if not being rebuilt)
-                extern bool g_bvh_rebuild_pending;
-                if (ctx.scene.bvh && !g_bvh_rebuild_pending) {
+                // Use BVH in ALL viewport modes. After the vertex sync above,
+                // Triangle::hit() uses world-space positions so the BVH's internal
+                // AABB pruning may be slightly stale (local-space) but can still
+                // return valid hits. We try BVH first for O(log N) performance,
+                // then fall back to linear scan if BVH misses or is unavailable.
+                if (ctx.scene.bvh) {
                     if (ctx.scene.bvh->hit(r, 0.001f, closest_so_far, temp_rec)) {
                         hit = true;
                         closest_so_far = temp_rec.t;
@@ -484,20 +781,23 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     }
                 }
                 
-                // Fallback to Linear Scan ONLY if scene is very small OR BVH missing/rebuilding
-                // Note: Rebuilding 1.2M objects BVH is much faster than linear scanning them!
-                if (!hit && (mesh_cache.size() < 1000 || !ctx.scene.bvh)) {
-                    for (const auto& [name, triangles] : mesh_cache) {
-                        // [FIX] Ignore ForceField gizmos
-                        if (name.find("ForceField") != std::string::npos || 
-                            name.find("Force Field") != std::string::npos) continue;
-
-                        for (const auto& pair : triangles) {
-                            if (pair.second->hit(r, 0.001f, closest_so_far, temp_rec)) {
-                                hit = true;
-                                closest_so_far = temp_rec.t;
-                                rec = temp_rec;
+                // Fallback to Linear Scan if BVH missed or missing.
+                // Linear scan always works because we synced vertices above.
+                if (!hit && (ctx.scene.world.objects.size() < 1000 || !ctx.scene.bvh || interactive_selection_fallback)) {
+                    for (const auto& obj : ctx.scene.world.objects) {
+                        if (!obj) continue;
+                        if (obj->hit(r, 0.001f, closest_so_far, temp_rec)) {
+                            // Filter ForceField helper meshes by resolved hit triangle name.
+                            if (temp_rec.triangle) {
+                                const std::string& name = temp_rec.triangle->getNodeName();
+                                if (name.find("ForceField") != std::string::npos ||
+                                    name.find("Force Field") != std::string::npos) {
+                                    continue;
+                                }
                             }
+                            hit = true;
+                            closest_so_far = temp_rec.t;
+                            rec = temp_rec;
                         }
                     }
                 }
@@ -729,8 +1029,9 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                     std::shared_ptr<Triangle> found_tri = nullptr;
                     int index = -1;
 
-                    // Ensure cache is valid
-                    if (!mesh_cache_valid) rebuildMeshCache(ctx.scene.world.objects);
+                    if (!mesh_cache_valid) {
+                        rebuildMeshCache(ctx.scene.world.objects);
+                    }
 
                     // Try fast O(1) lookup first with const-correctness
                     auto it = tri_to_index.find(rec.triangle);
@@ -738,6 +1039,17 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                         index = it->second;
                         if (index >= 0 && index < (int)ctx.scene.world.objects.size()) {
                             found_tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[index]);
+                            if (!found_tri) {
+                                for (const auto& kv : mesh_cache) {
+                                    for (const auto& pair : kv.second) {
+                                        if (pair.second && pair.second.get() == rec.triangle) {
+                                            found_tri = pair.second;
+                                            break;
+                                        }
+                                    }
+                                    if (found_tri) break;
+                                }
+                            }
                         }
                     }
 
@@ -756,7 +1068,7 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             }
                         } else {
                             ctx.selection.selectObject(found_tri, index, found_tri->nodeName);
-                            SCENE_LOG_INFO("Selected via CPU Viewport: " + found_tri->nodeName);
+                           // SCENE_LOG_INFO("Selected via CPU Viewport: " + found_tri->nodeName);
 
                             // TERRAIN CONNECTION: Check if this is a terrain chunk
                             std::string tName = found_tri->nodeName;
@@ -773,8 +1085,53 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                             }
                         }
                     } else {
-                        SCENE_LOG_WARN("Selection: Triangle hit but not found in cache. Forcing rebuild...");
-                        rebuildMeshCache(ctx.scene.world.objects);
+                        SCENE_LOG_INFO("Selection: BVH hit stale triangle - falling back to linear scan");
+                        if (!mesh_cache_valid) {
+                            rebuildMeshCache(ctx.scene.world.objects);
+                        }
+                        HitRecord retry_rec;
+                        float retry_closest = 1e9f;
+                        bool retry_hit = false;
+                        for (const auto& obj : ctx.scene.world.objects) {
+                            if (!obj) continue;
+                            auto retry_tri_obj = std::dynamic_pointer_cast<Triangle>(obj);
+                            if (!retry_tri_obj) continue;
+                            if (obj->hit(r, 0.001f, retry_closest, retry_rec)) {
+                                if (retry_rec.triangle) {
+                                    const std::string& retry_name = retry_rec.triangle->getNodeName();
+                                    if (retry_name.find("ForceField") != std::string::npos ||
+                                        retry_name.find("Force Field") != std::string::npos) {
+                                        continue;
+                                    }
+                                }
+                                retry_hit = true;
+                                retry_closest = retry_rec.t;
+                            }
+                        }
+                        if (retry_hit && retry_rec.triangle) {
+                            auto it2 = tri_to_index.find(retry_rec.triangle);
+                            if (it2 != tri_to_index.end()) {
+                                int idx2 = it2->second;
+                                if (idx2 >= 0 && idx2 < (int)ctx.scene.world.objects.size()) {
+                                    auto retry_tri = std::dynamic_pointer_cast<Triangle>(ctx.scene.world.objects[idx2]);
+                                    if (!retry_tri) {
+                                        for (const auto& kv : mesh_cache) {
+                                            for (const auto& pair : kv.second) {
+                                                if (pair.second && pair.second.get() == retry_rec.triangle) {
+                                                    retry_tri = pair.second;
+                                                    break;
+                                                }
+                                            }
+                                            if (retry_tri) break;
+                                        }
+                                    }
+                                    if (retry_tri) {
+                                        ctx.selection.selectObject(retry_tri, idx2, retry_tri->nodeName);
+                                       // SCENE_LOG_INFO("Selected via linear fallback: " + retry_tri->nodeName);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 else if (closest_camera && closest_camera_t < closest_t) {
@@ -934,15 +1291,17 @@ void SceneUI::triggerDelete(UIContext& ctx) {
             if (cache_it != mesh_cache.end()) {
                 std::vector<std::shared_ptr<Triangle>> tris_for_undo;
                 for (auto& pair : cache_it->second) {
-                    objects_to_delete.insert(pair.second.get());
+                    pair.second->visible = false;
                     tris_for_undo.push_back(pair.second);
                 }
 
                 if (!tris_for_undo.empty()) {
+                    ctx.scene.markObjectPendingDelete(deleted_name);
                     deleted_names.push_back(deleted_name);
                     undo_data.push_back({ deleted_name, std::move(tris_for_undo) });
                 }
             }
+            setSelectionSceneNodeLocalVisibility(ctx, deleted_name, false);
         }
     }
 
@@ -1061,59 +1420,53 @@ void SceneUI::triggerDelete(UIContext& ctx) {
         ctx.selection.clearSelection();
         g_ProjectManager.markModified();
 
-        g_mesh_cache_dirty = true;  // Flag for Main.cpp / other systems
+        // Keep UI caches warm; object tombstones are hidden by name instead of forcing
+        // a full mesh cache rebuild for large scenes.
+        for (const auto& name : deleted_names) {
+            auto countIt = cached_triangle_count_by_object.find(name);
+            if (countIt != cached_triangle_count_by_object.end()) {
+                if (cached_scene_triangle_count >= countIt->second) {
+                    cached_scene_triangle_count -= countIt->second;
+                }
+                cached_triangle_count_by_object.erase(countIt);
+            }
 
-        // Update class tracker and FORCE FULL REBUILD
+            mesh_cache.erase(name);
+            bbox_cache.erase(name);
+            material_slots_cache.erase(name);
+        }
+        mesh_ui_cache.erase(
+            std::remove_if(mesh_ui_cache.begin(), mesh_ui_cache.end(),
+                [&](const auto& entry) {
+                    return std::find(deleted_names.begin(), deleted_names.end(), entry.first) != deleted_names.end();
+                }),
+            mesh_ui_cache.end());
         last_scene_obj_count = ctx.scene.world.objects.size();
-        invalidateCache();
+
+        // Immediately rebuild the lightweight tri_to_index so viewport picking
+        // keeps working with the stale BVH (no expensive full rebuild needed).
+        rebuildTriToIndex(ctx.scene.world.objects);
 
         if (deleted_objects > 0) {
-            // =======================================================================
-            // INCREMENTAL GPU UPDATE (TLAS mode) - Instant!
-            // =======================================================================
-            if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-                if (ctx.render_settings.use_vulkan) {
-                    // [CRASH FIX] Vulkan: do NOT call hideInstancesByNodeName +
-                    // rebuildAccelerationStructure() inline here.
-                    // After erasing from world.objects the BLAS pointers those
-                    // instances reference may already be freed; calling
-                    // rebuildAccelerationStructure() while a traceRays dispatch
-                    // is still in flight (or descriptor sets are still bound) causes
-                    // an access violation / device lost.
-                    // Deferring to g_vulkan_rebuild_pending lets the frame-end block
-                    // in Main.cpp run the full safe sequence:
-                    //   rebuildAccelerationStructure() -> updateGeometry()
-                    //   -> uploadHairToGPU() -> updateBackendMaterials()
-                    // with no render in flight.
-                    g_vulkan_rebuild_pending = true;
-                } else {
-                    // OptiX fast path: hide instances then rebuild TLAS (safe)
-                    for (const auto& name : deleted_names) {
-                        ctx.backend_ptr->hideInstancesByNodeName(name);
-                    }
-                    // Single TLAS update after ALL hides complete (batched for efficiency)
-                    ctx.backend_ptr->rebuildAccelerationStructure();
-                }
+            extern bool g_cpu_sync_pending;
+            for (const auto& name : deleted_names) {
+                setSelectionObjectVisibility(ctx, name, false);
             }
-            else {
-                // GAS mode fallback: Full rebuild required
-                g_optix_rebuild_pending = true;
+            ctx.renderer.resetCPUAccumulation();
+            if (selectionHasGpuRenderBackend(ctx)) {
+                g_cpu_sync_pending = true;
             }
-
-            // CPU BVH still needs rebuild for picking (async)
-            g_bvh_rebuild_pending = true;
+            ctx.start_render = true;
         }
 
         // Update lights if any were deleted
-        if (deleted_lights > 0 && ctx.backend_ptr) {
-            ctx.backend_ptr->setLights(ctx.scene.lights);
-            ctx.backend_ptr->resetAccumulation();
+        if (deleted_lights > 0) {
+            syncSelectionSceneState(ctx, true, false);
         }
 
         // Update GPU camera if cameras changed
-        if (deleted_cameras > 0 && ctx.backend_ptr && ctx.scene.camera) {
-            ctx.backend_ptr->syncCamera(*ctx.scene.camera);
-            ctx.backend_ptr->resetAccumulation();
+        if (deleted_cameras > 0 && ctx.scene.camera) {
+            syncSelectionSceneState(ctx, false, true);
         }
 
         // ===========================================================================
@@ -1345,16 +1698,22 @@ void SceneUI::triggerDuplicate(UIContext& ctx) {
             sel.addToSelection(newItem);
         }
         
-        extern bool g_optix_rebuild_pending;
-        g_optix_rebuild_pending = true;
+        if (g_viewport_backend) {
+            rebuildInteractiveViewportAfterTopologyChange(ctx);
+            g_viewport_raster_rebuild_pending = true;
+        }
+        extern bool g_vulkan_rebuild_pending;
+        Backend::IBackend* renderBackend = getSelectionRenderBackend(ctx);
+        if (renderBackend && dynamic_cast<Backend::VulkanBackendAdapter*>(renderBackend) != nullptr) {
+            g_vulkan_rebuild_pending = true;
+        } else if (renderBackend) {
+            g_optix_rebuild_pending = true;
+        }
         extern bool g_bvh_rebuild_pending;
         g_bvh_rebuild_pending = true;
         
         ctx.renderer.resetCPUAccumulation();
-        if (ctx.backend_ptr) {
-            ctx.backend_ptr->setLights(ctx.scene.lights);
-            ctx.backend_ptr->resetAccumulation();
-        }
+        syncSelectionSceneState(ctx, true, false);
         
         ProjectManager::getInstance().markModified();
     }

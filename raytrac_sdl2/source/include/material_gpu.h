@@ -60,9 +60,10 @@ struct alignas(16) GpuMaterial {
     float anisotropic;                // 4 bytes - Surface anisotropy
     float sheen;                      // 4 bytes - Sheen amount  
     float sheen_tint;                 // 4 bytes - Sheen color tint
-    int flags;                        // 4 bytes - bitfield flags (replaced padding)
+    float normal_strength;            // 4 bytes - tangent-space normal XY multiplier
 
     // Subsurface control flags (1 = enable random-walk multi-scatter)
+    int flags;                        // 4 bytes - bitfield flags
     int sss_use_random_walk = 1;      // 4 bytes
     int sss_max_steps = 6;            // 4 bytes - bounded random-walk depth
 
@@ -88,7 +89,19 @@ struct alignas(16) GpuMaterial {
     float fft_amplitude;              // 4 bytes
     float fft_time_scale;             // 4 bytes
 
-    // Block 12: Standard Textures (Bindless Support)
+    // Block 12: UV transform core (16 bytes)
+    float uv_scale_x = 1.0f;
+    float uv_scale_y = 1.0f;
+    float uv_offset_x = 0.0f;
+    float uv_offset_y = 0.0f;
+
+    // Block 13: UV transform extra (16 bytes)
+    float uv_rotation_degrees = 0.0f;
+    float uv_tiling_x = 1.0f;
+    float uv_tiling_y = 1.0f;
+    int uv_wrap_mode = 0;
+
+    // Block 14: Standard Textures (Bindless Support)
     cudaTextureObject_t albedo_tex = 0;
     cudaTextureObject_t normal_tex = 0;
     cudaTextureObject_t roughness_tex = 0;
@@ -187,6 +200,7 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         // Clear Coat & Translucent
         fabsf(a.clearcoat_roughness - b.clearcoat_roughness) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.translucent - b.translucent) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.normal_strength - b.normal_strength) < FLOAT_COMPARE_EPSILON &&
         // Water Details
         fabsf(a.micro_detail_strength - b.micro_detail_strength) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.micro_detail_scale - b.micro_detail_scale) < FLOAT_COMPARE_EPSILON &&
@@ -198,7 +212,15 @@ inline bool operator==(const GpuMaterial& a, const GpuMaterial& b) {
         fabsf(a.fft_wind_speed - b.fft_wind_speed) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.fft_wind_direction - b.fft_wind_direction) < FLOAT_COMPARE_EPSILON &&
         fabsf(a.fft_amplitude - b.fft_amplitude) < FLOAT_COMPARE_EPSILON &&
-        fabsf(a.fft_time_scale - b.fft_time_scale) < FLOAT_COMPARE_EPSILON;
+        fabsf(a.fft_time_scale - b.fft_time_scale) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_scale_x - b.uv_scale_x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_scale_y - b.uv_scale_y) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_offset_x - b.uv_offset_x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_offset_y - b.uv_offset_y) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_rotation_degrees - b.uv_rotation_degrees) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_tiling_x - b.uv_tiling_x) < FLOAT_COMPARE_EPSILON &&
+        fabsf(a.uv_tiling_y - b.uv_tiling_y) < FLOAT_COMPARE_EPSILON &&
+        a.uv_wrap_mode == b.uv_wrap_mode;
 }    
 
 namespace std {  
@@ -246,6 +268,7 @@ namespace std {
             // Clear Coat & Translucent
             hash_combine_f(h, m.clearcoat_roughness);
             hash_combine_f(h, m.translucent);
+            hash_combine_f(h, m.normal_strength);
 
             // Water Details
             hash_combine_f(h, m.micro_detail_strength);
@@ -260,6 +283,14 @@ namespace std {
             hash_combine_f(h, m.fft_wind_direction);
             hash_combine_f(h, m.fft_amplitude);
             hash_combine_f(h, m.fft_time_scale);
+            hash_combine_f(h, m.uv_scale_x);
+            hash_combine_f(h, m.uv_scale_y);
+            hash_combine_f(h, m.uv_offset_x);
+            hash_combine_f(h, m.uv_offset_y);
+            hash_combine_f(h, m.uv_rotation_degrees);
+            hash_combine_f(h, m.uv_tiling_x);
+            hash_combine_f(h, m.uv_tiling_y);
+            hash_combine_f(h, (float)m.uv_wrap_mode);
 
                 // include sss fields at end for hash stability
                 hash_combine_f(h, (float)m.sss_use_random_walk);

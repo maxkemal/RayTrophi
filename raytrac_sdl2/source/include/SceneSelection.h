@@ -53,6 +53,13 @@ enum class TransformSpace {
     Local
 };
 
+enum class MeshElementSelectMode {
+    Object,
+    Vertex,
+    Edge,
+    Face
+};
+
 // Selectable Item - Base interface for anything that can be selected
 struct SelectableItem {
     SelectableType type = SelectableType::None;
@@ -124,6 +131,7 @@ public:
     // Transform mode settings
     TransformMode transform_mode = TransformMode::Translate;
     TransformSpace transform_space = TransformSpace::World;
+    MeshElementSelectMode mesh_element_mode = MeshElementSelectMode::Object;
     
     // Gizmo visibility
     bool show_gizmo = true;
@@ -181,6 +189,18 @@ public:
                 break;
             case 'S': // Scale
                 transform_mode = TransformMode::Scale;
+                break;
+            case '1':
+                mesh_element_mode = MeshElementSelectMode::Object;
+                break;
+            case '2':
+                mesh_element_mode = MeshElementSelectMode::Vertex;
+                break;
+            case '3':
+                mesh_element_mode = MeshElementSelectMode::Edge;
+                break;
+            case '4':
+                mesh_element_mode = MeshElementSelectMode::Face;
                 break;
             case 'X': // Delete
             case 127: // Delete key

@@ -16,9 +16,7 @@
     } while (0)
 
 AtmosphereLUT::AtmosphereLUT() {
-    data.transmittance_lut = 0;
-    data.skyview_lut = 0;
-    data.integrated_multi_scattering = make_float3(0.0f, 0.0f, 0.0f);
+    memset(&data, 0, sizeof(data));
 }
 
 AtmosphereLUT::~AtmosphereLUT() {
@@ -260,7 +258,7 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& params) {
                     }
                 }
             }
-            host_skyview[y * SKYVIEW_LUT_W + x] = make_float4(radiance.x * params.sun_intensity, radiance.y * params.sun_intensity, radiance.z * params.sun_intensity, 1.0f);
+            host_skyview[y * SKYVIEW_LUT_W + x] = make_float4(radiance.x * params.atmosphere_intensity, radiance.y * params.atmosphere_intensity, radiance.z * params.atmosphere_intensity, 1.0f);
         }
     }
     if (g_hasCUDA) {

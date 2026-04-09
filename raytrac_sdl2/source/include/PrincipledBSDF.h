@@ -19,6 +19,13 @@
 
 class PrincipledBSDF : public Material {
 public:
+    struct SurfaceDepositionSettings {
+        bool enabled = false;
+        float thickness_scale = 1.0f;
+        float max_thickness = 0.05f;
+        float hit_offset_scale = 1.0f;
+    };
+
     struct TextureTransform {
         Vec2 scale;
         float rotation_degrees;
@@ -130,16 +137,19 @@ public:
         return 0.01f;
     }
     Vec3 getEmission(const Vec2& uv, const Vec3& p) const {
+        (void)p;
         // Vulkan: payload.radiance = emColor * emStrength
         // OptiX:  gpuMat.emission = color * intensity (pre-multiplied at upload)
         // CPU must match: return color * intensity
+        Vec2 sampleUv = applyTextureTransform(uv.u, uv.v);
         if (emissionProperty.texture) {
-            return emissionProperty.texture->get_color(uv.u, uv.v) * emissionProperty.intensity;
+            return emissionProperty.texture->get_color_bilinear(sampleUv.u, sampleUv.v) * emissionProperty.intensity;
         }
         return emissionProperty.color * emissionProperty.intensity;
     }
     MaterialProperty specularProperty;
     TextureTransform textureTransform;
+    int selected_uv_set = 0;
     // MaterialProperty transmissionProperty; // Shadowing removed
     Vec3 albedoValue;
     Vec3 getPropertyValue(const MaterialProperty& prop, const Vec2& uv) const;
@@ -182,6 +192,7 @@ public:
     float transmission = 0.0f;                          // Glass/water transmission
     float sheen = 0.0f;                                 // Sheen amount (used as IS_WATER flag)
     float sheen_tint = 0.5f;                            // Sheen color tint (used as wave frequency for water)
+    SurfaceDepositionSettings surface_deposition;
     Vec3 anisotropicDirection;
     float opacityAlpha = 1.0f;
 private:

@@ -69,8 +69,29 @@ InstanceGroup* InstanceManager::findGroupByName(const std::string& name) {
 // BRUSH OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Simple Möller-Trumbore ray-triangle intersection utility local to this file
+static float local_RayTriangle(const Vec3& orig, const Vec3& dir,
+                               const Vec3& v0, const Vec3& v1, const Vec3& v2)
+{
+    const float EPS = 1e-8f;
+    Vec3 edge1 = v1 - v0;
+    Vec3 edge2 = v2 - v0;
+    Vec3 h = Vec3::cross(dir, edge2);
+    float a = Vec3::dot(edge1, h);
+    if (fabsf(a) < EPS) return -1.f;
+    float f = 1.f / a;
+    Vec3 s = orig - v0;
+    float u = f * Vec3::dot(s, h);
+    if (u < 0.f || u > 1.f) return -1.f;
+    Vec3 q = Vec3::cross(s, edge1);
+    float v = f * Vec3::dot(dir, q);
+    if (v < 0.f || u + v > 1.f) return -1.f;
+    float t = f * Vec3::dot(edge2, q);
+    return (t > EPS) ? t : -1.f;
+}
+
 int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3& normal,
-                                     float brush_radius, float density_multiplier) {
+                                     float brush_radius, float density_multiplier, SceneData* scene) {
     InstanceGroup* group = getGroup(group_id);
     if (!group) return 0;
     
@@ -89,6 +110,17 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
     
     // Add instances at each point (check against existing instances)
     int added = 0;
+    // If target is mesh, collect candidate triangles from scene
+    std::vector<std::shared_ptr<Triangle>> target_tris;
+    bool use_mesh_projection = false;
+    if (group->target_type == InstanceGroup::TargetType::MESH && !group->target_node_name.empty() && scene) {
+        use_mesh_projection = true;
+        for (auto& obj : scene->world.objects) {
+            auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+            if (tri && tri->getNodeName() == group->target_node_name) target_tris.push_back(tri);
+        }
+    }
+
     for (const Vec3& pos : points) {
         // Check if too close to any existing instance
         bool too_close = false;
@@ -104,10 +136,58 @@ int InstanceManager::paintInstances(int group_id, const Vec3& center, const Vec3
             // Re-sample terrain height and normal for each point to follow slope
             Vec3 surface_normal = normal;
             Vec3 surface_pos = pos;
-            
-            if (TerrainManager::getInstance().hasActiveTerrain()) {
-                surface_pos.y = TerrainManager::getInstance().sampleHeight(pos.x, pos.z);
-                surface_normal = TerrainManager::getInstance().sampleNormal(pos.x, pos.z);
+
+            if (use_mesh_projection && !target_tris.empty()) {
+                // Cast a short ray downwards from above the point to find mesh surface
+                Vec3 ray_orig = Vec3(pos.x, pos.y + 1000.0f, pos.z);
+                Vec3 ray_dir = Vec3(0, -1, 0);
+                float closest_t = 1e20f;
+                Vec3 best_n(0,1,0);
+                bool hit_found = false;
+                for (const auto& tri : target_tris) {
+                    Vec3 v0 = tri->getV0();
+                    Vec3 v1 = tri->getV1();
+                    Vec3 v2 = tri->getV2();
+                    float t = local_RayTriangle(ray_orig, ray_dir, v0, v1, v2);
+                    if (t > 0 && t < closest_t) {
+                        closest_t = t;
+                        Vec3 fn = Vec3::cross(v1 - v0, v2 - v0);
+                        float fn_len = fn.length();
+                        best_n = (fn_len > 1e-6f) ? fn / fn_len : Vec3(0,1,0);
+                        if (best_n.y < 0.f) best_n = -best_n;
+                        hit_found = true;
+                    }
+                }
+                if (hit_found) {
+                    surface_pos = ray_orig + ray_dir * closest_t;
+                    surface_normal = best_n;
+                } else if (TerrainManager::getInstance().hasActiveTerrain()) {
+                    surface_pos.y = TerrainManager::getInstance().sampleHeight(pos.x, pos.z);
+                    surface_normal = TerrainManager::getInstance().sampleNormal(pos.x, pos.z);
+                }
+            } else {
+                if (TerrainManager::getInstance().hasActiveTerrain()) {
+                    surface_pos.y = TerrainManager::getInstance().sampleHeight(pos.x, pos.z);
+                    surface_normal = TerrainManager::getInstance().sampleNormal(pos.x, pos.z);
+                }
+            }
+
+            // If group requests splat-map masking (terrain channels), respect it: only add when mask allows
+            int splat_ch = group->brush_settings.splat_map_channel;
+            int excl_ch = group->brush_settings.exclusion_channel;
+            float excl_th = group->brush_settings.exclusion_threshold;
+
+            if (splat_ch >= 0) {
+                float m = TerrainManager::getInstance().sampleSplatChannel(surface_pos.x, surface_pos.z, splat_ch);
+                if (m <= 0.001f) {
+                    continue; // not allowed on this channel
+                }
+            }
+            if (excl_ch >= 0) {
+                float em = TerrainManager::getInstance().sampleSplatChannel(surface_pos.x, surface_pos.z, excl_ch);
+                if (em >= excl_th) {
+                    continue; // excluded by mask
+                }
             }
 
             InstanceTransform t = group->generateRandomTransform(surface_pos, surface_normal);
@@ -487,8 +567,167 @@ void InstanceManager::deserialize(const json& j, SceneData& scene) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// FAST SIMDJSON DESERIALIZE — avoids sjsonToNlohmann round-trip
+// ═══════════════════════════════════════════════════════════════════════════════
+
+static double sj_double(simdjson::dom::element el, double def = 0.0) {
+    double v; return el.get(v) ? def : v;
+}
+static bool sj_bool(simdjson::dom::element el, bool def = false) {
+    bool v; return el.get(v) ? def : v;
+}
+static int64_t sj_int(simdjson::dom::element el, int64_t def = 0) {
+    int64_t v; return el.get(v) ? def : v;
+}
+static std::string sj_str(simdjson::dom::element el, const char* def = "") {
+    std::string_view sv; return el.get(sv) ? std::string(def) : std::string(sv);
+}
+
+void InstanceManager::deserializeFast(simdjson::dom::element el, SceneData& scene) {
+    clearAll();
+
+    simdjson::dom::array arr;
+    if (el.get_array().get(arr)) return;
+
+    // Build a name→triangles lookup once instead of scanning scene.world.objects per source
+    std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> tri_by_name;
+    for (const auto& obj : scene.world.objects) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(obj);
+        if (tri) {
+            tri_by_name[tri->getNodeName()].push_back(tri);
+        }
+    }
+
+    for (simdjson::dom::element j_group : arr) {
+        InstanceGroup group;
+        { simdjson::dom::element v; if (!j_group["id"].get(v)) group.id = (int)sj_int(v); else group.id = next_group_id++; }
+        { simdjson::dom::element v; if (!j_group["name"].get(v)) group.name = sj_str(v, "Foliage Layer"); else group.name = "Foliage Layer"; }
+        if (group.id >= next_group_id) next_group_id = group.id + 1;
+
+        // Settings
+        simdjson::dom::element s_el;
+        if (!j_group["settings"].get(s_el)) {
+            auto& bs = group.brush_settings;
+            simdjson::dom::element v;
+            if (!s_el["density"].get(v)) bs.density = (float)sj_double(v, 1.0);
+            if (!s_el["target_count"].get(v)) bs.target_count = (int)sj_int(v, 1000);
+            if (!s_el["seed"].get(v)) bs.seed = (int)sj_int(v, 1234);
+            if (!s_el["min_distance"].get(v)) bs.min_distance = (float)sj_double(v, 0.5);
+            if (!s_el["scale_min"].get(v)) bs.scale_min = (float)sj_double(v, 0.8);
+            if (!s_el["scale_max"].get(v)) bs.scale_max = (float)sj_double(v, 1.2);
+            if (!s_el["rotation_random_y"].get(v)) bs.rotation_random_y = (float)sj_double(v, 360.0);
+            if (!s_el["rotation_random_xz"].get(v)) bs.rotation_random_xz = (float)sj_double(v, 15.0);
+            if (!s_el["y_offset_min"].get(v)) bs.y_offset_min = (float)sj_double(v, 0.0);
+            if (!s_el["y_offset_max"].get(v)) bs.y_offset_max = (float)sj_double(v, 0.0);
+            if (!s_el["align_to_normal"].get(v)) bs.align_to_normal = sj_bool(v, true);
+            if (!s_el["normal_influence"].get(v)) bs.normal_influence = (float)sj_double(v, 1.0);
+            if (!s_el["splat_map_channel"].get(v)) bs.splat_map_channel = (int)sj_int(v, -1);
+            if (!s_el["exclusion_channel"].get(v)) bs.exclusion_channel = (int)sj_int(v, -1);
+            if (!s_el["exclusion_threshold"].get(v)) bs.exclusion_threshold = (float)sj_double(v, 0.5);
+            if (!s_el["slope_max"].get(v)) bs.slope_max = (float)sj_double(v, 45.0);
+            if (!s_el["height_min"].get(v)) bs.height_min = (float)sj_double(v, -10.0);
+            if (!s_el["height_max"].get(v)) bs.height_max = (float)sj_double(v, 10.0);
+            if (!s_el["curvature_min"].get(v)) bs.curvature_min = (float)sj_double(v, -2.0);
+            if (!s_el["curvature_max"].get(v)) bs.curvature_max = (float)sj_double(v, 2.0);
+            if (!s_el["curvature_step"].get(v)) bs.curvature_step = (int)sj_int(v, 1);
+            if (!s_el["allow_ridges"].get(v)) bs.allow_ridges = sj_bool(v, true);
+            if (!s_el["allow_flats"].get(v)) bs.allow_flats = sj_bool(v, true);
+            if (!s_el["allow_gullies"].get(v)) bs.allow_gullies = sj_bool(v, true);
+            if (!s_el["slope_direction_angle"].get(v)) bs.slope_direction_angle = (float)sj_double(v, 0.0);
+            if (!s_el["slope_direction_influence"].get(v)) bs.slope_direction_influence = (float)sj_double(v, 0.0);
+            if (!s_el["use_global_settings"].get(v)) bs.use_global_settings = sj_bool(v, false);
+        }
+
+        // Wind Settings
+        simdjson::dom::element w_el;
+        if (!j_group["wind"].get(w_el)) {
+            auto& ws = group.wind_settings;
+            simdjson::dom::element v;
+            if (!w_el["enabled"].get(v)) ws.enabled = sj_bool(v, false);
+            if (!w_el["speed"].get(v)) ws.speed = (float)sj_double(v, 1.0);
+            if (!w_el["strength"].get(v)) ws.strength = (float)sj_double(v, 0.1);
+            simdjson::dom::array dir_arr;
+            if (!w_el["direction"].get(dir_arr) && dir_arr.size() >= 3) {
+                auto it = dir_arr.begin();
+                float dx = (float)sj_double(*it); ++it;
+                float dy = (float)sj_double(*it); ++it;
+                float dz = (float)sj_double(*it);
+                ws.direction = Vec3(dx, dy, dz);
+            }
+            if (!w_el["turbulence"].get(v)) ws.turbulence = (float)sj_double(v, 1.5);
+            if (!w_el["wave_size"].get(v)) ws.wave_size = (float)sj_double(v, 50.0);
+            if (!w_el["use_source_profiles"].get(v)) ws.use_source_profiles = sj_bool(v, true);
+            if (!w_el["allow_gpu_deform"].get(v)) ws.allow_gpu_deform = sj_bool(v, true);
+            if (!w_el["gpu_deform_max_distance"].get(v)) ws.gpu_deform_max_distance = (float)sj_double(v, 35.0);
+            if (!w_el["gpu_deform_max_instances"].get(v)) ws.gpu_deform_max_instances = (int)sj_int(v, 32);
+        }
+
+        // Sources
+        simdjson::dom::array src_arr;
+        if (!j_group["sources"].get(src_arr)) {
+            for (simdjson::dom::element j_src : src_arr) {
+                ScatterSource src;
+                { simdjson::dom::element v; if (!j_src["name"].get(v)) src.name = sj_str(v); }
+                { simdjson::dom::element v; if (!j_src["weight"].get(v)) src.weight = (float)sj_double(v, 1.0); }
+
+                simdjson::dom::element ss_el;
+                if (!j_src["settings"].get(ss_el)) {
+                    auto& ss = src.settings;
+                    simdjson::dom::element v;
+                    if (!ss_el["scale_min"].get(v)) ss.scale_min = (float)sj_double(v, 0.8);
+                    if (!ss_el["scale_max"].get(v)) ss.scale_max = (float)sj_double(v, 1.2);
+                    if (!ss_el["rotation_random_y"].get(v)) ss.rotation_random_y = (float)sj_double(v, 360.0);
+                    if (!ss_el["rotation_random_xz"].get(v)) ss.rotation_random_xz = (float)sj_double(v, 5.0);
+                    if (!ss_el["y_offset_min"].get(v)) ss.y_offset_min = (float)sj_double(v, 0.0);
+                    if (!ss_el["y_offset_max"].get(v)) ss.y_offset_max = (float)sj_double(v, 0.0);
+                    if (!ss_el["align_to_normal"].get(v)) ss.align_to_normal = sj_bool(v, true);
+                    if (!ss_el["normal_influence"].get(v)) ss.normal_influence = (float)sj_double(v, 0.8);
+                    if (!ss_el["wind_strength_scale"].get(v)) ss.wind_strength_scale = (float)sj_double(v, 1.0);
+                    if (!ss_el["wind_speed_scale"].get(v)) ss.wind_speed_scale = (float)sj_double(v, 1.0);
+                    if (!ss_el["wind_turbulence_scale"].get(v)) ss.wind_turbulence_scale = (float)sj_double(v, 1.0);
+                    if (!ss_el["wind_bend_limit_scale"].get(v)) ss.wind_bend_limit_scale = (float)sj_double(v, 1.0);
+                    if (!ss_el["wind_phase_offset"].get(v)) ss.wind_phase_offset = (float)sj_double(v, 0.0);
+                }
+
+                // Re-link triangles from scene using pre-built lookup
+                auto lookup = tri_by_name.find(src.name);
+                if (lookup != tri_by_name.end()) {
+                    src.triangles = lookup->second;
+                }
+                src.computeCenter();
+                group.sources.push_back(std::move(src));
+            }
+        }
+
+        // Instances — the hot path. Parse directly from simdjson arrays.
+        simdjson::dom::array inst_arr;
+        if (!j_group["instances"].get(inst_arr)) {
+            group.instances.reserve(inst_arr.size());
+            for (simdjson::dom::element j_i : inst_arr) {
+                simdjson::dom::array vals;
+                if (j_i.get_array().get(vals) || vals.size() < 10) continue;
+                InstanceTransform inst;
+                auto it = vals.begin();
+                inst.position.x = (float)sj_double(*it); ++it;
+                inst.position.y = (float)sj_double(*it); ++it;
+                inst.position.z = (float)sj_double(*it); ++it;
+                inst.rotation.x = (float)sj_double(*it); ++it;
+                inst.rotation.y = (float)sj_double(*it); ++it;
+                inst.rotation.z = (float)sj_double(*it); ++it;
+                inst.scale.x    = (float)sj_double(*it); ++it;
+                inst.scale.y    = (float)sj_double(*it); ++it;
+                inst.scale.z    = (float)sj_double(*it); ++it;
+                inst.source_index = (int)sj_int(*it);
+                group.instances.push_back(inst);
+            }
+            group.initial_instances = group.instances;
+        }
+        groups.push_back(std::move(group));
+    }
+}
+
 #include "HittableInstance.h"
-// #include "BVHNode.h" // Removed
 
 void InstanceManager::rebuildSceneObjects(SceneData& scene) {
     if (groups.empty()) return;

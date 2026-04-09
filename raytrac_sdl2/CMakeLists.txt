@@ -71,6 +71,8 @@ file(GLOB_RECURSE SOURCES_CPP
     "source/src/Animation/*.cpp"
     "source/src/Hair/*.cpp"
     "source/src/Backend/*.cpp"
+    "source/src/Paint/*.cpp"
+    "source/src/Viewport/*.cpp"
 )
 list(APPEND SOURCES_CPP ${SOURCES_CPP_ROOT})
 list(APPEND SOURCES_CPP "source/src/Render/FoliageWindSystem.cpp")
@@ -124,6 +126,7 @@ set(OZZ_RUNTIME_SOURCES
     "external/ozz-animation/src/animation/offline/raw_animation.cc"
     "external/ozz-animation/src/animation/offline/raw_animation_archive.cc"
     "external/ozz-animation/src/animation/offline/raw_animation_utils.cc"
+    "external/ozz-animation/src/animation/offline/additive_animation_builder.cc"
     "external/ozz-animation/src/animation/offline/animation_builder.cc"
     "external/ozz-animation/src/animation/offline/raw_skeleton.cc"
     "external/ozz-animation/src/animation/offline/raw_skeleton_archive.cc"
@@ -218,6 +221,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Utils"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Animation"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Hair"
+    "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Viewport"
     "${CMAKE_CURRENT_SOURCE_DIR}/source/src/Device"
     "${CMAKE_CURRENT_SOURCE_DIR}/external"
     "${CMAKE_CURRENT_SOURCE_DIR}/external/imgui"

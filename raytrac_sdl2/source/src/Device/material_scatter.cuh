@@ -24,6 +24,78 @@ __device__ __forceinline__ float3 clamp3f(const float3& v, float lo, float hi) {
     );
 }
 
+__device__ __forceinline__ float wrap_repeat_gpu(float x) {
+    float r = fmodf(x, 1.0f);
+    return (r < 0.0f) ? (r + 1.0f) : r;
+}
+
+__device__ __forceinline__ float wrap_mirror_gpu(float x) {
+    float r = fmodf(x, 2.0f);
+    if (r < 0.0f) r += 2.0f;
+    return (r > 1.0f) ? (2.0f - r) : r;
+}
+
+__device__ __forceinline__ float wrap_clamp_gpu(float x) {
+    return fminf(fmaxf(x, 0.0f), 1.0f);
+}
+
+__device__ __forceinline__ float2 apply_material_uv_transform(const GpuMaterial& material, const float2& originalUv) {
+    float u = originalUv.x - 0.5f;
+    float v = originalUv.y - 0.5f;
+    u *= material.uv_scale_x;
+    v *= material.uv_scale_y;
+
+    const float radians = material.uv_rotation_degrees * (M_PIf / 180.0f);
+    const float cosTheta = cosf(radians);
+    const float sinTheta = sinf(radians);
+    const float rotatedU = u * cosTheta - v * sinTheta;
+    const float rotatedV = u * sinTheta + v * cosTheta;
+
+    float transformedU = (rotatedU + 0.5f + material.uv_offset_x) * material.uv_tiling_x;
+    float transformedV = (rotatedV + 0.5f + material.uv_offset_y) * material.uv_tiling_y;
+
+    switch (material.uv_wrap_mode) {
+    case 0:
+        transformedU = wrap_repeat_gpu(transformedU);
+        transformedV = wrap_repeat_gpu(transformedV);
+        break;
+    case 1:
+        transformedU = wrap_mirror_gpu(transformedU);
+        transformedV = wrap_mirror_gpu(transformedV);
+        break;
+    case 2:
+        transformedU = wrap_clamp_gpu(transformedU);
+        transformedV = wrap_clamp_gpu(transformedV);
+        break;
+    case 3:
+        transformedU = originalUv.x;
+        transformedV = originalUv.y;
+        break;
+    case 4: {
+        const float uScaled = transformedU * 3.0f;
+        const float vScaled = transformedV * 3.0f;
+        const int face = static_cast<int>(uScaled) + 3 * static_cast<int>(vScaled);
+        float uLocal = fmodf(uScaled, 1.0f);
+        float vLocal = fmodf(vScaled, 1.0f);
+        if (uLocal < 0.0f) uLocal += 1.0f;
+        if (vLocal < 0.0f) vLocal += 1.0f;
+        switch (face % 6) {
+        case 0: transformedU = uLocal; transformedV = vLocal; break;
+        case 1: transformedU = vLocal; transformedV = 1.0f - uLocal; break;
+        case 2: transformedU = 1.0f - uLocal; transformedV = vLocal; break;
+        case 3: transformedU = 1.0f - vLocal; transformedV = 1.0f - uLocal; break;
+        case 4: transformedU = uLocal; transformedV = 1.0f - vLocal; break;
+        default: transformedU = vLocal; transformedV = uLocal; break;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
+    return make_float2(transformedU, transformedV);
+}
+
 __device__ float G_SchlickGGX(float NdotV, float roughness) {
     // Match Vulkan/CPU direct-lighting parity: k = (roughness + 1)^2 / 8
     float r = roughness + 1.0f;
@@ -34,6 +106,8 @@ __device__ float G_SchlickGGX(float NdotV, float roughness) {
 __device__ float G_Smith(float NdotV, float NdotL, float roughness) {
     return G_SchlickGGX(NdotV, roughness) * G_SchlickGGX(NdotL, roughness);
 }
+
+__device__ float3 fresnel_schlick_roughness(float cosTheta, float3 F0, float roughness);
 
 __device__ float pdf_brdf(const GpuMaterial& mat, const float3& wo, const float3& wi, const float3& N) {
     float3 sum = wo + wi;
@@ -89,7 +163,7 @@ __device__ float3 evaluate_brdf(
 )
 {
     const float3 N = payload.normal;
-    float2 uv = payload.uv;
+    float2 uv = apply_material_uv_transform(material, payload.uv);
 
     float NdotL = max(dot(N, wi), GPU_MIN_DOT);
     float NdotV = max(dot(N, wo), GPU_MIN_DOT);
@@ -163,14 +237,14 @@ __device__ float3 evaluate_brdf(
     float D = alpha2 / (M_PIf * denom * denom);
 
     float3 F0 = lerp(make_float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    // Standard Schlick Fresnel (F90 = 1.0) matches Vulkan for consistency and correct highlights
-    float3 F = F0 + (make_float3(1.0f) - F0) * powf(1.0f - VdotH, 5.0f);
+    float3 F = fresnel_schlick_roughness(VdotH, F0, roughness);
+    float3 F_avg = F0 + (make_float3(1.0f) - F0) / 21.0f;
 
     float G = G_Smith(NdotV, NdotL, roughness);
     float3 spec = (F * D * G) / (4.0f * NdotV * NdotL + 0.001f);   
     
     // Diffuse weight (Energy Conservation): Use dynamic (1-F) like Vulkan
-    float3 k_d = (make_float3(1.0f) - F) * (1.0f - metallic);
+    float3 k_d = (make_float3(1.0f) - F_avg) * (1.0f - metallic);
     float3 diffuse = k_d * albedo / M_PIf;
   
    
@@ -304,6 +378,7 @@ __device__ bool sss_random_walk_scatter(
     float3* attenuation
 ) {
     float3 N = normalize(payload.normal);
+    float2 uv = apply_material_uv_transform(material, payload.uv);
     float3 V = -normalize(ray_in.direction);
     
     // Get SSS parameters
@@ -480,13 +555,14 @@ __device__ bool translucent_scatter(
     float3* attenuation
 ) {
     float3 N = normalize(payload.normal);
+    const float2 local_uv = apply_material_uv_transform(material, payload.uv);
     
     // Get albedo for tinting
     float3 albedo = material.albedo;
     if (payload.use_blended_data) {
         albedo = payload.blended_albedo;
     } else if (payload.has_albedo_tex) {
-        float4 tex = tex2D<float4>(payload.albedo_tex, payload.uv.x, payload.uv.y);
+        float4 tex = tex2D<float4>(payload.albedo_tex, local_uv.x, local_uv.y);
         albedo = make_float3(tex.x, tex.y, tex.z);
     }
     
@@ -533,64 +609,58 @@ __device__ bool transmission_scatter(
 )
 {
     const float3 N = normalize(payload.normal);
-    const float3 V = -normalize(ray_in.direction);
-    float3 outward_normal = normalize(N);
     float3 unit_direction = normalize(ray_in.direction);
-    float2 uv = payload.uv;
+    float2 uv = apply_material_uv_transform(material, payload.uv);
 
     float ior = material.ior;
     if (payload.use_blended_data) ior = payload.blended_ior;
+    bool front_face = dot(unit_direction, N) < 0.0f;
+    float3 macro_normal = front_face ? N : -N;
+    float eta = front_face ? (1.0f / ior) : ior;
 
-    float eta = dot(V, N) > 0.0f ? (1.0f / ior) : ior;
-
-    float cos_theta = fminf(dot(-unit_direction, outward_normal), 1.0f);
-    float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));
-
-    float reflect_prob = schlick(cos_theta, eta);
-    bool cannot_refract = (eta * sin_theta > 1.0f);
-
-    float direct_trans_prob = 0.05f;
-    float refract_prob = cannot_refract ? 0.0f : (1.0f - reflect_prob) * (1.0f - direct_trans_prob);
-
-    float total_prob = reflect_prob + refract_prob + direct_trans_prob;
-    reflect_prob /= total_prob;
-    refract_prob /= total_prob;
-    direct_trans_prob /= total_prob;
-
-    float random_val = random_float(rng);
-
-    float3 direction;
-    if (random_val < reflect_prob) {
-        direction = reflect(unit_direction, outward_normal);
-    }
-    else if (random_val < reflect_prob + refract_prob) {
-        bool refracted_success = refract(unit_direction, outward_normal, eta, &direction);
-        if (!refracted_success) {
-            direction = reflect(unit_direction, outward_normal);
-        }
-    }
-    else {
-        direction = unit_direction;
-    }
-
-    //  ROUGHNESS etkisi: Yönü hafif dağıt
     float roughness = material.roughness;
     if (payload.use_blended_data) {
         roughness = payload.blended_roughness;
     }
+    else if (material.roughness_tex) {
+        roughness = tex2D<float4>(material.roughness_tex, uv.x, uv.y).y;
+    }
     else if (payload.has_roughness_tex) {
-		float4 tex = tex2D<float4>(payload.roughness_tex, uv.x, uv.y);
-		roughness = tex.y;
-	}
-    if (roughness > 0.0f) {
-        float3 random_dir = random_cosine_direction(rng);
-        direction = normalize(lerp(direction, random_dir, roughness*0.1f));
+        float4 tex = tex2D<float4>(payload.roughness_tex, uv.x, uv.y);
+        roughness = tex.y;
+    }
+    roughness = fminf(fmaxf(roughness, 0.0f), 1.0f);
+
+    float3 micro_normal = macro_normal;
+    if (roughness >= 0.01f) {
+        micro_normal = importance_sample_ggx(random_float(rng), random_float(rng), roughness, macro_normal);
     }
 
-    //  Transmission rengi hesapla - Beer's Law
-    float thickness = 0.1f;
+    float cos_theta = fminf(dot(-unit_direction, macro_normal), 1.0f);
+    float sin_theta = sqrtf(fmaxf(0.0f, 1.0f - cos_theta * cos_theta));
+    bool cannot_refract = (eta * sin_theta > 1.0f);
+    float reflect_prob = schlick(cos_theta, ior);
+    bool do_reflect = cannot_refract || (random_float(rng) < reflect_prob);
 
-    float3 tint = material.albedo;   
+    float3 direction;
+    float3 offset_n;
+    if (do_reflect) {
+        direction = reflect(unit_direction, micro_normal);
+        offset_n = macro_normal;
+    }
+    else {
+        bool refracted_success = refract(unit_direction, micro_normal, eta, &direction);
+        if (!refracted_success || dot(direction, macro_normal) >= 0.0f) {
+            direction = reflect(unit_direction, macro_normal);
+            do_reflect = true;
+            offset_n = macro_normal;
+        }
+        else {
+            offset_n = -macro_normal;
+        }
+    }
+
+    float3 tint = material.albedo;
     if (payload.use_blended_data) {
         tint = payload.blended_albedo;
     }
@@ -601,45 +671,25 @@ __device__ bool transmission_scatter(
             make_float3(tex.x, tex.y, tex.z);
     }
 
-    // Beer's Law: absorbans için ters renk kullan (açık renkler daha az soğurur)
-    float3 absorption = make_float3(
-        (1.0f - tint.x) * thickness,
-        (1.0f - tint.y) * thickness,
-        (1.0f - tint.z) * thickness
-    );
-    float3 transmission_color = make_float3(
-        expf(-absorption.x),
-        expf(-absorption.y),
-        expf(-absorption.z)
-    );
-    
-    // Fresnel katkısını ekle - yüksek transmission'da daha fazla geçiş
-    float transmission = material.transmission;
-    if (payload.use_blended_data) transmission = payload.blended_transmission;
-
-    float fresnel = schlick(cos_theta, eta);
-    float transmission_factor = 1.0f - fresnel * (1.0f - transmission);
-    
-    // Şeffaf camlar için tint yerine transmission_color kullan
-    float3 result = lerp(tint, transmission_color, transmission) * transmission_factor;
-    
-    if (transmission > 0.9f) {
-        result = make_float3(
-            fmaxf(result.x, 0.9f),
-            fmaxf(result.y, 0.9f),
-            fmaxf(result.z, 0.9f)
+    if (do_reflect) {
+        *attenuation = make_float3(1.0f, 1.0f, 1.0f);
+    }
+    else {
+        tint = clamp3f(tint, 0.0f, 1.0f);
+        float cosInside = fmaxf(fabsf(dot(normalize(direction), -macro_normal)), 0.05f);
+        float thickness = 0.1f / cosInside;
+        float3 absorption = make_float3(
+            (1.0f - tint.x) * thickness,
+            (1.0f - tint.y) * thickness,
+            (1.0f - tint.z) * thickness
+        );
+        *attenuation = make_float3(
+            expf(-absorption.x),
+            expf(-absorption.y),
+            expf(-absorption.z)
         );
     }
 
-    //  Caustic katkısı
-    float3 caustic = calculate_caustic_gpu(unit_direction, outward_normal, direction, tint, 0.1f);
-    result += caustic * 0.05f;  
-
-    *attenuation = result;
-    
-    // Use offset_ray for robust self-intersection avoidance
-    // Flip normal if we are refracting (going through)
-    float3 offset_n = (dot(direction, outward_normal) > 0.0f) ? outward_normal : -outward_normal;
     *scattered = Ray(offset_ray(payload.position, offset_n), normalize(direction));
     
     return true;
@@ -656,7 +706,7 @@ __device__ bool scatter_material(
     bool* is_specular
 )
 {
-    float2 uv = payload.uv;
+    float2 uv = apply_material_uv_transform(material, payload.uv);
     float3 N = payload.normal;
  
     const float3 V = -normalize(ray_in.direction);
@@ -760,8 +810,12 @@ __device__ bool scatter_material(
     }
     
     // 2. TRANSMISSION (Glass/Water)
+    // Always mark transmission bounces as specular to skip NEE.
+    // roughness is clamped >= 0.02f above, so (roughness < 0.02f) is always false —
+    // meaning NEE ran for every refraction. evaluate_brdf gives (diffuse*0 + spec) for
+    // high-transmission glass, causing bright specular fireflies on the refracted path.
     if (transmission > 0.01f && random_float(rng) < transmission) {
-        *is_specular = (roughness < 0.02f);
+        *is_specular = true;
         return transmission_scatter(material, payload, ray_in, rng, scattered, attenuation);
     }
     

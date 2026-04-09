@@ -1244,7 +1244,7 @@ void OptixWrapper::launch_random_pixel_mode_progressive(
     SDL_Renderer* renderer,
     int width,
     int height,
-    std::vector<uchar4>& framebuffer,
+    void* /* framebuffer - unused, kept for interface compat */,
     SDL_Texture* raytrace_texture
 ) {
     // CRASH FIX: Don't render while geometry is being rebuilt
@@ -3226,8 +3226,8 @@ std::vector<int> OptixWrapper::cloneInstancesByNodeName(const std::string& sourc
     return new_ids;
 }
 
-void OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, TerrainObject* terrain) {
-    if (!accel_manager || !terrain || !use_tlas_mode) return;
+bool OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, TerrainObject* terrain) {
+    if (!accel_manager || !terrain || !use_tlas_mode) return false;
     
     // 1. Find the BLAS ID for this terrain (Terrain is never skinned)
     int blas_id = accel_manager->findBLAS(std::string(node_name), (int)terrain->material_id, false);
@@ -3250,7 +3250,7 @@ void OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, Terrai
                  
                  if (blas_id == -1) {
                      SCENE_LOG_ERROR("updateTerrainBLASPartial: FAILED to find BLAS for terrain: " + node_name + " (MatID: " + std::to_string(terrain->material_id) + ")");
-                     return;
+                     return false;
                  }
              }
         }
@@ -3265,7 +3265,7 @@ void OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, Terrai
     
     if (tri_count == 0) {
         SCENE_LOG_WARN("updateTerrainBLASPartial: Terrain has 0 triangles! cannot update.");
-        return;
+        return false;
     }
     
     geom.vertices.reserve(tri_count * 3);
@@ -3290,14 +3290,32 @@ void OptixWrapper::updateTerrainBLASPartial(const std::string& node_name, Terrai
         // SCENE_LOG_INFO("updateTerrainBLASPartial: Successfully updated BLAS " + std::to_string(blas_id));
         resetAccumulation();
     }
+    return success;
 }
 
-void OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles) {
-    if (!accel_manager || triangles.empty() || !use_tlas_mode) return;
+bool OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles) {
+    extern std::atomic<bool> g_optix_rebuild_in_progress;
+    if (!accel_manager || triangles.empty() || !use_tlas_mode ||
+        g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    struct ScopedOptixRebuildGuard {
+        std::atomic<bool>& flag;
+        explicit ScopedOptixRebuildGuard(std::atomic<bool>& in_flag) : flag(in_flag) {
+            flag.store(true, std::memory_order_release);
+        }
+        ~ScopedOptixRebuildGuard() {
+            flag.store(false, std::memory_order_release);
+        }
+    } rebuild_guard(g_optix_rebuild_in_progress);
+
+    cudaDeviceSynchronize();
 
     // 1. Group triangles by mesh/material
     auto groups = OptixAccelManager::groupTrianglesByMesh(triangles);
     bool any_updated = false;
+    bool requires_fallback_rebuild = false;
 
     for (const auto& group : groups) {
          // 2. Find BLAS ID
@@ -3320,12 +3338,46 @@ void OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, con
          if (blas_id >= 0) {
              // 3. Extract Geometry (Uses LOCAL SPACE via getOriginalVertexPosition)
              MeshGeometry geom = extractMeshGeometry(triangles, group);
+             bool needs_rebuild = true;
+             if (const MeshBLAS* blas = accel_manager->getBLAS(blas_id)) {
+                 needs_rebuild = false;
+                 const float extentX = (std::max)(1e-4f, blas->bounds_max.x - blas->bounds_min.x);
+                 const float extentY = (std::max)(1e-4f, blas->bounds_max.y - blas->bounds_min.y);
+                 const float extentZ = (std::max)(1e-4f, blas->bounds_max.z - blas->bounds_min.z);
+                 const float marginX = (std::max)(0.0025f, extentX * 0.02f);
+                 const float marginY = (std::max)(0.0025f, extentY * 0.02f);
+                 const float marginZ = (std::max)(0.0025f, extentZ * 0.02f);
+                 const float minX = blas->bounds_min.x - marginX;
+                 const float minY = blas->bounds_min.y - marginY;
+                 const float minZ = blas->bounds_min.z - marginZ;
+                 const float maxX = blas->bounds_max.x + marginX;
+                 const float maxY = blas->bounds_max.y + marginY;
+                 const float maxZ = blas->bounds_max.z + marginZ;
+                 for (const auto& v : geom.vertices) {
+                     if (v.x < minX || v.y < minY || v.z < minZ ||
+                         v.x > maxX || v.y > maxY || v.z > maxZ) {
+                         needs_rebuild = true;
+                         break;
+                     }
+                 }
+             }
 
-             // 4. Update BLAS
-             if (accel_manager->updateMeshBLAS(blas_id, geom, false, true)) {
+             bool updated = false;
+             if (!needs_rebuild) {
+                 updated = accel_manager->updateMeshBLAS(blas_id, geom, false, false);
+             }
+             if (!updated && needs_rebuild) {
+                 requires_fallback_rebuild = true;
+                 break;
+             }
+             if (updated) {
                  any_updated = true;
              }
          }
+    }
+
+    if (requires_fallback_rebuild) {
+        return false;
     }
 
     if (any_updated) {
@@ -3334,6 +3386,7 @@ void OptixWrapper::updateMeshBLASFromTriangles(const std::string& node_name, con
         traversable_handle = accel_manager->getTraversableHandle();
         resetAccumulation();
     }
+    return any_updated;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

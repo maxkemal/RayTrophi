@@ -330,8 +330,8 @@ __device__ float3 render_cloud_layer(
             float ambientBoost = 1.0f + heightFactor * 0.3f;
             
             float3 ambient = ambientSky * 0.35f * world.nishita.cloud_ambient_strength * ambientBoost;
-            ambient += shadowColor * world.nishita.sun_intensity * 0.12f * shadowAmount;
-            ambient += sunColor * multiScatter * world.nishita.sun_intensity * 0.4f;
+            ambient += shadowColor * world.nishita.atmosphere_intensity * 0.12f * shadowAmount;
+            ambient += sunColor * multiScatter * world.nishita.atmosphere_intensity * 0.4f;
             
             // ═══════════════════════════════════════════════════════════
             // FINAL COLOR - Energy conserving
@@ -1009,7 +1009,7 @@ __device__ float3 raymarch_vdb_volume(
             }
             
             // 3. Sky/Ambient Lighting (CPU Parity)
-            total_light += gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * sun_intensity;
+            total_light += gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
 
             float3 albedo = vol.scatter_color;
             float3 ms_boost = make_float3(1.0f) + albedo * vol.scatter_multi * 2.0f;
@@ -1491,7 +1491,7 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
                 float3 haloTint = make_float3(0.35f) + transToSun * 0.65f;
                 float3 mieScat = make_float3(world.nishita.mie_density, world.nishita.mie_density, world.nishita.mie_density); 
                 mieScat = mieScat * world.nishita.mie_scattering * (0.15f * 2.5f);
-                radiance += haloTint * mieScat * excessPhase * world.nishita.sun_intensity;
+                radiance += haloTint * mieScat * excessPhase * world.nishita.atmosphere_intensity;
             }
         }
 
@@ -1507,7 +1507,7 @@ __device__ float3 evaluate_background(const WorldData& world, const float3& orig
             if (mie_scale > 0.0f) {
                 float3 transToSun = gpu_get_transmittance(world, origin, sunDir);
                 float3 haloTint = make_float3(0.35f) + transToSun * 0.65f;
-                radiance += haloTint * world.nishita.sun_intensity * phaseM_cap * mie_scale;
+                radiance += haloTint * world.nishita.atmosphere_intensity * phaseM_cap * mie_scale;
             }
         }
 
@@ -1759,15 +1759,13 @@ __device__ float3 calculate_light_contribution(
     // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
     float3 shadow_normal = payload.is_terrain
         ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
-        : compute_cpu_like_shadow_normal(payload.geom_normal, payload.normal, wi);
-    float3 origin = offset_ray(payload.position, shadow_normal);
+        : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+    float3 origin = payload.position + shadow_normal * SCENE_EPSILON;
     Ray shadow_ray(origin, wi);
     OptixHitResult shadow_payload = {};
     
     trace_shadow_ray(shadow_ray, &shadow_payload, SCENE_EPSILON, distance);
-    float shadow_visibility = shadow_payload.hit
-        ? compute_shadow_terminator_visibility(payload.geom_normal, payload.normal, wi)
-        : 1.0f;
+    float shadow_visibility = shadow_payload.hit ? 0.0f : 1.0f;
     if (shadow_visibility <= 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
     
     // Check VDB Occlusion (Volumetric Shadow)
@@ -1879,8 +1877,8 @@ __device__ float3 calculate_direct_lighting(
     // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
     float3 shadow_normal = payload.is_terrain
         ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
-        : compute_cpu_like_shadow_normal(payload.geom_normal, payload.normal, wi);
-    float3 origin = offset_ray(payload.position, shadow_normal);
+        : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+    float3 origin = payload.position + shadow_normal * shadow_bias;
     Ray shadow_ray(origin, wi);
 
     OptixHitResult shadow_payload = {};
@@ -2220,8 +2218,8 @@ __device__ float3 raymarch_volumetric_object(
             float3 sun_color = sun_trans * sun_intensity;
             float3 shadow_radiance = sun_color * shadow_trans * phase;
             
-            // Physical Parity: Ambient sky light should scale with Sun Intensity to match CPU/Atmosphere model
-            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * sun_intensity;
+            // Physical Parity: Ambient sky light should scale with atmosphere intensity
+            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
             float3 total_light = shadow_radiance + ambient;
 
             float3 ms_boost = make_float3(1.0f) + vol_albedo * multi_scatter * 2.0f;
@@ -2388,7 +2386,7 @@ __device__ float3 raymarch_gas_volume(
             float powder = gpu_powder_effect(density, cos_theta);
             total_radiance = total_radiance * (1.0f + powder * 0.5f);
             
-            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * sun_intensity;
+            float3 ambient = gpu_get_ambient_radiance_volume(optixLaunchParams.world, ambient_dir) * 0.15f * optixLaunchParams.world.nishita.atmosphere_intensity;
             total_radiance += ambient;
             
             float3 emission = make_float3(0.0f);
@@ -2444,6 +2442,7 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
     int light_index = -1;
     
     float first_hit_t = -1.0f;
+    float first_hit_transmission = 0.0f;
     float vol_depth = -1.0f;
     float vol_trans_accum = 1.0f;
     float3 first_ray_origin = ray.origin;
@@ -2778,6 +2777,13 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
              mat.emission = payload.blended_emission;
              mat.ior = payload.blended_ior;
         }
+        if (bounce == 0) {
+            first_hit_transmission = fminf(fmaxf(mat.transmission, 0.0f), 1.0f);
+            if (!payload.use_blended_data && payload.has_transmission_tex) {
+                first_hit_transmission = tex2D<float4>(payload.transmission_tex, payload.uv.x, payload.uv.y).x;
+                first_hit_transmission = fminf(fmaxf(first_hit_transmission, 0.0f), 1.0f);
+            }
+        }
 
         // --- Emission hesabı: scatter'dan ÖNCE (Vulkan parity) ---
         // Vulkan closesthit: payload.radiance = emColor * emStrength (scatter kararından önce)
@@ -3013,7 +3019,15 @@ __device__ float3 ray_color(Ray ray, curandState* rng, float3* primary_albedo_ou
         // --- WEIGHTED FOG DISTANCE ---
         // Logic: if we have volumes, blend the fog distance based on cloud opacity.
         // This ensures thin cloud edges use background haze, while opaque centers use cloud-depth haze.
-        float aerial_dist = (vol_depth > 0.0f) ? vol_depth : first_hit_t;
+        float aerial_dist = first_hit_t;
+        if (vol_depth > 0.0f) {
+            float background_t = (first_hit_t > 0.0f) ? first_hit_t : 10000.0f;
+            float weight = fminf(fmaxf(1.0f - vol_trans_accum, 0.0f), 1.0f);
+            aerial_dist = background_t * (1.0f - weight) + vol_depth * weight;
+        }
+        else if (aerial_dist <= 0.0f) {
+            aerial_dist = 10000.0f;
+        }
         // Prepare ray origin/dir for aerial perspective sampling (use the first ray)
         float3 rayOrigin = first_ray_origin;
         float3 rayDir = normalize(first_ray_dir);

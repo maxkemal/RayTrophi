@@ -672,15 +672,24 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
             bool usedOzzRuntime = false;
             const auto& allClips = ctx.animator->getAllClips();
             if (!hasActiveClip) {
-                if (applyModelRestPose()) {
-                    modelChanged = true;
-                    if (!ctx.loggedOzzRuntimeUsage) {
-                        SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Rest Pose");
-                        ctx.loggedOzzRuntimeUsage = true;
+                // Apply rest pose ONCE when entering the no-clip state, not every frame.
+                // Without this guard, applyModelRestPose() returned true on every frame
+                // (bone matrices are always set to identity) which triggered resetCPUAccumulation()
+                // continuously even though nothing was actually changing.
+                if (!ctx.restPoseApplied) {
+                    ctx.restPoseApplied = applyModelRestPose();
+                    if (ctx.restPoseApplied) {
+                        modelChanged = true;
+                        if (!ctx.loggedOzzRuntimeUsage) {
+                            SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Rest Pose");
+                            ctx.loggedOzzRuntimeUsage = true;
+                        }
                     }
                 }
             }
             else if (!ctx.useRootMotion && ctx.preferOzzRuntime && ctx.ozzAnimationSet && ctx.ozzAnimationSet->isUsable() && !allClips.empty()) {
+                // A clip is now active — allow rest pose to be reapplied if it goes inactive again.
+                ctx.restPoseApplied = false;
                 auto findOzzClipIndex = [&](const std::string& clipName) -> int {
                     for (size_t i = 0; i < allClips.size(); ++i) {
                         if (allClips[i].name == clipName) {
@@ -696,7 +705,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     if (layer.weight <= 0.0f || !layer.blendState.clipA) {
                         continue;
                     }
-                    if (layer.blendMode != BlendMode::Replace || !layer.affectedBones.empty()) {
+                    if (layer.blendMode == BlendMode::Override) {
                         supportsOzzBlendPath = false;
                         break;
                     }
@@ -706,6 +715,7 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     input.timeA = layer.blendState.timeA;
                     input.layerWeight = layer.weight;
                     input.blendMode = layer.blendMode;
+                    input.affectedBones = layer.affectedBones;
 
                     if (layer.blendState.clipB) {
                         input.clipIndexB = findOzzClipIndex(layer.blendState.clipB->name);
@@ -822,7 +832,14 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 }
             }
 
-            if (changed || usedOzzRuntime) {
+            // usedOzzRuntime=true simply means Ozz filled bone matrices this frame.
+            // When the animator is paused the pose does NOT change, so treat it
+            // the same as changed=false to avoid resetting accumulation every frame.
+            const bool ozzPoseAdvanced = usedOzzRuntime &&
+                !(ctx.animator && ctx.animator->isPaused()) &&
+                std::abs(deltaTime) > 1e-6f;
+
+            if (changed || ozzPoseAdvanced) {
                 modelChanged = true;
 
 
@@ -1130,7 +1147,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
             animation_groups[transformToGroup[transformKey]].triangles.push_back(tri);
         }
         animation_groups_dirty = false;
-        SCENE_LOG_INFO("Animation groups rebuilt: " + std::to_string(animation_groups.size()) + " groups.");
+        //SCENE_LOG_INFO("Animation groups rebuilt: " + std::to_string(animation_groups.size()) + " groups.");
     }
 
     // --- 2. Ad�m: Gruplar� Animasyon T�r�ne G�re G�ncelle ---
@@ -1442,6 +1459,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 // Nishita Sky - Get params once, update as needed, set once at end
                 bool need_nishita_update = (wk.has_sun_elevation || wk.has_sun_azimuth ||
                     wk.has_sun_intensity || wk.has_sun_size ||
+                    wk.has_atmosphere_intensity ||
                     wk.has_air_density || wk.has_dust_density ||
                     wk.has_ozone_density || wk.has_altitude ||
                     wk.has_mie_anisotropy ||
@@ -1455,6 +1473,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                     if (wk.has_sun_elevation) np.sun_elevation = wk.sun_elevation;
                     if (wk.has_sun_azimuth) np.sun_azimuth = wk.sun_azimuth;
                     if (wk.has_sun_intensity) np.sun_intensity = wk.sun_intensity;
+                    if (wk.has_atmosphere_intensity) np.atmosphere_intensity = wk.atmosphere_intensity;
                     if (wk.has_sun_size) np.sun_size = wk.sun_size;
 
                     // Recalculate sun direction if elevation or azimuth changed
@@ -1496,7 +1515,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     }
 
     } // End of Legacy Else
-    
+
     // --- 4. Ad�m: BVH G�ncelle (only if geometry changed) ---
     // OPTIMIZATION: Skip CPU BVH rebuild for camera-only or material-only animations
     if (geometry_changed) {
@@ -1527,7 +1546,7 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
 void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Texture* raytrace_texture, SDL_Renderer* renderer,
     const int total_samples_per_pixel, const int samples_per_pass, float fps, float duration, int start_frame, int end_frame, SceneData& scene,
     const std::string& output_folder, bool use_denoiser, float denoiser_blend,
-    Backend::IBackend* backend, bool use_optix, UIContext* ui_ctx) {
+    Backend::IBackend* backend, bool use_gpu, UIContext* ui_ctx) {
 
     render_finished = false;
     rendering_complete = false;
@@ -1553,6 +1572,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 
     extern RenderSettings render_settings;
     extern bool g_hasOptix; // Ensure we can access global flag
+    extern bool g_hasVulkan;
 
     // DISABLE GRID/OVERLAYS FOR ANIMATION RENDER
     bool original_render_mode = render_settings.is_final_render_mode;
@@ -1563,7 +1583,7 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
     SCENE_LOG_INFO("render_Animation: Frame range " + std::to_string(start_frame) + " - " + std::to_string(end_frame) + 
                    " (" + std::to_string(end_frame - start_frame + 1) + " frames)");
     SCENE_LOG_INFO("render_Animation: " + std::to_string(total_samples_per_pixel) + " samples per frame, " + 
-                   std::to_string(fps) + " FPS, Mode: " + (use_optix ? "OptiX" : "CPU"));
+                   std::to_string(fps) + " FPS, Mode: " + (use_gpu ? (render_settings.use_vulkan ? "Vulkan" : "OptiX") : "CPU"));
 
     int total_frames = end_frame - start_frame + 1;
     if (total_frames <= 0) {
@@ -1590,17 +1610,26 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         ui_ctx->render_settings.animation_total_frames = total_frames;
     }
 
-    // Check if OptiX is valid
-    bool run_optix = use_optix && m_backend && g_hasOptix;
+    // Check if GPU backend is valid (OptiX or Vulkan)
+    bool run_gpu = use_gpu && m_backend && (g_hasOptix || g_hasVulkan);
+    bool is_vulkan = render_settings.use_vulkan;
+    bool is_optix = render_settings.use_optix;
 
-    // IMPORTANT: Sync local optix pointer for updateWind updates to work
-    // This is no longer needed as m_backend is used directly
-    // if (run_optix) {
-    //     this->m_backend = backend;
-    // }
+    if (use_gpu && !run_gpu) {
+        SCENE_LOG_WARN("GPU backend requested but not available/valid. Falling back to CPU.");
+    }
 
-    if (use_optix && !run_optix) {
-        SCENE_LOG_WARN("OptiX requested but not available/valid. Falling back to CPU.");
+    // For CPU animation rendering, sync image dimensions to final render resolution
+    // so render_progressive_pass uses the correct pixel grid.
+    int saved_image_width = image_width;
+    int saved_image_height = image_height;
+    if (!run_gpu) {
+        int rw = render_settings.final_render_width;
+        int rh = render_settings.final_render_height;
+        if (rw > 0 && rh > 0) {
+            resetResolution(rw, rh);
+            SCENE_LOG_INFO("CPU animation render: resolution set to " + std::to_string(rw) + "x" + std::to_string(rh));
+        }
     }
 
     for (int frame = start_frame; frame <= end_frame; ++frame) {
@@ -1624,8 +1653,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // Use absolute time based on frame number (not relative to start_frame)
         float current_time = frame * frame_time;
 
+        std::string backend_name = run_gpu ? (is_vulkan ? "Vulkan" : "OptiX") : "CPU";
         SCENE_LOG_INFO("Rendering frame " + std::to_string(frame) + "/" + std::to_string(end_frame) +
-            " at time " + std::to_string(current_time) + "s (Mode: " + (run_optix ? "OptiX" : "CPU") + ")");
+            " at time " + std::to_string(current_time) + "s (Mode: " + backend_name + ")");
 
         // --- SYNC TIMELINE FRAME FOR MATERIAL KEYFRAME EVALUATION ---
         // CRITICAL: updateAnimationState's material keyframe code (lines 797-842) reads
@@ -1639,12 +1669,12 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // Returns true if geometry changed
         // Disable CPU skinning if running on OptiX to save performance and prevent crashes
         // We only need CPU skinning for CPU rendering or if we need to update CPU BVH
-        bool geometry_changed = this->updateAnimationState(scene, current_time, !run_optix);
+        bool geometry_changed = this->updateAnimationState(scene, current_time, !run_gpu);
 
         // --- WIND ANIMATION ---
         // Apply wind simulation for this frame
         // FIX: Use same pattern as Play Mode (Main.cpp line 691-697) for consistent behavior
-        if (run_optix && m_backend && InstanceManager::getInstance().getGroupCount() > 0) {
+        if (run_gpu && m_backend && InstanceManager::getInstance().getGroupCount() > 0) {
             // Calculate wind transforms on CPU (same as Play Mode)
             FoliageWindUpdateStats wind_stats = InstanceManager::getInstance().updateWind(current_time, scene, this->m_backend);
 
@@ -1662,9 +1692,9 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // Update VDB sequences for current frame (loads new grid from disk if needed)
         scene.updateVDBVolumesFromTimeline(frame);
 
-        // Sync VDBs to GPU if running OptiX
+        // Sync VDBs to GPU if running GPU backend
         // This ensures the new grid data is uploaded to GPU memory
-        if (run_optix && ui_ctx) {
+        if (run_gpu && ui_ctx) {
             SceneUI::syncVDBVolumesToGPU(*ui_ctx);
             // Note: syncVDBVolumesToGPU handles geometry flag updates internally if needed
         }
@@ -1730,9 +1760,11 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
         // --- WATER ANIMATION UPDATE ---
         // Update FFT ocean simulation and geometric wave mesh animation
         // Frame delta: 1.0/fps gives the time for one frame
-        float frame_delta = 1.0f / static_cast<float>(render_settings.animation_fps);
-        if (WaterManager::getInstance().update(frame_delta)) {
-            // If update returns true, water mesh changed (geometric waves)
+        float animFps = static_cast<float>(std::max(1, render_settings.animation_fps));
+        float frame_delta = 1.0f / animFps;
+        float frame_time = static_cast<float>(frame) / animFps;
+        WaterUpdateResult waterUpdate = WaterManager::getInstance().update(frame_time);
+        if (waterUpdate.mesh_changed) {
             geometry_changed = true;
         }
 
@@ -1751,21 +1783,21 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             target_surface = render_surface;
         }
 
-        if (run_optix) {
-            // --- OPTIX RENDER PATH ---
+        if (run_gpu) {
+            // --- GPU RENDER PATH (OptiX / Vulkan) ---
 
-            // 1. Update Geometry if needed
-            // IMPORTANT: Terrain erosion can change triangle count, not just positions.
-            // Full rebuildOptiXGeometry is required to handle topology changes.
-            if (geometry_changed) {
-                // Determine if we can do a fast update or need a full rebuild
-                // For now, let the backend or renderer-level rebuild handle it
-                this->rebuildBackendGeometry(scene);
+            // 1. Update Geometry if needed (skinning + topology changes)
+            // Use updateSceneGeometry for both OptiX and Vulkan — it handles
+            // bone matrix dispatch (GPU skinning) and TLAS refit/rebuild.
+            if (geometry_changed && m_backend) {
+                m_backend->updateSceneGeometry(scene.world.objects, finalBoneMatrices);
             }
               // 1.5. Update GPU Materials (CRITICAL for material keyframe animations!)
-            // This uploads the materials updated by updateAnimationState to OptiX
             this->updateBackendMaterials(scene);
             // 2. Set Scene Params
+            if (m_backend) {
+                m_backend->setTime(static_cast<float>(frame) / animFps, frame_delta);
+            }
             this->syncCameraToBackend(*scene.camera);
             if (m_backend) {
                 m_backend->setLights(scene.lights);
@@ -1780,10 +1812,24 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                     }
                 }
                 m_backend->resetAccumulation();
+
+                // [FIX] Set backend target samples to match animation setting.
+                // Without this, Vulkan uses whatever m_targetSamples was set before
+                // (viewport max_samples or default 1000), causing the render loop to
+                // run far too many iterations per frame — appearing locked.
+                {
+                    Backend::RenderParams rp = {};
+                    rp.imageWidth = target_surface->w;
+                    rp.imageHeight = target_surface->h;
+                    rp.samplesPerPixel = total_samples_per_pixel;
+                    rp.maxBounces = std::max(1, render_settings.max_bounces);
+                    rp.useAdaptiveSampling = false;
+                    rp.adaptiveThreshold = 0.0f;
+                    m_backend->setRenderParams(rp);
+                }
             }
-              // 4. Render Loop (Accumulate Samples until target reached)
             // 4. Render Loop (Accumulate Samples until target reached)
-            std::vector<uchar4> temp_framebuffer(target_surface->w * target_surface->h);
+            std::vector<uint32_t> temp_framebuffer(target_surface->w * target_surface->h, 0u);
 
             // Render until max samples reached
             while (m_backend && !m_backend->isAccumulationComplete() && !rendering_stopped_gpu) {
@@ -1794,7 +1840,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
                 if (rendering_stopped_gpu.load()) break;
                 
                 // Launch progressive render
-                // Pass 'nullptr' for window to disable title updates (headless like)
+                // Pass nullptr for window to disable title bar updates (headless).
+                // raytrace_texture is still passed because Vulkan renderProgressiveImpl
+                // returns early if tex==nullptr.  The anim_owns_backend guard in Main.cpp
+                // ensures the main thread is not using the texture concurrently.
                  if (m_backend) {
                      void* framebuffer_ptr = (void*)&temp_framebuffer;
                      m_backend->renderProgressive(target_surface, nullptr, renderer, 
@@ -1816,8 +1865,10 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
             // Reset CPU accumulation for new frame
             resetCPUAccumulation();
 
-            // Render until max samples reached
-            while (!isCPUAccumulationComplete() && !rendering_stopped_cpu) {
+            // Render until target samples reached
+            // Use direct comparison with total_samples_per_pixel (animation setting)
+            // instead of isCPUAccumulationComplete() which uses render_settings.final_render_samples
+            while (cpu_accumulated_samples < total_samples_per_pixel && !rendering_stopped_cpu) {
                 // PAUSE WAIT - Block here while paused, check stop flag periodically
                 while (rendering_paused.load() && !rendering_stopped_cpu.load()) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1902,17 +1953,43 @@ void Renderer::render_Animation(SDL_Surface* surface, SDL_Window* window, SDL_Te
 
 
     rendering_complete = true;
-    rendering_in_progress = false;
+    // NOTE: rendering_in_progress is set to false AFTER backend state restoration
+    // to prevent the main thread from accessing the backend during cleanup.
     render_finished = true;
     
+    // RESTORE RENDER MODE
+    render_settings.is_final_render_mode = original_render_mode;
+
+    // [FIX] Restore GPU backend to viewport settings so the viewport can resume
+    // normal progressive rendering. Without this, the backend stays at the
+    // animation's target sample count with accumulation "complete", causing the
+    // viewport to show a stale cached frame indefinitely.
+    if (run_gpu && m_backend) {
+        Backend::RenderParams rp = {};
+        rp.imageWidth = image_width;
+        rp.imageHeight = image_height;
+        rp.samplesPerPixel = render_settings.max_samples > 0 ? render_settings.max_samples : 100;
+        rp.maxBounces = std::max(1, render_settings.max_bounces);
+        rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
+        rp.adaptiveThreshold = render_settings.variance_threshold;
+        m_backend->setRenderParams(rp);
+        m_backend->resetAccumulation();
+    }
+
+    // Restore viewport resolution for CPU path
+    if (!run_gpu && (image_width != saved_image_width || image_height != saved_image_height)) {
+        resetResolution(saved_image_width, saved_image_height);
+    }
+
     // UNLOCK viewport/camera input and disable animation mode
+    // Set these AFTER all backend cleanup — the main thread checks these flags
+    // to decide whether to access the backend.  Setting them early would let
+    // the main thread call backend methods while we're still restoring state.
+    rendering_in_progress = false;
     if (ui_ctx) {
         ui_ctx->is_animation_mode = false;
         ui_ctx->render_settings.animation_render_locked = false;
     }
-
-    // RESTORE RENDER MODE
-    render_settings.is_final_render_mode = original_render_mode;
 
     auto end_time = std::chrono::steady_clock::now();
 
@@ -1928,6 +2005,30 @@ void Renderer::rebuildBVH(SceneData& scene, bool use_embree) {
     if (!scene.initialized) {
         SCENE_LOG_WARN("Scene not initialized, BVH rebuild skipped.");
         return;
+    }
+
+    // Keep CPU geometry in sync with transform handles before building BVH.
+    // Open-project deserialization already does this for static meshes, but
+    // runtime import/add flows may leave triangles in local space.
+    for (auto& obj : scene.world.objects) {
+        if (!obj) continue;
+
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (tri->getTransformHandle() && tri->getVertexBoneWeights().empty()) {
+                tri->updateTransformedVertices();
+            }
+            continue;
+        }
+
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (inst->source_triangles) {
+                for (auto& srcTri : *inst->source_triangles) {
+                    if (srcTri && srcTri->getTransformHandle() && srcTri->getVertexBoneWeights().empty()) {
+                        srcTri->updateTransformedVertices();
+                    }
+                }
+            }
+        }
     }
 
     // Create a temporary list of ALL hittable objects for the BVH
@@ -2389,6 +2490,18 @@ void Renderer::create_scene(SceneData& scene, Backend::IBackend* backend, const 
 std::uniform_int_distribution<> dis_width(0, image_width - 1);
 std::uniform_int_distribution<> dis_height(0, image_height - 1);
 
+namespace {
+Vec3 orient_shading_normal(const Vec3& shading_normal, const Vec3& geometric_normal) {
+    Vec3 n = shading_normal.normalize();
+    Vec3 ng = geometric_normal.normalize();
+
+    // Keep shading normal on the same hemisphere as the face-forwarded geometric normal.
+    if (Vec3::dot(n, ng) < 0.0f) {
+        n = -n;
+    }
+    return n;
+}
+}
 
 
 void Renderer::apply_normal_map(HitRecord& rec) {
@@ -2399,13 +2512,46 @@ void Renderer::apply_normal_map(HitRecord& rec) {
     }
 
     if (material->has_normal_map()) {
-        Vec3 tangent;
-        Vec3 bitangent;
-        create_coordinate_system(rec.normal, tangent, bitangent);
-        tangent = (tangent - rec.normal * Vec3::dot(rec.normal, tangent));
-        bitangent = Vec3::cross(rec.normal, tangent);
-        if (Vec3::dot(Vec3::cross(tangent, bitangent), rec.normal) < 0.0f) {
-            bitangent = -bitangent;
+        Vec3 tangent(1.0f, 0.0f, 0.0f);
+        Vec3 bitangent(0.0f, 1.0f, 0.0f);
+        bool has_uv_tangent = false;
+
+        const Triangle* tri = rec.triangle;
+        if (tri) {
+            Vec3 v0 = tri->getV0();
+            Vec3 v1 = tri->getV1();
+            Vec3 v2 = tri->getV2();
+            auto [uv0, uv1, uv2] = tri->getUVCoordinates();
+            
+            // Paint system convention matches texture space: u, 1-v
+            uv0.v = 1.0f - uv0.v;
+            uv1.v = 1.0f - uv1.v;
+            uv2.v = 1.0f - uv2.v;
+
+            Vec3 edge1 = v1 - v0;
+            Vec3 edge2 = v2 - v0;
+            Vec2 deltaUV1 = uv1 - uv0;
+            Vec2 deltaUV2 = uv2 - uv0;
+
+            float det = deltaUV1.u * deltaUV2.v - deltaUV2.u * deltaUV1.v;
+            if (std::abs(det) > 1e-8f) {
+                float f = 1.0f / det;
+                tangent = (edge1 * deltaUV2.v - edge2 * deltaUV1.v) * f;
+                bitangent = (edge2 * deltaUV1.u - edge1 * deltaUV2.u) * f;
+                
+                tangent = (tangent - rec.normal * Vec3::dot(rec.normal, tangent)).normalize();
+                bitangent = Vec3::cross(rec.normal, tangent).normalize();
+                
+                Vec3 bitangent_test = (edge2 * deltaUV1.u - edge1 * deltaUV2.u) * f;
+                if (Vec3::dot(bitangent, bitangent_test) < 0.0f) {
+                    bitangent = -bitangent;
+                }
+                has_uv_tangent = true;
+            }
+        }
+
+        if (!has_uv_tangent) {
+            create_coordinate_system(rec.normal, tangent, bitangent);
         }
 
         Vec3 normal_from_map = material->get_normal_from_map(rec.u, rec.v);
@@ -2416,8 +2562,7 @@ void Renderer::apply_normal_map(HitRecord& rec) {
         normal_from_map.y *= normal_strength;
 
         Mat3x3 TBN(tangent, bitangent, rec.normal);
-        rec.interpolated_normal = (TBN * normal_from_map);
-        //rec.interpolated_normal = (rec.interpolated_normal + 0.5*rec.normal).normalize();
+        rec.interpolated_normal = orient_shading_normal(TBN * normal_from_map, rec.normal);
     }
     else {
         rec.interpolated_normal = rec.normal;
@@ -3046,6 +3191,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
     Ray current_ray = r;
     int transparent_hits = 0;
     float first_hit_t = -1.0f;
+    float first_hit_transmission = 0.0f;
     float vol_trans_accum = 1.0f;
     float first_vol_t = -1.0f;
     if (primary_hit) *primary_hit = false;
@@ -3426,6 +3572,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
             // Preserve the primary hit distance for volume-first paths so aerial
             // perspective stays stable while progressive samples accumulate.
             first_hit_t = solid_rec.t;
+            if (solid_rec.surface_override.valid) {
+                first_hit_transmission = std::clamp(solid_rec.surface_override.transmission, 0.0f, 1.0f);
+            }
+            else if (auto pbsdf = dynamic_cast<PrincipledBSDF*>(solid_rec.materialPtr)) {
+                first_hit_transmission = std::clamp(pbsdf->getTransmission(solid_rec.uv), 0.0f, 1.0f);
+            }
         }
 
         // --- God Rays (Bounce 0 only) ---
@@ -3965,7 +4117,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         // Sky Lighting (directional ambient): blend up with view direction
                         Vec3 sky_dir = (current_ray.direction * 0.45f + Vec3(0, 1, 0) * 0.55f).normalize();
                         total_radiance += toVec3f(world.evaluate(sky_dir, current_ray.origin))
-                                       * 0.15f * world.data.nishita.sun_intensity;
+                                       * 0.15f * world.data.nishita.atmosphere_intensity;
 
                         // --- EMISSION ---
                         Vec3f step_emission(0.0f);
@@ -4310,14 +4462,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
 
         // --- Ensure correct normal orientation (faceforward) ---
         Vec3f wo = toVec3f(-current_ray.direction.normalize());
+        rec.interpolated_normal = orient_shading_normal(rec.interpolated_normal, rec.normal);
         Vec3f N = toVec3f(rec.interpolated_normal);
         Vec3f geom_N = toVec3f(rec.normal);
-
-        // Faceforward: flip normal if we hit backface
-        if (dot(wo, geom_N) < 0.0f) {
-            N = -N;
-            geom_N = -geom_N;
-        }
 
         Vec3f hit_pos = toVec3f(rec.point);
 
@@ -4406,7 +4553,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             Vec3 T, B;
                             Renderer::create_coordinate_system(rec.normal, T, B);
                             Mat3x3 TBN(T, B, rec.normal);
-                            rec.interpolated_normal = (TBN * blended_n.normalize()).normalize();
+                            rec.interpolated_normal = orient_shading_normal(TBN * blended_n.normalize(), rec.normal);
                             N = toVec3f(rec.interpolated_normal);
                         }
                     }
@@ -4509,15 +4656,15 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     );
 
                     // Apply wave normal
-                    rec.interpolated_normal = wave.normal;
-                    N = toVec3f(wave.normal);
+                    rec.interpolated_normal = orient_shading_normal(wave.normal, rec.normal);
+                    N = toVec3f(rec.interpolated_normal);
 
                     // --- Apply Water Appearance (Color Parity) ---
                     // Overwrite base albedo with calculated water color (Shallow/Deep mix)
                     albedo = toVec3f(wave.water_color);
 
                     // Foam blending
-                    float total_foam = wave.foam * params.foam_level;
+                    float total_foam = wave.foam;
                     if (total_foam > 0.01f) {
                         Vec3f foam_color(0.92f, 0.96f, 1.0f); // Slightly blue-tinted foam
                         albedo = albedo * (1.0f - total_foam) + foam_color * total_foam;
@@ -4779,6 +4926,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
         else if (ap_dist <= 0.0f) {
             ap_dist = 10000.0f;
         }
+        ap_dist *= (1.0f - first_hit_transmission);
 
         Vec3 final_c = VolumetricRenderer::applyAerialPerspective(scene, world.data, r.origin, r.direction, ap_dist, toVec3(color), world.getLUT());
         color = toVec3f(final_c);
@@ -4856,6 +5004,39 @@ void Renderer::resetCPUAccumulation() {
 
 void Renderer::uploadHairToGPU() {
     if (!m_backend) return;
+
+    // ── Raster viewport hair line overlay ────────────────────────────────────
+    // Always runs regardless of render backend (Vulkan RT or OptiX).
+    // g_viewport_backend is the VulkanViewportBackend used for Solid/Matcap display.
+    {
+        extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+        auto* vpb = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get());
+        if (vpb) {
+            std::vector<float> lineVerts;
+            const auto groomNames = hairSystem.getGroomNames();
+            for (const auto& gName : groomNames) {
+                const Hair::HairGroom* groom = hairSystem.getGroom(gName);
+                if (!groom || !groom->isVisible || groom->guides.empty()) continue;
+                const Matrix4x4& xf = groom->transform;
+                // Mirror the same strand selection logic as the ray-tracing upload
+                const auto& viewportStrands = (!groom->interpolated.empty() && !hideInterpolatedHair)
+                    ? groom->interpolated : groom->guides;
+                for (const auto& strand : viewportStrands) {
+                    const size_t n = strand.points.size();
+                    if (n < 2) continue;
+                    const float invN = 1.0f / float(n - 1);
+                    for (size_t i = 0; i + 1 < n; ++i) {
+                        Vec3 p0 = xf.transform_point(strand.points[i].position);
+                        Vec3 p1 = xf.transform_point(strand.points[i + 1].position);
+                        lineVerts.insert(lineVerts.end(),
+                            { p0.x, p0.y, p0.z, float(i)     * invN,
+                              p1.x, p1.y, p1.z, float(i + 1) * invN });
+                    }
+                }
+            }
+            vpb->uploadHairViewportLines(lineVerts, uint32_t(lineVerts.size() / 4));
+        }
+    }
 
     // ── Vulkan path ──────────────────────────────────────────────────────────
     auto* vulkanBackend = dynamic_cast<Backend::VulkanBackendAdapter*>(m_backend);
@@ -5018,6 +5199,7 @@ void Renderer::uploadHairToGPU() {
         if (!allMaterials.empty()) {
             vulkanBackend->uploadHairMaterials(allMaterials);
         }
+
         SCENE_LOG_INFO("[Hair GPU/Vulkan] Uploaded " + std::to_string(groomMaterialIndex)
             + " grooms, " + std::to_string(combinedStrands.size()) + " strands (combined)");
         vulkanBackend->resetAccumulation();
@@ -5435,7 +5617,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
                     // Tone mapping for display (same as below)
                     auto toSRGB_fast = [](float c) {
-                        return (c <= 0.0031308f) ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
+                        return (c <= 0.0031308f) ? 12.92f * c : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
                         };
 
                     float exp_factor = scene.camera ? (scene.camera->auto_exposure ?
@@ -5589,7 +5771,7 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
                 if (c <= 0.0031308f)
                     return 12.92f * c;
                 else
-                    return 1.055f * std::pow(c, 1.0f / 2.2f) - 0.055f;
+                    return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
                 };
 
             // Calculate Exposure Factor (MUST match GPU path - OptixWrapper for consistency)
@@ -5705,11 +5887,27 @@ void Renderer::render_progressive_pass(SDL_Surface* surface, SDL_Window* window,
 
 // Add this implementation at the end of Renderer.cpp before the closing brace
 
+namespace {
+std::vector<std::shared_ptr<Hittable>> filterVisibleGeometryObjects(
+    const std::vector<std::shared_ptr<Hittable>>& objects) {
+    std::vector<std::shared_ptr<Hittable>> filtered;
+    filtered.reserve(objects.size());
+
+    for (const auto& obj : objects) {
+        if (!obj || !obj->visible) {
+            continue;
+        }
+        filtered.push_back(obj);
+    }
+
+    return filtered;
+}
+}
 
 // Rebuild OptiX geometry after scene modifications (deletion/addition)
 void Renderer::rebuildBackendGeometry(SceneData& scene) {
     // Rebuild geometry TLAS
-    rebuildBackendGeometryWithList(scene.world.objects);
+    rebuildBackendGeometryWithList(filterVisibleGeometryObjects(scene.world.objects));
     // Sync all volumes (VDB/Gas)
     // [VULKAN FIX] For Vulkan, rebuildBackendGeometryWithList() sets g_vulkan_rebuild_pending=true
     // and returns immediately — m_orderedVDBInstances is still stale/empty at this point.
@@ -6040,8 +6238,17 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                             gpu_mat.clearcoat_roughness = pbsdf->clearcoatRoughness;
                             gpu_mat.translucent = pbsdf->translucent;
                             gpu_mat.anisotropic = pbsdf->anisotropic;
+                            gpu_mat.normal_strength = pbsdf->get_normal_strength();
                             gpu_mat.sheen = pbsdf->sheen;
                             gpu_mat.sheen_tint = pbsdf->sheen_tint;
+                            gpu_mat.uv_scale_x = static_cast<float>(pbsdf->textureTransform.scale.u);
+                            gpu_mat.uv_scale_y = static_cast<float>(pbsdf->textureTransform.scale.v);
+                            gpu_mat.uv_offset_x = static_cast<float>(pbsdf->textureTransform.translation.u);
+                            gpu_mat.uv_offset_y = static_cast<float>(pbsdf->textureTransform.translation.v);
+                            gpu_mat.uv_rotation_degrees = pbsdf->textureTransform.rotation_degrees;
+                            gpu_mat.uv_tiling_x = static_cast<float>(pbsdf->textureTransform.tilingFactor.u);
+                            gpu_mat.uv_tiling_y = static_cast<float>(pbsdf->textureTransform.tilingFactor.v);
+                            gpu_mat.uv_wrap_mode = static_cast<int>(pbsdf->textureTransform.wrapMode);
                         }
 
                         gpu_mat.albedo_tex      = getCudaTex(pbsdf->albedoProperty.texture);
@@ -6161,8 +6368,14 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                 data.clearcoatRoughness = pbsdf->clearcoatRoughness;
                 data.translucent = pbsdf->translucent;
                 data.anisotropic = pbsdf->anisotropic;
+                data.normalStrength = pbsdf->get_normal_strength();
                 data.sheen = pbsdf->sheen;
                 data.sheenTint = pbsdf->sheen_tint;
+                data.uvScale = pbsdf->textureTransform.scale;
+                data.uvOffset = pbsdf->textureTransform.translation;
+                data.uvTiling = pbsdf->textureTransform.tilingFactor;
+                data.uvRotationDegrees = pbsdf->textureTransform.rotation_degrees;
+                data.uvWrapMode = static_cast<uint32_t>(pbsdf->textureTransform.wrapMode);
 
                 auto getH = [](const std::shared_ptr<Texture>& tex) -> int64_t { return tex ? reinterpret_cast<int64_t>(tex.get()) : 0; };
                 data.albedoTexture = getH(pbsdf->albedoProperty.texture);
@@ -6184,8 +6397,21 @@ void Renderer::updateBackendMaterials(SceneData& scene) {
                 data.fft_ocean_size        = gm.fft_ocean_size;
                 data.fft_choppiness        = gm.fft_choppiness;
                 data.fft_wind_speed        = gm.fft_wind_speed;
+                data.fft_wind_direction    = gm.fft_wind_direction;
                 data.fft_amplitude         = gm.fft_amplitude;
                 data.fft_time_scale        = gm.fft_time_scale;
+                data.micro_anim_speed      = gm.micro_anim_speed;
+                data.micro_morph_speed     = gm.micro_morph_speed;
+                data.foam_noise_scale      = gm.foam_noise_scale;
+            }
+
+            if (m_backend && m_backend->getInfo().type == Backend::BackendType::VULKAN_RT && mat->gpuMaterial) {
+                int64_t fftHeightTexture = 0;
+                int64_t fftNormalTexture = 0;
+                if (WaterManager::getInstance().syncVulkanFFTTexturesForMaterial(static_cast<uint16_t>(i), m_backend, fftHeightTexture, fftNormalTexture)) {
+                    data.heightTexture = fftHeightTexture;
+                    data.normalTexture = fftNormalTexture;
+                }
             }
 
             // Mark terrain base materials so the Vulkan shader knows to use splat blending

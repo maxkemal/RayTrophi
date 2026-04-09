@@ -36,6 +36,7 @@
 #include <functional>
 #include <mutex>
 #include "Backend/IBackend.h"
+#include "Backend/IViewportBackend.h"
 #include "AtmosphereLUT.h"
 namespace VulkanRT {
 
@@ -315,6 +316,7 @@ struct AccelStructHandle {
     bool hasSkinning = false;
     bool allowUpdate = false;
     uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
     BufferHandle baseVertexBuffer;
     BufferHandle baseNormalBuffer;
     BufferHandle boneIndexBuffer;
@@ -500,6 +502,10 @@ public:
                            const ImageHandle* varianceImage = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
+
+    /** @brief Clear multiple images in a single command buffer submission (batched). */
+    struct ImageClearRequest { const ImageHandle* image; float r, g, b, a; };
+    void clearImages(const std::vector<ImageClearRequest>& requests);
     
     /**
      * @brief Bind pipeline for execution
@@ -530,7 +536,7 @@ public:
      */
     void traceRays(uint32_t width, uint32_t height, uint32_t depth = 1);
     // Trace rays + image→buffer copy in a single command buffer (1 GPU sync instead of 4)
-    void traceRaysAndReadback(uint32_t width, uint32_t height, const ImageHandle& outputImage, const BufferHandle& stagingBuffer);
+    bool traceRaysAndReadback(uint32_t width, uint32_t height, const ImageHandle& outputImage, const BufferHandle& stagingBuffer);
     
     /**
      * @brief Set push constants
@@ -550,7 +556,8 @@ public:
     // ========================================================================
     
     ImageHandle createImage2D(uint32_t width, uint32_t height, VkFormat format,
-                              VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+                              VkImageUsageFlags usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                              VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT);
     void destroyImage(ImageHandle& image);
     
     void copyImageToBuffer(const ImageHandle& src, const BufferHandle& dst);
@@ -575,6 +582,7 @@ public:
     VkInstance getInstance() const { return m_instance; }
     VkQueue getComputeQueue() const { return m_computeQueue; }
     uint32_t getComputeQueueFamily() const { return m_computeQueueFamily; }
+    bool supportsGraphicsQueue() const { return m_queueSupportsGraphics; }
     // SSBO Update helpers
     void updateMaterialBuffer(const void* data, uint64_t size, uint32_t count);
     void updateLightBuffer(const void* data, uint64_t size, uint32_t count);
@@ -633,13 +641,35 @@ public:
     
     // Skinning Compute Pipeline
     bool createSkinningPipeline(const std::vector<uint32_t>& computeSPV);
+    bool hasSkinningPipeline() const;
     void dispatchSkinning(uint32_t blasIndex, const std::vector<Matrix4x4>& boneMatrices); // legacy shim
     void dispatchSkinningAll(const std::vector<Matrix4x4>& boneMatrices); // batch: 1 submit for all BLASes
+    bool dispatchSkinningToBuffers(BufferHandle& baseVertexBuffer,
+                                   BufferHandle& baseNormalBuffer,
+                                   BufferHandle& boneIndexBuffer,
+                                   BufferHandle& boneWeightBuffer,
+                                   BufferHandle& persistentBoneMatsBuffer,
+                                   uint64_t& persistentBoneMatsBufSize,
+                                   VkDescriptorSet& skinningDescSet,
+                                   const BufferHandle& outVertexBuffer,
+                                   const BufferHandle& outNormalBuffer,
+                                   uint32_t vertexCount,
+                                   const std::vector<Matrix4x4>& boneMatrices);
     
     VkPipeline m_skinningPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_skinningPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_skinningDescLayout = VK_NULL_HANDLE;
     VkDescriptorPool m_skinningDescPool = VK_NULL_HANDLE;
+
+    // Sculpt Compute Pipeline (simple GPU sculpt pass)
+    bool createSculptPipeline(const std::vector<uint32_t>& computeSPV);
+    void dispatchSculpt(const BufferHandle& positions, const BufferHandle& normals, const BufferHandle& weights,
+                        uint32_t vertexCount, const void* pushConstants = nullptr, uint32_t pushSize = 0);
+
+    VkPipeline m_sculptPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_sculptPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_sculptDescLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_sculptDescPool = VK_NULL_HANDLE;
     
 private:
     // Core Vulkan handles
@@ -648,6 +678,7 @@ private:
    
     VkQueue m_computeQueue = VK_NULL_HANDLE;
     uint32_t m_computeQueueFamily = 0;
+    bool m_queueSupportsGraphics = false;
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     
@@ -738,11 +769,28 @@ std::unique_ptr<VulkanDevice> createVulkanDevice(bool preferHardwareRT = true, b
 } // namespace VulkanRT
 
 struct TerrainObject;
+namespace {
+    class VulkanLogHelper {
+        std::ostringstream ss;
+        LogLevel level;
+    public:
+        VulkanLogHelper(LogLevel l) : level(l) {}
+        ~VulkanLogHelper() { g_sceneLog.add(ss.str(), level); }
 
+        template<typename T>
+        VulkanLogHelper& operator<<(const T& t) { ss << t; return *this; }
+
+        // Ignore std::endl
+        VulkanLogHelper& operator<<(std::ostream& (*)(std::ostream&)) { return *this; }
+    };
+}
 
 // ============================================================================
 // IBackend Adapter
 // ============================================================================
+#define VK_INFO() VulkanLogHelper(LogLevel::Info)
+#define VK_ERROR() VulkanLogHelper(LogLevel::Error)
+#define VK_WARN() VulkanLogHelper(LogLevel::Warning)
 
 namespace Backend {
 
@@ -755,7 +803,7 @@ namespace Backend {
  * Bridges the IBackend interface to VulkanRT::VulkanDevice.
  * Similar to how OptixBackend wraps OptixWrapper.
  */
-class VulkanBackendAdapter : public IBackend {
+class VulkanBackendAdapter : public IViewportBackend {
 public:
     VulkanBackendAdapter();
     virtual ~VulkanBackendAdapter();
@@ -774,6 +822,8 @@ public:
     uint32_t uploadTriangles(const std::vector<TriangleData>& triangles, const std::string& meshName) override;
     uint32_t uploadHairStrands(const std::vector<HairStrandData>& strands, const std::string& groomName) override;
     void clearHairGeometry(bool rebuild_tlas = true);
+    // Upload flat LINE_LIST vertex data {x,y,z,v_coord} x vertexCount for the raster viewport hair overlay
+    void uploadHairViewportLines(const std::vector<float>& vertexData, uint32_t vertexCount);
     void updateMeshTransform(uint32_t meshHandle, const Matrix4x4& transform) override;
     void rebuildAccelerationStructure() override;
     void showAllInstances() override;
@@ -782,6 +832,7 @@ public:
     void setVisibilityByNodeName(const std::string& nodeName, bool visible) override;
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
     bool updateTerrainBLASPartial(const std::string& nodeName, const TerrainObject* terrain);
+    bool updateMeshBLASPartial(const std::string& nodeName, const std::vector<std::shared_ptr<Triangle>>& triangles);
 
     // ========================================================================
     // IBackend - Materials & Textures
@@ -808,6 +859,23 @@ public:
     void setStatusCallback(std::function<void(const std::string&, int)> callback) override;
     void* getNativeCommandQueue() override;
     void renderPass(bool accumulate = true) override;
+    void setViewportMode(ViewportMode mode) override;
+    ViewportMode getViewportMode() const override;
+    bool supportsViewportMode(ViewportMode mode) const override;
+    bool updateInteractiveMesh(const std::string& nodeName,
+                               const std::vector<std::shared_ptr<Triangle>>& triangles) override;
+    bool updateRasterMeshFromTriangles(const std::string& nodeName,
+                                       const std::vector<std::shared_ptr<Triangle>>& triangles);
+    bool patchRasterMeshTriangles(const std::string& nodeName,
+                                  const std::vector<size_t>& dirtyIndices,
+                                  const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries);
+    void buildRasterGeometry(const std::vector<std::shared_ptr<Hittable>>& objects);
+    void syncRasterInstanceTransforms(const std::vector<std::shared_ptr<Hittable>>& objects);
+    void syncRasterSkinnedVertices(const std::vector<std::shared_ptr<Hittable>>& objects,
+                                   const std::vector<Matrix4x4>& boneMatrices);
+    bool hasValidRasterCache(uint64_t sceneGeometryGeneration) const override {
+        return !m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == sceneGeometryGeneration;
+    }
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,
                            int width, int height, void* outFramebuffer, void* outTexture) override;
     void downloadImage(void* outPixels) override;
@@ -845,8 +913,71 @@ public:
      * @param lut Pointer to AtmosphereLUT (may be nullptr)
      */
     void uploadAtmosphereLUT(const AtmosphereLUT* lut);
+    void setInteractiveViewportMatcap(int64_t textureID);
+    void setInteractiveViewportMatcapPreset(int preset);
+protected:
+    bool updateRasterMeshFromTrianglesImpl(const std::string& nodeName,
+                                           const std::vector<std::shared_ptr<Triangle>>& triangles);
+    bool patchRasterMeshTrianglesImpl(const std::string& nodeName,
+                                      const std::vector<size_t>& dirtyIndices,
+                                      const std::vector<std::pair<int, std::shared_ptr<Triangle>>>& meshEntries);
+    void buildRasterGeometryImpl(const std::vector<std::shared_ptr<Hittable>>& objects);
+    void syncRasterInstanceTransformsImpl(const std::vector<std::shared_ptr<Hittable>>& objects);
+    void syncRasterSkinnedVerticesImpl(const std::vector<std::shared_ptr<Hittable>>& objects,
+                                       const std::vector<Matrix4x4>& boneMatrices);
+    virtual bool shouldUseInteractiveViewportImpl() const;
+    virtual bool ensureInteractiveViewportResourcesImpl(const std::string& shaderDir, int width, int height);
+    virtual void destroyInteractiveViewportResourcesImpl(bool keepPipeline = false);
+    virtual void renderInteractiveViewportImpl(void* outSurface, int width, int height, void* outFramebuffer, void* outTexture);
+    void renderProgressiveImpl(void* outSurface, void* outWindow, void* outRenderer,
+                               int width, int height, void* outFramebuffer, void* outTexture);
+    virtual void setInteractiveViewportMatcapImpl(int64_t textureID);
+    virtual void setInteractiveViewportMatcapPresetImpl(int preset);
 
-private:
+    struct InteractiveViewportState {
+        bool initialized = false;
+        bool dirty = true;          // needs re-render (cleared after draw, set on scene change)
+        int width = 0;
+        int height = 0;
+        VulkanRT::ImageHandle colorImage;
+        VulkanRT::ImageHandle depthImage;
+        VulkanRT::BufferHandle stagingBuffer;
+        VkRenderPass renderPass = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        VkPipeline solidPipeline = VK_NULL_HANDLE;
+        // Material Preview pipeline (PBR shading with material data)
+        VkPipeline materialPreviewPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout materialPreviewPipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout materialPreviewDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool materialPreviewDescPool = VK_NULL_HANDLE;
+        VkDescriptorSet materialPreviewDescSet = VK_NULL_HANDLE;
+        // Matcap resources for solid viewport
+        VulkanRT::ImageHandle matcapImage; // optional matcap texture
+        bool matcapUserLoaded = false;     // true only when user explicitly loaded a matcap texture
+        int matcapPreset = 2;              // default procedural preset when no user texture (2..9)
+        // (no custom matcap storage)
+        VkDescriptorSetLayout matcapDescLayout = VK_NULL_HANDLE;
+        VkDescriptorPool matcapDescPool = VK_NULL_HANDLE;
+        VkDescriptorSet matcapDescSet = VK_NULL_HANDLE;
+
+        // Reference grid (Solid/Matcap viewport overlay)
+        VulkanRT::BufferHandle gridVertexBuffer;
+        VulkanRT::BufferHandle gridNormalBuffer;
+        VulkanRT::BufferHandle identityInstanceBuffer;
+        uint32_t gridVertexCount = 0;
+        uint32_t gridSegments[8] = {}; // [start,count] pairs: regular, xAxis, zAxis, negAxis
+
+        // Hair polyline overlay (Solid/Matcap viewport)
+        VkPipeline hairLinePipeline = VK_NULL_HANDLE;
+        VulkanRT::BufferHandle hairLineVertexBuffer;
+        uint32_t hairLineVertexCount = 0;
+    };
+
+    bool shouldUseInteractiveViewport() const;
+    bool ensureInteractiveViewportResources(const std::string& shaderDir, int width, int height);
+    void destroyInteractiveViewportResources(bool keepPipeline = false);
+    void renderInteractiveViewport(void* outSurface, int width, int height, void* outFramebuffer, void* outTexture);
     void purgeUploadedTextureCacheLocked();
     int64_t uploadCompressedTexture2D(const void* data, uint64_t dataSize, uint32_t width, uint32_t height, VkFormat format);
 
@@ -863,6 +994,9 @@ private:
     bool m_useAdaptiveSampling = false;
     float m_varianceThreshold = 0.05f;
     int m_maxBounces = 12;
+    ViewportMode m_viewportMode = ViewportMode::Rendered;
+    InteractiveViewportState m_interactiveViewport;
+    bool m_loggedInteractiveViewportFallback = false;
     std::vector<float> m_hdrPixels;   // Float32 HDR readback buffer — her frame realloc önler
     std::vector<uint16_t> m_halfPixels;
     std::vector<float> m_denoiserColorPixels;
@@ -929,6 +1063,11 @@ private:
     bool  m_hasPrevView = false;
     // When true, clear the UI framebuffer/texture on next renderProgressive call
     bool m_forceClearOnNextPresent = false;
+    // Tracks whether Rendered mode has produced at least one valid host-visible frame.
+    bool m_hasPresentedRenderedFrame = false;
+    // [PERF] True after resetAccumulation() already cleared GPU images — skip redundant
+    // frame-0 clears in renderProgressiveImpl to avoid double work.
+    bool m_imagesCleared = false;
 
     // ── Hair geometry ────────────────────────────────────────────────────────
     // Hair TLAS instances (kept separate from mesh instances so they survive
@@ -941,6 +1080,91 @@ private:
     // Hair BLASes are always appended after this index so clearHairGeometry()
     // can destroy and remove only the hair BLASes without touching mesh BLASes.
     uint32_t m_meshBlasCount = 0;
+
+    // ── Raster mesh buffers (lightweight, BLAS/TLAS-independent) ────────────
+    struct RasterMeshBuffer {
+        struct CullingChunk {
+            AABB worldBBox;
+            std::vector<uint32_t> instanceIndices;
+        };
+
+        VulkanRT::BufferHandle vertexBuffer;   // float3 positions (GPU_ONLY)
+        VulkanRT::BufferHandle normalBuffer;   // float3 normals  (GPU_ONLY)
+        VulkanRT::BufferHandle uvBuffer;       // float2 UVs (GPU_ONLY) — for MaterialPreview
+        VulkanRT::BufferHandle matIdBuffer;    // uint32 per-vertex materialID — for MaterialPreview
+        VulkanRT::BufferHandle indexBuffer;     // uint32 indices (optional)
+        VulkanRT::BufferHandle instanceBuffer;  // per-instance model matrices
+        VulkanRT::BufferHandle baseVertexBuffer;
+        VulkanRT::BufferHandle baseNormalBuffer;
+        VulkanRT::BufferHandle boneIndexBuffer;
+        VulkanRT::BufferHandle boneWeightBuffer;
+        VulkanRT::BufferHandle persistentBoneMatsBuffer;
+        VkDescriptorSet skinningDescSet = VK_NULL_HANDLE;
+        uint64_t persistentBoneMatsBufSize = 0;
+        uint32_t vertexCount = 0;
+        uint32_t indexCount = 0;
+        uint32_t instanceCount = 0;
+        bool hasSkinning = false;
+        bool isScatterGroup = false;
+        bool isScatterProxy = false;
+        std::string proxyMeshKey;
+        std::vector<uint32_t> instanceIndices;  // indices into m_rasterInstances
+        std::vector<CullingChunk> cullingChunks;
+        std::vector<uint32_t> visibleInstanceIndicesCache;
+        bool visibleInstancesDirty = true;
+        uint64_t lastVisibleFrustumRevision = 0;
+        // CPU shadow copy for dirty-range detection during sculpt
+        std::vector<float> cpuPositions;
+        std::vector<float> cpuNormals;
+    };
+
+    struct RasterInstance {
+        std::string meshKey;       // key into m_rasterMeshes
+        std::string nodeName;      // for transform sync lookup
+        Matrix4x4 transform;
+        AABB localBBox;            // local-space bounding box (from source mesh)
+        AABB worldBBox;            // world-space AABB (localBBox transformed)
+        uint8_t mask = 0xFF;       // visibility
+    };
+
+    std::unordered_map<std::string, RasterMeshBuffer> m_rasterMeshes;
+    std::vector<RasterInstance> m_rasterInstances;
+    bool m_rasterGeometryDirty = true;  // force initial build
+
+    // Generation counter: last g_scene_geometry_generation value seen when
+    // raster geometry was built.  Allows skipping redundant rebuilds on
+    // Rendered→Solid transitions when scene geometry hasn't changed.
+    uint64_t m_rasterBuiltGeometryGeneration = 0;
+
+    // Frustum culling for solid viewport
+    struct FrustumPlane {
+        Vec3 normal;
+        float d;
+        float distanceTo(const Vec3& p) const { return Vec3::dot(normal, p) + d; }
+    };
+    FrustumPlane m_frustumPlanes[6];
+    uint64_t m_rasterFrustumRevision = 0;
+    uint64_t m_rasterFrustumHash = 0;
+    Vec3 m_rasterCullCameraPosition;
+    float m_rasterCullFocalLengthPixels = 0.0f;
+    float m_rasterMinChunkScreenRadiusPixels = 2.0f;
+    uint64_t m_rasterScatterTriangleBudget = 96ull * 1000ull * 1000ull;
+    float m_rasterScatterBudgetScale = 1.0f;
+    void extractFrustumPlanes(const Matrix4x4& viewProj);
+    bool isAABBInFrustum(const AABB& box) const;
+    bool isAABBFullyInsideFrustum(const AABB& box) const;
+    bool isRasterChunkTooSmallToDraw(const AABB& box) const;
+    void updateRasterInstanceWorldBBox(RasterInstance& ri) const;
+    void rebuildRasterMeshCullingChunks(RasterMeshBuffer& mesh);
+    void setRasterVisibleInstances(RasterMeshBuffer& mesh, const std::vector<uint32_t>& visibleInstanceIndices);
+    void uploadVisibleRasterInstances(RasterMeshBuffer& mesh);
+
+    // Per-mesh local AABB cache (computed once during buildRasterGeometry)
+    std::unordered_map<std::string, AABB> m_rasterMeshBBoxes;
+
+    void destroyRasterMesh(RasterMeshBuffer& mesh);
+    void destroyAllRasterMeshes();
+    void uploadRasterInstanceBuffer(RasterMeshBuffer& mesh);
 
     mutable std::recursive_mutex m_mutex;
 };

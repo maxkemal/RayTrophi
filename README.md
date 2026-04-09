@@ -243,6 +243,27 @@ Full Technical Report: [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Flow Mapping**: Water texture flows along the spline direction naturally.
 - **Physics Interaction**: Objects float and drift according to river flow velocity.
 
+### 🛠️ Modeling & Mesh Editing Tools
+
+- **Sculpt Mode (Sculpt Mod)**: Real-time sculpting brushes (Grab, Smooth, Inflate, Draw, Flatten) with topology-aware falloff and symmetry options. Supports multi-resolution preview and bake/export of sculpt deltas.
+- **Mesh Paint**: Vertex and texture painting for color, roughness, metallic and mask channels. Brush falloff, projection painting and layer blending supported; paint can be baked to textures or saved as vertex colors.
+- **Edit Mesh Mode**: Polygon editing toolbox with:
+  - **Extrude** faces/edges with transform gizmo
+  - **Delete Face/Edge/Vertex** with smart re-triangulation
+  - **Merge Vertex** (by distance or manual collapse)
+  - **Inset / Bevel / Loop Cut** operations
+  - **Weld, Split, Flip Normal** utilities
+  - **UV Auto-Unwrap / Smart Packer** for quick lightmap and paint workflows
+- **Undo/Redo & History**: Full operation stack in edit modes with optional step grouping for batch edits.
+- **Interoperability**: Edit-mode changes update CPU/GPU buffers and can be exported as GLB with modifiers applied.
+
+### 🎛️ Viewport Shading & Vulkan Raster Matcap Integration
+
+- **Vulkan Raster Solid + Matcap**: Fast Vulkan raster solid mode with Matcap shading for immediate sculpt/paint feedback. Matcap images placed in `raytrac_sdl2/assets/matcaps/` are automatically available to the viewport rasterizer.
+- **Use Cases**: Ideal for sculpting, topology inspection and quick feedback when ray-traced preview is too slow; preserves normals and curvature cues efficiently.
+- **Enable**: Toggle Matcap/Solid shading in the Viewport Shading menu (Solid / Matcap). Choose matcap under Viewport → Shading → Matcap.
+- **Files & Workflow**: Add PNG/TGA/JPG matcap files to `raytrac_sdl2/assets/matcaps/`, then reload assets or restart the app to see them in the matcap picker.
+
 ---
 
 ## �🚦 Quick Start

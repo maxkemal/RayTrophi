@@ -57,6 +57,8 @@ struct MeshBLAS {
     size_t gas_output_size = 0;             // GAS output buffer size (for refit)
     size_t vertex_count = 0;
     size_t index_count = 0;
+    float3 bounds_min = make_float3(0.0f, 0.0f, 0.0f);
+    float3 bounds_max = make_float3(0.0f, 0.0f, 0.0f);
     int sbt_offset = 0;                     // Base SBT offset (for RAY_TYPE_COUNT records)
     int material_id = 0;                    // Material ID for this mesh
     std::string mesh_name;                  // Unique name (e.g. "Car_mat_0")
@@ -237,6 +239,9 @@ public:
     // Update BLAS vertices and refit (for transform updates)
     // Returns true if successful, false if refit not possible (needs full rebuild)
     bool updateMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload = false, bool sync = true);
+    
+    // Rebuild a single mesh BLAS after vertex deformation expands beyond previous bounds.
+    bool rebuildMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload = false, bool sync = true);
     
     // Partial update: Upload only a range of vertices/normals
     void uploadMeshVerticesPartial(int mesh_id, 

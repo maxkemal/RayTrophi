@@ -26,6 +26,7 @@ bool globalreflectance = false;
 bool use_embree = true;
 bool g_hasOptix = false;
 bool g_hasVulkan = false;
+bool g_hasVulkanRT = false;
 bool g_hasCUDA = false;
 float last_render_time_ms = 0.0f;  // Render süresi buraya yazılacak
 int pending_width = 1280;

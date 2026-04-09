@@ -3,7 +3,22 @@
 #include "Renderer.h"
 #include "ProjectManager.h"
 #include "globals.h"  // For SCENE_LOG_INFO
+#include "Paint/PaintLayerStack.h"
+#include "Paint/PaintTextureSet.h"
+#include "Paint/MeshPaintAdapter.h"
+#include "HittableInstance.h"
+#include "Backend/OptixBackend.h"
+#include "Backend/VulkanBackend.h"
+#include "Backend/IViewportBackend.h"
 #include <algorithm>
+#include <SceneSelection.h>
+
+extern bool g_optix_rebuild_pending;
+extern bool g_vulkan_rebuild_pending;
+extern bool g_viewport_raster_rebuild_pending;
+extern bool g_bvh_rebuild_pending;
+extern std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
 namespace {
 bool isVulkanBackend(Backend::IBackend* backend) {
@@ -16,6 +31,173 @@ bool isVulkanBackend(Backend::IBackend* backend) {
     }
     return type == Backend::BackendType::VULKAN_RT || type == Backend::BackendType::VULKAN_COMPUTE;
 }
+
+bool isOptixBackend(Backend::IBackend* backend) {
+    if (!backend) return false;
+    Backend::BackendType type = Backend::BackendType::CPU_EMBREE;
+    try {
+        type = backend->getInfo().type;
+    } catch (...) {
+        return false;
+    }
+    return type == Backend::BackendType::OPTIX;
+}
+
+bool sceneCommandNodeMatches(const std::string& candidate, const std::string& target) {
+    if (candidate.empty() || target.empty()) return false;
+    return candidate == target || candidate.rfind(target + "_mat_", 0) == 0;
+}
+
+Backend::IBackend* getActiveRenderBackend(UIContext& ctx) {
+    if (g_backend) {
+        return g_backend.get();
+    }
+    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
+        return ctx.backend_ptr;
+    }
+    return nullptr;
+}
+
+Backend::IViewportBackend* getActiveViewportBackend(UIContext& ctx) {
+    if (g_viewport_backend) {
+        return g_viewport_backend.get();
+    }
+    return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
+}
+
+void resetAccumulationForSceneMutation(UIContext& ctx) {
+    Backend::IBackend* renderBackend = getActiveRenderBackend(ctx);
+    Backend::IViewportBackend* viewportBackend = getActiveViewportBackend(ctx);
+
+    if (renderBackend) {
+        renderBackend->resetAccumulation();
+    }
+    if (viewportBackend && viewportBackend != renderBackend) {
+        viewportBackend->resetAccumulation();
+    }
+}
+
+void setSceneObjectVisibility(UIContext& ctx, const std::string& object_name, bool visible) {
+    if (object_name.empty()) return;
+    if (ctx.scene.isEditorPendingDeleteObjectName(object_name)) {
+        visible = false;
+    }
+
+    if (Backend::IViewportBackend* viewportBackend = getActiveViewportBackend(ctx)) {
+        viewportBackend->setVisibilityByNodeName(object_name, visible);
+    }
+
+    if (Backend::IBackend* renderBackend = getActiveRenderBackend(ctx)) {
+        if (renderBackend != getActiveViewportBackend(ctx)) {
+            renderBackend->setVisibilityByNodeName(object_name, visible);
+        }
+    }
+}
+
+void setSceneNodeLocalVisibility(UIContext& ctx, const std::string& object_name, bool visible) {
+    if (object_name.empty()) return;
+    if (ctx.scene.isEditorPendingDeleteObjectName(object_name)) {
+        visible = false;
+    }
+
+    for (auto& obj : ctx.scene.world.objects) {
+        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+            if (sceneCommandNodeMatches(tri->getNodeName(), object_name)) {
+                tri->visible = visible;
+            }
+            continue;
+        }
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) {
+            if (sceneCommandNodeMatches(inst->node_name, object_name)) {
+                inst->visible = visible;
+            }
+        }
+    }
+}
+
+bool activeSceneGpuRenderBackend(UIContext& ctx) {
+    if (Backend::IBackend* renderBackend = getActiveRenderBackend(ctx)) {
+        return isVulkanBackend(renderBackend) || isOptixBackend(renderBackend);
+    }
+    return false;
+}
+
+void scheduleSceneMutationRebuilds(UIContext& ctx, bool includeCpuBvh) {
+    if (includeCpuBvh) {
+        g_bvh_rebuild_pending = true;
+    }
+
+    if (getActiveViewportBackend(ctx)) {
+        g_viewport_raster_rebuild_pending = true;
+    }
+
+    if (Backend::IBackend* renderBackend = getActiveRenderBackend(ctx)) {
+        if (isVulkanBackend(renderBackend)) {
+            g_vulkan_rebuild_pending = true;
+        } else if (isOptixBackend(renderBackend)) {
+            g_optix_rebuild_pending = true;
+        }
+    } else if (ctx.backend_ptr) {
+        if (isVulkanBackend(ctx.backend_ptr)) {
+            g_vulkan_rebuild_pending = true;
+        } else if (isOptixBackend(ctx.backend_ptr)) {
+            g_optix_rebuild_pending = true;
+        }
+    }
+
+    resetAccumulationForSceneMutation(ctx);
+}
+
+std::string getHittableNodeName(const std::shared_ptr<Hittable>& obj) {
+    if (!obj) return "";
+    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) return tri->getNodeName();
+    if (auto inst = std::dynamic_pointer_cast<HittableInstance>(obj)) return inst->node_name;
+    return "";
+}
+
+std::vector<std::shared_ptr<Triangle>> evaluateMeshForNode(UIContext& ctx, const std::string& object_name) {
+    auto base_it = ctx.scene.base_mesh_cache.find(object_name);
+    if (base_it == ctx.scene.base_mesh_cache.end()) {
+        return {};
+    }
+
+    auto stack_it = ctx.scene.mesh_modifiers.find(object_name);
+    if (stack_it != ctx.scene.mesh_modifiers.end() && !stack_it->second.modifiers.empty()) {
+        return stack_it->second.evaluate(base_it->second);
+    }
+    return base_it->second;
+}
+
+void replaceSceneObjectsForNode(UIContext& ctx,
+                                const std::string& object_name,
+                                const std::vector<std::shared_ptr<Triangle>>& mesh) {
+    auto& objects = ctx.scene.world.objects;
+    objects.erase(
+        std::remove_if(objects.begin(), objects.end(), [&](const auto& obj) {
+            return getHittableNodeName(obj) == object_name;
+        }),
+        objects.end());
+
+    for (const auto& tri : mesh) {
+        if (tri) {
+            objects.push_back(tri);
+        }
+    }
+
+    if (ctx.selection.selected.type == SelectableType::Object && ctx.selection.selected.object) {
+        if (getHittableNodeName(ctx.selection.selected.object) == object_name && !mesh.empty()) {
+            ctx.selection.selected.object = mesh.front();
+        }
+    }
+}
+
+void scheduleUvGeometrySync(UIContext& ctx) {
+    ctx.renderer.resetCPUAccumulation();
+    scheduleSceneMutationRebuilds(ctx, false);
+
+    ProjectManager::getInstance().markModified();
+    ctx.start_render = true;
+}
 }
 
 // ============================================================================
@@ -23,23 +205,20 @@ bool isVulkanBackend(Backend::IBackend* backend) {
 // ============================================================================
 
 void DeleteObjectCommand::execute(UIContext& ctx) {
-    // Redo: Remove objects again
-    auto& objs = ctx.scene.world.objects;
     bool needs_update = false;
-    
-    // 1. Remove from Scene
-    auto new_end = std::remove_if(objs.begin(), objs.end(), [&](const std::shared_ptr<Hittable>& h){
-        auto t = std::dynamic_pointer_cast<Triangle>(h);
-        if (!t) return false;
-        // Check if this triangle is in our deleted list
-        for (auto& del : deleted_triangles_) {
-            if (del == t) return true;
+
+    for (const auto& tri : deleted_triangles_) {
+        if (tri) {
+            tri->visible = false;
+            ctx.scene.markObjectPendingDelete(tri->nodeName);
+            needs_update = true;
         }
-        return false;
-    });
-    
-    if (new_end != objs.end()) {
-        objs.erase(new_end, objs.end());
+    }
+    setSceneNodeLocalVisibility(ctx, object_name_, false);
+    needs_update = true;
+
+    if (needs_update) {
+        ctx.scene.markObjectPendingDelete(object_name_);
         needs_update = true;
     }
     
@@ -68,27 +247,11 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
     }
     
     if (needs_update) {
-        // Defer BVH rebuild to Main.cpp async handler
-        extern bool g_bvh_rebuild_pending;
-        g_bvh_rebuild_pending = true;
         ctx.renderer.resetCPUAccumulation();
-        
-        // Incremental GPU update for TLAS mode
-        if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-            if (isVulkanBackend(ctx.backend_ptr)) {
-                // [CRASH FIX] Defer to the safe frame-end rebuild block:
-                //   rebuildAccelerationStructure() -> updateGeometry() -> uploadHairToGPU() -> updateBackendMaterials()
-                // Calling updateGeometry() directly here (while traceRays may be dispatching)
-                // can leave stale descriptor bindings pointing at freed BLAS memory -> crash.
-                g_vulkan_rebuild_pending = true;
-                ctx.backend_ptr->resetAccumulation();
-            } else {
-                ctx.backend_ptr->hideInstancesByNodeName(object_name_);
-                ctx.backend_ptr->rebuildAccelerationStructure();
-            }
-        } else if (ctx.backend_ptr) {
-            extern bool g_optix_rebuild_pending;
-            g_optix_rebuild_pending = true;
+        setSceneObjectVisibility(ctx, object_name_, false);
+        if (activeSceneGpuRenderBackend(ctx)) {
+            extern bool g_cpu_sync_pending;
+            g_cpu_sync_pending = true;
         }
         
         ctx.start_render = true;
@@ -98,13 +261,22 @@ void DeleteObjectCommand::execute(UIContext& ctx) {
 }
 
 void DeleteObjectCommand::undo(UIContext& ctx) {
-    // 1. Restore objects to Scene
-    ctx.scene.world.objects.insert(
-        ctx.scene.world.objects.end(),
-        deleted_triangles_.begin(),
-        deleted_triangles_.end()
-    );
-    
+    bool needs_update = false;
+    for (const auto& tri : deleted_triangles_) {
+        if (tri) {
+            const bool existsInScene =
+                std::find(ctx.scene.world.objects.begin(), ctx.scene.world.objects.end(), tri) != ctx.scene.world.objects.end();
+            if (!existsInScene) {
+                ctx.scene.world.objects.push_back(tri);
+            }
+            tri->visible = true;
+            needs_update = true;
+        }
+    }
+    ctx.scene.restoreObjectPendingDelete(object_name_);
+    setSceneNodeLocalVisibility(ctx, object_name_, true);
+    needs_update = true;
+
     // 2. Sync with ProjectManager (Persistence)
     // Remove from deleted_objects list so it reappears on save/load
     auto& proj = ProjectManager::getInstance().getProjectData();
@@ -114,26 +286,14 @@ void DeleteObjectCommand::undo(UIContext& ctx) {
             model.deleted_objects.erase(it);
         }
     }
-    
-    // Defer BVH rebuild to Main.cpp async handler
-    extern bool g_bvh_rebuild_pending;
-    g_bvh_rebuild_pending = true;
-    ctx.renderer.resetCPUAccumulation();
-    
-    // Incremental GPU update for TLAS mode
-    // Note: For undo of delete, we need FULL rebuild since we're adding triangles back
-    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS()) {
-        if (isVulkanBackend(ctx.backend_ptr)) {
-            // [CRASH FIX] Use deferred safe-rebuild instead of direct updateGeometry().
-            g_vulkan_rebuild_pending = true;
-            ctx.backend_ptr->resetAccumulation();
-        } else {
-            extern bool g_optix_rebuild_pending;
-            g_optix_rebuild_pending = true;
+
+    if (needs_update) {
+        ctx.renderer.resetCPUAccumulation();
+        setSceneObjectVisibility(ctx, object_name_, true);
+        if (activeSceneGpuRenderBackend(ctx)) {
+            extern bool g_cpu_sync_pending;
+            g_cpu_sync_pending = true;
         }
-    } else if (ctx.backend_ptr) {
-        extern bool g_optix_rebuild_pending;
-        g_optix_rebuild_pending = true;
     }
     
     ProjectManager::getInstance().markModified();
@@ -168,19 +328,7 @@ void DuplicateObjectCommand::execute(UIContext& ctx) {
     }
     
     if (needs_update) {
-         // Defer full rebuild to Main.cpp async handler
-         extern bool g_bvh_rebuild_pending;
-         g_bvh_rebuild_pending = true;
-
-         if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS() && isVulkanBackend(ctx.backend_ptr)) {
-             // [CRASH FIX] Use deferred safe-rebuild instead of direct updateGeometry().
-             g_vulkan_rebuild_pending = true;
-             ctx.backend_ptr->resetAccumulation();
-         } else {
-             extern bool g_optix_rebuild_pending;
-             g_optix_rebuild_pending = true;
-         }
-
+         scheduleSceneMutationRebuilds(ctx, true);
          ctx.renderer.resetCPUAccumulation();
          ctx.start_render = true;
          SCENE_LOG_INFO("Redo: Duplicated " + source_name_ + " -> " + new_name_);
@@ -201,19 +349,7 @@ void DuplicateObjectCommand::undo(UIContext& ctx) {
         objs.erase(new_end, objs.end());
     }
     
-    // Defer full rebuild to Main.cpp async handler
-    extern bool g_bvh_rebuild_pending;
-    g_bvh_rebuild_pending = true;
-
-    if (ctx.backend_ptr && ctx.backend_ptr->isUsingTLAS() && isVulkanBackend(ctx.backend_ptr)) {
-        // [CRASH FIX] Use deferred safe-rebuild instead of direct updateGeometry().
-        g_vulkan_rebuild_pending = true;
-        ctx.backend_ptr->resetAccumulation();
-    } else {
-        extern bool g_optix_rebuild_pending;
-        g_optix_rebuild_pending = true;
-    }
-
+    scheduleSceneMutationRebuilds(ctx, true);
     ctx.renderer.resetCPUAccumulation();
     
     SCENE_LOG_INFO("Undo: Removed duplicate " + new_name_);
@@ -369,4 +505,189 @@ void AddLightCommand::undo(UIContext& ctx) {
         ctx.start_render = true;
     }
     SCENE_LOG_INFO("Undo: Removed Light");
+}
+
+void PaintTextureCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels) {
+    if (!texture_ || pixels.empty()) {
+        return;
+    }
+
+    texture_->pixels = pixels;
+    if (texture_->isUploaded()) {
+        texture_->updateGPU();
+    } else {
+        texture_->upload_to_gpu();
+    }
+
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.backend_ptr) {
+        ctx.renderer.updateBackendMaterials(ctx.scene);
+        ctx.backend_ptr->resetAccumulation();
+    }
+    ctx.start_render = true;
+    ProjectManager::getInstance().markModified();
+}
+
+void PaintTextureCommand::execute(UIContext& ctx) {
+    applyPixels(ctx, after_pixels_);
+    SCENE_LOG_INFO("Redo: Paint " + object_name_);
+}
+
+void PaintTextureCommand::undo(UIContext& ctx) {
+    applyPixels(ctx, before_pixels_);
+    SCENE_LOG_INFO("Undo: Paint " + object_name_);
+}
+
+// ============================================================================
+// PAINT LAYER COMMAND IMPLEMENTATION
+// ============================================================================
+
+void PaintLayerCommand::applyPixels(UIContext& ctx, const std::vector<CompactVec4>& pixels) {
+    // Find layer stack
+    auto it = ctx.scene.mesh_paint_layer_stacks.find(layer_stack_key_);
+    if (it == ctx.scene.mesh_paint_layer_stacks.end()) return;
+
+    Paint::PaintLayerStack& stack = it->second;
+    Paint::PaintLayerData* layer = stack.layerById(layer_id_);
+    if (!layer) return;
+
+    // Restore layer pixel data
+    const size_t ch_idx = static_cast<size_t>(channel_);
+    layer->channel_pixels[ch_idx] = pixels;
+
+    // Recomposite the affected channel into the flat texture set
+    auto tex_it = ctx.scene.mesh_paint_texture_sets.find(layer_stack_key_);
+    if (tex_it != ctx.scene.mesh_paint_texture_sets.end()) {
+        Paint::PaintTextureSet& tex_set = tex_it->second;
+        if (tex_set.initialized) {
+            stack.flattenChannelInto(channel_, tex_set);
+        }
+    }
+
+    ctx.renderer.resetCPUAccumulation();
+    if (ctx.backend_ptr) {
+        ctx.renderer.updateBackendMaterials(ctx.scene);
+        ctx.backend_ptr->resetAccumulation();
+    }
+    ctx.start_render = true;
+    ProjectManager::getInstance().markModified();
+}
+
+void PaintLayerCommand::execute(UIContext& ctx) {
+    applyPixels(ctx, after_pixels_);
+    SCENE_LOG_INFO("Redo: Paint Layer " + object_name_);
+}
+
+void PaintLayerCommand::undo(UIContext& ctx) {
+    applyPixels(ctx, before_pixels_);
+    SCENE_LOG_INFO("Undo: Paint Layer " + object_name_);
+}
+
+void UVProjectionCommand::applyStates(UIContext& ctx, const std::vector<TriangleUVSetState>& states) {
+    for (const auto& state : states) {
+        if (!state.triangle) {
+            continue;
+        }
+        state.triangle->setUVSetCoordinates(state.uv_set_index, state.uvs[0], state.uvs[1], state.uvs[2]);
+        state.triangle->applyUVSet(state.uv_set_index);
+    }
+
+    const auto evaluated_mesh = evaluateMeshForNode(ctx, object_name_);
+    replaceSceneObjectsForNode(ctx, object_name_, evaluated_mesh);
+    scheduleUvGeometrySync(ctx);
+}
+
+void UVProjectionCommand::execute(UIContext& ctx) {
+    applyStates(ctx, after_states_);
+    SCENE_LOG_INFO("Redo: Project UVs: " + object_name_);
+}
+
+void UVProjectionCommand::undo(UIContext& ctx) {
+    applyStates(ctx, before_states_);
+    SCENE_LOG_INFO("Undo: Project UVs: " + object_name_);
+}
+
+void MeshEditCommand::applyStates(UIContext& ctx, const std::vector<MeshEditTriangleState>& states) {
+    bool changed = false;
+    for (const auto& state : states) {
+        if (!state.triangle) {
+            continue;
+        }
+
+        for (int corner = 0; corner < 3; ++corner) {
+            state.triangle->setOriginalVertexPosition(corner, state.positions[corner]);
+        }
+        state.triangle->markAABBDirty();
+        state.triangle->updateTransformedVertices();
+        changed = true;
+    }
+
+    if (!changed) {
+        return;
+    }
+
+    scheduleSceneMutationRebuilds(ctx, true);
+
+    ctx.renderer.resetCPUAccumulation();
+    ProjectManager::getInstance().markModified();
+    ctx.start_render = true;
+}
+
+void MeshEditCommand::execute(UIContext& ctx) {
+    applyStates(ctx, after_states_);
+    SCENE_LOG_INFO("Redo: Edit Mesh " + object_name_);
+}
+
+void MeshEditCommand::undo(UIContext& ctx) {
+    applyStates(ctx, before_states_);
+    SCENE_LOG_INFO("Undo: Edit Mesh " + object_name_);
+}
+
+void ReplaceMeshGeometryCommand::applyMesh(
+    UIContext& ctx,
+    const std::vector<std::shared_ptr<Triangle>>& display_mesh,
+    const std::vector<std::shared_ptr<Triangle>>& base_mesh,
+    const MeshModifiers::ModifierStack& stack) {
+    replaceSceneObjectsForNode(ctx, object_name_, display_mesh);
+    ctx.scene.base_mesh_cache[object_name_] = base_mesh;
+    ctx.scene.mesh_modifiers[object_name_] = stack;
+
+    if (Backend::IViewportBackend* viewportBackend = getActiveViewportBackend(ctx)) {
+        if (!viewportBackend->updateRasterMeshFromTriangles(object_name_, display_mesh)) {
+            viewportBackend->buildRasterGeometry(ctx.scene.world.objects);
+        }
+        viewportBackend->resetAccumulation();
+    }
+
+    scheduleSceneMutationRebuilds(ctx, true);
+    ProjectManager::getInstance().markModified();
+    ctx.start_render = true;
+}
+
+void ReplaceMeshGeometryCommand::execute(UIContext& ctx) {
+    applyMesh(ctx, after_display_mesh_, after_base_mesh_, after_stack_);
+    SCENE_LOG_INFO("Redo: Replace Mesh Geometry " + object_name_);
+}
+
+void ReplaceMeshGeometryCommand::undo(UIContext& ctx) {
+    applyMesh(ctx, before_display_mesh_, before_base_mesh_, before_stack_);
+    SCENE_LOG_INFO("Undo: Replace Mesh Geometry " + object_name_);
+}
+
+void CompositeSceneCommand::execute(UIContext& ctx) {
+    for (auto& command : commands_) {
+        if (command) {
+            command->execute(ctx);
+        }
+    }
+    SCENE_LOG_INFO("Redo: " + description_);
+}
+
+void CompositeSceneCommand::undo(UIContext& ctx) {
+    for (auto it = commands_.rbegin(); it != commands_.rend(); ++it) {
+        if (*it) {
+            (*it)->undo(ctx);
+        }
+    }
+    SCENE_LOG_INFO("Undo: " + description_);
 }

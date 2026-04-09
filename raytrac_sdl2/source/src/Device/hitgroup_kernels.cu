@@ -99,9 +99,12 @@ extern "C" __global__ void __closesthit__ch() {
          bool use_uv_tangent = false;
          
          if (hgd->has_uvs) {
-             const float2 uv0_local = hgd->uvs[tri.x];
-             const float2 uv1_local = hgd->uvs[tri.y];
-             const float2 uv2_local = hgd->uvs[tri.z];
+             float2 uv0_local = hgd->uvs[tri.x];
+             float2 uv1_local = hgd->uvs[tri.y];
+             float2 uv2_local = hgd->uvs[tri.z];
+             uv0_local.y = 1.0f - uv0_local.y;
+             uv1_local.y = 1.0f - uv1_local.y;
+             uv2_local.y = 1.0f - uv2_local.y;
              float2 dUV1 = uv1_local - uv0_local;
              float2 dUV2 = uv2_local - uv0_local;
              float det_uv = (dUV1.x * dUV2.y - dUV2.x * dUV1.y);
@@ -171,6 +174,7 @@ extern "C" __global__ void __closesthit__ch() {
             
             // Apply UV tiling
             float2 l_uv = uv * hgd->layer_uv_scale[i];
+            l_uv = apply_material_uv_transform(mat, l_uv);
 
             // 1. Albedo
             float3 col = mat.albedo;
@@ -200,6 +204,8 @@ extern "C" __global__ void __closesthit__ch() {
             if (mat.normal_tex) {
                  float4 n = tex2D<float4>(mat.normal_tex, l_uv.x, l_uv.y);
                  n_ts = make_float3(n.x, n.y, n.z) * 2.0f - make_float3(1.0f);
+                 n_ts.x *= mat.normal_strength;
+                 n_ts.y *= mat.normal_strength;
             }
 
             // 5. Height (Optional - for future height blending)
@@ -280,8 +286,17 @@ extern "C" __global__ void __closesthit__ch() {
     } 
     else {
         if (hgd->has_normal_tex) {
-            float4 n_val = tex2D<float4>(hgd->normal_tex, uv.x, uv.y);
+            float2 material_uv = uv;
+            if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+                material_uv = apply_material_uv_transform(optixLaunchParams.materials[hgd->material_id], uv);
+            }
+            float4 n_val = tex2D<float4>(hgd->normal_tex, material_uv.x, material_uv.y);
             float3 ts_normal = make_float3(n_val.x, n_val.y, n_val.z) * 2.0f - make_float3(1.0f, 1.0f, 1.0f);
+            if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+                const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
+                ts_normal.x *= mat.normal_strength;
+                ts_normal.y *= mat.normal_strength;
+            }
             final_normal = normalize(
                 ts_normal.x * world_tangent +
                 ts_normal.y * world_bitangent +
@@ -412,7 +427,8 @@ extern "C" __global__ void __closesthit__ch() {
         const GpuMaterial& mat = optixLaunchParams.materials[hgd->material_id];
         primary_albedo = mat.albedo;
         if (hgd->has_albedo_tex) {
-            float4 c = tex2D<float4>(hgd->albedo_tex, uv.x, uv.y);
+            float2 material_uv = apply_material_uv_transform(mat, uv);
+            float4 c = tex2D<float4>(hgd->albedo_tex, material_uv.x, material_uv.y);
             primary_albedo = make_float3(c.x, c.y, c.z);
         }
     }
@@ -488,6 +504,9 @@ extern "C" __global__ void __anyhit__ah() {
             uv.y = 1.0f - uv.y;
         } else {
             uv = bary;
+        }
+        if (hgd->material_id >= 0 && optixLaunchParams.materials) {
+            uv = apply_material_uv_transform(optixLaunchParams.materials[hgd->material_id], uv);
         }
         float4 opacity_val = tex2D<float4>(hgd->opacity_tex, uv.x, uv.y);
         float mask = (hgd->opacity_has_alpha) ? opacity_val.w : opacity_val.x;
@@ -712,7 +731,8 @@ extern "C" __global__ void __closesthit__hair() {
         unsigned int sp0, sp1;
         packPayload(&shadow_payload, sp0, sp1);
 
-        float3 shadow_origin = offset_ray(hit_point, normal); 
+        float3 shadow_normal = safe_normalize(normal, make_float3(0.0f, 1.0f, 0.0f));
+        float3 shadow_origin = hit_point + shadow_normal * 0.001f;
         optixTrace(
             optixLaunchParams.handle,
             shadow_origin,

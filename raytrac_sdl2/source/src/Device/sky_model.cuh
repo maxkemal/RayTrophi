@@ -134,7 +134,7 @@ __device__ inline float3 calculate_nishita_sky_gpu(const float3& ray_dir, const 
     float3 mieS = params.mie_scattering * params.dust_density;
     
     // Sun Contribution + Add to existing L (Moon)
-    float3 L_Sun = (totalRayleigh * rayleighS * phaseR + totalMie * mieS * phaseM) * params.sun_intensity;
+    float3 L_Sun = (totalRayleigh * rayleighS * phaseR + totalMie * mieS * phaseM) * params.atmosphere_intensity;
     
     L += L_Sun;
     

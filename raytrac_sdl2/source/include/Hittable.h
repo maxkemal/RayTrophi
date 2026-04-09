@@ -37,6 +37,8 @@ struct HitRecord {
         float subsurface = 0.0f;
         float translucent = 0.0f;
         float ior = 1.45f;
+        float deposited_thickness = 0.0f;
+        float hit_offset = 0.0f;
         bool valid = false;
     };
 

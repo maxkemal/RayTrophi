@@ -42,6 +42,7 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 #include <memory>
+#include <fstream>
 #include <format>
 #include <algorithm>
 #include <cmath>
@@ -70,6 +71,190 @@
 #include <thread>
 #include <mutex>
 #include <limits>
+#include "json.hpp"
+
+struct GltfLightMetadata {
+    Vec3 color = Vec3(1.0f);
+    float intensity = 1.0f;
+    bool hasColor = false;
+    bool hasIntensity = false;
+};
+
+inline static std::string g_assimpLoaderCurrentImportFilePath;
+
+inline bool isRayTrophiGltfFile(const std::string& filepath) {
+    using json = nlohmann::json;
+
+    if (filepath.empty()) {
+        return false;
+    }
+
+    try {
+        const std::filesystem::path importPath(filepath);
+        const std::string ext = importPath.extension().string();
+        json gltf;
+
+        if (ext == ".gltf") {
+            std::ifstream in(filepath, std::ios::binary);
+            if (!in) {
+                return false;
+            }
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            gltf = json::parse(text, nullptr, false);
+        } else if (ext == ".glb") {
+            std::ifstream in(filepath, std::ios::binary);
+            if (!in) {
+                return false;
+            }
+
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (bytes.size() < 20) {
+                return false;
+            }
+
+            auto readU32 = [&](size_t offset) -> uint32_t {
+                return static_cast<uint32_t>(bytes[offset]) |
+                    (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+                    (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
+                    (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+            };
+
+            constexpr uint32_t kGlbMagic = 0x46546C67u;
+            constexpr uint32_t kGlbJsonChunkType = 0x4E4F534Au;
+            if (readU32(0) != kGlbMagic || readU32(16) != kGlbJsonChunkType) {
+                return false;
+            }
+
+            const uint32_t jsonChunkLength = readU32(12);
+            if (bytes.size() < 20ull + jsonChunkLength) {
+                return false;
+            }
+
+            std::string jsonText(reinterpret_cast<const char*>(bytes.data() + 20), jsonChunkLength);
+            gltf = json::parse(jsonText, nullptr, false);
+        } else {
+            return false;
+        }
+
+        if (gltf.is_discarded() || !gltf.contains("asset") || !gltf["asset"].is_object()) {
+            return false;
+        }
+
+        const std::string generator = gltf["asset"].value("generator", "");
+        return generator.find("RayTrophi") != std::string::npos;
+    } catch (...) {
+        return false;
+    }
+}
+
+inline std::unordered_map<std::string, GltfLightMetadata> loadGltfLightMetadataMap(const std::string& filepath) {
+    using json = nlohmann::json;
+
+    std::unordered_map<std::string, GltfLightMetadata> result;
+    if (filepath.empty()) {
+        return result;
+    }
+
+    try {
+        const std::filesystem::path importPath(filepath);
+        const std::string ext = importPath.extension().string();
+        json gltf;
+
+        if (ext == ".gltf") {
+            std::ifstream in(filepath, std::ios::binary);
+            if (!in) {
+                return result;
+            }
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            gltf = json::parse(text, nullptr, false);
+        } else if (ext == ".glb") {
+            std::ifstream in(filepath, std::ios::binary);
+            if (!in) {
+                return result;
+            }
+
+            std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (bytes.size() < 20) {
+                return result;
+            }
+
+            auto readU32 = [&](size_t offset) -> uint32_t {
+                return static_cast<uint32_t>(bytes[offset]) |
+                    (static_cast<uint32_t>(bytes[offset + 1]) << 8) |
+                    (static_cast<uint32_t>(bytes[offset + 2]) << 16) |
+                    (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+            };
+
+            constexpr uint32_t kGlbMagic = 0x46546C67u;
+            constexpr uint32_t kGlbJsonChunkType = 0x4E4F534Au;
+            if (readU32(0) != kGlbMagic || readU32(16) != kGlbJsonChunkType) {
+                return result;
+            }
+
+            const uint32_t jsonChunkLength = readU32(12);
+            if (bytes.size() < 20ull + jsonChunkLength) {
+                return result;
+            }
+
+            std::string jsonText(reinterpret_cast<const char*>(bytes.data() + 20), jsonChunkLength);
+            gltf = json::parse(jsonText, nullptr, false);
+        } else {
+            return result;
+        }
+
+        if (gltf.is_discarded()) {
+            return result;
+        }
+
+        if (!gltf.contains("extensions") ||
+            !gltf["extensions"].contains("KHR_lights_punctual") ||
+            !gltf["extensions"]["KHR_lights_punctual"].contains("lights") ||
+            !gltf["extensions"]["KHR_lights_punctual"]["lights"].is_array() ||
+            !gltf.contains("nodes") ||
+            !gltf["nodes"].is_array()) {
+            return result;
+        }
+
+        const json& gltfLights = gltf["extensions"]["KHR_lights_punctual"]["lights"];
+        for (const auto& node : gltf["nodes"]) {
+            if (!node.is_object() || !node.contains("name") || !node["name"].is_string()) {
+                continue;
+            }
+            if (!node.contains("extensions") ||
+                !node["extensions"].contains("KHR_lights_punctual") ||
+                !node["extensions"]["KHR_lights_punctual"].contains("light")) {
+                continue;
+            }
+
+            const int lightIndex = node["extensions"]["KHR_lights_punctual"]["light"].get<int>();
+            if (lightIndex < 0 || lightIndex >= static_cast<int>(gltfLights.size())) {
+                continue;
+            }
+
+            const json& lightDef = gltfLights[lightIndex];
+            GltfLightMetadata meta;
+            if (lightDef.contains("color") && lightDef["color"].is_array() && lightDef["color"].size() >= 3) {
+                meta.color = Vec3(
+                    lightDef["color"][0].get<float>(),
+                    lightDef["color"][1].get<float>(),
+                    lightDef["color"][2].get<float>()
+                );
+                meta.hasColor = true;
+            }
+            if (lightDef.contains("intensity") && lightDef["intensity"].is_number()) {
+                meta.intensity = lightDef["intensity"].get<float>();
+                meta.hasIntensity = true;
+            }
+
+            result[node["name"].get<std::string>()] = meta;
+        }
+    } catch (...) {
+        return {};
+    }
+
+    return result;
+}
+
 struct MeshInstance {
     int meshIndex; // aiMesh ID (aiMesh Kimliği)
     Matrix4x4 transform; // Global transform matrix (Global dönüşüm matrisi)
@@ -347,11 +532,37 @@ public:
     // Critical for Gizmo to move all object parts together.
     // Transform Önbelleği: Aynı isme sahip node'ların transformunu paylaştırır (Gizmo için kritik).
     std::unordered_map<std::string, std::shared_ptr<Transform>> nodeNameToTransform;
-    
+
+    // Tracks how many times each base name was seen during a single import,
+    // so duplicate node names get a numbered suffix ("Name.001", "Name.002" …).
+    // Without this, two hierarchy nodes sharing the same name would collide in
+    // nodeNameToTransform and the second node would inherit the first node's transform.
+    std::unordered_map<std::string, int> nodeNameUsageCount_;
+
+    // Resolve a base unique-name to a truly unique per-node name within the current import.
+    // First use: returns the name unchanged.
+    // Subsequent uses (duplicate name): appends ".001", ".002", … until free.
+    std::string resolveUniqueNodeName(const std::string& baseName) {
+        auto& count = nodeNameUsageCount_[baseName];
+        if (count == 0) {
+            ++count;
+            return baseName;
+        }
+        std::string candidate;
+        do {
+            std::string suffix = std::to_string(count++);
+            // Zero-pad to 3 digits: 1 → "001", 12 → "012"
+            while (suffix.size() < 3) suffix = "0" + suffix;
+            candidate = baseName + "." + suffix;
+        } while (nodeNameToTransform.count(candidate));
+        return candidate;
+    }
+
     // Clear transform cache (call before each import)
     // Transform önbelleğini temizle (her yüklemeden önce)
     void clearTransformCache() {
         nodeNameToTransform.clear();
+        nodeNameUsageCount_.clear();
     }
     
     // Get or create shared Transform for a node
@@ -438,7 +649,7 @@ public:
         auto& sharedTransform = transformIt->second;
         sharedTransform->setPivotOffset(localCenter, true);
 
-        SCENE_LOG_INFO("Auto-centered out-of-bounds pivot for node: " + nodeName);
+       // SCENE_LOG_INFO("Auto-centered out-of-bounds pivot for node: " + nodeName);
     }
 
     Assimp::Importer importer;
@@ -522,7 +733,8 @@ public:
     // @return: Triangles, Animation Data, Bone Data (Üçgenler, Animasyon, Kemik Verileri)
     std::tuple<std::vector<std::shared_ptr<Triangle>>, std::vector<std::shared_ptr<AnimationData>>, BoneData>
         loadModelToTriangles(const std::string& filename, const std::shared_ptr<Material>& material = nullptr, const std::string& import_prefix = "") {
-        
+        g_assimpLoaderCurrentImportFilePath = filename;
+
         if (import_prefix.empty()) {
             std::filesystem::path p(filename);
             this->currentImportName = p.parent_path().filename().string() + "_" + p.stem().string();
@@ -566,6 +778,41 @@ public:
             importFlags |= aiProcess_GlobalScale;
         }
         
+        // If loading a .gltf (text) file, Assimp may try to open percent-encoded URIs
+        // (e.g. "Green%20House.bin"). Some exporters leave spaces encoded; create
+        // a temporary decoded copy where %20 -> space so Assimp can open the referenced
+        // files on disk. We only replace %20 to avoid touching data URIs or other
+        // percent-encodings that are not common for file names.
+        std::filesystem::path tempDecodedPath; 
+        if (this->isGLTF && ext == ".gltf") {
+            try {
+                std::ifstream ifs(fileNameStr, std::ios::binary);
+                if (ifs) {
+                    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                    if (content.find("%20") != std::string::npos) {
+                        std::string decoded = content;
+                        size_t pos = 0;
+                        while ((pos = decoded.find("%20", pos)) != std::string::npos) {
+                            decoded.replace(pos, 3, " ");
+                            pos += 1;
+                        }
+                        std::filesystem::path p(fileNameStr);
+                        std::filesystem::path temp = p.parent_path() / (p.stem().string() + "_decoded.gltf");
+                        std::ofstream ofs(temp, std::ios::binary);
+                        if (ofs) {
+                            ofs << decoded;
+                            ofs.close();
+                            fileNameStr = temp.string();
+                            tempDecodedPath = temp;
+                        }
+                    }
+                }
+            }
+            catch (...) {
+                // non-fatal: fallback to original filename
+            }
+        }
+
         this->scene = importer.ReadFile(fileNameStr, importFlags);
 
         if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
@@ -574,6 +821,18 @@ public:
         }
 
         SCENE_LOG_INFO("Assimp file loaded successfully. Extracting geometry data...");
+
+        // If we created a temporary decoded glTF file for Assimp, remove it now
+        // to avoid leaving debug artifacts. Keep it only on failure for debugging.
+        if (!tempDecodedPath.empty()) {
+            try {
+                std::filesystem::remove(tempDecodedPath);
+                SCENE_LOG_INFO("Removed temporary decoded glTF: " + tempDecodedPath.string());
+            }
+            catch (...) {
+                // non-fatal: ignore removal failures
+            }
+        }
 
         // Save the original root transform
         boneData.originalRootTransform = convert(scene->mRootNode->mTransformation);
@@ -722,6 +981,7 @@ public:
     // =========================================================================
     std::tuple<std::vector<Mesh>, std::vector<std::shared_ptr<AnimationData>>, BoneData>
         loadModelToMeshes(const std::string& filename) {
+        g_assimpLoaderCurrentImportFilePath = filename;
         Assimp::Importer importer;
 
         // Flags for high-quality geometry import (Yüksek kaliteli geometri içe aktarımı için bayraklar)
@@ -1483,7 +1743,11 @@ private:
     // =========================================================================
     void processNodeToTriangles(aiNode* node, const aiScene* scene, std::vector<std::shared_ptr<Triangle>>& triangles, const BoneData& boneData, OptixGeometryData* geometry_data = nullptr) {
         aiMatrix4x4 globalTransform = getGlobalTransform(node);
-        const std::string uniqueNodeName = getUniqueName(node->mName.C_Str());
+        // resolveUniqueNodeName ensures that two different hierarchy nodes sharing
+        // the same Assimp name get distinct entries in nodeNameToTransform.
+        // Without this, the second node would silently reuse the first node's transform
+        // and be placed at the wrong world position.
+        const std::string uniqueNodeName = resolveUniqueNodeName(getUniqueName(node->mName.C_Str()));
         const size_t nodeTriangleStart = triangles.size();
 
         for (unsigned int i = 0; i < node->mNumMeshes; i++) {
@@ -1547,7 +1811,11 @@ private:
             }
         }
 
-        recenterNodePivotIfOutsideBounds(uniqueNodeName, triangles, nodeTriangleStart, triangles.size());
+        // glTF/GLB nodes often carry authored pivots and parent-space offsets.
+        // Auto-centering those pivots can break valid hierarchy transforms.
+        if (!isGLTF) {
+            recenterNodePivotIfOutsideBounds(uniqueNodeName, triangles, nodeTriangleStart, triangles.size());
+        }
 
         // Process child nodes recursively
         // Çocuk düğümleri özyinelemeli olarak işle
@@ -1564,7 +1832,7 @@ private:
 
          result.meshName = mesh->mName.C_Str();
          result.nodeName = node->mName.C_Str();
-         result.localTransform = convertMatrix(node->mTransformation);
+         result.localTransform = convertMatrix(getGlobalTransform(node));
          
          // CRITICAL SAFEGUARD: Set the original mesh index for bone processing (Kritik Güvenlik: Kemik işleme için orijinal indeks)
          result.originalMeshIndex = meshIndex;
@@ -1735,7 +2003,6 @@ private:
             
             // Apply initial transform (for start position)
             // İlk transform'u uygula (başlangıç pozisyonu için)
-            triangle->updateTransformedVertices();
 
 
 
@@ -1743,6 +2010,24 @@ private:
             triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
             triangle->setAssimpVertexIndices(face.mIndices[0], face.mIndices[1], face.mIndices[2]);
             triangle->setFaceIndex(static_cast<int>(triangles.size()));
+
+            const unsigned int uv_channel_count = std::min<unsigned int>(AI_MAX_NUMBER_OF_TEXTURECOORDS, mesh->GetNumUVChannels());
+            for (unsigned int uv_set = 0; uv_set < uv_channel_count; ++uv_set) {
+                Vec2 uv_set_coords[3];
+                for (unsigned int uv_vertex = 0; uv_vertex < 3; ++uv_vertex) {
+                    const unsigned int uv_index = face.mIndices[uv_vertex];
+                    if (mesh->HasTextureCoords(uv_set)) {
+                        const aiVector3D texCoord = mesh->mTextureCoords[uv_set][uv_index];
+                        uv_set_coords[uv_vertex] = Vec2(texCoord.x, texCoord.y);
+                    } else {
+                        uv_set_coords[uv_vertex] = Vec2(0.0f, 0.0f);
+                    }
+                }
+                triangle->setUVSetCoordinates(uv_set, uv_set_coords[0], uv_set_coords[1], uv_set_coords[2]);
+            }
+            if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(material.get())) {
+                triangle->applyUVSet(static_cast<size_t>(std::max(0, pbsdf->selected_uv_set)));
+            }
 
             // Assign Colors
             triangle->setVertexColor(0, colors[0]);
@@ -1758,6 +2043,10 @@ private:
                 triangle->setSkinBoneWeights(2, meshVertexWeights[face.mIndices[2]]);
             }
             // ------------------------------------------------
+
+            if (!hasActualWeights) {
+                triangle->updateTransformedVertices();
+            }
 
             triangles.push_back(triangle);
         }
@@ -1850,6 +2139,9 @@ private:
                 return;
             }
 
+            const auto gltfLightMetadata = loadGltfLightMetadataMap(g_assimpLoaderCurrentImportFilePath);
+            const bool isRayTrophiFile = isRayTrophiGltfFile(g_assimpLoaderCurrentImportFilePath);
+
            // SCENE_LOG_INFO("Total lights in scene: " + std::to_string(scene->mNumLights));
 
             for (unsigned int i = 0; i < scene->mNumLights; i++) {
@@ -1913,7 +2205,30 @@ private:
                 // Dividing by 100 provides a better baseline brightness (100W ~ 1.0 unit)
                 // This fixes the 'too dark' issue compared to Blender
                 // Blender Watt cinsinden çıktı verir. 100'e bölmek daha iyi bir temel parlaklık sağlar.
-                intensity /= 1000.0f;
+                auto metaIt = gltfLightMetadata.find(originalName);
+                if (metaIt == gltfLightMetadata.end()) {
+                    metaIt = gltfLightMetadata.find(name);
+                }
+
+                if (metaIt != gltfLightMetadata.end()) {
+                    if (metaIt->second.hasColor) {
+                        color = metaIt->second.color;
+                    }
+                    if (metaIt->second.hasIntensity) {
+                        intensity = metaIt->second.intensity;
+                        if (!isRayTrophiFile) {
+                            if (aiLgt->mType == aiLightSource_DIRECTIONAL) {
+                                if (intensity > 100.0f) intensity /= 100.0f;
+                                else if (intensity > 20.0f) intensity /= 10.0f;
+                            } else {
+                                if (intensity > 1000.0f) intensity /= 1000.0f;
+                                else if (intensity > 100.0f) intensity /= 100.0f;
+                            }
+                        }
+                    }
+                } else {
+                    intensity /= 1000.0f;
+                }
 
                 std::shared_ptr<Light> light = nullptr;
 
@@ -2044,6 +2359,19 @@ private:
                }
            }
        }
+
+       unsigned int preferredUvSet = 0;
+       bool hasPreferredUvSet = false;
+       for (auto type : textureTypes) {
+           if (aiMat->GetTextureCount(type) <= 0) continue;
+           int uvIndex = 0;
+           if (aiMat->Get(AI_MATKEY_UVWSRC(type, 0), uvIndex) == AI_SUCCESS) {
+               preferredUvSet = static_cast<unsigned int>(std::max(0, uvIndex));
+               hasPreferredUvSet = true;
+               break;
+           }
+       }
+       material->selected_uv_set = hasPreferredUvSet ? static_cast<int>(preferredUvSet) : 0;
 
        aiColor3D color(0.0f, 0.0f, 0.0f);
        aiMat->Get(AI_MATKEY_COLOR_DIFFUSE, color);

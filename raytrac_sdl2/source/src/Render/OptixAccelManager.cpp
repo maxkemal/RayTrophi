@@ -14,6 +14,22 @@
 #include "ParallelBVHNode.h"
 #include "HittableInstance.h" // Added for syncInstanceTransforms
 #include "InstanceManager.h"  // For foliage wind flag detection
+#include "WaterSystem.h"
+
+namespace {
+void computeGeometryBounds(const MeshGeometry& geometry, float3& outMin, float3& outMax) {
+    outMin = make_float3(1e20f, 1e20f, 1e20f);
+    outMax = make_float3(-1e20f, -1e20f, -1e20f);
+    for (const auto& v : geometry.vertices) {
+        outMin.x = (std::min)(outMin.x, v.x);
+        outMin.y = (std::min)(outMin.y, v.y);
+        outMin.z = (std::min)(outMin.z, v.z);
+        outMax.x = (std::max)(outMax.x, v.x);
+        outMax.y = (std::max)(outMax.y, v.y);
+        outMax.z = (std::max)(outMax.z, v.z);
+    }
+}
+}
 
 
 // EXTERN KERNEL DECLARATION
@@ -61,6 +77,10 @@ void OptixAccelManager::initialize(OptixDeviceContext ctx, CUstream str,
     hair_hit_program_group = hair_hit_pg;
     hair_shadow_program_group = hair_shadow_pg;
     // SCENE_LOG_INFO("[OptixAccelManager] Initialized with OptiX context");
+}
+// Helper: Convert Vec3 to float3
+inline float3 toFloat3(const Vec3& v) {
+    return make_float3(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -134,6 +154,7 @@ int OptixAccelManager::buildMeshBLAS(const MeshGeometry& geometry) {
     blas.material_id = geometry.material_id;  // Store material ID for SBT
     blas.vertex_count = geometry.vertices.size();
     blas.index_count = geometry.indices.size();
+    computeGeometryBounds(geometry, blas.bounds_min, blas.bounds_max);
     
     // Upload vertices
     size_t v_size = geometry.vertices.size() * sizeof(float3);
@@ -529,11 +550,15 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
     
     // Check if vertex count matches (required for refit)
     if (geometry.vertices.size() != blas.vertex_count) {
-        std::string msg = "[OptixAccelManager] Vertex count mismatch for BLAS update";
-        SCENE_LOG_ERROR(msg);
-        if (m_messageCallback) m_messageCallback(msg, 2);
+        if (!m_topology_dirty) {
+            std::string msg = "[OptixAccelManager] Vertex count mismatch for BLAS update";
+            SCENE_LOG_ERROR(msg);
+            if (m_messageCallback) m_messageCallback(msg, 2);
+        }
         return false;
     }
+
+    computeGeometryBounds(geometry, blas.bounds_min, blas.bounds_max);
     
     // Update vertex buffer on GPU (Only if not skipped)
     if (!skipCpuUpload) {
@@ -593,6 +618,65 @@ bool OptixAccelManager::updateMeshBLAS(int mesh_id, const MeshGeometry& geometry
         return false;
     }
     
+    if (sync) {
+        cudaStreamSynchronize(stream);
+    }
+    return true;
+}
+
+bool OptixAccelManager::rebuildMeshBLAS(int mesh_id, const MeshGeometry& geometry, bool skipCpuUpload, bool sync) {
+    if (mesh_id < 0 || mesh_id >= static_cast<int>(mesh_blas_list.size())) {
+        return false;
+    }
+
+    MeshBLAS& blas = mesh_blas_list[mesh_id];
+
+    if (geometry.vertices.size() != blas.vertex_count) {
+        if (!m_topology_dirty) {
+            std::string msg = "[OptixAccelManager] Vertex count mismatch for BLAS rebuild";
+            SCENE_LOG_ERROR(msg);
+            if (m_messageCallback) m_messageCallback(msg, 2);
+        }
+        return false;
+    }
+
+    computeGeometryBounds(geometry, blas.bounds_min, blas.bounds_max);
+
+    if (!skipCpuUpload) {
+        const size_t v_size = geometry.vertices.size() * sizeof(float3);
+        cudaMemcpy(reinterpret_cast<void*>(blas.d_vertices), geometry.vertices.data(), v_size, cudaMemcpyHostToDevice);
+
+        if (!geometry.normals.empty() && blas.d_normals) {
+            const size_t n_size = geometry.normals.size() * sizeof(float3);
+            cudaMemcpy(reinterpret_cast<void*>(blas.d_normals), geometry.normals.data(), n_size, cudaMemcpyHostToDevice);
+        }
+    }
+
+    CUdeviceptr new_gas_output = 0;
+    size_t new_gas_output_size = 0;
+    const OptixTraversableHandle new_handle = buildGAS(
+        blas.d_vertices,
+        blas.vertex_count,
+        blas.d_indices,
+        blas.index_count,
+        new_gas_output,
+        new_gas_output_size);
+
+    if (new_handle == 0 || new_gas_output == 0 || new_gas_output_size == 0) {
+        std::string msg = "[OptixAccelManager] BLAS rebuild failed";
+        SCENE_LOG_ERROR(msg);
+        if (m_messageCallback) m_messageCallback(msg, 2);
+        return false;
+    }
+
+    if (blas.d_gas_output) {
+        cudaFree(reinterpret_cast<void*>(blas.d_gas_output));
+    }
+
+    blas.d_gas_output = new_gas_output;
+    blas.gas_output_size = new_gas_output_size;
+    blas.handle = new_handle;
+
     if (sync) {
         cudaStreamSynchronize(stream);
     }
@@ -816,15 +900,21 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
         cudaMemcpy(reinterpret_cast<void*>(d_globalBoneMatrices), boneMatrices.data(), sz, cudaMemcpyHostToDevice);
         d_boneMatricesPtr = d_globalBoneMatrices;
     }
+
+    std::unordered_set<const Triangle*> live_water_triangles;
+    for (const auto& surf : WaterManager::getInstance().getWaterSurfaces()) {
+        for (const auto& tri : surf.mesh_triangles) {
+            if (tri) {
+                live_water_triangles.insert(tri.get());
+            }
+        }
+    }
     
     // 3. UPDATE BLAS AND INSTANCE TRANSFORMS
     for (const auto& group : m_cached_groups) {
         MeshBLAS& blas = mesh_blas_list[group.blas_idx];
-        bool gpu_skinning_applied = false;
 
         // --- DEFORMATION PATH (BLAS Rebuild) ---
-        // Only trigger expensive BLAS vertex updates if the mesh is actually deforming (Skinning)
-        // Static high-poly meshes will COMPLETELY skip this section.
         if (blas.hasSkinningData && d_boneMatricesPtr) {
             launchSkinningKernel(
                 reinterpret_cast<float3*>(blas.d_bindPoses),
@@ -842,9 +932,44 @@ void OptixAccelManager::updateAllBLASFromTriangles(const std::vector<std::shared
             MeshGeometry dummyGeom;
             dummyGeom.vertices.resize(blas.vertex_count); 
             updateMeshBLAS(group.blas_idx, dummyGeom, true, false);
-            gpu_skinning_applied = true;
+            continue;
         }
-        // Rigid sync is now handled globally above
+
+        bool group_contains_live_water = false;
+        for (int tri_idx : group.triangle_indices) {
+            if (tri_idx < 0 || tri_idx >= static_cast<int>(m_cached_triangles.size())) continue;
+            const auto& tri = m_cached_triangles[tri_idx];
+            if (tri && live_water_triangles.count(tri.get()) > 0) {
+                group_contains_live_water = true;
+                break;
+            }
+        }
+        if (!group_contains_live_water) {
+            continue;
+        }
+
+        // Non-skinned deformers such as animated water still need live vertex uploads.
+        MeshGeometry liveGeom;
+        liveGeom.vertices.reserve(group.triangle_indices.size() * 3);
+        liveGeom.normals.reserve(group.triangle_indices.size() * 3);
+
+        for (int tri_idx : group.triangle_indices) {
+            if (tri_idx < 0 || tri_idx >= static_cast<int>(m_cached_triangles.size())) continue;
+            const auto& tri = m_cached_triangles[tri_idx];
+            if (!tri) continue;
+
+            liveGeom.vertices.push_back(toFloat3(tri->getVertexPosition(0)));
+            liveGeom.vertices.push_back(toFloat3(tri->getVertexPosition(1)));
+            liveGeom.vertices.push_back(toFloat3(tri->getVertexPosition(2)));
+
+            liveGeom.normals.push_back(toFloat3(tri->getVertexNormal(0)));
+            liveGeom.normals.push_back(toFloat3(tri->getVertexNormal(1)));
+            liveGeom.normals.push_back(toFloat3(tri->getVertexNormal(2)));
+        }
+
+        if (liveGeom.vertices.size() == blas.vertex_count) {
+            updateMeshBLAS(group.blas_idx, liveGeom, false, false);
+        }
     }
     
    // SCENE_LOG_INFO("[OptixAccelManager] Updated " + std::to_string(updated_count) + " BLAS structures");
